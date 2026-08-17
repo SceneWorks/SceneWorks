@@ -1,9 +1,57 @@
 use super::*;
 
+/// The single backend this API instance can actually enqueue for — the one authority every
+/// enqueue-time capability gate must key off.
+///
+/// macOS runs the MLX worker, *unless* the operator forced the Candle one
+/// (`SCENEWORKS_CANDLE_REQUIRED` → [`Settings::candle_required`]); every other platform is
+/// Candle-only. A bare `cfg!(target_os = "macos")` is wrong in precisely the mode the setting
+/// exists for: the gate would validate the request against MLX's capability lists while the job
+/// executes on Candle, so an MLX-only choice is admitted and then fails on the worker, and a
+/// Candle-valid choice is 400'd (sc-18420). One derivation, one place.
+///
+/// ## Scope: enqueue gates only — NOT the catalog advertisement lanes
+///
+/// `models.rs`'s `apply_imported_lora_advertisement`, `apply_imported_provider_surface` and the
+/// `mlx_catalog_status` probe keep their own bare `cfg!(target_os = "macos")` deliberately. They
+/// answer a DIFFERENT question: *which engines does this BUILD link* (macOS links MLX and no candle
+/// engine; Windows/Linux/Docker link candle and no MLX), and the MLX tier probe additionally reads
+/// convert-output directories that only exist on macOS. This function answers *which single backend
+/// does this INSTANCE route a job to*, which `candle_required` can move at runtime.
+///
+/// Three reasons not to unify them:
+/// 1. Those sites need a LANE PAIR, consulted ASYMMETRICALLY — a withdrawal crosses lanes, a
+///    positive advertisement never does. Collapsing that into this one-hot routing answer would
+///    break the invariant `apply_imported_lora_advertisement` documents.
+/// 2. A macOS build links no candle engine, so deriving the advertisement from `candle_required`
+///    would publish verdicts for an engine this binary cannot run.
+/// 3. Routing the `mlx_catalog_status` probe through here would HIDE `mlxTiers` and its per-tier
+///    state from the Studio on macOS under `candle_required`, for tier directories that are
+///    genuinely on disk — a regression, not a unification.
+///
+/// The residual skew is real but unshipped: on macOS the desktop wrapper sets
+/// `SCENEWORKS_CANDLE_REQUIRED` only under `cfg(not(target_os = "macos"))` and
+/// [`Settings::candle_required`] is documented "Absent on macOS", so reaching it takes a manual
+/// operator override. Under that override the catalog still advertises MLX-derived imported verdicts
+/// while these gates refuse against candle. Closing it properly means making the advertisement lane
+/// pair a runtime DEPLOYMENT fact (including remote candle workers registered with this API), not
+/// re-pointing it at this function.
+pub(crate) fn enqueue_backend(state: &AppState) -> &'static str {
+    if !cfg!(target_os = "macos") || state.settings.candle_required {
+        "candle"
+    } else {
+        "mlx"
+    }
+}
+
 /// Validate `advanced.decoder` against the descriptor-derived options on the exact post-preset model
 /// row. This is an enqueue-time fail-closed gate: z48/video/unknown models have no compatible option,
 /// and a soft donor that is not installed cannot produce a job that will fail later on the worker.
-fn validate_selected_decoder_for_manifest(
+///
+/// `active_backend` must come from [`enqueue_backend`] — never a hand-rolled `cfg!` — so the list
+/// consulted here is the list the worker that runs this job will actually offer.
+pub(crate) fn validate_selected_decoder_for_manifest(
+    active_backend: &str,
     job_payload: &JsonObject,
     model_manifest_entry: &Value,
 ) -> Result<(), ApiError> {
@@ -37,13 +85,8 @@ fn validate_selected_decoder_for_manifest(
     }
 
     // The catalog carries capability facts for every deployable backend, but this API instance can
-    // enqueue only for the backend used on its platform. Looking across every list would let a Linux
+    // enqueue only for the backend it actually routes to. Looking across every list would let a Linux
     // candle deployment accept an MLX-only choice and defer the rejection to the worker.
-    let active_backend = if cfg!(target_os = "macos") {
-        "mlx"
-    } else {
-        "candle"
-    };
     let matching: Vec<&Value> = model_manifest_entry
         .get(sceneworks_core::decoder_support::DECODERS_FIELD)
         .and_then(|decoders| decoders.get(sceneworks_core::decoder_support::BY_BACKEND_FIELD))
@@ -138,7 +181,11 @@ pub(crate) async fn create_image_job(
     // against the same server-owned entry.
     resolve_selected_image_text_encoder(&state, &job_payload, &model_id, &mut model_manifest_entry)
         .await?;
-    validate_selected_decoder_for_manifest(&job_payload, &model_manifest_entry)?;
+    validate_selected_decoder_for_manifest(
+        enqueue_backend(&state),
+        &job_payload,
+        &model_manifest_entry,
+    )?;
     job_payload.insert(
         "modelManifestEntry".to_owned(),
         model_manifest_entry.clone(),
@@ -227,7 +274,7 @@ pub(crate) async fn create_image_job(
 /// Refuse every imported request shape that the selected backend cannot execute. The exact stamped
 /// source shape and operation select one provider registration; family identity alone never admits
 /// a request. Builtins retain their id-keyed routing and are out of this family gate.
-fn validate_imported_submission(
+pub(crate) fn validate_imported_submission(
     state: &AppState,
     model_id: &str,
     payload: &JsonObject,
@@ -240,12 +287,12 @@ fn validate_imported_submission(
     {
         return Ok(());
     }
-    let candle_required = !cfg!(target_os = "macos") || state.settings.candle_required;
     let has_material_control = payload
         .get("advanced")
         .and_then(Value::as_object)
         .is_some_and(sceneworks_core::jobs_store::imported_control_intent_is_material);
-    let backend = if candle_required { "candle" } else { "mlx" };
+    let backend = enqueue_backend(state);
+    let candle_required = backend == "candle";
     let family = entry
         .get("family")
         .and_then(Value::as_str)
@@ -732,7 +779,11 @@ pub(crate) async fn create_video_job(
         .unwrap_or(payload.model.as_str())
         .to_owned();
     let model_manifest_entry = resolve_model_manifest_entry(&state, &model_id).await?;
-    validate_selected_decoder_for_manifest(&job_payload, &model_manifest_entry)?;
+    validate_selected_decoder_for_manifest(
+        enqueue_backend(&state),
+        &job_payload,
+        &model_manifest_entry,
+    )?;
     // The model's declared `limits.hardMaxDuration`, enforced at enqueue (sc-12297). It had ten
     // declarations and zero readers, so `validate_video_job`'s blanket `1..=30` was the ONLY
     // ceiling: a raw API/MCP/preset-replay caller could ask mochi_1 (cap 5) for 30s @ 30fps, and
@@ -983,44 +1034,103 @@ mod decoder_selection_tests {
         })
     }
 
+    /// A row whose `mlx` and `candle` lists advertise DIFFERENT installed decoders, so which list
+    /// the gate consulted is observable from the error alone. The shipped facts happen to declare
+    /// no candle decoders at all today, which would make "consulted candle" and "consulted nothing"
+    /// indistinguishable — this fixture keeps the assertion about the backend selection itself.
+    fn split_manifest() -> Value {
+        json!({
+            "id": "qwen_image",
+            "decoders": { "byBackend": {
+                "mlx": [{ "id": "mlx_only_vae", "componentId": "vae", "available": true }],
+                "candle": [{ "id": "candle_only_vae", "componentId": "vae", "available": true }]
+            } }
+        })
+    }
+
     fn payload(value: Value) -> JsonObject {
         value.as_object().expect("payload object").clone()
     }
 
     #[test]
     fn decoder_submission_is_default_off_and_fails_closed() {
-        assert!(
-            validate_selected_decoder_for_manifest(&payload(json!({})), &manifest(false)).is_ok()
-        );
         assert!(validate_selected_decoder_for_manifest(
+            "mlx",
+            &payload(json!({})),
+            &manifest(false)
+        )
+        .is_ok());
+        assert!(validate_selected_decoder_for_manifest(
+            "mlx",
             &payload(json!({ "advanced": { "decoder": "native" } })),
             &manifest(false),
         )
         .is_ok());
         assert!(validate_selected_decoder_for_manifest(
+            "mlx",
             &payload(json!({ "advanced": { "decoder": "wan_2_1_vae" } })),
             &manifest(false),
         )
         .is_err());
-        let selected = validate_selected_decoder_for_manifest(
+        assert!(validate_selected_decoder_for_manifest(
+            "mlx",
             &payload(json!({ "advanced": { "decoder": "wan_2_1_vae" } })),
             &manifest(true),
-        );
-        if cfg!(target_os = "macos") {
-            assert!(selected.is_ok());
-        } else {
-            assert!(selected.is_err());
-        }
+        )
+        .is_ok());
+        // The same installed MLX option on the candle lane: the shipped facts declare no candle
+        // decoders, so it fails closed rather than deferring the rejection to the worker.
         assert!(validate_selected_decoder_for_manifest(
+            "candle",
+            &payload(json!({ "advanced": { "decoder": "wan_2_1_vae" } })),
+            &manifest(true),
+        )
+        .is_err());
+        assert!(validate_selected_decoder_for_manifest(
+            "mlx",
             &payload(json!({ "advanced": { "decoder": "wan_2_1_vae" } })),
             &json!({ "id": "wan_2_2_t2v_a14b" }),
         )
         .is_err());
     }
 
+    /// Both directions of the backend selection, against one row that advertises a different
+    /// installed decoder per lane. This is the half a bare `cfg!(target_os = "macos")` got wrong
+    /// (sc-18420): under `SCENEWORKS_CANDLE_REQUIRED` on macOS the gate consulted the MLX list
+    /// while the job ran on candle, admitting the MLX-only id and refusing the candle-valid one.
+    #[test]
+    fn the_gate_consults_only_the_executing_backends_option_list() {
+        for (backend, valid, foreign) in [
+            ("mlx", "mlx_only_vae", "candle_only_vae"),
+            ("candle", "candle_only_vae", "mlx_only_vae"),
+        ] {
+            assert!(
+                validate_selected_decoder_for_manifest(
+                    backend,
+                    &payload(json!({ "advanced": { "decoder": valid } })),
+                    &split_manifest(),
+                )
+                .is_ok(),
+                "{backend} must admit its own installed option {valid}"
+            );
+            let error = validate_selected_decoder_for_manifest(
+                backend,
+                &payload(json!({ "advanced": { "decoder": foreign } })),
+                &split_manifest(),
+            )
+            .expect_err("the other lane's option must not be admitted")
+            .detail;
+            assert!(
+                error.contains("is not compatible with qwen_image"),
+                "{backend} got: {error}"
+            );
+        }
+    }
+
     #[test]
     fn alternate_decoder_and_pid_are_mutually_exclusive() {
         let error = validate_selected_decoder_for_manifest(
+            "mlx",
             &payload(json!({
                 "advanced": { "decoder": "wan_2_1_vae", "usePid": true }
             })),
