@@ -1270,6 +1270,26 @@ mod tests {
                 gen_core::MemoryStrategySupport::Missing
             };
         }
+        // Declaring StagedResidency Implemented is not free: gen-core's `conformance_errors()`
+        // requires the lifecycle that rung actually needs — the three phases plus synchronized
+        // release of completed ones — because staging IS phase-scoped residency. Without them the
+        // contract is non-conformant, and `select_strategy`'s first gate rejects the WHOLE request
+        // as `Unverified { Invalid }` before any candidate is considered, which reads as "nothing
+        // fit" rather than "the fixture declared a rung it did not equip".
+        contract.lifecycle = gen_core::MemoryLifecycleCapabilities {
+            phases: vec![
+                gen_core::MemoryPhase::Conditioning,
+                gen_core::MemoryPhase::Denoise,
+                gen_core::MemoryPhase::Decode,
+            ],
+            synchronized_phase_release: true,
+            ..contract.lifecycle
+        };
+        assert!(
+            contract.conformance_errors().is_empty(),
+            "the staged fixture must be a shape a real provider could declare: {:?}",
+            contract.conformance_errors()
+        );
         let manifest = json!({ "candle": { "sequentialPeakGb": 4.0 } })
             .as_object()
             .expect("manifest object")
@@ -2415,10 +2435,16 @@ mod tests {
         .unwrap();
         assert!(evaluation.is_none());
 
+        // The route MUST be the probe contract's own provider (`z_image_turbo`), the same pairing
+        // the sibling `evaluate_shared_bespoke_image` probe uses. `candidate_exclusion` fails closed
+        // on `request.resolved_route != contract.provider_id` with a structural `Invalid`, so a
+        // mismatched pair excludes every candidate and returns `None` — which would have made the
+        // two `is_none()` assertions below pass for a reason that has nothing to do with the
+        // Hires.fix / phases axes they exist to probe.
         let evaluate_axes = |worker_multipass: bool, request_has_phases: bool| {
             evaluate_shared_image_inner(
-                "krea_2_raw",
-                "krea_2_raw",
+                "z_image_turbo",
+                "z_image_turbo",
                 &spec,
                 true,
                 &manifest,
@@ -2450,6 +2476,11 @@ mod tests {
             )
             .expect("request-axis evaluation")
         };
+        // Control arm first, or the two `is_none()` assertions below prove nothing: this fixture must
+        // actually be selectable when neither axis is set.
+        let plain = evaluate_axes(false, false)
+            .expect("the control arm must reach a selection, or the None assertions are vacuous");
+        assert!(!plain.context.has_phases);
         assert!(
             evaluate_axes(true, false).is_none(),
             "Hires.fix alone must remain outside one-scope declaration authority"
