@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, stat, symlink, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import {
+  chmod, mkdir, mkdtemp, readFile, readdir, stat, symlink, writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 
 import {
   CARGO_METADATA_TIMEOUT_MS,
@@ -12,7 +16,7 @@ import {
   MAX_RUNTIME_SECONDS,
   MIN_PREFLIGHT_FREE_BYTES,
   MIN_RUNTIME_FREE_BYTES,
-  MIN_SWAP_FREE_BYTES,
+  acquirePreparationLock,
   canaryRequest,
   cargoSourceStatusIsClean,
   cleanupCanaryScratch,
@@ -22,15 +26,24 @@ import {
   inventoryAtRoot,
   parseMemoryFreePercent,
   parseSwapFreeBytes,
+  preparationCacheKey,
+  preparationIdentity,
+  preparationLockPath,
+  prepareCanaryCache,
   privateArtifactRoots,
   preservePrimaryFailure,
   preflightFreeFloor,
   repositoryToolchain,
   runtimeFreeFloor,
+  runOwnedCommand,
+  sealedArtifactIdentity,
   telemetryResolutionBytes,
   validateCanaryResponse,
+  validatePreparedCache,
   watchdogFailureSummary,
 } from "./run-ltx-safety-canary.mjs";
+
+import { hashArtifactInventory } from "./hash-artifact-inventory.mjs";
 
 const TEXT_ENCODER_INVENTORY = {
   root: "/models/gemma",
@@ -38,6 +51,64 @@ const TEXT_ENCODER_INVENTORY = {
   bytes: 26_427_894_918,
   sha256: "abde2d155aa8991747cc2999d40688d29a50261c080c0d51fac20357653928d7",
 };
+
+async function cacheFixture(t) {
+  const root = await mkdtemp(path.join(tmpdir(), "sc19741-cache-test-"));
+  t.after(() => cleanupCanaryScratch(root));
+  const sources = {
+    numericTier: path.join(root, "source-q4"),
+    textEncoder: path.join(root, "source-gemma"),
+  };
+  await mkdir(sources.numericTier);
+  await mkdir(sources.textEncoder);
+  await writeFile(path.join(sources.numericTier, "weights.safetensors"), "numeric-tier\n");
+  await writeFile(path.join(sources.textEncoder, "encoder.safetensors"), "text-encoder\n");
+  const [numericTier, textEncoder] = await Promise.all([
+    hashArtifactInventory(sources.numericTier),
+    hashArtifactInventory(sources.textEncoder),
+  ]);
+  const identity = preparationIdentity("1".repeat(40), "2".repeat(40), "1.97.1");
+  identity.artifact.numericTier = {
+    files: numericTier.files, bytes: numericTier.bytes, sha256: numericTier.sha256,
+  };
+  identity.artifact.textEncoder = {
+    files: textEncoder.files, bytes: textEncoder.bytes, sha256: textEncoder.sha256,
+  };
+  const key = preparationCacheKey(identity);
+  const preparationRoot = path.join(root, "prepared", key);
+  let builds = 0;
+  const build = async (stage, signal, hooks = {}) => {
+    builds += 1;
+    const device = (await stat(stage, { bigint: true })).dev;
+    const roots = privateArtifactRoots(stage);
+    await mkdir(path.dirname(roots.numericTier), { recursive: true, mode: 0o700 });
+    await cloneArtifactTree(sources.numericTier, roots.numericTier, device, signal);
+    const preparedNumeric = await hashArtifactInventory(roots.numericTier, { signal });
+    await hooks.afterNumericClone?.(stage, signal);
+    await cloneArtifactTree(sources.textEncoder, roots.textEncoder, device, signal);
+    const preparedText = await hashArtifactInventory(roots.textEncoder, { signal });
+    await hooks.afterArtifactClone?.(stage, signal);
+    const adapterDirectory = path.join(stage, "adapter");
+    await mkdir(adapterDirectory, { mode: 0o700 });
+    await writeFile(path.join(adapterDirectory, "memory-mlx-adapter"), "adapter\n", { mode: 0o500 });
+    await chmod(path.join(adapterDirectory, "memory-mlx-adapter"), 0o500);
+    await chmod(adapterDirectory, 0o500);
+    return {
+      artifacts: { numericTier: preparedNumeric, textEncoder: preparedText },
+    };
+  };
+  const options = {
+    preparationRoot,
+    key,
+    identity,
+    preparedFrom: {
+      sceneWorksRevision: "3".repeat(40),
+      inferenceRevision: "4".repeat(40),
+    },
+    build,
+  };
+  return { root, sources, identity, key, preparationRoot, options, build, builds: () => builds };
+}
 
 test("the runner freezes the exact tiny bounded-decode canary", () => {
   const request = canaryRequest(128 * 1024 ** 3, TEXT_ENCODER_INVENTORY);
@@ -51,7 +122,7 @@ test("the runner freezes the exact tiny bounded-decode canary", () => {
     decodeTileEdge: 192, decodeOverlap: 64,
   });
   assert.deepEqual(request.planned._canary, {
-    videoMode: "default", fps: 24, seed: 1234,
+    videoMode: "no_audio", fps: 24, seed: 1234,
   });
   assert.equal(request.planned._watchdog.maxFootprintBytes, 53_347_146_863);
   assert.deepEqual(request.planned._artifact.numericTierInventory, {
@@ -79,8 +150,8 @@ test("private artifact clones preserve the canonical immutable snapshot roots", 
   assert.equal(path.relative(scratch, roots.numericTier).startsWith(".."), false);
   assert.equal(path.relative(scratch, roots.textEncoder).startsWith(".."), false);
   const runnerSource = await readFile(new URL("./run-ltx-safety-canary.mjs", import.meta.url), "utf8");
-  assert.match(runnerSource,
-    /mkdir\(path\.dirname\(privateNumericTierRoot\), \{ recursive: true, mode: 0o700 \}\)/);
+  assert.match(runnerSource, /privateArtifactRoots\(stage\)/);
+  assert.match(runnerSource, /rename\(stage, preparationRoot\)/);
 });
 
 test("the runner refuses promotable or identity-drifted adapter output", () => {
@@ -95,7 +166,7 @@ test("the runner refuses promotable or identity-drifted adapter output", () => {
       provider: "ltx_2_3",
       tier: "q4",
       geometry: { width: 256, height: 256, frames: 9, fps: 24 },
-      audio: true,
+      audio: false,
     },
     artifact: {
       repository: "SceneWorks/ltx-2.3-mlx",
@@ -126,9 +197,7 @@ test("the runner refuses promotable or identity-drifted adapter output", () => {
       maxRuntimeSeconds: MAX_RUNTIME_SECONDS,
       hostMemoryBytes: 128 * 1024 ** 3,
       minInitialMemoryFreeBytes: preflightFreeFloor(128 * 1024 ** 3),
-      minInitialMemoryFreePercent: 70,
       minMemoryFreeBytes: runtimeFreeFloor(128 * 1024 ** 3),
-      minSwapFreeBytes: MIN_SWAP_FREE_BYTES,
     },
     mlxLimits: {
       memoryLimitBytes: MAX_FOOTPRINT_BYTES,
@@ -146,7 +215,7 @@ test("the runner refuses promotable or identity-drifted adapter output", () => {
   );
   const mutations = [
     (value) => { value.promotable = true; },
-    (value) => { value.target.audio = false; },
+    (value) => { value.target.audio = true; },
     (value) => { value.target.geometry.frames = 97; },
     (value) => { value.strategy.parameters.decodeTileEdge = 384; },
     (value) => { value.strategy.engagedRungs = ["resident", "bounded_decode"]; },
@@ -155,8 +224,9 @@ test("the runner refuses promotable or identity-drifted adapter output", () => {
     (value) => { value.watchdog.maxFootprintBytes += 1; },
     (value) => { value.watchdog.maxRuntimeSeconds += 1; },
     (value) => { value.watchdog.minInitialMemoryFreeBytes -= 1; },
-    (value) => { value.watchdog.minInitialMemoryFreePercent -= 1; },
+    (value) => { value.watchdog.minInitialMemoryFreePercent = 70; },
     (value) => { value.watchdog.minMemoryFreeBytes -= 1; },
+    (value) => { value.watchdog.minSwapFreeBytes = 1024 ** 3; },
     (value) => { value.mlxLimits.wiredLimitBytes = MAX_FOOTPRINT_BYTES + 1; },
     (value) => { value.observedMemory.postCleanupActiveBytes = 1; },
     (value) => { value.output.firstFrameNondegenerate = false; },
@@ -175,7 +245,7 @@ test("the runner refuses promotable or identity-drifted adapter output", () => {
   }
 });
 
-test("host preflight parsers reject pressure, swap and executable-identity mutations", () => {
+test("host preflight parses telemetry and excludes only actual GPU or shared-lane owners", () => {
   assert.equal(parseMemoryFreePercent("System-wide memory free percentage: 92%\n"), 92);
   assert.throws(() => parseMemoryFreePercent("no percentage"));
   assert.equal(
@@ -190,10 +260,11 @@ test("host preflight parsers reject pressure, swap and executable-identity mutat
     "13 1 /usr/bin/python3 /tmp/MiniMax/real_weight.py",
     "14 1 /bin/zsh -lc ps | rg cargo",
     "15 1 /Applications/Xcode.app/toolchains/metal -c kernel.metal",
+    "16 1 /opt/actions-runner/bin/Runner.Worker spawnclient 42 43",
   ].join("\n");
   assert.deepEqual(
     foreignHeavyProcesses(table).map((line) => Number(line.split(/\s+/, 1)[0])),
-    [10, 11, 12, 13, 15],
+    [12, 13, 16],
   );
 });
 
@@ -275,7 +346,7 @@ test("the production runner can only launch through the identity-checked watchdo
     MIN_RUNTIME_FREE_BYTES + telemetryResolutionBytes(128 * 1024 ** 3),
   );
   assert.match(source, /"--min-memory-free-bytes", String\(runtimeMemoryFreeFloor\)/);
-  assert.match(source, /"--min-swap-free-bytes", String\(MIN_SWAP_FREE_BYTES\)/);
+  assert.doesNotMatch(source, /--min-swap-free-bytes/);
   assert.match(source, /status\.code !== 0 \|\| status\.signal/);
   assert.match(source, /event\.event === "hard_stop" \|\| event\.event === "terminated"/);
   assert.doesNotMatch(source, /memory-mlx-adapter[^\n]*spawn\(/);
@@ -285,10 +356,14 @@ test("the production runner can only launch through the identity-checked watchdo
   assert.equal(CARGO_METADATA_TIMEOUT_MS, 15 * 60 * 1000);
   assert.match(source, /timeout: CARGO_METADATA_TIMEOUT_MS/);
   assert.match(source, /await assertAdapterIdentity\(adapter, signal\)/);
-  assert.match(source, /pre-launch q4/);
-  assert.match(source, /post-run q4/);
-  assert.match(source, /pre-launch text-encoder/);
-  assert.match(source, /post-run text-encoder/);
+  assert.match(source, /validatePreparedCache\(preparationRoot, preparationKey, identity, signal\)/);
+  assert.match(source, /sealedArtifactIdentity\(root\)/);
+  const reuseValidation = source.slice(
+    source.indexOf("export async function validatePreparedCache("),
+    source.indexOf("async function sealPreparationDirectories("),
+  );
+  assert.doesNotMatch(reuseValidation, /hashArtifactInventory\(/,
+    "cache reuse must not repeat the 46.9 GB content hash");
   assert.match(source, /const resolutionEnv = Object\.fromEntries/);
   assert.match(source, /RUSTUP_TOOLCHAIN: channel/);
   assert.match(source, /CARGO_HOME: path\.join\(scratch, "cargo-home"\)/);
@@ -302,12 +377,21 @@ test("the production runner can only launch through the identity-checked watchdo
   assert.match(source, /--child-attestation-timeout", String\(CHILD_ATTESTATION_TIMEOUT_SECONDS\)/);
   assert.match(source, /event\.event === "child_attested"/);
   assert.match(source, /await chmod\(adapterDirectory, 0o500\)/);
-  assert.match(source, /execFileAsync\("\/bin\/cp", \["-c", cloneSource, output\]/);
-  assert.match(source, /await cleanupCanaryScratch\(scratch\)/);
+  assert.match(source, /runOwnedCommand\("\/bin\/cp", \["-c", cloneSource, output\]/);
+  assert.match(source, /await cleanupCanaryScratch\(runScratch\)/);
   const failureRead = source.indexOf("const eventBytes = await readFile(eventsPath");
-  const cleanup = source.indexOf("await cleanupCanaryScratch(scratch)");
+  const cleanup = source.indexOf("await cleanupCanaryScratch(runScratch)");
   assert.ok(failureRead >= 0 && cleanup > failureRead,
     "watchdog failure reason must be read before scratch cleanup");
+  assert.equal(source.match(/await assertHostPreflight\(/g)?.length, 1,
+    "foreign-heavy work is checked only at model release");
+  assert.doesNotMatch(source, /300_000|5 \* 60 \* 1_000/);
+  assert.match(
+    source,
+    /const preLaunchHost = await assertHostPreflight\(memoryBytes, signal\);\n\s*const status = await new Promise\(\(resolve, reject\) => \{\n\s*const childProcess = spawn/,
+    "the fresh host gate must be the final operation before watchdog launch",
+  );
+  assert.match(source, /sourceAfterRun: \{ sceneWorks: sceneWorksAfterRun, inference: inferenceAfterRun \}/);
   assert.match(source, /cancellation\.abort\(new CanaryInterrupted\(signalName\)\)/);
   assert.match(source, /process\.exitCode = error instanceof CanaryInterrupted \? error\.exitCode : 1/);
 });
@@ -372,4 +456,262 @@ test("the runner binds the pinned toolchain and private same-volume artifact clo
   } finally {
     await cleanupCanaryScratch(root);
   }
+});
+
+test("preparation identity and cache keys change for every canonical input", () => {
+  const identity = preparationIdentity("1".repeat(40), "2".repeat(40), "1.97.1");
+  const key = preparationCacheKey(identity);
+  for (const mutate of [
+    (value) => { value.sceneWorksTree = "3".repeat(40); },
+    (value) => { value.inferenceTree = "4".repeat(40); },
+    (value) => { value.toolchainChannel = "1.97.2"; },
+    (value) => { value.artifact.revision = "5".repeat(40); },
+    (value) => { value.artifact.numericTier.sha256 = "6".repeat(64); },
+    (value) => { value.artifact.textEncoder.bytes += 1; },
+  ]) {
+    const changed = structuredClone(identity);
+    mutate(changed);
+    assert.notEqual(preparationCacheKey(changed), key);
+  }
+  assert.throws(() => preparationIdentity("short", "2".repeat(40), "1.97.1"));
+  assert.throws(() => preparationIdentity("1".repeat(40), "2".repeat(40), "stable"));
+});
+
+test("a completed cache is atomically reused without rebuilding or rehashing file contents", async (t) => {
+  const fixture = await cacheFixture(t);
+  const first = await prepareCanaryCache(fixture.options);
+  assert.equal(first.reused, false);
+  assert.equal(fixture.builds(), 1);
+  const second = await prepareCanaryCache({
+    ...fixture.options,
+    build: async () => { throw new Error("completed cache must not rebuild"); },
+  });
+  assert.equal(second.reused, true);
+  assert.equal(fixture.builds(), 1);
+  assert.deepEqual(second.manifest.artifacts.numericTier.content, fixture.identity.artifact.numericTier);
+  assert.deepEqual(second.manifest.artifacts.textEncoder.content, fixture.identity.artifact.textEncoder);
+  assert.equal((await stat(fixture.preparationRoot)).mode & 0o777, 0o500);
+  assert.equal(
+    (await stat(path.join(fixture.preparationRoot, "prepared.json"))).mode & 0o777,
+    0o400,
+  );
+  assert.deepEqual((await readdir(fixture.preparationRoot)).sort(), [
+    "adapter", "artifacts", "prepared.json", "prepared.sha256",
+  ]);
+});
+
+test("cache validation rejects canonical identity, completion, permission and metadata mutations", async (t) => {
+  const canonical = await cacheFixture(t);
+  await prepareCanaryCache(canonical.options);
+  const changedIdentity = structuredClone(canonical.identity);
+  changedIdentity.artifact.numericTier.sha256 = "0".repeat(64);
+  await assert.rejects(
+    () => validatePreparedCache(
+      canonical.preparationRoot, canonical.key, changedIdentity,
+    ),
+    /identity|canonical/,
+  );
+
+  const manifestFixture = await cacheFixture(t);
+  await prepareCanaryCache(manifestFixture.options);
+  const manifestPath = path.join(manifestFixture.preparationRoot, "prepared.json");
+  const completionPath = path.join(manifestFixture.preparationRoot, "prepared.sha256");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  manifest.artifacts.numericTier.content.sha256 = "0".repeat(64);
+  const bytes = `${JSON.stringify(manifest, null, 2)}\n`;
+  await chmod(manifestPath, 0o600);
+  await chmod(completionPath, 0o600);
+  await writeFile(manifestPath, bytes);
+  await writeFile(completionPath, `${createHash("sha256").update(bytes).digest("hex")}\n`);
+  await chmod(manifestPath, 0o400);
+  await chmod(completionPath, 0o400);
+  await assert.rejects(
+    () => validatePreparedCache(
+      manifestFixture.preparationRoot, manifestFixture.key, manifestFixture.identity,
+    ),
+    /canonical artifact identity/,
+  );
+
+  const permissions = await cacheFixture(t);
+  await prepareCanaryCache(permissions.options);
+  await chmod(path.join(permissions.preparationRoot, "prepared.json"), 0o600);
+  await assert.rejects(
+    () => validatePreparedCache(permissions.preparationRoot, permissions.key, permissions.identity),
+    /file mode changed/,
+  );
+
+  const adapter = await cacheFixture(t);
+  await prepareCanaryCache(adapter.options);
+  const adapterPath = path.join(adapter.preparationRoot, "adapter", "memory-mlx-adapter");
+  await chmod(adapterPath, 0o700);
+  await assert.rejects(
+    () => validatePreparedCache(adapter.preparationRoot, adapter.key, adapter.identity),
+    /read-only executable regular file/,
+  );
+
+  const metadata = await cacheFixture(t);
+  await prepareCanaryCache(metadata.options);
+  const artifactPath = path.join(
+    privateArtifactRoots(metadata.preparationRoot).numericTier,
+    "weights.safetensors",
+  );
+  await chmod(artifactPath, 0o600);
+  await writeFile(artifactPath, "changed-tier\n");
+  await chmod(artifactPath, 0o400);
+  await assert.rejects(
+    () => validatePreparedCache(metadata.preparationRoot, metadata.key, metadata.identity),
+    /seal changed/,
+  );
+});
+
+test("partial publication, orphaned ownership and concurrent preparation recover safely", async (t) => {
+  const partial = await cacheFixture(t);
+  await mkdir(path.dirname(partial.preparationRoot), { recursive: true, mode: 0o700 });
+  await mkdir(partial.preparationRoot, { mode: 0o700 });
+  await writeFile(path.join(partial.preparationRoot, "partial"), "interrupted\n");
+  const lock = preparationLockPath(partial.preparationRoot);
+  await mkdir(lock, { mode: 0o700 });
+  await writeFile(path.join(lock, "owner.json"), JSON.stringify({
+    schemaVersion: 2,
+    pid: 999_999_999,
+    processIdentity: { startIdentity: "old process birth", executable: "/usr/bin/node" },
+    token: "orphan",
+    startedAt: 0,
+  }), { mode: 0o400 });
+  const recovered = await prepareCanaryCache(partial.options);
+  assert.equal(recovered.reused, false);
+  assert.equal(partial.builds(), 1);
+  await assert.rejects(() => stat(lock), { code: "ENOENT" });
+
+  const concurrent = await cacheFixture(t);
+  const slowBuild = async (...args) => {
+    await delay(50);
+    return concurrent.build(...args);
+  };
+  const options = { ...concurrent.options, build: slowBuild };
+  const [left, right] = await Promise.all([
+    prepareCanaryCache(options),
+    prepareCanaryCache(options),
+  ]);
+  assert.equal(concurrent.builds(), 1);
+  assert.deepEqual([left.reused, right.reused].sort(), [false, true]);
+  assert.equal((await readdir(path.dirname(concurrent.preparationRoot)))
+    .some((entry) => entry.includes(".stage-") || entry.endsWith(".lock")), false);
+});
+
+test("a reused live PID with a different process start identity is recovered as stale", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "sc19741-pid-reuse-test-"));
+  t.after(() => cleanupCanaryScratch(root));
+  const preparationRoot = path.join(root, "prepared", "a".repeat(64));
+  await mkdir(path.dirname(preparationRoot), { recursive: true, mode: 0o700 });
+  const lock = preparationLockPath(preparationRoot);
+  await mkdir(lock, { mode: 0o700 });
+  const reusedPid = 4242;
+  const oldIdentity = {
+    startIdentity: "Sun Aug 16 01:02:03 2026",
+    executable: "/usr/local/bin/node",
+  };
+  await writeFile(path.join(lock, "owner.json"), `${JSON.stringify({
+    schemaVersion: 2,
+    pid: reusedPid,
+    processIdentity: oldIdentity,
+    token: "old-owner",
+    startedAt: 0,
+  })}\n`, { mode: 0o400 });
+
+  const blocked = new AbortController();
+  const blockedTimer = setTimeout(
+    () => blocked.abort(new Error("verified live owner wait bounded by test")), 100,
+  );
+  await assert.rejects(
+    acquirePreparationLock(
+      preparationRoot,
+      blocked.signal,
+      async (pid) => pid === reusedPid ? oldIdentity : null,
+    ),
+    /verified live owner wait bounded by test/,
+  );
+  clearTimeout(blockedTimer);
+  assert.equal((await stat(lock)).isDirectory(), true,
+    "a matching process-birth identity must keep exclusive ownership");
+
+  const currentIdentity = {
+    startIdentity: "Sun Aug 16 04:05:06 2026",
+    executable: "/usr/local/bin/node",
+  };
+  const release = await acquirePreparationLock(
+    preparationRoot,
+    undefined,
+    async (pid) => pid === reusedPid
+      ? { ...oldIdentity, startIdentity: "Sun Aug 16 03:04:05 2026" }
+      : currentIdentity,
+  );
+  const newOwner = JSON.parse(await readFile(path.join(lock, "owner.json"), "utf8"));
+  assert.equal(newOwner.pid, process.pid);
+  assert.deepEqual(newOwner.processIdentity, currentIdentity);
+  await release();
+  await assert.rejects(() => stat(lock), { code: "ENOENT" });
+});
+
+test("cancellation during clone, build and publication removes owned staging and locks", async (t) => {
+  for (const phase of ["clone", "build", "publish"]) {
+    const fixture = await cacheFixture(t);
+    const cancellation = new AbortController();
+    let reached;
+    const reachedPhase = new Promise((resolve) => { reached = resolve; });
+    let build = fixture.build;
+    const hooks = {};
+    if (phase === "clone") {
+      hooks.afterNumericClone = async () => {
+        reached();
+        await delay(60_000, undefined, { signal: cancellation.signal });
+      };
+    } else if (phase === "build") {
+      build = async (stage, signal) => {
+        reached();
+        await delay(60_000, undefined, { signal });
+        return fixture.build(stage, signal);
+      };
+    } else {
+      hooks.beforePublish = async () => {
+        reached();
+        await delay(60_000, undefined, { signal: cancellation.signal });
+      };
+    }
+    const operation = prepareCanaryCache({
+      ...fixture.options, build, hooks, signal: cancellation.signal,
+    });
+    await reachedPhase;
+    cancellation.abort(new CanaryInterrupted("SIGTERM"));
+    await assert.rejects(
+      operation,
+      (error) => error instanceof CanaryInterrupted || error.cause instanceof CanaryInterrupted,
+      phase,
+    );
+    const parent = path.dirname(fixture.preparationRoot);
+    const entries = await readdir(parent);
+    assert.equal(entries.some((entry) => entry.includes(".stage-") || entry.endsWith(".lock")), false);
+    await assert.rejects(() => stat(fixture.preparationRoot), { code: "ENOENT" });
+  }
+});
+
+test("owned command cancellation terminates descendants before rejecting", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "sc19741-owned-command-"));
+  t.after(() => cleanupCanaryScratch(root));
+  const pidFile = path.join(root, "child.pid");
+  const cancellation = new AbortController();
+  const operation = runOwnedCommand("/bin/sh", [
+    "-c", `sleep 60 & child=$!; echo $child > ${JSON.stringify(pidFile)}; wait`,
+  ], { signal: cancellation.signal });
+  for (let attempt = 0; attempt < 100 && !(await readFile(pidFile, "utf8").catch(() => "")); attempt += 1) {
+    await delay(10);
+  }
+  const childPid = Number((await readFile(pidFile, "utf8")).trim());
+  cancellation.abort(new CanaryInterrupted("SIGTERM"));
+  await assert.rejects(operation, CanaryInterrupted);
+  assert.throws(
+    () => process.kill(childPid, 0),
+    (error) => error.code === "ESRCH",
+    "owned descendant survived cancellation",
+  );
 });
