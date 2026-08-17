@@ -31,9 +31,7 @@ use sceneworks_core::model_artifacts::external_library::{
 };
 use sceneworks_core::model_artifacts::local_preference::ActiveLocalArtifacts;
 use sceneworks_core::model_artifacts::resolved_cache::{ResolvedCacheLease, ResolvedCacheStore};
-use sceneworks_core::model_artifacts::{
-    ArtifactSourceLibrary, ModelArtifactResolver, ResolvedModelArtifact,
-};
+use sceneworks_core::model_artifacts::{ModelArtifactResolver, ResolvedModelArtifact};
 use serde_json::json;
 use tracing::Level;
 
@@ -312,12 +310,9 @@ fn admit_local_artifact(
     let artifact = artifact?;
     let cache_key = artifact.cache_key().ok()?;
     let store = cache_store(settings)?;
-    let resolver = ModelArtifactResolver::new(
-        ArtifactSourceLibrary::new(sceneworks_core::hf_home::huggingface_hub_cache_dir(
-            &settings.data_dir,
-        ))
-        .ok()?,
-    );
+    let resolver = ModelArtifactResolver::new(sceneworks_core::hf_home::model_source_library(
+        &settings.data_dir,
+    ));
     // The store takes the entry's SHARED artifact lock before it re-reads and re-validates the
     // published entry under it, then stamps usage. An evictor that reaches the entry first holds
     // the exclusive lock, so this waits; an evictor that arrives afterwards finds the lock held
@@ -523,6 +518,7 @@ fn unavailable(detail: impl Into<String>) -> WorkerError {
 mod tests {
     use super::*;
     use sceneworks_core::model_artifacts::external_library::EXTERNAL_LIBRARY_UNAVAILABLE_CODE;
+    use sceneworks_core::model_artifacts::ArtifactSourceLibrary;
     use serde_json::{json, Value};
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;

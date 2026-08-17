@@ -165,6 +165,86 @@ fn resolver(root: &Path, registry: ActiveArtifactLeaseRegistry) -> ModelArtifact
     ModelArtifactResolver::with_lease_registry(ArtifactSourceLibrary::new(root).unwrap(), registry)
 }
 
+/// A source candidate laid out the way a promotion writes it: the bundle mirrors the source
+/// library, which is what makes a published entry loadable by every runtime (sc-19707).
+fn hub_layout_candidate(root: &Path, revision: &str) -> PromotionCandidate {
+    let mut candidate = source_candidate(root, revision);
+    let mut members = candidate.artifact.closure.members.clone();
+    members[0].destination = crate::model_artifacts::local_preference::hub_cache_member_destination(
+        &members[0].source.repository,
+        &members[0].source.revision,
+        Path::new(""),
+    )
+    .unwrap();
+    candidate.artifact.closure = ResolvedBundleClosure::new(members).unwrap();
+    candidate.cache_key = candidate.artifact.cache_key().unwrap();
+    candidate
+}
+
+/// The one provider both the API preflight and the worker's pre-loader guard read. It must offer
+/// ONLY entries a runtime can actually load: published, verifiable, and stored in the source
+/// library layout. Everything else stays on the source tier instead of poisoning the answer.
+#[test]
+fn valid_local_artifacts_offers_only_loadable_published_entries() {
+    let scratch = TempDir::new().unwrap();
+    let source = scratch.path().join("source");
+    let data = scratch.path().join("data");
+    std::fs::create_dir(&source).unwrap();
+    assert!(ResolvedCacheStore::valid_local_artifacts(&data).is_empty());
+
+    let store = ResolvedCacheStore::open(&data).unwrap();
+    // An uninitialized-but-open cache offers nothing.
+    assert!(ResolvedCacheStore::valid_local_artifacts(&data).is_empty());
+
+    // An entry still materializing is never a candidate: its bytes are not published yet.
+    let in_flight = hub_layout_candidate(&source, REVISION_B);
+    let reservation = match store.reserve(&in_flight, &source, "fixture:model").unwrap() {
+        ReservationOutcome::Acquired(reservation) => reservation,
+        _ => panic!("fixture reservation must acquire"),
+    };
+    assert!(ResolvedCacheStore::valid_local_artifacts(&data).is_empty());
+    drop(reservation);
+    assert!(ResolvedCacheStore::valid_local_artifacts(&data).is_empty());
+
+    // A published hub-layout bundle IS a candidate.
+    let candidate = hub_layout_candidate(&source, REVISION_A);
+    let materializer = ResolvedCacheMaterializer::new(store.clone());
+    let published = match materializer
+        .materialize(
+            &candidate,
+            &source,
+            "fixture:model",
+            &MaterializationCancellation::default(),
+        )
+        .unwrap()
+    {
+        MaterializationOutcome::Published(metadata) => *metadata,
+        other => panic!("fixture bundle was not published: {other:?}"),
+    };
+    let offered = ResolvedCacheStore::valid_local_artifacts(&data);
+    assert_eq!(offered, vec![published.artifact.clone()]);
+
+    // A published bundle stored in any other layout cannot be handed to the shared snapshot
+    // resolvers, so it is not offered even though the store considers it complete.
+    let legacy = source_candidate(&scratch.path().join("legacy-source"), REVISION_B);
+    match materializer
+        .materialize(
+            &legacy,
+            &scratch.path().join("legacy-source"),
+            "fixture:legacy",
+            &MaterializationCancellation::default(),
+        )
+        .unwrap()
+    {
+        MaterializationOutcome::Published(_) => {}
+        other => panic!("legacy fixture was not published: {other:?}"),
+    }
+    assert_eq!(
+        ResolvedCacheStore::valid_local_artifacts(&data),
+        vec![published.artifact]
+    );
+}
+
 #[cfg(windows)]
 struct WindowsDirectoryJunction {
     path: PathBuf,
