@@ -732,6 +732,50 @@ pub(crate) async fn cancel_pending_jobs(
     }))
 }
 
+/// Move selected not-yet-started jobs to the front of the worker queue. The store applies the
+/// change under the same immediate transaction used for claims, so a worker either claims a job
+/// first (and it is ignored here) or observes its new rank — there is no preemption race. Prompt
+/// refinement uses the same rank mechanism automatically when it is created.
+pub(crate) async fn prioritize_jobs(
+    State(state): State<AppState>,
+    ApiJson(payload): ApiJson<PrioritizeJobsRequest>,
+) -> Result<Json<PrioritizeJobsResponse>, ApiError> {
+    const MAX_PRIORITY_SELECTION: usize = 500;
+    if payload.job_ids.is_empty() {
+        return Err(ApiError::bad_request("Select at least one queued job"));
+    }
+    if payload.job_ids.len() > MAX_PRIORITY_SELECTION {
+        return Err(ApiError::bad_request(format!(
+            "At most {MAX_PRIORITY_SELECTION} jobs can be prioritized at once"
+        )));
+    }
+
+    let job_ids = payload
+        .job_ids
+        .into_iter()
+        .filter(|job_id| !job_id.trim().is_empty())
+        .collect::<Vec<_>>();
+    if job_ids.is_empty() {
+        return Err(ApiError::bad_request("Select at least one queued job"));
+    }
+
+    let jobs = store_call(state.clone(), move |store, _timeout| {
+        store.prioritize_jobs(&job_ids)
+    })
+    .await?;
+    for job in &jobs {
+        publish(&state, "job.updated", job);
+    }
+    if !jobs.is_empty() {
+        publish_queue(&state).await?;
+    }
+    Ok(Json(PrioritizeJobsResponse {
+        prioritized: jobs.len(),
+        jobs,
+        extra: Default::default(),
+    }))
+}
+
 /// Clear a single completed item from the queue (sc-12231, issue #1556) — the
 /// per-card "×" dismiss. Soft-hides one terminal job (see `JobsStore::clear_job`)
 /// so it drops off the queue list + counts while its row (and generated assets)
