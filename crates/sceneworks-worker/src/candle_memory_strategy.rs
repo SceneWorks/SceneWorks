@@ -1290,10 +1290,34 @@ mod tests {
             "the staged fixture must be a shape a real provider could declare: {:?}",
             contract.conformance_errors()
         );
-        let manifest = json!({ "candle": { "sequentialPeakGb": 4.0 } })
+        // `sequentialPeakGb` is read PER TIER by `vram_gate::predicted_sequential_peak_gb`
+        // (`sequential.get(tier_key)`), so a bare scalar looks up as `None` and the staged floor
+        // silently falls back to the RESIDENT peak — which can never fit where resident does not,
+        // making this test's premise unsatisfiable by construction. Same map shape the sibling
+        // `eligible_lens_selector_contract_...` fixture uses.
+        const STAGED_ROW_GB: f64 = 2.5;
+        const RESIDENT_PEAK_GB: f64 = 16.0;
+        // `evaluate_shared_image_inner` hands the selector a fixed 2 GiB reserved headroom, and
+        // `Budget::effective_gb` subtracts it, so the staged floor competes against
+        // `free_gb - SELECTOR_RESERVE_GB`.
+        const SELECTOR_RESERVE_GB: f64 = 2.0;
+        let manifest = json!({ "candle": { "sequentialPeakGb": { "q4": STAGED_ROW_GB } } })
             .as_object()
             .expect("manifest object")
             .clone();
+        // Derived through the production formula rather than guessed: the staged row is padded by
+        // the allocator reserve and then widened by the candle estimate margin before the fit check.
+        // The previous literals (4.0 row, 8.0 free) missed by 0.24 GiB even with the map shape, and
+        // a margin re-derivation would silently move the window again.
+        let staged_floor_gb = STAGED_ROW_GB + crate::vram_gate::HEADROOM_GB;
+        let widened_staged_gb =
+            staged_floor_gb * (1.0 + crate::ladder_margin_policy::CANDLE_ESTIMATE_MARGIN);
+        let free_gb = widened_staged_gb + SELECTOR_RESERVE_GB + 0.3;
+        assert!(
+            free_gb - SELECTOR_RESERVE_GB < RESIDENT_PEAK_GB,
+            "the budget must stay below the resident estimate, or 'staged fits where resident does \
+             not' proves nothing"
+        );
         let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("krea-q4")));
         let evaluation = evaluate_shared_image_inner(
             "krea_2_edit",
@@ -1317,10 +1341,10 @@ mod tests {
             false,
             false,
             Some(VramBudget {
-                free_gb: 8.0,
+                free_gb,
                 total_gb: 32.0,
             }),
-            Some(16.0),
+            Some(RESIDENT_PEAK_GB),
             0,
             MemoryCacheState::Cold,
             Some("edit_image"),
