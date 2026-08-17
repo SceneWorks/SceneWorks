@@ -2674,6 +2674,11 @@ async fn try_render_frame_png(
     Ok(tokio::fs::try_exists(output_path).await?)
 }
 
+/// End-relative seek offset for [`render_frame_png`]'s last-frame fallback. Small enough to land on
+/// the final frame of any cadence this app produces, and works on a single-image source (which
+/// decodes as one frame) as well as a clip.
+const FRAME_SEEK_EOF_SECONDS: f64 = 0.1;
+
 pub(crate) async fn render_frame_png(
     ffmpeg: &str,
     source_path: &Path,
@@ -2703,6 +2708,34 @@ pub(crate) async fn render_frame_png(
         context,
     )
     .await?;
+    if !tokio::fs::try_exists(output_path).await? {
+        // The accurate seek landed past the last real frame, so ffmpeg encoded nothing. The two
+        // ways to get here are both legitimate: a STILL-image timeline item (a PNG decodes as one
+        // frame at t=0, so any playhead past ~1/25s seeks past it) and a playhead that maps to the
+        // tail of a short clip. In both cases the frame the user is looking at IS the last frame,
+        // so fall back to an end-relative seek — the same "clone the previous frame forward"
+        // intent `try_render_frame_png` leaves to its caller. Only a source that yields no frame
+        // at all still errors.
+        run_ffmpeg(
+            vec![
+                ffmpeg.to_owned(),
+                "-y".to_owned(),
+                "-sseof".to_owned(),
+                format!("-{FRAME_SEEK_EOF_SECONDS:.3}"),
+                "-i".to_owned(),
+                source_path.display().to_string(),
+                "-frames:v".to_owned(),
+                "1".to_owned(),
+                "-vf".to_owned(),
+                frame_scale_pad_filter(width, height),
+                "-f".to_owned(),
+                "image2".to_owned(),
+                output_path.display().to_string(),
+            ],
+            context,
+        )
+        .await?;
+    }
     if !tokio::fs::try_exists(output_path).await? {
         return Err(WorkerError::InvalidPayload(format!(
             "FFmpeg did not produce frame output: {}",

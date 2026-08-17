@@ -238,14 +238,15 @@ test("e2e: a base commit that predates the bundle is confirmed-absent and growth
   assert.deepEqual([...outcome.headIds], [A, B]);
 });
 
-test("the gate and this suite are wired into npm run check", async () => {
+test("this suite is wired into npm run check", async () => {
   const { scripts } = JSON.parse(await readFile(path.join(ROOT, "package.json"), "utf8"));
-  // The self-test invocation and the LIVE invocation are separate claims: a lone `.mjs`-suffix
-  // match would be satisfied by the `--self-test` call alone, letting the live run be deleted
-  // unnoticed. Pin the exact self-test-then-live sequence instead.
-  assert.match(
-    scripts.check,
-    /node scripts\/check-evidence-corpus\.mjs --self-test && node scripts\/check-evidence-corpus\.mjs(?: &&|$)/,
-  );
+  // sc-19758 unwired the GATE. `npm run check` used to run `check-evidence-corpus.mjs --self-test`
+  // and then the live corpus check; it is now the unit tests alone, so the assertion that pinned
+  // that self-test-then-live sequence is gone with it. The script is still on disk and still works
+  // when run deliberately — `node scripts/check-evidence-corpus.mjs`.
+  //
+  // This suite stays wired, and that half is still worth pinning: the tests are cheap, they grade
+  // the corpus logic rather than the pin, and dropping them from the chain would be an accident
+  // rather than a decision.
   assert.match(scripts.check, /scripts\/check-evidence-corpus\.test\.mjs/);
 });
