@@ -68,7 +68,9 @@ Before creating branches:
 5. Add an explicit final integration/acceptance story covering the whole epic,
    cross-repository pins, documentation, migrations, and runtime evidence.
 6. Define the validation matrix, including required MLX, candle/CUDA, desktop,
-   server, real-weight, migration, and compatibility evidence.
+   server, real-weight, migration, and compatibility evidence. Matrix evidence
+   is gathered once, at epic completion — not re-proven per story (see *Gate
+   teardown* under **CI and repository configuration**).
 7. Record the intended feature branch name in the epic.
 
 Do not create an epic branch as a substitute for incomplete requirements.
@@ -172,9 +174,11 @@ For a story that changes inference:
    node scripts/bump-inference.mjs --sha <inference-feature-sha40>
    ```
 
-4. Regenerate and validate every pin-derived lockfile, provenance, license,
-   compatibility, capability, memory, calibration, and closure artifact
-   required by the script and current CI.
+4. Regenerate the pin-derived artifacts that `bump-inference.mjs` and current
+   CI actually require — as of the 2026-08-15/16 gate teardown that is a short
+   list, and a pin bump no longer invalidates capability dumps or obligates any
+   measurement work (see *Gate teardown* under **CI and repository
+   configuration**).
 5. Merge the SceneWorks story PR only after inference and SceneWorks validation
    both pass at the exact paired revisions.
 
@@ -231,7 +235,10 @@ by exact commit SHA:
 6. Record the exact resulting inference `main` commit. An open PR is not a merged
    dependency.
 7. Update the SceneWorks feature branch to that inference-main commit with
-   `bump-inference.mjs` and regenerate every derived artifact at the final pin.
+   `bump-inference.mjs` and regenerate the derived artifacts current CI
+   requires at the final pin. The epic's single measurement campaign, if the
+   epic calls for one, runs here — after this bump, never earlier (see *Gate
+   teardown* under **CI and repository configuration**).
 8. Rerun the complete SceneWorks validation matrix and final review. The pin
    change after the inference merge invalidates earlier final-CI claims.
 9. Proceed to the SceneWorks final merge only when inference `main`, the
@@ -296,6 +303,53 @@ publish a release.
 ## CI and repository configuration
 
 ### Current state verified on 2026-08-15
+
+#### Gate teardown (2026-08-15/16) — read before regenerating anything
+
+The pin-keyed verification gates are **deliberately dismantled**:
+
+- sc-19758 (`68670a3ee`): four `check.yml` steps are switched off with `if: false`
+  — the per-lane inference closure-digest verification, the NC-weights source
+  scan, the About→Licenses guard, and the gen-core version-skew guard. The jobs
+  and their scripts are retained **on purpose** (the `parity` aggregator asserts
+  a member floor, and re-enabling any of them is deleting one line).
+  `release.yml` still scans built bundles for NC weights.
+- sc-19751: `check-license-coverage.mjs` reports and exits 0; `--strict` gates
+  only during a deliberate compliance pass.
+- `e14171984` (PR #2360): an inference pin bump **no longer invalidates
+  capability dumps**. A dump is stale only when a provider's declared
+  capabilities actually change; a media/audio revision disagreement is recorded
+  (`audioInferenceRevision`), not refused, and `bump-inference.mjs` no longer
+  fails a bump on a stale facts file.
+
+Consequences, binding on agents:
+
+- **A script that exists in `scripts/` but is disabled or unwired is the
+  designed state, not a blocker.** Do not wire it up, re-enable an `if: false`,
+  treat its existence as a requirement, or file a story about it.
+- **Measurement campaigns — capability dumps, memory-matrix regeneration,
+  calibration captures, VRAM/canary runs — run once, at the end of an epic**
+  (immediately after its single pin bump), or when explicitly requested. Never
+  per story and never per pin movement. Calibration records demoted to floors
+  during development is the accepted state.
+- Where older prose in this document says to regenerate or validate "every"
+  pin-derived artifact, the operative authority is **what current CI on the
+  actual PR requires**, which after the teardown is much less than the lists
+  suggest.
+- Story "done" = the code, its tests, adversarial review, and green required CI
+  on the PR. Nothing more unless the story itself is a measurement story.
+- **Tests over measured corpora** (calibration records and evidence, capability
+  dumps, session logs, survey populations) **assert shape and invariants —
+  schema validity, non-emptiness, resolving cross-references, per-item
+  properties — never exact populations, pinned ids, or historical counts.** A
+  pinned count over a corpus that is supposed to churn cannot fail on a bug and
+  is guaranteed to fail on every legitimate re-capture; it is a gate on
+  measurement wearing a test's clothes. When a re-capture trips one, the defect
+  is in the test: rewrite that assertion and its siblings to shape in the same
+  PR rather than hand-updating the numbers. (Golden/parity fixtures that pin a
+  fixed input's output are a different, legitimate class.)
+
+#### Merge queues
 
 **Neither repository has a merge queue.** Both were removed on 2026-08-11 —
 SceneWorks first, inference the same day — and the two are now structurally
