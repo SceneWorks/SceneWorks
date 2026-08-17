@@ -1,5 +1,9 @@
 use super::*;
 
+// Keep the behavior-preserving legacy root helper available to this module while all production
+// consumers enter through `model_source_library`; taking the function item constructs no root.
+const _: fn(&FsPath) -> PathBuf = huggingface_hub_cache_dir;
+
 use sceneworks_core::base_weights::{detect_base_weight_file, import_detection_supported};
 use sceneworks_core::credentials::normalize_host;
 use sceneworks_core::lora_family::is_hidden_file;
@@ -1087,7 +1091,9 @@ pub(crate) async fn delete_model(
     let cleanup_source = manifest_entry.as_ref().unwrap_or(&model);
     let allowed_roots = vec![
         state.settings.data_dir.join("models"),
-        huggingface_hub_cache_dir(&state.settings.data_dir),
+        sceneworks_core::hf_home::model_source_library(&state.settings.data_dir)
+            .root()
+            .to_owned(),
     ];
     let removal = match remove_owned_artifacts(
         model_artifact_paths(cleanup_source, &state.settings.data_dir),
@@ -1180,7 +1186,12 @@ pub(crate) async fn delete_model_variant(
             code: None,
         })?;
     let data_dir = &state.settings.data_dir;
-    let allowed_roots = vec![data_dir.join("models"), huggingface_hub_cache_dir(data_dir)];
+    let allowed_roots = vec![
+        data_dir.join("models"),
+        sceneworks_core::hf_home::model_source_library(data_dir)
+            .root()
+            .to_owned(),
+    ];
     // A tier lives in one of two storage shapes. Download-matrix models (`hasVariantMatrix`) keep the
     // tier as a `files`-filtered slice of a shared HF cache repo (sc-12024); convert-at-install
     // models (Anima) keep it as a real `<converted>/<tier>/` dir emitted by one convert job
@@ -1464,7 +1475,18 @@ async fn remove_empty_dirs(dir: &FsPath) {
 /// subtrees, and — when no payload remains (no blobs, no snapshot files) — the whole repo cache
 /// dir, so a fully-drained repo doesn't linger as a bare `refs/` skeleton. Best-effort.
 async fn prune_empty_repo_cache(repo_cache: &FsPath) {
-    remove_empty_dirs(&repo_cache.join("snapshots")).await;
+    let Some(source_root) = repo_cache.parent() else {
+        return;
+    };
+    let Ok(source_library) =
+        sceneworks_core::model_artifacts::ArtifactSourceLibrary::new(source_root)
+    else {
+        return;
+    };
+    let Ok(snapshots_root) = source_library.snapshots_root_from_repository_root(repo_cache) else {
+        return;
+    };
+    remove_empty_dirs(&snapshots_root).await;
     remove_empty_dirs(&repo_cache.join("blobs")).await;
     let has_blobs = std::fs::read_dir(repo_cache.join("blobs"))
         .map(|mut entries| entries.next().is_some())
@@ -2111,7 +2133,9 @@ mod runtime_text_encoder_option_tests {
             "TheCluster/amoral-gemma-3-12B-v2-mlx-4bit",
         )
         .unwrap();
-        let snapshot = repo.join("snapshots").join("test-revision");
+        let snapshot = repo
+            .join("snapshots")
+            .join("0123456789abcdef0123456789abcdef01234567");
         std::fs::create_dir_all(&snapshot).unwrap();
         std::fs::write(
             snapshot.join("config.json"),

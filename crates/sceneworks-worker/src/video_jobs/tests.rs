@@ -694,8 +694,10 @@ fn mochi_receipts_are_atomic_across_tier_and_shared_corequisite() {
     let hub = data.path().join("hub");
     let _env = crate::test_env::EnvVars::set(&[("HF_HUB_CACHE", hub.to_str().unwrap())]);
     let repo_cache = hub.join("models--SceneWorks--mochi-1-mlx");
-    let installed = repo_cache.join("snapshots/installed");
-    let newer = repo_cache.join("snapshots/newer");
+    let installed_revision = "1111111111111111111111111111111111111111";
+    let newer_revision = "2222222222222222222222222222222222222222";
+    let installed = repo_cache.join("snapshots").join(installed_revision);
+    let newer = repo_cache.join("snapshots").join(newer_revision);
     for root in [&installed, &newer] {
         std::fs::create_dir_all(root.join("q4/transformer")).unwrap();
         std::fs::write(root.join("q4/transformer/model.safetensors"), b"x").unwrap();
@@ -706,7 +708,7 @@ fn mochi_receipts_are_atomic_across_tier_and_shared_corequisite() {
         }
     }
     std::fs::create_dir_all(repo_cache.join("refs")).unwrap();
-    std::fs::write(repo_cache.join("refs/main"), b"newer").unwrap();
+    std::fs::write(repo_cache.join("refs/main"), newer_revision).unwrap();
     let marker = data
         .path()
         .join("models")
@@ -733,12 +735,12 @@ fn mochi_receipts_are_atomic_across_tier_and_shared_corequisite() {
     };
     let request = mochi_request(json!({ "mlxQuantize": 4 }));
 
-    write_receipts("installed", "installed");
+    write_receipts(installed_revision, installed_revision);
     assert_eq!(
         resolve_mochi_model_dir(&settings, &request).unwrap(),
         installed.join("q4")
     );
-    write_receipts("installed", "newer");
+    write_receipts(installed_revision, newer_revision);
     assert_ne!(
         resolve_mochi_model_dir(&settings, &request).unwrap(),
         installed.join("q4")
@@ -7289,7 +7291,7 @@ fn write_fake_wan_lightning(data_dir: &Path, engine_id: &str) -> (PathBuf, PathB
         .join("hub")
         .join("models--lightx2v--Wan2.2-Lightning")
         .join("snapshots")
-        .join("deadbeef")
+        .join("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
         .join(subdir);
     std::fs::create_dir_all(&base).unwrap();
     let high = base.join("high_noise_model.safetensors");
@@ -10199,7 +10201,7 @@ fn write_fake_hf_lora(data_dir: &Path, repo: &str, file: &str) -> PathBuf {
     let snapshot = fake_hf_hub_dir(data_dir)
         .join(format!("models--{}", repo.replace('/', "--")))
         .join("snapshots")
-        .join("deadbeef");
+        .join("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
     std::fs::create_dir_all(&snapshot).unwrap();
     let path = snapshot.join(file);
     write_lora_fixture(&path, None);

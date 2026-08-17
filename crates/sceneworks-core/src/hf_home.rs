@@ -14,6 +14,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use crate::model_artifacts::ArtifactSourceLibrary;
+
 static DEFAULT_HF_HOME: OnceLock<Option<PathBuf>> = OnceLock::new();
 
 /// The OS Hugging Face home, `~/.cache/huggingface` (the literal `~/.cache`, not
@@ -92,6 +94,13 @@ pub fn huggingface_hub_cache_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("cache").join("huggingface").join("hub")
 }
 
+/// Typed authoritative model source library. Runtime and catalog compatibility helpers delegate
+/// to this value instead of reconstructing a configured Hugging Face root independently.
+pub fn model_source_library(data_dir: &Path) -> ArtifactSourceLibrary {
+    ArtifactSourceLibrary::new(huggingface_hub_cache_dir(data_dir))
+        .expect("the resolved Hugging Face source-library root is nonempty")
+}
+
 /// The `<X>` in Hugging Face hub's `models--<X>` cache directory name: every
 /// character outside `[A-Za-z0-9._-]` becomes `--`, then surrounding `-` are
 /// trimmed. `None` when nothing survives. Kept byte-identical to the Python
@@ -121,7 +130,9 @@ pub fn safe_repo_dir_name(repo: &str) -> Option<String> {
 /// `None` when the repo slug sanitizes to nothing.
 pub fn huggingface_repo_cache_path(data_dir: &Path, repo: &str) -> Option<PathBuf> {
     let safe_repo = safe_repo_dir_name(repo)?;
-    Some(huggingface_hub_cache_dir(data_dir).join(format!("models--{safe_repo}")))
+    model_source_library(data_dir)
+        .repository_root_from_safe_name(&safe_repo)
+        .ok()
 }
 
 #[cfg(test)]

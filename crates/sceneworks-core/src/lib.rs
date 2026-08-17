@@ -20,6 +20,7 @@ pub mod lora_url;
 pub mod media_convert;
 pub mod memory_calibration;
 pub mod mlx_tier_completeness;
+pub mod model_artifacts;
 pub mod observability;
 pub mod payload_util;
 pub mod preview_support;
