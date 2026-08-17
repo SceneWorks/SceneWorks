@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmod, mkdir, mkdtemp, readFile, readdir, stat, symlink, writeFile,
@@ -896,9 +897,31 @@ test("owned command cancellation terminates descendants before rejecting", async
   const childPid = Number((await readFile(pidFile, "utf8")).trim());
   cancellation.abort(new CanaryInterrupted("SIGTERM"));
   await assert.rejects(operation, CanaryInterrupted);
-  assert.throws(
-    () => process.kill(childPid, 0),
-    (error) => error.code === "ESRCH",
-    "owned descendant survived cancellation",
-  );
+  let childExists = true;
+  try {
+    process.kill(childPid, 0);
+  } catch (error) {
+    if (error.code !== "ESRCH") throw error;
+    childExists = false;
+  }
+  if (childExists) {
+    const childStatus = spawnSync("/bin/ps", ["-o", "stat=", "-p", String(childPid)], {
+      encoding: "utf8",
+    });
+    assert.equal(childStatus.error, undefined);
+    assert.equal(childStatus.signal, null);
+    assert.equal(childStatus.stderr, "");
+    const childStates = childStatus.stdout.split("\n").map((state) => state.trim()).filter(Boolean);
+    if (childStatus.status === 1 && childStates.length === 0) {
+      assert.throws(
+        () => process.kill(childPid, 0),
+        (error) => error.code === "ESRCH",
+        "owned descendant survived cancellation after ps reported no process",
+      );
+    } else {
+      assert.equal(childStatus.status, 0);
+      assert.equal(childStates.length, 1);
+      assert.match(childStates[0], /^Z/, `owned descendant survived cancellation: state=${childStates[0]}`);
+    }
+  }
 });
