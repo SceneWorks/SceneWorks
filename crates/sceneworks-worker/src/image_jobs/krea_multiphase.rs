@@ -472,6 +472,12 @@ async fn generate_krea_multiphase_stream(
     let engine_id = raw_model.engine_id();
 
     let (quant, quant_bits) = resolve_quant(request, Some(&weights_dir));
+    // `quant` feeds the macOS resolved-artifact tier mapping below. The candle arm of that same cfg
+    // split hardcodes `load_quant = None` rather than passing `quant` through the way the sibling
+    // `krea_edit.rs` candle arm does, so the binding has no candle-lane reader. Kept as an explicit
+    // discard so the divergence stays visible instead of being hidden behind an `_quant` rename.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let _ = quant;
     // The SAME adapter stack the phases reference by index: `resolve_adapters` emits one `AdapterSpec`
     // per `request.loras` entry, in order, so `LoadSpec::adapters[i]` is `request.loras[i]` and a
     // phase's lora `index` selects it directly.
@@ -615,7 +621,7 @@ async fn generate_krea_multiphase_stream(
         (
             evaluation
                 .as_ref()
-                .and_then(|evaluation| evaluation.memory.clone()),
+                .and_then(|evaluation| evaluation.memory),
             evaluation.and_then(|evaluation| optimized_shared_memory_context(evaluation.context)),
         )
     };

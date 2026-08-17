@@ -451,7 +451,7 @@ pub(super) async fn generate_candle_krea_edit_stream(
     )?;
     let generation_memory = memory_evaluation
         .as_ref()
-        .and_then(|evaluation| evaluation.memory.clone());
+        .and_then(|evaluation| evaluation.memory);
     let memory_strategy_context = memory_evaluation
         .and_then(|evaluation| optimized_shared_memory_context(evaluation.context));
 
@@ -488,7 +488,7 @@ pub(super) async fn generate_candle_krea_edit_stream(
                         conditioning,
                         use_pid,
                         text_style_gain,
-                        generation_memory.clone(),
+                        generation_memory,
                         memory_strategy_context.as_ref(),
                         preview,
                         &cancel,
