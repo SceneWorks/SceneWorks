@@ -5074,47 +5074,19 @@ pub(crate) fn merge_model_manifest_entry(builtin: Option<Value>, user: Option<Va
 /// (sc-3240, Wan2.2) — so filtering here makes the download job, install status, size, and the
 /// frontend's `downloads[0]` all resolve to the right per-platform repo from one seam. No-op unless
 /// at least one entry is platform-tagged, so single-repo models are untouched.
-pub(crate) fn retain_downloads_for_os(model: &mut Value, os: &str) {
-    let Some(downloads) = model.get_mut("downloads").and_then(Value::as_array_mut) else {
-        return;
-    };
-    if !downloads
-        .iter()
-        .any(|entry| entry.get("platforms").is_some())
-    {
-        return;
-    }
-    downloads.retain(
-        |entry| match entry.get("platforms").and_then(Value::as_array) {
-            Some(platforms) => platforms.iter().any(|p| p.as_str() == Some(os)),
-            None => true,
-        },
-    );
-}
+///
+/// sc-19708: the manifest-shape predicates below now live in
+/// `sceneworks_core::model_artifacts::artifact_selection` because the availability seam (API
+/// preflight AND the worker's pre-loader guard) selects the same closures. These re-exports keep
+/// the API's install/display call sites on the identical definitions so they cannot drift.
+pub(crate) use sceneworks_core::model_artifacts::artifact_selection::retain_downloads_for_os;
 
-pub(crate) fn model_download(model: &Value) -> Option<Value> {
-    let downloads = model.get("downloads")?.as_array()?;
-    let mut fallback = None;
-    for download in downloads {
-        // Co-requisites (sc-9696) install alongside the primary, never AS it — skip them when
-        // choosing the canonical entry for size/install-path/download.
-        if !is_supported_model_download(download) || is_co_requisite_download(download) {
-            continue;
-        }
-        fallback.get_or_insert(download);
-        if download.get("default").and_then(Value::as_bool) == Some(true) {
-            return Some(download.clone());
-        }
-    }
-    fallback.cloned()
-}
+pub(crate) use sceneworks_core::model_artifacts::artifact_selection::model_download;
 
 /// True when a download entry is a co-requisite dependency (sc-9696): fetched ALONGSIDE the primary
 /// download rather than as a pick-one alternate, and gating the entry's install state. See the
 /// manifest schema `downloads[].coRequisite`.
-pub(crate) fn is_co_requisite_download(download: &Value) -> bool {
-    download.get("coRequisite").and_then(Value::as_bool) == Some(true)
-}
+pub(crate) use sceneworks_core::model_artifacts::artifact_selection::is_co_requisite_download;
 
 /// The co-requisite download entries for `model` (sc-9696) — the dependencies that must install
 /// alongside the primary (e.g. the PiD decoder's shared gemma-2-2b-it caption encoder). The catalog
@@ -5128,74 +5100,10 @@ pub(crate) fn is_co_requisite_download(download: &Value) -> bool {
 /// that are themselves per-tier: they exist as `q4`/`q8`/`bf16` subtrees of one components mirror,
 /// and only the one matching the selected tier should be fetched, sized, or gated on. Keying that on
 /// the presence of `variant` keeps every existing co-requisite on exactly its current path.
-pub(crate) fn co_requisite_variant(download: &Value) -> Option<String> {
-    download
-        .get("variant")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_ascii_lowercase)
-}
-
-/// The co-requisite downloads that apply to `variant` (sc-14980).
-///
-/// Tier-agnostic rows (no `variant`) always apply. A tier-scoped row applies only to its own tier;
-/// when no tier is in scope, every tier-scoped row is returned so callers that genuinely aggregate
-/// across tiers still see them all.
-pub(crate) fn model_co_requisite_downloads_for_variant(
-    model: &Value,
-    variant: Option<&str>,
-) -> Vec<Value> {
-    let wanted = variant.map(|value| value.trim().to_ascii_lowercase());
-    model_co_requisite_downloads(model)
-        .into_iter()
-        .filter(
-            |download| match (co_requisite_variant(download), wanted.as_deref()) {
-                (None, _) => true,
-                (Some(_), None) => true,
-                (Some(row), Some(wanted)) => row == wanted,
-            },
-        )
-        .collect()
-}
-
-pub(crate) fn model_co_requisite_downloads(model: &Value) -> Vec<Value> {
-    model
-        .get("downloads")
-        .and_then(Value::as_array)
-        .map(|downloads| {
-            downloads
-                .iter()
-                .filter(|download| {
-                    is_co_requisite_download(download) && is_supported_model_download(download)
-                })
-                .cloned()
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// Select a specific quant tier's download entry for a quant-matrix model (sc-8508). Returns the
-/// supported `downloads` entry whose `variant` matches `variant` (case-insensitive). `None` when the
-/// model declares no such tier — the caller surfaces a 400 rather than silently installing the wrong
-/// tier. A `None` `variant` argument means "the default tier" and is handled by [`model_download`].
-pub(crate) fn model_download_for_variant(model: &Value, variant: &str) -> Option<Value> {
-    let downloads = model.get("downloads")?.as_array()?;
-    let wanted = variant.trim().to_ascii_lowercase();
-    downloads
-        .iter()
-        .find(|download| {
-            is_supported_model_download(download)
-                && !is_co_requisite_download(download)
-                && download
-                    .get("variant")
-                    .and_then(Value::as_str)
-                    .map(|value| value.trim().to_ascii_lowercase())
-                    .as_deref()
-                    == Some(wanted.as_str())
-        })
-        .cloned()
-}
+pub(crate) use sceneworks_core::model_artifacts::artifact_selection::{
+    co_requisite_variant, model_co_requisite_downloads, model_co_requisite_downloads_for_variant,
+    model_download_for_variant,
+};
 
 /// Best-effort credential host for a gated model when the manifest entry doesn't
 /// set `credentialHost` explicitly: an explicit per-download `credentialHost`,
@@ -5228,13 +5136,7 @@ fn derive_credential_host(model: &serde_json::Map<String, Value>) -> Option<Stri
     None
 }
 
-pub(crate) fn is_supported_model_download(download: &Value) -> bool {
-    download.get("provider").and_then(Value::as_str) == Some("huggingface")
-        && download
-            .get("repo")
-            .and_then(Value::as_str)
-            .is_some_and(|repo| !repo.is_empty())
-}
+pub(crate) use sceneworks_core::model_artifacts::artifact_selection::is_supported_model_download;
 
 pub(crate) fn model_download_context(model: &Value) -> Result<Option<DownloadContext>, ApiError> {
     let Some(download) = model_download(model) else {
