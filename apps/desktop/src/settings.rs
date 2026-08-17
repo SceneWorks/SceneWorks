@@ -955,13 +955,22 @@ pub async fn choose_data_dir(app: AppHandle) -> Option<String> {
 #[tauri::command]
 pub fn set_model_library(path: String) -> Result<AppSettings, String> {
     let mut settings = load_settings();
-    let hf_home = storage_override_input("Model library folder", &path)?;
-    if hf_home.is_none() {
-        return Err("A model library folder is required.".to_owned());
-    }
-    settings.hf_home = hf_home;
+    settings.hf_home = Some(model_library_override_for(
+        &path,
+        cfg!(all(unix, not(target_os = "macos"))),
+    )?);
     save_settings(&settings)?;
     Ok(settings)
+}
+
+/// The pure decision behind [`set_model_library`], with the Linux absolute-path rule as an explicit
+/// argument so it is testable on every platform. Relocation always names a concrete folder, so —
+/// unlike the first-run storage step — an empty value is a rejection rather than "use the default":
+/// silently reverting to the platform default would leave the user pointed at a library that is not
+/// the one they just chose.
+fn model_library_override_for(path: &str, linux_absolute: bool) -> Result<String, String> {
+    storage_override_input_for("Model library folder", path, linux_absolute)?
+        .ok_or_else(|| "A model library folder is required.".to_owned())
 }
 
 #[tauri::command]
@@ -1424,6 +1433,23 @@ mod tests {
         let hf_error = storage_override_input_for("HF cache", "./huggingface", true)
             .expect_err("relative Linux HF cache must be rejected");
         assert!(hf_error.contains("absolute path on Linux"));
+    }
+
+    /// sc-19709: relocating the model library writes the SAME `hf_home` override the first-run
+    /// storage step writes, with the same normalization — but an empty choice is a rejection, not a
+    /// silent revert to the platform default (the user just picked a specific library).
+    #[test]
+    fn relocating_the_model_library_normalizes_and_refuses_an_empty_choice() {
+        assert_eq!(
+            model_library_override_for(" /Volumes/Models/hf ", true).expect("absolute path"),
+            "/Volumes/Models/hf".to_owned()
+        );
+        let empty = model_library_override_for("   ", false)
+            .expect_err("an empty folder must not clear the override");
+        assert!(empty.contains("required"), "{empty}");
+        let relative = model_library_override_for("./models", true)
+            .expect_err("relative Linux library root must be rejected");
+        assert!(relative.contains("absolute path on Linux"), "{relative}");
     }
 
     #[test]
