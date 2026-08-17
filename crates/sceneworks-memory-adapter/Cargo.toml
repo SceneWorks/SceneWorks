@@ -10,20 +10,20 @@ serde_json = "1.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Keep every first-party adapter crate on the exact pinned inference revision.
-mlx-gen = { git = "https://github.com/SceneWorks/inference", rev = "81ed5aa1f75bade63b2589a852beb1f2e6bb2de5", optional = true }
-mlx-gen-flux2 = { git = "https://github.com/SceneWorks/inference", rev = "81ed5aa1f75bade63b2589a852beb1f2e6bb2de5", optional = true }
-mlx-gen-krea = { git = "https://github.com/SceneWorks/inference", rev = "81ed5aa1f75bade63b2589a852beb1f2e6bb2de5", optional = true }
-mlx-gen-sdxl = { git = "https://github.com/SceneWorks/inference", rev = "81ed5aa1f75bade63b2589a852beb1f2e6bb2de5", optional = true }
+mlx-gen = { git = "https://github.com/SceneWorks/inference", rev = "931366f62a4e5800c54e0586b7fb34e3a4079e3b", optional = true }
+mlx-gen-flux2 = { git = "https://github.com/SceneWorks/inference", rev = "931366f62a4e5800c54e0586b7fb34e3a4079e3b", optional = true }
+mlx-gen-krea = { git = "https://github.com/SceneWorks/inference", rev = "931366f62a4e5800c54e0586b7fb34e3a4079e3b", optional = true }
+mlx-gen-sdxl = { git = "https://github.com/SceneWorks/inference", rev = "931366f62a4e5800c54e0586b7fb34e3a4079e3b", optional = true }
 mlx-rs = { package = "pmetal-mlx-rs", git = "https://github.com/michaeltrefry/mlx-rs", rev = "7151a9b27921c6198fd8dfb493dee21db4dcdfcc", optional = true }
-runtime-macos = { git = "https://github.com/SceneWorks/inference", rev = "81ed5aa1f75bade63b2589a852beb1f2e6bb2de5", optional = true }
+runtime-macos = { git = "https://github.com/SceneWorks/inference", rev = "931366f62a4e5800c54e0586b7fb34e3a4079e3b", optional = true }
 sha2 = "0.10"
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
-candle-gen = { git = "https://github.com/SceneWorks/inference", rev = "81ed5aa1f75bade63b2589a852beb1f2e6bb2de5", features = ["cuda", "testkit"], optional = true }
-runtime-cuda = { git = "https://github.com/SceneWorks/inference", rev = "81ed5aa1f75bade63b2589a852beb1f2e6bb2de5", optional = true }
+candle-gen = { git = "https://github.com/SceneWorks/inference", rev = "931366f62a4e5800c54e0586b7fb34e3a4079e3b", features = ["cuda", "testkit"], optional = true }
+runtime-cuda = { git = "https://github.com/SceneWorks/inference", rev = "931366f62a4e5800c54e0586b7fb34e3a4079e3b", optional = true }
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
-sceneworks-gen-core-testkit = { git = "https://github.com/SceneWorks/inference", rev = "81ed5aa1f75bade63b2589a852beb1f2e6bb2de5" }
+sceneworks-gen-core-testkit = { git = "https://github.com/SceneWorks/inference", rev = "931366f62a4e5800c54e0586b7fb34e3a4079e3b" }
 
 [features]
 default = []

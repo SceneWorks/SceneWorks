@@ -1967,7 +1967,6 @@ async fn generate_krea_imported_stream(
                         hires_fix,
                         None,
                         preview,
-                        gen_core::PromptEnhancementSink::default(),
                         &cancel,
                         on_progress,
                     )

@@ -1374,10 +1374,14 @@ pub(crate) async fn run_image_generate_job(
                     .await?;
                 }
                 CandleImageRoute::MageFinetuned => {
+                    let PreparedCandleImageRoute::MageFinetuned(transformer) = route else {
+                        unreachable!("Mage fine-tuned route missing its prepared transformer")
+                    };
                     generate_mage_finetuned_stream(
                         api,
                         settings,
                         job,
+                        *transformer,
                         &plan,
                         &project_path,
                         backend,

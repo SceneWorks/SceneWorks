@@ -973,6 +973,7 @@ enum PreparedCandleImageRoute {
     ZimageComfyui(Box<zimage_comfyui_candle::ComfyuiZImagePaths>),
     QwenImageComfyui(Box<qwen_comfyui_candle::ComfyuiQwenPaths>),
     Flux2Comfyui(Box<flux2_comfyui_candle::ComfyuiFlux2Paths>),
+    MageFinetuned(Box<PreparedMageFinetunedTransformer>),
 }
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -985,6 +986,7 @@ impl PreparedCandleImageRoute {
             Self::ZimageComfyui(_) => CandleImageRoute::ZimageComfyui,
             Self::QwenImageComfyui(_) => CandleImageRoute::QwenImageComfyui,
             Self::Flux2Comfyui(_) => CandleImageRoute::Flux2Comfyui,
+            Self::MageFinetuned(_) => CandleImageRoute::MageFinetuned,
         }
     }
 }
@@ -994,6 +996,9 @@ impl PreparedCandleImageRoute {
 /// `else if settings.backend_candle_enabled && <predicate>` ladder EXACTLY — same predicate order,
 /// same `backend_candle_enabled` gating, same handler per family — so routing is byte-identical
 /// (sc-8828). Pure decision: no I/O, no generation.
+// One `…_available` flag per prepared bundle, so the count tracks the number of prepared candle
+// lanes rather than any avoidable grouping.
+#[allow(clippy::too_many_arguments)]
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn resolve_candle_image_route_with_prepared_availability(
     request: &ImageRequest,
@@ -1003,6 +1008,7 @@ fn resolve_candle_image_route_with_prepared_availability(
     zimage_comfyui_available: bool,
     qwen_comfyui_available: bool,
     flux2_comfyui_available: bool,
+    mage_finetuned_available: bool,
 ) -> Option<CandleImageRoute> {
     if !settings.backend_candle_enabled {
         return None;
@@ -1113,7 +1119,7 @@ fn resolve_candle_image_route_with_prepared_availability(
         // `is_candle_engine`, so this bespoke text-to-image/img2img/edit route must claim them before
         // the generic/external fall-through.
         Some(CandleImageRoute::KreaImported)
-    } else if mage_finetuned_available(request, settings) {
+    } else if mage_finetuned_available {
         // A fine-tuned Mage-Flow base (sc-15036): its id is in no `MODEL_TABLE` / `is_candle_engine`
         // arm, so this route is what dispatches it to real candle generation at all.
         Some(CandleImageRoute::MageFinetuned)
@@ -1211,6 +1217,7 @@ fn resolve_candle_image_route(
         zimage_comfyui_candle::zimage_comfyui_available(request, settings),
         qwen_comfyui_candle::qwen_comfyui_available(request, settings),
         flux2_comfyui_candle::flux2_comfyui_available(request, settings),
+        mage_finetuned_available(request, settings),
     )
 }
 
@@ -1236,6 +1243,7 @@ fn prepare_candle_image_route(
     let zimage = zimage_comfyui_candle::prepare_zimage_comfyui_sources(request, settings)?;
     let qwen = qwen_comfyui_candle::prepare_qwen_comfyui_sources(request, settings)?;
     let flux2 = flux2_comfyui_candle::prepare_flux2_comfyui_sources(request, settings)?;
+    let mage_finetuned = prepare_mage_finetuned_transformer(request, settings)?;
     let Some(kind) = resolve_candle_image_route_with_prepared_availability(
         request,
         settings,
@@ -1244,6 +1252,7 @@ fn prepare_candle_image_route(
         zimage.is_some(),
         qwen.is_some(),
         flux2.is_some(),
+        mage_finetuned.is_some(),
     ) else {
         return Ok(None);
     };
@@ -1263,6 +1272,9 @@ fn prepare_candle_image_route(
         CandleImageRoute::Flux2Comfyui => PreparedCandleImageRoute::Flux2Comfyui(
             Box::new(flux2.expect("prepared FLUX.2 route lost its sources")),
         ),
+        CandleImageRoute::MageFinetuned => PreparedCandleImageRoute::MageFinetuned(Box::new(
+            mage_finetuned.expect("prepared Mage fine-tuned route lost its transformer"),
+        )),
         route => PreparedCandleImageRoute::Plain(route),
     }))
 }
@@ -3903,7 +3915,16 @@ struct PreparedAdapters {
     test
 ))]
 impl PreparedAdapters {
-    #[cfg(all(target_os = "macos", test))]
+    // Gated to exactly where it is used. `imported_edit_requires_the_identity_edit_lora` became
+    // cross-platform when the Kontext edit surface started being served on both native backends, so
+    // a macOS-only helper left the candle test build without it.
+    #[cfg(all(
+        any(
+            target_os = "macos",
+            all(not(target_os = "macos"), feature = "backend-candle")
+        ),
+        test
+    ))]
     fn is_empty(&self) -> bool {
         self.specs.is_empty()
     }
