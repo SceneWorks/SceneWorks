@@ -19,8 +19,14 @@ fn policy_from(values: &[(&str, &str)]) -> Result<ResolvedCachePolicy, ResolvedC
 }
 
 fn source_candidate(root: &Path, revision: &str) -> PromotionCandidate {
-    std::fs::create_dir_all(root).unwrap();
-    std::fs::write(root.join("weights.bin"), b"model-weights").unwrap();
+    let library = ArtifactSourceLibrary::new(root).unwrap();
+    let snapshot = library
+        .repository_root("owner/model")
+        .unwrap()
+        .join("snapshots")
+        .join(revision);
+    std::fs::create_dir_all(&snapshot).unwrap();
+    std::fs::write(snapshot.join("weights.bin"), b"model-weights").unwrap();
     let identity = ArtifactIdentity::pinned("owner/model", revision, "default").unwrap();
     let closure = ResolvedBundleClosure::new(vec![ResolvedBundleMember {
         role: ArtifactMemberRole::Primary,
@@ -35,9 +41,7 @@ fn source_candidate(root: &Path, revision: &str) -> PromotionCandidate {
     let artifact = ResolvedModelArtifact {
         schema_version: MODEL_ARTIFACT_CONTRACT_VERSION,
         identity: identity.clone(),
-        location: ArtifactLocation::SourceLibrary {
-            root: root.to_path_buf(),
-        },
+        location: ArtifactLocation::SourceLibrary { root: snapshot },
         closure,
         provenance: ArtifactProvenance {
             identity,
@@ -53,6 +57,82 @@ fn source_candidate(root: &Path, revision: &str) -> PromotionCandidate {
     }
 }
 
+fn source_snapshot(candidate: &PromotionCandidate) -> &Path {
+    match &candidate.artifact.location {
+        ArtifactLocation::SourceLibrary { root } => root,
+        ArtifactLocation::ResolvedLocal { .. } => panic!("fixture candidate is source-backed"),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn stale_cleanup_directory_swap_never_follows_an_external_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let scratch = TempDir::new().unwrap();
+    let source = scratch.path().join("source");
+    std::fs::create_dir(&source).unwrap();
+    let candidate = source_candidate(&source, REVISION_A);
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let reservation = match store.reserve(&candidate, &source, "fixture:model").unwrap() {
+        ReservationOutcome::Acquired(reservation) => reservation,
+        _ => panic!("fixture reservation must acquire"),
+    };
+    let staging = reservation.staging_path().to_owned();
+    std::fs::write(staging.join("partial"), b"partial").unwrap();
+    drop(reservation);
+
+    let external = scratch.path().join("external");
+    std::fs::create_dir(&external).unwrap();
+    let sentinel = external.join("sentinel");
+    std::fs::write(&sentinel, b"untouched").unwrap();
+    let swapped_staging = staging.clone();
+    let external_target = external.clone();
+    set_remove_entry_after_stat_hook(move || {
+        std::fs::remove_dir_all(&swapped_staging).unwrap();
+        symlink(&external_target, &swapped_staging).unwrap();
+    });
+
+    assert!(store.cleanup_stale_staging().is_err());
+    assert_eq!(std::fs::read(&sentinel).unwrap(), b"untouched");
+    assert!(external.is_dir());
+    std::fs::remove_file(staging).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn stale_cleanup_directory_swap_never_follows_an_external_junction() {
+    let scratch = TempDir::new().unwrap();
+    let source = scratch.path().join("source");
+    std::fs::create_dir(&source).unwrap();
+    let candidate = source_candidate(&source, REVISION_A);
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let reservation = match store.reserve(&candidate, &source, "fixture:model").unwrap() {
+        ReservationOutcome::Acquired(reservation) => reservation,
+        _ => panic!("fixture reservation must acquire"),
+    };
+    let staging = reservation.staging_path().to_owned();
+    std::fs::write(staging.join("partial"), b"partial").unwrap();
+    drop(reservation);
+
+    let external = scratch.path().join("external");
+    std::fs::create_dir(&external).unwrap();
+    let sentinel = external.join("sentinel");
+    std::fs::write(&sentinel, b"untouched").unwrap();
+    let swapped_staging = staging.clone();
+    let external_target = external.clone();
+    set_windows_directory_after_validation_hook(move || {
+        std::fs::remove_dir_all(&swapped_staging).unwrap();
+        let junction = WindowsDirectoryJunction::create(&swapped_staging, &external_target);
+        std::mem::forget(junction);
+    });
+
+    assert!(store.cleanup_stale_staging().is_err());
+    assert_eq!(std::fs::read(&sentinel).unwrap(), b"untouched");
+    assert!(external.is_dir());
+    std::fs::remove_dir(staging).unwrap();
+}
+
 fn make_complete(
     store: &ResolvedCacheStore,
     candidate: &PromotionCandidate,
@@ -65,7 +145,11 @@ fn make_complete(
     };
     let bundle = reservation.bundle_path().unwrap();
     std::fs::create_dir_all(&bundle).unwrap();
-    std::fs::copy(source.join("weights.bin"), bundle.join("weights.bin")).unwrap();
+    std::fs::copy(
+        source_snapshot(candidate).join("weights.bin"),
+        bundle.join("weights.bin"),
+    )
+    .unwrap();
     let mut local = candidate.artifact.clone();
     local.location = ArtifactLocation::ResolvedLocal { root: bundle };
     let metadata = reservation.record_complete(local).unwrap();
@@ -404,7 +488,11 @@ fn one_reservation_cannot_interrupt_or_complete_another_owner() {
     };
     let bundle = reservation_b.bundle_path().unwrap();
     std::fs::create_dir(&bundle).unwrap();
-    std::fs::copy(source_b.join("weights.bin"), bundle.join("weights.bin")).unwrap();
+    std::fs::copy(
+        source_snapshot(&candidate_b).join("weights.bin"),
+        bundle.join("weights.bin"),
+    )
+    .unwrap();
     store
         .update_metadata(&candidate_b.cache_key, |metadata| {
             metadata.reservation_owner = Some("other:model".to_owned());
@@ -927,6 +1015,10 @@ fn cross_process_same_key_reservation_shared_lease_and_kill_recovery() {
             .state,
         ResolvedCacheEntryState::Interrupted
     );
+    assert!(std::fs::read_dir(store.root().join("staging"))
+        .unwrap()
+        .next()
+        .is_none());
 
     make_complete(&store, &candidate_a, &source_a);
     let mut child = spawn_child(&data, &source_a, scratch.path(), "lease");
@@ -989,7 +1081,10 @@ fn cross_process_store_child() {
     let candidate = source_candidate(&source, REVISION_A);
     let _held: Box<dyn std::any::Any> = if mode == "reserve" {
         match store.reserve(&candidate, &source, "child:model").unwrap() {
-            ReservationOutcome::Acquired(reservation) => reservation,
+            ReservationOutcome::Acquired(reservation) => {
+                std::fs::write(reservation.staging_path().join("partial"), b"partial").unwrap();
+                reservation
+            }
             ReservationOutcome::AlreadyComplete(_) => panic!("child entry is already complete"),
             ReservationOutcome::Contended => panic!("child reservation contended"),
         }

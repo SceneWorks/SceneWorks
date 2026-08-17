@@ -4,6 +4,13 @@
 //! `<data_dir>/models/resolved`, refuses to adopt an unmarked directory, and names entries from
 //! the portable immutable cache key defined by [`crate::model_artifacts`].
 
+#[path = "resolved_cache/materialization.rs"]
+mod materialization;
+pub use materialization::{
+    IdlePromotionOutcome, MaterializationCancellation, MaterializationOutcome,
+    PromotionScheduleOutcome, ResolvedCacheMaterializer, ResolvedCachePromotionScheduler,
+};
+
 use crate::model_artifacts::{
     ActiveArtifactLease, ArtifactLocation, ModelArtifactResolver, PromotionCandidate,
     ResolvedModelArtifact,
@@ -711,8 +718,53 @@ impl ResolvedCacheStore {
                 }
             }
         }
+        self.cleanup_stale_staging()?;
         self.clean_stale_sessions()?;
         self.enumerate()
+    }
+
+    /// Remove only exact, lock-authorized stale materialization staging directories. Malformed
+    /// names, reparse points and live reservations are retained fail-closed. Complete bundles live
+    /// under `entries/` and are never traversed by this cleanup.
+    pub fn cleanup_stale_staging(&self) -> Result<usize, ResolvedCacheError> {
+        let staging_root = self.inner.root.join("staging");
+        let mut removed = 0;
+        for item in std::fs::read_dir(&staging_root)? {
+            let item = item?;
+            let name = item.file_name();
+            let Some((digest, reservation_id)) = name.to_str().and_then(parse_staging_name) else {
+                continue;
+            };
+            let metadata = item.file_type()?;
+            if !metadata.is_dir() || metadata.is_symlink() {
+                continue;
+            }
+            let artifact_lock = open_lock_file(&self.artifact_lock_path(digest))?;
+            match FileExt::try_lock_exclusive(&artifact_lock) {
+                Ok(()) => {}
+                Err(error) if is_lock_contended(&error) => continue,
+                Err(error) => return Err(error.into()),
+            }
+            let _metadata_lock = self.lock_metadata(digest)?;
+            let live = match self.read_metadata_unlocked(digest) {
+                Ok(JournalRead::Valid { metadata, .. })
+                    if metadata.state == ResolvedCacheEntryState::Materializing
+                        && metadata.reservation_id.as_deref() == Some(reservation_id) =>
+                {
+                    match metadata.session_id.as_deref() {
+                        Some(session) => !self.session_lock_is_acquirable(session)?,
+                        None => true,
+                    }
+                }
+                _ => false,
+            };
+            if live {
+                continue;
+            }
+            remove_managed_tree(&item.path(), &staging_root)?;
+            removed += 1;
+        }
+        Ok(removed)
     }
 
     fn update_metadata(
@@ -968,6 +1020,66 @@ impl ResolvedCacheReservation {
 
     pub fn bundle_path(&self) -> Result<PathBuf, ResolvedCacheError> {
         self.store.bundle_path(&self.cache_key)
+    }
+
+    pub(crate) fn prepare_for_materialization(&self) -> Result<(), ResolvedCacheError> {
+        let _metadata_lock = self.store.lock_metadata(&self.digest)?;
+        let metadata = self.store.read_metadata_locked(&self.digest)?;
+        self.verify_ownership(&metadata)?;
+        reject_link_or_reparse(&self.staging_path, "resolved cache staging directory")?;
+        if std::fs::read_dir(&self.staging_path)?.next().is_some() {
+            return Err(ResolvedCacheError::new(
+                "materialization staging directory is not empty",
+            ));
+        }
+        let bundle = self.bundle_path()?;
+        if std::fs::symlink_metadata(&bundle).is_ok() {
+            let entry = self.store.entry_path(&self.cache_key)?;
+            remove_managed_tree(&bundle, &entry)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn publish_staged(
+        self,
+        mut artifact: ResolvedModelArtifact,
+    ) -> Result<ResolvedCacheMetadata, ResolvedCacheError> {
+        if !matches!(&artifact.location, ArtifactLocation::ResolvedLocal { root } if root == &self.staging_path)
+        {
+            return Err(ResolvedCacheError::new(
+                "staged artifact is not rooted at its reservation staging directory",
+            ));
+        }
+        validate_staging_confinement(&self)?;
+        artifact
+            .validate()
+            .map_err(|error| ResolvedCacheError::new(error.to_string()))?;
+        if artifact
+            .cache_key()
+            .map_err(|error| ResolvedCacheError::new(error.to_string()))?
+            != self.cache_key
+        {
+            return Err(ResolvedCacheError::new(
+                "staged artifact cache key differs from its reservation",
+            ));
+        }
+        sync_tree(&self.staging_path)?;
+        let entry = self.store.entry_path(&self.cache_key)?;
+        let bundle = self.bundle_path()?;
+        if std::fs::symlink_metadata(&bundle).is_ok() {
+            return Err(ResolvedCacheError::new(
+                "resolved cache bundle appeared before atomic publication",
+            ));
+        }
+        {
+            let _metadata_lock = self.store.lock_metadata(&self.digest)?;
+            let metadata = self.store.read_metadata_locked(&self.digest)?;
+            self.verify_ownership(&metadata)?;
+        }
+        std::fs::rename(&self.staging_path, &bundle)?;
+        sync_dir(&entry)?;
+        artifact.location = ArtifactLocation::ResolvedLocal { root: bundle };
+        self.record_complete(artifact)
     }
 
     /// Marks only this still-owned reservation interrupted. The private reservation/session
@@ -1515,6 +1627,244 @@ fn validate_completion_confinement(
     Ok(())
 }
 
+fn validate_staging_confinement(
+    reservation: &ResolvedCacheReservation,
+) -> Result<(), ResolvedCacheError> {
+    let staging_root = reservation.store.root().join("staging");
+    reject_link_or_reparse(&staging_root, "resolved cache staging root")?;
+    reject_link_or_reparse(
+        &reservation.staging_path,
+        "resolved cache reservation staging directory",
+    )?;
+    let canonical_root = std::fs::canonicalize(&staging_root)?;
+    let canonical_staging = std::fs::canonicalize(&reservation.staging_path)?;
+    if canonical_staging.parent() != Some(canonical_root.as_path()) {
+        return Err(ResolvedCacheError::new(
+            "materialization staging directory escaped its managed root",
+        ));
+    }
+    validate_regular_tree(&reservation.staging_path)
+}
+
+fn validate_regular_tree(path: &Path) -> Result<(), ResolvedCacheError> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || metadata_is_reparse_point(&metadata) {
+        return Err(ResolvedCacheError::new(format!(
+            "managed cache path {} is a link or reparse point",
+            path.display()
+        )));
+    }
+    if metadata.is_dir() {
+        for item in std::fs::read_dir(path)? {
+            validate_regular_tree(&item?.path())?;
+        }
+    } else if !metadata.is_file() {
+        return Err(ResolvedCacheError::new(format!(
+            "managed cache path {} is not a regular file or directory",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn remove_managed_tree(path: &Path, managed_parent: &Path) -> Result<(), ResolvedCacheError> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    ensure_regular_directory(managed_parent)?;
+    if path.parent() != Some(managed_parent) {
+        return Err(ResolvedCacheError::new(format!(
+            "refusing to remove non-child managed path {}",
+            path.display()
+        )));
+    }
+    let name = path
+        .file_name()
+        .ok_or_else(|| ResolvedCacheError::new("managed path has no final name"))?;
+    if name.as_bytes().contains(&b'/') {
+        return Err(ResolvedCacheError::new(
+            "managed path name contains a separator",
+        ));
+    }
+    let parent = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(managed_parent)?;
+    remove_entry_at(&parent, name)
+}
+
+#[cfg(windows)]
+fn remove_managed_tree(path: &Path, managed_parent: &Path) -> Result<(), ResolvedCacheError> {
+    use remove_dir_all::RemoveDir;
+
+    let (parent, directory, name) = windows_confined_directory(path, managed_parent)?;
+    let mut handle = directory;
+    handle
+        .remove_dir_contents(Some(path))
+        .map_err(|error| ResolvedCacheError::new(error.to_string()))?;
+    drop(handle);
+    fs_at::OpenOptions::default().rmdir_at(&parent, name)?;
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn remove_managed_tree(_path: &Path, _managed_parent: &Path) -> Result<(), ResolvedCacheError> {
+    Err(ResolvedCacheError::new(
+        "managed cache cleanup is unsupported on this platform",
+    ))
+}
+
+#[cfg(windows)]
+fn windows_confined_directory(
+    path: &Path,
+    managed_parent: &Path,
+) -> Result<(File, File, std::ffi::OsString), ResolvedCacheError> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+    ensure_regular_directory(managed_parent)?;
+    if path.parent() != Some(managed_parent) {
+        return Err(ResolvedCacheError::new(format!(
+            "managed directory {} is not a direct child of {}",
+            path.display(),
+            managed_parent.display()
+        )));
+    }
+    let name = path
+        .file_name()
+        .ok_or_else(|| ResolvedCacheError::new("managed directory has no final name"))?
+        .to_owned();
+    reject_link_or_reparse(path, "managed cache directory")?;
+    #[cfg(test)]
+    run_windows_directory_after_validation_hook();
+    let parent = OpenOptions::new()
+        .read(true)
+        .share_mode(0x0000_0001 | 0x0000_0002)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(managed_parent)?;
+    let mut options = fs_at::OpenOptions::default();
+    options.follow(false);
+    let directory = options.open_dir_at(&parent, &name)?;
+    reject_link_or_reparse(path, "managed cache directory")?;
+    let current = options.open_dir_at(&parent, &name)?;
+    let directory_information = winapi_util::file::information(&directory)?;
+    let current_information = winapi_util::file::information(&current)?;
+    if directory_information.volume_serial_number() != current_information.volume_serial_number()
+        || directory_information.file_index() != current_information.file_index()
+    {
+        return Err(ResolvedCacheError::new(format!(
+            "managed cache directory {} changed while it was opened",
+            path.display()
+        )));
+    }
+    Ok((parent, directory, name))
+}
+
+#[cfg(all(test, windows))]
+thread_local! {
+    static WINDOWS_DIRECTORY_AFTER_VALIDATION_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(all(test, windows))]
+fn set_windows_directory_after_validation_hook(hook: impl FnOnce() + 'static) {
+    WINDOWS_DIRECTORY_AFTER_VALIDATION_HOOK.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+}
+
+#[cfg(all(test, windows))]
+fn run_windows_directory_after_validation_hook() {
+    WINDOWS_DIRECTORY_AFTER_VALIDATION_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(unix)]
+fn remove_entry_at(parent: &File, name: &std::ffi::OsStr) -> Result<(), ResolvedCacheError> {
+    use rustix::fs::{openat, statat, unlinkat, AtFlags, Dir, FileType, Mode, OFlags};
+    use std::os::unix::ffi::OsStrExt;
+
+    let stat = statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)
+        .map_err(|error| ResolvedCacheError::new(error.to_string()))?;
+    #[cfg(test)]
+    run_remove_entry_after_stat_hook();
+    let kind = FileType::from_raw_mode(stat.st_mode);
+    if kind == FileType::Symlink {
+        return Err(ResolvedCacheError::new(
+            "refusing to remove linked managed path",
+        ));
+    }
+    if kind == FileType::Directory {
+        let descriptor = openat(
+            parent,
+            name,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::DIRECTORY | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )
+        .map_err(|error| ResolvedCacheError::new(error.to_string()))?;
+        let directory = File::from(descriptor);
+        let names = Dir::read_from(&directory)
+            .map_err(|error| ResolvedCacheError::new(error.to_string()))?
+            .map(|item| {
+                item.map(|item| std::ffi::OsStr::from_bytes(item.file_name().to_bytes()).to_owned())
+                    .map_err(|error| ResolvedCacheError::new(error.to_string()))
+            })
+            .filter(|item| {
+                !matches!(item, Ok(name) if name == std::ffi::OsStr::new(".") || name == std::ffi::OsStr::new(".."))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for child in names {
+            remove_entry_at(&directory, &child)?;
+        }
+        unlinkat(parent, name, AtFlags::REMOVEDIR)
+            .map_err(|error| ResolvedCacheError::new(error.to_string()))?;
+    } else if kind == FileType::RegularFile {
+        unlinkat(parent, name, AtFlags::empty())
+            .map_err(|error| ResolvedCacheError::new(error.to_string()))?;
+    } else {
+        return Err(ResolvedCacheError::new(
+            "refusing to remove unmanaged filesystem entry",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(all(test, unix))]
+thread_local! {
+    static REMOVE_ENTRY_AFTER_STAT_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(all(test, unix))]
+fn set_remove_entry_after_stat_hook(hook: impl FnOnce() + 'static) {
+    REMOVE_ENTRY_AFTER_STAT_HOOK.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(hook));
+    });
+}
+
+#[cfg(all(test, unix))]
+fn run_remove_entry_after_stat_hook() {
+    REMOVE_ENTRY_AFTER_STAT_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+fn parse_staging_name(name: &str) -> Option<(&str, &str)> {
+    let (digest, reservation_id) = name.split_once('-')?;
+    if is_lower_hex_64(digest) && is_valid_session_id(reservation_id) {
+        Some((digest, reservation_id))
+    } else {
+        None
+    }
+}
+
 fn reject_link_or_reparse(path: &Path, label: &str) -> Result<(), ResolvedCacheError> {
     let metadata = std::fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() || metadata_is_reparse_point(&metadata) {
@@ -1654,6 +2004,30 @@ fn write_synced_file(path: &Path, body: &[u8]) -> Result<(), ResolvedCacheError>
     let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
     file.write_all(body)?;
     file.sync_all()?;
+    Ok(())
+}
+
+fn sync_tree(path: &Path) -> Result<(), ResolvedCacheError> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || metadata_is_reparse_point(&metadata) {
+        return Err(ResolvedCacheError::new(format!(
+            "cannot sync linked managed path {}",
+            path.display()
+        )));
+    }
+    if metadata.is_dir() {
+        for item in std::fs::read_dir(path)? {
+            sync_tree(&item?.path())?;
+        }
+        sync_dir(path)?;
+    } else if metadata.is_file() {
+        File::open(path)?.sync_all()?;
+    } else {
+        return Err(ResolvedCacheError::new(format!(
+            "cannot sync unmanaged filesystem entry {}",
+            path.display()
+        )));
+    }
     Ok(())
 }
 
