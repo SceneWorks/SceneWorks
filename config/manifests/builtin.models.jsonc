@@ -8047,7 +8047,7 @@
       },
       "mlx": {
         "minMemoryGb": 42,
-        "quantize": 8,
+        "quantize": 0,
         // Install-time conversion: pull the bf16 single-file from convertSourceRepo,
         // run the FLUX.2-klein diffusers converter (sc-2235), and assemble a local
         // diffusers dir under <data>/models/mlx/flux2_klein_9b_true_v2 by borrowing
