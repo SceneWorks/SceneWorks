@@ -2649,10 +2649,25 @@ async fn startup_drain_recovers_accepted_terminal_side_effect_failure_without_su
     })
     .await
     .expect("production startup recovery must finalize the durable pending row");
-    recovery_task.abort();
     assert_eq!(recovered["status"], "completed");
     assert_eq!(recovered["result"]["loraRegistered"], true);
-    let recovery_event_names = drain_event_names(&mut recovery_events).await;
+    // The durable row flips BEFORE the recovery task publishes its augmented snapshot, so
+    // aborting on the polled completion can race the `job.updated` publish away entirely
+    // (observed under full-suite load 2026-08-17: event count 0). Await the event itself,
+    // bounded, before aborting; the quiet-window drain below still collects any duplicates.
+    let mut recovery_event_names = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(message) = recovery_events.next().await {
+            let is_job_updated = message.event == "job.updated";
+            recovery_event_names.push(message.event);
+            if is_job_updated {
+                break;
+            }
+        }
+    })
+    .await;
+    recovery_task.abort();
+    recovery_event_names.extend(drain_event_names(&mut recovery_events).await);
     assert_eq!(
         recovery_event_names
             .iter()

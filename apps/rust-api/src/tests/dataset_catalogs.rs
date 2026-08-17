@@ -3216,10 +3216,17 @@ async fn cancellation_while_waiting_for_busy_lease_is_restartable() {
         Value::Null,
     )
     .await;
-    assert_eq!(interrupted["processing"]["state"], "failed");
-    assert!(interrupted["processing"]["message"]
-        .as_str()
-        .is_some_and(|message| message.contains("restart")));
+    assert_eq!(
+        interrupted["processing"]["state"], "failed",
+        "{interrupted}"
+    );
+    assert!(
+        interrupted["processing"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("restart")),
+        "cancellation must leave a restartable message: {}",
+        interrupted["processing"]
+    );
 
     let restarted_app = create_app(settings).expect("restarted app creates");
     let (resume_status, resumed) = request(
@@ -3300,10 +3307,17 @@ async fn cancellation_while_waiting_for_global_scan_permit_is_restartable() {
         Value::Null,
     )
     .await;
-    assert_eq!(interrupted["processing"]["state"], "failed");
-    assert!(interrupted["processing"]["message"]
-        .as_str()
-        .is_some_and(|message| message.contains("restart")));
+    assert_eq!(
+        interrupted["processing"]["state"], "failed",
+        "{interrupted}"
+    );
+    assert!(
+        interrupted["processing"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("restart")),
+        "cancellation must leave a restartable message: {}",
+        interrupted["processing"]
+    );
 
     let restarted_app = create_app(settings).expect("restarted app creates");
     let (resume_status, resumed) = request(
