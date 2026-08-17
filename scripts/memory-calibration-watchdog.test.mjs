@@ -141,7 +141,7 @@ function assertGone(pid) {
 async function runWithMockedProductionTelemetry(files, childCommand, options = {}) {
   const {
     telemetryTimeout = 0.5, actualHostMemory = 1000, requestedHostMemory = 1000,
-    childAttestationTimeout = 1,
+    childAttestationTimeout = 1, maxRuntimeSeconds = 2,
     requireProviderPhases = false,
     providerPhaseProfile = "campaign-entry",
     memoryFreePercent = 90, memoryFreeBytes = 900, swapFreeBytes = 900,
@@ -170,7 +170,8 @@ module.DarwinHostPressureSampler = Pressure
 module.DarwinHostPressureSampler.actual_host_memory_bytes = staticmethod(
     lambda timeout: ${actualHostMemory})
 sys.argv = [${JSON.stringify(WATCHDOG)},
-    "--max-footprint-bytes", "100", "--max-runtime-seconds", "2",
+    "--max-footprint-bytes", "100", "--max-runtime-seconds",
+    ${JSON.stringify(String(maxRuntimeSeconds))},
     "--host-memory-bytes", ${JSON.stringify(String(requestedHostMemory))},
     "--min-memory-free-bytes", "100",
     "--sample-interval", "0.02",
@@ -526,8 +527,10 @@ while True:
 test("a cold child gets a separately bounded startup window while strict telemetry continues", async () => {
   const files = await fixture();
   const attester = `${files.program}.delayed-attest.py`;
+  const telemetryTimeoutSeconds = 0.5;
+  const childConnectDelaySeconds = 1.1;
   await writeFile(attester, String.raw`import json, os, socket, time
-time.sleep(0.35)
+time.sleep(${childConnectDelaySeconds})
 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 sock.connect(os.environ["SCENEWORKS_MEMORY_WATCHDOG_SOCKET"])
 def line():
@@ -543,16 +546,32 @@ while True:
     if message == f"BYE {nonce}": break
     assert message == f"PING {nonce}"
 `);
-  await runWithMockedProductionTelemetry(files, ["python3", attester], {
-    telemetryTimeout: 0.1,
-    childAttestationTimeout: 3,
-  });
+  try {
+    await runWithMockedProductionTelemetry(files, ["python3", attester], {
+      telemetryTimeout: telemetryTimeoutSeconds,
+      childAttestationTimeout: 3,
+      maxRuntimeSeconds: 5,
+    });
+  } catch (error) {
+    const events = (await readFile(files.events, "utf8").catch(() => "")).trim()
+      .split("\n").filter(Boolean).map(JSON.parse);
+    const hardStops = events.filter((event) => event.event === "hard_stop")
+      .map((event) => event.reason);
+    assert.fail(
+      `cold child watchdog unexpectedly exited ${error.code}; hard_stop=${JSON.stringify(hardStops)}; events=${JSON.stringify(events)}`,
+    );
+  }
   const events = (await readFile(files.events, "utf8")).trim().split("\n").map(JSON.parse);
   const waiting = events.filter((event) =>
     event.event === "sample" && event.phase === "awaiting_child_attestation");
   assert.ok(waiting.length >= 2, `expected repeated startup samples, saw ${waiting.length}`);
+  assert.ok(
+    waiting.at(-1).at - waiting[0].at > telemetryTimeoutSeconds,
+    "startup samples did not span more than one aggregate telemetry window",
+  );
   assert.ok(events.some((event) => event.event === "child_attested"));
   assert.ok(events.some((event) => event.event === "child_completed"));
+  assert.equal(events.some((event) => event.event === "hard_stop"), false);
 });
 
 test("child startup never weakens the strict pre-allocation pressure floor", async () => {
