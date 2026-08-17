@@ -114,19 +114,63 @@ def test_matrix_accounts_for_all_models_and_pinned_mlx_staged_coverage():
     )
     # Staged coverage is a property of the RESOLVED ROUTE, so every entry sharing a route agrees.
     # An entry drifting away from its own route siblings is exactly what a bumped count cannot see.
+    #
+    # EXEMPT, 2026-08-17: entries whose MLX tier axis is a single synthetic `default` — no advertised
+    # tier ladder at all. Kept in lockstep with `assertMlxStagedCoverageIsStructurallyConsistent` in
+    # scripts/generate-memory-matrix.mjs, which carries the full reasoning and the coordinator decision;
+    # this is that assertion's mirror against the PUBLISHED document, so the two must scope alike or the
+    # published artifact and the pre-publication census would disagree about the same catalog.
+    #
+    # `flux2_klein_9b_true_v2` is the instance: a convert-at-install entry whose transformer is a fixed
+    # dense BF16 artifact (`mlx.quantize: 0`, the only truthful encoding under `resolve_quant`), sharing
+    # route `flux2_klein_9b` with two tiered siblings. Its verdict is structurally fixed at "not staged"
+    # because the tiers its contract declares do not exist for it, so including it reports a
+    # disagreement no declaration change can resolve.
+    #
+    # Narrow on purpose: it removes these entries from the CROSS-ENTRY comparison only, and the
+    # comparison keeps full force among tiered entries sharing a route. The JS side carries the mutation
+    # control proving a drifting tiered route-mate still reds, and that an exempt entry on the route does
+    # not suppress drift between its tiered siblings.
+    def has_single_dense_tier_axis(model: dict) -> bool:
+        return model.get("axes", {}).get("mlx", {}).get("tiers") == ["default"]
+
     route_verdicts: dict[str, set[bool]] = {}
     for model in matrix["models"]:
+        if has_single_dense_tier_axis(model):
+            continue
         route_verdicts.setdefault(model["resolvedRoute"], set()).add(
             model["id"] in mlx_staged
         )
     assert all(len(verdicts) == 1 for verdicts in route_verdicts.values()), sorted(
         route for route, verdicts in route_verdicts.items() if len(verdicts) > 1
     )
-    # A bespoke route carries its own pipeline and never advertises the generic staged ladder.
+    # The exemption must stay narrow: it may never empty the comparison. If every entry became
+    # single-dense the loop above would pass vacuously, so assert it still has routes to compare.
+    assert route_verdicts, "the per-route comparison must not be emptied by the exemption"
+    # A bespoke route carries its own pipeline and never advertises the GENERIC staged ladder.
+    #
+    # "Generic" is enforced as written, 2026-08-17, in lockstep with the generator-side assertion (which
+    # carries the reasoning). `routeKind: "bespoke"` means only "no row in engines.rs's MODEL_TABLE" — a
+    # worker dispatch fact — not "the engine registers no contract". PuLID is that split: bespoke in
+    # dispatch, unregistered on candle, but the MLX registry publishes a real `pulid_flux` contract at
+    # pin 931366f62. This document agrees: its staged coverage row reads
+    # `implementedBy.overlay = {identity: 3, lora: 0, none: 0}` — its own closed identity contract and
+    # nothing generic.
+    #
+    # So the claim to reject is implemented coverage on a generic overlay. Teeth intact: if a bespoke
+    # route ever implements `none` or `lora` staged coverage, this reds.
+    generic_overlays = ("none", "lora")
+    bespoke_ids = {
+        model["id"] for model in matrix["models"] if model["routeKind"] == "bespoke"
+    }
     assert not [
-        model["id"]
-        for model in matrix["models"]
-        if model["routeKind"] == "bespoke" and model["id"] in mlx_staged
+        (row["modelId"], overlay)
+        for row in matrix["coverage"]
+        if row["backend"] == "mlx"
+        and row["rung"] == "staged_residency"
+        and row["modelId"] in bespoke_ids
+        for overlay in generic_overlays
+        if row.get("implementedBy", {}).get("overlay", {}).get(overlay, 0)
     ]
     # Every entry keeps a slice key even when it publishes nothing, and no slice may name a cell the
     # slim dropped.
