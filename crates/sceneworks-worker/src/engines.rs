@@ -1335,8 +1335,9 @@ mod tests {
     /// The engine registry id(s) a video manifest model resolves to, across backends — the union of
     /// the mlx maps (`wan_engine_id` / `ltx_engine_id` / `svd_engine_id` + the native VACE-Fun
     /// dispatch) and the candle map (`candle_video_engine_id`) in `video_jobs`. LTX is backend-split
-    /// (`ltx_2_3` on mlx, `ltx_2_3_distilled` on candle) and `ltx_2_3_eros` shares the base engine id
-    /// per backend; the resolver lists both and picks whichever the active registry actually holds.
+    /// (`ltx_2_3` on mlx, `ltx_2_3_distilled` on candle). `ltx_2_3_eros` is MLX-only after its
+    /// undistilled Candle route failed exact-head CUDA acceptance (sc-18902), so it resolves only the
+    /// MLX id. The resolver lists the valid backend ids and picks whichever the active registry holds.
     /// VACE-Fun uses the same dedicated `wan2_2_vace_fun_14b` provider id on both native backends.
     #[cfg(any(
         target_os = "macos",
@@ -1349,7 +1350,8 @@ mod tests {
             "wan_2_2_i2v_14b" => &["wan2_2_i2v_14b"],
             "wan_2_2_vace_fun_14b" => &["wan2_2_vace_fun_14b"],
             "svd" => &["svd_xt"],
-            "ltx_2_3" | "ltx_2_3_eros" => &["ltx_2_3", "ltx_2_3_distilled"],
+            "ltx_2_3" => &["ltx_2_3", "ltx_2_3_distilled"],
+            "ltx_2_3_eros" => &["ltx_2_3"],
             // Mochi 1 (sc-11991): the sceneworks id IS the engine id, and BOTH backends register it,
             // so one entry resolves the descriptor on either lane.
             "mochi_1" => &["mochi_1"],

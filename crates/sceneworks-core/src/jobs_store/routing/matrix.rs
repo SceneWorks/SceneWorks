@@ -3923,7 +3923,8 @@ mod tests {
 
         // LTX clip append/control routes require the IC-LoRA carried by the canonical probe. The
         // operation matrix must evaluate that complete runnable shape, not rebuild a bare payload
-        // that both production routers correctly reject.
+        // that both production routers correctly reject. SC-18902's failed exact-head CUDA render
+        // withdrew Eros from every Candle lane; the newer advanced routes must not restore it.
         for model_id in ["ltx_2_3", "ltx_2_3_eros"] {
             let row = matrix.models.iter().find(|row| row.id == model_id).unwrap();
             for mode in ["extend_clip", "video_bridge", "replace_person"] {
@@ -3934,10 +3935,12 @@ mod tests {
                     .unwrap_or_else(|| panic!("{model_id}/{mode} is represented"));
                 assert_eq!(
                     (cell.mlx, cell.candle),
-                    (Some(true), Some(true)),
-                    "{model_id}/{mode} uses the complete IC-LoRA probe on both backends"
+                    (Some(true), Some(model_id == "ltx_2_3")),
+                    "{model_id}/{mode} uses the complete IC-LoRA probe while honoring the Eros withdrawal"
                 );
-                assert!(cell.parity_obligation.is_none());
+                if model_id == "ltx_2_3" {
+                    assert!(cell.parity_obligation.is_none());
+                }
             }
         }
 
@@ -4348,7 +4351,7 @@ mod tests {
         validate_exceptions(&register).expect("approved exception register validates");
 
         assert_eq!(register.schema_version, 2);
-        assert_eq!(register.authorized_approvers.len(), 4);
+        assert_eq!(register.authorized_approvers.len(), 5);
         let authorized: BTreeSet<_> = register
             .authorized_approvers
             .iter()
@@ -4361,10 +4364,11 @@ mod tests {
                 ("Michael Trefry", "epic-8433"),
                 ("Michael Trefry", "epic-8588"),
                 ("Michael Trefry", "epic-7434"),
+                ("Michael Trefry", "epic-18803"),
             ])
         );
 
-        assert_eq!(register.records.len(), 7);
+        assert_eq!(register.records.len(), 11);
         let expected_groups = BTreeMap::from([
             (("epic-9083", "precision"), 27usize),
             (("epic-8433", "operation"), 3usize),
@@ -4373,6 +4377,10 @@ mod tests {
             (("epic-8433", "precision"), 3usize),
             (("epic-8588", "conditioning"), 6usize),
             (("epic-7434", "guidance"), 4usize),
+            (("epic-18803", "operation"), 6usize),
+            (("epic-18803", "conditioning"), 4usize),
+            (("epic-18803", "adapter"), 2usize),
+            (("epic-18803", "precision"), 1usize),
         ]);
         let actual_groups: BTreeMap<_, _> = register
             .records
@@ -4380,9 +4388,16 @@ mod tests {
             .map(|record| {
                 assert_eq!(record.approver, "Michael Trefry");
                 assert_eq!(record.approved_date, "2026-08-14");
-                assert_eq!(record.decision_type, DecisionType::SequencingChoice);
-                assert!(record.evidence.contains("directly approved"));
-                assert!(record.evidence.contains("#activity-19457"));
+                if record.authority == "epic-18803" {
+                    assert_eq!(record.decision_type, DecisionType::ProductDecision);
+                    assert!(record.evidence.contains("SC-18902"));
+                    assert!(record.evidence.contains("run 31766800005"));
+                    assert!(record.evidence.contains("artifact 9207109616"));
+                } else {
+                    assert_eq!(record.decision_type, DecisionType::SequencingChoice);
+                    assert!(record.evidence.contains("directly approved"));
+                    assert!(record.evidence.contains("#activity-19457"));
+                }
                 assert!(record.user_facing_behavior.contains("hidden or disabled"));
                 assert!(record.user_facing_behavior.contains("explanation"));
                 assert!(record.user_facing_behavior.contains("fail closed"));
@@ -4404,7 +4419,7 @@ mod tests {
             .collect();
         assert_eq!(
             exception_paths.len(),
-            47,
+            60,
             "every approved cell appears once"
         );
         assert_eq!(
@@ -4418,7 +4433,7 @@ mod tests {
         );
 
         let matrix = backend_capability_matrix().expect("capability matrix generates");
-        assert_eq!(matrix.summary.exception_count, 7);
+        assert_eq!(matrix.summary.exception_count, 11);
         let mut residual_paths = BTreeSet::new();
         for model in &matrix.models {
             for (axis, cells) in [
@@ -4674,12 +4689,19 @@ mod tests {
         let mlx = runtime_facts(MLX_RUNTIME_FACTS, "mlx").unwrap();
         let candle = runtime_facts(CANDLE_RUNTIME_FACTS, "candle").unwrap();
         for original in [&mlx, &candle] {
+            let mut routed_mappings = 0;
             for index in 0..original.video_model_mappings.len() {
                 let mapping = &original.video_model_mappings[index];
                 let job =
                     super::super::canonical_video_route_probe(&mapping.model_id, &mapping.mode)
                         .unwrap();
-                assert!(backend_supports(&job, original).unwrap());
+                // Runtime descriptors can retain a provider that product routing intentionally
+                // rejects (Eros/Candle after SC-18902). Only a mapping that participates in a live
+                // route is a valid subject for this deletion mutation.
+                if !backend_supports(&job, original).unwrap() {
+                    continue;
+                }
+                routed_mappings += 1;
                 let mut mutated = original.clone();
                 mutated.video_model_mappings.remove(index);
                 assert!(routed_cell(
@@ -4701,6 +4723,11 @@ mod tests {
                 )
                 .is_err());
             }
+            assert!(
+                routed_mappings > 0,
+                "{} must exercise at least one routed video mapping",
+                original.snapshot.backend
+            );
         }
     }
 

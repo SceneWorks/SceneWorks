@@ -396,18 +396,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn canonical_ltx_clip_probes_include_the_required_ic_lora() {
+    fn canonical_ltx_clip_probes_include_the_required_ic_lora_and_honor_eros_withdrawal() {
         for model in ["ltx_2_3", "ltx_2_3_eros"] {
             for mode in ["extend_clip", "video_bridge", "replace_person"] {
                 let job = canonical_video_route_probe(model, mode).unwrap();
                 let loras = job.payload["loras"].as_array().unwrap();
                 assert!(crate::video_request::loras_contain_ltx_ic_lora(loras));
-                for backend in ["mlx", "candle"] {
-                    assert!(
-                        video_backend_mode_supported(backend, model, mode).unwrap(),
-                        "{backend} must admit the complete {model}/{mode} probe"
-                    );
-                }
+                assert!(video_backend_mode_supported("mlx", model, mode).unwrap());
+                assert_eq!(
+                    video_backend_mode_supported("candle", model, mode).unwrap(),
+                    model == "ltx_2_3",
+                    "Candle must admit base LTX and reject withdrawn Eros for {mode}"
+                );
             }
             for mode in ["text_to_video", "image_to_video", "first_last_frame"] {
                 assert!(canonical_video_route_probe(model, mode)

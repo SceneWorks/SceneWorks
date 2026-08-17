@@ -24,6 +24,10 @@ struct CachedGenerator {
     /// Process-global MLX active bytes that predated this cached generator. Request admission must
     /// never mistake these unrelated allocations for already-resident generator weights.
     external_committed_bytes: u64,
+    /// Backend-committed bytes added by this exact cold load. Unlike the historical external
+    /// baseline, this is a fixed provider attribution that remains valid when unrelated process
+    /// allocations grow or shrink before a later warm request.
+    provider_resident_bytes: u64,
 }
 
 #[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
@@ -40,18 +44,44 @@ const DEFAULT_GENERATOR_CACHE_IDLE_SECONDS: u64 = 300;
 /// the [`crate::cache_thread`] module docs; do not silently unify it away.
 const GENERATOR_EVICT_BEFORE_LOAD: bool = false;
 
-#[cfg(target_os = "macos")]
-fn capture_external_committed_bytes() -> u64 {
+#[cfg(all(target_os = "macos", not(test)))]
+fn capture_backend_committed_bytes() -> WorkerResult<u64> {
     mlx_rs::memory::clear_cache();
-    mlx_rs::memory::get_active_memory() as u64
+    Ok(mlx_rs::memory::get_active_memory() as u64)
 }
 
-#[cfg(not(target_os = "macos"))]
-fn capture_external_committed_bytes() -> u64 {
-    0
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle", not(test)))]
+fn capture_backend_committed_bytes() -> WorkerResult<u64> {
+    runtime_cuda::media::candle_core::cuda::cudarc::driver::result::mem_get_info()
+        .map(|(free, total)| (total as u64).saturating_sub(free as u64))
+        .map_err(|error| {
+            crate::WorkerError::Engine(format!(
+                "CUDA VRAM snapshot around generator load failed: {error}"
+            ))
+        })
+}
+
+// Unit seams inject backend-neutral generators and deliberately create no Metal/CUDA context. Keep
+// their cache-accounting handshake deterministic; production binaries still execute the physical
+// probes above, including the real CUDA acceptance workflow.
+#[cfg(test)]
+fn capture_backend_committed_bytes() -> WorkerResult<u64> {
+    Ok(0)
+}
+
+#[cfg(all(not(target_os = "macos"), not(feature = "backend-candle"), not(test)))]
+fn capture_backend_committed_bytes() -> WorkerResult<u64> {
+    Ok(0)
 }
 
 static GENERATOR_WORKER: OnceLock<mpsc::Sender<GeneratorJob>> = OnceLock::new();
+
+const fn provider_resident_delta(
+    pre_load_committed_bytes: u64,
+    post_load_committed_bytes: u64,
+) -> u64 {
+    post_load_committed_bytes.saturating_sub(pre_load_committed_bytes)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct GeneratorCacheKey {
@@ -532,7 +562,11 @@ where
         spec,
         load_error_context,
         crate::inference_runtime::load,
-        move |generator, _cache_state, _load_policy, _external_committed_bytes| run(generator),
+        move |generator,
+              _cache_state,
+              _load_policy,
+              _external_committed_bytes,
+              _provider_resident_bytes| run(generator),
     )
     .await
 }
@@ -543,7 +577,7 @@ pub(crate) async fn with_cached_generator_for_request<R>(
     engine_id: &'static str,
     spec: LoadSpec,
     load_error_context: impl Into<String>,
-    run: impl FnOnce(&dyn Generator, MemoryCacheState, OffloadPolicy, u64) -> WorkerResult<R>
+    run: impl FnOnce(&dyn Generator, MemoryCacheState, OffloadPolicy, u64, u64) -> WorkerResult<R>
         + Send
         + 'static,
 ) -> WorkerResult<R>
@@ -569,6 +603,7 @@ where
 /// `generate_candle_video`) reachable from a unit test. Their pre-load decisions — the frame lattice
 /// and the Mochi fit gate — are otherwise unpinned, since a test can assert the free functions an arm
 /// calls but never that it calls them.
+#[cfg(test)]
 pub(crate) async fn with_cached_generator_using<R>(
     engine_id: &'static str,
     spec: LoadSpec,
@@ -586,7 +621,11 @@ where
         spec,
         load_error_context,
         load_generator,
-        move |generator, _cache_state, _load_policy, _external_committed_bytes| run(generator),
+        move |generator,
+              _cache_state,
+              _load_policy,
+              _external_committed_bytes,
+              _provider_resident_bytes| run(generator),
     )
     .await
 }
@@ -637,6 +676,71 @@ async fn with_cached_generator_using_cold_admission_on<R>(
 where
     R: Send + 'static,
 {
+    with_cached_generator_for_request_using_cold_admission_on(
+        worker,
+        engine_id,
+        spec,
+        load_error_context,
+        cold_load,
+        load_generator,
+        move |generator,
+              _cache_state,
+              _load_policy,
+              _external_committed_bytes,
+              _provider_resident_bytes| run(generator),
+    )
+    .await
+}
+
+/// Request-policy sibling of [`with_cached_generator_using_cold_admission`]. It preserves the
+/// atomic cold-miss admission transaction while exposing the same physical cache/load accounting
+/// as [`with_cached_generator_for_request_using`].
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) async fn with_cached_generator_for_request_using_cold_admission<R>(
+    engine_id: &'static str,
+    spec: LoadSpec,
+    load_error_context: impl Into<String>,
+    request_cancel: gen_core::CancelFlag,
+    cold_admission: GeneratorColdLoadAdmission,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+    run: impl FnOnce(&dyn Generator, MemoryCacheState, OffloadPolicy, u64, u64) -> WorkerResult<R>
+        + Send
+        + 'static,
+) -> WorkerResult<R>
+where
+    R: Send + 'static,
+{
+    with_cached_generator_for_request_using_cold_admission_on(
+        generator_worker().clone(),
+        engine_id,
+        spec,
+        load_error_context,
+        GeneratorColdLoadTransaction::new(request_cancel, cold_admission),
+        load_generator,
+        run,
+    )
+    .await
+}
+
+#[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
+async fn with_cached_generator_for_request_using_cold_admission_on<R>(
+    worker: mpsc::Sender<GeneratorJob>,
+    engine_id: &'static str,
+    spec: LoadSpec,
+    load_error_context: impl Into<String>,
+    cold_load: GeneratorColdLoadTransaction,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+    run: impl FnOnce(&dyn Generator, MemoryCacheState, OffloadPolicy, u64, u64) -> WorkerResult<R>
+        + Send
+        + 'static,
+) -> WorkerResult<R>
+where
+    R: Send + 'static,
+{
     let GeneratorColdLoadTransaction {
         request_cancel,
         admission: cold_admission,
@@ -646,13 +750,18 @@ where
     let load = move || {
         let spec = crate::mlx_fit_gate::apply_residency_policy(spec, engine_id)?;
         let load_policy = spec.offload_policy;
-        let external_committed_bytes = capture_external_committed_bytes();
+        let external_committed_bytes = capture_backend_committed_bytes()?;
         let generator = load_generator(engine_id, &spec)
             .map_err(|error| crate::classify_engine_error(&load_error_context, error))?;
+        let post_load_committed_bytes = capture_backend_committed_bytes()?;
         Ok(CachedGenerator {
             generator,
             load_policy,
             external_committed_bytes,
+            provider_resident_bytes: provider_resident_delta(
+                external_committed_bytes,
+                post_load_committed_bytes,
+            ),
         })
     };
     cache_thread::run_cached_with_access_after_cold_evict(
@@ -669,7 +778,19 @@ where
         },
         move || cold_admission.admit(),
         load,
-        move |cached, _access| run(cached.generator.as_ref()),
+        move |cached, access| {
+            let cache_state = match access {
+                CacheAccess::Cold => MemoryCacheState::Cold,
+                CacheAccess::Warm => MemoryCacheState::Warm,
+            };
+            run(
+                cached.generator.as_ref(),
+                cache_state,
+                cached.load_policy,
+                cached.external_committed_bytes,
+                cached.provider_resident_bytes,
+            )
+        },
         GENERATOR_SEAM_MESSAGES,
     )
     .await
@@ -682,7 +803,7 @@ pub(crate) async fn with_cached_generator_for_request_using<R>(
     load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
         + Send
         + 'static,
-    run: impl FnOnce(&dyn Generator, MemoryCacheState, OffloadPolicy, u64) -> WorkerResult<R>
+    run: impl FnOnce(&dyn Generator, MemoryCacheState, OffloadPolicy, u64, u64) -> WorkerResult<R>
         + Send
         + 'static,
 ) -> WorkerResult<R>
@@ -701,13 +822,18 @@ where
     let load = move || {
         let spec = crate::mlx_fit_gate::apply_residency_policy(spec, engine_id)?;
         let load_policy = spec.offload_policy;
-        let external_committed_bytes = capture_external_committed_bytes();
+        let external_committed_bytes = capture_backend_committed_bytes()?;
         let generator = load_generator(engine_id, &spec)
             .map_err(|error| crate::classify_engine_error(&load_error_context, error))?;
+        let post_load_committed_bytes = capture_backend_committed_bytes()?;
         Ok(CachedGenerator {
             generator,
             load_policy,
             external_committed_bytes,
+            provider_resident_bytes: provider_resident_delta(
+                external_committed_bytes,
+                post_load_committed_bytes,
+            ),
         })
     };
     let run = move |cached: &CachedGenerator, access| {
@@ -720,6 +846,7 @@ where
             cache_state,
             cached.load_policy,
             cached.external_committed_bytes,
+            cached.provider_resident_bytes,
         )
     };
     cache_thread::run_cached_with_access(
@@ -746,7 +873,9 @@ where
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(crate) async fn with_uncached_generator<R>(
     load: impl FnOnce() -> WorkerResult<Box<dyn Generator>> + Send + 'static,
-    run: impl FnOnce(&dyn Generator) -> WorkerResult<R> + Send + 'static,
+    run: impl FnOnce(&dyn Generator, MemoryCacheState, OffloadPolicy, u64, u64) -> WorkerResult<R>
+        + Send
+        + 'static,
 ) -> WorkerResult<R>
 where
     R: Send + 'static,
@@ -762,8 +891,21 @@ where
             if cache.evict().is_some() {
                 cache_thread::release_backend_cache_after_evict();
             }
+            // The in-place ComfyUI route is uncached, but it still needs the same post-load
+            // accounting handshake as a cache miss: capture the baseline only after the previous
+            // cached generator has been evicted, then retain this exact load's committed delta for
+            // admission. Passing zero here would make a Candle contract double-charge its already
+            // resident weights and would not be a truthful same-snapshot budget.
+            let external_committed_bytes = capture_backend_committed_bytes()?;
             let generator = load()?;
-            run(generator.as_ref())
+            let post_load_committed_bytes = capture_backend_committed_bytes()?;
+            run(
+                generator.as_ref(),
+                MemoryCacheState::Cold,
+                OffloadPolicy::Sequential,
+                external_committed_bytes,
+                provider_resident_delta(external_committed_bytes, post_load_committed_bytes),
+            )
         })) {
             Ok(result) => result,
             Err(panic) => {
@@ -841,6 +983,16 @@ async fn evict_cached_generator_on(worker: &mpsc::Sender<GeneratorJob>) -> Worke
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_attribution_is_the_conservative_same_load_snapshot_delta() {
+        assert_eq!(provider_resident_delta(7, 27), 20);
+        assert_eq!(
+            provider_resident_delta(27, 7),
+            0,
+            "a noisy shrinking snapshot never wraps"
+        );
+    }
     use crate::WorkerError;
 
     // sc-12178 (GitHub #1544): the requested GPU cap is clamped to the device wired ceiling so
@@ -1264,6 +1416,7 @@ mod tests {
                 }),
                 load_policy: OffloadPolicy::Resident,
                 external_committed_bytes: 0,
+                provider_resident_bytes: 0,
             },
         );
     }
@@ -1290,7 +1443,7 @@ mod tests {
     }
 
     #[test]
-    fn warm_hit_keeps_cold_load_policy_but_gets_fresh_access_state() {
+    fn warm_hit_keeps_cold_load_policy_and_provider_delta_but_gets_fresh_access_state() {
         use std::cell::Cell;
         let mut cache = GeneratorCache::new(false);
         let loads = Cell::new(0);
@@ -1307,9 +1460,12 @@ mod tests {
                             }),
                             load_policy: OffloadPolicy::Sequential,
                             external_committed_bytes: 0,
+                            provider_resident_bytes: 20,
                         })
                     },
-                    |cached, access| Ok((access, cached.load_policy)),
+                    |cached, access| {
+                        Ok((access, cached.load_policy, cached.provider_resident_bytes))
+                    },
                     "missing",
                 )
                 .unwrap()
@@ -1317,11 +1473,11 @@ mod tests {
 
         assert_eq!(
             run(&mut cache),
-            (CacheAccess::Cold, OffloadPolicy::Sequential)
+            (CacheAccess::Cold, OffloadPolicy::Sequential, 20)
         );
         assert_eq!(
             run(&mut cache),
-            (CacheAccess::Warm, OffloadPolicy::Sequential)
+            (CacheAccess::Warm, OffloadPolicy::Sequential, 20)
         );
         assert_eq!(loads.get(), 1, "geometry-independent key loads only once");
     }
@@ -1380,6 +1536,62 @@ mod tests {
                 "changing {field} must force cold admission before a different resident loads"
             );
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn request_aware_cold_admission_reports_fresh_access_and_stable_load_accounting() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let weights = tempfile::tempdir().expect("weights");
+        let spec = LoadSpec::new(WeightsSource::Dir(weights.path().to_path_buf()))
+            .with_offload_policy(OffloadPolicy::Sequential);
+        let (tx, worker) = start_isolated_generator_worker();
+        let gates = Arc::new(AtomicUsize::new(0));
+        let loads = Arc::new(AtomicUsize::new(0));
+
+        let first_gates = gates.clone();
+        let first_loads = loads.clone();
+        let cold = with_cached_generator_for_request_using_cold_admission_on(
+            tx.clone(),
+            "scail2",
+            spec.clone(),
+            "stub load",
+            cold_load_transaction(move || {
+                first_gates.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }),
+            move |_id, _spec| {
+                first_loads.fetch_add(1, Ordering::SeqCst);
+                Ok(stub_box())
+            },
+            |_generator, state, policy, external, provider| Ok((state, policy, external, provider)),
+        )
+        .await
+        .expect("cold request");
+        assert_eq!(cold.0, MemoryCacheState::Cold);
+        assert_eq!(cold.1, OffloadPolicy::Sequential);
+
+        let warm = with_cached_generator_for_request_using_cold_admission_on(
+            tx.clone(),
+            "scail2",
+            spec,
+            "stub load",
+            cold_load_transaction(|| panic!("warm hit must bypass cold admission")),
+            |_id, _spec| panic!("warm hit must not reload"),
+            |_generator, state, policy, external, provider| Ok((state, policy, external, provider)),
+        )
+        .await
+        .expect("warm request");
+        assert_eq!(warm.0, MemoryCacheState::Warm);
+        assert_eq!(warm.1, cold.1);
+        assert_eq!(warm.2, cold.2, "external baseline belongs to the cold load");
+        assert_eq!(warm.3, cold.3, "provider delta belongs to the cold load");
+        assert_eq!(gates.load(Ordering::SeqCst), 1);
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+
+        drop(tx);
+        worker.join().expect("isolated cache worker exits");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

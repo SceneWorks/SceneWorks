@@ -3352,6 +3352,291 @@ async fn model_download_job_enqueues_co_requisite_dependencies() {
 }
 
 #[tokio::test]
+async fn mmaudio_repo_rename_keeps_legacy_install_ready_and_skips_duplicate_clip_download() {
+    let _env = isolate_hf_cache();
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    let rename = sceneworks_core::hf_repo_renames::MMAUDIO_DFN5B_CLIP_RENAME;
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        format!(
+            r#"{{
+              "schemaVersion": 1,
+              "models": [{{
+                "id": "mmaudio_rename_fixture",
+                "name": "MMAudio rename fixture",
+                "type": "audio",
+                "family": "mmaudio",
+                "downloads": [
+                  {{ "provider": "huggingface", "repo": "owner/mmaudio", "files": ["weights.bin"] }},
+                  {{ "provider": "huggingface", "repo": "{}", "revision": "{}", "files": ["{}"], "coRequisite": true, "componentId": "clip" }}
+                ]
+              }}]
+            }}"#,
+            rename.current_repo, rename.revision, rename.files[0]
+        ),
+    )
+    .expect("builtin models writes");
+    write_empty_sibling_manifests(&config_dir);
+    let data_dir = temp_dir.path().join("data");
+
+    for (repo, revision, file) in [
+        ("owner/mmaudio", "primary-revision", "weights.bin"),
+        (rename.legacy_repo, rename.revision, rename.files[0]),
+    ] {
+        let path = huggingface_repo_cache_path(&data_dir, repo)
+            .unwrap()
+            .join("snapshots")
+            .join(revision)
+            .join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"existing cached weights").unwrap();
+    }
+
+    // Mutation: the corrected cache namespace may be poisoned or unwritable even though the exact
+    // immutable legacy snapshot remains valid. Catalog readiness must be based on the confined
+    // legacy source the worker can load directly, and serving the catalog must never traverse or
+    // populate this unsafe destination.
+    #[cfg(unix)]
+    let poisoned_canonical_destination = {
+        use std::os::unix::fs::symlink;
+
+        let current_repo = huggingface_repo_cache_path(&data_dir, rename.current_repo).unwrap();
+        std::fs::create_dir_all(&current_repo).unwrap();
+        let outside = temp_dir.path().join("outside-canonical-snapshots");
+        std::fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, current_repo.join("snapshots")).unwrap();
+        outside
+    };
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, models) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    let model = models
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["id"] == "mmaudio_rename_fixture")
+        .expect("fixture model is cataloged");
+    assert_eq!(model["installState"], "installed");
+    assert_eq!(model["repairAvailable"], false);
+
+    let (status, primary) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/mmaudio_rename_fixture/download",
+        json!({ "requestedGpu": "auto" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(primary["payload"]["repo"], "owner/mmaudio");
+
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    let download_jobs = jobs
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|job| job["type"] == "model_download")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        download_jobs.len(),
+        1,
+        "the exact legacy CLIP cache suppresses a duplicate fetch"
+    );
+    assert!(download_jobs
+        .iter()
+        .all(|job| job["payload"]["repo"] != rename.current_repo));
+    #[cfg(unix)]
+    assert!(
+        !poisoned_canonical_destination.join(rename.revision).exists(),
+        "catalog readiness and duplicate suppression must not write through the poisoned destination"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn mmaudio_repo_rename_does_not_suppress_repair_for_an_escaping_legacy_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let _env = isolate_hf_cache();
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    let rename = sceneworks_core::hf_repo_renames::MMAUDIO_DFN5B_CLIP_RENAME;
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        format!(
+            r#"{{
+              "schemaVersion": 1,
+              "models": [{{
+                "id": "mmaudio_rename_escape_fixture",
+                "name": "MMAudio rename escape fixture",
+                "type": "audio",
+                "family": "mmaudio",
+                "downloads": [
+                  {{ "provider": "huggingface", "repo": "owner/mmaudio", "files": ["weights.bin"] }},
+                  {{ "provider": "huggingface", "repo": "{}", "revision": "{}", "files": ["{}"], "coRequisite": true, "componentId": "clip" }}
+                ]
+              }}]
+            }}"#,
+            rename.current_repo, rename.revision, rename.files[0]
+        ),
+    )
+    .expect("builtin models writes");
+    write_empty_sibling_manifests(&config_dir);
+    let data_dir = temp_dir.path().join("data");
+
+    let primary = huggingface_repo_cache_path(&data_dir, "owner/mmaudio")
+        .unwrap()
+        .join("snapshots")
+        .join("primary-revision")
+        .join("weights.bin");
+    std::fs::create_dir_all(primary.parent().unwrap()).unwrap();
+    std::fs::write(primary, b"existing primary weights").unwrap();
+
+    let legacy = huggingface_repo_cache_path(&data_dir, rename.legacy_repo)
+        .unwrap()
+        .join("snapshots")
+        .join(rename.revision)
+        .join(rename.files[0]);
+    std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    let outside = temp_dir.path().join("outside-clip.bin");
+    std::fs::write(&outside, b"not cache owned").unwrap();
+    symlink(&outside, &legacy).unwrap();
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, models) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    let model = models
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["id"] == "mmaudio_rename_escape_fixture")
+        .expect("fixture model is cataloged");
+    assert_ne!(
+        model["installState"], "installed",
+        "an escaping legacy file cannot satisfy install readiness"
+    );
+    assert_eq!(model["repairAvailable"], true);
+
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/mmaudio_rename_escape_fixture/download",
+        json!({ "requestedGpu": "auto" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    let download_jobs = jobs
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|job| job["type"] == "model_download")
+        .collect::<Vec<_>>();
+    assert!(
+        download_jobs
+            .iter()
+            .any(|job| job["payload"]["repo"] == rename.current_repo),
+        "the unusable legacy alias must not suppress the canonical repair download"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn mmaudio_repo_rename_requires_the_exact_confined_current_snapshot() {
+    use std::os::unix::fs::symlink;
+
+    async fn assert_repair_download(
+        mode: &str,
+        stage_current: impl FnOnce(&std::path::Path, &str),
+    ) {
+        let _env = isolate_hf_cache();
+        std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let config_dir = temp_dir.path().join("config/manifests");
+        std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+        let rename = sceneworks_core::hf_repo_renames::MMAUDIO_DFN5B_CLIP_RENAME;
+        let model_id = format!("mmaudio_current_{mode}_fixture");
+        std::fs::write(
+            config_dir.join("builtin.models.jsonc"),
+            format!(
+                r#"{{
+                  "schemaVersion": 1,
+                  "models": [{{
+                    "id": "{model_id}",
+                    "name": "MMAudio current cache fixture",
+                    "type": "audio",
+                    "family": "mmaudio",
+                    "downloads": [
+                      {{ "provider": "huggingface", "repo": "owner/mmaudio", "files": ["weights.bin"] }},
+                      {{ "provider": "huggingface", "repo": "{}", "revision": "{}", "files": ["{}"], "coRequisite": true, "componentId": "clip" }}
+                    ]
+                  }}]
+                }}"#,
+                rename.current_repo, rename.revision, rename.files[0]
+            ),
+        )
+        .expect("builtin models writes");
+        write_empty_sibling_manifests(&config_dir);
+        let data_dir = temp_dir.path().join("data");
+        let primary = huggingface_repo_cache_path(&data_dir, "owner/mmaudio")
+            .unwrap()
+            .join("snapshots/primary-revision/weights.bin");
+        std::fs::create_dir_all(primary.parent().unwrap()).unwrap();
+        std::fs::write(primary, b"primary").unwrap();
+        let current_root = huggingface_repo_cache_path(&data_dir, rename.current_repo).unwrap();
+        stage_current(&current_root, rename.files[0]);
+
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (status, models) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        let model = models
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|model| model["id"] == model_id)
+            .expect("fixture model is cataloged");
+        assert_ne!(model["installState"], "installed", "{mode}");
+        assert_eq!(model["repairAvailable"], true, "{mode}");
+        let (status, _) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/models/{model_id}/download"),
+            json!({ "requestedGpu": "auto" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+        assert!(jobs
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|job| job["type"] == "model_download"
+                && job["payload"]["repo"] == rename.current_repo));
+    }
+
+    let rename = sceneworks_core::hf_repo_renames::MMAUDIO_DFN5B_CLIP_RENAME;
+    assert_repair_download("wrong_revision", |root, file| {
+        let path = root.join("snapshots/wrong-revision").join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"wrong revision").unwrap();
+    })
+    .await;
+    assert_repair_download("escaping_symlink", |root, file| {
+        let path = root.join("snapshots").join(rename.revision).join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let outside = root.parent().unwrap().join("outside-current.bin");
+        std::fs::write(&outside, b"outside").unwrap();
+        symlink(outside, path).unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn model_download_job_forwards_pinned_revision_for_co_requisite() {
     // sc-13541: a co-requisite whose weight the runtime resolves via a pinned-SHA `hf_get_pinned`
     // (chatterbox_tts's ve/perth) must have its `revision` forwarded to the download job, so the worker

@@ -42,8 +42,7 @@ if (request.action === "probe") {
   process.exit(0);
 }
 const phase = (value) => ({
-  activeBytes: value, allocatorBytes: value + 10, deviceBytes: value + 20,
-  wiredBytes: value + 30, reclaimableBytes: 0
+  activeBytes: value, allocatorBytes: value + 10, reclaimableBytes: 10
 });
 const fragment = async (planned) => {
   const p = planned.strategy.parameters;

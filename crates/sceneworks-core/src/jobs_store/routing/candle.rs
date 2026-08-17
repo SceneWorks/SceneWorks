@@ -25,16 +25,16 @@ use crate::jobs_store::routing::{
 
 /// Candle video models whose provider descriptor advertises user-LoRA inference, so a video job
 /// carrying `request.loras` stays on the candle lane instead of being refused. Wan-14B applies
-/// adapters per MoE expert, while LTX installs additive residuals on its video-attention projections
-/// for both the packed Q4 base and dense Eros checkpoint. Wan-5B now applies dense/packed LoRA and
-/// LoKr too; SVD and Mochi advertise no adapter slot. Mirror of the candle-gen descriptors — kept in lockstep the same way
+/// adapters per MoE expert, while base LTX installs additive residuals on its video-attention
+/// projections. Wan-5B now applies dense/packed LoRA and LoKr, and Bernini exposes its provider
+/// slot. 10Eros remains MLX-only after SC-18902's failed Candle acceptance; SVD and Mochi advertise
+/// no adapter slot. Mirror of the candle-gen descriptors — kept in lockstep the same way
 /// `CANDLE_VIDEO_ROUTED_MODELS` mirrors the routed engines.
 pub(crate) const CANDLE_VIDEO_LORA_MODELS: &[&str] = &[
     "wan_2_2",
     "wan_2_2_t2v_14b",
     "wan_2_2_i2v_14b",
     "ltx_2_3",
-    "ltx_2_3_eros",
     "bernini",
 ];
 
@@ -688,7 +688,10 @@ fn candle_video_tier_select_eligible(model: &str, payload: &Map<String, Value>) 
 /// route keeps the selected LTX/Eros model and forwards the tracked clip, masks, references, and
 /// selected IC-LoRA to that model's `ControlClip`/keyframe-append provider path.
 pub(crate) fn ltx_replace_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
-    if !matches!(model, "ltx_2_3" | "ltx_2_3_eros")
+    // SC-18902 withdrew the Eros Candle route after the exact-head CUDA render proved that its
+    // undistilled checkpoint is not compatible with Candle's single-pass distilled recipe. Keep
+    // this newer advanced-mode route aligned with the same product decision as the base lane.
+    if model != "ltx_2_3"
         || !has_nonempty_string(payload, "sourceClipAssetId")
         || !has_nonempty_string(payload, "personTrackId")
         || !has_nonempty_string(payload, "characterId")

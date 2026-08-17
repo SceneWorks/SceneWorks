@@ -341,8 +341,10 @@ pub(crate) fn resolve_bundled_ltx_gemma_dir(model_dir: &Path) -> Option<PathBuf>
 /// first, then the fetched [`LTX_BUNDLE_REPO`] snapshot's `gemma/`. Resolution order: an operator
 /// `$LTX_GEMMA_DIR` override (existence-checked, [`ltx_gemma_env_override`]) — threaded onto the spec
 /// because the MLX provider dropped its own env read (sc-13664) — then the complete `<parent>/gemma`
-/// sibling, then the bundle snapshot's `gemma/`. `None` only when nothing complete is on disk (the
-/// provider then surfaces its required-`LoadSpec::text_encoder` error) — a partial dir never wins.
+/// sibling, then the bundle snapshot's `gemma/` **and its sibling revisions'** (sc-18809: the same
+/// cross-revision predicate [`ensure_ltx_bundle_gemma_present`] probes with, so the probe can never be
+/// more permissive than this resolver). `None` only when nothing complete is on disk (the provider
+/// then surfaces its required-`LoadSpec::text_encoder` error) — a partial dir never wins.
 #[cfg(target_os = "macos")]
 pub(super) fn resolve_ltx_eros_gemma_dir(settings: &Settings, model_dir: &Path) -> Option<PathBuf> {
     if let Some(env_dir) = ltx_gemma_env_override() {
@@ -354,8 +356,15 @@ pub(super) fn resolve_ltx_eros_gemma_dir(settings: &Settings, model_dir: &Path) 
             return Some(sibling);
         }
     }
-    let bundle_gemma = huggingface_snapshot_dir(&settings.data_dir, LTX_BUNDLE_REPO)?.join("gemma");
-    ltx_gemma_dir_is_complete(&bundle_gemma).then_some(bundle_gemma)
+    // The SAME sibling-revision scan [`ensure_ltx_bundle_gemma_present`] probes with: it takes a tier
+    // dir and reads its parent snapshot, so `root.join("gemma")` asks it about `root` itself, then the
+    // siblings. A single-snapshot check here would be STRICTLY NARROWER than that probe — on a
+    // split-revision install the probe would report gemma present, skip the fetch, and this resolver
+    // would then return `None`, dead-ending the job on the provider's required-`LoadSpec::text_encoder`
+    // error (sc-18809). Probe and resolver share one predicate.
+    bundled_ltx_gemma_dir(
+        &huggingface_snapshot_dir(&settings.data_dir, LTX_BUNDLE_REPO)?.join("gemma"),
+    )
 }
 
 /// The amoral 4-bit Gemma prompt-enhancer snapshot the OPT-IN `useUncensoredEnhancer` path loads
@@ -530,6 +539,13 @@ pub(super) fn resolve_selected_ltx_text_encoder(
 /// bundle" error), or `q8/` is already present. Fails loud on a real download error — fast, before
 /// any compute; a `q8/` tier that isn't published yet stays absent so resolve falls back to Q4.
 /// Mirrors the eros [`ensure_ltx_upscaler_cached`] on-demand fetch.
+///
+/// The presence probe must be the SAME cross-revision scan [`resolve_ltx_model_dir`] loads through
+/// (sc-18809). Probing only the selected snapshot on a split-revision install is permanently false —
+/// the pre-bump `254989c3…` snapshot wins `resolve_huggingface_snapshot_dir`'s most-files fallback and
+/// never gains the tier — so every job would re-enter `ensure_hf_files_cached` for weights already on
+/// disk. That transfers no bytes, but it still does a `HuggingFaceSnapshot::resolve` plus a HEAD per
+/// file, which turns a fully-provisioned tier into a HARD FAILURE offline or during a hub outage.
 #[cfg(target_os = "macos")]
 pub(super) async fn ensure_ltx_q8_present(
     api: &ApiClient,
@@ -562,7 +578,10 @@ pub(super) async fn ensure_ltx_q8_present(
 /// Fetch the SceneWorks LTX bundle's dense `bf16/` subdir on demand (sc-8513, epic 8506). The macOS
 /// default download is lean (`q4/` + `gemma/`); a bf16 job ([`ltx_wants_bf16`]) pulls the ~47 GB
 /// `bf16/*` from the FIXED [`LTX_BUNDLE_REVISION`] the first time it is requested. No-op for eros, for
-/// non-bf16 jobs, or when `bf16/` is already complete. Mirrors [`ensure_ltx_q8_present`].
+/// non-bf16 jobs, or when `bf16/` is already complete. Mirrors [`ensure_ltx_q8_present`], including its
+/// cross-revision presence probe — and bf16 is the tier that MAKES installs split-revision, since
+/// `bf16/` only exists at the bumped pin, so a single-snapshot probe here would be wrong on exactly the
+/// machines this story creates.
 #[cfg(target_os = "macos")]
 pub(super) async fn ensure_ltx_bf16_present(
     api: &ApiClient,
@@ -635,7 +654,13 @@ pub(crate) async fn ensure_ltx_bundle_gemma_present(
         return Ok(());
     }
     if let Some(root) = huggingface_snapshot_dir(&settings.data_dir, LTX_BUNDLE_REPO) {
-        if ltx_gemma_dir_is_complete(&root.join("gemma")) {
+        // Probe with the SAME sibling-revision scan the eros resolver loads through
+        // ([`bundled_ltx_gemma_dir`], sc-14377) — it takes a tier dir and reads its parent snapshot,
+        // so `root.join("gemma")` asks it about `root` itself, then the siblings. Probing only
+        // `root/gemma` would re-fetch a co-requisite the resolver can already see in a sibling
+        // revision, which needs the hub for weights that are on disk (sc-18809, same class as the
+        // q8/bf16 probes above).
+        if bundled_ltx_gemma_dir(&root.join("gemma")).is_some() {
             return Ok(());
         }
     }
@@ -676,8 +701,11 @@ pub(super) fn resolve_ltx_adapters(
 }
 
 /// Resolve user-selected LTX video LoRAs for both native providers. MLX and Candle consume the same
-/// PEFT attention-projection files and strengths. Candle has one distilled denoise pass, so this
-/// shared resolver deliberately excludes the MLX-only two-pass 10Eros distill recipe above.
+/// PEFT attention-projection files and strengths. This deliberately excludes the model-required
+/// 10Eros distill recipe: MLX injects that two-pass recipe in [`resolve_ltx_adapters`], while Candle
+/// does not route 10Eros after exact-head CUDA acceptance proved that the undistilled checkpoint
+/// collapses to noise and its cond_safe adapter does not fit Candle's single-pass adapter surface
+/// (sc-18902, run 31766800005).
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")

@@ -157,6 +157,11 @@ on:
         description: "Exact 40-hex Krea artifact revision"
         required: false
         type: string
+      run_ltx_eros_acceptance:
+        description: "Reproduce the fixed SC-18902 rejected historical LTX-2.3 10Eros CUDA baseline"
+        required: false
+        type: boolean
+        default: false
 
 # Cancel superseded PR runs, but never cancel a main-push run: this lane is the
 # ONLY thing that compiles the candle-gated worker code, so a main commit whose
@@ -276,7 +281,7 @@ jobs:
     # that box and starves every queued PR/main run on it until the cap fires
     # (sc-13603). Well above the healthy ~11-14 min build+test+clippy — a cold
     # candle-kernels (nvcc) rebuild still fits comfortably.
-    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && inputs.provision_krea_snapshot && 240 || github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && 120 || 45 }}
+    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && inputs.run_ltx_eros_acceptance && 360 || github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && inputs.provision_krea_snapshot && 240 || github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && 120 || 45 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # sc-13166: point this lane at the REAL rustup toolchain bin and prepend it to
@@ -353,13 +358,19 @@ jobs:
       # `MemoryStrategyParameters` literal here went stale against the inference contract with
       # nothing to catch it). Keep both the production typecheck and the binary's CUDA-only unit
       # tests here: the batching contamination guard cannot be compiled or exercised on macOS.
-      - name: Check and test the candle memory adapter (memory-candle-adapter)
+      #
+      # The TEST step carries no `--bin` selector (sc-18808 review). `--bin memory-candle-adapter`
+      # selects that one target and EXCLUDES the crate's lib test target — the shared protocol guards
+      # (e.g. `still_geometry_guard_refuses_every_non_still_axis_and_reproduces_the_pinned_wording`)
+      # ran in zero lanes on either platform. The CHECK step above it keeps its selector on purpose:
+      # it is the production-typecheck half and the lib compiles on every platform anyway.
+      - name: Check and test the candle memory adapter (lib + memory-candle-adapter)
         shell: cmd
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
           cargo check -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter
-          cargo test -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter
+          cargo test -p sceneworks-memory-adapter --features candle
       - name: Validate five-rung reference inputs
         if: ${{ github.event_name == 'workflow_dispatch' }}
         shell: powershell
@@ -545,6 +556,7 @@ jobs:
       # at every pin bump with nothing red). Checking it on both lanes is what turns that argument
       # into a measurement, and it costs nothing either side: the same dumper run already writes it.
       - name: Verify capabilities.candle.json is a real dump, not a restamp
+        id: verify-candle-facts
         shell: cmd
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
@@ -606,4 +618,240 @@ jobs:
         with:
           name: backend-capability-facts-candle
           path: ${{ runner.temp }}/engine-capability-facts-verify
+          if-no-files-found: error
+      # SC-18902's product decision required an actual Eros render, not source inference. These
+      # dispatch-only steps are retained only to reproduce that rejected historical baseline; they
+      # do not restore an Eros Candle product route. A candidate is intentionally absent: the
+      # published cond_safe LoRA has 3,320 keys while the retained Candle adapter surface accepts
+      # only 768, so filtering it would not be an honest comparison.
+      - name: Validate the fixed LTX Eros acceptance dispatch
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_ltx_eros_acceptance }}
+        shell: powershell
+        run: |
+          $version = python --version
+          if ($LASTEXITCODE -ne 0 -or $version -notmatch '^Python 3\.(?<minor>\d+)\.') {
+            throw "the self-hosted CUDA runner requires Python 3.12 or newer, got: $version"
+          }
+          if ([int]$Matches.minor -lt 12) {
+            throw "the self-hosted CUDA runner requires Python 3.12 or newer, got: $version"
+          }
+          foreach ($command in @('nvidia-smi', 'ffmpeg', 'ffprobe')) {
+            if (-not (Get-Command $command -ErrorAction SilentlyContinue)) {
+              throw "the self-hosted CUDA runner is missing required command: $command"
+            }
+          }
+      - name: Provision exact public LTX Eros acceptance artifacts
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_ltx_eros_acceptance }}
+        shell: powershell
+        env:
+          EROS_REVISION: "84a05a13610d78dbe4340d1be23fd8185e10f697"
+          GEMMA_REVISION: "01df27d308466533aa09d251e3aebdcc627d07eb"
+          HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"
+          HF_HUB_DISABLE_PROGRESS_BARS: "1"
+          HF_HUB_DISABLE_TELEMETRY: "1"
+          HF_HUB_VERBOSITY: "error"
+        run: |
+          $venv = Join-Path $env:RUNNER_TEMP 'ltx-eros-provision-venv'
+          python -m venv $venv
+          if ($LASTEXITCODE -ne 0) { throw 'failed to create the job-local LTX provisioning venv' }
+          $python = Join-Path $venv 'Scripts\python.exe'
+          & $python -m pip install --disable-pip-version-check --no-input 'huggingface_hub==0.36.0'
+          if ($LASTEXITCODE -ne 0) { throw 'failed to install the pinned huggingface_hub client' }
+          @'
+          import os
+          from pathlib import Path
+          from huggingface_hub import snapshot_download
+
+          cache_dir = os.path.join(os.environ["USERPROFILE"], ".cache", "huggingface", "hub")
+          eros_root = Path(snapshot_download(
+              repo_id="TenStrip/LTX2.3-10Eros",
+              repo_type="model",
+              revision=os.environ["EROS_REVISION"],
+              allow_patterns=["10Eros_v1.3_bf16.safetensors"],
+              cache_dir=cache_dir,
+              token=False,
+              max_workers=4,
+          ))
+          gemma_root = Path(snapshot_download(
+              repo_id="SceneWorks/ltx-2.3-mlx",
+              repo_type="model",
+              revision=os.environ["GEMMA_REVISION"],
+              allow_patterns=["gemma/**"],
+              cache_dir=cache_dir,
+              token=False,
+              max_workers=4,
+          ))
+
+          eros_file = eros_root / "10Eros_v1.3_bf16.safetensors"
+          gemma_dir = gemma_root / "gemma"
+          for path, label in [
+              (eros_file, "Eros checkpoint"),
+              (gemma_dir / "config.json", "public SceneWorks Gemma component"),
+          ]:
+              if not path.is_file():
+                  raise RuntimeError(f"{label} is missing after exact-revision provisioning: {path}")
+          output_dir = Path(os.environ["RUNNER_TEMP"]) / (
+              f"sc-18902-ltx-eros-{os.environ['GITHUB_RUN_ID']}-{os.environ['GITHUB_RUN_ATTEMPT']}"
+          )
+          if output_dir.exists():
+              raise RuntimeError(f"refusing a stale LTX acceptance output directory: {output_dir}")
+
+          exports = {
+              "LTX_EROS_DIR": str(eros_root),
+              "LTX_EROS_GEMMA_DIR": str(gemma_dir),
+              "LTX_EROS_OUT_DIR": str(output_dir),
+          }
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env_file:
+              for key, value in exports.items():
+                  print(f"{key}={value}", file=env_file)
+          print("Exact public LTX Eros acceptance artifacts provisioned anonymously")
+          '@ | & $python -
+          if ($LASTEXITCODE -ne 0) { throw 'exact LTX Eros artifact provisioning failed' }
+      - name: Render the fixed LTX Eros CUDA acceptance artifact
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_ltx_eros_acceptance }}
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          nvidia-smi
+          cargo test -p sceneworks-worker --features backend-candle --release ltx_eros_candle_gpu_smoke -- --ignored --nocapture --test-threads=1
+      - name: Encode and verify the LTX Eros evidence bundle
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_ltx_eros_acceptance }}
+        shell: powershell
+        run: |
+          $out = $env:LTX_EROS_OUT_DIR
+          if (-not (Test-Path -LiteralPath $out -PathType Container)) {
+            throw "the LTX Eros smoke wrote no output directory: $out"
+          }
+          $mp4 = Join-Path $out 'ltx_eros.mp4'
+          $videoOnly = Join-Path $out 'ltx_eros.rendered-frames.mp4'
+          $frames = Join-Path $out 'frames\frame_%05d.png'
+          $audio = Join-Path $out 'audio.wav'
+          & ffmpeg -hide_banner -loglevel warning -nostdin -y -framerate 25 -start_number 0 -i $frames -c:v libx264 -preset slow -crf 18 -pix_fmt yuv420p -r 25 $videoOnly
+          if ($LASTEXITCODE -ne 0) { throw 'ffmpeg failed to encode the LTX Eros video stream' }
+          # Preserve the full 153-frame renderer output above, then separately match the product's
+          # LTX mux contract: copy H.264, encode the WAV as AAC, and bound the user-visible file by
+          # the shorter input. Synchronized audio may include up to the 153-frame LTX lattice
+          # boundary (6.12 seconds), so `-shortest` trims the product-faithful MP4 to its exact
+          # recorded duration rather than the six-second request scalar.
+          & ffmpeg -hide_banner -loglevel warning -nostdin -y -i $videoOnly -i $audio -map 0:v:0 -map 1:a:0 -c:v copy -c:a aac -b:a 192k -shortest -map_metadata 0 -movflags +faststart $mp4
+          if ($LASTEXITCODE -ne 0) { throw 'ffmpeg failed to mux the LTX Eros evidence MP4' }
+
+          $renderedProbePath = Join-Path $out 'ffprobe-rendered-frames.json'
+          & ffprobe -v error -count_frames -show_entries 'stream=index,codec_name,codec_type,width,height,r_frame_rate,nb_read_frames,duration:format=duration' -of json $videoOnly | Out-File -LiteralPath $renderedProbePath -Encoding utf8
+          if ($LASTEXITCODE -ne 0) { throw 'ffprobe failed on the complete LTX Eros rendered-frame video' }
+          $renderedProbe = Get-Content -Raw -LiteralPath $renderedProbePath | ConvertFrom-Json
+          $renderedVideo = $renderedProbe.streams | Where-Object { $_.codec_type -eq 'video' } | Select-Object -First 1
+          if (-not $renderedVideo -or $renderedVideo.codec_name -ne 'h264' -or $renderedVideo.width -ne 768 -or $renderedVideo.height -ne 512) {
+            throw 'complete LTX Eros rendered-frame video must contain h264 768x512 video'
+          }
+          if ($renderedVideo.r_frame_rate -ne '25/1' -or [int]$renderedVideo.nb_read_frames -ne 153) {
+            throw "complete LTX Eros rendered-frame video must contain exactly 153 frames at 25 fps, got $($renderedVideo.nb_read_frames) at $($renderedVideo.r_frame_rate)"
+          }
+
+          $probePath = Join-Path $out 'ffprobe-mp4.json'
+          & ffprobe -v error -count_frames -show_entries 'stream=index,codec_name,codec_type,width,height,r_frame_rate,nb_read_frames,sample_rate,channels,duration:format=duration' -of json $mp4 | Out-File -LiteralPath $probePath -Encoding utf8
+          if ($LASTEXITCODE -ne 0) { throw 'ffprobe failed on the LTX Eros evidence MP4' }
+          $probe = Get-Content -Raw -LiteralPath $probePath | ConvertFrom-Json
+          $video = $probe.streams | Where-Object { $_.codec_type -eq 'video' } | Select-Object -First 1
+          $sound = $probe.streams | Where-Object { $_.codec_type -eq 'audio' } | Select-Object -First 1
+          if (-not $video -or $video.codec_name -ne 'h264' -or $video.width -ne 768 -or $video.height -ne 512) {
+            throw 'encoded LTX Eros MP4 must contain h264 768x512 video'
+          }
+          $productFrames = [int]$video.nb_read_frames
+          if ($video.r_frame_rate -ne '25/1' -or $productFrames -lt 150 -or $productFrames -gt 151) {
+            throw "product-faithful LTX Eros MP4 must retain 150 or 151 frames at the synchronized-audio boundary, got $productFrames at $($video.r_frame_rate)"
+          }
+          if (-not $sound -or $sound.codec_name -ne 'aac') {
+            throw 'encoded LTX Eros MP4 must contain AAC audio'
+          }
+
+          $wavProbePath = Join-Path $out 'ffprobe-wav.json'
+          & ffprobe -v error -show_entries 'stream=index,codec_name,codec_type,sample_rate,channels,duration:format=duration' -of json $audio | Out-File -LiteralPath $wavProbePath -Encoding utf8
+          if ($LASTEXITCODE -ne 0) { throw 'ffprobe failed on the LTX Eros source WAV' }
+          $wavProbe = Get-Content -Raw -LiteralPath $wavProbePath | ConvertFrom-Json
+          $wavAudio = $wavProbe.streams | Where-Object { $_.codec_type -eq 'audio' } | Select-Object -First 1
+          if (-not $wavAudio -or $wavAudio.codec_name -ne 'pcm_s16le') {
+            throw 'LTX Eros source WAV must contain signed 16-bit little-endian PCM audio'
+          }
+
+          $metadata = Get-Content -Raw -LiteralPath (Join-Path $out 'metadata.json') | ConvertFrom-Json
+          if ($metadata.captureKind -ne 'current-candle-route-baseline' -or $metadata.request.seed -ne 18902) {
+            throw 'LTX Eros metadata does not identify the fixed current-route baseline and seed'
+          }
+          if ($metadata.request.width -ne 768 -or $metadata.request.height -ne 512 -or $metadata.request.durationSeconds -ne 6 -or $metadata.request.fps -ne 25 -or $metadata.request.steps -ne 8) {
+            throw 'LTX Eros metadata drifted from the shipped manifest defaults'
+          }
+
+          # One output frame (40 ms) is the maximum tolerated timestamp/container rounding error.
+          # LTX emits on its own temporal/audio lattices: this exact baseline returned 153 video
+          # frames (6.12 s) and 6.09 s of synchronized PCM for a six-second request. Bind each
+          # encoded duration to the renderer's recorded output instead of pretending every stream
+          # must equal the request scalar exactly.
+          $renderedDurationSeconds = 153.0 / 25.0
+          $requestedProductDurationSeconds = 6.0
+          $audioDurationSeconds = [Convert]::ToDouble($metadata.result.audio.durationSeconds, [Globalization.CultureInfo]::InvariantCulture)
+          if ($audioDurationSeconds -lt $requestedProductDurationSeconds -or $audioDurationSeconds -gt $renderedDurationSeconds) {
+            throw "LTX Eros synchronized audio duration $audioDurationSeconds s must stay between the requested $requestedProductDurationSeconds s and rendered-frame $renderedDurationSeconds s timelines"
+          }
+          $productBoundarySeconds = [Math]::Min($renderedDurationSeconds, $audioDurationSeconds)
+          $productVideoDurationSeconds = $productFrames / 25.0
+          $durationToleranceSeconds = 1.0 / 25.0
+          function Assert-DurationNear([string]$label, $actualValue, [double]$expectedDurationSeconds) {
+            if ($null -eq $actualValue) { throw "$label duration is missing" }
+            $actualSeconds = [Convert]::ToDouble($actualValue, [Globalization.CultureInfo]::InvariantCulture)
+            if ([Math]::Abs($actualSeconds - $expectedDurationSeconds) -gt ($durationToleranceSeconds + 0.000001)) {
+              throw "$label duration $actualSeconds is not within $durationToleranceSeconds s of $expectedDurationSeconds s"
+            }
+          }
+          Assert-DurationNear 'complete rendered-frame video stream' $renderedVideo.duration $renderedDurationSeconds
+          Assert-DurationNear 'complete rendered-frame container' $renderedProbe.format.duration $renderedDurationSeconds
+          Assert-DurationNear 'source WAV stream' $wavAudio.duration $audioDurationSeconds
+          Assert-DurationNear 'source WAV container' $wavProbe.format.duration $audioDurationSeconds
+          Assert-DurationNear 'product MP4 video stream' $video.duration $productVideoDurationSeconds
+          Assert-DurationNear 'product MP4 audio stream' $sound.duration $productBoundarySeconds
+          Assert-DurationNear 'product MP4 container' $probe.format.duration $productBoundarySeconds
+
+          # Consume the native process completely before selecting one line. Piping ffmpeg directly
+          # into `Select-Object -First 1` closes stdout early on Windows, leaves LASTEXITCODE=1, and
+          # makes the otherwise-successful evidence step fail when the Actions wrapper exits.
+          $ffmpegVersionLines = @(& ffmpeg -version)
+          if ($LASTEXITCODE -ne 0) { throw 'ffmpeg version probe failed' }
+          $ffmpegVersion = ($ffmpegVersionLines | Select-Object -First 1).Trim()
+          $runnerMetadata = [ordered]@{
+            story = 'SC-18902'
+            captureKind = 'current-candle-route-baseline'
+            gitSha = (git rev-parse HEAD).Trim()
+            githubSha = $env:GITHUB_SHA
+            runId = $env:GITHUB_RUN_ID
+            runAttempt = $env:GITHUB_RUN_ATTEMPT
+            runnerName = $env:RUNNER_NAME
+            gpu = ((& nvidia-smi --query-gpu=name,uuid,driver_version,memory.total --format=csv,noheader | Out-String).Trim())
+            rustc = ((& rustc --version | Out-String).Trim())
+            cargo = ((& cargo --version | Out-String).Trim())
+            ffmpeg = $ffmpegVersion
+          }
+          $runnerMetadata | ConvertTo-Json -Depth 4 | Out-File -LiteralPath (Join-Path $out 'runner.json') -Encoding utf8
+          $productHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $mp4).Hash.ToLowerInvariant()
+          $renderedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $videoOnly).Hash.ToLowerInvariant()
+          @(
+            "$productHash  ltx_eros.mp4"
+            "$renderedHash  ltx_eros.rendered-frames.mp4"
+          ) | Out-File -LiteralPath (Join-Path $out 'sha256.txt') -Encoding ascii
+      - name: Upload the LTX Eros acceptance evidence
+        if: ${{ success() && github.event_name == 'workflow_dispatch' && inputs.run_ltx_eros_acceptance }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sc-18902-ltx-eros-baseline-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/sc-18902-ltx-eros-${{ github.run_id }}-${{ github.run_attempt }}/ltx_eros.mp4
+            ${{ runner.temp }}/sc-18902-ltx-eros-${{ github.run_id }}-${{ github.run_attempt }}/ltx_eros.rendered-frames.mp4
+            ${{ runner.temp }}/sc-18902-ltx-eros-${{ github.run_id }}-${{ github.run_attempt }}/audio.wav
+            ${{ runner.temp }}/sc-18902-ltx-eros-${{ github.run_id }}-${{ github.run_attempt }}/stills/*.png
+            ${{ runner.temp }}/sc-18902-ltx-eros-${{ github.run_id }}-${{ github.run_attempt }}/metadata.json
+            ${{ runner.temp }}/sc-18902-ltx-eros-${{ github.run_id }}-${{ github.run_attempt }}/ffprobe-mp4.json
+            ${{ runner.temp }}/sc-18902-ltx-eros-${{ github.run_id }}-${{ github.run_attempt }}/ffprobe-rendered-frames.json
+            ${{ runner.temp }}/sc-18902-ltx-eros-${{ github.run_id }}-${{ github.run_attempt }}/ffprobe-wav.json
+            ${{ runner.temp }}/sc-18902-ltx-eros-${{ github.run_id }}-${{ github.run_attempt }}/runner.json
+            ${{ runner.temp }}/sc-18902-ltx-eros-${{ github.run_id }}-${{ github.run_attempt }}/sha256.txt
           if-no-files-found: error

@@ -63,30 +63,22 @@
         "conditioning": {
           "activeBytes": 29700915200,
           "allocatorBytes": 29700915200,
-          "deviceBytes": 29700915200,
-          "reclaimableBytes": 0,
-          "wiredBytes": 29700915200
+          "reclaimableBytes": 0
         },
         "decode": {
           "activeBytes": 29600251904,
           "allocatorBytes": 29600251904,
-          "deviceBytes": 29600251904,
-          "reclaimableBytes": 0,
-          "wiredBytes": 29600251904
+          "reclaimableBytes": 0
         },
         "denoise": {
           "activeBytes": 29600251904,
           "allocatorBytes": 29600251904,
-          "deviceBytes": 29600251904,
-          "reclaimableBytes": 0,
-          "wiredBytes": 29600251904
+          "reclaimableBytes": 0
         },
         "overall": {
           "activeBytes": 29700915200,
           "allocatorBytes": 29700915200,
-          "deviceBytes": 29700915200,
-          "reclaimableBytes": 0,
-          "wiredBytes": 29700915200
+          "reclaimableBytes": 0
         }
       },
       "predictedPeakBytes": null,
@@ -261,30 +253,22 @@
         "conditioning": {
           "activeBytes": 29700915200,
           "allocatorBytes": 29700915200,
-          "deviceBytes": 29700915200,
-          "reclaimableBytes": 0,
-          "wiredBytes": 29700915200
+          "reclaimableBytes": 0
         },
         "decode": {
           "activeBytes": 29600251904,
           "allocatorBytes": 29600251904,
-          "deviceBytes": 29600251904,
-          "reclaimableBytes": 0,
-          "wiredBytes": 29600251904
+          "reclaimableBytes": 0
         },
         "denoise": {
           "activeBytes": 29600251904,
           "allocatorBytes": 29600251904,
-          "deviceBytes": 29600251904,
-          "reclaimableBytes": 0,
-          "wiredBytes": 29600251904
+          "reclaimableBytes": 0
         },
         "overall": {
           "activeBytes": 29700915200,
           "allocatorBytes": 29700915200,
-          "deviceBytes": 29700915200,
-          "reclaimableBytes": 0,
-          "wiredBytes": 29700915200
+          "reclaimableBytes": 0
         }
       },
       "predictedPeakBytes": null,
@@ -468,30 +452,22 @@
         "conditioning": {
           "activeBytes": 42048946176,
           "allocatorBytes": 42048946176,
-          "deviceBytes": 42048946176,
-          "reclaimableBytes": 0,
-          "wiredBytes": 42048946176
+          "reclaimableBytes": 0
         },
         "decode": {
           "activeBytes": 33526120448,
           "allocatorBytes": 33526120448,
-          "deviceBytes": 33526120448,
-          "reclaimableBytes": 0,
-          "wiredBytes": 33526120448
+          "reclaimableBytes": 0
         },
         "denoise": {
           "activeBytes": 29734469632,
           "allocatorBytes": 29734469632,
-          "deviceBytes": 29734469632,
-          "reclaimableBytes": 0,
-          "wiredBytes": 29734469632
+          "reclaimableBytes": 0
         },
         "overall": {
           "activeBytes": 42048946176,
           "allocatorBytes": 42048946176,
-          "deviceBytes": 42048946176,
-          "reclaimableBytes": 0,
-          "wiredBytes": 42048946176
+          "reclaimableBytes": 0
         }
       },
       "predictedPeakBytes": null,
@@ -646,30 +622,22 @@
         "conditioning": {
           "activeBytes": 42013294592,
           "allocatorBytes": 42013294592,
-          "deviceBytes": 42013294592,
-          "reclaimableBytes": 0,
-          "wiredBytes": 42013294592
+          "reclaimableBytes": 0
         },
         "decode": {
           "activeBytes": 55604936704,
           "allocatorBytes": 55604936704,
-          "deviceBytes": 55604936704,
-          "reclaimableBytes": 0,
-          "wiredBytes": 55604936704
+          "reclaimableBytes": 0
         },
         "denoise": {
           "activeBytes": 44731203584,
           "allocatorBytes": 44731203584,
-          "deviceBytes": 44731203584,
-          "reclaimableBytes": 0,
-          "wiredBytes": 44731203584
+          "reclaimableBytes": 0
         },
         "overall": {
           "activeBytes": 55604936704,
           "allocatorBytes": 55604936704,
-          "deviceBytes": 55604936704,
-          "reclaimableBytes": 0,
-          "wiredBytes": 55604936704
+          "reclaimableBytes": 0
         }
       },
       "predictedPeakBytes": null,
@@ -823,30 +791,22 @@
         "conditioning": {
           "activeBytes": 29700915200,
           "allocatorBytes": 29700915200,
-          "deviceBytes": 29700915200,
-          "reclaimableBytes": 0,
-          "wiredBytes": 29700915200
+          "reclaimableBytes": 0
         },
         "decode": {
           "activeBytes": 4132438016,
           "allocatorBytes": 4132438016,
-          "deviceBytes": 4132438016,
-          "reclaimableBytes": 0,
-          "wiredBytes": 4132438016
+          "reclaimableBytes": 0
         },
         "denoise": {
           "activeBytes": 29600251904,
           "allocatorBytes": 29600251904,
-          "deviceBytes": 29600251904,
-          "reclaimableBytes": 0,
-          "wiredBytes": 29600251904
+          "reclaimableBytes": 0
         },
         "overall": {
           "activeBytes": 29700915200,
           "allocatorBytes": 29700915200,
-          "deviceBytes": 29700915200,
-          "reclaimableBytes": 0,
-          "wiredBytes": 29700915200
+          "reclaimableBytes": 0
         }
       },
       "predictedPeakBytes": null,
@@ -978,5 +938,5 @@
       }
     }
   ],
-  "schemaVersion": 4
+  "schemaVersion": 5
 }
