@@ -1224,6 +1224,23 @@
           "key": "dwpose-apache"
         }
       ]
+    },
+    {
+      "id": "insightface",
+      "models": [
+        "instantid_face_stack"
+      ],
+      "name": "InsightFace face analysis models (SCRFD + ArcFace)",
+      "publisher": "InsightFace (deepinsight)",
+      "license": "Non-commercial research only (model weights); MIT (code)",
+      "homepage": "https://github.com/deepinsight/insightface",
+      "usage": "SCRFD face detector (scrfd_10g) and ArcFace recognition embedder (arcface_iresnet100) behind dataset face analysis, face-likeness comparison, keypoint extraction, structured catalog analysis and the identity lanes' likeness staging; staged from the SceneWorks/instantid-mlx safetensors conversion. InsightFace publishes no standalone weights license: per the verbatim upstream README terms reproduced in the notice, the CODE is MIT but models trained on InsightFace's annotated data — including SCRFD and ArcFace — are available for NON-COMMERCIAL RESEARCH PURPOSES ONLY, and conversion does not change the governing terms. Commercial use requires a separate license from the InsightFace team.",
+      "documents": [
+        {
+          "label": "InsightFace Model License Notice (verbatim upstream terms)",
+          "key": "insightface-model-notice"
+        }
+      ]
     }
   ]
 }

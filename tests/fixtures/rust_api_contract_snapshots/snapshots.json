@@ -1301,6 +1301,35 @@
           ],
           "mode": "character_image",
           "model": "z_image_turbo",
+          "modelManifestEntries": [
+            {
+              "adapter": "z_image_diffusers",
+              "capabilities": [
+                "text_to_image",
+                "edit_image",
+                "character_image"
+              ],
+              "defaults": {
+                "height": 1024,
+                "width": 1024
+              },
+              "downloads": [],
+              "family": "z-image",
+              "id": "z_image_turbo",
+              "limits": {},
+              "loraCompatibility": {
+                "families": [
+                  "z-image"
+                ]
+              },
+              "name": "Z-Image Turbo",
+              "paths": {},
+              "type": "image",
+              "ui": {
+                "label": "Z-Image"
+              }
+            }
+          ],
           "negativePrompt": "",
           "projectId": "project_fixture",
           "prompt": "portrait in rain",
@@ -1394,6 +1423,35 @@
               ],
               "mode": "character_image",
               "model": "z_image_turbo",
+              "modelManifestEntries": [
+                {
+                  "adapter": "z_image_diffusers",
+                  "capabilities": [
+                    "text_to_image",
+                    "edit_image",
+                    "character_image"
+                  ],
+                  "defaults": {
+                    "height": 1024,
+                    "width": 1024
+                  },
+                  "downloads": [],
+                  "family": "z-image",
+                  "id": "z_image_turbo",
+                  "limits": {},
+                  "loraCompatibility": {
+                    "families": [
+                      "z-image"
+                    ]
+                  },
+                  "name": "Z-Image Turbo",
+                  "paths": {},
+                  "type": "image",
+                  "ui": {
+                    "label": "Z-Image"
+                  }
+                }
+              ],
               "negativePrompt": "",
               "projectId": "project_fixture",
               "prompt": "portrait in rain",
@@ -1502,6 +1560,35 @@
       ],
       "mode": "character_image",
       "model": "z_image_turbo",
+      "modelManifestEntries": [
+        {
+          "adapter": "z_image_diffusers",
+          "capabilities": [
+            "text_to_image",
+            "edit_image",
+            "character_image"
+          ],
+          "defaults": {
+            "height": 1024,
+            "width": 1024
+          },
+          "downloads": [],
+          "family": "z-image",
+          "id": "z_image_turbo",
+          "limits": {},
+          "loraCompatibility": {
+            "families": [
+              "z-image"
+            ]
+          },
+          "name": "Z-Image Turbo",
+          "paths": {},
+          "type": "image",
+          "ui": {
+            "label": "Z-Image"
+          }
+        }
+      ],
       "negativePrompt": "",
       "projectId": "project_fixture",
       "prompt": "portrait in rain",
@@ -1563,7 +1650,307 @@
         "id": "job_fixture",
         "lastHeartbeatAt": null,
         "message": "Worker claimed job.",
-        "payload": {},
+        "payload": {
+          "modelManifestEntries": [
+            {
+              "adapter": "sdxl_diffusers",
+              "capabilities": [
+                "text_to_image",
+                "edit_image",
+                "image_inpaint",
+                "image_detail",
+                "character_image"
+              ],
+              "defaults": {
+                "count": 4,
+                "guidanceScale": 7.0,
+                "resolution": "1024x1024",
+                "steps": 30
+              },
+              "downloads": [
+                {
+                  "default": true,
+                  "estimatedSizeBytes": 3911656467,
+                  "files": [
+                    "q4/*"
+                  ],
+                  "footprint": {
+                    "diskSizeBytes": 3911656467,
+                    "peakMemoryBytes": null,
+                    "residentMemoryBytes": null
+                  },
+                  "provider": "huggingface",
+                  "repo": "SceneWorks/realvisxl-mlx",
+                  "revision": "e40202d63baef826c7df95a639a811698c1178d2",
+                  "variant": "q4"
+                },
+                {
+                  "estimatedSizeBytes": 5385840183,
+                  "files": [
+                    "q8/*"
+                  ],
+                  "footprint": {
+                    "diskSizeBytes": 5385840183,
+                    "peakMemoryBytes": null,
+                    "residentMemoryBytes": null
+                  },
+                  "provider": "huggingface",
+                  "repo": "SceneWorks/realvisxl-mlx",
+                  "revision": "e40202d63baef826c7df95a639a811698c1178d2",
+                  "variant": "q8"
+                },
+                {
+                  "estimatedSizeBytes": 7108692804,
+                  "files": [
+                    "bf16/*"
+                  ],
+                  "footprint": {
+                    "diskSizeBytes": 7108692804,
+                    "peakMemoryBytes": null,
+                    "residentMemoryBytes": null
+                  },
+                  "provider": "huggingface",
+                  "repo": "SceneWorks/realvisxl-mlx",
+                  "revision": "e40202d63baef826c7df95a639a811698c1178d2",
+                  "variant": "bf16"
+                },
+                {
+                  "coRequisite": true,
+                  "componentId": "tokenizer_clip_l",
+                  "estimatedSizeBytes": 2224003,
+                  "files": [
+                    "tokenizer.json"
+                  ],
+                  "footprint": {
+                    "diskSizeBytes": 2224003
+                  },
+                  "platforms": [
+                    "windows",
+                    "linux"
+                  ],
+                  "provider": "huggingface",
+                  "repo": "openai/clip-vit-large-patch14",
+                  "revision": "32bd64288804d66eefd0ccbe215aa642df71cc41"
+                },
+                {
+                  "coRequisite": true,
+                  "componentId": "tokenizer_clip_bigg",
+                  "estimatedSizeBytes": 2224003,
+                  "files": [
+                    "tokenizer.json"
+                  ],
+                  "footprint": {
+                    "diskSizeBytes": 2224003
+                  },
+                  "platforms": [
+                    "windows",
+                    "linux"
+                  ],
+                  "provider": "huggingface",
+                  "repo": "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k",
+                  "revision": "743c27bd53dfe508a0ade0f50698f99b39d03bec"
+                },
+                {
+                  "coRequisite": true,
+                  "componentId": "vae_fp16_fix",
+                  "estimatedSizeBytes": 167335590,
+                  "files": [
+                    "diffusion_pytorch_model.safetensors"
+                  ],
+                  "footprint": {
+                    "diskSizeBytes": 167335590
+                  },
+                  "platforms": [
+                    "windows",
+                    "linux"
+                  ],
+                  "provider": "huggingface",
+                  "repo": "madebyollin/sdxl-vae-fp16-fix",
+                  "revision": "207b116dae70ace3637169f1ddd2434b91b3a8cd"
+                }
+              ],
+              "family": "sdxl",
+              "gated": false,
+              "id": "realvisxl",
+              "limits": {
+                "count": [
+                  1,
+                  2,
+                  4
+                ],
+                "resolutions": [
+                  "1024x1024",
+                  "1152x896",
+                  "896x1152",
+                  "1216x832",
+                  "832x1216",
+                  "1344x768",
+                  "768x1344"
+                ],
+                "samplers": [
+                  "default",
+                  "euler",
+                  "euler_ancestral",
+                  "heun",
+                  "dpmpp_2m",
+                  "dpmpp_sde",
+                  "uni_pc",
+                  "lcm",
+                  "ddim"
+                ],
+                "schedulers": [
+                  "default",
+                  "normal",
+                  "simple",
+                  "karras",
+                  "exponential",
+                  "sgm_uniform",
+                  "beta",
+                  "ddim_uniform"
+                ]
+              },
+              "loraCompatibility": {
+                "families": [
+                  "sdxl"
+                ],
+                "types": [
+                  "style",
+                  "enhance",
+                  "character"
+                ]
+              },
+              "mlx": {
+                "limits": {
+                  "guidanceMethods": [
+                    "cfg",
+                    "cfg_pp"
+                  ]
+                },
+                "memoryStrategyContract": {
+                  "abi": 1,
+                  "implementations": [
+                    {
+                      "engagedRungs": [
+                        "resident",
+                        "staged_residency",
+                        "bounded_transformer_residency"
+                      ],
+                      "fingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+                      "modes": [
+                        "text_to_image",
+                        "edit_image",
+                        "image_inpaint",
+                        "image_detail",
+                        "character_image"
+                      ],
+                      "overlays": [
+                        "none"
+                      ],
+                      "parameterRanges": {
+                        "transformerWindowComponents": [
+                          "Dit"
+                        ],
+                        "transformerWindowSizes": [
+                          1,
+                          2,
+                          5,
+                          10
+                        ]
+                      },
+                      "parameters": {
+                        "transformerWindowComponent": "Dit",
+                        "transformerWindowSize": 10
+                      },
+                      "rung": "bounded_transformer_residency",
+                      "source": "inference:crates/media/mlx-gen/mlx-gen-sdxl/src/memory_strategy.rs",
+                      "tiers": [
+                        "bf16"
+                      ]
+                    },
+                    {
+                      "engagedRungs": [
+                        "resident",
+                        "staged_residency",
+                        "bounded_transformer_residency"
+                      ],
+                      "fingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+                      "modes": [
+                        "text_to_image",
+                        "edit_image",
+                        "image_inpaint",
+                        "image_detail",
+                        "character_image"
+                      ],
+                      "overlays": [
+                        "none",
+                        "lora"
+                      ],
+                      "parameterRanges": {
+                        "transformerWindowComponents": [
+                          "Dit"
+                        ],
+                        "transformerWindowSizes": [
+                          1,
+                          2,
+                          5,
+                          10
+                        ]
+                      },
+                      "parameters": {
+                        "transformerWindowComponent": "Dit",
+                        "transformerWindowSize": 10
+                      },
+                      "rung": "bounded_transformer_residency",
+                      "source": "inference:crates/media/mlx-gen/mlx-gen-sdxl/src/memory_strategy.rs",
+                      "tiers": [
+                        "q4",
+                        "q8"
+                      ]
+                    }
+                  ],
+                  "provider": "sdxl"
+                },
+                "quantize": 4,
+                "standardTierLayout": true
+              },
+              "name": "RealVisXL (photoreal SDXL)",
+              "paths": {
+                "model": "${HF_CACHE}/SceneWorks/realvisxl-mlx"
+              },
+              "type": "image",
+              "ui": {
+                "description": "Photoreal SDXL finetune that targets the \"shiny/plastic\" look of base SDXL \u2014 the same RealVisXL_V5.0 checkpoint the InstantID built-in uses, exposed as a plain selectable for general photoreal work. openrail++ (commercial use OK, ungated). Drop-in SDXL: same UNet, same dual-CLIP, sdxl-family LoRA support, real CFG + negative prompt; ~30 steps at guidance 7.0, native 1024x1024. With a character reference, runs IP-Adapter plus-face for scene-flexible resemblance (faithful likeness \u2014 see InstantID).",
+                "label": "RealVisXL (photoreal SDXL)",
+                "pid": {
+                  "checkpointId": "pid_sdxl"
+                },
+                "promptGuide": {
+                  "path": "/prompt-guides/realvisxl.md",
+                  "sources": [
+                    {
+                      "label": "RealVisXL_V5.0 model card",
+                      "url": "https://huggingface.co/SG161222/RealVisXL_V5.0"
+                    },
+                    {
+                      "label": "SDXL technical report",
+                      "url": "https://arxiv.org/abs/2307.01952"
+                    },
+                    {
+                      "label": "Diffusers SDXL pipeline docs",
+                      "url": "https://huggingface.co/docs/diffusers/main/en/api/pipelines/stable_diffusion/stable_diffusion_xl"
+                    }
+                  ],
+                  "title": "RealVisXL Prompt Guide"
+                },
+                "recommendedFor": [
+                  "text_to_image",
+                  "edit_image",
+                  "character_image"
+                ]
+              }
+            }
+          ]
+        },
         "progress": 0.0,
         "projectId": null,
         "projectName": null,
@@ -2130,6 +2517,10 @@
         "*.safetensors"
       ],
       "memoryCalibrationProvenanceRequired": false,
+      "modelArtifactOperation": {
+        "kind": "explicit_download",
+        "schemaVersion": 1
+      },
       "modelId": "base-model",
       "modelName": "User Model",
       "provider": "huggingface",
@@ -2215,6 +2606,15 @@
         "supported": false
       },
       "missingRequiredFiles": [],
+      "modelAvailability": "missing",
+      "modelResolution": {
+        "availability": "missing",
+        "configuredLibraryPath": "/Users/michael/.cache/huggingface/hub",
+        "expectedLibrary": null,
+        "localArtifact": null,
+        "requirements": [],
+        "schemaVersion": 1
+      },
       "name": "User Model",
       "paths": {},
       "removable": true,
@@ -2277,6 +2677,15 @@
         "supported": true
       },
       "missingRequiredFiles": [],
+      "modelAvailability": "missing",
+      "modelResolution": {
+        "availability": "missing",
+        "configuredLibraryPath": "/Users/michael/.cache/huggingface/hub",
+        "expectedLibrary": null,
+        "localArtifact": null,
+        "requirements": [],
+        "schemaVersion": 1
+      },
       "name": "Z-Image Turbo",
       "paths": {},
       "preview": {
@@ -2380,6 +2789,53 @@
     "lastHeartbeatAt": null,
     "message": "Waiting for an available worker.",
     "payload": {
+      "modelManifestEntries": [
+        {
+          "capabilities": [],
+          "defaults": {},
+          "downloads": [
+            {
+              "estimatedSizeBytes": 80388864,
+              "files": [
+                "yolo11m_fused_mlx.safetensors"
+              ],
+              "platforms": [
+                "macos"
+              ],
+              "provider": "huggingface",
+              "repo": "SceneWorks/yolo11m-person-detect-mlx",
+              "revision": "d7027d3a8812bdebbf7862fc1c7dcfdeebb0f777"
+            },
+            {
+              "estimatedSizeBytes": 80622117,
+              "files": [
+                "yolo11m.onnx"
+              ],
+              "platforms": [
+                "windows",
+                "linux"
+              ],
+              "provider": "huggingface",
+              "repo": "SceneWorks/yolo11m-person-detect-onnx",
+              "revision": "3cffbaccca4f239ae6301d8b66ba721401ecfa8d"
+            }
+          ],
+          "family": "yolo11m-person-detect",
+          "id": "person_detector",
+          "limits": {},
+          "loraCompatibility": {
+            "families": [],
+            "types": []
+          },
+          "name": "YOLO11m Person Detector",
+          "type": "utility",
+          "ui": {
+            "description": "Person bounding-box detection feeding ByteTrack person tracking and the segmentation prompts. Required by person-track features.",
+            "label": "YOLO11m Person Detector",
+            "recommendedFor": []
+          }
+        }
+      ],
       "projectId": "project_fixture",
       "sourceAssetId": "asset-video",
       "sourceTimestamp": 1.25
@@ -2530,6 +2986,86 @@
         },
         "id": "person_1"
       },
+      "modelManifestEntries": [
+        {
+          "capabilities": [],
+          "defaults": {},
+          "downloads": [
+            {
+              "estimatedSizeBytes": 80388864,
+              "files": [
+                "yolo11m_fused_mlx.safetensors"
+              ],
+              "platforms": [
+                "macos"
+              ],
+              "provider": "huggingface",
+              "repo": "SceneWorks/yolo11m-person-detect-mlx",
+              "revision": "d7027d3a8812bdebbf7862fc1c7dcfdeebb0f777"
+            },
+            {
+              "estimatedSizeBytes": 80622117,
+              "files": [
+                "yolo11m.onnx"
+              ],
+              "platforms": [
+                "windows",
+                "linux"
+              ],
+              "provider": "huggingface",
+              "repo": "SceneWorks/yolo11m-person-detect-onnx",
+              "revision": "3cffbaccca4f239ae6301d8b66ba721401ecfa8d"
+            }
+          ],
+          "family": "yolo11m-person-detect",
+          "id": "person_detector",
+          "limits": {},
+          "loraCompatibility": {
+            "families": [],
+            "types": []
+          },
+          "name": "YOLO11m Person Detector",
+          "type": "utility",
+          "ui": {
+            "description": "Person bounding-box detection feeding ByteTrack person tracking and the segmentation prompts. Required by person-track features.",
+            "label": "YOLO11m Person Detector",
+            "recommendedFor": []
+          }
+        },
+        {
+          "capabilities": [],
+          "defaults": {},
+          "downloads": [
+            {
+              "estimatedSizeBytes": 3443580585,
+              "files": [
+                "model.safetensors",
+                "tokenizer.json"
+              ],
+              "provider": "huggingface",
+              "repo": "SceneWorks/sam3-mlx",
+              "revision": "3ed10b164a755c00b1a4d671dde95719c127e1a7"
+            }
+          ],
+          "family": "sam3",
+          "id": "sam3_person_segment",
+          "limits": {},
+          "loraCompatibility": {
+            "families": [],
+            "types": []
+          },
+          "name": "SAM3 Person Segmenter",
+          "paths": {
+            "model": "${HF_CACHE}/SceneWorks/sam3-mlx"
+          },
+          "type": "utility",
+          "ui": {
+            "description": "Text-concept person segmentation (\"person\" prompt, no manual box) behind person tracking and Smart Select. Required by person-mask features; installed once and shared by the MLX and candle lanes.",
+            "label": "SAM3 Person Segmenter",
+            "recommendedFor": []
+          }
+        }
+      ],
       "projectId": "project_fixture",
       "representativeFrameAssetId": "asset-frame",
       "sourceAssetId": "asset-video",
@@ -2676,7 +3212,213 @@
       "loras": [],
       "mode": "replace_person",
       "model": "ltx_2_3",
-      "modelManifestEntry": {},
+      "modelManifestEntry": {
+        "adapter": "ltx_video",
+        "autoDownload": false,
+        "capabilities": [
+          "image_to_video",
+          "text_to_video",
+          "first_last_frame",
+          "extend_clip",
+          "video_bridge",
+          "replace_person"
+        ],
+        "defaults": {
+          "duration": 6,
+          "fps": 25,
+          "quality": "balanced",
+          "resolution": "768x512",
+          "steps": 8
+        },
+        "downloads": [
+          {
+            "coRequisite": true,
+            "estimatedSizeBytes": 26427894918,
+            "files": [
+              "gemma/*"
+            ],
+            "platforms": [
+              "macos",
+              "windows",
+              "linux"
+            ],
+            "provider": "huggingface",
+            "repo": "SceneWorks/ltx-2.3-mlx",
+            "revision": "01df27d308466533aa09d251e3aebdcc627d07eb"
+          },
+          {
+            "default": true,
+            "estimatedSizeBytes": 20467690460,
+            "files": [
+              "q4/*"
+            ],
+            "footprint": {
+              "diskSizeBytes": 20467690460,
+              "peakMemoryBytes": null,
+              "residentMemoryBytes": null
+            },
+            "platforms": [
+              "macos",
+              "windows",
+              "linux"
+            ],
+            "provider": "huggingface",
+            "repo": "SceneWorks/ltx-2.3-mlx",
+            "revision": "01df27d308466533aa09d251e3aebdcc627d07eb",
+            "variant": "q4"
+          },
+          {
+            "estimatedSizeBytes": 29728720716,
+            "files": [
+              "q8/*"
+            ],
+            "footprint": {
+              "diskSizeBytes": 29728720716,
+              "peakMemoryBytes": null,
+              "residentMemoryBytes": null
+            },
+            "platforms": [
+              "macos"
+            ],
+            "provider": "huggingface",
+            "repo": "SceneWorks/ltx-2.3-mlx",
+            "revision": "01df27d308466533aa09d251e3aebdcc627d07eb",
+            "variant": "q8"
+          },
+          {
+            "estimatedSizeBytes": 47092811992,
+            "files": [
+              "bf16/*"
+            ],
+            "footprint": {
+              "diskSizeBytes": 47092811992,
+              "peakMemoryBytes": null,
+              "residentMemoryBytes": null
+            },
+            "platforms": [
+              "macos"
+            ],
+            "provider": "huggingface",
+            "repo": "SceneWorks/ltx-2.3-mlx",
+            "revision": "01df27d308466533aa09d251e3aebdcc627d07eb",
+            "variant": "bf16"
+          }
+        ],
+        "family": "ltx-video",
+        "id": "ltx_2_3",
+        "limits": {
+          "durations": [
+            4,
+            6,
+            8,
+            10,
+            12,
+            15
+          ],
+          "fps": [
+            24,
+            25,
+            30
+          ],
+          "hardMaxDuration": 15,
+          "recommendedMaxDuration": 10,
+          "requiresDimensionsMultipleOf": 64,
+          "resolutions": [
+            "768x512",
+            "512x768",
+            "640x640",
+            "1280x704",
+            "704x1280"
+          ],
+          "samplers": [
+            "default",
+            "euler",
+            "euler_ancestral",
+            "heun",
+            "dpmpp_2m",
+            "dpmpp_sde",
+            "uni_pc",
+            "lcm",
+            "ddim"
+          ]
+        },
+        "loraCompatibility": {
+          "families": [
+            "ltx-video"
+          ],
+          "types": [
+            "style",
+            "motion",
+            "character",
+            "enhance"
+          ]
+        },
+        "mlx": {
+          "minMemoryGb": 31,
+          "repo": "SceneWorks/ltx-2.3-mlx"
+        },
+        "name": "LTX-2.3",
+        "paths": {
+          "model": "${HF_CACHE}/SceneWorks/ltx-2.3-mlx"
+        },
+        "recommended": true,
+        "resources": {
+          "checkpoint": {
+            "file": "ltx-2.3-22b-dev.safetensors",
+            "repo": "Lightricks/LTX-2.3"
+          },
+          "distilledCheckpoint": {
+            "file": "ltx-2.3-22b-distilled-1.1.safetensors",
+            "repo": "Lightricks/LTX-2.3",
+            "variants": {
+              "1.0": "ltx-2.3-22b-distilled.safetensors",
+              "1.1": "ltx-2.3-22b-distilled-1.1.safetensors"
+            }
+          },
+          "distilledLora": {
+            "file": "ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
+            "repo": "Lightricks/LTX-2.3",
+            "variants": {
+              "1.0": "ltx-2.3-22b-distilled-lora-384.safetensors",
+              "1.1": "ltx-2.3-22b-distilled-lora-384-1.1.safetensors"
+            }
+          },
+          "gemma": {
+            "repo": "google/gemma-3-12b-it-qat-q4_0-unquantized"
+          },
+          "spatialUpscaler": {
+            "file": "ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
+            "repo": "Lightricks/LTX-2.3"
+          }
+        },
+        "type": "video",
+        "ui": {
+          "description": "First-class short-shot video target for image-to-video and text-to-video.",
+          "durationHint": "Best for short clips. Start with 4-8 seconds; 10 seconds is the normal ceiling for the current workflow.",
+          "label": "LTX-2.3",
+          "promptGuide": {
+            "path": "/prompt-guides/ltx-2-3.md",
+            "sources": [
+              {
+                "label": "LTX official prompting guide",
+                "url": "https://docs.ltx.video/api-documentation/guides/prompting-guide"
+              },
+              {
+                "label": "LTX-2.3 prompt guide blog",
+                "url": "https://ltx.io/model/model-blog/ltx-2-3-prompt-guide"
+              }
+            ],
+            "title": "LTX-2.3 Prompt Guide"
+          },
+          "recommendedFor": [
+            "image_to_video",
+            "text_to_video",
+            "first_last_frame",
+            "extend_clip",
+            "video_bridge"
+          ]
+        }
+      },
       "negativePrompt": "",
       "personTrackId": "track_fixture",
       "projectId": "project_fixture",
