@@ -1060,14 +1060,22 @@ fn windows_shared_reader_without_a_lease_does_not_protect_an_expired_entry() {
     assert_eq!(contents, b"0123456789");
 }
 
-/// A genuine Windows sharing violation (an exclusive, share-mode-0 handle) must fail closed and
-/// stay convergent: the durable tombstone survives the failed deletion, the entry reads as
-/// `Evicting` rather than as a usable bundle, no audit record claims a removal that did not
-/// happen, and the next checkpoint after the handle closes finishes the removal exactly once.
+/// A genuine Windows sharing violation must fail closed and stay convergent: the durable tombstone
+/// survives the failed deletion, the entry reads as `Evicting` rather than as a usable bundle, no
+/// audit record claims a removal that did not happen, and the next checkpoint after the handle
+/// closes finishes the removal exactly once.
+///
+/// The handle deliberately shares READ and WRITE but withholds DELETE. Sharing reads is what makes
+/// this test exercise the *removal* stage: every pre-eviction check reopens the bundle file (the
+/// enriched closure is size- and sha256-verified), so a fully exclusive `share_mode(0)` handle
+/// would instead fail that verification and retain the entry as unverifiable — correct fail-safe
+/// behavior, but a different code path than the one under test here.
 #[cfg(windows)]
 #[test]
 fn windows_sharing_violation_keeps_the_eviction_pending_until_it_converges() {
     use std::os::windows::fs::OpenOptionsExt;
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
 
     let scratch = TempDir::new().unwrap();
     let library = scratch.path().join("library");
@@ -1080,9 +1088,9 @@ fn windows_sharing_violation_keeps_the_eviction_pending_until_it_converges() {
         .unwrap()
         .join("model.safetensors");
 
-    let exclusive = OpenOptions::new()
+    let delete_blocking = OpenOptions::new()
         .read(true)
-        .share_mode(0)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
         .open(&bundle_file)
         .unwrap();
     let report = store.enforce_retention(&policy(1, 1), FAR_FUTURE).unwrap();
@@ -1098,7 +1106,7 @@ fn windows_sharing_violation_keeps_the_eviction_pending_until_it_converges() {
         .unwrap()
         .is_none());
 
-    drop(exclusive);
+    drop(delete_blocking);
     store.recover().unwrap();
     assert!(!entry_dir(&store, &candidate.cache_key).exists());
     assert_eq!(audit_records(&store).len(), 1);
