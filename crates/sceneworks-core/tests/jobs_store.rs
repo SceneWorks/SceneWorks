@@ -2075,6 +2075,113 @@ fn auto_claim_prefers_job_matching_loaded_model() {
 }
 
 #[test]
+fn prompt_refinement_automatically_jumps_a_compatible_worker_queue() {
+    let store = store("prompt-refine-priority");
+    store
+        .register_worker(RegisterWorker {
+            worker_id: "worker-1".to_owned(),
+            gpu_id: "gpu-0".to_owned(),
+            gpu_name: None,
+            capabilities: vec![
+                WorkerCapability::Gpu,
+                WorkerCapability::ImageGenerate,
+                WorkerCapability::PromptRefine,
+            ],
+            loaded_models: Vec::new(),
+            utilization: None,
+        })
+        .expect("worker registers");
+    let ordinary = store
+        .create_job(image_job(object(json!({ "prompt": "ordinary render" }))))
+        .expect("ordinary job creates");
+    let refinement = store
+        .create_job(magic_prompt_job("refine me", "1:1"))
+        .expect("refinement creates");
+
+    assert_eq!(ordinary.extra["queueRank"], json!(0));
+    assert!(
+        refinement.extra["queueRank"].as_i64().unwrap_or_default() > 0,
+        "prompt refinement receives a durable priority rank at enqueue"
+    );
+    let claimed = store
+        .claim_next_job("worker-1")
+        .expect("claim succeeds")
+        .expect("job claimed");
+    assert_eq!(claimed.id, refinement.id);
+    assert_eq!(
+        store
+            .get_job(&ordinary.id)
+            .expect("ordinary job loads")
+            .status,
+        JobStatus::Queued
+    );
+}
+
+#[test]
+fn manual_priority_moves_only_pending_jobs_and_beats_gpu_affinity() {
+    let store = store("manual-queue-priority");
+    store
+        .register_worker(RegisterWorker {
+            worker_id: "worker-1".to_owned(),
+            gpu_id: "gpu-0".to_owned(),
+            gpu_name: None,
+            capabilities: vec![WorkerCapability::Gpu, WorkerCapability::ImageGenerate],
+            loaded_models: vec!["warm-model".to_owned()],
+            utilization: None,
+        })
+        .expect("worker registers");
+
+    let active = store
+        .create_job(image_job(object(json!({ "model": "first-model" }))))
+        .expect("active job creates");
+    let claimed = store
+        .claim_next_job("worker-1")
+        .expect("first claim succeeds")
+        .expect("first job claimed");
+    assert_eq!(claimed.id, active.id);
+
+    let selected = store
+        .create_job(image_job(object(json!({ "model": "cold-model" }))))
+        .expect("selected job creates");
+    let affinity_favorite = store
+        .create_job(CreateJob {
+            requested_gpu: "gpu-0".to_owned(),
+            ..image_job(object(json!({ "model": "warm-model" })))
+        })
+        .expect("affinity-favored job creates");
+
+    let prioritized = store
+        .prioritize_jobs(&[active.id.clone(), selected.id.clone()])
+        .expect("priority update succeeds");
+    assert_eq!(
+        prioritized.iter().map(|job| &job.id).collect::<Vec<_>>(),
+        vec![&selected.id],
+        "the already worker-owned job is ignored rather than preempted"
+    );
+    assert_eq!(
+        store.get_job(&active.id).expect("active job loads").status,
+        JobStatus::Preparing
+    );
+
+    complete_job(&store, &active.id);
+    let claimed = store
+        .claim_next_job("worker-1")
+        .expect("next claim succeeds")
+        .expect("next job claimed");
+    assert_eq!(
+        claimed.id, selected.id,
+        "manual queue priority must outrank explicit-GPU and warm-model affinity"
+    );
+    assert_eq!(
+        store
+            .get_job(&affinity_favorite.id)
+            .expect("affinity job loads")
+            .status,
+        JobStatus::Queued
+    );
+}
+
+#[test]
 fn loaded_model_preference_does_not_skip_explicit_gpu_job() {
     let store = store("loaded-model-explicit-gpu");
     store
