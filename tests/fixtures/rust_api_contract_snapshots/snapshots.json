@@ -2281,14 +2281,6 @@
       },
       "removable": false,
       "repairAvailable": false,
-      "textEncoderOptions": [
-        {
-          "description": "Uses the text encoder paired with z_image_turbo.",
-          "id": "default",
-          "isDefault": true,
-          "label": "Model encoder (default)"
-        }
-      ],
       "type": "image",
       "ui": {
         "label": "Z-Image"
