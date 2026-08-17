@@ -427,10 +427,11 @@ test("macOS memory-strategy calibration dispatch is opt-in and secret-scoped", a
     workflow,
     /memory-calibration-harness\.mjs check/,
   );
-  assert.match(
-    workflow,
-    /actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/,
-  );
+  // Pinned to the SHAPE, not to a review-time SHA. scripts/lib/action-pins.mjs is the authority on
+  // this and says so outright: the control is that the reference resolves to an immutable 40-hex
+  // commit, and Dependabot rewrites the SHA in place, so freezing the value here only means every
+  // automated bump reddens a test that has nothing to do with what it is checking.
+  assert.match(workflow, /actions\/upload-artifact@[0-9a-f]{40}\b/);
   assert.match(
     workflow,
     /if: \$\{\{ success\(\) && github\.event_name == 'workflow_dispatch' && inputs\.run_memory_calibration \}\}/,
@@ -895,6 +896,21 @@ test("both stage-1 lanes verify their own capability dump last among coverage, r
   }
 });
 
+// Kept as its own test rather than folded into the `candleFailureArtifact` carve-out above, which was
+// raised as possible duplication. It is not: that carve-out is a `continue` GUARD, so it can only ever
+// weaken the ordering rule, never assert anything. Three claims below have nowhere else to live —
+//
+//   * the upload step EXISTS. Delete it and the guard simply stops matching, the ordering loop finds no
+//     such block, and every assertion up there still passes. The failure-only upload would be gone with
+//     nothing red.
+//   * the VERIFY step declares `id: verify_candle_capabilities`. Without the id,
+//     `steps.verify_candle_capabilities.outcome` resolves to nothing, the condition is false on every
+//     run, and the upload never fires — while the guard's literal text match keeps passing.
+//   * the artifact CONTENT: name, whole-directory path, if-no-files-found. See the note below on the
+//     enumerated two-file spelling that silently produced an unusable artifact.
+//
+// The `if:` expression is deliberately spelled in both places: up there it is the condition under which
+// the carve-out is legitimate, here it is the failure-only guarantee itself.
 test("Windows preserves exact fresh capability facts when verification fails", async () => {
   const workflow = await source(".github/workflows/windows-candle.yml");
   const verifyAt = workflow.indexOf(
@@ -910,10 +926,8 @@ test("Windows preserves exact fresh capability facts when verification fails", a
     tail,
     /if: \$\{\{ always\(\) && steps\.verify_candle_capabilities\.outcome == 'failure' \}\}/,
   );
-  assert.match(
-    tail,
-    /actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/,
-  );
+  // The shape, not a review-time SHA — see the note in the calibration-artifact test above.
+  assert.match(tail, /actions\/upload-artifact@[0-9a-f]{40}\b/);
   // The whole scratch DIRECTORY, not an enumerated file list, and that distinction has already
   // been load-bearing once. The dumper writes three files — `capabilities.candle.json`,
   // `audio/capabilities.candle.json`, and the rich `runtime/capabilities.candle.json` — and the
