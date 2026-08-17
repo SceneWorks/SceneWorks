@@ -34,3 +34,18 @@ receipted adapter and the catalog advertises an update. It must never silently s
    validation, and web eligibility tests before shipping.
 5. Verify a retained old snapshot loads as one atomic receipted set. Never combine old and current
    manifest files to make a seemingly complete model.
+
+## External model libraries and typed availability (sc-19708)
+
+Receipts are also the install evidence for the external-library availability seam. When the
+configured Hugging Face library lives on an external volume, a receipted (or previously validated)
+install whose volume is disconnected reads as **installed — external library unavailable**: the
+catalog shows the typed state, submission preflight rejects with `503
+external_model_library_unavailable`, and the worker refuses the load before any loader runs.
+Receipts and the library-binding ledger are never rewritten by a disconnect, so reconnecting the
+same physical volume restores the install with no re-download.
+
+Upgrade note for operators: jobs that were **queued before** an upgrade to a build with this seam
+carry no model manifest entries in their payloads, so a model-backed job claimed after the upgrade
+fails with a typed validation error rather than running unguarded. Re-submitting the request
+creates a fully stamped job; no installed state is affected.

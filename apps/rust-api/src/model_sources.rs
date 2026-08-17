@@ -347,8 +347,15 @@ pub(crate) fn availability_for_entry(
 
 /// Re-judge the externally sourced rows of a (possibly cached) catalog snapshot against the LIVE
 /// library state. The snapshot is rebuilt only when its inputs change, but a drive can disconnect
-/// or reconnect between rebuilds — the catalog must show the transition immediately, from the
-/// stamped requirement closure, without mutating receipts or the snapshot cache itself.
+/// or reconnect between rebuilds — the catalog must show the transition immediately.
+///
+/// This is a READ path, so it is deliberately cheap and write-free: the durable binding is loaded
+/// once (shared lock) and its physical identity probed ONCE — never a per-row closure validation,
+/// never an exclusive lock, and never a binding/ledger write, so an unreachable network volume
+/// cannot stall catalog reads on per-file canonicalization. Only the binary disconnect/reconnect
+/// transition flips here (the two states whose stamping already proved install evidence); full
+/// closure validation stays where it has authority — snapshot builds, submission preflight, and
+/// the worker's pre-loader guard.
 pub(crate) async fn refresh_live_external_availability(
     data_dir: &Path,
     models: &mut Vec<Value>,
@@ -364,60 +371,87 @@ pub(crate) async fn refresh_live_external_availability(
     let data_dir = data_dir.to_path_buf();
     let input = std::mem::take(models);
     *models = tokio::task::spawn_blocking(move || {
-        let mut models = input;
-        for model in &mut models {
-            let Some(resolution_value) = model
-                .get("modelResolution")
-                .filter(|value| !value.is_null())
-            else {
-                continue;
-            };
-            let Ok(resolution) =
-                serde_json::from_value::<ModelResolution>(resolution_value.clone())
-            else {
-                continue;
-            };
-            // Only the two states whose durable evidence is a live question refresh here: an
-            // external-ready row can disconnect and an unavailable row can reconnect between
-            // snapshot rebuilds. Both imply a durable binding/receipt existed at stamping time.
-            if !matches!(
-                resolution.availability,
-                ModelAvailability::ExternalReady | ModelAvailability::InstalledExternalUnavailable
-            ) || resolution.requirements.is_empty()
-            {
-                continue;
-            }
-            // A stamped external/incomplete resolution existed only because install evidence
-            // existed when it was stamped, so the live re-judgement keeps that strength.
-            let live = resolve_model_availability(
-                &data_dir,
-                &resolution.configured_library_path,
-                &resolution.requirements,
-                true,
-                &[],
-            );
-            if let Some(object) = model.as_object_mut() {
-                object.insert(
-                    "modelAvailability".to_owned(),
-                    serde_json::to_value(&live.availability).map_err(|error| {
-                        ApiError::internal(format!("serialize live model availability: {error}"))
-                    })?,
-                );
-                object.insert(
-                    "modelResolution".to_owned(),
-                    serde_json::to_value(&live).map_err(|error| {
-                        ApiError::internal(format!("serialize live model resolution: {error}"))
-                    })?,
-                );
-            }
-        }
-        Ok::<_, ApiError>(models)
+        refresh_live_external_availability_blocking(&data_dir, input)
     })
     .await
     .map_err(|error| {
         ApiError::internal(format!("external availability probe failed: {error}"))
     })??;
     Ok(())
+}
+
+fn refresh_live_external_availability_blocking(
+    data_dir: &Path,
+    mut models: Vec<Value>,
+) -> Result<Vec<Value>, ApiError> {
+    use sceneworks_core::model_artifacts::external_library::{
+        probe_binding, ExternalLibraryBindingStore, ExternalLibraryProbeStatus,
+    };
+
+    let Ok(store) = ExternalLibraryBindingStore::new(data_dir) else {
+        return Ok(models);
+    };
+    let Ok(Some(binding)) = store.load() else {
+        // No durable binding: nothing external was ever bound, so there is no live transition to
+        // reflect and nothing to probe.
+        return Ok(models);
+    };
+    // ONE physical-identity probe per refresh (read-only). Every stamped row that references the
+    // bound library flips on this single answer.
+    let library_available = probe_binding(&binding.configured_path, &binding).status
+        == ExternalLibraryProbeStatus::Available;
+    for model in &mut models {
+        let Some(resolution_value) = model
+            .get("modelResolution")
+            .filter(|value| !value.is_null())
+        else {
+            continue;
+        };
+        let Ok(resolution) = serde_json::from_value::<ModelResolution>(resolution_value.clone())
+        else {
+            continue;
+        };
+        // Only the two states whose durable evidence is a live question refresh here: an
+        // external-ready row can disconnect and an unavailable row can reconnect between
+        // snapshot rebuilds. Both proved install evidence when they were stamped.
+        if !matches!(
+            resolution.availability,
+            ModelAvailability::ExternalReady | ModelAvailability::InstalledExternalUnavailable
+        ) || resolution.requirements.is_empty()
+            || resolution.configured_library_path != binding.configured_path
+        {
+            continue;
+        }
+        let live = if library_available {
+            ModelResolution::external_ready(
+                resolution.configured_library_path.clone(),
+                binding.clone(),
+                resolution.requirements.clone(),
+            )
+            .unwrap_or(resolution)
+        } else {
+            ModelResolution::unavailable(
+                resolution.configured_library_path.clone(),
+                Some(binding.clone()),
+                resolution.requirements.clone(),
+            )
+        };
+        if let Some(object) = model.as_object_mut() {
+            object.insert(
+                "modelAvailability".to_owned(),
+                serde_json::to_value(&live.availability).map_err(|error| {
+                    ApiError::internal(format!("serialize live model availability: {error}"))
+                })?,
+            );
+            object.insert(
+                "modelResolution".to_owned(),
+                serde_json::to_value(&live).map_err(|error| {
+                    ApiError::internal(format!("serialize live model resolution: {error}"))
+                })?,
+            );
+        }
+    }
+    Ok(models)
 }
 
 /// Submission preflight over every carried model entry: reject with the typed 503 only when a
@@ -466,4 +500,87 @@ async fn preflight_payload_model_sources(
     })
     .await
     .map_err(|error| ApiError::internal(format!("model source preflight failed: {error}")))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sceneworks_core::model_artifacts::external_library::{
+        ExternalArtifactRequirement, ExternalLibraryBindingStore,
+    };
+    use serde_json::json;
+    use std::path::PathBuf;
+
+    const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    /// The catalog READ path must reflect disconnect/reconnect from ONE binding probe and must be
+    /// write-free: no binding or validated-closure ledger byte may change on a catalog GET.
+    #[test]
+    fn live_refresh_flips_on_one_probe_and_never_writes_on_the_read_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().join("data");
+        let library = temp.path().join("external-hf");
+        let snapshot = library
+            .join("models--owner--model")
+            .join("snapshots")
+            .join(REVISION);
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::write(snapshot.join("model.safetensors"), b"weights").unwrap();
+        let requirement = ExternalArtifactRequirement {
+            repository: "owner/model".to_owned(),
+            revision: Some(REVISION.to_owned()),
+            variant: "default".to_owned(),
+            files: vec![PathBuf::from("model.safetensors")],
+            is_primary: true,
+        };
+        let store = ExternalLibraryBindingStore::new(&data).unwrap();
+        let (binding, _) = store
+            .bind_or_probe_validated(&library, std::slice::from_ref(&requirement))
+            .unwrap();
+        let stamped =
+            ModelResolution::external_ready(library.clone(), binding, vec![requirement]).unwrap();
+        let row = json!({ "id": "m", "modelResolution": stamped });
+
+        let ledger_files = || {
+            let models = data.join("models");
+            [
+                ".sceneworks-external-library-state.json",
+                ".sceneworks-external-library-closures.json",
+            ]
+            .map(|name| std::fs::read(models.join(name)).unwrap())
+        };
+        let before = ledger_files();
+
+        // Disconnect: the single probe flips the row to the typed unavailable state.
+        std::fs::rename(&library, temp.path().join("detached")).unwrap();
+        let offline =
+            refresh_live_external_availability_blocking(&data, vec![row.clone()]).unwrap();
+        assert_eq!(
+            offline[0]["modelAvailability"],
+            json!("installed_external_unavailable")
+        );
+
+        // Reconnect: the same probe flips it back to ready under the original binding.
+        std::fs::rename(temp.path().join("detached"), &library).unwrap();
+        let online = refresh_live_external_availability_blocking(&data, vec![row]).unwrap();
+        assert_eq!(online[0]["modelAvailability"], json!("external_ready"));
+
+        // Write-free: both durable ledgers are byte-identical after the two refreshes.
+        assert_eq!(ledger_files(), before);
+    }
+
+    /// Rows with no external stamping (missing/incomplete/local/no resolution) pass through the
+    /// live refresh untouched — a read must never invent availability.
+    #[test]
+    fn live_refresh_leaves_unstamped_and_non_external_rows_untouched() {
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let rows = vec![
+            json!({ "id": "plain" }),
+            json!({ "id": "null-resolution", "modelResolution": Value::Null }),
+        ];
+        let refreshed = refresh_live_external_availability_blocking(&data, rows.clone()).unwrap();
+        assert_eq!(refreshed, rows);
+    }
 }

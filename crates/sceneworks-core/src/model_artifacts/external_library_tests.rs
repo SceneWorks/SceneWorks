@@ -453,6 +453,53 @@ fn without_a_binding_only_receipt_evidence_can_prove_installed_but_unavailable()
     );
 }
 
+/// With a durable binding present and the volume disconnected, the typed unavailable state still
+/// requires install evidence for THE MODEL, not merely for the library: a receipt-less legacy
+/// install whose exact closure was validated while connected (the validated-closures ledger) stays
+/// installed-but-unavailable, while a declared-exact model that was never installed resolves
+/// Missing — the binding of an unrelated model must not misrepresent it as installed, 503 its
+/// submissions, or typed-fail its established install path.
+#[test]
+fn with_a_binding_only_receipted_or_ledger_validated_closures_read_unavailable() {
+    let temp = TempDir::new().unwrap();
+    let data = temp.path().join("data");
+    let library = temp.path().join("external-hf");
+    std::fs::create_dir_all(&library).unwrap();
+    // Legacy install: present in the library, NO download receipt anywhere. Validating it while
+    // connected binds the library and records the closure in the ledger.
+    seed_snapshot(&library, "owner/legacy", "legacy.safetensors");
+    let legacy = vec![requirement("owner/legacy", "legacy.safetensors")];
+    let ready = resolve_model_availability(&data, &library, &legacy, false, &[]);
+    assert_eq!(ready.availability, ModelAvailability::ExternalReady);
+    // Never-installed sibling: declared-exact manifest identity only, no files, no receipt.
+    let never_installed = vec![requirement("owner/never-installed", "missing.safetensors")];
+
+    std::fs::rename(&library, temp.path().join("detached")).unwrap();
+
+    let legacy_offline = resolve_model_availability(&data, &library, &legacy, false, &[]);
+    assert_eq!(
+        legacy_offline.availability,
+        ModelAvailability::InstalledExternalUnavailable,
+        "a ledger-validated receipt-less install must never degrade to Missing on disconnect"
+    );
+    let never_installed_offline =
+        resolve_model_availability(&data, &library, &never_installed, false, &[]);
+    assert_eq!(
+        never_installed_offline.availability,
+        ModelAvailability::Missing,
+        "an unrelated model's binding must not manufacture installed-but-unavailable"
+    );
+
+    // Reconnect: the ledger-validated install returns to ready under the original binding.
+    std::fs::rename(temp.path().join("detached"), &library).unwrap();
+    let reconnected = resolve_model_availability(&data, &library, &legacy, false, &[]);
+    assert_eq!(reconnected.availability, ModelAvailability::ExternalReady);
+    assert_eq!(
+        reconnected.expected_library, ready.expected_library,
+        "reconnecting the same volume preserves the original binding"
+    );
+}
+
 /// An empty requirement closure means no durable install identity: the resolver reports Missing
 /// (preserving established download behavior) and never invents a binding.
 #[test]

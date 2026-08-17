@@ -229,9 +229,11 @@ impl RuntimeSourceGuard {
     }
 }
 
-/// Exhaustive allowlist AT THE SEAM: only routes that cannot open model/HF bytes may run without
-/// model carriers. A total match means a newly added job type fails compilation until it is
-/// classified here — an unclassified HF-backed route can never pass silently.
+/// Allowlist AT THE SEAM: only routes that cannot open model/HF bytes may run without model
+/// carriers. `JobType` is `#[non_exhaustive]`, so this match cannot force a compile error for a
+/// new variant; instead the wildcard arm classifies anything unlisted as model-backed — an
+/// unclassified route therefore defaults to FAIL CLOSED (requires carriers) and can only become
+/// model-free by an explicit entry in the allowlist above.
 fn job_requires_typed_model_source(job_type: &JobType) -> bool {
     match job_type {
         JobType::Placeholder

@@ -12919,6 +12919,10 @@
       "name": "InstantID Face Analysis Stack",
       "family": "instantid",
       "type": "utility",
+      // Installable component bundle loaded by owning routes (face analysis, likeness, KPS,
+      // structured catalog analysis) — never a routable `model` of any job. Declared here so the
+      // capability matrix keys non-routability on manifest data, not a model-id branch.
+      "componentOnly": true,
       "capabilities": [],
       "downloads": [
         {

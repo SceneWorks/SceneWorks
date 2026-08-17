@@ -457,23 +457,7 @@ impl ExternalLibraryBindingStore {
         requirements: &[ExternalArtifactRequirement],
     ) -> Result<(), ExternalLibraryError> {
         let mut closures = self.read_validated_closures_unlocked()?;
-        let mut closure = requirements.to_vec();
-        closure.sort_by(|left, right| {
-            (
-                !left.is_primary,
-                &left.repository,
-                &left.revision,
-                &left.variant,
-                &left.files,
-            )
-                .cmp(&(
-                    !right.is_primary,
-                    &right.repository,
-                    &right.revision,
-                    &right.variant,
-                    &right.files,
-                ))
-        });
+        let closure = canonical_requirement_closure(requirements);
         if !closures.contains(&closure) {
             closures.push(closure);
             closures.sort_by(|left, right| format!("{left:?}").cmp(&format!("{right:?}")));
@@ -1062,6 +1046,47 @@ fn metadata_is_reparse(_metadata: &std::fs::Metadata) -> bool {
     false
 }
 
+/// The one canonical ordering for a requirement closure: primary first, then by repository,
+/// revision, variant and files. Both the validated-closures ledger writer and its readers sort
+/// through this function, so ledger equality can never diverge from write-time ordering.
+fn canonical_requirement_closure(
+    requirements: &[ExternalArtifactRequirement],
+) -> Vec<ExternalArtifactRequirement> {
+    let mut closure = requirements.to_vec();
+    closure.sort_by(|left, right| {
+        (
+            !left.is_primary,
+            &left.repository,
+            &left.revision,
+            &left.variant,
+            &left.files,
+        )
+            .cmp(&(
+                !right.is_primary,
+                &right.repository,
+                &right.revision,
+                &right.variant,
+                &right.files,
+            ))
+    });
+    closure
+}
+
+/// True when the validated-closures ledger records exactly this closure — the durable proof that
+/// it once validated in full on the bound physical library. This is what keeps a receipt-less
+/// legacy install typed as installed-but-unavailable across a disconnect instead of degrading to
+/// `Missing` (which would silently re-enter the download path).
+fn closure_has_validated_ledger_record(
+    store: &ExternalLibraryBindingStore,
+    requirements: &[ExternalArtifactRequirement],
+) -> bool {
+    let Ok(closures) = store.validated_closures() else {
+        return false;
+    };
+    let canonical = canonical_requirement_closure(requirements);
+    closures.contains(&canonical)
+}
+
 fn unknown_probe() -> ExternalLibraryProbe {
     ExternalLibraryProbe {
         status: ExternalLibraryProbeStatus::Unknown,
@@ -1159,11 +1184,14 @@ pub fn local_artifact_for_requirements(
 ///    now occupies the configured path) → `InstalledExternalUnavailable`. The install receipts and
 ///    binding ledger are never mutated on this path, so reconnecting restores `ExternalReady`.
 ///
-/// `receipt_backed` is the strength of the closure's install evidence. Without a durable binding,
-/// only a receipt-backed closure may produce `InstalledExternalUnavailable` (the pre-binding
-/// upgrade path: receipts prove the install even though the library was never bound). A
-/// declared-exact closure with no receipts, no binding, and no library is a model that was never
-/// installed: `Missing`, never a typed disconnect.
+/// `receipt_backed` is the strength of the closure's install evidence. The typed
+/// `InstalledExternalUnavailable` state requires PROOF the model was installed: a durable download
+/// receipt, or this exact closure recorded in the validated-closures ledger (written whenever the
+/// closure validated on the bound physical library — the receipt-less legacy-install path). A
+/// binding alone proves only that SOME library was bound, never that THIS model was installed on
+/// it, so a declared-exact closure with neither receipts nor a ledger record resolves `Missing`
+/// even while the bound volume is disconnected — a manifest declaration must not manufacture a
+/// typed disconnect for a model that was never installed.
 pub fn resolve_model_availability(
     data_dir: &Path,
     configured_library: &Path,
@@ -1210,6 +1238,8 @@ pub fn resolve_model_availability(
             requirements.to_vec(),
         );
     };
+    let installed_evidence =
+        || receipt_backed || closure_has_validated_ledger_record(&store, requirements);
     match store.bind_or_probe_validated(configured_library, requirements) {
         Ok((binding, probe)) if probe.status == ExternalLibraryProbeStatus::Available => {
             ModelResolution::external_ready(
@@ -1225,11 +1255,15 @@ pub fn resolve_model_availability(
                 )
             })
         }
-        Ok((binding, _)) => ModelResolution::unavailable(
+        Ok((binding, _)) if installed_evidence() => ModelResolution::unavailable(
             configured_library.to_path_buf(),
             Some(binding),
             requirements.to_vec(),
         ),
+        // The bound volume is disconnected, but nothing proves THIS model was ever installed on
+        // it (no receipt, no validated-closure record): it is a missing model, and its
+        // established install path must stay reachable.
+        Ok(_) => not_installed(),
         Err(_) => {
             let existing_binding = store.load().ok().flatten();
             let library_is_physically_present = existing_binding.as_ref().map_or_else(
@@ -1252,12 +1286,13 @@ pub fn resolve_model_availability(
                         requirements.to_vec(),
                     )
                 })
-            } else if existing_binding.is_none() && !receipt_backed {
-                // No binding, no receipts, no library: nothing was ever installed here. The
-                // declared manifest identity alone must not manufacture a typed disconnect.
+            } else if !installed_evidence() {
+                // No install proof (no receipt, no validated-closure record): nothing was ever
+                // installed here regardless of whether some binding exists. The declared manifest
+                // identity alone must not manufacture a typed disconnect.
                 not_installed()
             } else {
-                // Receipt/binding identity is durable even while the configured source cannot be
+                // Receipt/ledger identity is durable even while the configured source cannot be
                 // opened. Keep it installed-but-unavailable; never rewrite receipts or download.
                 ModelResolution::unavailable(
                     configured_library.to_path_buf(),

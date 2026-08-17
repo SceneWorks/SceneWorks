@@ -271,6 +271,11 @@ struct ManifestModel {
     candle: Value,
     #[serde(rename = "loraCompatibility", default)]
     lora_compatibility: Value,
+    /// Declarative non-routability (sc-19708): the entry is an installable component bundle
+    /// loaded by owning routes, never a routable `model` of any job. Keyed on manifest data so
+    /// adding component entries never adds a model-id branch here.
+    #[serde(rename = "componentOnly", default)]
+    component_only: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2005,11 +2010,10 @@ fn utility_model_cells(
     candle_facts: &RuntimeDescriptorFacts,
 ) -> Result<Vec<CapabilityCell>, String> {
     // PiD rows are decoder overlays loaded by their owning image model; they are not standalone
-    // person detectors (or any other independently routable utility job). The InstantID face
-    // stack (sc-19708) is the same shape: a component bundle staged by the face-analysis and
-    // identity lanes, declared in the catalog for install/availability identity, but never a
-    // routable `model` of any job.
-    if model.id.starts_with("pid_") || model.id == "instantid_face_stack" {
+    // person detectors (or any other independently routable utility job). `componentOnly` entries
+    // (sc-19708) declare the same shape in manifest data: an installable component bundle staged
+    // by owning lanes (the InstantID face stack), never a routable `model` of any job.
+    if model.id.starts_with("pid_") || model.component_only {
         return Ok(Vec::new());
     }
     let engine_request = match model.id.as_str() {
