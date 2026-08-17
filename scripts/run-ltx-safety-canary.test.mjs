@@ -16,7 +16,9 @@ import {
   MAX_RUNTIME_SECONDS,
   MIN_PREFLIGHT_FREE_BYTES,
   MIN_RUNTIME_FREE_BYTES,
+  PREPARATION_SCHEMA_VERSION,
   acquirePreparationLock,
+  canaryWatchdogEnvironment,
   canaryRequest,
   cargoSourceStatusIsClean,
   cleanupCanaryScratch,
@@ -24,6 +26,7 @@ import {
   exactToolchain,
   foreignHeavyProcesses,
   inventoryAtRoot,
+  locateBuiltMetallib,
   parseMemoryFreePercent,
   parseSwapFreeBytes,
   preparationCacheKey,
@@ -91,7 +94,9 @@ async function cacheFixture(t) {
     const adapterDirectory = path.join(stage, "adapter");
     await mkdir(adapterDirectory, { mode: 0o700 });
     await writeFile(path.join(adapterDirectory, "memory-mlx-adapter"), "adapter\n", { mode: 0o500 });
+    await writeFile(path.join(adapterDirectory, "mlx.metallib"), "metallib\n", { mode: 0o400 });
     await chmod(path.join(adapterDirectory, "memory-mlx-adapter"), 0o500);
+    await chmod(path.join(adapterDirectory, "mlx.metallib"), 0o400);
     await chmod(adapterDirectory, 0o500);
     return {
       artifacts: { numericTier: preparedNumeric, textEncoder: preparedText },
@@ -352,10 +357,11 @@ test("the production runner can only launch through the identity-checked watchdo
   assert.doesNotMatch(source, /memory-mlx-adapter[^\n]*spawn\(/);
   assert.doesNotMatch(source, /--child-adapter|async function child\(/);
   assert.match(source, /buildExactAdapter\(/);
+  assert.match(source, /locateBuiltMetallib\(target\)/);
   assert.match(source, /inferenceCargoSource\(/);
   assert.equal(CARGO_METADATA_TIMEOUT_MS, 15 * 60 * 1000);
   assert.match(source, /timeout: CARGO_METADATA_TIMEOUT_MS/);
-  assert.match(source, /await assertAdapterIdentity\(adapter, signal\)/);
+  assert.match(source, /await assertRuntimeAssetIdentities\(adapter, metallib, signal\)/);
   assert.match(source, /validatePreparedCache\(preparationRoot, preparationKey, identity, signal\)/);
   assert.match(source, /sealedArtifactIdentity\(root\)/);
   const reuseValidation = source.slice(
@@ -365,9 +371,13 @@ test("the production runner can only launch through the identity-checked watchdo
   assert.doesNotMatch(reuseValidation, /hashArtifactInventory\(/,
     "cache reuse must not repeat the 46.9 GB content hash");
   assert.match(source, /const resolutionEnv = Object\.fromEntries/);
+  assert.match(source, /const resolvedRustupHome = path\.resolve/);
+  assert.match(source, /HOME: privateHome/);
+  assert.match(source, /RUSTUP_HOME = resolvedRustupHome/);
   assert.match(source, /RUSTUP_TOOLCHAIN: channel/);
-  assert.match(source, /CARGO_HOME: path\.join\(scratch, "cargo-home"\)/);
-  assert.match(source, /CARGO_TARGET_DIR: path\.join\(scratch, "target"\)/);
+  assert.match(source, /CARGO_HOME: privateCargoHome/);
+  assert.match(source, /CARGO_TARGET_DIR: privateTarget/);
+  assert.match(source, /RUSTC: rustc/);
   assert.match(source, /TMPDIR: privateTemp/);
   assert.doesNotMatch(source, /TMPDIR: process\.env\.TMPDIR/);
   assert.match(source, /Cargo inference source tree differs from the verified checkout/);
@@ -377,6 +387,12 @@ test("the production runner can only launch through the identity-checked watchdo
   assert.match(source, /--child-attestation-timeout", String\(CHILD_ATTESTATION_TIMEOUT_SECONDS\)/);
   assert.match(source, /event\.event === "child_attested"/);
   assert.match(source, /await chmod\(adapterDirectory, 0o500\)/);
+  assert.match(source, /await chmod\(metallibPath, 0o400\)/);
+  assert.match(source, /PMETAL_METALLIB_PATH: metallibPath/);
+  assert.match(source, /const runtimeHome = path\.join\(runScratch, "home"\)/);
+  assert.match(source, /await exactEntries\(runtimeHome, \[\]\)/);
+  assert.doesNotMatch(source, /\.cache\/pmetal\/lib\/mlx\.metallib/,
+    "the canary must never name the mutable global metallib cache");
   assert.match(source, /runOwnedCommand\("\/bin\/cp", \["-c", cloneSource, output\]/);
   assert.match(source, /await cleanupCanaryScratch\(runScratch\)/);
   const failureRead = source.indexOf("const eventBytes = await readFile(eventsPath");
@@ -441,10 +457,41 @@ test("the runner binds the pinned toolchain and private same-volume artifact clo
       const toolchain = await exactToolchain(scratch);
       assert.equal(toolchain.channel, "1.97.1");
       assert.equal(toolchain.env.RUSTUP_TOOLCHAIN, toolchain.channel);
+      assert.equal(toolchain.env.RUSTUP_HOME,
+        path.resolve(process.env.RUSTUP_HOME ?? path.join(process.env.HOME, ".rustup")));
+      assert.equal(toolchain.env.HOME, path.join(scratch, "home"));
+      assert.notEqual(toolchain.env.HOME, process.env.HOME);
+      assert.equal(toolchain.env.PATH,
+        ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"].join(":"));
       assert.equal(toolchain.env.CARGO_HOME, path.join(scratch, "cargo-home"));
+      assert.equal(toolchain.env.CARGO_TARGET_DIR, path.join(scratch, "target"));
       assert.equal(toolchain.env.TMPDIR, path.join(scratch, "tmp"));
-      assert.equal((await stat(toolchain.env.TMPDIR)).mode & 0o777, 0o700);
+      assert.ok(path.isAbsolute(toolchain.env.RUSTC));
+      assert.equal(path.dirname(toolchain.env.RUSTC), path.dirname(toolchain.cargo));
+      for (const directory of [
+        toolchain.env.HOME, toolchain.env.CARGO_HOME,
+        toolchain.env.CARGO_TARGET_DIR, toolchain.env.TMPDIR,
+      ]) assert.equal((await stat(directory)).mode & 0o777, 0o700);
+      assert.deepEqual(await readdir(toolchain.env.HOME), []);
       assert.ok(path.isAbsolute(toolchain.cargo));
+      const probe = path.join(root, "cargo-rustc-probe");
+      await mkdir(path.join(probe, "src"), { recursive: true });
+      await writeFile(path.join(probe, "Cargo.toml"), [
+        "[package]", 'name = "sc19741-cargo-rustc-probe"', 'version = "0.0.0"',
+        'edition = "2024"', "",
+      ].join("\n"));
+      await writeFile(path.join(probe, "src/main.rs"), "fn main() {}\n");
+      const probeArgs = [
+        "check", "--offline", "--manifest-path", path.join(probe, "Cargo.toml"),
+      ];
+      await assert.rejects(() => runOwnedCommand(toolchain.cargo, probeArgs, {
+        cwd: probe,
+        env: { ...toolchain.env, RUSTC: path.join(root, "missing-rustc") },
+        timeout: 30_000,
+      }));
+      await runOwnedCommand(toolchain.cargo, probeArgs, {
+        cwd: probe, env: toolchain.env, timeout: 30_000,
+      });
     }
 
     const disposable = path.join(root, "disposable");
@@ -458,7 +505,53 @@ test("the runner binds the pinned toolchain and private same-volume artifact clo
   }
 });
 
+test("the exact Cargo build metallib is uniquely selected and overrides every global cache", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "sc19741-metallib-test-"));
+  t.after(() => cleanupCanaryScratch(root));
+  const target = path.join(root, "target");
+  const first = path.join(
+    target, "release", "build", "pmetal-mlx-sys-first", "out", "build", "lib", "mlx.metallib",
+  );
+  await mkdir(path.dirname(first), { recursive: true });
+  await writeFile(first, "exact build metallib\n");
+  assert.equal(await locateBuiltMetallib(target), first);
+
+  const prepared = path.join(root, "prepared", "adapter", "mlx.metallib");
+  const runtimeHome = path.join(root, "runtime-home");
+  await mkdir(runtimeHome, { mode: 0o700 });
+  const roots = { numericTier: "/prepared/q4", textEncoder: "/prepared/gemma" };
+  const environment = canaryWatchdogEnvironment({
+    HOME: "/Users/test",
+    PMETAL_METALLIB_PATH: "/Users/test/.cache/pmetal/lib/mlx.metallib",
+    PMETAL_CACHE_DIR: "/Users/test/.cache/pmetal",
+    XDG_CACHE_HOME: "/Users/test/.cache",
+  }, roots, prepared, runtimeHome);
+  assert.equal((await stat(runtimeHome)).mode & 0o777, 0o700);
+  assert.deepEqual(await readdir(runtimeHome), []);
+  assert.equal(environment.HOME, runtimeHome);
+  assert.notEqual(environment.HOME, "/Users/test");
+  assert.equal(environment.PMETAL_METALLIB_PATH, prepared);
+  assert.equal(Object.hasOwn(environment, "PMETAL_CACHE_DIR"), false);
+  assert.equal(Object.hasOwn(environment, "XDG_CACHE_HOME"), false);
+  assert.equal(environment.SCENEWORKS_LTX_ROOT, roots.numericTier);
+  assert.equal(environment.SCENEWORKS_LTX_TEXT_ENCODER_ROOT, roots.textEncoder);
+  assert.notEqual(environment.PMETAL_METALLIB_PATH,
+    "/Users/test/.cache/pmetal/lib/mlx.metallib");
+  assert.throws(() => canaryWatchdogEnvironment(
+    {}, roots, "relative/mlx.metallib", runtimeHome,
+  ));
+  assert.throws(() => canaryWatchdogEnvironment({}, roots, prepared, "relative/home"));
+
+  const second = path.join(
+    target, "release", "build", "pmetal-mlx-sys-second", "out", "build", "lib", "mlx.metallib",
+  );
+  await mkdir(path.dirname(second), { recursive: true });
+  await writeFile(second, "ambiguous metallib\n");
+  await assert.rejects(() => locateBuiltMetallib(target), /exactly one.*found 2/);
+});
+
 test("preparation identity and cache keys change for every canonical input", () => {
+  assert.equal(PREPARATION_SCHEMA_VERSION, 3);
   const identity = preparationIdentity("1".repeat(40), "2".repeat(40), "1.97.1");
   const key = preparationCacheKey(identity);
   for (const mutate of [
@@ -490,6 +583,10 @@ test("a completed cache is atomically reused without rebuilding or rehashing fil
   assert.equal(fixture.builds(), 1);
   assert.deepEqual(second.manifest.artifacts.numericTier.content, fixture.identity.artifact.numericTier);
   assert.deepEqual(second.manifest.artifacts.textEncoder.content, fixture.identity.artifact.textEncoder);
+  assert.match(second.manifest.metallib.sha256, /^[0-9a-f]{64}$/);
+  assert.equal(second.manifest.metallib.seal.mode, 0o400);
+  assert.equal(second.metallib.path,
+    path.join(fixture.preparationRoot, "adapter", "mlx.metallib"));
   assert.equal((await stat(fixture.preparationRoot)).mode & 0o777, 0o500);
   assert.equal(
     (await stat(path.join(fixture.preparationRoot, "prepared.json"))).mode & 0o777,
@@ -497,6 +594,9 @@ test("a completed cache is atomically reused without rebuilding or rehashing fil
   );
   assert.deepEqual((await readdir(fixture.preparationRoot)).sort(), [
     "adapter", "artifacts", "prepared.json", "prepared.sha256",
+  ]);
+  assert.deepEqual((await readdir(path.join(fixture.preparationRoot, "adapter"))).sort(), [
+    "memory-mlx-adapter", "mlx.metallib",
   ]);
 });
 
@@ -546,7 +646,18 @@ test("cache validation rejects canonical identity, completion, permission and me
   await chmod(adapterPath, 0o700);
   await assert.rejects(
     () => validatePreparedCache(adapter.preparationRoot, adapter.key, adapter.identity),
-    /read-only executable regular file/,
+    /adapter executable.*mode 500/,
+  );
+
+  const metallib = await cacheFixture(t);
+  await prepareCanaryCache(metallib.options);
+  const metallibPath = path.join(metallib.preparationRoot, "adapter", "mlx.metallib");
+  await chmod(metallibPath, 0o600);
+  await writeFile(metallibPath, "drifted global-cache candidate\n");
+  await chmod(metallibPath, 0o400);
+  await assert.rejects(
+    () => validatePreparedCache(metallib.preparationRoot, metallib.key, metallib.identity),
+    /metallib changed/,
   );
 
   const metadata = await cacheFixture(t);
