@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmod, mkdir, mkdtemp, readFile, readdir, stat, symlink, writeFile,
@@ -208,7 +209,20 @@ test("the runner refuses promotable or identity-drifted adapter output", () => {
       memoryLimitBytes: MAX_FOOTPRINT_BYTES,
       wiredLimitBytes: MAX_FOOTPRINT_BYTES,
     },
-    observedMemory: { postCleanupActiveBytes: 0, postCleanupCacheBytes: 0 },
+    observedMemory: {
+      preProviderActiveBytes: 0,
+      preProviderCacheBytes: 0,
+      expectedPersistentActive: {
+        identity: "mlx-gen-ltx-transformer-ones-cache-av-bfloat16-v1",
+        videoDimension: 4_096,
+        audioDimension: 2_048,
+        dtype: "bfloat16",
+        bytesPerElement: 2,
+        bytes: (4_096 + 2_048) * 2,
+      },
+      postCleanupActiveBytes: (4_096 + 2_048) * 2,
+      postCleanupCacheBytes: 0,
+    },
     output: { firstFrameNondegenerate: true },
   };
   assert.deepEqual(
@@ -233,7 +247,6 @@ test("the runner refuses promotable or identity-drifted adapter output", () => {
     (value) => { value.watchdog.minMemoryFreeBytes -= 1; },
     (value) => { value.watchdog.minSwapFreeBytes = 1024 ** 3; },
     (value) => { value.mlxLimits.wiredLimitBytes = MAX_FOOTPRINT_BYTES + 1; },
-    (value) => { value.observedMemory.postCleanupActiveBytes = 1; },
     (value) => { value.output.firstFrameNondegenerate = false; },
     (value) => { value.inferenceRevision = "0".repeat(40); },
     (value) => { value.artifact.resolvedRevision = "0".repeat(40); },
@@ -247,6 +260,70 @@ test("the runner refuses promotable or identity-drifted adapter output", () => {
       changed, response.inferenceRevision, TEXT_ENCODER_INVENTORY,
       response.watchdog.hostMemoryBytes,
     ));
+  }
+  for (const [mutate, expected] of [
+    [
+      (value) => { delete value.observedMemory.preProviderActiveBytes; },
+      /preProviderActiveBytes must be a non-negative safe integer/,
+    ],
+    [
+      (value) => { value.observedMemory.preProviderActiveBytes = 1; },
+      /postCleanupActiveBytes 12288 did not equal pre-provider active 1 plus intentional persistent active 12288 = 12289/,
+    ],
+    [
+      (value) => {
+        value.observedMemory.preProviderActiveBytes = Number.MAX_SAFE_INTEGER;
+        value.observedMemory.postCleanupActiveBytes = Number.MAX_SAFE_INTEGER;
+      },
+      /pre-provider plus persistent active-byte arithmetic overflowed/,
+    ],
+    [
+      (value) => { value.observedMemory.postCleanupActiveBytes -= 1; },
+      /postCleanupActiveBytes 12287 did not equal pre-provider active 0 plus intentional persistent active 12288 = 12288/,
+    ],
+    [
+      (value) => { value.observedMemory.postCleanupActiveBytes += 1; },
+      /postCleanupActiveBytes 12289 did not equal pre-provider active 0 plus intentional persistent active 12288 = 12288/,
+    ],
+    [
+      (value) => { value.observedMemory.preProviderCacheBytes = 1; },
+      /preProviderCacheBytes 1 did not attest the cleared pre-provider cache 0/,
+    ],
+    [
+      (value) => { value.observedMemory.postCleanupCacheBytes = 1; },
+      /postCleanupCacheBytes 1 did not return to observedMemory\.preProviderCacheBytes 0/,
+    ],
+    [
+      (value) => { value.observedMemory.expectedPersistentActive.bytes += 1; },
+      /expectedPersistentActive\.bytes 12289 did not equal 12288/,
+    ],
+    [
+      (value) => { value.observedMemory.expectedPersistentActive.videoDimension -= 1; },
+      /expectedPersistentActive\.videoDimension 4095 did not equal 4096/,
+    ],
+    [
+      (value) => { value.observedMemory.expectedPersistentActive.audioDimension += 1; },
+      /expectedPersistentActive\.audioDimension 2049 did not equal 2048/,
+    ],
+    [
+      (value) => { value.observedMemory.expectedPersistentActive.dtype = "float32"; },
+      /expectedPersistentActive\.dtype "float32" did not equal "bfloat16"/,
+    ],
+    [
+      (value) => { value.observedMemory.expectedPersistentActive.bytesPerElement = 4; },
+      /expectedPersistentActive\.bytesPerElement 4 did not equal 2/,
+    ],
+    [
+      (value) => { value.observedMemory.expectedPersistentActive.identity = "generic-cache"; },
+      /expectedPersistentActive\.identity "generic-cache" did not equal/,
+    ],
+  ]) {
+    const changed = structuredClone(response);
+    mutate(changed);
+    assert.throws(() => validateCanaryResponse(
+      changed, response.inferenceRevision, TEXT_ENCODER_INVENTORY,
+      response.watchdog.hostMemoryBytes,
+    ), expected);
   }
 });
 
@@ -820,9 +897,31 @@ test("owned command cancellation terminates descendants before rejecting", async
   const childPid = Number((await readFile(pidFile, "utf8")).trim());
   cancellation.abort(new CanaryInterrupted("SIGTERM"));
   await assert.rejects(operation, CanaryInterrupted);
-  assert.throws(
-    () => process.kill(childPid, 0),
-    (error) => error.code === "ESRCH",
-    "owned descendant survived cancellation",
-  );
+  let childExists = true;
+  try {
+    process.kill(childPid, 0);
+  } catch (error) {
+    if (error.code !== "ESRCH") throw error;
+    childExists = false;
+  }
+  if (childExists) {
+    const childStatus = spawnSync("/bin/ps", ["-o", "stat=", "-p", String(childPid)], {
+      encoding: "utf8",
+    });
+    assert.equal(childStatus.error, undefined);
+    assert.equal(childStatus.signal, null);
+    assert.equal(childStatus.stderr, "");
+    const childStates = childStatus.stdout.split("\n").map((state) => state.trim()).filter(Boolean);
+    if (childStatus.status === 1 && childStates.length === 0) {
+      assert.throws(
+        () => process.kill(childPid, 0),
+        (error) => error.code === "ESRCH",
+        "owned descendant survived cancellation after ps reported no process",
+      );
+    } else {
+      assert.equal(childStatus.status, 0);
+      assert.equal(childStates.length, 1);
+      assert.match(childStates[0], /^Z/, `owned descendant survived cancellation: state=${childStates[0]}`);
+    }
+  }
 });

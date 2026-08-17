@@ -38,6 +38,17 @@ const Q4_INVENTORY_SHA256 = "4e811932e87bb258f642ada790525e36ef2a55959c520e755f1
 const TEXT_ENCODER_INVENTORY_FILES = 17;
 const TEXT_ENCODER_INVENTORY_BYTES = 26_427_894_918;
 const TEXT_ENCODER_INVENTORY_SHA256 = "abde2d155aa8991747cc2999d40688d29a50261c080c0d51fac20357653928d7";
+const LTX_ONES_CACHE_IDENTITY = "mlx-gen-ltx-transformer-ones-cache-av-bfloat16-v1";
+const LTX_ONES_CACHE_VIDEO_DIMENSION = 4_096;
+const LTX_ONES_CACHE_AUDIO_DIMENSION = 2_048;
+const BFLOAT16_BYTES_PER_ELEMENT = 2;
+
+function ltxOnesCacheBytes() {
+  const elements = LTX_ONES_CACHE_VIDEO_DIMENSION + LTX_ONES_CACHE_AUDIO_DIMENSION;
+  const bytes = elements * BFLOAT16_BYTES_PER_ELEMENT;
+  if (!Number.isSafeInteger(bytes)) fail("LTX ONES_CACHE byte arithmetic overflowed");
+  return bytes;
+}
 
 function fail(message) {
   throw new Error(message);
@@ -454,10 +465,47 @@ export function validateCanaryResponse(
       || !Number.isInteger(response?.mlxLimits?.wiredLimitBytes)
       || response.mlxLimits.wiredLimitBytes <= 0
       || response.mlxLimits.wiredLimitBytes > MAX_FOOTPRINT_BYTES
-      || response?.observedMemory?.postCleanupActiveBytes !== 0
-      || response?.observedMemory?.postCleanupCacheBytes !== 0
       || response?.output?.firstFrameNondegenerate !== true) {
     fail("adapter response did not attest the exact bounded canary execution");
+  }
+  for (const field of [
+    "preProviderActiveBytes",
+    "preProviderCacheBytes",
+    "postCleanupActiveBytes",
+    "postCleanupCacheBytes",
+  ]) {
+    const value = response?.observedMemory?.[field];
+    if (!Number.isSafeInteger(value) || value < 0) {
+      fail(`adapter response observedMemory.${field} must be a non-negative safe integer`);
+    }
+  }
+  if (response.observedMemory.preProviderCacheBytes !== 0) {
+    fail(`adapter response observedMemory.preProviderCacheBytes ${response.observedMemory.preProviderCacheBytes} did not attest the cleared pre-provider cache 0`);
+  }
+  const persistent = response?.observedMemory?.expectedPersistentActive;
+  for (const [field, expected] of [
+    ["identity", LTX_ONES_CACHE_IDENTITY],
+    ["videoDimension", LTX_ONES_CACHE_VIDEO_DIMENSION],
+    ["audioDimension", LTX_ONES_CACHE_AUDIO_DIMENSION],
+    ["dtype", "bfloat16"],
+    ["bytesPerElement", BFLOAT16_BYTES_PER_ELEMENT],
+    ["bytes", ltxOnesCacheBytes()],
+  ]) {
+    if (persistent?.[field] !== expected) {
+      fail(`adapter response observedMemory.expectedPersistentActive.${field} ${JSON.stringify(persistent?.[field])} did not equal ${JSON.stringify(expected)}`);
+    }
+  }
+  const expectedPostActive = response.observedMemory.preProviderActiveBytes
+    + persistent.bytes;
+  if (!Number.isSafeInteger(expectedPostActive)) {
+    fail("adapter response pre-provider plus persistent active-byte arithmetic overflowed");
+  }
+  if (response.observedMemory.postCleanupActiveBytes !== expectedPostActive) {
+    fail(`adapter response observedMemory.postCleanupActiveBytes ${response.observedMemory.postCleanupActiveBytes} did not equal pre-provider active ${response.observedMemory.preProviderActiveBytes} plus intentional persistent active ${persistent.bytes} = ${expectedPostActive}`);
+  }
+  if (response.observedMemory.postCleanupCacheBytes
+      !== response.observedMemory.preProviderCacheBytes) {
+    fail(`adapter response observedMemory.postCleanupCacheBytes ${response.observedMemory.postCleanupCacheBytes} did not return to observedMemory.preProviderCacheBytes ${response.observedMemory.preProviderCacheBytes}`);
   }
   return response;
 }
