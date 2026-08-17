@@ -2553,7 +2553,7 @@ test("an out-of-matrix record has to date the tree its evidence resolves in (sc-
   // Candle record was last surveyed at 79f02e6d0 and re-stamping it without re-surveying would be
   // provenance theater.
   const expected = {
-    mlx: "2f0de72ade4ee54ec3f5656f007b7f4a9642688b",
+    mlx: "e09f46aafb10126b14172a148acb26c619cf9213",
     candle: "79f02e6d0eaca861a0698ee490b70daa7441e321",
   };
   for (const backend of ["mlx", "candle"]) {
@@ -2565,7 +2565,7 @@ test("an out-of-matrix record has to date the tree its evidence resolves in (sc-
   }
   // And the divergence is stated in prose too, not left for a reader to infer from two shas —
   // BOTH revisions, since the record's paths no longer date at a single one.
-  assert.match(h3(survey).whyOutOfMatrix, /2f0de72ade4ee54ec3f5656f007b7f4a9642688b/);
+  assert.match(h3(survey).whyOutOfMatrix, /e09f46aafb10126b14172a148acb26c619cf9213/);
   assert.match(h3(survey).whyOutOfMatrix, /79f02e6d0eaca861a0698ee490b70daa7441e321/);
 
   // Each guard mutated alone.
