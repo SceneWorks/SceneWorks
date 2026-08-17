@@ -9,6 +9,7 @@ import {
 } from "node:fs/promises";
 import { arch } from "node:os";
 import path from "node:path";
+import { createInterface } from "node:readline";
 import { isDeepStrictEqual, promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
@@ -36,6 +37,7 @@ const FINGERPRINT = "sc-19109-ltx-2-3-mlx-memory-ladder-v1";
 export const SAFETY_CANARY_PROFILE = "safety";
 export const PRODUCT_ENVELOPE_CANARY_PROFILE = "product-envelope";
 export const CAMPAIGN_ENTRY_PROFILE = "campaign-entry";
+export const BOUNDED_CARRIER_PROFILE = "bounded-carrier";
 export const CAMPAIGN_ENTRY_PROVIDER =
   "mlx-ltx-2-3-q4-768x512-f121-fps30-staged_residency";
 export const CAMPAIGN_ENTRY_FIXTURE =
@@ -43,6 +45,17 @@ export const CAMPAIGN_ENTRY_FIXTURE =
 export const CAMPAIGN_ENTRY_LOGICAL_CASE_ID = "implan-9b107d4d1ca0d61d4faa";
 export const CAMPAIGN_ENTRY_IDENTITY = "sc-20191-q4-768x512-f121-fps30-staged-v1";
 export const CAMPAIGN_FAILURE_RECEIPT_TYPE = "sceneworks_campaign_entry_failure_v1";
+export const BOUNDED_CARRIER_ACTION = "bounded_carrier_proof";
+export const BOUNDED_CARRIER_IDENTITY =
+  "sc-20254-q4-768x512-f121-fps30-bounded-192-64-v1";
+export const BOUNDED_CARRIER_LOGICAL_CASE_ID =
+  "diagnostic-sc20254-q4-768x512-f121-fps30-bounded-192-64";
+export const BOUNDED_CARRIER_FIXTURE =
+  "ltx-2-3-mlx-q4-768x512-f121-fps30-seed18946-bounded-decode-192-64-proof";
+export const BOUNDED_CARRIER_SUCCESS_RECEIPT_TYPE =
+  "sceneworks_bounded_carrier_success_v1";
+export const BOUNDED_CARRIER_FAILURE_RECEIPT_TYPE =
+  "sceneworks_bounded_carrier_failure_v1";
 export const PROVIDER_PHASE_PROTOCOL = "sceneworks-provider-phase-v1";
 export const WATCHDOG_EVENT_CHAIN_PROTOCOL = "sceneworks-watchdog-event-chain-v1";
 export const PROVIDER_PHASES = Object.freeze([
@@ -55,6 +68,13 @@ export const PROVIDER_PHASES = Object.freeze([
   "lifecycle_cancel_recovery",
   "lifecycle_error",
   "lifecycle_error_recovery",
+  "cleanup",
+]);
+export const BOUNDED_CARRIER_PHASES = Object.freeze([
+  "common_load",
+  "primary_conditioning",
+  "primary_denoise",
+  "primary_decode",
   "cleanup",
 ]);
 const CAMPAIGN_ENTRY_ACTION = "campaign_entry";
@@ -478,6 +498,63 @@ export function canaryRequest(
   };
 }
 
+export function boundedCarrierRequest(memoryBytes, textEncoderInventory) {
+  assertInventory(textEncoderInventory, {
+    files: TEXT_ENCODER_INVENTORY_FILES,
+    bytes: TEXT_ENCODER_INVENTORY_BYTES,
+    sha256: TEXT_ENCODER_INVENTORY_SHA256,
+  }, "immutable text-encoder");
+  return {
+    action: BOUNDED_CARRIER_ACTION,
+    hardware: { memoryBytes },
+    planned: {
+      _diagnosticOnly: true,
+      logicalCaseId: BOUNDED_CARRIER_LOGICAL_CASE_ID,
+      evidenceScope: "fixture",
+      backend: "mlx",
+      loadShape: "eager_materialization",
+      target: {
+        provider: PROVIDER,
+        modelId: PROVIDER,
+        tier: "q4",
+        mode: "text_to_video",
+        overlay: "none",
+        geometry: { width: 768, height: 512, batch: 1, frames: 121 },
+      },
+      strategy: {
+        rung: "bounded_decode",
+        engagedRungs: ["resident", "staged_residency", "bounded_decode"],
+        parameters: { decodeTileEdge: 192, decodeOverlap: 64 },
+      },
+      calibrationFingerprint: FINGERPRINT,
+      fixture: BOUNDED_CARRIER_FIXTURE,
+      negative: false,
+      expectedResult: "passed",
+      modelLoadPolicy: "fresh_per_case",
+      modelLoadGroup: null,
+      _watchdog: { maxFootprintBytes: MAX_FOOTPRINT_BYTES },
+      _boundedCarrier: {
+        identity: BOUNDED_CARRIER_IDENTITY,
+        fps: 30,
+        seed: 18_946,
+        videoMode: "default_av",
+        artifact: {
+          repository: ARTIFACT_REPOSITORY,
+          revision: ARTIFACT_REVISION,
+          numericTierInventory: {
+            files: 11, bytes: Q4_INVENTORY_BYTES, sha256: Q4_INVENTORY_SHA256,
+          },
+          textEncoderInventory: {
+            files: textEncoderInventory.files,
+            bytes: textEncoderInventory.bytes,
+            sha256: textEncoderInventory.sha256,
+          },
+        },
+      },
+    },
+  };
+}
+
 export function campaignEntryPlan(config) {
   const matches = config?.providers?.filter((provider) =>
     provider.name === CAMPAIGN_ENTRY_PROVIDER) ?? [];
@@ -672,7 +749,143 @@ export function validateCampaignEntryAdapterResponse(response, {
   return response;
 }
 
-export function validateCampaignEntryWatchdogEvents(events, hostMemoryBytes) {
+export function validateBoundedCarrierResponse(response, {
+  inferenceRevision, hostMemoryBytes,
+} = {}) {
+  let canonicallyIngestible = true;
+  try {
+    validateBundle(response);
+  } catch {
+    canonicallyIngestible = false;
+  }
+  if (canonicallyIngestible
+      || response?.schemaVersion !== 1
+      || response?.recordType !== "sceneworks_bounded_carrier_proof_response_v1"
+      || response?.status !== "diagnostic_bounded_carrier_complete"
+      || response?.story !== "sc-20254"
+      || response?.logicalCaseId !== BOUNDED_CARRIER_LOGICAL_CASE_ID
+      || response?.fixture !== BOUNDED_CARRIER_FIXTURE
+      || response?.identity !== BOUNDED_CARRIER_IDENTITY
+      || response?.diagnosticOnly !== true
+      || response?.promotable !== false
+      || response?.ingestible !== false
+      || (inferenceRevision !== undefined && response?.inferenceRevision !== inferenceRevision)
+      || response?.calibrationFingerprint !== FINGERPRINT
+      || response?.artifact?.repository !== ARTIFACT_REPOSITORY
+      || response?.artifact?.resolvedRevision !== ARTIFACT_REVISION
+      || response?.artifact?.variant !== "q4"
+      || !isDeepStrictEqual(response?.artifact?.numericTierInventory, {
+        files: 11, bytes: Q4_INVENTORY_BYTES, sha256: Q4_INVENTORY_SHA256,
+      })
+      || !isDeepStrictEqual(response?.artifact?.textEncoderInventory, {
+        files: TEXT_ENCODER_INVENTORY_FILES,
+        bytes: TEXT_ENCODER_INVENTORY_BYTES,
+        sha256: TEXT_ENCODER_INVENTORY_SHA256,
+      })
+      || !isDeepStrictEqual(response?.target, {
+        provider: PROVIDER,
+        tier: "q4",
+        geometry: { width: 768, height: 512, frames: 121, fps: 30 },
+        seed: 18_946,
+        videoMode: "default_av",
+        audio: true,
+      })
+      || !isDeepStrictEqual(response?.strategy, {
+        rung: "bounded_decode",
+        engagedRungs: ["resident", "staged_residency", "bounded_decode"],
+        parameters: { decodeTileEdge: 192, decodeOverlap: 64 },
+        spatialDecodeTiles: 24,
+      })
+      || response?.watchdog?.required !== true
+      || response?.watchdog?.protocol !== "sceneworks-memory-watchdog-v1"
+      || response?.watchdog?.providerPhaseProtocol !== PROVIDER_PHASE_PROTOCOL
+      || response?.watchdog?.providerPhaseProfile !== "bounded-carrier"
+      || !isDeepStrictEqual(response?.watchdog?.providerPhases, BOUNDED_CARRIER_PHASES)
+      || response?.watchdog?.maxFootprintBytes !== MAX_FOOTPRINT_BYTES
+      || response?.watchdog?.maxRuntimeSeconds !== MAX_RUNTIME_SECONDS
+      || (hostMemoryBytes !== undefined && response?.watchdog?.hostMemoryBytes !== hostMemoryBytes)
+      || response?.watchdog?.minInitialMemoryFreeBytes
+        !== preflightFreeFloor(response?.watchdog?.hostMemoryBytes)
+      || response?.watchdog?.minMemoryFreeBytes
+        !== runtimeFreeFloor(response?.watchdog?.hostMemoryBytes)
+      || Object.hasOwn(response?.watchdog ?? {}, "minSwapFreeBytes")
+      || Object.hasOwn(response?.watchdog ?? {}, "minInitialMemoryFreePercent")
+      || response?.mlxLimits?.memoryLimitBytes !== MAX_FOOTPRINT_BYTES
+      || !Number.isSafeInteger(response?.mlxLimits?.wiredLimitBytes)
+      || response.mlxLimits.wiredLimitBytes <= 0
+      || response.mlxLimits.wiredLimitBytes > MAX_FOOTPRINT_BYTES
+      || !isDeepStrictEqual(response?.output, {
+        frames: 121,
+        fps: 30,
+        audio: response?.output?.audio,
+        frameTimelineSeconds: 4,
+        firstFrameNondegenerate: true,
+      })
+      || response?.output?.audio?.present !== true
+      || !Number.isSafeInteger(response?.output?.audio?.samples)
+      || response.output.audio.samples <= 0
+      || !Number.isSafeInteger(response?.output?.audio?.sampleRate)
+      || response.output.audio.sampleRate <= 0
+      || !Number.isSafeInteger(response?.output?.audio?.channels)
+      || response.output.audio.channels <= 0) {
+    fail("SC-20254 response changed the exact non-ingestible bounded carrier");
+  }
+  const observed = response.observedMemory;
+  const phaseActive = [];
+  for (const phaseName of ["conditioning", "denoise", "decode"]) {
+    const phase = observed?.[phaseName];
+    for (const field of ["activeBytes", "allocatorBytes", "reclaimableBytes"]) {
+      if (!Number.isSafeInteger(phase?.[field]) || phase[field] < 0) {
+        fail(`SC-20254 observedMemory.${phaseName}.${field} is invalid`);
+      }
+    }
+    if (phase.activeBytes <= 0
+        || phase.allocatorBytes !== phase.activeBytes + phase.reclaimableBytes) {
+      fail(`SC-20254 observedMemory.${phaseName} is not exact`);
+    }
+    phaseActive.push(phase.activeBytes);
+  }
+  for (const field of [
+    "preProviderActiveBytes", "preProviderCacheBytes",
+    "postCleanupActiveBytes", "postCleanupCacheBytes",
+  ]) {
+    if (!Number.isSafeInteger(observed?.[field]) || observed[field] < 0) {
+      fail(`SC-20254 observedMemory.${field} must be a non-negative safe integer`);
+    }
+  }
+  if (observed.peakActiveBytes !== Math.max(...phaseActive)
+      || observed.preProviderCacheBytes !== 0
+      || !isDeepStrictEqual(observed.expectedPersistentActive, {
+        identity: LTX_ONES_CACHE_IDENTITY,
+        videoDimension: LTX_ONES_CACHE_VIDEO_DIMENSION,
+        audioDimension: LTX_ONES_CACHE_AUDIO_DIMENSION,
+        dtype: "bfloat16",
+        bytesPerElement: BFLOAT16_BYTES_PER_ELEMENT,
+        bytes: ltxOnesCacheBytes(),
+      })) {
+    fail("SC-20254 allocator phase or named persistent identity changed");
+  }
+  const expectedPostActive = observed.preProviderActiveBytes
+    + observed.expectedPersistentActive.bytes;
+  if (!Number.isSafeInteger(expectedPostActive)) {
+    fail("SC-20254 cleanup active-byte arithmetic overflowed");
+  }
+  if (observed.postCleanupActiveBytes !== expectedPostActive
+      || observed.postCleanupCacheBytes !== observed.preProviderCacheBytes) {
+    fail("SC-20254 cleanup did not return to its exact intentional persistent baseline");
+  }
+  return response;
+}
+
+export function validateBoundedCarrierWatchdogEvents(events, hostMemoryBytes) {
+  return validateCampaignEntryWatchdogEvents(
+    events, hostMemoryBytes, BOUNDED_CARRIER_PHASES,
+  );
+}
+
+export function validateCampaignEntryWatchdogEvents(
+  events, hostMemoryBytes, expectedPhases = PROVIDER_PHASES,
+) {
   if (!Array.isArray(events) || events.length === 0) fail("SC-20191 watchdog stream is empty");
   const startedIndex = events.findIndex((event) => event.event === "started");
   const attestedIndex = events.findIndex((event) => event.event === "child_attested");
@@ -705,7 +918,7 @@ export function validateCampaignEntryWatchdogEvents(events, hostMemoryBytes) {
       || events.some((event) => event.event === "hard_stop" || event.event === "terminated")) {
     fail("SC-20191 watchdog stream is incomplete or crossed a safety boundary");
   }
-  validateProviderPhaseTimeline(events, { complete: true });
+  validateProviderPhaseTimeline(events, { complete: true, expectedPhases });
   return Math.max(...samples.map((event) => event.physicalFootprintBytes));
 }
 
@@ -748,7 +961,9 @@ export function validateWatchdogEventChain(events) {
   };
 }
 
-export function validateProviderPhaseTimeline(events, { complete = false } = {}) {
+export function validateProviderPhaseTimeline(events, {
+  complete = false, expectedPhases = PROVIDER_PHASES,
+} = {}) {
   validateWatchdogEventChain(events);
   let current = null;
   let sequence = 0;
@@ -760,7 +975,7 @@ export function validateProviderPhaseTimeline(events, { complete = false } = {})
     previousAt = event.at;
     if (event.event === "provider_phase") {
       const expectedSequence = sequence + 1;
-      const expectedName = PROVIDER_PHASES[sequence];
+      const expectedName = expectedPhases[sequence];
       if (event.authenticated !== true
           || event.providerPhase?.sequence !== expectedSequence
           || event.providerPhase?.name !== expectedName) {
@@ -775,15 +990,17 @@ export function validateProviderPhaseTimeline(events, { complete = false } = {})
       fail("SC-20216 watchdog event is not bound to the latest authenticated provider phase");
     }
   }
-  if (sequence === 0 || (complete && sequence !== PROVIDER_PHASES.length)) {
+  if (sequence === 0 || (complete && sequence !== expectedPhases.length)) {
     fail("SC-20216 watchdog stream omitted required authenticated provider phases");
   }
   return current;
 }
 
-export function validateCampaignEntryFailureEvents(events, hostMemoryBytes) {
+export function validateCampaignEntryFailureEvents(
+  events, hostMemoryBytes, expectedPhases = PROVIDER_PHASES,
+) {
   if (!Array.isArray(events) || events.length === 0) fail("SC-20216 failure stream is empty");
-  validateProviderPhaseTimeline(events);
+  validateProviderPhaseTimeline(events, { expectedPhases });
   const eventChain = validateWatchdogEventChain(events);
   const hardStops = events.filter((event) => event.event === "hard_stop");
   const terminated = events.filter((event) => event.event === "terminated");
@@ -1053,6 +1270,64 @@ export function campaignEntryFailureReceipt({
   return validateCampaignEntryFailureReceipt(receipt);
 }
 
+function validateContainedReceiptArtifactIdentity(receipt, label) {
+  for (const source of [receipt.source?.sceneWorks, receipt.source?.inference]) {
+    if (!/^[0-9a-f]{40}$/.test(source?.revision ?? "")
+        || !/^[0-9a-f]{40}$/.test(source?.tree ?? "")) {
+      fail(`${label} receipt source identity is malformed`);
+    }
+  }
+  const preparation = receipt.artifacts?.preparation;
+  const identity = preparation?.identity;
+  const validFileIdentity = (file, mode) => path.isAbsolute(file?.path ?? "")
+    && /^[0-9a-f]{64}$/.test(file?.sha256 ?? "")
+    && typeof file?.device === "string" && typeof file?.inode === "string"
+    && Number.isSafeInteger(file?.size) && file.size > 0
+    && typeof file?.mtimeNs === "string" && typeof file?.ctimeNs === "string"
+    && file?.mode === mode;
+  if (receipt.artifacts?.repository !== ARTIFACT_REPOSITORY
+      || receipt.artifacts?.revision !== ARTIFACT_REVISION
+      || !isDeepStrictEqual(receipt.artifacts?.numericTierInventory, {
+        files: 11, bytes: Q4_INVENTORY_BYTES, sha256: Q4_INVENTORY_SHA256,
+      })
+      || !isDeepStrictEqual(receipt.artifacts?.textEncoderInventory, {
+        files: TEXT_ENCODER_INVENTORY_FILES,
+        bytes: TEXT_ENCODER_INVENTORY_BYTES,
+        sha256: TEXT_ENCODER_INVENTORY_SHA256,
+      })
+      || !/^[0-9a-f]{64}$/.test(preparation?.key ?? "")
+      || !path.isAbsolute(preparation?.root ?? "")
+      || path.basename(preparation?.root ?? "") !== preparation.key
+      || preparation?.manifest?.key !== preparation.key
+      || preparation?.manifest?.schemaVersion !== PREPARATION_SCHEMA_VERSION
+      || !isDeepStrictEqual(preparation?.manifest?.identity, identity)
+      || preparation?.manifest?.preparedFrom?.sceneWorksRevision
+        !== receipt.source.sceneWorks.revision
+      || preparation?.manifest?.preparedFrom?.inferenceRevision
+        !== receipt.source.inference.revision
+      || !isDeepStrictEqual(preparation?.manifest?.artifacts?.numericTier?.content,
+        receipt.artifacts.numericTierInventory)
+      || !isDeepStrictEqual(preparation?.manifest?.artifacts?.textEncoder?.content,
+        receipt.artifacts.textEncoderInventory)
+      || identity?.sceneWorksTree !== receipt.source.sceneWorks.tree
+      || identity?.inferenceTree !== receipt.source.inference.tree
+      || identity?.schemaVersion !== PREPARATION_SCHEMA_VERSION
+      || !isDeepStrictEqual(identity?.artifact, {
+        repository: ARTIFACT_REPOSITORY,
+        revision: ARTIFACT_REVISION,
+        numericTier: receipt.artifacts.numericTierInventory,
+        textEncoder: receipt.artifacts.textEncoderInventory,
+      })
+      || !validFileIdentity(receipt.artifacts?.adapter, 0o500)
+      || !validFileIdentity(receipt.artifacts?.metallib, 0o400)
+      || !isDeepStrictEqual(preparation?.manifest?.adapter,
+        preparedFileManifestIdentity(receipt.artifacts.adapter))
+      || !isDeepStrictEqual(preparation?.manifest?.metallib,
+        preparedFileManifestIdentity(receipt.artifacts.metallib))) {
+    fail(`${label} receipt artifact or sealed-preparation identity changed`);
+  }
+}
+
 export function validateCampaignEntryFailureReceipt(receipt) {
   let canonicallyIngestible = true;
   try {
@@ -1115,67 +1390,216 @@ export function validateCampaignEntryFailureReceipt(receipt) {
       || !isDeepStrictEqual(receipt?.cleanup, expectedCleanup)) {
     fail("SC-20216 failure receipt is ingestible, incomplete, or identity-drifted");
   }
-  for (const source of [receipt.source?.sceneWorks, receipt.source?.inference]) {
-    if (!/^[0-9a-f]{40}$/.test(source?.revision ?? "")
-        || !/^[0-9a-f]{40}$/.test(source?.tree ?? "")) {
-      fail("SC-20216 failure receipt source identity is malformed");
-    }
-  }
-  const preparation = receipt.artifacts?.preparation;
-  const identity = preparation?.identity;
-  const validFileIdentity = (file, mode) => path.isAbsolute(file?.path ?? "")
-    && /^[0-9a-f]{64}$/.test(file?.sha256 ?? "")
-    && typeof file?.device === "string" && typeof file?.inode === "string"
-    && Number.isSafeInteger(file?.size) && file.size > 0
-    && typeof file?.mtimeNs === "string" && typeof file?.ctimeNs === "string"
-    && file?.mode === mode;
-  if (receipt.artifacts?.repository !== ARTIFACT_REPOSITORY
-      || receipt.artifacts?.revision !== ARTIFACT_REVISION
-      || !isDeepStrictEqual(receipt.artifacts?.numericTierInventory, {
-        files: 11, bytes: Q4_INVENTORY_BYTES, sha256: Q4_INVENTORY_SHA256,
-      })
-      || !isDeepStrictEqual(receipt.artifacts?.textEncoderInventory, {
-        files: TEXT_ENCODER_INVENTORY_FILES,
-        bytes: TEXT_ENCODER_INVENTORY_BYTES,
-        sha256: TEXT_ENCODER_INVENTORY_SHA256,
-      })
-      || !/^[0-9a-f]{64}$/.test(preparation?.key ?? "")
-      || !path.isAbsolute(preparation?.root ?? "")
-      || path.basename(preparation?.root ?? "") !== preparation.key
-      || preparation?.manifest?.key !== preparation.key
-      || preparation?.manifest?.schemaVersion !== PREPARATION_SCHEMA_VERSION
-      || !isDeepStrictEqual(preparation?.manifest?.identity, identity)
-      || preparation?.manifest?.preparedFrom?.sceneWorksRevision
-        !== receipt.source.sceneWorks.revision
-      || preparation?.manifest?.preparedFrom?.inferenceRevision
-        !== receipt.source.inference.revision
-      || !isDeepStrictEqual(preparation?.manifest?.artifacts?.numericTier?.content,
-        receipt.artifacts.numericTierInventory)
-      || !isDeepStrictEqual(preparation?.manifest?.artifacts?.textEncoder?.content,
-        receipt.artifacts.textEncoderInventory)
-      || identity?.sceneWorksTree !== receipt.source.sceneWorks.tree
-      || identity?.inferenceTree !== receipt.source.inference.tree
-      || identity?.schemaVersion !== PREPARATION_SCHEMA_VERSION
-      || !isDeepStrictEqual(identity?.artifact, {
-        repository: ARTIFACT_REPOSITORY,
-        revision: ARTIFACT_REVISION,
-        numericTier: receipt.artifacts.numericTierInventory,
-        textEncoder: receipt.artifacts.textEncoderInventory,
-      })
-      || !validFileIdentity(receipt.artifacts?.adapter, 0o500)
-      || !validFileIdentity(receipt.artifacts?.metallib, 0o400)
-      || !isDeepStrictEqual(preparation?.manifest?.adapter,
-        preparedFileManifestIdentity(receipt.artifacts.adapter))
-      || !isDeepStrictEqual(preparation?.manifest?.metallib,
-        preparedFileManifestIdentity(receipt.artifacts.metallib))) {
-    fail("SC-20216 failure receipt artifact or sealed-preparation identity changed");
-  }
+  validateContainedReceiptArtifactIdentity(receipt, "SC-20216 failure");
   const validated = validateCampaignEntryFailureEvents(
     receipt.watchdog.events, receipt.watchdog.hostMemoryBytes,
   );
   if (!isDeepStrictEqual(receipt.watchdog.failure, validated)
       || !isDeepStrictEqual(receipt.watchdog.eventChain, validated.eventChain)) {
     fail("SC-20216 failure receipt summary does not match its complete event stream");
+  }
+  return receipt;
+}
+
+export function boundedCarrierSuccessPath(canonicalOutput) {
+  return path.join(path.dirname(canonicalOutput), "sc-20254-bounded-carrier-success.json");
+}
+
+export function boundedCarrierFailurePath(canonicalOutput) {
+  return path.join(path.dirname(canonicalOutput), "sc-20254-bounded-carrier-failure.json");
+}
+
+export function boundedCarrierOutcomeReservationPath(canonicalOutput) {
+  return path.join(path.dirname(canonicalOutput), ".sc-20254-bounded-carrier-outcome");
+}
+
+function boundedCarrierCaseIdentity() {
+  return {
+    action: BOUNDED_CARRIER_ACTION,
+    logicalCaseId: BOUNDED_CARRIER_LOGICAL_CASE_ID,
+    fixture: BOUNDED_CARRIER_FIXTURE,
+    identity: BOUNDED_CARRIER_IDENTITY,
+    target: {
+      provider: PROVIDER, tier: "q4",
+      geometry: { width: 768, height: 512, batch: 1, frames: 121, fps: 30 },
+      seed: 18_946, videoMode: "default_av", audio: true,
+    },
+    strategy: {
+      rung: "bounded_decode",
+      engagedRungs: ["resident", "staged_residency", "bounded_decode"],
+      parameters: { decodeTileEdge: 192, decodeOverlap: 64 },
+      spatialDecodeTiles: 24,
+    },
+  };
+}
+
+function boundedCarrierReceiptBase({
+  recordType, status, sceneWorksRevision, sceneWorksTree, inferenceRevision, inferenceTree,
+  identity, preparationKey, preparationRoot, prepared, hostMemoryBytes, events, outcome,
+}) {
+  return {
+    schemaVersion: 1,
+    recordType,
+    status,
+    diagnosticOnly: true,
+    promotable: false,
+    ingestible: false,
+    canonicalBundlePublished: false,
+    outcome: structuredClone(outcome),
+    story: "sc-20254",
+    source: {
+      sceneWorks: { revision: sceneWorksRevision, tree: sceneWorksTree },
+      inference: { revision: inferenceRevision, tree: inferenceTree },
+    },
+    boundedCarrier: boundedCarrierCaseIdentity(),
+    artifacts: {
+      repository: ARTIFACT_REPOSITORY,
+      revision: ARTIFACT_REVISION,
+      numericTierInventory: structuredClone(identity.artifact.numericTier),
+      textEncoderInventory: structuredClone(identity.artifact.textEncoder),
+      adapter: structuredClone(prepared.adapter),
+      metallib: structuredClone(prepared.metallib),
+      preparation: {
+        key: preparationKey,
+        root: preparationRoot,
+        identity: structuredClone(identity),
+        manifest: structuredClone(prepared.manifest),
+      },
+    },
+    watchdog: {
+      protocol: "sceneworks-memory-watchdog-v1",
+      providerPhaseProtocol: PROVIDER_PHASE_PROTOCOL,
+      providerPhaseProfile: "bounded-carrier",
+      providerPhases: [...BOUNDED_CARRIER_PHASES],
+      maxFootprintBytes: MAX_FOOTPRINT_BYTES,
+      maxRuntimeSeconds: MAX_RUNTIME_SECONDS,
+      hostMemoryBytes,
+      minInitialMemoryFreeBytes: preflightFreeFloor(hostMemoryBytes),
+      minMemoryFreeBytes: runtimeFreeFloor(hostMemoryBytes),
+      eventChain: validateWatchdogEventChain(events),
+      events: structuredClone(events),
+    },
+    cleanup: {
+      ownedProcessGroupResidueVerified: true,
+      runScratchRemoved: true,
+      runRootEmpty: true,
+      sourceIdentityVerified: true,
+      runtimeAssetIdentityVerified: true,
+      preparedCacheVerified: true,
+      preparationTransientResidueVerified: true,
+    },
+  };
+}
+
+export function boundedCarrierSuccessReceipt(options) {
+  const maxObservedFootprintBytes = validateBoundedCarrierWatchdogEvents(
+    options.events, options.hostMemoryBytes,
+  );
+  const receipt = boundedCarrierReceiptBase({
+    ...options,
+    recordType: BOUNDED_CARRIER_SUCCESS_RECEIPT_TYPE,
+    status: "diagnostic_success",
+  });
+  receipt.response = structuredClone(validateBoundedCarrierResponse(options.response, {
+    inferenceRevision: options.inferenceRevision,
+    hostMemoryBytes: options.hostMemoryBytes,
+  }));
+  receipt.watchdog.maxObservedFootprintBytes = maxObservedFootprintBytes;
+  return validateBoundedCarrierReceipt(receipt);
+}
+
+export function boundedCarrierFailureReceipt(options) {
+  const failure = validateCampaignEntryFailureEvents(
+    options.events, options.hostMemoryBytes, BOUNDED_CARRIER_PHASES,
+  );
+  const receipt = boundedCarrierReceiptBase({
+    ...options,
+    recordType: BOUNDED_CARRIER_FAILURE_RECEIPT_TYPE,
+    status: "diagnostic_failure",
+  });
+  receipt.watchdog.failure = failure;
+  return validateBoundedCarrierReceipt(receipt);
+}
+
+export function validateBoundedCarrierReceipt(receipt) {
+  let canonicallyIngestible = true;
+  try {
+    validateBundle(receipt);
+  } catch {
+    canonicallyIngestible = false;
+  }
+  const success = receipt?.recordType === BOUNDED_CARRIER_SUCCESS_RECEIPT_TYPE
+    && receipt?.status === "diagnostic_success";
+  const failure = receipt?.recordType === BOUNDED_CARRIER_FAILURE_RECEIPT_TYPE
+    && receipt?.status === "diagnostic_failure";
+  const expectedCleanup = {
+    ownedProcessGroupResidueVerified: true,
+    runScratchRemoved: true,
+    runRootEmpty: true,
+    sourceIdentityVerified: true,
+    runtimeAssetIdentityVerified: true,
+    preparedCacheVerified: true,
+    preparationTransientResidueVerified: true,
+  };
+  const canonicalOutput = receipt?.outcome?.canonicalOutput ?? "";
+  if (canonicallyIngestible
+      || (!success && !failure)
+      || receipt?.diagnosticOnly !== true
+      || receipt?.promotable !== false
+      || receipt?.ingestible !== false
+      || receipt?.canonicalBundlePublished !== false
+      || receipt?.story !== "sc-20254"
+      || !isDeepStrictEqual(receipt?.boundedCarrier, boundedCarrierCaseIdentity())
+      || !path.isAbsolute(canonicalOutput)
+      || receipt?.outcome?.successOutput !== boundedCarrierSuccessPath(canonicalOutput)
+      || receipt?.outcome?.failureOutput !== boundedCarrierFailurePath(canonicalOutput)
+      || receipt?.outcome?.reservation !== boundedCarrierOutcomeReservationPath(canonicalOutput)
+      || receipt?.outcome?.choice !== `${receipt?.outcome?.reservation}.choice`
+      || receipt?.outcome?.canonicalPublicationClaim
+        !== canonicalPublicationClaimPath(canonicalOutput)
+      || receipt?.outcome?.canonicalPublicationClaimHeldAtPublication !== true
+      || receipt?.outcome?.canonicalBundleAbsentAtPublication !== true
+      || receipt?.outcome?.outcomeReservationHeldAtPublication !== true
+      || receipt?.outcome?.outcomeChoice !== (success ? "success" : "failure")
+      || receipt?.watchdog?.protocol !== "sceneworks-memory-watchdog-v1"
+      || receipt?.watchdog?.providerPhaseProtocol !== PROVIDER_PHASE_PROTOCOL
+      || receipt?.watchdog?.providerPhaseProfile !== "bounded-carrier"
+      || !isDeepStrictEqual(receipt?.watchdog?.providerPhases, BOUNDED_CARRIER_PHASES)
+      || receipt?.watchdog?.eventChain?.protocol !== WATCHDOG_EVENT_CHAIN_PROTOCOL
+      || receipt?.watchdog?.maxFootprintBytes !== MAX_FOOTPRINT_BYTES
+      || receipt?.watchdog?.maxRuntimeSeconds !== MAX_RUNTIME_SECONDS
+      || receipt?.watchdog?.minInitialMemoryFreeBytes
+        !== preflightFreeFloor(receipt?.watchdog?.hostMemoryBytes)
+      || receipt?.watchdog?.minMemoryFreeBytes
+        !== runtimeFreeFloor(receipt?.watchdog?.hostMemoryBytes)
+      || !isDeepStrictEqual(receipt?.cleanup, expectedCleanup)) {
+    fail("SC-20254 receipt is ingestible, incomplete, or identity-drifted");
+  }
+  validateContainedReceiptArtifactIdentity(receipt, "SC-20254");
+  const expectedEventChain = validateWatchdogEventChain(receipt.watchdog.events);
+  if (!isDeepStrictEqual(receipt.watchdog.eventChain, expectedEventChain)) {
+    fail("SC-20254 receipt event chain does not match its complete stream");
+  }
+  if (success) {
+    const maximum = validateBoundedCarrierWatchdogEvents(
+      receipt.watchdog.events, receipt.watchdog.hostMemoryBytes,
+    );
+    validateBoundedCarrierResponse(receipt.response, {
+      inferenceRevision: receipt.source.inference.revision,
+      hostMemoryBytes: receipt.watchdog.hostMemoryBytes,
+    });
+    if (receipt.watchdog.maxObservedFootprintBytes !== maximum
+        || Object.hasOwn(receipt.watchdog, "failure")) {
+      fail("SC-20254 success receipt watchdog summary changed");
+    }
+  } else {
+    const validated = validateCampaignEntryFailureEvents(
+      receipt.watchdog.events, receipt.watchdog.hostMemoryBytes, BOUNDED_CARRIER_PHASES,
+    );
+    if (!isDeepStrictEqual(receipt.watchdog.failure, validated)
+        || Object.hasOwn(receipt, "response")) {
+      fail("SC-20254 failure receipt summary changed");
+    }
   }
   return receipt;
 }
@@ -2163,7 +2587,7 @@ async function assertRunRootEmpty(runRoot) {
   if (entries.length !== 0) fail(`SC-20191 run scratch retained residue: ${entries.join(", ")}`);
 }
 
-async function assertCampaignSourceState(options, signal) {
+async function assertCampaignSourceState(options, signal, operation = "SC-20191 campaign entry") {
   const pairs = [
     [ROOT, "SceneWorks", options["scene-revision"], options["scene-tree"]],
     [options["inference-repo"], "inference", options["inference-revision"], options["inference-tree"]],
@@ -2171,7 +2595,7 @@ async function assertCampaignSourceState(options, signal) {
   for (const [repo, label, revision, tree] of pairs) {
     if (await cleanHead(repo, label, signal) !== revision
         || await git(repo, ["rev-parse", "HEAD^{tree}"], signal) !== tree) {
-      fail(`${label} source changed during SC-20191 campaign entry`);
+      fail(`${label} source changed during ${operation}`);
     }
   }
 }
@@ -2201,7 +2625,7 @@ function campaignProviderOptions(argv) {
 }
 
 async function campaignProviderInvocation(options, input, {
-  signal, setActiveWatchdog = () => {},
+  signal, setActiveWatchdog = () => {}, canonicalClaim,
 } = {}) {
   signal?.throwIfAborted();
   const request = JSON.parse(input);
@@ -2211,6 +2635,7 @@ async function campaignProviderInvocation(options, input, {
     reservation: options["outcome-reservation"],
     choice: `${options["outcome-reservation"]}.choice`,
     token: options["outcome-token"],
+    canonicalClaim,
   };
   if (campaignOutcome.failureOutput !== campaignEntryFailurePath(campaignOutcome.canonicalOutput)
       || campaignOutcome.reservation
@@ -2285,6 +2710,7 @@ async function campaignProviderInvocation(options, input, {
         "--event-file", eventsPath,
         "--require-child-attestation",
         "--require-provider-phases",
+        "--provider-phase-profile", "campaign-entry",
         "--",
         "/bin/sh", "-c", 'set -C; exec "$1" <"$2" >"$3"',
         "sc-20191-campaign-entry", prepared.adapter.path, requestPath, responsePath,
@@ -2474,6 +2900,10 @@ export async function releaseUnpublishedCampaignEntryOutcome(outcome) {
 
 async function publishCampaignEntryOutcome(outcome, kind, build, signal) {
   await assertCampaignEntryOutcomeOwner(outcome);
+  if (typeof outcome?.canonicalClaim?.assertOwner !== "function") {
+    fail("SC-20216 publication requires the shared canonical claim");
+  }
+  await outcome.canonicalClaim.assertOwner();
   const target = kind === "canonical" ? outcome.canonicalOutput : outcome.failureOutput;
   const other = kind === "canonical" ? outcome.failureOutput : outcome.canonicalOutput;
   await writeFile(outcome.choice, `${kind}\n`, { flag: "wx", mode: 0o400 });
@@ -2510,6 +2940,411 @@ export async function publishCampaignEntryFailureReceipt(outcome, { verify, buil
   });
 }
 
+export function canonicalPublicationClaimPath(canonicalOutput) {
+  return path.join(
+    path.dirname(canonicalOutput),
+    `.${path.basename(canonicalOutput)}.ltx-canonical-publication-claim`,
+  );
+}
+
+const CANONICAL_RECLAMATION_LOCK_HELPER = String.raw`
+import base64
+import fcntl
+import os
+import stat
+import sys
+
+lock_path = sys.argv[1]
+lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+initial_stat = os.fstat(lock_fd)
+if (
+    not stat.S_ISREG(initial_stat.st_mode)
+    or initial_stat.st_nlink != 1
+    or stat.S_IMODE(initial_stat.st_mode) != 0o600
+):
+    raise RuntimeError("reclamation lock is not an exact private regular file")
+fcntl.flock(lock_fd, fcntl.LOCK_EX)
+lock_stat = os.fstat(lock_fd)
+if lock_stat.st_size > 16384:
+    raise RuntimeError("reclamation lock owner is oversized")
+os.lseek(lock_fd, 0, os.SEEK_SET)
+previous_owner = b""
+while len(previous_owner) < lock_stat.st_size:
+    previous_owner += os.read(lock_fd, lock_stat.st_size - len(previous_owner))
+encoded_previous_owner = base64.b64encode(previous_owner).decode("ascii") or "-"
+print(
+    f"LOCKED {lock_stat.st_dev} {lock_stat.st_ino} {encoded_previous_owner}",
+    flush=True,
+)
+owner_command = sys.stdin.readline().strip().split(" ")
+if owner_command == ["RELEASE"]:
+    sys.exit(0)
+if owner_command[0] != "OWNER" or len(owner_command) != 2:
+    raise RuntimeError("missing reclamation lock owner")
+owner_bytes = base64.b64decode(owner_command[1])
+os.fchmod(lock_fd, 0o600)
+os.ftruncate(lock_fd, 0)
+os.lseek(lock_fd, 0, os.SEEK_SET)
+remaining = memoryview(owner_bytes)
+while remaining:
+    remaining = remaining[os.write(lock_fd, remaining):]
+os.fsync(lock_fd)
+owned_stat = os.fstat(lock_fd)
+print(
+    f"OWNED {owned_stat.st_dev} {owned_stat.st_ino} "
+    f"{stat.S_IMODE(owned_stat.st_mode)} {owned_stat.st_size} {owned_stat.st_nlink}",
+    flush=True,
+)
+command = sys.stdin.readline().strip().split(" ")
+if command[0] == "RENAME" and len(command) == 3:
+    source = base64.b64decode(command[1]).decode("utf-8")
+    target = base64.b64decode(command[2]).decode("utf-8")
+    os.rename(source, target)
+    print("RENAMED", flush=True)
+elif command != ["RELEASE"]:
+    raise RuntimeError("invalid reclamation lock command")
+`;
+
+function encodedLockPath(value) {
+  return Buffer.from(value, "utf8").toString("base64");
+}
+
+function encodedLockOwner(value) {
+  return Buffer.from(`${JSON.stringify(value)}\n`, "utf8").toString("base64");
+}
+
+async function acquireCanonicalClaimReclamationMutex(
+  claimPath, signal, processIdentityProbe,
+) {
+  // Keep one stable inode: unlinking it could split an existing waiter from a new opener. The
+  // kernel lock, not the retained diagnostic owner bytes, is authoritative and is released when
+  // this helper exits after an explicit command or loss of its parent pipe.
+  const mutexPath = `${claimPath}.reclaiming`;
+  const deadline = Date.now() + 2_000;
+  signal?.throwIfAborted();
+  const child = spawn("/usr/bin/python3", ["-c", CANONICAL_RECLAMATION_LOCK_HELPER, mutexPath], {
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  child.stderr.setEncoding("utf8");
+  let stderr = "";
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
+  const iterator = lines[Symbol.asyncIterator]();
+  const childClosed = new Promise((resolve) => {
+    child.once("close", (code, childSignal) => resolve([code, childSignal]));
+  });
+  let termination = null;
+  const terminate = (error) => {
+    if (termination !== null) return;
+    termination = error;
+    child.kill("SIGKILL");
+  };
+  const timeout = setTimeout(() => terminate(
+    new Error("canonical claim reclamation serialization remained unavailable"),
+  ), Math.max(0, deadline - Date.now()));
+  const onAbort = () => terminate(signal.reason ?? new Error("canonical claim reclamation aborted"));
+  signal?.addEventListener("abort", onAbort, { once: true });
+  let locked;
+  try {
+    locked = await iterator.next();
+  } finally {
+    clearTimeout(timeout);
+    signal?.removeEventListener("abort", onAbort);
+  }
+  if (termination !== null) {
+    await childClosed;
+    throw termination;
+  }
+  if (locked.done) fail(`canonical reclamation lock helper exited before ownership: ${stderr}`);
+  const match = /^LOCKED ([0-9]+) ([0-9]+) ([A-Za-z0-9+/=]+|-)$/.exec(locked.value);
+  if (match === null) fail("canonical reclamation lock helper returned invalid ownership");
+  const filesystemIdentity = { device: match[1], inode: match[2] };
+  const previousOwnerBytes = match[3] === "-"
+    ? "" : Buffer.from(match[3], "base64").toString("utf8");
+  if (previousOwnerBytes !== "") {
+    let previousOwner;
+    try {
+      previousOwner = JSON.parse(previousOwnerBytes);
+    } catch {
+      previousOwner = null;
+    }
+    if (previousOwner?.schemaVersion !== 1
+        || previousOwner?.kind !== "canonical-claim-reclamation-mutex"
+        || !Number.isSafeInteger(previousOwner?.pid) || previousOwner.pid <= 0
+        || !validProcessIdentity(previousOwner?.processIdentity)
+        || typeof previousOwner?.token !== "string" || previousOwner.token === ""
+        || !sameJson(previousOwner?.filesystemIdentity, filesystemIdentity)) {
+      child.stdin.end("RELEASE\n");
+      await childClosed;
+      fail("preexisting canonical reclamation lock owner is invalid");
+    }
+  }
+  const token = randomUUID();
+  let processIdentity;
+  try {
+    processIdentity = await processIdentityProbe(process.pid, signal);
+    if (!validProcessIdentity(processIdentity)) {
+      fail("cannot bind canonical reclamation lock to this process start identity");
+    }
+  } catch (error) {
+    child.stdin.end("RELEASE\n");
+    await childClosed;
+    throw error;
+  }
+  const owner = {
+    schemaVersion: 1,
+    kind: "canonical-claim-reclamation-mutex",
+    pid: process.pid,
+    processIdentity,
+    token,
+    filesystemIdentity,
+  };
+  try {
+    const ownerBytes = Buffer.byteLength(`${JSON.stringify(owner)}\n`);
+    child.stdin.write(`OWNER ${encodedLockOwner(owner)}\n`);
+    const owned = await iterator.next();
+    const ownedMatch = owned.done ? null
+      : /^OWNED ([0-9]+) ([0-9]+) ([0-9]+) ([0-9]+) ([0-9]+)$/
+      .exec(owned.value);
+    if (ownedMatch === null
+        || ownedMatch[1] !== filesystemIdentity.device
+        || ownedMatch[2] !== filesystemIdentity.inode
+        || Number(ownedMatch[3]) !== 0o600
+        || Number(ownedMatch[4]) !== ownerBytes
+        || Number(ownedMatch[5]) !== 1) {
+      fail("canonical reclamation lock helper changed its locked inode during owner publication");
+    }
+  } catch (error) {
+    child.stdin.end("RELEASE\n");
+    await childClosed;
+    throw error;
+  }
+  const assertOwner = async () => {
+    if (child.exitCode !== null) fail("canonical reclamation lock helper exited unexpectedly");
+    const [actualOwner, metadata, actualIdentity] = await Promise.all([
+      readFile(mutexPath, "utf8").then(JSON.parse),
+      lstat(mutexPath, { bigint: true }),
+      processIdentityProbe(process.pid),
+    ]);
+    const actualFilesystemIdentity = {
+      device: String(metadata.dev), inode: String(metadata.ino),
+    };
+    if (!metadata.isFile() || metadata.isSymbolicLink()
+        || Number(metadata.mode & 0o777n) !== 0o600
+        || !sameJson(actualOwner, owner)
+        || !sameJson(actualFilesystemIdentity, filesystemIdentity)
+        || !sameJson(actualIdentity, processIdentity)) {
+      fail("canonical reclamation lock ownership changed");
+    }
+  };
+  let closed = false;
+  const finish = async (command, expectedLine) => {
+    if (closed) fail("canonical reclamation lock was already released");
+    try {
+      await assertOwner();
+      child.stdin.end(`${command}\n`);
+      const response = await iterator.next();
+      if (expectedLine === null ? !response.done : response.done || response.value !== expectedLine) {
+        fail(`canonical reclamation lock helper rejected its command: ${stderr}`);
+      }
+      const [code, childSignal] = await childClosed;
+      if (code !== 0 || childSignal !== null) {
+        fail(`canonical reclamation lock helper failed: code=${code} signal=${childSignal} ${stderr}`);
+      }
+      closed = true;
+    } catch (error) {
+      child.kill("SIGKILL");
+      await childClosed;
+      closed = true;
+      throw error;
+    }
+  };
+  return {
+    rename: async (source, target) => finish(
+      `RENAME ${encodedLockPath(source)} ${encodedLockPath(target)}`, "RENAMED",
+    ),
+    release: async () => { if (!closed) await finish("RELEASE", null); },
+  };
+}
+
+export async function acquireCanonicalPublicationClaim(
+  canonicalOutput, signal, processIdentityProbe = osProcessIdentity, reclamationHooks = {},
+) {
+  const claimPath = canonicalPublicationClaimPath(canonicalOutput);
+  const token = randomUUID();
+  for (;;) {
+    signal?.throwIfAborted();
+    let acquired = false;
+    try {
+      await mkdir(claimPath, { mode: 0o700 });
+      acquired = true;
+      const processIdentity = await processIdentityProbe(process.pid, signal);
+      if (!validProcessIdentity(processIdentity)) {
+        fail("cannot bind canonical publication claim to this process start identity");
+      }
+      await writeFile(path.join(claimPath, "owner.json"), `${JSON.stringify({
+        schemaVersion: 1,
+        pid: process.pid,
+        processIdentity,
+        token,
+      })}\n`, { flag: "wx", mode: 0o400 });
+      const assertOwner = async () => {
+        const owner = JSON.parse(await readFile(path.join(claimPath, "owner.json"), "utf8"));
+        const actualIdentity = await processIdentityProbe(process.pid);
+        if (owner.token !== token || owner.pid !== process.pid
+            || !sameJson(owner.processIdentity, actualIdentity)) {
+          fail("canonical publication claim ownership changed");
+        }
+      };
+      return {
+        path: claimPath,
+        assertOwner,
+        release: async () => {
+          await assertOwner();
+          await cleanupCanaryScratch(claimPath);
+        },
+      };
+    } catch (error) {
+      if (error.code !== "EEXIST") {
+        if (acquired) await cleanupCanaryScratch(claimPath);
+        throw error;
+      }
+    }
+    await reclamationHooks.beforeSerialization?.(claimPath);
+    const reclamation = await acquireCanonicalClaimReclamationMutex(
+      claimPath, signal, processIdentityProbe,
+    );
+    try {
+      signal?.throwIfAborted();
+      // A contender may have replaced the stale claim while this process waited for the
+      // reclamation mutex. Re-read every byte and re-probe the current owner while serialized;
+      // only this exact observation may authorize the subsequent rename.
+      const ownerPath = path.join(claimPath, "owner.json");
+      const owner = await readFile(ownerPath, "utf8").then(JSON.parse).catch(() => null);
+      const metadata = await lstat(claimPath, { bigint: true }).catch((error) => {
+        if (error.code === "ENOENT") return null;
+        throw error;
+      });
+      if (metadata === null) continue;
+      const oldEnough = Date.now() - Number(metadata.mtimeMs)
+        >= PREPARATION_LOCK_ORPHAN_GRACE_MS;
+      const verifiableOwner = owner?.schemaVersion === 1
+        && Number.isSafeInteger(owner.pid) && owner.pid > 0
+        && validProcessIdentity(owner.processIdentity);
+      const observedIdentity = verifiableOwner
+        ? await processIdentityProbe(owner.pid, signal) : null;
+      const staleOwner = verifiableOwner
+        ? !sameJson(observedIdentity, owner.processIdentity) : oldEnough;
+      if (!staleOwner) {
+        fail("another live contained LTX run owns the canonical publication claim");
+      }
+      await reclamationHooks.afterStaleRevalidation?.(claimPath);
+      signal?.throwIfAborted();
+      const stale = `${claimPath}.stale-${randomUUID()}`;
+      try {
+        await reclamation.rename(claimPath, stale);
+        await cleanupCanaryScratch(stale);
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
+      continue;
+    } finally {
+      if (reclamation.release !== null) await reclamation.release();
+    }
+  }
+}
+
+export async function acquireBoundedCarrierOutcome(canonicalOutput) {
+  const outcome = {
+    canonicalOutput,
+    successOutput: boundedCarrierSuccessPath(canonicalOutput),
+    failureOutput: boundedCarrierFailurePath(canonicalOutput),
+    reservation: boundedCarrierOutcomeReservationPath(canonicalOutput),
+    choice: `${boundedCarrierOutcomeReservationPath(canonicalOutput)}.choice`,
+    token: randomUUID(),
+  };
+  await mkdir(path.dirname(canonicalOutput), { recursive: true });
+  await writeFile(outcome.reservation, `${outcome.token}\n`, { flag: "wx", mode: 0o400 });
+  if (await pathExists(outcome.canonicalOutput)
+      || await pathExists(outcome.successOutput)
+      || await pathExists(outcome.failureOutput)) {
+    await unlink(outcome.reservation);
+    fail("SC-20254 already has an immutable canonical, success, or failure outcome");
+  }
+  return outcome;
+}
+
+async function assertBoundedCarrierOutcomeOwner(outcome) {
+  if (await readFile(outcome?.reservation ?? "", "utf8").catch(() => null)
+      !== `${outcome?.token}\n`) {
+    fail("SC-20254 outcome reservation ownership changed");
+  }
+}
+
+export async function releaseUnpublishedBoundedCarrierOutcome(outcome) {
+  await assertBoundedCarrierOutcomeOwner(outcome);
+  if (await pathExists(outcome.choice)
+      || await pathExists(outcome.canonicalOutput)
+      || await pathExists(outcome.successOutput)
+      || await pathExists(outcome.failureOutput)) return;
+  await unlink(outcome.reservation);
+}
+
+async function publishBoundedCarrierOutcome(outcome, kind, build, signal) {
+  await assertBoundedCarrierOutcomeOwner(outcome);
+  if (typeof outcome?.canonicalClaim?.assertOwner !== "function") {
+    fail("SC-20254 publication requires the shared canonical claim");
+  }
+  await outcome.canonicalClaim.assertOwner();
+  const target = kind === "success" ? outcome.successOutput : outcome.failureOutput;
+  const other = kind === "success" ? outcome.failureOutput : outcome.successOutput;
+  await writeFile(outcome.choice, `${kind}\n`, { flag: "wx", mode: 0o400 });
+  if (await pathExists(outcome.canonicalOutput)
+      || await pathExists(target) || await pathExists(other)) {
+    fail("SC-20254 bounded-carrier outcome is already fixed");
+  }
+  const value = await build({
+    canonicalOutput: outcome.canonicalOutput,
+    successOutput: outcome.successOutput,
+    failureOutput: outcome.failureOutput,
+    reservation: outcome.reservation,
+    choice: outcome.choice,
+    canonicalPublicationClaim: outcome.canonicalClaim.path,
+    canonicalPublicationClaimHeldAtPublication: true,
+    outcomeChoice: kind,
+    canonicalBundleAbsentAtPublication: true,
+    outcomeReservationHeldAtPublication: true,
+  });
+  await publishExclusiveJson(target, value, signal);
+  return value;
+}
+
+export async function publishBoundedCarrierSuccessReceipt(outcome, { verify, build, signal }) {
+  if (typeof verify !== "function" || typeof build !== "function") {
+    fail("SC-20254 success publication requires validation and receipt builders");
+  }
+  await verify();
+  return publishBoundedCarrierOutcome(outcome, "success", async (publication) => {
+    if (await pathExists(outcome.canonicalOutput)) {
+      fail("SC-20254 canonical bundle exists; success receipt suppressed");
+    }
+    return validateBoundedCarrierReceipt(await build(publication));
+  }, signal);
+}
+
+export async function publishBoundedCarrierFailureReceipt(outcome, { verify, build, signal }) {
+  if (typeof verify !== "function" || typeof build !== "function") {
+    fail("SC-20254 failure publication requires validation and receipt builders");
+  }
+  await verify();
+  return publishBoundedCarrierOutcome(outcome, "failure", async (publication) => {
+    if (await pathExists(outcome.canonicalOutput)) {
+      fail("SC-20254 canonical bundle exists; failure receipt suppressed");
+    }
+    return validateBoundedCarrierReceipt(await build(publication));
+  }, signal);
+}
+
 async function assertPreparationHasNoTransientResidue(preparationRoot) {
   const parent = path.dirname(preparationRoot);
   const key = path.basename(preparationRoot);
@@ -2532,7 +3367,16 @@ async function runCampaignEntryController({
 }) {
   const config = JSON.parse(await readFile(path.join(ROOT, CAMPAIGN_ENTRY_PLAN), "utf8"));
   campaignEntryPlan(config);
-  const campaignOutcome = await acquireCampaignEntryOutcome(output);
+  const canonicalClaim = await acquireCanonicalPublicationClaim(output, signal);
+  let campaignOutcome;
+  try {
+    campaignOutcome = await acquireCampaignEntryOutcome(output);
+    campaignOutcome.canonicalClaim = canonicalClaim;
+  } catch (error) {
+    let releaseError = null;
+    try { await canonicalClaim.release(); } catch (cleanup) { releaseError = cleanup; }
+    throw preservePrimaryFailure(error, releaseError);
+  }
   const runRoot = path.join(path.dirname(output), "runs");
   const providerOptions = {
     "inference-repo": inferenceRepo,
@@ -2575,7 +3419,7 @@ async function runCampaignEntryController({
           fail("SC-20191 harness attempted a foreign provider command");
         }
         return campaignProviderInvocation(providerOptions, input, {
-          signal, setActiveWatchdog,
+          signal, setActiveWatchdog, canonicalClaim,
         });
       },
     });
@@ -2592,16 +3436,244 @@ async function runCampaignEntryController({
   } catch (error) {
     operationError = error;
   } finally {
-    try {
-      if (await pathExists(runRoot)) await cleanupCanaryScratch(runRoot);
-      await releaseUnpublishedCampaignEntryOutcome(campaignOutcome);
-    } catch (error) {
-      cleanupError = error;
+    for (const cleanup of [
+      async () => {
+        if (await pathExists(runRoot)) await cleanupCanaryScratch(runRoot);
+      },
+      async () => releaseUnpublishedCampaignEntryOutcome(campaignOutcome),
+      async () => canonicalClaim.release(),
+    ]) {
+      try {
+        await cleanup();
+      } catch (error) {
+        cleanupError = preservePrimaryFailure(cleanupError, error);
+      }
     }
   }
   const finalError = preservePrimaryFailure(operationError, cleanupError);
   if (finalError !== null) throw finalError;
   process.stdout.write(`${output}\n`);
+}
+
+async function runBoundedCarrierController({
+  output, inferenceRepo, sceneWorksRevision, inferenceRevision,
+  sceneWorksTree, inferenceTree, identity, preparationKey, preparationRoot,
+  prepared, hostMemoryBytes, signal, setActiveWatchdog,
+}) {
+  const canonicalClaim = await acquireCanonicalPublicationClaim(output, signal);
+  let outcome;
+  try {
+    outcome = await acquireBoundedCarrierOutcome(output);
+    outcome.canonicalClaim = canonicalClaim;
+  } catch (error) {
+    let releaseError = null;
+    try { await canonicalClaim.release(); } catch (cleanup) { releaseError = cleanup; }
+    throw preservePrimaryFailure(error, releaseError);
+  }
+  const runRoot = path.join(path.dirname(output), "sc-20254-runs");
+  const sourceOptions = {
+    "inference-repo": inferenceRepo,
+    "scene-revision": sceneWorksRevision,
+    "scene-tree": sceneWorksTree,
+    "inference-revision": inferenceRevision,
+    "inference-tree": inferenceTree,
+  };
+  let runScratch = null;
+  let operationError = null;
+  let cleanupError = null;
+  let failureEvents = null;
+  let response = null;
+  let successEvents = null;
+  try {
+    await mkdir(runRoot, { recursive: true, mode: 0o700 });
+    await assertRunRootEmpty(runRoot);
+    runScratch = await mkdtemp(path.join(runRoot, "sc-20254-run-"));
+    const runtimeHome = path.join(runScratch, "home");
+    await mkdir(runtimeHome, { mode: 0o700 });
+    await exactMetadata(runtimeHome, "directory", 0o700);
+    await exactEntries(runtimeHome, []);
+    const requestPath = path.join(runScratch, "request.json");
+    const responsePath = path.join(runScratch, "response.json");
+    const eventsPath = path.join(runScratch, "watchdog.jsonl");
+    const request = boundedCarrierRequest(
+      hostMemoryBytes,
+      inventoryAtRoot(identity.artifact.textEncoder, prepared.roots.textEncoder),
+    );
+    await writeFile(requestPath, canonicalJson(request), { flag: "wx" });
+    const launchPrepared = await validatePreparedCache(
+      preparationRoot, preparationKey, identity, signal,
+    );
+    if (launchPrepared === null) fail("SC-20254 prepared cache disappeared before launch");
+    await assertRuntimeAssetIdentities(
+      launchPrepared.adapter, launchPrepared.metallib, signal,
+    );
+    const runtimeMemoryFreeFloor = runtimeFreeFloor(hostMemoryBytes);
+    const watchdogArgs = [
+      path.join(ROOT, "scripts/memory-calibration-watchdog.py"),
+      "--max-footprint-bytes", String(MAX_FOOTPRINT_BYTES),
+      "--max-runtime-seconds", String(MAX_RUNTIME_SECONDS),
+      "--host-memory-bytes", String(hostMemoryBytes),
+      "--min-memory-free-bytes", String(runtimeMemoryFreeFloor),
+      "--sample-interval", "0.25",
+      "--telemetry-timeout", "1",
+      "--child-attestation-timeout", String(CHILD_ATTESTATION_TIMEOUT_SECONDS),
+      "--term-grace", "1",
+      "--event-file", eventsPath,
+      "--require-child-attestation",
+      "--require-provider-phases",
+      "--provider-phase-profile", "bounded-carrier",
+      "--",
+      "/bin/sh", "-c", 'set -C; exec "$1" <"$2" >"$3"',
+      "sc-20254-bounded-carrier", prepared.adapter.path, requestPath, responsePath,
+    ];
+    const environment = canaryWatchdogEnvironment(
+      process.env, prepared.roots, prepared.metallib.path, runtimeHome,
+    );
+    await assertCampaignSourceState(
+      sourceOptions, signal, "SC-20254 bounded carrier",
+    );
+    // The sole fresh actual-GPU-owner and two-boundary host check remains the final operation before
+    // the watchdog owns and releases the one provider render.
+    await assertHostPreflight(hostMemoryBytes, signal);
+    const status = await new Promise((resolve, reject) => {
+      const child = spawn("/usr/bin/python3", watchdogArgs, {
+        stdio: "inherit", env: environment,
+      });
+      setActiveWatchdog(child);
+      const onAbort = () => child.kill(signal.reason?.signalName ?? "SIGTERM");
+      signal.addEventListener("abort", onAbort, { once: true });
+      child.on("error", reject);
+      child.on("close", (code, childSignal) => {
+        signal.removeEventListener("abort", onAbort);
+        setActiveWatchdog(null);
+        resolve({ code, signal: childSignal });
+      });
+    });
+    const eventBytes = await readFile(eventsPath, "utf8").catch(() => "");
+    if (status.code !== 0 || status.signal) {
+      const watchdogError = new Error(watchdogFailureSummary(status, eventBytes));
+      try {
+        const events = eventBytes.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+        validateCampaignEntryFailureEvents(
+          events, hostMemoryBytes, BOUNDED_CARRIER_PHASES,
+        );
+        const started = events.find((event) => event.event === "started");
+        const processTable = (await execFileAsync(
+          "/bin/ps", ["-ww", "-axo", "pid=,pgid=,command="],
+          { encoding: "utf8", timeout: 2_000 },
+        )).stdout;
+        const residue = ownedProcessGroupResidue(processTable, started?.pgid);
+        if (residue.length) fail(`SC-20254 watchdog process group retained residue:\n${residue.join("\n")}`);
+        await assertCampaignSourceState(
+          sourceOptions, undefined, "SC-20254 bounded carrier",
+        );
+        await assertRuntimeAssetIdentities(prepared.adapter, prepared.metallib);
+        if (await validatePreparedCache(
+          preparationRoot, preparationKey, identity,
+        ) === null) fail("SC-20254 prepared cache disappeared after watchdog failure");
+        failureEvents = events;
+      } catch (error) {
+        throw preserveFailureReceiptSuppression(watchdogError, error);
+      }
+      throw watchdogError;
+    }
+    signal.throwIfAborted();
+    response = validateBoundedCarrierResponse(
+      JSON.parse(await readFile(responsePath, "utf8")),
+      { inferenceRevision, hostMemoryBytes },
+    );
+    successEvents = eventBytes.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    validateBoundedCarrierWatchdogEvents(successEvents, hostMemoryBytes);
+    const started = successEvents.find((event) => event.event === "started");
+    const processTable = (await execFileAsync(
+      "/bin/ps", ["-ww", "-axo", "pid=,pgid=,command="],
+      { encoding: "utf8", timeout: 2_000 },
+    )).stdout;
+    const residue = ownedProcessGroupResidue(processTable, started?.pgid);
+    if (residue.length) fail(`SC-20254 watchdog process group retained residue:\n${residue.join("\n")}`);
+    await assertCampaignSourceState(sourceOptions, signal, "SC-20254 bounded carrier");
+    await assertRuntimeAssetIdentities(prepared.adapter, prepared.metallib, signal);
+    if (await validatePreparedCache(
+      preparationRoot, preparationKey, identity, signal,
+    ) === null) fail("SC-20254 prepared cache disappeared after bounded carrier");
+  } catch (error) {
+    operationError = error;
+  } finally {
+    try {
+      if (runScratch !== null) await cleanupCanaryScratch(runScratch);
+      await assertRunRootEmpty(runRoot);
+    } catch (error) {
+      cleanupError = error;
+    }
+  }
+  const finalError = preservePrimaryFailure(operationError, cleanupError);
+  let terminalError = null;
+  try {
+    if (finalError !== null) {
+      let publicationError = null;
+      if (failureEvents !== null && cleanupError === null) {
+        try {
+          await publishBoundedCarrierFailureReceipt(outcome, {
+            verify: async () => {
+              await assertRunRootEmpty(runRoot);
+              await assertCampaignSourceState(
+                sourceOptions, undefined, "SC-20254 bounded carrier",
+              );
+              await assertRuntimeAssetIdentities(prepared.adapter, prepared.metallib);
+              if (await validatePreparedCache(
+                preparationRoot, preparationKey, identity,
+              ) === null) fail("SC-20254 prepared cache disappeared before failure publication");
+              await assertPreparationHasNoTransientResidue(preparationRoot);
+            },
+            build: (publication) => boundedCarrierFailureReceipt({
+              sceneWorksRevision, sceneWorksTree, inferenceRevision, inferenceTree,
+              identity, preparationKey, preparationRoot, prepared,
+              hostMemoryBytes, events: failureEvents, outcome: publication,
+            }),
+          });
+        } catch (error) {
+          publicationError = error;
+        }
+      }
+      if (publicationError !== null) {
+        throw preserveFailureReceiptSuppression(finalError, publicationError);
+      }
+      throw finalError;
+    }
+    await publishBoundedCarrierSuccessReceipt(outcome, {
+      signal,
+      verify: async () => {
+        await assertRunRootEmpty(runRoot);
+        await assertCampaignSourceState(sourceOptions, signal, "SC-20254 bounded carrier");
+        await assertRuntimeAssetIdentities(prepared.adapter, prepared.metallib, signal);
+        if (await validatePreparedCache(
+          preparationRoot, preparationKey, identity, signal,
+        ) === null) fail("SC-20254 prepared cache disappeared before success publication");
+        await assertPreparationHasNoTransientResidue(preparationRoot);
+      },
+      build: (publication) => boundedCarrierSuccessReceipt({
+        sceneWorksRevision, sceneWorksTree, inferenceRevision, inferenceTree,
+        identity, preparationKey, preparationRoot, prepared,
+        hostMemoryBytes, events: successEvents, response, outcome: publication,
+      }),
+    });
+    process.stdout.write(`${outcome.successOutput}\n`);
+  } catch (error) {
+    terminalError = error;
+  }
+  let releaseError = null;
+  for (const release of [
+    async () => releaseUnpublishedBoundedCarrierOutcome(outcome),
+    async () => canonicalClaim.release(),
+  ]) {
+    try {
+      await release();
+    } catch (error) {
+      releaseError = preservePrimaryFailure(releaseError, error);
+    }
+  }
+  const completedError = preservePrimaryFailure(terminalError, releaseError);
+  if (completedError !== null) throw completedError;
 }
 
 async function controller(argv) {
@@ -2616,7 +3688,10 @@ async function controller(argv) {
   if (unexpected.length) fail(`unsupported option(s): ${unexpected.join(", ")}`);
   const profileName = options.profile ?? SAFETY_CANARY_PROFILE;
   const campaignEntry = profileName === CAMPAIGN_ENTRY_PROFILE;
-  const profile = campaignEntry ? { story: "sc-20191" } : canaryProfile(profileName);
+  const boundedCarrier = profileName === BOUNDED_CARRIER_PROFILE;
+  const profile = campaignEntry
+    ? { story: "sc-20191" }
+    : boundedCarrier ? { story: "sc-20254" } : canaryProfile(profileName);
   const inferenceRepo = path.resolve(options["inference-repo"]);
   const output = path.resolve(options.output);
   const relativeOutput = path.relative(ROOT, output);
@@ -2751,6 +3826,24 @@ async function controller(argv) {
     const textEncoderInventory = inventoryAtRoot(
       identity.artifact.textEncoder, privateTextEncoderRoot,
     );
+    if (boundedCarrier) {
+      await runBoundedCarrierController({
+        output,
+        inferenceRepo,
+        sceneWorksRevision,
+        inferenceRevision,
+        sceneWorksTree,
+        inferenceTree,
+        identity,
+        preparationKey,
+        preparationRoot,
+        prepared,
+        hostMemoryBytes: memoryBytes,
+        signal,
+        setActiveWatchdog: (child) => { activeWatchdog = child; },
+      });
+      return;
+    }
     if (campaignEntry) {
       await runCampaignEntryController({
         output,

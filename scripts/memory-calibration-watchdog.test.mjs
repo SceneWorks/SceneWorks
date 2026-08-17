@@ -143,6 +143,7 @@ async function runWithMockedProductionTelemetry(files, childCommand, options = {
     telemetryTimeout = 0.5, actualHostMemory = 1000, requestedHostMemory = 1000,
     childAttestationTimeout = 1,
     requireProviderPhases = false,
+    providerPhaseProfile = "campaign-entry",
     memoryFreePercent = 90, memoryFreeBytes = 900, swapFreeBytes = 900,
     pressureSamples = [[memoryFreePercent, memoryFreeBytes, swapFreeBytes]],
     pressureFailureAt = null,
@@ -176,7 +177,9 @@ sys.argv = [${JSON.stringify(WATCHDOG)},
     "--telemetry-timeout", ${JSON.stringify(String(telemetryTimeout))},
     "--child-attestation-timeout", ${JSON.stringify(String(childAttestationTimeout))},
     "--term-grace", "0.1", "--event-file", ${JSON.stringify(files.events)},
-    "--require-child-attestation", ${requireProviderPhases ? '"--require-provider-phases",' : ""}
+    "--require-child-attestation", ${requireProviderPhases
+      ? `"--require-provider-phases", "--provider-phase-profile", ${JSON.stringify(providerPhaseProfile)},`
+      : ""}
     "--", *${JSON.stringify(childCommand)}]
 raise SystemExit(module.guard(module.parse_args()))
 `);
@@ -357,6 +360,7 @@ def line():
     return data.decode().strip()
 payload = json.loads(line()); nonce = payload["nonce"]
 assert payload["providerPhaseProtocol"] == "sceneworks-provider-phase-v1"
+assert payload["providerPhaseProfile"] == "campaign-entry"
 assert payload["providerPhases"] == ${JSON.stringify(phases)}
 sock.sendall(f"ACK {nonce}\n".encode()); assert line() == f"GO {nonce}"
 for sequence, name in enumerate(payload["providerPhases"], 1):
@@ -394,6 +398,53 @@ while True:
   }
   assert.ok(events.every((event) => /^[0-9a-f]{64}$/.test(event.eventHash)));
   validateWatchdogEventChain(events);
+});
+
+test("bounded carrier profile advertises and acknowledges exactly five phases", async () => {
+  const files = await fixture();
+  const attester = `${files.program}.bounded-phases.py`;
+  const phases = [
+    "common_load", "primary_conditioning", "primary_denoise", "primary_decode", "cleanup",
+  ];
+  await writeFile(attester, String.raw`import json, os, socket
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.connect(os.environ["SCENEWORKS_MEMORY_WATCHDOG_SOCKET"])
+def line():
+    data = b""
+    while not data.endswith(b"\n"): data += sock.recv(1)
+    return data.decode().strip()
+payload = json.loads(line()); nonce = payload["nonce"]
+assert payload["providerPhaseProtocol"] == "sceneworks-provider-phase-v1"
+assert payload["providerPhaseProfile"] == "bounded-carrier"
+assert payload["providerPhases"] == ${JSON.stringify(phases)}
+sock.sendall(f"ACK {nonce}\n".encode()); assert line() == f"GO {nonce}"
+for sequence, name in enumerate(payload["providerPhases"], 1):
+    sock.sendall(f"PHASE {nonce} {sequence} {name}\n".encode())
+    while True:
+        acknowledgement = line()
+        if acknowledgement == f"PING {nonce}": continue
+        assert acknowledgement == f"PHASE_ACK {nonce} {sequence} {name}"
+        break
+sock.sendall(f"DONE {nonce}\n".encode())
+while True:
+    message = line()
+    if message == f"BYE {nonce}": break
+    assert message == f"PING {nonce}"
+`);
+  await runWithMockedProductionTelemetry(files, ["python3", attester], {
+    requireProviderPhases: true,
+    providerPhaseProfile: "bounded-carrier",
+  });
+  const events = (await readFile(files.events, "utf8")).trim().split("\n").map(JSON.parse);
+  assert.deepEqual(
+    events.filter((event) => event.event === "provider_phase")
+      .map((event) => event.providerPhase.name),
+    phases,
+  );
+  assert.deepEqual(
+    events.find((event) => event.event === "child_completed").providerPhase,
+    { sequence: 5, name: "cleanup" },
+  );
 });
 
 test("reordered or foreign provider phases hard-stop the owned group", async () => {
