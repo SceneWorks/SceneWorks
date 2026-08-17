@@ -242,6 +242,47 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
             entrypoint: TypedResolverEntrypoint::SourceLibrary,
         },
     },
+    // sc-19708: the worker's single pre-loader model-source guard. It judges every dispatched
+    // job's carriers (all categories) against the typed source-library availability contract and
+    // is deliberately the ONLY worker surface holding external-library availability policy.
+    ModelConsumerInventoryEntry {
+        source_files: &["crates/sceneworks-worker/src/external_library_runtime.rs"],
+        categories: &[
+            Category::Image,
+            Category::Video,
+            Category::Audio,
+            Category::CaptioningUtility,
+            Category::Training,
+            Category::LoraControl,
+            Category::Primary,
+            Category::OptionalComponent,
+            Category::CoRequisite,
+            Category::ImportedConverted,
+        ],
+        resolution: Resolution::SharedContract {
+            entrypoint: TypedResolverEntrypoint::SourceLibrary,
+        },
+    },
+    // sc-19708: the API's single model-source seam (carrier attachment + submission preflight);
+    // same shared source-library contract, mirrored on the API side of the boundary.
+    ModelConsumerInventoryEntry {
+        source_files: &["apps/rust-api/src/model_sources.rs"],
+        categories: &[
+            Category::Image,
+            Category::Video,
+            Category::Audio,
+            Category::CaptioningUtility,
+            Category::Training,
+            Category::LoraControl,
+            Category::Primary,
+            Category::OptionalComponent,
+            Category::CoRequisite,
+            Category::ImportedConverted,
+        ],
+        resolution: Resolution::SharedContract {
+            entrypoint: TypedResolverEntrypoint::SourceLibrary,
+        },
+    },
 ];
 
 pub const EXPLICITLY_UNSUPPORTED_ARTIFACTS: &[ModelConsumerInventoryEntry] = &[

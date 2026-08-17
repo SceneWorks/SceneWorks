@@ -189,6 +189,9 @@ use dto::{
     TrainingCaptionJobRequest, VerifyResponse, VideoJobRequest, VqaJobRequest,
 };
 mod manifest;
+// The single model-source seam every job-creation path calls (sc-19708): generic carrier
+// attachment + typed external-library availability preflight, all data-driven.
+mod model_sources;
 use manifest::{
     acquire_manifest_file_lock, load_manifest_entries, manifest_write_lock, merge_entries_by_id,
     merge_object, mutate_manifest_entries, remove_catalog_manifest_entry, write_manifest_atomic,
@@ -3053,10 +3056,11 @@ async fn create_generation_job_with_status(
     job_type: JobType,
     project_id: Option<String>,
     project_name: Option<String>,
-    payload: JsonObject,
+    mut payload: JsonObject,
     requested_gpu: String,
     initial_status: Option<JobStatus>,
 ) -> Result<JobSnapshot, ApiError> {
+    model_sources::ensure_runtime_model_sources(&state, &job_type, &mut payload).await?;
     let job = store_call(state.clone(), move |store, _timeout| {
         store.create_job(CreateJob {
             job_type,

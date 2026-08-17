@@ -1,0 +1,33 @@
+InsightFace Model License Notice
+================================
+
+Applies to the SCRFD face detector (scrfd_10g) and the ArcFace face recognition
+embedder (arcface_iresnet100) used by SceneWorks' face-analysis features. These
+models originate from the InsightFace project (deepinsight/insightface).
+
+InsightFace publishes no standalone license document for its model weights; the
+governing terms are stated in the project README (License section,
+https://github.com/deepinsight/insightface). The upstream statements are
+reproduced verbatim below:
+
+  "The code of InsightFace is released under the MIT License. There is no
+  limitation for both academic and commercial usage."
+
+  "The training data containing the annotation (and the models trained with
+  these data) are available for non-commercial research purposes only."
+
+  "Both manual-downloading models from our github repo and auto-downloading
+  models with our python-library follow the above license policy(which is for
+  non-commercial research purposes only)."
+
+Summary of effect: the InsightFace CODE license (MIT) does not govern these
+weights. The SCRFD and ArcFace model weights are trained on InsightFace's
+annotated training data and are therefore available for NON-COMMERCIAL RESEARCH
+PURPOSES ONLY under the upstream terms above. Anyone requiring commercial use
+of these models must obtain a separate license from the InsightFace team
+(contact@insightface.ai).
+
+Provenance: SceneWorks stages these weights as safetensors conversions
+(SceneWorks/instantid-mlx) of the InsightFace-published model files. Conversion
+does not change the governing terms; the converted weights remain derivatives
+of the upstream models and carry the same non-commercial-research restriction.

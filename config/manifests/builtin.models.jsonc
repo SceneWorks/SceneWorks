@@ -12915,6 +12915,44 @@
       }
     },
     {
+      "id": "instantid_face_stack",
+      "name": "InstantID Face Analysis Stack",
+      "family": "instantid",
+      "type": "utility",
+      // Installable component bundle loaded by owning routes (face analysis, likeness, KPS,
+      // structured catalog analysis) — never a routable `model` of any job. Declared here so the
+      // capability matrix keys non-routability on manifest data, not a model-id branch.
+      "componentOnly": true,
+      "capabilities": [],
+      "downloads": [
+        {
+          // The SCRFD detector + ArcFace embedder pair every face-analysis lane loads
+          // (dataset face analysis, face-likeness compare, KPS extraction, structured
+          // catalog analysis, and the identity lanes' likeness staging). Declared here
+          // (sc-19708) so those routes carry a real catalog artifact through the typed
+          // model-source seam: install state, external-library availability, and the
+          // worker's pre-loader guard all key on this exact revision + file pair. The
+          // revision is byte-for-byte the worker's own `INSTANTID_MLX_REVISION`
+          // (`image_jobs/instantid.rs`) — they MUST agree, mirroring the real_esrgan
+          // precedent (sc-17633): declared-vs-loaded drift at the revision level is the
+          // defect this entry exists to remove. The staging loader itself still fetches
+          // into `<data_dir>/cache/instantid-mlx` at job time; moving that load onto the
+          // resolved-path seam is the sc-19707 local-preference story.
+          "provider": "huggingface",
+          "repo": "SceneWorks/instantid-mlx",
+          "revision": "bca0cacf8e5e04529bb2b326a521361b02be84fd",
+          "files": ["scrfd_10g.safetensors", "arcface_iresnet100.safetensors"]
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/instantid-mlx"
+      },
+      "ui": {
+        "label": "InstantID Face Analysis Stack",
+        "description": "Shared SCRFD face detector and ArcFace identity embedder used by dataset face analysis, face-likeness comparison, keypoint extraction, and identity-conditioned generation."
+      }
+    },
+    {
       "id": "real_esrgan",
       "recommended": true,
       "name": "Real-ESRGAN Upscaler",

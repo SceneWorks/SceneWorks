@@ -2004,7 +2004,10 @@ pub(crate) fn max_model_upload_bytes() -> usize {
 /// byte-accurate download size — so an unreachable huggingface.co can't stall
 /// those paths (sc-4169).
 pub(crate) async fn model_catalog(state: &AppState) -> Result<Vec<Value>, ApiError> {
-    Ok(model_catalog_snapshot(state).await?.as_ref().clone())
+    let mut models = model_catalog_snapshot(state).await?.as_ref().clone();
+    crate::model_sources::refresh_live_external_availability(&state.settings.data_dir, &mut models)
+        .await?;
+    Ok(models)
 }
 
 /// Catalog with live Hugging Face download-size estimates (negative-cached on
@@ -2019,6 +2022,8 @@ pub(crate) async fn model_catalog_sized(state: &AppState) -> Result<Vec<Value>, 
     let (size_estimates, snapshot) = tokio::join!(size_estimates, snapshot);
     let size_estimates = size_estimates?;
     let mut models = snapshot?.as_ref().clone();
+    crate::model_sources::refresh_live_external_availability(&state.settings.data_dir, &mut models)
+        .await?;
     for model in &mut models {
         let context = model_download_context(model)?;
         let live_estimate = context.as_ref().and_then(|context| {
@@ -4454,13 +4459,59 @@ fn apply_model_catalog_entry(
     download_context: Option<DownloadContext>,
     data_dir: &FsPath,
     user_model_ids: &std::collections::HashSet<String>,
+    local_artifacts: &[sceneworks_core::model_artifacts::ResolvedModelArtifact],
 ) -> Result<Value, ApiError> {
     #[cfg(test)]
     test_delay_catalog_probe(&model);
     let state = install_state_for(download_context, &model, data_dir);
+    // sc-19708: the typed availability judgement for this entry's default selected closure on
+    // this host, through the ONE shared resolver. Catalog nuances layered on top of it:
+    // an install living in an app-owned path is local-ready regardless of the library, and an
+    // installed-but-incomplete cache stays `incomplete` rather than `missing`.
+    let availability_resolution =
+        crate::model_sources::availability_for_entry(data_dir, &model, None, local_artifacts);
+    use sceneworks_core::model_artifacts::external_library::ModelAvailability;
+    let managed_models = data_dir.join("models");
+    let installed_in_app_owned_path = state.installed
+        && state
+            .installed_path
+            .as_deref()
+            .map(FsPath::new)
+            .is_some_and(|path| path.starts_with(&managed_models));
+    let (availability, availability_resolution) = if installed_in_app_owned_path
+        && !matches!(
+            availability_resolution.availability,
+            ModelAvailability::LocalReady
+        ) {
+        (ModelAvailability::LocalReady, None)
+    } else if availability_resolution.availability == ModelAvailability::Missing
+        && state.cache_incomplete
+    {
+        (ModelAvailability::Incomplete, Some(availability_resolution))
+    } else {
+        (
+            availability_resolution.availability.clone(),
+            Some(availability_resolution),
+        )
+    };
     let object = model
         .as_object_mut()
         .ok_or_else(|| ApiError::internal("Model manifest entry must be an object"))?;
+    object.insert(
+        "modelAvailability".to_owned(),
+        serde_json::to_value(&availability).map_err(|error| {
+            ApiError::internal(format!("serialize model availability: {error}"))
+        })?,
+    );
+    object.insert(
+        "modelResolution".to_owned(),
+        availability_resolution
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|error| ApiError::internal(format!("serialize model resolution: {error}")))?
+            .unwrap_or(Value::Null),
+    );
     let model_id = object.get("id").and_then(Value::as_str).unwrap_or_default();
     let user_managed = user_model_ids.contains(model_id);
     object.insert(
@@ -4618,8 +4669,14 @@ mod model_size_concurrency_tests {
         // sc-18481 retired AuraSR from the installable catalog because every production backend
         // rejects its dead `engine:aura-sr` route. Its unscoped download row had contributed one
         // context on every OS, so removing it reduces macOS 87 → 86 and windows/linux 85 → 84.
+        //
+        // sc-19708 declared `instantid_face_stack`: the SCRFD + ArcFace pair the face-analysis
+        // and identity lanes stage from `SceneWorks/instantid-mlx`, now a catalog entry so those
+        // routes carry a typed model-source identity. One download row, no `platforms` scoping
+        // (the pair loads on macOS and the off-Mac candle lane alike), so every OS gains exactly
+        // one: macOS 86 → 87, windows/linux 84 → 85.
         for (os, expected_distinct_contexts) in
-            [("macos", 86_usize), ("windows", 84), ("linux", 84)]
+            [("macos", 87_usize), ("windows", 85), ("linux", 85)]
         {
             let mut keys = std::collections::HashSet::new();
             for mut model in manifest["models"]
@@ -4786,6 +4843,9 @@ async fn build_model_catalog_snapshot(state: &AppState) -> Result<Vec<Value>, Ap
 
     let data_dir = Arc::new(state.settings.data_dir.clone());
     let user_model_ids = Arc::new(user_model_ids);
+    // App-owned resolved-local artifacts, enumerated ONCE per snapshot build (read-only: no
+    // session, no usage refresh) so every entry's availability can detect local-ready coverage.
+    let local_artifacts = Arc::new(crate::model_sources::local_resolved_artifacts(state));
     let work_items = models
         .into_iter()
         .zip(download_contexts.clone())
@@ -4793,6 +4853,7 @@ async fn build_model_catalog_snapshot(state: &AppState) -> Result<Vec<Value>, Ap
     let work_groups = group_model_catalog_work_items(work_items);
     let data_dir_for_sweep = data_dir.clone();
     let user_model_ids_for_sweep = user_model_ids.clone();
+    let local_artifacts_for_sweep = local_artifacts.clone();
 
     // sc-14530: each model's install-state resolution is independent but may spend seconds
     // waiting on network-volume metadata. Dispatch bounded blocking tasks per primary-repo group
@@ -4807,6 +4868,7 @@ async fn build_model_catalog_snapshot(state: &AppState) -> Result<Vec<Value>, Ap
                     download_context,
                     &data_dir_for_sweep,
                     &user_model_ids_for_sweep,
+                    &local_artifacts_for_sweep,
                 )
             })
             .collect::<Result<Vec<_>, _>>()
@@ -4897,7 +4959,38 @@ pub(crate) async fn resolve_model_manifest_entry(
             .cloned()
     };
     let mut entry = merge_model_manifest_entry(find(&builtin), find(&user));
+    if entry.as_object().map_or(true, JsonObject::is_empty) {
+        // The model-source seam (sc-19708) resolves fixed utility models (upscalers, detectors,
+        // the face stack) for job admission even when the configured manifest directory is
+        // missing or trimmed — the compiled-in builtin manifest is the complete fallback so a
+        // stripped config dir cannot silently strip typed model-source coverage.
+        if let Some(embedded) = embedded_builtin_catalog_entry(|candidate| {
+            candidate.get("id").and_then(Value::as_str) == Some(model_id)
+        })? {
+            entry = embedded;
+        }
+    }
     inject_converted_model_path(&mut entry, &state.settings.data_dir);
+    Ok(entry)
+}
+
+/// The compiled-in builtin model manifest, used as the last-resort catalog authority when the
+/// on-disk manifest directory does not carry an entry. Kept complete and cross-platform: the
+/// caller derives per-platform closures from it, so filtering here would let a macOS API omit
+/// Candle-only co-requisites from a Windows/Linux worker carrier.
+pub(crate) fn embedded_builtin_catalog_entry(
+    predicate: impl Fn(&Value) -> bool,
+) -> Result<Option<Value>, ApiError> {
+    let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
+    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+        .map_err(|error| ApiError::internal(format!("embedded model manifest invalid: {error}")))?;
+    let entry = manifest
+        .get("models")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|entry| predicate(entry))
+        .cloned();
     Ok(entry)
 }
 
@@ -4981,47 +5074,19 @@ pub(crate) fn merge_model_manifest_entry(builtin: Option<Value>, user: Option<Va
 /// (sc-3240, Wan2.2) — so filtering here makes the download job, install status, size, and the
 /// frontend's `downloads[0]` all resolve to the right per-platform repo from one seam. No-op unless
 /// at least one entry is platform-tagged, so single-repo models are untouched.
-pub(crate) fn retain_downloads_for_os(model: &mut Value, os: &str) {
-    let Some(downloads) = model.get_mut("downloads").and_then(Value::as_array_mut) else {
-        return;
-    };
-    if !downloads
-        .iter()
-        .any(|entry| entry.get("platforms").is_some())
-    {
-        return;
-    }
-    downloads.retain(
-        |entry| match entry.get("platforms").and_then(Value::as_array) {
-            Some(platforms) => platforms.iter().any(|p| p.as_str() == Some(os)),
-            None => true,
-        },
-    );
-}
+///
+/// sc-19708: the manifest-shape predicates below now live in
+/// `sceneworks_core::model_artifacts::artifact_selection` because the availability seam (API
+/// preflight AND the worker's pre-loader guard) selects the same closures. These re-exports keep
+/// the API's install/display call sites on the identical definitions so they cannot drift.
+pub(crate) use sceneworks_core::model_artifacts::artifact_selection::retain_downloads_for_os;
 
-pub(crate) fn model_download(model: &Value) -> Option<Value> {
-    let downloads = model.get("downloads")?.as_array()?;
-    let mut fallback = None;
-    for download in downloads {
-        // Co-requisites (sc-9696) install alongside the primary, never AS it — skip them when
-        // choosing the canonical entry for size/install-path/download.
-        if !is_supported_model_download(download) || is_co_requisite_download(download) {
-            continue;
-        }
-        fallback.get_or_insert(download);
-        if download.get("default").and_then(Value::as_bool) == Some(true) {
-            return Some(download.clone());
-        }
-    }
-    fallback.cloned()
-}
+pub(crate) use sceneworks_core::model_artifacts::artifact_selection::model_download;
 
 /// True when a download entry is a co-requisite dependency (sc-9696): fetched ALONGSIDE the primary
 /// download rather than as a pick-one alternate, and gating the entry's install state. See the
 /// manifest schema `downloads[].coRequisite`.
-pub(crate) fn is_co_requisite_download(download: &Value) -> bool {
-    download.get("coRequisite").and_then(Value::as_bool) == Some(true)
-}
+pub(crate) use sceneworks_core::model_artifacts::artifact_selection::is_co_requisite_download;
 
 /// The co-requisite download entries for `model` (sc-9696) — the dependencies that must install
 /// alongside the primary (e.g. the PiD decoder's shared gemma-2-2b-it caption encoder). The catalog
@@ -5035,74 +5100,10 @@ pub(crate) fn is_co_requisite_download(download: &Value) -> bool {
 /// that are themselves per-tier: they exist as `q4`/`q8`/`bf16` subtrees of one components mirror,
 /// and only the one matching the selected tier should be fetched, sized, or gated on. Keying that on
 /// the presence of `variant` keeps every existing co-requisite on exactly its current path.
-pub(crate) fn co_requisite_variant(download: &Value) -> Option<String> {
-    download
-        .get("variant")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_ascii_lowercase)
-}
-
-/// The co-requisite downloads that apply to `variant` (sc-14980).
-///
-/// Tier-agnostic rows (no `variant`) always apply. A tier-scoped row applies only to its own tier;
-/// when no tier is in scope, every tier-scoped row is returned so callers that genuinely aggregate
-/// across tiers still see them all.
-pub(crate) fn model_co_requisite_downloads_for_variant(
-    model: &Value,
-    variant: Option<&str>,
-) -> Vec<Value> {
-    let wanted = variant.map(|value| value.trim().to_ascii_lowercase());
-    model_co_requisite_downloads(model)
-        .into_iter()
-        .filter(
-            |download| match (co_requisite_variant(download), wanted.as_deref()) {
-                (None, _) => true,
-                (Some(_), None) => true,
-                (Some(row), Some(wanted)) => row == wanted,
-            },
-        )
-        .collect()
-}
-
-pub(crate) fn model_co_requisite_downloads(model: &Value) -> Vec<Value> {
-    model
-        .get("downloads")
-        .and_then(Value::as_array)
-        .map(|downloads| {
-            downloads
-                .iter()
-                .filter(|download| {
-                    is_co_requisite_download(download) && is_supported_model_download(download)
-                })
-                .cloned()
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// Select a specific quant tier's download entry for a quant-matrix model (sc-8508). Returns the
-/// supported `downloads` entry whose `variant` matches `variant` (case-insensitive). `None` when the
-/// model declares no such tier — the caller surfaces a 400 rather than silently installing the wrong
-/// tier. A `None` `variant` argument means "the default tier" and is handled by [`model_download`].
-pub(crate) fn model_download_for_variant(model: &Value, variant: &str) -> Option<Value> {
-    let downloads = model.get("downloads")?.as_array()?;
-    let wanted = variant.trim().to_ascii_lowercase();
-    downloads
-        .iter()
-        .find(|download| {
-            is_supported_model_download(download)
-                && !is_co_requisite_download(download)
-                && download
-                    .get("variant")
-                    .and_then(Value::as_str)
-                    .map(|value| value.trim().to_ascii_lowercase())
-                    .as_deref()
-                    == Some(wanted.as_str())
-        })
-        .cloned()
-}
+pub(crate) use sceneworks_core::model_artifacts::artifact_selection::{
+    co_requisite_variant, model_co_requisite_downloads, model_co_requisite_downloads_for_variant,
+    model_download_for_variant,
+};
 
 /// Best-effort credential host for a gated model when the manifest entry doesn't
 /// set `credentialHost` explicitly: an explicit per-download `credentialHost`,
@@ -5135,13 +5136,7 @@ fn derive_credential_host(model: &serde_json::Map<String, Value>) -> Option<Stri
     None
 }
 
-pub(crate) fn is_supported_model_download(download: &Value) -> bool {
-    download.get("provider").and_then(Value::as_str) == Some("huggingface")
-        && download
-            .get("repo")
-            .and_then(Value::as_str)
-            .is_some_and(|repo| !repo.is_empty())
-}
+pub(crate) use sceneworks_core::model_artifacts::artifact_selection::is_supported_model_download;
 
 pub(crate) fn model_download_context(model: &Value) -> Result<Option<DownloadContext>, ApiError> {
     let Some(download) = model_download(model) else {

@@ -6456,6 +6456,7 @@ dependencies = [
  "fs2",
  "fs_at",
  "getrandom 0.3.4",
+ "glob",
  "image",
  "imagesize",
  "libc",
