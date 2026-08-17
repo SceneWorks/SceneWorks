@@ -324,9 +324,18 @@ impl ResolvedCacheStore {
     pub fn enumerate_existing(
         data_dir: &Path,
     ) -> Result<Vec<ResolvedCacheEntrySummary>, ResolvedCacheError> {
+        match Self::open_read_only(data_dir)? {
+            Some(store) => store.enumerate(),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// The read-only inspection handle behind [`Self::enumerate_existing`]: no runtime session, no
+    /// session lock, no usage stamping. `None` when no cache has ever been initialized here.
+    fn open_read_only(data_dir: &Path) -> Result<Option<Self>, ResolvedCacheError> {
         let root = data_dir.join("models").join("resolved");
         if !root.exists() {
-            return Ok(Vec::new());
+            return Ok(None);
         }
         ensure_regular_directory(&root)?;
         let marker = std::fs::read(root.join(STORE_MARKER)).map_err(|_| {
@@ -338,14 +347,67 @@ impl ResolvedCacheStore {
             ));
         }
         let root = std::fs::canonicalize(root)?;
-        Self {
+        Ok(Some(Self {
             inner: Arc::new(StoreInner {
                 root,
                 session_id: "read-only-inspection".to_owned(),
                 _session_lock: None,
             }),
+        }))
+    }
+
+    /// Every published artifact this cache can actually serve a runtime load from (sc-19707).
+    ///
+    /// Validity is judged per entry and fails CLOSED to the source tier: an entry that is not
+    /// `Complete`, whose journal or receipt does not verify, whose bundle no longer matches the
+    /// recorded closure (a torn, truncated, or hand-edited bundle), or whose shape the local tier
+    /// cannot serve is silently skipped rather than poisoning the whole answer. Read-only: never
+    /// creates a session, never stamps usage, and never repairs.
+    pub fn valid_local_artifacts(data_dir: &Path) -> Vec<ResolvedModelArtifact> {
+        let Ok(Some(store)) = Self::open_read_only(data_dir) else {
+            return Vec::new();
+        };
+        let Ok(entries) = std::fs::read_dir(store.inner.root.join("entries")) else {
+            return Vec::new();
+        };
+        let mut artifacts = Vec::new();
+        for item in entries.flatten() {
+            let Some(digest) = item
+                .file_name()
+                .to_str()
+                .filter(|value| is_lower_hex_64(value))
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            if !item.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            let Ok(metadata_lock) = store.lock_metadata(&digest) else {
+                continue;
+            };
+            let read = store.read_metadata_unlocked(&digest);
+            drop(metadata_lock);
+            let Ok(JournalRead::Valid { metadata, .. }) = read else {
+                continue;
+            };
+            if metadata.state != ResolvedCacheEntryState::Complete
+                || validate_complete_metadata(&store, &metadata).is_err()
+            {
+                continue;
+            }
+            // A published bundle that is not stored in the source-library layout cannot be handed
+            // to the shared snapshot resolvers, so it is not a local-tier candidate at all.
+            if crate::model_artifacts::local_preference::overlay_entries_for_artifact(
+                &metadata.artifact,
+            )
+            .is_err()
+            {
+                continue;
+            }
+            artifacts.push(metadata.artifact);
         }
-        .enumerate()
+        artifacts
     }
 
     pub fn root(&self) -> &Path {
