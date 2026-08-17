@@ -249,7 +249,8 @@ pub struct ResolvedCacheEntrySummary {
 
 #[derive(Debug)]
 pub enum ReservationOutcome {
-    Acquired(MaterializationReservation),
+    Acquired(ResolvedCacheReservation),
+    AlreadyComplete(Box<ResolvedCacheMetadata>),
     Contended,
 }
 
@@ -389,13 +390,42 @@ impl ResolvedCacheStore {
         let artifact_lock = open_lock_file(&self.artifact_lock_path(&digest))?;
         match FileExt::try_lock_exclusive(&artifact_lock) {
             Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            Err(error) if is_lock_contended(&error) => {
                 return Ok(ReservationOutcome::Contended);
             }
             Err(error) => return Err(error.into()),
         }
         let entry = self.entry_path(&candidate.cache_key)?;
         ensure_managed_entry_dir(&entry)?;
+        let _metadata_lock = self.lock_metadata(&digest)?;
+        let existing = match self.read_metadata_unlocked(&digest)? {
+            JournalRead::Missing => None,
+            JournalRead::Valid { metadata, .. } => Some(*metadata),
+        };
+        if let Some(mut metadata) = existing {
+            match metadata.state {
+                ResolvedCacheEntryState::Complete => {
+                    validate_complete_metadata(self, &metadata)?;
+                    return Ok(ReservationOutcome::AlreadyComplete(Box::new(metadata)));
+                }
+                ResolvedCacheEntryState::Materializing => {
+                    let session = metadata.session_id.as_deref().ok_or_else(|| {
+                        ResolvedCacheError::new("materializing cache entry has no owning session")
+                    })?;
+                    if !self.session_lock_is_acquirable(session)? {
+                        return Ok(ReservationOutcome::Contended);
+                    }
+                    metadata.state = ResolvedCacheEntryState::Interrupted;
+                    metadata.recovery_status = RecoveryStatus::InterruptedReservation;
+                    metadata.reservation_id = None;
+                    metadata.reservation_owner = None;
+                    metadata.session_id = None;
+                    metadata.updated_at = now_seconds()?;
+                    self.write_metadata_unlocked(&digest, &metadata)?;
+                }
+                _ => {}
+            }
+        }
         let reservation_id = random_id()?;
         let staging = self
             .inner
@@ -428,7 +458,6 @@ impl ResolvedCacheStore {
             recovery_status: RecoveryStatus::Clean,
             source_volume: self.compare_source_volume(source_configured_path)?,
         };
-        let _metadata_lock = self.lock_metadata(&digest)?;
         if let Ok(existing) = self.read_metadata_locked(&digest) {
             metadata.created_at = existing.created_at;
             metadata.artifact_pinned = existing.artifact_pinned;
@@ -440,16 +469,18 @@ impl ResolvedCacheStore {
             schema_version: RESOLVED_CACHE_STORE_VERSION,
             cache_key: candidate.cache_key.clone(),
             operation_id: reservation_id.clone(),
-            model_owner: logical_model_owner,
+            model_owner: logical_model_owner.clone(),
             kind: SessionRecordKind::Reservation,
             acquired_at: now,
         };
         let record_path = self.write_session_record(&record)?;
-        Ok(ReservationOutcome::Acquired(MaterializationReservation {
+        Ok(ReservationOutcome::Acquired(ResolvedCacheReservation {
             store: self.clone(),
             cache_key: candidate.cache_key.clone(),
             digest,
             reservation_id,
+            reservation_owner: logical_model_owner,
+            session_id: self.inner.session_id.clone(),
             staging_path: staging,
             record_path,
             artifact_lock: Some(artifact_lock),
@@ -564,25 +595,6 @@ impl ResolvedCacheStore {
         Ok(self.read_metadata_locked(&digest)?.effective_pin)
     }
 
-    pub fn mark_interrupted(
-        &self,
-        cache_key: &str,
-    ) -> Result<ResolvedCacheMetadata, ResolvedCacheError> {
-        self.update_metadata(cache_key, |metadata| {
-            if metadata.state == ResolvedCacheEntryState::Complete {
-                return Err(ResolvedCacheError::new(
-                    "a complete resolved-cache entry cannot be marked interrupted",
-                ));
-            }
-            metadata.state = ResolvedCacheEntryState::Interrupted;
-            metadata.recovery_status = RecoveryStatus::InterruptedReservation;
-            metadata.reservation_id = None;
-            metadata.reservation_owner = None;
-            metadata.session_id = None;
-            Ok(())
-        })
-    }
-
     pub fn acquire_complete(
         &self,
         cache_key: &str,
@@ -636,7 +648,7 @@ impl ResolvedCacheStore {
             let artifact_lock = open_lock_file(&self.artifact_lock_path(&digest))?;
             match FileExt::try_lock_exclusive(&artifact_lock) {
                 Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
+                Err(error) if is_lock_contended(&error) => continue,
                 Err(error) => return Err(error.into()),
             }
             let _metadata_lock = self.lock_metadata(&digest)?;
@@ -652,12 +664,16 @@ impl ResolvedCacheStore {
                         metadata.refresh_effective_pin();
                         changed = true;
                     }
-                    if metadata.state == ResolvedCacheEntryState::Materializing
-                        && metadata
-                            .session_id
-                            .as_deref()
-                            .map_or(true, |session| self.session_is_stale(session))
-                    {
+                    let materializing_session_is_stale =
+                        if metadata.state == ResolvedCacheEntryState::Materializing {
+                            match metadata.session_id.as_deref() {
+                                Some(session) => self.session_lock_is_acquirable(session)?,
+                                None => false,
+                            }
+                        } else {
+                            false
+                        };
+                    if materializing_session_is_stale {
                         metadata.state = ResolvedCacheEntryState::Interrupted;
                         metadata.recovery_status = RecoveryStatus::InterruptedReservation;
                         metadata.reservation_id = None;
@@ -860,19 +876,21 @@ impl ResolvedCacheStore {
         Ok(path)
     }
 
-    fn session_is_stale(&self, session: &str) -> bool {
-        if session == self.inner.session_id {
-            return false;
+    fn session_lock_is_acquirable(&self, session: &str) -> Result<bool, ResolvedCacheError> {
+        if !is_valid_session_id(session) || session == self.inner.session_id {
+            return Ok(false);
         }
         let path = self
             .inner
             .root
             .join("sessions")
             .join(format!("{session}.lock"));
-        let Ok(file) = open_lock_file(&path) else {
-            return false;
-        };
-        FileExt::try_lock_exclusive(&file).is_ok()
+        let file = open_lock_file(&path)?;
+        match FileExt::try_lock_exclusive(&file) {
+            Ok(()) => Ok(true),
+            Err(error) if is_lock_contended(&error) => Ok(false),
+            Err(error) => Err(error.into()),
+        }
     }
 
     fn clean_stale_sessions(&self) -> Result<(), ResolvedCacheError> {
@@ -883,38 +901,44 @@ impl ResolvedCacheStore {
             let Some(session) = name.strip_suffix(".lock") else {
                 continue;
             };
-            if session == self.inner.session_id {
+            if !is_valid_session_id(session) || session == self.inner.session_id {
                 continue;
             }
             let file = open_lock_file(&item.path())?;
-            if FileExt::try_lock_exclusive(&file).is_ok() {
-                let records = sessions.join(session);
-                if records.is_dir() {
-                    std::fs::remove_dir_all(records)?;
+            match FileExt::try_lock_exclusive(&file) {
+                Ok(()) => {
+                    let records = sessions.join(session);
+                    if records.is_dir() {
+                        std::fs::remove_dir_all(records)?;
+                    }
+                    drop(file);
+                    let _ = std::fs::remove_file(item.path());
                 }
-                drop(file);
-                let _ = std::fs::remove_file(item.path());
+                Err(error) if is_lock_contended(&error) => {}
+                Err(error) => return Err(error.into()),
             }
         }
         Ok(())
     }
 }
 
-pub struct MaterializationReservation {
+pub struct ResolvedCacheReservation {
     store: ResolvedCacheStore,
     cache_key: String,
     digest: String,
     reservation_id: String,
+    reservation_owner: String,
+    session_id: String,
     staging_path: PathBuf,
     record_path: PathBuf,
     artifact_lock: Option<File>,
     finished: bool,
 }
 
-impl std::fmt::Debug for MaterializationReservation {
+impl std::fmt::Debug for ResolvedCacheReservation {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("MaterializationReservation")
+            .debug_struct("ResolvedCacheReservation")
             .field("cache_key", &self.cache_key)
             .field("reservation_id", &self.reservation_id)
             .field("staging_path", &self.staging_path)
@@ -922,7 +946,7 @@ impl std::fmt::Debug for MaterializationReservation {
     }
 }
 
-impl MaterializationReservation {
+impl ResolvedCacheReservation {
     pub fn cache_key(&self) -> &str {
         &self.cache_key
     }
@@ -939,6 +963,26 @@ impl MaterializationReservation {
         self.store.bundle_path(&self.cache_key)
     }
 
+    /// Marks only this still-owned reservation interrupted. The private reservation/session
+    /// identities and held artifact lock prevent key-only or cross-owner invalidation.
+    pub fn mark_interrupted(&mut self) -> Result<ResolvedCacheMetadata, ResolvedCacheError> {
+        let _metadata_lock = self.store.lock_metadata(&self.digest)?;
+        let mut metadata = self.store.read_metadata_locked(&self.digest)?;
+        self.verify_ownership(&metadata)?;
+        metadata.state = ResolvedCacheEntryState::Interrupted;
+        metadata.reservation_id = None;
+        metadata.reservation_owner = None;
+        metadata.session_id = None;
+        metadata.recovery_status = RecoveryStatus::InterruptedReservation;
+        metadata.updated_at = now_seconds()?;
+        self.store
+            .write_metadata_unlocked(&self.digest, &metadata)?;
+        self.finished = true;
+        let _ = std::fs::remove_file(&self.record_path);
+        self.artifact_lock.take();
+        Ok(metadata)
+    }
+
     /// Records publication after a later materializer has atomically installed and validated the
     /// bundle. This method does not copy, move, or delete any model bytes.
     pub fn record_complete(
@@ -952,6 +996,7 @@ impl MaterializationReservation {
                 "complete artifact is not rooted at its resolved-cache bundle",
             ));
         }
+        validate_completion_confinement(&self.store, &self.cache_key, &artifact)?;
         artifact
             .validate()
             .map_err(|error| ResolvedCacheError::new(error.to_string()))?;
@@ -967,11 +1012,7 @@ impl MaterializationReservation {
         let verified_bytes = checked_artifact_bytes(&artifact)?;
         let _metadata_lock = self.store.lock_metadata(&self.digest)?;
         let mut metadata = self.store.read_metadata_locked(&self.digest)?;
-        if metadata.reservation_id.as_deref() != Some(&self.reservation_id) {
-            return Err(ResolvedCacheError::new(
-                "materialization reservation changed",
-            ));
-        }
+        self.verify_ownership(&metadata)?;
         metadata.artifact = artifact;
         metadata.state = ResolvedCacheEntryState::Complete;
         metadata.verified_bytes = verified_bytes;
@@ -988,16 +1029,29 @@ impl MaterializationReservation {
         self.artifact_lock.take();
         Ok(metadata)
     }
+
+    fn verify_ownership(&self, metadata: &ResolvedCacheMetadata) -> Result<(), ResolvedCacheError> {
+        if metadata.state != ResolvedCacheEntryState::Materializing
+            || metadata.reservation_id.as_deref() != Some(&self.reservation_id)
+            || metadata.reservation_owner.as_deref() != Some(&self.reservation_owner)
+            || metadata.session_id.as_deref() != Some(&self.session_id)
+        {
+            return Err(ResolvedCacheError::new(
+                "materialization reservation ownership changed",
+            ));
+        }
+        Ok(())
+    }
 }
 
-impl Drop for MaterializationReservation {
+impl Drop for ResolvedCacheReservation {
     fn drop(&mut self) {
         if self.finished {
             return;
         }
         if let Ok(_metadata_lock) = self.store.lock_metadata(&self.digest) {
             if let Ok(mut metadata) = self.store.read_metadata_locked(&self.digest) {
-                if metadata.reservation_id.as_deref() == Some(&self.reservation_id) {
+                if self.verify_ownership(&metadata).is_ok() {
                     metadata.state = ResolvedCacheEntryState::Interrupted;
                     metadata.reservation_id = None;
                     metadata.reservation_owner = None;
@@ -1147,7 +1201,10 @@ struct CorruptMarker {
 fn initialize_or_validate_root(root: &Path) -> Result<(), ResolvedCacheError> {
     match std::fs::symlink_metadata(root) {
         Ok(metadata) => {
-            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            if metadata.file_type().is_symlink()
+                || metadata_is_reparse_point(&metadata)
+                || !metadata.is_dir()
+            {
                 return Err(ResolvedCacheError::new(format!(
                     "resolved cache root {} is a symlink or not a directory",
                     root.display()
@@ -1203,7 +1260,10 @@ fn ensure_regular_directory(path: &Path) -> Result<(), ResolvedCacheError> {
             path.display()
         ))
     })?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+    if metadata.file_type().is_symlink()
+        || metadata_is_reparse_point(&metadata)
+        || !metadata.is_dir()
+    {
         return Err(ResolvedCacheError::new(format!(
             "cache path {} is a symlink or not a directory",
             path.display()
@@ -1214,9 +1274,16 @@ fn ensure_regular_directory(path: &Path) -> Result<(), ResolvedCacheError> {
 
 fn ensure_managed_entry_dir(path: &Path) -> Result<(), ResolvedCacheError> {
     match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => Err(
-            ResolvedCacheError::new(format!("cache entry {} is unmanaged", path.display())),
-        ),
+        Ok(metadata)
+            if metadata.file_type().is_symlink()
+                || metadata_is_reparse_point(&metadata)
+                || !metadata.is_dir() =>
+        {
+            Err(ResolvedCacheError::new(format!(
+                "cache entry {} is unmanaged",
+                path.display()
+            )))
+        }
         Ok(_) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             std::fs::create_dir(path)?;
@@ -1228,7 +1295,10 @@ fn ensure_managed_entry_dir(path: &Path) -> Result<(), ResolvedCacheError> {
 
 fn open_lock_file(path: &Path) -> Result<File, ResolvedCacheError> {
     if let Ok(metadata) = std::fs::symlink_metadata(path) {
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
+        if metadata.file_type().is_symlink()
+            || metadata_is_reparse_point(&metadata)
+            || !metadata.is_file()
+        {
             return Err(ResolvedCacheError::new(format!(
                 "cache lock {} is not a regular file",
                 path.display()
@@ -1242,6 +1312,12 @@ fn open_lock_file(path: &Path) -> Result<File, ResolvedCacheError> {
         .truncate(false)
         .open(path)
         .map_err(Into::into)
+}
+
+fn is_lock_contended(error: &std::io::Error) -> bool {
+    let fs2_contended = fs2::lock_contended_error().raw_os_error();
+    error.kind() == std::io::ErrorKind::WouldBlock
+        || fs2_contended.is_some() && error.raw_os_error() == fs2_contended
 }
 
 fn validate_candidate(candidate: &PromotionCandidate) -> Result<(), ResolvedCacheError> {
@@ -1304,11 +1380,11 @@ fn validate_metadata_shape(
         || metadata
             .reservation_id
             .as_deref()
-            .is_some_and(|value| !is_lower_hex_32(value))
+            .is_some_and(|value| !is_valid_session_id(value))
         || metadata
             .session_id
             .as_deref()
-            .is_some_and(|value| !is_lower_hex_32(value))
+            .is_some_and(|value| !is_valid_session_id(value))
         || metadata
             .reservation_owner
             .as_deref()
@@ -1363,6 +1439,103 @@ fn validate_complete_metadata(
     Ok(())
 }
 
+fn validate_completion_confinement(
+    store: &ResolvedCacheStore,
+    cache_key: &str,
+    artifact: &ResolvedModelArtifact,
+) -> Result<(), ResolvedCacheError> {
+    let canonical_root = std::fs::canonicalize(store.root())?;
+    if canonical_root != store.root() {
+        return Err(ResolvedCacheError::new(
+            "resolved cache root changed after store open",
+        ));
+    }
+    let entries = store.root().join("entries");
+    reject_link_or_reparse(&entries, "resolved cache entries directory")?;
+    let canonical_entries = std::fs::canonicalize(&entries)?;
+    if canonical_entries.parent() != Some(canonical_root.as_path()) {
+        return Err(ResolvedCacheError::new(
+            "resolved cache entries directory escaped its managed root",
+        ));
+    }
+    let entry = store.entry_path(cache_key)?;
+    reject_link_or_reparse(&entry, "resolved cache entry")?;
+    let canonical_entry = std::fs::canonicalize(&entry)?;
+    if canonical_entry.parent() != Some(canonical_entries.as_path()) {
+        return Err(ResolvedCacheError::new(
+            "resolved cache entry escaped its managed entries directory",
+        ));
+    }
+    let bundle = entry.join("bundle");
+    reject_link_or_reparse(&bundle, "resolved cache bundle")?;
+    let canonical_bundle = std::fs::canonicalize(&bundle)?;
+    if canonical_bundle.parent() != Some(canonical_entry.as_path())
+        || canonical_bundle != canonical_entry.join("bundle")
+    {
+        return Err(ResolvedCacheError::new(
+            "resolved cache bundle escaped its managed entry",
+        ));
+    }
+    for path in artifact
+        .closure
+        .rebased_paths(artifact.location.root())
+        .map_err(|error| ResolvedCacheError::new(error.to_string()))?
+    {
+        if !path.starts_with(&bundle) {
+            return Err(ResolvedCacheError::new(
+                "resolved artifact file escaped its lexical bundle",
+            ));
+        }
+        let mut cursor = Some(path.as_path());
+        while let Some(current) = cursor {
+            if !current.starts_with(&entry) {
+                return Err(ResolvedCacheError::new(
+                    "resolved artifact ancestor escaped its managed entry",
+                ));
+            }
+            if !std::fs::canonicalize(current)?.starts_with(&canonical_entry) {
+                return Err(ResolvedCacheError::new(
+                    "resolved artifact ancestor resolves outside its managed entry",
+                ));
+            }
+            if current == entry {
+                break;
+            }
+            cursor = current.parent();
+        }
+    }
+    Ok(())
+}
+
+fn reject_link_or_reparse(path: &Path, label: &str) -> Result<(), ResolvedCacheError> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || metadata_is_reparse_point(&metadata) {
+        return Err(ResolvedCacheError::new(format!(
+            "{label} {} is a symlink or reparse point",
+            path.display()
+        )));
+    }
+    if !metadata.is_dir() {
+        return Err(ResolvedCacheError::new(format!(
+            "{label} {} is not a directory",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn metadata_is_reparse_point(_metadata: &std::fs::Metadata) -> bool {
+    false
+}
+
 fn checked_artifact_bytes(artifact: &ResolvedModelArtifact) -> Result<u64, ResolvedCacheError> {
     artifact
         .closure
@@ -1405,7 +1578,7 @@ fn is_lower_hex_64(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
-fn is_lower_hex_32(value: &str) -> bool {
+fn is_valid_session_id(value: &str) -> bool {
     value.len() == 32
         && value
             .bytes()
@@ -1525,7 +1698,12 @@ fn volume_identity(path: &Path) -> Result<u64, ResolvedCacheError> {
 
 #[cfg(windows)]
 fn volume_identity(path: &Path) -> Result<u64, ResolvedCacheError> {
-    let file = File::open(path)?;
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)?;
     Ok(u64::from(
         winapi_util::file::information(&file)
             .map_err(|error| ResolvedCacheError::new(error.to_string()))?

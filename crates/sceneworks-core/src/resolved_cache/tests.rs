@@ -60,6 +60,7 @@ fn make_complete(
 ) -> ResolvedCacheMetadata {
     let reservation = match store.reserve(candidate, source, "fixture:model").unwrap() {
         ReservationOutcome::Acquired(reservation) => reservation,
+        ReservationOutcome::AlreadyComplete(_) => panic!("unexpected complete entry"),
         ReservationOutcome::Contended => panic!("unexpected reservation contention"),
     };
     let bundle = reservation.bundle_path().unwrap();
@@ -191,11 +192,12 @@ fn reservation_is_exclusive_unrelated_keys_progress_and_drop_interrupts() {
     let source_b = scratch.path().join("source-b");
     let candidate_a = source_candidate(&source_a, REVISION_A);
     let candidate_b = source_candidate(&source_b, REVISION_B);
-    let first = match store
+    let mut first = match store
         .reserve(&candidate_a, &source_a, "image:model-a")
         .unwrap()
     {
         ReservationOutcome::Acquired(value) => value,
+        ReservationOutcome::AlreadyComplete(_) => panic!("first cannot already be complete"),
         ReservationOutcome::Contended => panic!("first must win"),
     };
     let active = store
@@ -214,6 +216,13 @@ fn reservation_is_exclusive_unrelated_keys_progress_and_drop_interrupts() {
         &cache_key_digest(&candidate_a.cache_key).unwrap()
     )
     .is_err());
+    assert!(matches!(
+        store
+            .reserve(&candidate_a, &source_a, "image:model-a")
+            .unwrap(),
+        ReservationOutcome::Contended
+    ));
+    first.artifact_lock.take();
     assert!(matches!(
         store
             .reserve(&candidate_a, &source_a, "image:model-a")
@@ -240,6 +249,184 @@ fn reservation_is_exclusive_unrelated_keys_progress_and_drop_interrupts() {
         .unwrap()
         .is_none());
     assert!(store.reserve(&candidate_a, &source_a, "\n").is_err());
+}
+
+#[test]
+fn complete_entries_are_preserved_and_reservations_require_exact_ownership() {
+    let scratch = TempDir::new().unwrap();
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let source = scratch.path().join("source");
+    let candidate = source_candidate(&source, REVISION_A);
+    let complete = make_complete(&store, &candidate, &source);
+    let bundle_file = store
+        .bundle_path(&candidate.cache_key)
+        .unwrap()
+        .join("weights.bin");
+    let bytes = std::fs::read(&bundle_file).unwrap();
+    match store.reserve(&candidate, &source, "image:model-a").unwrap() {
+        ReservationOutcome::AlreadyComplete(metadata) => assert_eq!(*metadata, complete),
+        ReservationOutcome::Acquired(_) => panic!("complete entry was overwritten"),
+        ReservationOutcome::Contended => panic!("complete entry was treated as materializing"),
+    }
+    assert_eq!(std::fs::read(&bundle_file).unwrap(), bytes);
+
+    let source_b = scratch.path().join("source-b");
+    let candidate_b = source_candidate(&source_b, REVISION_B);
+    let mut reservation = match store
+        .reserve(&candidate_b, &source_b, "video:model-b")
+        .unwrap()
+    {
+        ReservationOutcome::Acquired(reservation) => reservation,
+        _ => panic!("new entry must reserve"),
+    };
+    let genuine_id = reservation.reservation_id.clone();
+    reservation.reservation_id = "cccccccccccccccccccccccccccccccc".to_owned();
+    assert!(reservation.mark_interrupted().is_err());
+    assert_eq!(
+        store
+            .enumerate()
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.cache_key == candidate_b.cache_key)
+            .unwrap()
+            .state,
+        ResolvedCacheEntryState::Materializing
+    );
+    reservation.reservation_id = genuine_id;
+    assert_eq!(
+        reservation.mark_interrupted().unwrap().state,
+        ResolvedCacheEntryState::Interrupted
+    );
+}
+
+#[test]
+fn one_reservation_cannot_interrupt_or_complete_another_owner() {
+    let scratch = TempDir::new().unwrap();
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let source = scratch.path().join("source");
+    let candidate = source_candidate(&source, REVISION_A);
+    let mut reservation = match store.reserve(&candidate, &source, "image:model-a").unwrap() {
+        ReservationOutcome::Acquired(reservation) => reservation,
+        _ => panic!("new entry must reserve"),
+    };
+    let original_id = reservation.reservation_id.clone();
+    let original_owner = reservation.reservation_owner.clone();
+    store
+        .update_metadata(&candidate.cache_key, |metadata| {
+            metadata.reservation_id = Some("dddddddddddddddddddddddddddddddd".to_owned());
+            metadata.reservation_owner = Some("other:model".to_owned());
+            Ok(())
+        })
+        .unwrap();
+    assert!(reservation.mark_interrupted().is_err());
+    let current = store.enumerate().unwrap()[0].metadata.clone().unwrap();
+    assert_eq!(
+        current.reservation_id.as_deref(),
+        Some("dddddddddddddddddddddddddddddddd")
+    );
+    assert_eq!(current.reservation_owner.as_deref(), Some("other:model"));
+
+    store
+        .update_metadata(&candidate.cache_key, |metadata| {
+            metadata.reservation_id = Some(original_id.clone());
+            metadata.reservation_owner = Some(original_owner.clone());
+            Ok(())
+        })
+        .unwrap();
+    reservation.mark_interrupted().unwrap();
+
+    let source_b = scratch.path().join("source-b");
+    let candidate_b = source_candidate(&source_b, REVISION_B);
+    let reservation_b = match store
+        .reserve(&candidate_b, &source_b, "video:model-b")
+        .unwrap()
+    {
+        ReservationOutcome::Acquired(reservation) => reservation,
+        _ => panic!("second entry must reserve"),
+    };
+    let bundle = reservation_b.bundle_path().unwrap();
+    std::fs::create_dir(&bundle).unwrap();
+    std::fs::copy(source_b.join("weights.bin"), bundle.join("weights.bin")).unwrap();
+    store
+        .update_metadata(&candidate_b.cache_key, |metadata| {
+            metadata.reservation_owner = Some("other:model".to_owned());
+            Ok(())
+        })
+        .unwrap();
+    let mut local = candidate_b.artifact.clone();
+    local.location = ArtifactLocation::ResolvedLocal { root: bundle };
+    assert!(reservation_b.record_complete(local).is_err());
+    let current_b = store
+        .enumerate()
+        .unwrap()
+        .into_iter()
+        .find(|entry| entry.cache_key == candidate_b.cache_key)
+        .unwrap()
+        .metadata
+        .unwrap();
+    assert_eq!(current_b.state, ResolvedCacheEntryState::Materializing);
+    assert_eq!(current_b.reservation_owner.as_deref(), Some("other:model"));
+}
+
+#[cfg(unix)]
+#[test]
+fn completion_rejects_a_bundle_symlink_without_touching_external_bytes() {
+    use std::os::unix::fs::symlink;
+    let scratch = TempDir::new().unwrap();
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let source = scratch.path().join("source");
+    let candidate = source_candidate(&source, REVISION_A);
+    let reservation = match store.reserve(&candidate, &source, "image:model-a").unwrap() {
+        ReservationOutcome::Acquired(reservation) => reservation,
+        _ => panic!("new entry must reserve"),
+    };
+    let external = scratch.path().join("external");
+    std::fs::create_dir(&external).unwrap();
+    std::fs::write(external.join("weights.bin"), b"external-model-bytes").unwrap();
+    let bundle = reservation.bundle_path().unwrap();
+    symlink(&external, &bundle).unwrap();
+    let mut local = candidate.artifact.clone();
+    local.location = ArtifactLocation::ResolvedLocal { root: bundle };
+    assert!(reservation.record_complete(local).is_err());
+    assert_eq!(
+        std::fs::read(external.join("weights.bin")).unwrap(),
+        b"external-model-bytes"
+    );
+    assert!(store
+        .lookup_complete(&candidate.cache_key)
+        .unwrap()
+        .is_none());
+}
+
+#[cfg(windows)]
+#[test]
+fn completion_rejects_a_directory_reparse_point_when_windows_allows_fixture_creation() {
+    use std::os::windows::fs::symlink_dir;
+    let scratch = TempDir::new().unwrap();
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let source = scratch.path().join("source");
+    let candidate = source_candidate(&source, REVISION_A);
+    let reservation = match store.reserve(&candidate, &source, "image:model-a").unwrap() {
+        ReservationOutcome::Acquired(reservation) => reservation,
+        _ => panic!("new entry must reserve"),
+    };
+    let external = scratch.path().join("external");
+    std::fs::create_dir(&external).unwrap();
+    std::fs::write(external.join("weights.bin"), b"external-model-bytes").unwrap();
+    let bundle = reservation.bundle_path().unwrap();
+    if let Err(error) = symlink_dir(&external, &bundle) {
+        if error.kind() == std::io::ErrorKind::PermissionDenied {
+            return;
+        }
+        panic!("create directory reparse fixture: {error}");
+    }
+    let mut local = candidate.artifact.clone();
+    local.location = ArtifactLocation::ResolvedLocal { root: bundle };
+    assert!(reservation.record_complete(local).is_err());
+    assert_eq!(
+        std::fs::read(external.join("weights.bin")).unwrap(),
+        b"external-model-bytes"
+    );
 }
 
 #[test]
@@ -456,6 +643,24 @@ fn volume_probe_is_deterministic_and_missing_source_is_unavailable() {
 fn stale_sessions_are_removed_only_after_their_lock_is_acquirable() {
     let scratch = TempDir::new().unwrap();
     let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let own_records = store.root().join("sessions").join(store.session_id());
+    std::fs::write(own_records.join("keep.json"), b"live").unwrap();
+    let unrelated_entry = store.root().join("keep-unrelated");
+    std::fs::write(&unrelated_entry, b"unrelated").unwrap();
+    for malformed in [
+        ".lock",
+        "..lock",
+        "...lock",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA.lock",
+        "short.lock",
+        "deadbeefdeadbeefdeadbeefdeadbeef.lock.extra",
+    ] {
+        std::fs::write(store.root().join("sessions").join(malformed), b"").unwrap();
+    }
+    assert!(!is_valid_session_id(""));
+    assert!(!is_valid_session_id(".."));
+    assert!(!is_valid_session_id("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"));
+    assert!(is_valid_session_id("deadbeefdeadbeefdeadbeefdeadbeef"));
     let stale = "deadbeefdeadbeefdeadbeefdeadbeef";
     let lock = store.root().join("sessions").join(format!("{stale}.lock"));
     std::fs::write(&lock, b"").unwrap();
@@ -475,6 +680,60 @@ fn stale_sessions_are_removed_only_after_their_lock_is_acquirable() {
     std::fs::write(live_records.join("keep.json"), b"garbage").unwrap();
     store.recover().unwrap();
     assert!(live_records.exists());
+    assert!(live_lock_path.exists());
+    assert_eq!(
+        std::fs::read(own_records.join("keep.json")).unwrap(),
+        b"live"
+    );
+    assert_eq!(std::fs::read(unrelated_entry).unwrap(), b"unrelated");
+    for malformed in [
+        ".lock",
+        "..lock",
+        "...lock",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA.lock",
+        "short.lock",
+        "deadbeefdeadbeefdeadbeefdeadbeef.lock.extra",
+    ] {
+        assert!(store.root().join("sessions").join(malformed).exists());
+    }
+}
+
+#[test]
+fn lock_contention_classifier_covers_fs2_and_would_block_without_masking_other_errors() {
+    let fs2_error = fs2::lock_contended_error();
+    assert!(is_lock_contended(&fs2_error));
+    assert!(is_lock_contended(&std::io::Error::from(
+        std::io::ErrorKind::WouldBlock
+    )));
+    assert!(!is_lock_contended(&std::io::Error::from(
+        std::io::ErrorKind::PermissionDenied
+    )));
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_runtime_file_lock_contention_uses_the_portable_classifier() {
+    let scratch = TempDir::new().unwrap();
+    let path = scratch.path().join("contention.lock");
+    let first = open_lock_file(&path).unwrap();
+    let second = open_lock_file(&path).unwrap();
+    FileExt::lock_exclusive(&first).unwrap();
+    let error = FileExt::try_lock_exclusive(&second).unwrap_err();
+    assert!(is_lock_contended(&error));
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_directory_volume_probe_returns_a_native_same_volume_identity() {
+    let scratch = TempDir::new().unwrap();
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let observation = store.compare_source_volume(scratch.path()).unwrap();
+    assert_eq!(observation.relation, SourceVolumeRelation::Same);
+    assert!(observation.source_identity.is_some());
+    assert_eq!(
+        observation.source_identity, observation.resolved_identity,
+        "source and resolved directory handles must report the same volume serial"
+    );
 }
 
 #[test]
@@ -576,6 +835,7 @@ fn cross_process_store_child() {
     let _held: Box<dyn std::any::Any> = if mode == "reserve" {
         match store.reserve(&candidate, &source, "child:model").unwrap() {
             ReservationOutcome::Acquired(reservation) => Box::new(reservation),
+            ReservationOutcome::AlreadyComplete(_) => panic!("child entry is already complete"),
             ReservationOutcome::Contended => panic!("child reservation contended"),
         }
     } else {
