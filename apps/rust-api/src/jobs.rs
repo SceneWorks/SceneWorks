@@ -456,7 +456,53 @@ async fn validate_and_canonicalize_merged_generation_payload(
                 .to_owned();
             resolve_selected_image_text_encoder(state, &merged, &model_id, &mut manifest_entry)
                 .await?;
+            // The two remaining `create_image_job` capability gates, run on the SAME merged object
+            // the queue transaction will persist (sc-18420). `payload_changes` is a SHALLOW merge,
+            // so `advanced` arrives replaced wholesale: without these, a retry/duplicate could
+            // enqueue a decoder+`usePid` pair, an uninstalled or wrong-backend decoder, or an
+            // imported request shape the create path 400s — the exact combinations this boundary's
+            // own doc comment claims it re-validates. Order mirrors `create_image_job`: the decoder
+            // gate reads the rebuilt entry directly, then the entry is stamped so the imported gate
+            // sees the server-owned row rather than anything the caller sent.
+            crate::generation::validate_selected_decoder_for_manifest(
+                crate::generation::enqueue_backend(state),
+                &merged,
+                &manifest_entry,
+            )?;
             merged.insert("modelManifestEntry".to_owned(), manifest_entry);
+            crate::generation::validate_imported_submission(state, &model_id, &merged)?;
+        }
+    } else if matches!(
+        job_type,
+        JobType::VideoGenerate
+            | JobType::VideoExtend
+            | JobType::VideoBridge
+            | JobType::PersonReplace
+    ) {
+        // The video half of the same bypass. `canonicalize_image_model_payload` is image-only, so
+        // there is no rebuilt entry to gate against here; resolve the catalog row for the merged
+        // model exactly as `create_video_job` does and gate on that. Read-only on purpose — this
+        // closes the decoder bypass without taking on video's separate entry-canonicalization
+        // question.
+        //
+        // Keyed off an actually-present `advanced.decoder`, which is precisely when the gate stops
+        // being a no-op, so the overwhelmingly common decoder-less replay costs no extra catalog
+        // resolution.
+        let selects_decoder = merged
+            .get("advanced")
+            .and_then(Value::as_object)
+            .is_some_and(|advanced| advanced.contains_key("decoder"));
+        if let Some(model_id) = merged
+            .get("model")
+            .and_then(Value::as_str)
+            .filter(|_| selects_decoder)
+        {
+            let entry = crate::models::resolve_model_manifest_entry(state, model_id).await?;
+            crate::generation::validate_selected_decoder_for_manifest(
+                crate::generation::enqueue_backend(state),
+                &merged,
+                &entry,
+            )?;
         }
     }
     Ok(merged)

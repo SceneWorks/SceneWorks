@@ -2599,6 +2599,384 @@ async fn candle_required_rejects_unsupported_import_before_creating_a_job() {
     assert_eq!(count, 0, "a preflight refusal must not create a queued job");
 }
 
+/// The pinned soft VAE donor the `wan_2_1_vae` decoder option depends on, mirroring the shipped
+/// `qwen_image` co-requisite row. Written into a test manifest so a tempdir catalog can advertise a
+/// genuinely SELECTABLE decoder option rather than only the "not installed" refusal.
+const DECODER_DONOR_REPO: &str = "SceneWorks/krea-realtime-14b-mlx";
+const DECODER_DONOR_REVISION: &str = "e68e9a3d98187fdf6936838ffcf6df5aa48d6626";
+const DECODER_DONOR_FILE: &str = "q4/vae.safetensors";
+
+/// A catalog holding the real `qwen_image` id — the id the checked-in engine decoder facts key on,
+/// so `decoders.byBackend` is stamped onto the resolved entry — plus that row's pinned soft VAE
+/// donor, with the donor's exact snapshot file seeded under `data_dir` so the descriptor-derived
+/// MLX option resolves `available: true`.
+///
+/// Installing the donor is what makes the backend selection observable: with it absent, both lanes
+/// refuse (candle for "no such option", MLX for "not installed") and the two are indistinguishable.
+fn write_decoder_capable_catalog(temp_dir: &tempfile::TempDir) {
+    let manifest_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
+    write_empty_sibling_manifests(&manifest_dir);
+    std::fs::write(
+        manifest_dir.join("builtin.models.jsonc"),
+        format!(
+            r#"{{ "schemaVersion": 1, "models": [{{
+                "id": "qwen_image", "name": "Qwen Image", "type": "image", "family": "test",
+                "downloads": [
+                  {{ "provider": "huggingface", "repo": "SceneWorks/qwen-image-mlx" }},
+                  {{
+                    "provider": "huggingface",
+                    "repo": "{DECODER_DONOR_REPO}",
+                    "revision": "{DECODER_DONOR_REVISION}",
+                    "coRequisite": true,
+                    "required": "soft",
+                    "componentId": "vae",
+                    "files": ["{DECODER_DONOR_FILE}"],
+                    "estimatedSizeBytes": 507591212
+                  }}
+                ]
+            }}] }}"#
+        ),
+    )
+    .expect("builtin models writes");
+
+    let data_dir = temp_dir.path().join("data");
+    std::fs::create_dir_all(&data_dir).expect("data dir creates");
+    let repo_cache =
+        huggingface_repo_cache_path(&data_dir, DECODER_DONOR_REPO).expect("donor cache path");
+    let snapshot = repo_cache.join("snapshots").join(DECODER_DONOR_REVISION);
+    let donor = snapshot.join(DECODER_DONOR_FILE);
+    std::fs::create_dir_all(donor.parent().expect("donor parent")).expect("donor dir creates");
+    std::fs::write(&donor, b"pinned donor").expect("donor writes");
+}
+
+fn decoder_image_job(decoder: Value) -> Value {
+    json!({
+        "projectId": "project-1",
+        "model": "qwen_image",
+        "mode": "text_to_image",
+        "prompt": "mist over hills",
+        "count": 1,
+        "advanced": { "decoder": decoder },
+    })
+}
+
+/// sc-18420: the alternate-decoder gate must consult the option list of the backend this API
+/// instance actually routes to. It derived that with a bare `cfg!(target_os = "macos")`, so under
+/// `SCENEWORKS_CANDLE_REQUIRED` on macOS — a real, supported mode — it validated `advanced.decoder`
+/// against MLX's list while the job executed on Candle: an MLX-only decoder was admitted and then
+/// failed on the worker, and a Candle-valid one would have been 400'd.
+///
+/// Both directions of the same catalog row and the same request: only `candle_required` differs.
+#[tokio::test]
+async fn candle_required_moves_the_decoder_gate_onto_the_candle_option_list() {
+    let _env = isolate_hf_cache();
+
+    // Candle lane: the shipped facts declare no candle decoder for this row, so the MLX-only
+    // selection must be refused at enqueue rather than deferred to a worker that cannot run it.
+    let candle_dir = tempfile::tempdir().expect("temp dir creates");
+    write_decoder_capable_catalog(&candle_dir);
+    let mut candle_settings = test_settings(&candle_dir);
+    candle_settings.candle_required = true;
+    let candle_app = create_app(candle_settings).expect("app creates");
+    let (status, error) = request(
+        candle_app,
+        "POST",
+        "/api/v1/image/jobs",
+        decoder_image_job(json!("wan_2_1_vae")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    let detail = error["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("is not compatible with qwen_image"),
+        "candle_required must reject an MLX-only decoder as incompatible, not merely uninstalled: \
+         {error}"
+    );
+
+    // Native lane: the same request against the same row, with candle_required off. On macOS the
+    // MLX option is installed and selectable, so it is accepted — which is what proves the
+    // refusal above came from the backend swap and not from the option being unusable.
+    let native_dir = tempfile::tempdir().expect("temp dir creates");
+    write_decoder_capable_catalog(&native_dir);
+    let native_app = create_app(test_settings(&native_dir)).expect("app creates");
+    let (status, body) = request(
+        native_app,
+        "POST",
+        "/api/v1/image/jobs",
+        decoder_image_job(json!("wan_2_1_vae")),
+    )
+    .await;
+    if cfg!(target_os = "macos") {
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(
+            body["payload"]["advanced"]["decoder"], "wan_2_1_vae",
+            "the accepted selection must reach the worker verbatim"
+        );
+    } else {
+        // Candle everywhere else regardless of the setting — same refusal as above.
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("is not compatible with qwen_image")));
+    }
+}
+
+/// sc-18420: retry/duplicate re-run the text-encoder gate but skipped the decoder gate entirely,
+/// and `payloadChanges` is a SHALLOW merge — `advanced` arrives replaced wholesale. A retry could
+/// therefore enqueue exactly the decoder shapes the create path 400s.
+#[tokio::test]
+async fn retry_and_duplicate_gate_a_merged_decoder_selection_the_create_path_refuses() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_decoder_capable_catalog(&temp_dir);
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    // The original job selects no decoder, so it is admitted on either lane.
+    let (status, original) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        decoder_image_job(Value::Null),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{original}");
+    let job_id = original["id"].as_str().expect("job id").to_owned();
+
+    let (_, before) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    let before = before.as_array().expect("jobs array").len();
+
+    for (label, advanced) in [
+        // Mutually exclusive with usePid — refused on every lane, before any list lookup.
+        (
+            "exactly one decoder",
+            json!({ "decoder": "wan_2_1_vae", "usePid": true }),
+        ),
+        // Not an option on any backend for this row.
+        (
+            "is not compatible with qwen_image",
+            json!({ "decoder": "no_such_decoder" }),
+        ),
+        // The typed shape guard the create path applies to the same field.
+        (
+            "advanced.decoder must be a decoder id string",
+            json!({ "decoder": 7 }),
+        ),
+    ] {
+        for operation in ["retry", "duplicate"] {
+            let (status, error) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{job_id}/{operation}"),
+                json!({ "payloadChanges": { "advanced": advanced } }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {error}");
+            assert!(
+                error["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains(label)),
+                "{operation} must fail with the create path's own refusal ({label}): {error}"
+            );
+        }
+    }
+
+    // A refused retry/duplicate must not have enqueued anything, and the boundary must still admit
+    // the selection the create path admits — the gate is not a blanket refusal of `advanced`.
+    let (_, after) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(
+        after.as_array().expect("jobs array").len(),
+        before,
+        "a refused retry/duplicate must not persist a job"
+    );
+
+    let (status, replayed) = request(
+        app,
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/duplicate"),
+        json!({ "payloadChanges": { "advanced": { "decoder": "wan_2_1_vae" } } }),
+    )
+    .await;
+    if cfg!(target_os = "macos") {
+        assert_eq!(status, StatusCode::CREATED, "{replayed}");
+        assert_eq!(replayed["payload"]["advanced"]["decoder"], "wan_2_1_vae");
+    } else {
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{replayed}");
+    }
+}
+
+/// sc-18420, video half: `create_video_job` runs the same decoder gate, and the merged
+/// retry/duplicate boundary skipped it there too. No video provider advertises an alternate
+/// decoder, so every selection must fail closed at enqueue rather than reach a worker that has no
+/// such option.
+#[tokio::test]
+async fn retry_and_duplicate_gate_a_merged_video_decoder_selection() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, original) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": "project-1",
+            "mode": "text_to_video",
+            "prompt": "a drone shot",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{original}");
+    let job_id = original["id"].as_str().expect("job id").to_owned();
+
+    let (_, before) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    let before = before.as_array().expect("jobs array").len();
+
+    for (label, advanced) in [
+        (
+            "is not compatible with",
+            json!({ "decoder": "wan_2_1_vae" }),
+        ),
+        (
+            "exactly one decoder",
+            json!({ "decoder": "wan_2_1_vae", "usePid": true }),
+        ),
+    ] {
+        for operation in ["retry", "duplicate"] {
+            let (status, error) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{job_id}/{operation}"),
+                json!({ "payloadChanges": { "advanced": advanced } }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {error}");
+            assert!(
+                error["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains(label)),
+                "{operation} must reproduce the video create path's refusal ({label}): {error}"
+            );
+        }
+    }
+
+    let (_, after) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(
+        after.as_array().expect("jobs array").len(),
+        before,
+        "a refused retry/duplicate must not persist a job"
+    );
+
+    // A replay that selects no decoder is untouched by the new gate.
+    let (status, replayed) = request(
+        app,
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/duplicate"),
+        json!({ "payloadChanges": { "prompt": "a slower drone shot" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{replayed}");
+}
+
+/// sc-18420: the same retry/duplicate bypass for the imported-submission gate. The create path
+/// refuses an imported request shape the resolved provider registration cannot execute; the merged
+/// boundary never ran that check, so a retry could swap `advanced` for one carrying a shape the
+/// backend has no route for.
+#[tokio::test]
+async fn retry_and_duplicate_gate_a_merged_imported_shape_the_create_path_refuses() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let manifest_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
+    write_empty_sibling_manifests(&manifest_dir);
+    std::fs::write(
+        manifest_dir.join("builtin.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("builtin manifest writes");
+    std::fs::write(
+        manifest_dir.join("user.models.jsonc"),
+        r#"{
+          "schemaVersion": 1,
+          "models": [{
+            "id": "user_krea",
+            "name": "User Krea",
+            "type": "image",
+            "family": "krea_2",
+            "importSourceShape": "transformer_file",
+            "paths": { "model": "/probe/user-krea.safetensors" }
+          }]
+        }"#,
+    )
+    .expect("user manifest writes");
+    let mut settings = test_settings(&temp_dir);
+    // Candle declares krea_2/transformer_file for `generate` but NOT for `pose`, so the plain
+    // request is admitted and the pose replay is the shape with no route.
+    settings.candle_required = true;
+    let app = create_app(settings).expect("app creates");
+
+    let (status, original) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": "project-1",
+            "model": "user_krea",
+            "mode": "text_to_image",
+            "prompt": "mist over hills",
+            "count": 1,
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "the plain imported generate shape has a candle route: {original}"
+    );
+    let job_id = original["id"].as_str().expect("job id").to_owned();
+
+    let (_, before) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    let before = before.as_array().expect("jobs array").len();
+
+    for advanced in [
+        json!({ "poses": [{ "id": "pose-1", "keypoints": [] }] }),
+        json!({ "controlImage": "control-1" }),
+        json!({ "controlMode": "pose" }),
+    ] {
+        for operation in ["retry", "duplicate"] {
+            let (status, error) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{job_id}/{operation}"),
+                json!({ "payloadChanges": { "advanced": advanced } }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {error}");
+            assert!(
+                error["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains("candle_unsupported")),
+                "{operation} must reproduce the create path's imported refusal: {error}"
+            );
+        }
+    }
+
+    let (_, after) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(
+        after.as_array().expect("jobs array").len(),
+        before,
+        "a refused retry/duplicate must not persist a job"
+    );
+
+    // The gate must still pass a merged shape the create path accepts — a prompt-only replay keeps
+    // the admitted generate operation.
+    let (status, replayed) = request(
+        app,
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/duplicate"),
+        json!({ "payloadChanges": { "prompt": "fog over hills" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{replayed}");
+}
+
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn native_imported_control_requires_pose_but_preserves_krea_pose_user_map() {
