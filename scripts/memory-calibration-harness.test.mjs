@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -521,14 +521,38 @@ test("complete status fails closed on scenario, quality, mutation, memory and lo
 // sc-18100: rehomed from `sc-15823-flux1-evidence.test.mjs`, which was the ONLY coverage of these
 // three `validateRuntimeComplete` rejection paths. They gate the SURVIVING harness, not the deleted
 // one-shot, so deleting that file without this test would have dropped the gates silently.
-test("runtime-complete fails closed on promoted lifecycle scenarios, overlay targets and extra cases", () => {
-  // A runtime-complete record attests only that the rung ran. Promoting an unexercised lifecycle
-  // scenario to `passed` is the overclaim the status exists to prevent.
+test("runtime-complete requires lifecycle scenarios to be wholly deferred or fully proven", () => {
+  const proven = runtimeComplete();
   for (const name of ["warm_repeat", "cancel", "error"]) {
-    const record = runtimeComplete();
-    record.scenarios.find((scenario) => scenario.name === name).result = "passed";
+    const scenario = proven.scenarios.find((entry) => entry.name === name);
+    scenario.result = "passed";
+    scenario.reason = `${name} executed under the selected request scope`;
+    if (name !== "warm_repeat") {
+      scenario.cleanupVerified = true;
+      scenario.warmFollowUpPassed = true;
+    }
+  }
+  proven.id = recordId(proven);
+  assert.equal(validateRecord(proven), proven);
+  validateBundle({
+    schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION,
+    sourceSessions: [], records: [proven],
+  });
+
+  for (const mutate of [
+    (record) => { record.scenarios.find((entry) => entry.name === "warm_repeat").result = "not_run"; },
+    (record) => { record.scenarios.find((entry) => entry.name === "cancel").cleanupVerified = false; },
+    (record) => { delete record.scenarios.find((entry) => entry.name === "error").warmFollowUpPassed; },
+    (record) => { record.scenarios.find((entry) => entry.name === "warm_repeat").reason = ""; },
+  ]) {
+    const record = structuredClone(proven);
+    mutate(record);
     record.id = recordId(record);
-    assert.throws(() => validateRecord(record), new RegExp(`${name} must remain explicitly not_run`));
+    assert.throws(() => validateRecord(record), /lifecycle|non-empty/);
+    assert.throws(() => validateBundle({
+      schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION,
+      sourceSessions: [], records: [record],
+    }), /schema validation failed|non-empty/);
   }
 
   // Runtime-complete evidence is base-only: an overlay coordinate may never be attested this way.
@@ -1664,6 +1688,27 @@ test("executable runner handles fragmented responses across provider processes",
       ],
     }],
   };
+  const actions = [];
+  const executeProvider = async (command, args, input) => {
+    const request = JSON.parse(input);
+    actions.push(request.action);
+    if (request.action === "run") {
+      assert.equal(typeof request.planned.logicalCaseId, "string");
+      assert.equal(Object.hasOwn(request.planned, "_campaignEntry"), false);
+    }
+    return new Promise((resolve, reject) => {
+      const child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"] });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (chunk) => { stdout += chunk; });
+      child.stderr.on("data", (chunk) => { stderr += chunk; });
+      child.on("error", reject);
+      child.on("close", (code) => code === 0
+        ? resolve(stdout)
+        : reject(new Error(`provider exited ${code}: ${stderr}`)));
+      child.stdin.end(input);
+    });
+  };
   const result = await runProviderPlan({
     closureDigestFor: stubClosureDigest,
     config,
@@ -1673,6 +1718,7 @@ test("executable runner handles fragmented responses across provider processes",
     ],
     sceneWorksRepo: fileURLToPath(new URL("..", import.meta.url)),
     inferenceRepo: fileURLToPath(new URL("..", import.meta.url)),
+    executeProvider,
   });
   const clean = result.records.every((record) =>
     !record.repositories.sceneWorks.dirty && !record.repositories.inference.dirty
@@ -1681,6 +1727,7 @@ test("executable runner handles fragmented responses across provider processes",
   assert.equal(expandPlan(config, result.records).length, clean ? 0 : 2);
   assert.equal(result.records[0].hardware.deviceId, "fixture:0");
   assert.match(result.records[0].repositories.sceneWorks.revision, /^[0-9a-f]{40}$/);
+  assert.deepEqual(actions, ["probe", "run", ...(clean ? [] : ["run"])]);
 });
 
 function physicalMlxConfig() {

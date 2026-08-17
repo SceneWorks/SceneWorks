@@ -148,6 +148,14 @@ const LTX_PRODUCT_CANARY_FRAMES: u32 = 97;
 const LTX_PRODUCT_CANARY_FPS: u32 = 24;
 const LTX_PRODUCT_CANARY_FIXTURE: &str =
     "ltx-2-3-mlx-q4-768x512-f97-fps24-seed1234-product-envelope-canary";
+const LTX_CAMPAIGN_ENTRY_ACTION: &str = "campaign_entry";
+const LTX_CAMPAIGN_ENTRY_IDENTITY: &str = "sc-20191-q4-768x512-f121-fps30-staged-v1";
+const LTX_CAMPAIGN_ENTRY_LOGICAL_CASE_ID: &str = "implan-9b107d4d1ca0d61d4faa";
+const LTX_CAMPAIGN_ENTRY_FIXTURE: &str = "ltx-2-3-mlx-q4-768x512-f121-fps30-seed18946";
+const LTX_CAMPAIGN_ENTRY_WIDTH: u32 = 768;
+const LTX_CAMPAIGN_ENTRY_HEIGHT: u32 = 512;
+const LTX_CAMPAIGN_ENTRY_FRAMES: u32 = 121;
+const LTX_CAMPAIGN_ENTRY_FPS: u32 = 30;
 const LTX_CANARY_ARTIFACT_REVISION: &str = "01df27d308466533aa09d251e3aebdcc627d07eb";
 const LTX_CANARY_Q4_INVENTORY_FILES: u64 = 11;
 const LTX_CANARY_Q4_INVENTORY_SHA256: &str =
@@ -5488,12 +5496,12 @@ fn planned_ltx_capture(
 /// row is refused; only rows supported by incident or monotonic evidence are called unmeasurable,
 /// while the rest remain explicitly safety-refused/open. External polling is defense in depth,
 /// not admission.
-fn refuse_unsafe_ltx_capture(
+fn validate_ltx_safety_evidence(
     request: &Value,
     tier: &str,
     geometry: LtxGeometry,
     selection: &MemorySelection,
-) -> Result<(), String> {
+) -> Result<(&'static str, u64, u64), String> {
     let inventory_bytes = match tier {
         "q4" => LTX_Q4_INVENTORY_BYTES,
         "q8" => LTX_Q8_INVENTORY_BYTES,
@@ -5570,10 +5578,138 @@ fn refuse_unsafe_ltx_capture(
     let projection = u64::try_from(projection)
         .map_err(|_| "SC-18946 incident-calibrated projection must fit u64".to_owned())?;
     exact_u64("incidentCalibratedProjectionBytes", projection)?;
+    Ok((expected_disposition, inventory_bytes, projection))
+}
+
+fn refuse_unsafe_ltx_capture(
+    request: &Value,
+    tier: &str,
+    geometry: LtxGeometry,
+    selection: &MemorySelection,
+) -> Result<(), String> {
+    let (expected_disposition, inventory_bytes, projection) =
+        validate_ltx_safety_evidence(request, tier, geometry, selection)?;
     Err(format!(
         "SC-19642 pre-load safety refusal: SC-18946 {tier} is {expected_disposition}; exact tier inventory={inventory_bytes} bytes, incident q4 f305 physical footprint={} bytes, incident-calibrated projection={projection} bytes, and every geometry shares the complete tier plus Gemma load without a proved safe upper bound",
         LTX_Q4_F305_CRASH_FOOTPRINT_BYTES
     ))
+}
+
+/// The sole supervised entry into SC-18946. The ordinary `run` action continues through
+/// [`refuse_unsafe_ltx_capture`]; this private action additionally requires the live watchdog
+/// channel and may reach only the first frozen q4 staged row. The runner injects the two private
+/// objects after the canonical harness has constructed the row, so neither object participates in
+/// the campaign logical-case identity.
+fn validate_ltx_campaign_entry(
+    request: &Value,
+    tier: &str,
+    geometry: LtxGeometry,
+    selection: &MemorySelection,
+) -> Result<(), String> {
+    if protocol::action(request)? != LTX_CAMPAIGN_ENTRY_ACTION {
+        return Err("SC-20191 campaign entry action changed".to_owned());
+    }
+    let planned = protocol::planned(request)?;
+    let exact = |pointer: &str, expected: &Value| -> Result<(), String> {
+        let actual = planned.pointer(pointer);
+        if actual == Some(expected) {
+            Ok(())
+        } else {
+            Err(format!(
+                "SC-20191 campaign entry {pointer} must be {expected}, got {actual:?}"
+            ))
+        }
+    };
+    exact("/logicalCaseId", &json!(LTX_CAMPAIGN_ENTRY_LOGICAL_CASE_ID))?;
+    exact("/evidenceScope", &json!("authoritative"))?;
+    exact("/backend", &json!("mlx"))?;
+    exact("/loadShape", &json!("eager_materialization"))?;
+    exact("/target/provider", &json!(LTX_PROVIDER))?;
+    exact("/target/modelId", &json!(LTX_PROVIDER))?;
+    exact("/target/tier", &json!("q4"))?;
+    exact("/target/mode", &json!("text_to_video"))?;
+    exact("/target/overlay", &json!("none"))?;
+    exact("/target/geometry/width", &json!(LTX_CAMPAIGN_ENTRY_WIDTH))?;
+    exact("/target/geometry/height", &json!(LTX_CAMPAIGN_ENTRY_HEIGHT))?;
+    exact("/target/geometry/batch", &json!(1))?;
+    exact("/target/geometry/frames", &json!(LTX_CAMPAIGN_ENTRY_FRAMES))?;
+    exact("/strategy/rung", &json!("staged_residency"))?;
+    exact(
+        "/strategy/engagedRungs",
+        &json!(["resident", "staged_residency"]),
+    )?;
+    exact("/strategy/parameters", &json!({}))?;
+    exact(
+        "/calibrationFingerprint",
+        &json!(LTX_CALIBRATION_FINGERPRINT),
+    )?;
+    exact("/fixture", &json!(LTX_CAMPAIGN_ENTRY_FIXTURE))?;
+    exact("/negative", &json!(false))?;
+    exact("/expectedResult", &json!("passed"))?;
+    exact("/modelLoadPolicy", &json!("fresh_per_case"))?;
+    exact("/modelLoadGroup", &Value::Null)?;
+    exact(
+        "/_watchdog",
+        &json!({ "maxFootprintBytes": LTX_CANARY_MAX_FOOTPRINT_BYTES }),
+    )?;
+    exact(
+        "/_campaignEntry",
+        &json!({
+            "identity": LTX_CAMPAIGN_ENTRY_IDENTITY,
+            "artifact": {
+                "repository": protocol::LTX_REPOSITORY,
+                "revision": LTX_CANARY_ARTIFACT_REVISION,
+                "numericTierInventory": {
+                    "files": LTX_CANARY_Q4_INVENTORY_FILES,
+                    "bytes": LTX_Q4_INVENTORY_BYTES,
+                    "sha256": LTX_CANARY_Q4_INVENTORY_SHA256,
+                },
+                "textEncoderInventory": {
+                    "files": LTX_CANARY_TEXT_ENCODER_INVENTORY_FILES,
+                    "bytes": LTX_CANARY_TEXT_ENCODER_INVENTORY_BYTES,
+                    "sha256": LTX_CANARY_TEXT_ENCODER_INVENTORY_SHA256,
+                },
+            },
+        }),
+    )?;
+    exact(
+        "/_measurementSafety",
+        &json!({
+            "disposition": LTX_SAFETY_REFUSED_OPEN,
+            "tierInventoryBytes": LTX_Q4_INVENTORY_BYTES,
+            "incidentCrashFootprintBytes": LTX_Q4_F305_CRASH_FOOTPRINT_BYTES,
+            "incidentCase": "mlx-ltx-2-3-q4-1280x704-f305-fps30-bounded_decode",
+            "commonLoad": "complete numeric tier plus shared Gemma stack before geometry-specific work",
+            "predictedDecodeBytes": 19_476_906_240_u64,
+            "incidentPredictedDecodeBytes": LTX_INCIDENT_PREDICTED_DECODE_BYTES,
+            "incidentCalibratedProjectionBytes": 97_906_593_920_u64,
+            "projectionAssumptions": [
+                "pinned provider decode cost is the only geometry-varying term used",
+                "immutable tier inventory delta is added byte-for-byte",
+                "incident binding phase is unknown, so the projection is not a physical-footprint bound and cannot admit execution",
+            ],
+            "reason": "incident-calibrated projection is diagnostic only; no proved bound or hard containment admits this row",
+        }),
+    )?;
+    if tier != "q4"
+        || geometry.width != LTX_CAMPAIGN_ENTRY_WIDTH
+        || geometry.height != LTX_CAMPAIGN_ENTRY_HEIGHT
+        || geometry.frames != LTX_CAMPAIGN_ENTRY_FRAMES
+        || selection.strategy != MemoryStrategy::StagedResidency
+        || selection.parameters.decode_tile_edge.is_some()
+        || selection.parameters.decode_overlap.is_some()
+    {
+        return Err("SC-20191 campaign entry resolved a non-canonical tuple or carrier".to_owned());
+    }
+    let (fps, seed) = planned_ltx_capture(request, tier, geometry)?;
+    if fps != LTX_CAMPAIGN_ENTRY_FPS || seed != LTX_SEED {
+        return Err("SC-20191 campaign entry fps or seed changed".to_owned());
+    }
+    let (disposition, _, _) = validate_ltx_safety_evidence(request, tier, geometry, selection)?;
+    if disposition != LTX_SAFETY_REFUSED_OPEN {
+        return Err("SC-20191 campaign entry safety disposition changed".to_owned());
+    }
+    Ok(())
 }
 
 /// The production A/V request. `video_mode` is deliberately left unset so the arm measures the same
@@ -7276,7 +7412,13 @@ fn run_ltx_product_envelope_canary(request: &Value) -> Result<Value, String> {
 /// The `mlx:ltx_2_3` SC-18946 arm. SC-19109 moved strategy ownership into the provider: this path
 /// reads the exact registry contract, proves the loaded generator exposes the same contract, drives
 /// the selected request scope, and executes every runtime-complete admission/lifecycle scenario.
-fn run_ltx(request: &Value) -> Result<Value, String> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LtxRunAdmission {
+    Ordinary,
+    CampaignEntry,
+}
+
+fn run_ltx_with_admission(request: &Value, admission: LtxRunAdmission) -> Result<Value, String> {
     let geometry = validate_ltx_target(request)?;
     protocol::validate_plain_overlay_target(request, LTX_PLAIN_EXECUTION_PATH)?;
     let load_shape = planned_load_shape(request)?;
@@ -7307,7 +7449,14 @@ fn run_ltx(request: &Value) -> Result<Value, String> {
              implements {LTX_CALIBRATION_FINGERPRINT}"
         ));
     }
-    refuse_unsafe_ltx_capture(request, tier, geometry, &selection)?;
+    match admission {
+        LtxRunAdmission::Ordinary => {
+            refuse_unsafe_ltx_capture(request, tier, geometry, &selection)?
+        }
+        LtxRunAdmission::CampaignEntry => {
+            validate_ltx_campaign_entry(request, tier, geometry, &selection)?
+        }
+    }
     let (repository, revision, root, text_encoder_root, spec) =
         ltx_load_spec(request, tier, &selection)?;
     // Read BEFORE the load so the staging bound below is grounded in the artifact on disk rather
@@ -7418,7 +7567,7 @@ fn run_ltx(request: &Value) -> Result<Value, String> {
     reset_peak_memory();
     let pre_rung_active = get_active_memory() as u64;
     let pre_rung_cache = get_cache_memory() as u64;
-    let (measured, output_fps, has_audio) = video_frames(scoped_generate(
+    let (measured, output_fps, audio) = diagnostic_video_frames(scoped_generate(
         generator.as_ref(),
         ltx_request(geometry, fps, seed),
         &context,
@@ -7463,6 +7612,17 @@ fn run_ltx(request: &Value) -> Result<Value, String> {
         return Err(format!(
             "LTX-2.3 returned fps {output_fps} for a {fps} fps request"
         ));
+    }
+    let audio = audio
+        .filter(|audio| audio.samples > 0 && audio.sample_rate > 0 && audio.channels > 0)
+        .ok_or_else(|| {
+            "LTX-2.3 full-A/V campaign render returned no non-empty audio track".to_owned()
+        })?;
+    let first = measured
+        .first()
+        .ok_or_else(|| "LTX-2.3 campaign render returned no first frame".to_owned())?;
+    if first.pixels.is_empty() || first.pixels.iter().all(|pixel| *pixel == first.pixels[0]) {
+        return Err("LTX-2.3 campaign render returned a degenerate first frame".to_owned());
     }
     let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
 
@@ -7563,6 +7723,17 @@ fn run_ltx(request: &Value) -> Result<Value, String> {
             "result": "passed",
             "resolvedPathFingerprint": format!("{repository}@{revision}:{tier}+gemma"),
         },
+        "output": {
+            "frames": geometry.frames,
+            "fps": fps,
+            "audio": {
+                "present": true,
+                "samples": audio.samples,
+                "sampleRate": audio.sample_rate,
+                "channels": audio.channels,
+            },
+            "firstFrameNondegenerate": true,
+        },
         "diagnostics": protocol::diagnostics(
             "memory-mlx-adapter:ltx-2-3-provider-contract-video",
             "executed",
@@ -7601,7 +7772,7 @@ fn run_ltx(request: &Value) -> Result<Value, String> {
                 ("latentTemporalDepth", "count", u64::from(geometry.latent_frames)),
                 ("latentTokens", "count", u64::from(geometry.latent_frames) * u64::from(geometry.width / 32) * u64::from(geometry.height / 32)),
                 ("outputFps", "count", u64::from(fps)),
-                ("audioTrackDecoded", "count", u64::from(has_audio)),
+                ("audioTrackDecoded", "count", 1),
                 ("decodeTilingEngaged", "count", u64::from(decode_plan.tiling_engaged())),
                 ("decodeWritableFrameCap", "count", decode_plan.writable_frame_cap.max(0) as u64),
                 ("decodeTileSpatialPx", "count", decode_plan.spatial_tile_px()),
@@ -7616,6 +7787,151 @@ fn run_ltx(request: &Value) -> Result<Value, String> {
     });
     protocol::settle_plain_overlay_scenario(request, &mut fragment, LTX_PLAIN_EXECUTION_PATH)?;
     Ok(fragment)
+}
+
+fn campaign_entry_diagnostic(fragment: &Value, name: &str) -> Result<u64, String> {
+    fragment
+        .pointer("/diagnostics/measurements")
+        .and_then(Value::as_array)
+        .and_then(|measurements| {
+            measurements
+                .iter()
+                .find(|measurement| measurement.get("name").and_then(Value::as_str) == Some(name))
+        })
+        .and_then(|measurement| measurement.get("value"))
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("SC-20191 campaign entry omitted diagnostic {name}"))
+}
+
+fn validate_ltx_campaign_entry_fragment(fragment: &Value) -> Result<(), String> {
+    for (name, expected) in [
+        ("renderedFrames", u64::from(LTX_CAMPAIGN_ENTRY_FRAMES)),
+        ("outputFps", u64::from(LTX_CAMPAIGN_ENTRY_FPS)),
+        ("audioTrackDecoded", 1),
+        ("decodeTilingEngaged", 0),
+        ("decodeTileSpatialPx", 0),
+        ("decodeTileOverlapPx", 0),
+        ("latentTemporalDepth", 16),
+        ("latentTokens", 6_144),
+    ] {
+        let actual = campaign_entry_diagnostic(fragment, name)?;
+        if actual != expected {
+            return Err(format!(
+                "SC-20191 campaign entry diagnostic {name} must be {expected}, got {actual}"
+            ));
+        }
+    }
+    if fragment.pointer("/strategy/rung").and_then(Value::as_str) != Some("staged_residency")
+        || fragment.pointer("/strategy/engagedRungs")
+            != Some(&json!(["resident", "staged_residency"]))
+        || fragment.pointer("/strategy/parameters") != Some(&json!({}))
+        || fragment.pointer("/output/frames").and_then(Value::as_u64)
+            != Some(u64::from(LTX_CAMPAIGN_ENTRY_FRAMES))
+        || fragment.pointer("/output/fps").and_then(Value::as_u64)
+            != Some(u64::from(LTX_CAMPAIGN_ENTRY_FPS))
+        || fragment
+            .pointer("/output/audio/present")
+            .and_then(Value::as_bool)
+            != Some(true)
+        || fragment
+            .pointer("/output/audio/samples")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            == 0
+        || fragment
+            .pointer("/output/audio/sampleRate")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            == 0
+        || fragment
+            .pointer("/output/audio/channels")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            == 0
+        || fragment
+            .pointer("/output/firstFrameNondegenerate")
+            .and_then(Value::as_bool)
+            != Some(true)
+    {
+        return Err(
+            "SC-20191 campaign entry response changed the exact untiled full-A/V carrier"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn prevalidate_ltx_campaign_entry(request: &Value) -> Result<(), String> {
+    let geometry = validate_ltx_target(request)?;
+    protocol::validate_plain_overlay_target(request, LTX_PLAIN_EXECUTION_PATH)?;
+    if planned_load_shape(request)? != LoadShape::EagerMaterialization {
+        return Err("SC-20191 campaign entry requires eager materialization".to_owned());
+    }
+    let selection = planned_selection(request)?;
+    let tier = planned_qwen_tier(request)?;
+    let planned_fingerprint = protocol::planned(request)?
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    if planned_fingerprint != LTX_CALIBRATION_FINGERPRINT {
+        return Err("SC-20191 campaign entry calibration fingerprint changed".to_owned());
+    }
+    validate_ltx_campaign_entry(request, tier, geometry, &selection)
+}
+
+fn run_ltx_campaign_entry(request: &Value) -> Result<Value, String> {
+    // Every request identity check precedes the live watchdog handshake, process-global limits,
+    // model-path resolution and provider registry construction.
+    prevalidate_ltx_campaign_entry(request)?;
+    let mut watchdog = consume_ltx_canary_watchdog_attestation(request)?;
+    let watchdog_lease = watchdog.start_lease()?;
+    let limits = LtxCanaryLimits::install()?;
+    clear_cache();
+    let pre_provider = AllocatorState::capture_current();
+    validate_ltx_canary_pre_provider(pre_provider)?;
+    let expected_persistent_active = ltx_canary_ones_cache_bytes()?;
+    let mut fragment = run_ltx_with_admission(request, LtxRunAdmission::CampaignEntry)?;
+    validate_ltx_campaign_entry_fragment(&fragment)?;
+    clear_cache();
+    let post_cleanup = AllocatorState::capture_current();
+    validate_ltx_canary_cleanup(pre_provider, post_cleanup, expected_persistent_active)?;
+    fragment["_campaignEntry"] = json!({
+        "identity": LTX_CAMPAIGN_ENTRY_IDENTITY,
+        "inferenceRevision": protocol::INFERENCE_PIN,
+        "watchdog": {
+            "required": true,
+            "protocol": LTX_CANARY_WATCHDOG_PROTOCOL,
+            "maxFootprintBytes": watchdog.max_footprint_bytes,
+            "maxRuntimeSeconds": watchdog.max_runtime_seconds,
+            "hostMemoryBytes": watchdog.host_memory_bytes,
+            "minInitialMemoryFreeBytes": watchdog.min_initial_memory_free_bytes,
+            "minMemoryFreeBytes": watchdog.min_memory_free_bytes,
+        },
+        "mlxLimits": {
+            "memoryLimitBytes": LTX_CANARY_MAX_FOOTPRINT_BYTES,
+            "wiredLimitBytes": limits.wired,
+        },
+        "cleanup": {
+            "preProviderActiveBytes": pre_provider.active,
+            "preProviderCacheBytes": pre_provider.cache,
+            "expectedPersistentActive": {
+                "identity": LTX_CANARY_ONES_CACHE_IDENTITY,
+                "videoDimension": LTX_CANARY_ONES_CACHE_VIDEO_DIMENSION,
+                "audioDimension": LTX_CANARY_ONES_CACHE_AUDIO_DIMENSION,
+                "dtype": "bfloat16",
+                "bytesPerElement": BFLOAT16_BYTES_PER_ELEMENT,
+                "bytes": expected_persistent_active,
+            },
+            "postCleanupActiveBytes": post_cleanup.active,
+            "postCleanupCacheBytes": post_cleanup.cache,
+        },
+    });
+    watchdog_lease.complete()?;
+    Ok(fragment)
+}
+
+fn run_ltx(request: &Value) -> Result<Value, String> {
+    run_ltx_with_admission(request, LtxRunAdmission::Ordinary)
 }
 
 fn run(request: &Value) -> Result<Value, String> {
@@ -7653,6 +7969,7 @@ fn main() {
         "run" => run(&request),
         "canary" => run_ltx_canary(&request),
         "product_envelope_canary" => run_ltx_product_envelope_canary(&request),
+        LTX_CAMPAIGN_ENTRY_ACTION => run_ltx_campaign_entry(&request),
         "assess_batch" => assess_z_image_batch(&request),
         other => Err(format!("unsupported action {other:?}")),
     }
@@ -8840,6 +9157,144 @@ mod ltx_tests {
             "seed": LTX_CANARY_SEED,
         });
         request
+    }
+
+    fn ltx_campaign_entry_request_json() -> Value {
+        let mut request = ltx_request_json(
+            LTX_CAMPAIGN_ENTRY_WIDTH,
+            LTX_CAMPAIGN_ENTRY_HEIGHT,
+            LTX_CAMPAIGN_ENTRY_FRAMES,
+        );
+        request["action"] = json!(LTX_CAMPAIGN_ENTRY_ACTION);
+        request["hardware"] = json!({ "memoryBytes": 128_u64 * 1024 * 1024 * 1024 });
+        request["planned"]["logicalCaseId"] = json!(LTX_CAMPAIGN_ENTRY_LOGICAL_CASE_ID);
+        request["planned"]["evidenceScope"] = json!("authoritative");
+        request["planned"]["target"]["tier"] = json!("q4");
+        request["planned"]["fixture"] = json!(LTX_CAMPAIGN_ENTRY_FIXTURE);
+        request["planned"]["negative"] = json!(false);
+        request["planned"]["expectedResult"] = json!("passed");
+        request["planned"]["modelLoadPolicy"] = json!("fresh_per_case");
+        request["planned"]["modelLoadGroup"] = Value::Null;
+        request["planned"]["_watchdog"] =
+            json!({ "maxFootprintBytes": LTX_CANARY_MAX_FOOTPRINT_BYTES });
+        request["planned"]["_campaignEntry"] = json!({
+            "identity": LTX_CAMPAIGN_ENTRY_IDENTITY,
+            "artifact": {
+                "repository": protocol::LTX_REPOSITORY,
+                "revision": LTX_CANARY_ARTIFACT_REVISION,
+                "numericTierInventory": {
+                    "files": LTX_CANARY_Q4_INVENTORY_FILES,
+                    "bytes": LTX_Q4_INVENTORY_BYTES,
+                    "sha256": LTX_CANARY_Q4_INVENTORY_SHA256,
+                },
+                "textEncoderInventory": {
+                    "files": LTX_CANARY_TEXT_ENCODER_INVENTORY_FILES,
+                    "bytes": LTX_CANARY_TEXT_ENCODER_INVENTORY_BYTES,
+                    "sha256": LTX_CANARY_TEXT_ENCODER_INVENTORY_SHA256,
+                },
+            },
+        });
+        request["planned"]["_measurementSafety"] = json!({
+            "disposition": LTX_SAFETY_REFUSED_OPEN,
+            "tierInventoryBytes": LTX_Q4_INVENTORY_BYTES,
+            "incidentCrashFootprintBytes": LTX_Q4_F305_CRASH_FOOTPRINT_BYTES,
+            "incidentCase": "mlx-ltx-2-3-q4-1280x704-f305-fps30-bounded_decode",
+            "commonLoad": "complete numeric tier plus shared Gemma stack before geometry-specific work",
+            "predictedDecodeBytes": 19_476_906_240_u64,
+            "incidentPredictedDecodeBytes": LTX_INCIDENT_PREDICTED_DECODE_BYTES,
+            "incidentCalibratedProjectionBytes": 97_906_593_920_u64,
+            "projectionAssumptions": [
+                "pinned provider decode cost is the only geometry-varying term used",
+                "immutable tier inventory delta is added byte-for-byte",
+                "incident binding phase is unknown, so the projection is not a physical-footprint bound and cannot admit execution",
+            ],
+            "reason": "incident-calibrated projection is diagnostic only; no proved bound or hard containment admits this row",
+        });
+        request
+    }
+
+    #[test]
+    fn sc_20191_admits_only_the_exact_private_campaign_row_before_weight_work() {
+        let request = ltx_campaign_entry_request_json();
+        prevalidate_ltx_campaign_entry(&request).expect("the exact canonical row is admissible");
+
+        for (pointer, value) in [
+            ("/action", json!("run")),
+            ("/planned/logicalCaseId", json!("implan-mutated")),
+            ("/planned/target/tier", json!("q8")),
+            ("/planned/target/geometry/frames", json!(97)),
+            (
+                "/planned/fixture",
+                json!("ltx-2-3-mlx-q4-768x512-f121-fps30-seed1"),
+            ),
+            (
+                "/planned/strategy/parameters",
+                json!({ "decodeTileEdge": 192 }),
+            ),
+            ("/planned/evidenceScope", json!("fixture")),
+            ("/planned/modelLoadPolicy", json!("batch_rungs")),
+            (
+                "/planned/_watchdog/maxFootprintBytes",
+                json!(LTX_CANARY_MAX_FOOTPRINT_BYTES - 1),
+            ),
+            (
+                "/planned/_campaignEntry/identity",
+                json!("sc-20191-mutated"),
+            ),
+            (
+                "/planned/_measurementSafety/predictedDecodeBytes",
+                json!(19_476_906_239_u64),
+            ),
+        ] {
+            let mut mutated = request.clone();
+            *mutated.pointer_mut(pointer).expect("mutation pointer") = value;
+            let error = prevalidate_ltx_campaign_entry(&mutated)
+                .expect_err("every campaign-entry identity mutation must fail closed");
+            assert!(
+                error.contains("SC-20191") || error.contains("SC-18946"),
+                "{pointer}: {error}"
+            );
+        }
+
+        let direct = run_ltx_campaign_entry(&request)
+            .expect_err("canonical JSON alone cannot bypass the live watchdog");
+        assert!(
+            direct.contains("live external watchdog channel"),
+            "{direct}"
+        );
+    }
+
+    #[test]
+    fn sc_20191_requires_the_exact_untiled_full_av_response_carrier() {
+        let diagnostics = |name: &str, value: u64| json!({ "name": name, "value": value });
+        let mut fragment = json!({
+            "strategy": {
+                "rung": "staged_residency",
+                "engagedRungs": ["resident", "staged_residency"],
+                "parameters": {},
+            },
+            "output": {
+                "frames": 121,
+                "fps": 30,
+                "audio": { "present": true, "samples": 1, "sampleRate": 48_000, "channels": 2 },
+                "firstFrameNondegenerate": true,
+            },
+            "diagnostics": { "measurements": [
+                diagnostics("renderedFrames", 121),
+                diagnostics("outputFps", 30),
+                diagnostics("audioTrackDecoded", 1),
+                diagnostics("decodeTilingEngaged", 0),
+                diagnostics("decodeTileSpatialPx", 0),
+                diagnostics("decodeTileOverlapPx", 0),
+                diagnostics("latentTemporalDepth", 16),
+                diagnostics("latentTokens", 6_144),
+            ] },
+        });
+        validate_ltx_campaign_entry_fragment(&fragment).expect("exact carrier");
+        fragment["diagnostics"]["measurements"][3]["value"] = json!(1);
+        let tiled = validate_ltx_campaign_entry_fragment(&fragment)
+            .expect_err("a tiled carrier cannot publish the untiled canonical row");
+        assert!(tiled.contains("decodeTilingEngaged"), "{tiled}");
     }
 
     #[test]

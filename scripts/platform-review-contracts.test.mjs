@@ -2011,9 +2011,14 @@ test("the LTX real-weight safety canary cannot relax or masquerade as campaign e
   );
 
   const campaign = adapter.slice(
+    adapter.indexOf("fn run_ltx_with_admission("),
+    adapter.indexOf("fn campaign_entry_diagnostic("),
+  );
+  const ordinary = adapter.slice(
     adapter.indexOf("fn run_ltx(request:"),
     adapter.indexOf("fn run(request:"),
   );
+  assert.match(ordinary, /run_ltx_with_admission\(request, LtxRunAdmission::Ordinary\)/);
   assert.ok(campaign.indexOf("refuse_unsafe_ltx_capture(") >= 0);
   assert.ok(
     campaign.indexOf("refuse_unsafe_ltx_capture(") < campaign.indexOf("ltx_load_spec("),
@@ -2029,8 +2034,27 @@ test("the LTX real-weight safety canary cannot relax or masquerade as campaign e
     );
   }
   assert.doesNotMatch(
-    campaign,
+    ordinary,
     /LTX_(?:CANARY|PRODUCT_CANARY)_FIXTURE|diagnostic_(?:product_envelope_)?canary_complete/,
+  );
+  const campaignEntry = adapter.slice(
+    adapter.indexOf("fn prevalidate_ltx_campaign_entry("),
+    adapter.indexOf("fn run_ltx(request:"),
+  );
+  for (const required of [
+    "prevalidate_ltx_campaign_entry(request)?",
+    "consume_ltx_canary_watchdog_attestation(request)?",
+    "LtxCanaryLimits::install()?",
+    "LtxRunAdmission::CampaignEntry",
+    "validate_ltx_campaign_entry_fragment(&fragment)?",
+    "validate_ltx_canary_cleanup(",
+    '"_campaignEntry"',
+    "watchdog_lease.complete()?",
+  ]) assert.ok(campaignEntry.includes(required), `campaign entry must retain ${required}`);
+  assert.ok(
+    campaignEntry.indexOf("prevalidate_ltx_campaign_entry(request)?")
+      < campaignEntry.indexOf("consume_ltx_canary_watchdog_attestation(request)?"),
+    "the exact campaign row must be validated before the watchdog releases model allocation",
   );
 
   const canary = adapter.slice(
