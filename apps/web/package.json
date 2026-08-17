@@ -26,10 +26,10 @@
     "eslint": "^9.39.5",
     "eslint-plugin-react": "^7.37.5",
     "eslint-plugin-react-hooks": "^5.2.0",
-    "globals": "^17.9.0",
+    "globals": "^17.10.0",
     "jsdom": "27.4.0",
     "json5": "^2.2.3",
-    "vite": "8.2.0",
+    "vite": "8.2.1",
     "vitest": "4.1.10"
   }
 }

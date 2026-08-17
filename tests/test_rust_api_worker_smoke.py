@@ -593,7 +593,13 @@ def test_rust_worker_completes_ffmpeg_frame_and_timeline_jobs_against_rust_api_b
         for index in range(5):
             detection_job = httpx.post(
                 f"{rust_api}/api/v1/projects/{project_id}/person-tracks/detections",
-                json={"sourceAssetId": asset_id, "sourceTimestamp": index * 0.1},
+                # `preview: true` is required for this CPU-only smoke. Detection/tracking
+                # default to the REAL, model-backed capability (`preview` defaults to false in
+                # `PersonDetectionJobRequest`), which only the MLX/candle GPU worker advertises;
+                # the CPU utility worker this test spawns (`SCENEWORKS_GPU_ID=cpu`) advertises
+                # only `person_detect_preview`/`person_track_preview`, so a real job would sit
+                # queued forever. Exercising the procedural preview path is the point here.
+                json={"sourceAssetId": asset_id, "sourceTimestamp": index * 0.1, "preview": True},
                 timeout=5,
             )
             detection_job.raise_for_status()
@@ -638,7 +644,12 @@ def test_rust_worker_completes_ffmpeg_frame_and_timeline_jobs_against_rust_api_b
         frame_job.raise_for_status()
         export_job = httpx.post(
             f"{rust_api}/api/v1/projects/{project_id}/timelines/{timeline_id}/exports",
-            json={"resolution": 240, "fps": 24, "requestedGpu": "auto"},
+            # 640 is the smallest export preset the API accepts (`validate_timeline_export`
+            # allows 640/720/1024/1280). The original 240 here was the *worker's* clamp floor
+            # (`media_jobs.rs` `.clamp(240, 2160)`), which is a defensive bound on an untrusted
+            # payload, not a supported size — so this POST 400'd and the test never passed on a
+            # machine with ffmpeg. Matches the parity contract snapshot's export payload.
+            json={"resolution": 640, "fps": 24, "requestedGpu": "auto"},
             timeout=5,
         )
         export_job.raise_for_status()
@@ -656,6 +667,8 @@ def test_rust_worker_completes_ffmpeg_frame_and_timeline_jobs_against_rust_api_b
                 "representativeFrameAssetId": detection_completed[0]["result"]["frameAssetId"],
                 "detection": first_detection,
                 "trackName": "Hero",
+                # Same CPU-lane reason as the detection jobs above.
+                "preview": True,
             },
             timeout=5,
         )
