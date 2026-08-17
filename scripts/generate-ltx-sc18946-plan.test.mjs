@@ -10,6 +10,9 @@ import {
   INFERENCE_REVISION,
   INCIDENT_PREDICTED_DECODE_BYTES,
   Q4_F305_CRASH_FOOTPRINT_BYTES,
+  RATIFIED_BOUNDED_FIXTURE,
+  RATIFIED_BOUNDED_PARAMETERS,
+  RATIFIED_BOUNDED_PROVIDER,
   RUNG2_PARAMETERS,
   SAFETY_DISPOSITIONS,
   SEED,
@@ -78,7 +81,7 @@ test("every campaign identity and derived geometry fact is exact and collision-f
       `${row.name} latent tokens`,
     );
     assert.equal(row._writableFrameCap, Math.floor(2_147_483_647 / (8 * width * height)));
-    assert.match(row.fixture, new RegExp(`-${row.target.tier}-${width}x${height}-f${frames}-fps\\d+-seed${SEED}$`));
+    assert.match(row.fixture, new RegExp(`-${row.target.tier}-${width}x${height}-f${frames}-fps\\d+(?:-bounded-decode-192-64)?-seed${SEED}$`));
     assert.equal(row.calibrationFingerprint, FINGERPRINT);
     assert.equal(row.cases.length, 1);
     assert.equal(row.cases[0].expectedResult, "passed");
@@ -99,27 +102,42 @@ test("the flip bands, deep anchors, original six and held-out transfer cells are
   ]) assert.ok(cells.has(cell), cell);
 });
 
-test("rung two is q4 q8 bf16 by f305 f449 with the exact 384 by 64 carrier", () => {
+test("rung two preserves the six 384 by 64 rows and appends one exact ratified carrier", () => {
   const rows = plans["ltx-mlx-rung2-sweep.json"].providers;
-  assert.equal(rows.length, 6);
+  assert.equal(rows.length, 7);
+  const frozen = rows.slice(0, 6);
+  const [ratified] = rows.slice(6);
   assert.deepEqual(TIERS, ["q4", "q8", "bf16"]);
   assert.deepEqual(
-    rows.map((row) => `${row.target.geometry.frames}:${row.target.tier}`),
+    frozen.map((row) => `${row.target.geometry.frames}:${row.target.tier}`),
     ["305:q4", "305:q8", "305:bf16", "449:q4", "449:q8", "449:bf16"],
     "the checked-in matrix preserves the reviewed serialized launch order",
   );
-  assert.deepEqual(new Set(rows.map((row) => row.target.tier)), new Set(TIERS));
-  assert.deepEqual(new Set(rows.map((row) => row.target.geometry.frames)), new Set([305, 449]));
-  for (const row of rows) {
+  assert.deepEqual(new Set(frozen.map((row) => row.target.tier)), new Set(TIERS));
+  assert.deepEqual(new Set(frozen.map((row) => row.target.geometry.frames)), new Set([305, 449]));
+  for (const row of frozen) {
     assert.equal(row.rung, "bounded_decode");
     assert.deepEqual(row.engagedRungs, ["resident", "staged_residency", "bounded_decode"]);
     assert.deepEqual(row.cases, [{ parameters: RUNG2_PARAMETERS, expectedResult: "passed" }]);
     assert.equal(row.calibrationFingerprint, FINGERPRINT);
     assert.match(row.fixture, new RegExp(`seed${SEED}$`));
   }
-  const predicted = Object.fromEntries(rows.filter((row) => row.target.tier === "q8").map((row) => [row.target.geometry.frames, row._predictedDecodeBytes]));
+  const predicted = Object.fromEntries(frozen.filter((row) => row.target.tier === "q8").map((row) => [row.target.geometry.frames, row._predictedDecodeBytes]));
   assert.equal(predicted[305], 18_540_396_800);
   assert.equal(predicted[449], 23_730_848_000);
+  assert.equal(ratified.name, RATIFIED_BOUNDED_PROVIDER);
+  assert.equal(ratified.fixture, RATIFIED_BOUNDED_FIXTURE);
+  assert.equal(ratified._role, "bounded_carrier_entry");
+  assert.equal(ratified._campaignPhase, "bounded_carrier_ratification");
+  assert.deepEqual(ratified.target.geometry, {
+    width: 768, height: 512, batch: 1, frames: 121,
+  });
+  assert.deepEqual(ratified.cases, [{
+    parameters: RATIFIED_BOUNDED_PARAMETERS, expectedResult: "passed",
+  }]);
+  assert.equal(ratified._measurementSafety.disposition, SAFETY_DISPOSITIONS.SAFETY_REFUSED_OPEN);
+  assert.equal(ratified._measurementSafety.predictedDecodeBytes, 6_264_848_640);
+  assert.equal(ratified._measurementSafety.incidentCalibratedProjectionBytes, 84_694_536_320);
 });
 
 test("host-risk coverage is explicitly planned rather than absent", () => {
@@ -141,6 +159,7 @@ test("host-risk coverage is explicitly planned rather than absent", () => {
 
 test("SC-19642 classifies every row for pre-load refusal without inventing a safe host fraction", () => {
   const rows = Object.values(plans).flatMap((plan) => plan.providers);
+  assert.equal(rows.length, 71);
   assert.equal(Q4_F305_CRASH_FOOTPRINT_BYTES, 96_970_084_480);
   assert.deepEqual(TIER_INVENTORY_BYTES, {
     q4: 20_467_690_460,

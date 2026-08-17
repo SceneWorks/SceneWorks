@@ -19,6 +19,12 @@ import {
   BOUNDED_CARRIER_PHASES,
   BOUNDED_CARRIER_PROFILE,
   BOUNDED_CARRIER_SUCCESS_RECEIPT_TYPE,
+  BOUNDED_CAMPAIGN_ENTRY_ACTION,
+  BOUNDED_CAMPAIGN_ENTRY_FIXTURE,
+  BOUNDED_CAMPAIGN_ENTRY_IDENTITY,
+  BOUNDED_CAMPAIGN_ENTRY_LOGICAL_CASE_ID,
+  BOUNDED_CAMPAIGN_ENTRY_PROVIDER,
+  BOUNDED_CAMPAIGN_FAILURE_RECEIPT_TYPE,
   CAMPAIGN_ENTRY_FIXTURE,
   CAMPAIGN_ENTRY_IDENTITY,
   CAMPAIGN_ENTRY_LOGICAL_CASE_ID,
@@ -36,6 +42,15 @@ import {
   acquireCampaignEntryOutcome,
   acquireBoundedCarrierOutcome,
   acquireCanonicalPublicationClaim,
+  boundedCampaignEntryAdapterRequest,
+  boundedCampaignEntryCanonicalFragment,
+  boundedCampaignEntryFailurePath,
+  boundedCampaignEntryFailureReceipt,
+  boundedCampaignEntryOutcomeReservationPath,
+  boundedCampaignEntryPlan,
+  validateBoundedCampaignEntryResponse,
+  validateBoundedCampaignEntryBundle,
+  validateBoundedCampaignEntryFailureReceipt,
   acquirePreparationLock,
   campaignEntryAdapterRequest,
   campaignEntryCanonicalFragment,
@@ -50,6 +65,7 @@ import {
   boundedCarrierSuccessPath,
   boundedCarrierSuccessReceipt,
   canonicalPublicationClaimPath,
+  containedCampaignExecutionClaimTarget,
   canaryWatchdogEnvironment,
   canaryRequest,
   cargoSourceStatusIsClean,
@@ -95,7 +111,9 @@ import {
 } from "./run-ltx-safety-canary.mjs";
 
 import { hashArtifactInventory } from "./hash-artifact-inventory.mjs";
-import { canonicalJson, runProviderPlan, validateBundle } from "./memory-calibration-harness.mjs";
+import {
+  canonicalJson, recordId, runProviderPlan, validateBundle,
+} from "./memory-calibration-harness.mjs";
 
 const TEXT_ENCODER_INVENTORY = {
   root: "/models/gemma",
@@ -110,6 +128,27 @@ async function campaignEntryFixture() {
     import.meta.url,
   ), "utf8"));
   const { provider, planned } = campaignEntryPlan(config);
+  const request = {
+    action: "run",
+    planned,
+    repositories: {
+      sceneWorks: {
+        revision: "1".repeat(40), dirty: false, matrixSourceRevision: "1".repeat(40),
+      },
+      inference: { revision: "2".repeat(40), dirty: false, closureDigest: "3".repeat(64) },
+    },
+    repositoryPaths: { sceneWorks: "/scene", inference: "/inference" },
+    hardware: { probe: "mlx", memoryBytes: 128 * 1024 ** 3 },
+  };
+  return { config, provider, planned, request };
+}
+
+async function boundedCampaignEntryFixture() {
+  const config = JSON.parse(await readFile(new URL(
+    "../docs/calibration/sc-18946/ltx-mlx-rung2-sweep.json",
+    import.meta.url,
+  ), "utf8"));
+  const { provider, planned } = boundedCampaignEntryPlan(config);
   const request = {
     action: "run",
     planned,
@@ -227,6 +266,63 @@ function campaignEntryRuntimeResponse(hostMemoryBytes = 128 * 1024 ** 3) {
     loadability: { result: "passed", resolvedPathFingerprint: "exact@campaign-entry:q4" },
     capturedAt: "2026-08-17T12:00:00Z",
   };
+}
+
+function boundedCampaignEntryRuntimeResponse(hostMemoryBytes = 128 * 1024 ** 3) {
+  const response = campaignEntryRuntimeResponse(hostMemoryBytes);
+  response.strategy = {
+    rung: "bounded_decode",
+    engagedRungs: ["resident", "staged_residency", "bounded_decode"],
+    parameters: { decodeTileEdge: 192, decodeOverlap: 64 },
+  };
+  response.sweep.cases[0].parameters = structuredClone(response.strategy.parameters);
+  for (const name of ["cancel", "error"]) {
+    const scenario = response.scenarios.find((item) => item.name === name);
+    scenario.result = "not_run";
+    scenario.reason = "SC-20318 parity-only lifecycle";
+    delete scenario.cleanupVerified;
+    delete scenario.warmFollowUpPassed;
+  }
+  const values = new Map([
+    ["renderedFrames", 121], ["outputFps", 30], ["audioTrackDecoded", 1],
+    ["decodeTilingEngaged", 1], ["decodeTileSpatialPx", 192],
+    ["decodeTileOverlapPx", 64], ["spatialDecodeTiles", 24],
+    ["latentTemporalDepth", 16], ["latentTokens", 6_144],
+    ["warmConditioningActivePeak", 101], ["warmDenoiseActivePeak", 201],
+    ["warmDecodeActivePeak", 151], ["warmOutputAudioSamples", 48_000],
+    ["warmOutputAudioSampleRate", 48_000], ["warmOutputAudioChannels", 2],
+    ["providerRequestScopeRenders", 2],
+  ]);
+  response.diagnostics.measurements = [...values].map(([name, value]) => ({
+    name, unit: name.includes("Bytes") || name.includes("Peak") ? "bytes" : "count", value,
+  }));
+  delete response._campaignEntry;
+  response._boundedCampaignEntry = {
+    identity: BOUNDED_CAMPAIGN_ENTRY_IDENTITY,
+    inferenceRevision: "2".repeat(40),
+    watchdog: {
+      required: true, protocol: "sceneworks-memory-watchdog-v1",
+      providerPhaseProtocol: "sceneworks-provider-phase-v1",
+      providerPhaseProfile: "bounded-campaign-entry",
+      providerPhases: [...BOUNDED_CARRIER_PHASES],
+      maxFootprintBytes: MAX_FOOTPRINT_BYTES,
+      maxRuntimeSeconds: MAX_RUNTIME_SECONDS,
+      hostMemoryBytes,
+      minInitialMemoryFreeBytes: preflightFreeFloor(hostMemoryBytes),
+      minMemoryFreeBytes: runtimeFreeFloor(hostMemoryBytes),
+    },
+    mlxLimits: { memoryLimitBytes: MAX_FOOTPRINT_BYTES, wiredLimitBytes: MAX_FOOTPRINT_BYTES },
+    cleanup: {
+      preProviderActiveBytes: 0, preProviderCacheBytes: 0,
+      expectedPersistentActive: {
+        identity: "mlx-gen-ltx-transformer-ones-cache-av-bfloat16-v1",
+        videoDimension: 4_096, audioDimension: 2_048,
+        dtype: "bfloat16", bytesPerElement: 2, bytes: 12_288,
+      },
+      postCleanupActiveBytes: 12_288, postCleanupCacheBytes: 0,
+    },
+  };
+  return response;
 }
 
 function boundedCarrierResponse(hostMemoryBytes = 128 * 1024 ** 3) {
@@ -635,6 +731,109 @@ test("SC-20191 rejects carrier, cleanup and watchdog mutations", () => {
   ]) assert.throws(() => validateCampaignEntryWatchdogEvents(events, hostMemoryBytes), /SC-20(?:191|216)/);
 });
 
+test("SC-20318 transforms only the new exact bounded row and rejects every identity mutation", async () => {
+  const { config, planned, request } = await boundedCampaignEntryFixture();
+  const expectedSource = {
+    sceneWorksRevision: "1".repeat(40), inferenceRevision: "2".repeat(40),
+    sceneWorksRepo: "/scene", inferenceRepo: "/inference",
+  };
+  const adapter = boundedCampaignEntryAdapterRequest(request, planned, expectedSource);
+  assert.equal(adapter.action, BOUNDED_CAMPAIGN_ENTRY_ACTION);
+  assert.equal(adapter.planned.logicalCaseId, BOUNDED_CAMPAIGN_ENTRY_LOGICAL_CASE_ID);
+  assert.equal(adapter.planned.fixture, BOUNDED_CAMPAIGN_ENTRY_FIXTURE);
+  assert.equal(adapter.planned._boundedCampaignEntry.identity, BOUNDED_CAMPAIGN_ENTRY_IDENTITY);
+  assert.equal(adapter.planned._boundedCampaignEntry.seed, 18_946);
+  assert.equal(adapter.planned._boundedCampaignEntry.videoMode, "default_av");
+  assert.equal(adapter.planned._boundedCampaignEntry.spatialDecodeTiles, 24);
+  assert.equal(adapter.planned._measurementSafety.disposition, "safety_refused_open");
+  assert.equal(config.providers.length, 7);
+  for (const mutate of [
+    (value) => { value.action = "run_batch"; },
+    (value) => { value.planned.logicalCaseId = CAMPAIGN_ENTRY_LOGICAL_CASE_ID; },
+    (value) => { value.planned.fixture = CAMPAIGN_ENTRY_FIXTURE; },
+    (value) => { value.planned.target.tier = "q8"; },
+    (value) => { value.planned.strategy.parameters.decodeTileEdge = 193; },
+    (value) => { value.planned.strategy.parameters.decodeOverlap = 63; },
+    (value) => { value.repositories.sceneWorks.dirty = true; },
+    (value) => { value.hardware.memoryBytes = 0; },
+  ]) {
+    const changed = structuredClone(request);
+    mutate(changed);
+    assert.throws(() => boundedCampaignEntryAdapterRequest(changed, planned, expectedSource),
+      /SC-20318|canonical/);
+  }
+});
+
+test("SC-20318 response requires two-render parity, stereo output, exact tiling and cleanup", () => {
+  const hostMemoryBytes = 128 * 1024 ** 3;
+  const response = boundedCampaignEntryRuntimeResponse(hostMemoryBytes);
+  validateBoundedCampaignEntryResponse(response, {
+    inferenceRevision: "2".repeat(40), hostMemoryBytes,
+  });
+  for (const mutate of [
+    (value) => { value.strategy.spatialDecodeTiles = 24; },
+    (value) => { value.output.audio.channels = 1; },
+    (value) => { value.scenarios.find((item) => item.name === "warm_repeat").result = "not_run"; },
+    (value) => { value.scenarios.find((item) => item.name === "cancel").result = "passed"; },
+    (value) => { value.quality.maximumError = value.quality.maximumErrorThreshold + 1; },
+    (value) => { value.diagnostics.measurements.find((item) =>
+      item.name === "providerRequestScopeRenders").value = 1; },
+    (value) => { value.diagnostics.measurements.find((item) =>
+      item.name === "spatialDecodeTiles").value = 23; },
+    (value) => { value.diagnostics.measurements.find((item) =>
+      item.name === "warmDenoiseActivePeak").value = 0; },
+    (value) => { value._boundedCampaignEntry.watchdog.providerPhaseProfile = "bounded-carrier"; },
+    (value) => { value._boundedCampaignEntry.cleanup.postCleanupActiveBytes += 1; },
+  ]) {
+    const changed = structuredClone(response);
+    mutate(changed);
+    assert.throws(() => validateBoundedCampaignEntryResponse(changed, {
+      inferenceRevision: "2".repeat(40), hostMemoryBytes,
+    }), /SC-20318/);
+  }
+});
+
+test("SC-20318 failure receipt stays non-ingestible, phase-bound and mutation-sensitive", () => {
+  const hostMemoryBytes = 128 * 1024 ** 3;
+  const { identity, key, preparationRoot, prepared } = campaignFailurePreparation();
+  const events = campaignFailureEvents(hostMemoryBytes, 3, BOUNDED_CARRIER_PHASES);
+  const canonicalOutput = "/private/results/sc20318-canonical.json";
+  const outcome = {
+    canonicalOutput,
+    failureOutput: boundedCampaignEntryFailurePath(canonicalOutput),
+    reservation: boundedCampaignEntryOutcomeReservationPath(canonicalOutput),
+    choice: `${boundedCampaignEntryOutcomeReservationPath(canonicalOutput)}.choice`,
+    outcomeChoice: "failure",
+    canonicalBundleAbsentAtPublication: true,
+    outcomeReservationHeldAtPublication: true,
+  };
+  const receipt = boundedCampaignEntryFailureReceipt({
+    sceneWorksRevision: "1".repeat(40), sceneWorksTree: "a".repeat(40),
+    inferenceRevision: "3".repeat(40), inferenceTree: "b".repeat(40),
+    identity, preparationKey: key, preparationRoot, prepared,
+    hostMemoryBytes, events, outcome,
+  });
+  assert.equal(receipt.recordType, BOUNDED_CAMPAIGN_FAILURE_RECEIPT_TYPE);
+  assert.equal(receipt.ingestible, false);
+  assert.throws(() => validateBundle(receipt), /schema|object|property|records|required/i);
+  validateBoundedCampaignEntryFailureReceipt(receipt);
+  for (const mutate of [
+    (value) => { value.ingestible = true; },
+    (value) => { value.story = "sc-20216"; },
+    (value) => { value.campaignCase.identity = CAMPAIGN_ENTRY_IDENTITY; },
+    (value) => { value.campaignCase.strategy.spatialDecodeTiles = 23; },
+    (value) => { value.outcome.canonicalBundleAbsentAtPublication = false; },
+    (value) => { value.watchdog.providerPhases = [...PROVIDER_PHASES]; },
+    (value) => { value.watchdog.events[4].providerPhase.name = "primary_decode"; },
+    (value) => { value.watchdog.events.splice(2, 1); },
+    (value) => { value.cleanup.runRootEmpty = false; },
+  ]) {
+    const changed = structuredClone(receipt);
+    mutate(changed);
+    assert.throws(() => validateBoundedCampaignEntryFailureReceipt(changed), /SC-20318|SC-20216/);
+  }
+});
+
 test("SC-20216 failure receipt is phase-authenticated, non-ingestible and mutation-sensitive", () => {
   const hostMemoryBytes = 128 * 1024 ** 3;
   const { identity, key, preparationRoot, prepared } = campaignFailurePreparation();
@@ -831,6 +1030,27 @@ test("SC-20216 jointly reserves canonical and failure outcomes across races and 
   await partialClaim.release();
   await assert.rejects(() => acquireCampaignEntryOutcome(partialOutput), /EEXIST/,
     "a claimed but interrupted outcome must remain fail-closed");
+});
+
+test("distinct contained campaign outputs share one exclusive SC-18946 execution claim", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "sc20318-shared-execution-"));
+  t.after(() => cleanupCanaryScratch(root));
+  const stagedOutput = path.join(root, "sc-20191", "staged.json");
+  const boundedOutput = path.join(root, "sc-20318", "bounded.json");
+  assert.equal(
+    containedCampaignExecutionClaimTarget(stagedOutput),
+    containedCampaignExecutionClaimTarget(boundedOutput),
+    "production containment must not depend on each story's distinct output directory",
+  );
+  const stagedTarget = containedCampaignExecutionClaimTarget(stagedOutput, root);
+  const boundedTarget = containedCampaignExecutionClaimTarget(boundedOutput, root);
+  assert.equal(stagedTarget, boundedTarget);
+  const owner = await acquireCanonicalPublicationClaim(stagedTarget);
+  await assert.rejects(() => acquireCanonicalPublicationClaim(boundedTarget),
+    /live contained LTX run/);
+  await owner.release();
+  const successor = await acquireCanonicalPublicationClaim(boundedTarget);
+  await successor.release();
 });
 
 test("SC-20254 freezes one distinct bounded full-A/V carrier and rejects identity drift", () => {
@@ -1273,6 +1493,75 @@ test("SC-20191 publishes one schema-valid canonical runtime record after strippi
     const changed = structuredClone(result);
     mutate(changed.records[0]);
     assert.throws(() => validateCampaignEntryBundle(changed), /runtime lifecycle|schema|SC-20191/);
+  }
+});
+
+test("SC-20318 synthetic adapter to harness path yields one distinct schema-valid record", async (t) => {
+  const { provider } = await boundedCampaignEntryFixture();
+  const repo = await cleanCampaignHarnessRepo(t);
+  let runRequests = 0;
+  const result = await runProviderPlan({
+    config: { providers: [provider] },
+    providerCommand: ["synthetic-sc20318-provider"],
+    sceneWorksRepo: repo,
+    inferenceRepo: repo,
+    backend: "mlx",
+    providerName: BOUNDED_CAMPAIGN_ENTRY_PROVIDER,
+    closureDigestFor: async () => "c".repeat(64),
+    executeProvider: async (_command, _args, input) => {
+      const request = JSON.parse(input);
+      if (request.action === "probe") {
+        return canonicalJson({ hardware: {
+          probe: "synthetic SC-20318 MLX provider",
+          memoryBytes: 128 * 1024 ** 3,
+          model: "MacFixture", chip: "Apple Fixture", osVersion: "macOS fixture",
+          metalDevice: "Apple Fixture",
+          mlxMemoryLimitBytes: 96 * 1024 ** 3, wiredLimitBytes: 64 * 1024 ** 3,
+        } });
+      }
+      assert.equal(request.action, "run");
+      assert.equal(request.planned.logicalCaseId, BOUNDED_CAMPAIGN_ENTRY_LOGICAL_CASE_ID);
+      runRequests += 1;
+      const response = boundedCampaignEntryRuntimeResponse(request.hardware.memoryBytes);
+      response._boundedCampaignEntry.inferenceRevision = request.repositories.inference.revision;
+      validateBoundedCampaignEntryResponse(response, {
+        inferenceRevision: request.repositories.inference.revision,
+        hostMemoryBytes: request.hardware.memoryBytes,
+      });
+      return canonicalJson(boundedCampaignEntryCanonicalFragment(response, 43_193_032_536));
+    },
+  });
+  assert.equal(runRequests, 1, "one harness request owns exactly two adapter renders");
+  validateBoundedCampaignEntryBundle(result);
+  const [record] = result.records;
+  assert.equal(record.logicalCaseId, BOUNDED_CAMPAIGN_ENTRY_LOGICAL_CASE_ID);
+  assert.notEqual(record.logicalCaseId, CAMPAIGN_ENTRY_LOGICAL_CASE_ID);
+  assert.match(record.id, /^imc-[0-9a-f]{20}$/);
+  const stagedIdentity = structuredClone(record);
+  stagedIdentity.fixture = CAMPAIGN_ENTRY_FIXTURE;
+  stagedIdentity.strategy = {
+    rung: "staged_residency", engagedRungs: ["resident", "staged_residency"], parameters: {},
+  };
+  assert.notEqual(record.id, recordId(stagedIdentity),
+    "the bounded canonical record identity must remain distinct from the staged row");
+  assert.equal(Object.hasOwn(record, "output"), false);
+  assert.equal(Object.hasOwn(record, "_boundedCampaignEntry"), false);
+
+  for (const mutate of [
+    (value) => { value.logicalCaseId = CAMPAIGN_ENTRY_LOGICAL_CASE_ID; },
+    (value) => { value.strategy.parameters.decodeTileEdge = 193; },
+    (value) => { value.scenarios.find((item) => item.name === "warm_repeat").result = "not_run"; },
+    (value) => { value.scenarios.find((item) => item.name === "cancel").result = "passed"; },
+    (value) => { value.diagnostics.measurements.find((item) =>
+      item.name === "spatialDecodeTiles").value = 1; },
+    (value) => { value.diagnostics.measurements.find((item) =>
+      item.name === "boundedCampaignWatchdogMaxObservedFootprintBytes").value
+      = MAX_FOOTPRINT_BYTES; },
+  ]) {
+    const changed = structuredClone(result);
+    mutate(changed.records[0]);
+    assert.throws(() => validateBoundedCampaignEntryBundle(changed),
+      /SC-20318|schema|runtime lifecycle|logicalCaseId|logical identity/);
   }
 });
 
@@ -1756,7 +2045,7 @@ test("the production runner can only launch through the identity-checked watchdo
   assert.match(source, /response\?\.inferenceRevision !== expectedInferenceRevision/);
   assert.match(source, /--require-child-attestation/);
   assert.match(source, /--require-provider-phases/);
-  assert.match(source, /"--provider-phase-profile", "campaign-entry"/);
+  assert.match(source, /"--provider-phase-profile", spec\.phaseProfile/);
   assert.equal(CHILD_ATTESTATION_TIMEOUT_SECONDS, 30);
   assert.match(source, /--child-attestation-timeout", String\(CHILD_ATTESTATION_TIMEOUT_SECONDS\)/);
   assert.match(source, /event\.event === "child_attested"/);
@@ -1788,7 +2077,7 @@ test("the production runner can only launch through the identity-checked watchdo
     < failureHandling.indexOf("validateCampaignEntryFailureEvents"),
   "the original watchdog failure must exist before receipt or postcondition validation");
   assert.match(failureHandling, /preserveFailureReceiptSuppression\(watchdogError, error\)/);
-  assert.match(source, /acquireCampaignEntryOutcome\(output\)/);
+  assert.match(source, /campaignOutcome = await spec\.acquireOutcome\(output\)/);
   const canonicalClaim = source.slice(
     source.indexOf("export async function acquireCanonicalPublicationClaim("),
     source.indexOf("export async function acquireBoundedCarrierOutcome("),
@@ -1847,11 +2136,11 @@ test("the production runner can only launch through the identity-checked watchdo
     "await assertCampaignSourceState(providerOptions, signal)",
     "await assertRuntimeAssetIdentities(prepared.adapter, prepared.metallib, signal)",
     "await assertPreparationHasNoTransientResidue(preparationRoot)",
-    "validateCampaignEntryBundle(bundle)",
+    "spec.validateBundle(bundle)",
   ]) {
     assert.ok(campaignController.indexOf(operation) >= 0
       && campaignController.indexOf(operation)
-        < campaignController.indexOf("await publishCampaignEntryCanonicalOutcome("),
+        < campaignController.indexOf("if (bounded) {"),
     `${operation} must precede atomic canonical publication`);
   }
   assert.match(source, /cancellation\.abort\(new CanaryInterrupted\(signalName\)\)/);

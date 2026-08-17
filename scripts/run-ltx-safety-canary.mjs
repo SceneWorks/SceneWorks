@@ -20,6 +20,7 @@ import {
 
 const execFileAsync = promisify(execFile);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const CONTAINED_CAMPAIGN_ROOT = "/Volumes/Data/sceneworks-safety-canary";
 export const MAX_FOOTPRINT_BYTES = 53_347_146_863;
 export const MAX_RUNTIME_SECONDS = 1_800;
 export const CHILD_ATTESTATION_TIMEOUT_SECONDS = 30;
@@ -38,6 +39,7 @@ export const SAFETY_CANARY_PROFILE = "safety";
 export const PRODUCT_ENVELOPE_CANARY_PROFILE = "product-envelope";
 export const CAMPAIGN_ENTRY_PROFILE = "campaign-entry";
 export const BOUNDED_CARRIER_PROFILE = "bounded-carrier";
+export const BOUNDED_CAMPAIGN_ENTRY_PROFILE = "bounded-campaign-entry";
 export const CAMPAIGN_ENTRY_PROVIDER =
   "mlx-ltx-2-3-q4-768x512-f121-fps30-staged_residency";
 export const CAMPAIGN_ENTRY_FIXTURE =
@@ -56,6 +58,16 @@ export const BOUNDED_CARRIER_SUCCESS_RECEIPT_TYPE =
   "sceneworks_bounded_carrier_success_v1";
 export const BOUNDED_CARRIER_FAILURE_RECEIPT_TYPE =
   "sceneworks_bounded_carrier_failure_v1";
+export const BOUNDED_CAMPAIGN_ENTRY_ACTION = "bounded_campaign_entry";
+export const BOUNDED_CAMPAIGN_ENTRY_PROVIDER =
+  "mlx-ltx-2-3-q4-768x512-f121-fps30-bounded_decode-192x64";
+export const BOUNDED_CAMPAIGN_ENTRY_FIXTURE =
+  "ltx-2-3-mlx-q4-768x512-f121-fps30-bounded-decode-192-64-seed18946";
+export const BOUNDED_CAMPAIGN_ENTRY_LOGICAL_CASE_ID = "implan-964db61ed3789af6386b";
+export const BOUNDED_CAMPAIGN_ENTRY_IDENTITY =
+  "sc-20318-q4-768x512-f121-fps30-bounded-192-64-authoritative-v1";
+export const BOUNDED_CAMPAIGN_FAILURE_RECEIPT_TYPE =
+  "sceneworks_bounded_campaign_entry_failure_v1";
 export const PROVIDER_PHASE_PROTOCOL = "sceneworks-provider-phase-v1";
 export const WATCHDOG_EVENT_CHAIN_PROTOCOL = "sceneworks-watchdog-event-chain-v1";
 export const PROVIDER_PHASES = Object.freeze([
@@ -79,6 +91,7 @@ export const BOUNDED_CARRIER_PHASES = Object.freeze([
 ]);
 const CAMPAIGN_ENTRY_ACTION = "campaign_entry";
 const CAMPAIGN_ENTRY_PLAN = "docs/calibration/sc-18946/ltx-mlx-single-pass-sweep.json";
+const BOUNDED_CAMPAIGN_ENTRY_PLAN = "docs/calibration/sc-18946/ltx-mlx-rung2-sweep.json";
 const CAMPAIGN_ENTRY_SAFETY = Object.freeze({
   disposition: "safety_refused_open",
   tierInventoryBytes: 20_467_690_460,
@@ -94,6 +107,18 @@ const CAMPAIGN_ENTRY_SAFETY = Object.freeze({
     "incident binding phase is unknown, so the projection is not a physical-footprint bound and cannot admit execution",
   ]),
   reason: "incident-calibrated projection is diagnostic only; no proved bound or hard containment admits this row",
+});
+const BOUNDED_CAMPAIGN_ENTRY_SAFETY = Object.freeze({
+  disposition: "safety_refused_open",
+  tierInventoryBytes: 20_467_690_460,
+  incidentCrashFootprintBytes: 96_970_084_480,
+  incidentCase: "mlx-ltx-2-3-q4-1280x704-f305-fps30-bounded_decode",
+  commonLoad: "complete numeric tier plus shared Gemma stack before geometry-specific work",
+  predictedDecodeBytes: 6_264_848_640,
+  incidentPredictedDecodeBytes: 18_540_396_800,
+  incidentCalibratedProjectionBytes: 84_694_536_320,
+  projectionAssumptions: CAMPAIGN_ENTRY_SAFETY.projectionAssumptions,
+  reason: "incident-calibrated projection is diagnostic only; ordinary run remains refused and only the exact privately contained SC-20318 action is admitted",
 });
 const CANARY_PROFILES = Object.freeze({
   [SAFETY_CANARY_PROFILE]: Object.freeze({
@@ -599,6 +624,49 @@ export function campaignEntryPlan(config) {
   return { provider, planned: planned[0] };
 }
 
+export function boundedCampaignEntryPlan(config) {
+  const matches = config?.providers?.filter((provider) =>
+    provider.name === BOUNDED_CAMPAIGN_ENTRY_PROVIDER) ?? [];
+  if (matches.length !== 1) fail("SC-20318 requires exactly one bounded campaign provider");
+  const provider = matches[0];
+  const exactProvider = {
+    name: BOUNDED_CAMPAIGN_ENTRY_PROVIDER,
+    _role: "bounded_carrier_entry",
+    _campaignPhase: "bounded_carrier_ratification",
+    _coverageExpectation: "captured_or_attempted",
+    _latentTokens: 6_144,
+    _writableFrameCap: 682,
+    _outputVoxels: 47_579_136,
+    _measurementSafety: structuredClone(BOUNDED_CAMPAIGN_ENTRY_SAFETY),
+    evidenceScope: "authoritative",
+    backend: "mlx",
+    loadShape: "eager_materialization",
+    target: {
+      provider: PROVIDER, modelId: PROVIDER, tier: "q4", mode: "text_to_video",
+      overlay: "none", geometry: { width: 768, height: 512, batch: 1, frames: 121 },
+    },
+    rung: "bounded_decode",
+    engagedRungs: ["resident", "staged_residency", "bounded_decode"],
+    calibrationFingerprint: FINGERPRINT,
+    fixture: BOUNDED_CAMPAIGN_ENTRY_FIXTURE,
+    cases: [{ parameters: { decodeTileEdge: 192, decodeOverlap: 64 }, expectedResult: "passed" }],
+    _predictedDecodeBytes: 6_264_848_640,
+    _predictedDecodeFormula:
+      "3.3e9 + 40*(width*height*frames) + 300*(192*192*96) bytes",
+  };
+  if (!isDeepStrictEqual(provider, exactProvider)) {
+    fail("SC-20318 bounded campaign provider changed");
+  }
+  const planned = expandPlan({ providers: [provider] });
+  if (planned.length !== 1
+      || planned[0].logicalCaseId !== BOUNDED_CAMPAIGN_ENTRY_LOGICAL_CASE_ID
+      || planned[0].modelLoadPolicy !== "fresh_per_case"
+      || planned[0].modelLoadGroup !== null) {
+    fail("SC-20318 bounded campaign logical identity changed");
+  }
+  return { provider, planned: planned[0] };
+}
+
 export function validateCampaignEntryHarnessRequest(request, expectedPlanned, {
   sceneWorksRevision, inferenceRevision, sceneWorksRepo, inferenceRepo,
 } = {}) {
@@ -639,6 +707,59 @@ export function campaignEntryAdapterRequest(request, expectedPlanned, expectedSo
   transformed.planned._measurementSafety = structuredClone(CAMPAIGN_ENTRY_SAFETY);
   transformed.planned._campaignEntry = {
     identity: CAMPAIGN_ENTRY_IDENTITY,
+    artifact: {
+      repository: ARTIFACT_REPOSITORY,
+      revision: ARTIFACT_REVISION,
+      numericTierInventory: {
+        files: 11, bytes: Q4_INVENTORY_BYTES, sha256: Q4_INVENTORY_SHA256,
+      },
+      textEncoderInventory: {
+        files: TEXT_ENCODER_INVENTORY_FILES,
+        bytes: TEXT_ENCODER_INVENTORY_BYTES,
+        sha256: TEXT_ENCODER_INVENTORY_SHA256,
+      },
+    },
+  };
+  return transformed;
+}
+
+export function boundedCampaignEntryAdapterRequest(request, expectedPlanned, expectedSource) {
+  if (request?.action !== "run"
+      || !isDeepStrictEqual(request?.planned, expectedPlanned)
+      || request.planned.logicalCaseId !== BOUNDED_CAMPAIGN_ENTRY_LOGICAL_CASE_ID
+      || request.planned.fixture !== BOUNDED_CAMPAIGN_ENTRY_FIXTURE
+      || request.planned.evidenceScope !== "authoritative"
+      || request.planned.modelLoadPolicy !== "fresh_per_case"
+      || request.planned.modelLoadGroup !== null
+      || request.repositories?.sceneWorks?.dirty !== false
+      || request.repositories?.inference?.dirty !== false
+      || (expectedSource?.sceneWorksRevision !== undefined
+        && request.repositories.sceneWorks.revision !== expectedSource.sceneWorksRevision)
+      || (expectedSource?.inferenceRevision !== undefined
+        && request.repositories.inference.revision !== expectedSource.inferenceRevision)
+      || (expectedSource?.sceneWorksRepo !== undefined
+        && request.repositoryPaths?.sceneWorks !== expectedSource.sceneWorksRepo)
+      || (expectedSource?.inferenceRepo !== undefined
+        && request.repositoryPaths?.inference !== expectedSource.inferenceRepo)
+      || !Number.isSafeInteger(request.hardware?.memoryBytes)
+      || request.hardware.memoryBytes <= 0) {
+    fail("SC-20318 provider wrapper received a non-canonical harness request");
+  }
+  for (const field of ["_watchdog", "_boundedCampaignEntry", "_measurementSafety"]) {
+    if (Object.hasOwn(request.planned, field)) {
+      fail(`canonical SC-20318 request unexpectedly contains ${field}`);
+    }
+  }
+  const transformed = structuredClone(request);
+  transformed.action = BOUNDED_CAMPAIGN_ENTRY_ACTION;
+  transformed.planned._watchdog = { maxFootprintBytes: MAX_FOOTPRINT_BYTES };
+  transformed.planned._measurementSafety = structuredClone(BOUNDED_CAMPAIGN_ENTRY_SAFETY);
+  transformed.planned._boundedCampaignEntry = {
+    identity: BOUNDED_CAMPAIGN_ENTRY_IDENTITY,
+    fps: 30,
+    seed: 18_946,
+    videoMode: "default_av",
+    spatialDecodeTiles: 24,
     artifact: {
       repository: ARTIFACT_REPOSITORY,
       revision: ARTIFACT_REVISION,
@@ -745,6 +866,112 @@ export function validateCampaignEntryAdapterResponse(response, {
   if (cleanup.postCleanupActiveBytes !== expectedPostActive
       || cleanup.postCleanupCacheBytes !== cleanup.preProviderCacheBytes) {
     fail("SC-20191 cleanup did not return to the exact intentional persistent baseline");
+  }
+  return response;
+}
+
+export function validateBoundedCampaignEntryResponse(response, {
+  inferenceRevision, hostMemoryBytes,
+} = {}) {
+  const diagnostics = diagnosticMeasurements(response);
+  for (const [name, expected] of [
+    ["renderedFrames", 121], ["outputFps", 30], ["audioTrackDecoded", 1],
+    ["decodeTilingEngaged", 1], ["decodeTileSpatialPx", 192],
+    ["decodeTileOverlapPx", 64], ["spatialDecodeTiles", 24],
+    ["latentTemporalDepth", 16], ["latentTokens", 6_144],
+    ["warmOutputAudioChannels", 2], ["providerRequestScopeRenders", 2],
+  ]) {
+    if (diagnostics.get(name) !== expected) {
+      fail(`SC-20318 response diagnostic ${name} must be ${expected}`);
+    }
+  }
+  for (const name of [
+    "warmConditioningActivePeak", "warmDenoiseActivePeak", "warmDecodeActivePeak",
+    "warmOutputAudioSamples", "warmOutputAudioSampleRate",
+  ]) {
+    if (!Number.isSafeInteger(diagnostics.get(name)) || diagnostics.get(name) <= 0) {
+      fail(`SC-20318 response diagnostic ${name} must be positive`);
+    }
+  }
+  const scenarios = new Map(response?.scenarios?.map((item) => [item.name, item]) ?? []);
+  const quality = response?.quality;
+  for (const name of [
+    "maximumError", "meanError", "rootMeanSquareError",
+    "maximumErrorThreshold", "meanErrorThreshold", "rootMeanSquareErrorThreshold",
+  ]) {
+    if (!Number.isFinite(quality?.[name]) || quality[name] < 0) {
+      fail(`SC-20318 quality ${name} is invalid`);
+    }
+  }
+  const sidecar = response?._boundedCampaignEntry;
+  if (response?.status !== "runtime_complete"
+      || response?.loadShape !== "eager_materialization"
+      || response?.artifact?.repository !== ARTIFACT_REPOSITORY
+      || response?.artifact?.resolvedRevision !== ARTIFACT_REVISION
+      || response?.artifact?.variant !== "q4"
+      || !isDeepStrictEqual(response?.strategy, {
+        rung: "bounded_decode",
+        engagedRungs: ["resident", "staged_residency", "bounded_decode"],
+        parameters: { decodeTileEdge: 192, decodeOverlap: 64 },
+      })
+      || scenarios.get("warm_repeat")?.result !== "passed"
+      || scenarios.get("cancel")?.result !== "not_run"
+      || scenarios.get("error")?.result !== "not_run"
+      || quality?.result !== "passed" || quality?.identicalInputs !== true
+      || quality.maximumError > quality.maximumErrorThreshold
+      || quality.meanError > quality.meanErrorThreshold
+      || quality.rootMeanSquareError > quality.rootMeanSquareErrorThreshold
+      || response?.output?.frames !== 121 || response?.output?.fps !== 30
+      || response?.output?.audio?.present !== true
+      || !Number.isSafeInteger(response?.output?.audio?.samples)
+      || response.output.audio.samples <= 0
+      || !Number.isSafeInteger(response?.output?.audio?.sampleRate)
+      || response.output.audio.sampleRate <= 0
+      || response?.output?.audio?.channels !== 2
+      || response?.output?.firstFrameNondegenerate !== true
+      || sidecar?.identity !== BOUNDED_CAMPAIGN_ENTRY_IDENTITY
+      || (inferenceRevision !== undefined && sidecar?.inferenceRevision !== inferenceRevision)
+      || sidecar?.watchdog?.required !== true
+      || sidecar?.watchdog?.protocol !== "sceneworks-memory-watchdog-v1"
+      || sidecar?.watchdog?.providerPhaseProtocol !== PROVIDER_PHASE_PROTOCOL
+      || sidecar?.watchdog?.providerPhaseProfile !== "bounded-campaign-entry"
+      || !isDeepStrictEqual(sidecar?.watchdog?.providerPhases, BOUNDED_CARRIER_PHASES)
+      || sidecar?.watchdog?.maxFootprintBytes !== MAX_FOOTPRINT_BYTES
+      || sidecar?.watchdog?.maxRuntimeSeconds !== MAX_RUNTIME_SECONDS
+      || (hostMemoryBytes !== undefined && sidecar?.watchdog?.hostMemoryBytes !== hostMemoryBytes)
+      || sidecar?.watchdog?.minInitialMemoryFreeBytes
+        !== preflightFreeFloor(sidecar?.watchdog?.hostMemoryBytes)
+      || sidecar?.watchdog?.minMemoryFreeBytes
+        !== runtimeFreeFloor(sidecar?.watchdog?.hostMemoryBytes)
+      || Object.hasOwn(sidecar?.watchdog ?? {}, "minSwapFreeBytes")
+      || sidecar?.mlxLimits?.memoryLimitBytes !== MAX_FOOTPRINT_BYTES
+      || !Number.isSafeInteger(sidecar?.mlxLimits?.wiredLimitBytes)
+      || sidecar.mlxLimits.wiredLimitBytes <= 0
+      || sidecar.mlxLimits.wiredLimitBytes > MAX_FOOTPRINT_BYTES) {
+    fail("SC-20318 adapter response changed the exact bounded campaign entry");
+  }
+  const cleanup = sidecar.cleanup;
+  for (const field of [
+    "preProviderActiveBytes", "preProviderCacheBytes",
+    "postCleanupActiveBytes", "postCleanupCacheBytes",
+  ]) {
+    if (!Number.isSafeInteger(cleanup?.[field]) || cleanup[field] < 0) {
+      fail(`SC-20318 cleanup ${field} must be a non-negative safe integer`);
+    }
+  }
+  if (cleanup.preProviderCacheBytes !== 0
+      || !isDeepStrictEqual(cleanup.expectedPersistentActive, {
+        identity: LTX_ONES_CACHE_IDENTITY,
+        videoDimension: LTX_ONES_CACHE_VIDEO_DIMENSION,
+        audioDimension: LTX_ONES_CACHE_AUDIO_DIMENSION,
+        dtype: "bfloat16", bytesPerElement: BFLOAT16_BYTES_PER_ELEMENT,
+        bytes: ltxOnesCacheBytes(),
+      })) fail("SC-20318 cleanup changed the named ONES_CACHE contract");
+  const expectedPost = cleanup.preProviderActiveBytes + cleanup.expectedPersistentActive.bytes;
+  if (!Number.isSafeInteger(expectedPost)
+      || cleanup.postCleanupActiveBytes !== expectedPost
+      || cleanup.postCleanupCacheBytes !== cleanup.preProviderCacheBytes) {
+    fail("SC-20318 cleanup did not return to the exact persistent baseline");
   }
   return response;
 }
@@ -1124,6 +1351,54 @@ export function campaignEntryCanonicalFragment(response, maxObservedFootprintByt
   return canonical;
 }
 
+export function boundedCampaignEntryCanonicalFragment(response, maxObservedFootprintBytes) {
+  if (!Number.isSafeInteger(maxObservedFootprintBytes)
+      || maxObservedFootprintBytes < 0
+      || maxObservedFootprintBytes >= MAX_FOOTPRINT_BYTES) {
+    fail("SC-20318 canonical fragment requires a contained physical-footprint maximum");
+  }
+  const canonical = structuredClone(response);
+  const sidecar = canonical._boundedCampaignEntry;
+  const output = canonical.output;
+  if (!sidecar || !output) fail("SC-20318 canonical fragment omitted private evidence");
+  delete canonical._boundedCampaignEntry;
+  delete canonical.output;
+  const measurements = canonical.diagnostics?.measurements;
+  if (!Array.isArray(measurements)) fail("SC-20318 canonical fragment omitted diagnostics");
+  const existing = new Set(measurements.map((measurement) => measurement.name));
+  const append = (name, unit, value) => {
+    if (existing.has(name) || !Number.isSafeInteger(value) || value < 0) {
+      fail(`SC-20318 canonical diagnostic ${name} is duplicated or invalid`);
+    }
+    existing.add(name);
+    measurements.push({ name, unit, value });
+  };
+  append("boundedCampaignWatchdogMaxFootprintBytes", "bytes", sidecar.watchdog.maxFootprintBytes);
+  append("boundedCampaignWatchdogMaxObservedFootprintBytes", "bytes", maxObservedFootprintBytes);
+  append("boundedCampaignWatchdogMaxRuntimeSeconds", "seconds", sidecar.watchdog.maxRuntimeSeconds);
+  append("boundedCampaignWatchdogHostMemoryBytes", "bytes", sidecar.watchdog.hostMemoryBytes);
+  append("boundedCampaignWatchdogMinInitialMemoryFreeBytes", "bytes",
+    sidecar.watchdog.minInitialMemoryFreeBytes);
+  append("boundedCampaignWatchdogMinMemoryFreeBytes", "bytes",
+    sidecar.watchdog.minMemoryFreeBytes);
+  append("boundedCampaignMlxMemoryLimitBytes", "bytes", sidecar.mlxLimits.memoryLimitBytes);
+  append("boundedCampaignMlxWiredLimitBytes", "bytes", sidecar.mlxLimits.wiredLimitBytes);
+  append("boundedCampaignPreProviderActiveBytes", "bytes", sidecar.cleanup.preProviderActiveBytes);
+  append("boundedCampaignPreProviderCacheBytes", "bytes", sidecar.cleanup.preProviderCacheBytes);
+  append("boundedCampaignExpectedPersistentActiveBytes", "bytes",
+    sidecar.cleanup.expectedPersistentActive.bytes);
+  append("boundedCampaignPostCleanupActiveBytes", "bytes", sidecar.cleanup.postCleanupActiveBytes);
+  append("boundedCampaignPostCleanupCacheBytes", "bytes", sidecar.cleanup.postCleanupCacheBytes);
+  append("boundedCampaignOutputAudioSamples", "count", output.audio.samples);
+  append("boundedCampaignOutputAudioSampleRate", "hertz", output.audio.sampleRate);
+  append("boundedCampaignOutputAudioChannels", "count", output.audio.channels);
+  append("boundedCampaignFirstFrameNondegenerate", "boolean",
+    output.firstFrameNondegenerate ? 1 : 0);
+  append("boundedCampaignOwnedProcessGroupResidue", "count", 0);
+  append("boundedCampaignContainmentComplete", "boolean", 1);
+  return canonical;
+}
+
 export function validateCampaignEntryBundle(bundle) {
   validateBundle(bundle);
   if (bundle.records.length !== 1 || (bundle.sourceSessions?.length ?? 0) !== 0) {
@@ -1188,12 +1463,78 @@ export function validateCampaignEntryBundle(bundle) {
   return bundle;
 }
 
+export function validateBoundedCampaignEntryBundle(bundle) {
+  validateBundle(bundle);
+  if (bundle.records.length !== 1 || (bundle.sourceSessions?.length ?? 0) !== 0) {
+    fail("SC-20318 must publish exactly one canonical record and no source session");
+  }
+  const record = bundle.records[0];
+  const scenarios = new Map(record?.scenarios?.map((item) => [item.name, item]) ?? []);
+  if (record.logicalCaseId !== BOUNDED_CAMPAIGN_ENTRY_LOGICAL_CASE_ID
+      || record.status !== "runtime_complete"
+      || record.evidenceScope !== "authoritative"
+      || record.fixture !== BOUNDED_CAMPAIGN_ENTRY_FIXTURE
+      || !isDeepStrictEqual(record.strategy, {
+        rung: "bounded_decode",
+        engagedRungs: ["resident", "staged_residency", "bounded_decode"],
+        parameters: { decodeTileEdge: 192, decodeOverlap: 64 },
+      })
+      || scenarios.get("warm_repeat")?.result !== "passed"
+      || scenarios.get("cancel")?.result !== "not_run"
+      || scenarios.get("error")?.result !== "not_run") {
+    fail("SC-20318 canonical bundle changed identity or parity-only lifecycle");
+  }
+  const diagnostics = diagnosticMeasurements(record);
+  for (const [name, expected] of [
+    ["renderedFrames", 121], ["outputFps", 30], ["audioTrackDecoded", 1],
+    ["decodeTilingEngaged", 1], ["decodeTileSpatialPx", 192],
+    ["decodeTileOverlapPx", 64], ["spatialDecodeTiles", 24],
+    ["providerRequestScopeRenders", 2], ["warmOutputAudioChannels", 2],
+    ["boundedCampaignWatchdogMaxFootprintBytes", MAX_FOOTPRINT_BYTES],
+    ["boundedCampaignWatchdogMaxRuntimeSeconds", MAX_RUNTIME_SECONDS],
+    ["boundedCampaignMlxMemoryLimitBytes", MAX_FOOTPRINT_BYTES],
+    ["boundedCampaignPreProviderCacheBytes", 0],
+    ["boundedCampaignExpectedPersistentActiveBytes", ltxOnesCacheBytes()],
+    ["boundedCampaignPostCleanupCacheBytes", 0],
+    ["boundedCampaignOutputAudioChannels", 2],
+    ["boundedCampaignFirstFrameNondegenerate", 1],
+    ["boundedCampaignOwnedProcessGroupResidue", 0],
+    ["boundedCampaignContainmentComplete", 1],
+  ]) {
+    if (diagnostics.get(name) !== expected) {
+      fail(`SC-20318 canonical bundle diagnostic ${name} must be ${expected}`);
+    }
+  }
+  const pre = diagnostics.get("boundedCampaignPreProviderActiveBytes");
+  const post = diagnostics.get("boundedCampaignPostCleanupActiveBytes");
+  const observed = diagnostics.get("boundedCampaignWatchdogMaxObservedFootprintBytes");
+  const host = diagnostics.get("boundedCampaignWatchdogHostMemoryBytes");
+  if (!Number.isSafeInteger(pre) || post !== pre + ltxOnesCacheBytes()
+      || host !== record.hardware.memoryBytes
+      || diagnostics.get("boundedCampaignWatchdogMinInitialMemoryFreeBytes")
+        !== preflightFreeFloor(host)
+      || diagnostics.get("boundedCampaignWatchdogMinMemoryFreeBytes") !== runtimeFreeFloor(host)
+      || diagnostics.get("boundedCampaignMlxWiredLimitBytes") > MAX_FOOTPRINT_BYTES
+      || !Number.isSafeInteger(observed) || observed < 0 || observed >= MAX_FOOTPRINT_BYTES) {
+    fail("SC-20318 canonical bundle cleanup or footprint attestation changed");
+  }
+  return bundle;
+}
+
 export function campaignEntryFailurePath(canonicalOutput) {
   return path.join(path.dirname(canonicalOutput), "sc-20216-campaign-entry-failure.json");
 }
 
 export function campaignEntryOutcomeReservationPath(canonicalOutput) {
   return path.join(path.dirname(canonicalOutput), ".sc-20216-campaign-entry-outcome");
+}
+
+export function boundedCampaignEntryFailurePath(canonicalOutput) {
+  return path.join(path.dirname(canonicalOutput), "sc-20318-bounded-campaign-entry-failure.json");
+}
+
+export function boundedCampaignEntryOutcomeReservationPath(canonicalOutput) {
+  return path.join(path.dirname(canonicalOutput), ".sc-20318-bounded-campaign-entry-outcome");
 }
 
 export function campaignEntryFailureReceipt({
@@ -1268,6 +1609,83 @@ export function campaignEntryFailureReceipt({
     },
   };
   return validateCampaignEntryFailureReceipt(receipt);
+}
+
+export function boundedCampaignEntryFailureReceipt({
+  sceneWorksRevision, sceneWorksTree, inferenceRevision, inferenceTree,
+  identity, preparationKey, preparationRoot, prepared, hostMemoryBytes, events, outcome,
+}) {
+  const failure = validateCampaignEntryFailureEvents(
+    events, hostMemoryBytes, BOUNDED_CARRIER_PHASES,
+  );
+  const receipt = {
+    schemaVersion: 1,
+    recordType: BOUNDED_CAMPAIGN_FAILURE_RECEIPT_TYPE,
+    status: "diagnostic_failure",
+    diagnosticOnly: true,
+    promotable: false,
+    ingestible: false,
+    canonicalBundlePublished: false,
+    outcome: structuredClone(outcome),
+    story: "sc-20318",
+    source: {
+      sceneWorks: { revision: sceneWorksRevision, tree: sceneWorksTree },
+      inference: { revision: inferenceRevision, tree: inferenceTree },
+    },
+    campaignCase: {
+      plan: BOUNDED_CAMPAIGN_ENTRY_PLAN,
+      provider: BOUNDED_CAMPAIGN_ENTRY_PROVIDER,
+      logicalCaseId: BOUNDED_CAMPAIGN_ENTRY_LOGICAL_CASE_ID,
+      fixture: BOUNDED_CAMPAIGN_ENTRY_FIXTURE,
+      identity: BOUNDED_CAMPAIGN_ENTRY_IDENTITY,
+      action: BOUNDED_CAMPAIGN_ENTRY_ACTION,
+      target: {
+        provider: PROVIDER, tier: "q4",
+        geometry: { width: 768, height: 512, batch: 1, frames: 121, fps: 30 },
+      },
+      strategy: {
+        rung: "bounded_decode",
+        engagedRungs: ["resident", "staged_residency", "bounded_decode"],
+        parameters: { decodeTileEdge: 192, decodeOverlap: 64 },
+        spatialDecodeTiles: 24,
+      },
+    },
+    artifacts: {
+      repository: ARTIFACT_REPOSITORY,
+      revision: ARTIFACT_REVISION,
+      numericTierInventory: structuredClone(identity.artifact.numericTier),
+      textEncoderInventory: structuredClone(identity.artifact.textEncoder),
+      adapter: structuredClone(prepared.adapter),
+      metallib: structuredClone(prepared.metallib),
+      preparation: {
+        key: preparationKey, root: preparationRoot,
+        identity: structuredClone(identity), manifest: structuredClone(prepared.manifest),
+      },
+    },
+    watchdog: {
+      protocol: "sceneworks-memory-watchdog-v1",
+      providerPhaseProtocol: PROVIDER_PHASE_PROTOCOL,
+      providerPhases: [...BOUNDED_CARRIER_PHASES],
+      maxFootprintBytes: MAX_FOOTPRINT_BYTES,
+      maxRuntimeSeconds: MAX_RUNTIME_SECONDS,
+      hostMemoryBytes,
+      minInitialMemoryFreeBytes: preflightFreeFloor(hostMemoryBytes),
+      minMemoryFreeBytes: runtimeFreeFloor(hostMemoryBytes),
+      failure,
+      eventChain: structuredClone(failure.eventChain),
+      events: structuredClone(events),
+    },
+    cleanup: {
+      ownedProcessGroupResidueVerified: true,
+      runScratchRemoved: true,
+      runRootEmpty: true,
+      sourceIdentityVerified: true,
+      runtimeAssetIdentityVerified: true,
+      preparedCacheVerified: true,
+      preparationTransientResidueVerified: true,
+    },
+  };
+  return validateBoundedCampaignEntryFailureReceipt(receipt);
 }
 
 function validateContainedReceiptArtifactIdentity(receipt, label) {
@@ -1397,6 +1815,70 @@ export function validateCampaignEntryFailureReceipt(receipt) {
   if (!isDeepStrictEqual(receipt.watchdog.failure, validated)
       || !isDeepStrictEqual(receipt.watchdog.eventChain, validated.eventChain)) {
     fail("SC-20216 failure receipt summary does not match its complete event stream");
+  }
+  return receipt;
+}
+
+export function validateBoundedCampaignEntryFailureReceipt(receipt) {
+  let ingestible = true;
+  try { validateBundle(receipt); } catch { ingestible = false; }
+  const expectedCase = {
+    plan: BOUNDED_CAMPAIGN_ENTRY_PLAN,
+    provider: BOUNDED_CAMPAIGN_ENTRY_PROVIDER,
+    logicalCaseId: BOUNDED_CAMPAIGN_ENTRY_LOGICAL_CASE_ID,
+    fixture: BOUNDED_CAMPAIGN_ENTRY_FIXTURE,
+    identity: BOUNDED_CAMPAIGN_ENTRY_IDENTITY,
+    action: BOUNDED_CAMPAIGN_ENTRY_ACTION,
+    target: {
+      provider: PROVIDER, tier: "q4",
+      geometry: { width: 768, height: 512, batch: 1, frames: 121, fps: 30 },
+    },
+    strategy: {
+      rung: "bounded_decode",
+      engagedRungs: ["resident", "staged_residency", "bounded_decode"],
+      parameters: { decodeTileEdge: 192, decodeOverlap: 64 },
+      spatialDecodeTiles: 24,
+    },
+  };
+  const expectedCleanup = {
+    ownedProcessGroupResidueVerified: true,
+    runScratchRemoved: true,
+    runRootEmpty: true,
+    sourceIdentityVerified: true,
+    runtimeAssetIdentityVerified: true,
+    preparedCacheVerified: true,
+    preparationTransientResidueVerified: true,
+  };
+  if (ingestible
+      || receipt?.recordType !== BOUNDED_CAMPAIGN_FAILURE_RECEIPT_TYPE
+      || receipt?.status !== "diagnostic_failure"
+      || receipt?.diagnosticOnly !== true || receipt?.promotable !== false
+      || receipt?.ingestible !== false || receipt?.canonicalBundlePublished !== false
+      || receipt?.outcome?.canonicalBundleAbsentAtPublication !== true
+      || receipt?.outcome?.outcomeReservationHeldAtPublication !== true
+      || receipt?.outcome?.outcomeChoice !== "failure"
+      || receipt?.outcome?.failureOutput
+        !== boundedCampaignEntryFailurePath(receipt?.outcome?.canonicalOutput ?? "")
+      || receipt?.outcome?.reservation
+        !== boundedCampaignEntryOutcomeReservationPath(receipt?.outcome?.canonicalOutput ?? "")
+      || receipt?.outcome?.choice !== `${receipt?.outcome?.reservation}.choice`
+      || receipt?.story !== "sc-20318"
+      || !isDeepStrictEqual(receipt?.campaignCase, expectedCase)
+      || receipt?.watchdog?.protocol !== "sceneworks-memory-watchdog-v1"
+      || receipt?.watchdog?.providerPhaseProtocol !== PROVIDER_PHASE_PROTOCOL
+      || !isDeepStrictEqual(receipt?.watchdog?.providerPhases, BOUNDED_CARRIER_PHASES)
+      || receipt?.watchdog?.maxFootprintBytes !== MAX_FOOTPRINT_BYTES
+      || receipt?.watchdog?.maxRuntimeSeconds !== MAX_RUNTIME_SECONDS
+      || !isDeepStrictEqual(receipt?.cleanup, expectedCleanup)) {
+    fail("SC-20318 failure receipt is ingestible, incomplete, or identity-drifted");
+  }
+  validateContainedReceiptArtifactIdentity(receipt, "SC-20318 failure");
+  const validated = validateCampaignEntryFailureEvents(
+    receipt.watchdog.events, receipt.watchdog.hostMemoryBytes, BOUNDED_CARRIER_PHASES,
+  );
+  if (!isDeepStrictEqual(receipt.watchdog.failure, validated)
+      || !isDeepStrictEqual(receipt.watchdog.eventChain, validated.eventChain)) {
+    fail("SC-20318 failure receipt summary changed from its authenticated stream");
   }
   return receipt;
 }
@@ -2625,9 +3107,34 @@ function campaignProviderOptions(argv) {
 }
 
 async function campaignProviderInvocation(options, input, {
-  signal, setActiveWatchdog = () => {}, canonicalClaim,
+  signal, setActiveWatchdog = () => {}, canonicalClaim, executionClaim, bounded = false,
 } = {}) {
   signal?.throwIfAborted();
+  const spec = bounded ? {
+    story: "SC-20318",
+    plan: BOUNDED_CAMPAIGN_ENTRY_PLAN,
+    planEntry: boundedCampaignEntryPlan,
+    failurePath: boundedCampaignEntryFailurePath,
+    outcomePath: boundedCampaignEntryOutcomeReservationPath,
+    adapterRequest: boundedCampaignEntryAdapterRequest,
+    validateResponse: validateBoundedCampaignEntryResponse,
+    canonicalFragment: boundedCampaignEntryCanonicalFragment,
+    phases: BOUNDED_CARRIER_PHASES,
+    phaseProfile: "bounded-campaign-entry",
+    childName: "sc-20318-bounded-campaign-entry",
+  } : {
+    story: "SC-20191",
+    plan: CAMPAIGN_ENTRY_PLAN,
+    planEntry: campaignEntryPlan,
+    failurePath: campaignEntryFailurePath,
+    outcomePath: campaignEntryOutcomeReservationPath,
+    adapterRequest: campaignEntryAdapterRequest,
+    validateResponse: validateCampaignEntryAdapterResponse,
+    canonicalFragment: campaignEntryCanonicalFragment,
+    phases: PROVIDER_PHASES,
+    phaseProfile: "campaign-entry",
+    childName: "sc-20191-campaign-entry",
+  };
   const request = JSON.parse(input);
   const campaignOutcome = {
     canonicalOutput: options["canonical-output"],
@@ -2636,14 +3143,14 @@ async function campaignProviderInvocation(options, input, {
     choice: `${options["outcome-reservation"]}.choice`,
     token: options["outcome-token"],
     canonicalClaim,
+    executionClaim,
   };
-  if (campaignOutcome.failureOutput !== campaignEntryFailurePath(campaignOutcome.canonicalOutput)
-      || campaignOutcome.reservation
-        !== campaignEntryOutcomeReservationPath(campaignOutcome.canonicalOutput)) {
-    fail("SC-20216 campaign provider outcome paths changed");
+  if (campaignOutcome.failureOutput !== spec.failurePath(campaignOutcome.canonicalOutput)
+      || campaignOutcome.reservation !== spec.outcomePath(campaignOutcome.canonicalOutput)) {
+    fail(`${spec.story} campaign provider outcome paths changed`);
   }
-  const config = JSON.parse(await readFile(path.join(ROOT, CAMPAIGN_ENTRY_PLAN), "utf8"));
-  const { planned } = campaignEntryPlan(config);
+  const config = JSON.parse(await readFile(path.join(ROOT, spec.plan), "utf8"));
+  const { planned } = spec.planEntry(config);
   const toolchainChannel = await repositoryToolchain();
   const identity = preparationIdentity(
     options["scene-tree"], options["inference-tree"], toolchainChannel,
@@ -2685,7 +3192,7 @@ async function campaignProviderInvocation(options, input, {
       ) === null) fail("SC-20191 prepared cache disappeared after provider probe");
       output = probeOutput;
     } else {
-      const adapterRequest = campaignEntryAdapterRequest(request, planned, {
+      const adapterRequest = spec.adapterRequest(request, planned, {
         sceneWorksRevision: options["scene-revision"],
         inferenceRevision: options["inference-revision"],
         sceneWorksRepo: ROOT,
@@ -2710,10 +3217,10 @@ async function campaignProviderInvocation(options, input, {
         "--event-file", eventsPath,
         "--require-child-attestation",
         "--require-provider-phases",
-        "--provider-phase-profile", "campaign-entry",
+        "--provider-phase-profile", spec.phaseProfile,
         "--",
         "/bin/sh", "-c", 'set -C; exec "$1" <"$2" >"$3"',
-        "sc-20191-campaign-entry", prepared.adapter.path, requestPath, responsePath,
+        spec.childName, prepared.adapter.path, requestPath, responsePath,
       ];
       await assertCampaignSourceState(options, signal);
       await assertRuntimeAssetIdentities(prepared.adapter, prepared.metallib, signal);
@@ -2742,7 +3249,7 @@ async function campaignProviderInvocation(options, input, {
         const watchdogError = new Error(watchdogFailureSummary(status, eventBytes));
         try {
           const events = eventBytes.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
-          validateCampaignEntryFailureEvents(events, hostMemoryBytes);
+          validateCampaignEntryFailureEvents(events, hostMemoryBytes, spec.phases);
           const started = events.find((event) => event.event === "started");
           const processTable = (await execFileAsync(
             "/bin/ps", ["-ww", "-axo", "pid=,pgid=,command="],
@@ -2765,11 +3272,11 @@ async function campaignProviderInvocation(options, input, {
       signal?.throwIfAborted();
       const response = JSON.parse(await readFile(responsePath, "utf8"));
       const events = eventBytes.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
-      validateCampaignEntryAdapterResponse(response, {
+      spec.validateResponse(response, {
         inferenceRevision: options["inference-revision"], hostMemoryBytes,
       });
       const maxObservedFootprintBytes = validateCampaignEntryWatchdogEvents(
-        events, hostMemoryBytes,
+        events, hostMemoryBytes, spec.phases,
       );
       const started = events.find((event) => event.event === "started");
       const processTable = (await execFileAsync(
@@ -2783,7 +3290,7 @@ async function campaignProviderInvocation(options, input, {
       if (await validatePreparedCache(
         options["preparation-root"], options["preparation-key"], identity, signal,
       ) === null) fail("SC-20191 prepared cache disappeared after campaign entry");
-      output = canonicalJson(campaignEntryCanonicalFragment(response, maxObservedFootprintBytes));
+      output = canonicalJson(spec.canonicalFragment(response, maxObservedFootprintBytes));
     }
   } catch (error) {
     operationError = error;
@@ -2800,7 +3307,9 @@ async function campaignProviderInvocation(options, input, {
     let publicationError = null;
     if (failureEvents !== null && cleanupError === null) {
       try {
-        await publishCampaignEntryFailureReceipt(campaignOutcome, {
+        const publishFailure = bounded
+          ? publishBoundedCampaignEntryFailure : publishCampaignEntryFailureReceipt;
+        await publishFailure(campaignOutcome, {
           verify: async () => {
             await assertRunRootEmpty(options["run-root"]);
             await assertCampaignSourceState(options);
@@ -2810,7 +3319,21 @@ async function campaignProviderInvocation(options, input, {
             ) === null) fail("SC-20216 prepared cache disappeared before failure publication");
             await assertPreparationHasNoTransientResidue(options["preparation-root"]);
           },
-          build: (outcome) => campaignEntryFailureReceipt({
+          build: (outcome) => (bounded
+            ? boundedCampaignEntryFailureReceipt({
+              sceneWorksRevision: options["scene-revision"],
+              sceneWorksTree: options["scene-tree"],
+              inferenceRevision: options["inference-revision"],
+              inferenceTree: options["inference-tree"],
+              identity,
+              preparationKey: options["preparation-key"],
+              preparationRoot: options["preparation-root"],
+              prepared,
+              hostMemoryBytes: failureHostMemoryBytes,
+              events: failureEvents,
+              outcome,
+            })
+            : campaignEntryFailureReceipt({
             sceneWorksRevision: options["scene-revision"],
             sceneWorksTree: options["scene-tree"],
             inferenceRevision: options["inference-revision"],
@@ -2822,7 +3345,7 @@ async function campaignProviderInvocation(options, input, {
             hostMemoryBytes: failureHostMemoryBytes,
             events: failureEvents,
             outcome,
-          }),
+          })),
         });
       } catch (error) {
         publicationError = error;
@@ -2940,11 +3463,75 @@ export async function publishCampaignEntryFailureReceipt(outcome, { verify, buil
   });
 }
 
+export async function acquireBoundedCampaignEntryOutcome(canonicalOutput) {
+  const outcome = {
+    canonicalOutput,
+    failureOutput: boundedCampaignEntryFailurePath(canonicalOutput),
+    reservation: boundedCampaignEntryOutcomeReservationPath(canonicalOutput),
+    choice: `${boundedCampaignEntryOutcomeReservationPath(canonicalOutput)}.choice`,
+    token: randomUUID(),
+  };
+  await mkdir(path.dirname(canonicalOutput), { recursive: true });
+  await writeFile(outcome.reservation, `${outcome.token}\n`, { flag: "wx", mode: 0o400 });
+  if (await pathExists(outcome.canonicalOutput) || await pathExists(outcome.failureOutput)) {
+    await unlink(outcome.reservation);
+    fail("SC-20318 already has an immutable canonical or failure outcome");
+  }
+  return outcome;
+}
+
+async function assertBoundedCampaignEntryOutcomeOwner(outcome) {
+  if (await readFile(outcome?.reservation ?? "", "utf8").catch(() => null)
+      !== `${outcome?.token}\n`) fail("SC-20318 outcome reservation ownership changed");
+}
+
+export async function releaseUnpublishedBoundedCampaignEntryOutcome(outcome) {
+  await assertBoundedCampaignEntryOutcomeOwner(outcome);
+  if (await pathExists(outcome.choice)
+      || await pathExists(outcome.canonicalOutput) || await pathExists(outcome.failureOutput)) return;
+  await unlink(outcome.reservation);
+}
+
+async function publishBoundedCampaignEntryOutcome(outcome, kind, build, signal) {
+  await assertBoundedCampaignEntryOutcomeOwner(outcome);
+  await outcome.canonicalClaim.assertOwner();
+  await outcome.executionClaim.assertOwner();
+  const target = kind === "canonical" ? outcome.canonicalOutput : outcome.failureOutput;
+  const other = kind === "canonical" ? outcome.failureOutput : outcome.canonicalOutput;
+  await writeFile(outcome.choice, `${kind}\n`, { flag: "wx", mode: 0o400 });
+  if (await pathExists(target) || await pathExists(other)) fail("SC-20318 outcome is already fixed");
+  const value = await build();
+  await publishExclusiveJson(target, value, signal);
+  return value;
+}
+
+async function publishBoundedCampaignEntryFailure(outcome, { verify, build }) {
+  await verify();
+  return publishBoundedCampaignEntryOutcome(outcome, "failure", async () => {
+    if (await pathExists(outcome.canonicalOutput)) fail("SC-20318 canonical exists; failure suppressed");
+    return validateBoundedCampaignEntryFailureReceipt(await build({
+      canonicalOutput: outcome.canonicalOutput,
+      failureOutput: outcome.failureOutput,
+      reservation: outcome.reservation,
+      choice: outcome.choice,
+      outcomeChoice: "failure",
+      canonicalBundleAbsentAtPublication: true,
+      outcomeReservationHeldAtPublication: true,
+    }));
+  });
+}
+
 export function canonicalPublicationClaimPath(canonicalOutput) {
   return path.join(
     path.dirname(canonicalOutput),
     `.${path.basename(canonicalOutput)}.ltx-canonical-publication-claim`,
   );
+}
+
+export function containedCampaignExecutionClaimTarget(
+  _output, containmentRoot = CONTAINED_CAMPAIGN_ROOT,
+) {
+  return path.join(path.resolve(containmentRoot), ".sc-18946-contained-execution");
 }
 
 const CANONICAL_RECLAMATION_LOCK_HELPER = String.raw`
@@ -3363,18 +3950,48 @@ async function assertPreparationHasNoTransientResidue(preparationRoot) {
 async function runCampaignEntryController({
   output, inferenceRepo, sceneWorksRevision, inferenceRevision,
   sceneWorksTree, inferenceTree, identity, preparationKey, preparationRoot,
-  prepared, signal, setActiveWatchdog,
+  prepared, signal, setActiveWatchdog, bounded = false,
 }) {
-  const config = JSON.parse(await readFile(path.join(ROOT, CAMPAIGN_ENTRY_PLAN), "utf8"));
-  campaignEntryPlan(config);
-  const canonicalClaim = await acquireCanonicalPublicationClaim(output, signal);
+  const spec = bounded ? {
+    plan: BOUNDED_CAMPAIGN_ENTRY_PLAN,
+    planEntry: boundedCampaignEntryPlan,
+    acquireOutcome: acquireBoundedCampaignEntryOutcome,
+    releaseOutcome: releaseUnpublishedBoundedCampaignEntryOutcome,
+    provider: BOUNDED_CAMPAIGN_ENTRY_PROVIDER,
+    logicalCaseId: BOUNDED_CAMPAIGN_ENTRY_LOGICAL_CASE_ID,
+    validateBundle: validateBoundedCampaignEntryBundle,
+  } : {
+    plan: CAMPAIGN_ENTRY_PLAN,
+    planEntry: campaignEntryPlan,
+    acquireOutcome: acquireCampaignEntryOutcome,
+    releaseOutcome: releaseUnpublishedCampaignEntryOutcome,
+    provider: CAMPAIGN_ENTRY_PROVIDER,
+    logicalCaseId: CAMPAIGN_ENTRY_LOGICAL_CASE_ID,
+    validateBundle: validateCampaignEntryBundle,
+  };
+  const config = JSON.parse(await readFile(path.join(ROOT, spec.plan), "utf8"));
+  spec.planEntry(config);
+  const executionClaim = await acquireCanonicalPublicationClaim(
+    containedCampaignExecutionClaimTarget(output), signal,
+  );
+  let canonicalClaim;
+  try {
+    canonicalClaim = await acquireCanonicalPublicationClaim(output, signal);
+  } catch (error) {
+    await executionClaim.release();
+    throw error;
+  }
   let campaignOutcome;
   try {
-    campaignOutcome = await acquireCampaignEntryOutcome(output);
+    campaignOutcome = await spec.acquireOutcome(output);
     campaignOutcome.canonicalClaim = canonicalClaim;
+    campaignOutcome.executionClaim = executionClaim;
   } catch (error) {
     let releaseError = null;
     try { await canonicalClaim.release(); } catch (cleanup) { releaseError = cleanup; }
+    try { await executionClaim.release(); } catch (cleanup) {
+      releaseError = preservePrimaryFailure(releaseError, cleanup);
+    }
     throw preservePrimaryFailure(error, releaseError);
   }
   const runRoot = path.join(path.dirname(output), "runs");
@@ -3405,11 +4022,11 @@ async function runCampaignEntryController({
       sceneWorksRepo: ROOT,
       inferenceRepo,
       backend: "mlx",
-      providerName: CAMPAIGN_ENTRY_PROVIDER,
+      providerName: spec.provider,
       onProviderInvocation: ({ action, cases }) => {
         if (action !== "run" || cases.length !== 1
-            || cases[0].logicalCaseId !== CAMPAIGN_ENTRY_LOGICAL_CASE_ID) {
-          fail("SC-20191 attempted a batch or a foreign logical case");
+            || cases[0].logicalCaseId !== spec.logicalCaseId) {
+          fail("contained LTX campaign attempted a batch or a foreign logical case");
         }
       },
       // No checkpoint callback: no partial or pre-validation bundle may reach the output path.
@@ -3419,7 +4036,7 @@ async function runCampaignEntryController({
           fail("SC-20191 harness attempted a foreign provider command");
         }
         return campaignProviderInvocation(providerOptions, input, {
-          signal, setActiveWatchdog, canonicalClaim,
+          signal, setActiveWatchdog, canonicalClaim, executionClaim, bounded,
         });
       },
     });
@@ -3431,8 +4048,14 @@ async function runCampaignEntryController({
       preparationRoot, preparationKey, identity, signal,
     ) === null) fail("SC-20191 prepared cache disappeared before publication");
     await assertPreparationHasNoTransientResidue(preparationRoot);
-    validateCampaignEntryBundle(bundle);
-    await publishCampaignEntryCanonicalOutcome(campaignOutcome, bundle, signal);
+    spec.validateBundle(bundle);
+    if (bounded) {
+      await publishBoundedCampaignEntryOutcome(
+        campaignOutcome, "canonical", async () => bundle, signal,
+      );
+    } else {
+      await publishCampaignEntryCanonicalOutcome(campaignOutcome, bundle, signal);
+    }
   } catch (error) {
     operationError = error;
   } finally {
@@ -3440,8 +4063,9 @@ async function runCampaignEntryController({
       async () => {
         if (await pathExists(runRoot)) await cleanupCanaryScratch(runRoot);
       },
-      async () => releaseUnpublishedCampaignEntryOutcome(campaignOutcome),
+      async () => spec.releaseOutcome(campaignOutcome),
       async () => canonicalClaim.release(),
+      async () => executionClaim.release(),
     ]) {
       try {
         await cleanup();
@@ -3460,7 +4084,16 @@ async function runBoundedCarrierController({
   sceneWorksTree, inferenceTree, identity, preparationKey, preparationRoot,
   prepared, hostMemoryBytes, signal, setActiveWatchdog,
 }) {
-  const canonicalClaim = await acquireCanonicalPublicationClaim(output, signal);
+  const executionClaim = await acquireCanonicalPublicationClaim(
+    containedCampaignExecutionClaimTarget(output), signal,
+  );
+  let canonicalClaim;
+  try {
+    canonicalClaim = await acquireCanonicalPublicationClaim(output, signal);
+  } catch (error) {
+    await executionClaim.release();
+    throw error;
+  }
   let outcome;
   try {
     outcome = await acquireBoundedCarrierOutcome(output);
@@ -3468,6 +4101,9 @@ async function runBoundedCarrierController({
   } catch (error) {
     let releaseError = null;
     try { await canonicalClaim.release(); } catch (cleanup) { releaseError = cleanup; }
+    try { await executionClaim.release(); } catch (cleanup) {
+      releaseError = preservePrimaryFailure(releaseError, cleanup);
+    }
     throw preservePrimaryFailure(error, releaseError);
   }
   const runRoot = path.join(path.dirname(output), "sc-20254-runs");
@@ -3665,6 +4301,7 @@ async function runBoundedCarrierController({
   for (const release of [
     async () => releaseUnpublishedBoundedCarrierOutcome(outcome),
     async () => canonicalClaim.release(),
+    async () => executionClaim.release(),
   ]) {
     try {
       await release();
@@ -3689,9 +4326,11 @@ async function controller(argv) {
   const profileName = options.profile ?? SAFETY_CANARY_PROFILE;
   const campaignEntry = profileName === CAMPAIGN_ENTRY_PROFILE;
   const boundedCarrier = profileName === BOUNDED_CARRIER_PROFILE;
+  const boundedCampaignEntry = profileName === BOUNDED_CAMPAIGN_ENTRY_PROFILE;
   const profile = campaignEntry
     ? { story: "sc-20191" }
-    : boundedCarrier ? { story: "sc-20254" } : canaryProfile(profileName);
+    : boundedCarrier ? { story: "sc-20254" }
+      : boundedCampaignEntry ? { story: "sc-20318" } : canaryProfile(profileName);
   const inferenceRepo = path.resolve(options["inference-repo"]);
   const output = path.resolve(options.output);
   const relativeOutput = path.relative(ROOT, output);
@@ -3841,6 +4480,24 @@ async function controller(argv) {
         hostMemoryBytes: memoryBytes,
         signal,
         setActiveWatchdog: (child) => { activeWatchdog = child; },
+      });
+      return;
+    }
+    if (boundedCampaignEntry) {
+      await runCampaignEntryController({
+        output,
+        inferenceRepo,
+        sceneWorksRevision,
+        inferenceRevision,
+        sceneWorksTree,
+        inferenceTree,
+        identity,
+        preparationKey,
+        preparationRoot,
+        prepared,
+        signal,
+        setActiveWatchdog: (child) => { activeWatchdog = child; },
+        bounded: true,
       });
       return;
     }

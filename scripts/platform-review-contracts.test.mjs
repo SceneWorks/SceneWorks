@@ -2028,8 +2028,12 @@ test("the LTX real-weight safety canary cannot relax or masquerade as campaign e
     "the campaign must still refuse before model-path/provider/weights access",
   );
   const campaignRows = Object.values(buildLtxPlans()).flatMap((plan) => plan.providers);
-  assert.equal(campaignRows.length, 70, "the frozen SC-18946 campaign must retain all 70 rows");
-  for (const row of campaignRows) {
+  assert.equal(campaignRows.length, 71, "SC-20318 must explicitly inventory 71 rows");
+  const ratified = campaignRows.filter((row) => row._role === "bounded_carrier_entry");
+  assert.equal(ratified.length, 1, "only one bounded carrier may be ratified");
+  const originalRows = campaignRows.filter((row) => row._role !== "bounded_carrier_entry");
+  assert.equal(originalRows.length, 70, "all original campaign rows must remain present");
+  for (const row of originalRows) {
     assert.ok(
       ["incident_forbidden", "arithmetic_unmeasurable", "safety_refused_open"]
         .includes(row._measurementSafety.disposition),
@@ -2096,6 +2100,22 @@ test("the LTX real-weight safety canary cannot relax or masquerade as campaign e
   assert.equal((boundedCarrier.match(/scoped_generate\(/g) ?? []).length, 1,
     "SC-20254 must contain exactly one full-A/V render call");
   assert.match(adapter, /LTX_BOUNDED_CARRIER_ACTION => run_ltx_bounded_carrier_proof\(&request\)/);
+  const boundedCampaign = adapter.slice(
+    adapter.indexOf("fn run_ltx_bounded_campaign_entry("),
+    adapter.indexOf("fn run_ltx(request:"),
+  );
+  for (const required of [
+    "prevalidate_ltx_bounded_campaign_entry(request)?",
+    "start_lease_for(&LTX_BOUNDED_CARRIER_PHASE_NAMES)?",
+    "LtxRunAdmission::BoundedCampaignEntry",
+    "validate_ltx_bounded_campaign_fragment(&fragment)?",
+    "validate_ltx_canary_cleanup(",
+    '"_boundedCampaignEntry"',
+    'watchdog_lease.mark("common_load")?',
+    'watchdog_lease.mark("cleanup")?',
+  ]) assert.ok(boundedCampaign.includes(required), `bounded campaign must retain ${required}`);
+  assert.match(adapter,
+    /LTX_BOUNDED_CAMPAIGN_ACTION => run_ltx_bounded_campaign_entry\(&request\)/);
 
   const canary = adapter.slice(
     adapter.indexOf("fn validate_ltx_canary_plan_for("),
