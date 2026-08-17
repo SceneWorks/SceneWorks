@@ -95,8 +95,14 @@ pub(crate) struct LoadIdentity {
 }
 
 /// Request-scoped residency and materialization intent, split from [`LoadIdentity`] so changing a
-/// policy does not force the same weights/composition to reload. Until sc-18317 adds warm switching,
-/// a cached generator continues to run under the policy selected when it was loaded.
+/// policy does not force the same weights/composition to reload.
+///
+/// sc-18317 made the warm-hit case a decision rather than a substitution: see
+/// [`resolve_warm_policy`] and [`crate::execution_planner`]. A cached generator now runs under the
+/// requested policy when that request is strictly tighter at peak than the loaded shape and its
+/// source can re-open components; otherwise it runs under the loaded policy and the outcome is
+/// reported on `generator_cache_warm_policy_decision`. Either way no new generator is constructed —
+/// the switch is component re-materialization inside `gen_core::residency`, not a cache miss.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ExecutionPolicy {
     pub(crate) offload_policy: OffloadPolicy,
@@ -271,26 +277,49 @@ impl ExecutionPolicy {
     }
 }
 
-fn log_warm_policy_mismatch(
+/// Decide, log and resolve a warm hit's execution-policy switch (sc-18317).
+///
+/// A cold access has no decision to make: the loader just ran under exactly the policy
+/// [`crate::mlx_fit_gate::apply_residency_policy`] selected, so the loaded policy IS the effective
+/// one. Only a warm hit can be asked to run under a policy other than the one its resident weights
+/// were materialized under, and [`crate::execution_planner::decide_warm_policy`] owns that call:
+/// grant it when the requested shape is strictly tighter at peak (inside the admitted envelope) and
+/// the source can re-open its components, refuse it explicitly when it cannot, and otherwise serve
+/// under the loaded policy. The reasoning lives in that module's docs.
+///
+/// Returns the policy the request executes under. Callers must keep using `loaded_policy` for
+/// ADMISSION — the resident weights' real shape is what the budget was proved against — and use this
+/// only as the request's vetted execution intent.
+fn resolve_warm_policy(
     engine_id: &str,
     access: CacheAccess,
-    loaded_policy: ExecutionPolicy,
+    cached: &CachedGenerator,
+    spec: &LoadSpec,
     requested_policy: ExecutionPolicy,
-) {
-    if access != CacheAccess::Warm || loaded_policy == requested_policy {
-        return;
+) -> ExecutionPolicy {
+    let loaded_policy = cached.loaded_policy;
+    if access != CacheAccess::Warm {
+        return loaded_policy;
     }
-    tracing::warn!(
-        event = "generator_cache_policy_mismatch",
-        engine = engine_id,
-        loadedOffloadPolicy = ?loaded_policy.offload_policy,
-        loadedLoadShape = ?loaded_policy.load_shape,
-        requestedOffloadPolicy = ?requested_policy.offload_policy,
-        requestedLoadShape = ?requested_policy.load_shape,
-        loadedLoadShapeDeclarationResult = ?loaded_policy.load_shape_declaration_result,
-        requestedLoadShapeDeclarationResult = ?requested_policy.load_shape_declaration_result,
-        "serving the cached generator under its cold-load policy"
+    let reopenability = crate::execution_planner::SourceReopenability::of_spec(spec);
+    let decision = crate::execution_planner::decide_warm_policy(
+        loaded_policy,
+        requested_policy,
+        reopenability,
+        cached
+            .generator
+            .descriptor()
+            .capabilities
+            .staged_residency_availability(),
     );
+    crate::execution_planner::log_warm_policy_decision(
+        engine_id,
+        decision,
+        loaded_policy,
+        requested_policy,
+        reopenability,
+    );
+    crate::execution_planner::effective_policy(loaded_policy, requested_policy, decision)
 }
 
 impl CacheWeightsSource {
@@ -735,8 +764,13 @@ where
 }
 
 /// Run one request against a cached generator while exposing the independent request-policy inputs
-/// that do not belong in [`LoadIdentity`]. The callback receives both the policy the resident
-/// generator was loaded under and the current request's policy intent.
+/// that do not belong in [`LoadIdentity`].
+///
+/// The callback receives, in order, the policy the resident generator was loaded under and the
+/// **effective** policy this request executes under — the raw request intent already vetted by
+/// [`resolve_warm_policy`], so no caller can act on a switch the resident source cannot perform.
+/// Memory admission must keep using the LOADED policy: it names the shape the resident weights are
+/// actually in, which is what the budget was proved against.
 pub(crate) async fn with_cached_generator_for_request<R>(
     engine_id: &'static str,
     spec: LoadSpec,
@@ -1068,12 +1102,13 @@ where
             CacheAccess::Cold => MemoryCacheState::Cold,
             CacheAccess::Warm => MemoryCacheState::Warm,
         };
-        log_warm_policy_mismatch(engine_id, access, cached.loaded_policy, requested_policy);
+        let effective_policy =
+            resolve_warm_policy(engine_id, access, cached, &run_spec, requested_policy);
         run(
             cached.generator.as_ref(),
             cache_state,
             cached.loaded_policy,
-            requested_policy,
+            effective_policy,
             cached.external_committed_bytes,
         )
     };
@@ -2509,29 +2544,34 @@ mod tests {
         assert_eq!(loads.get(), 1, "geometry-independent key loads only once");
     }
 
-    #[tokio::test]
-    async fn production_seam_reuses_identity_exposes_policy_and_logs_warm_mismatch() {
-        use std::io::Write;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::{Arc, Mutex};
+    #[derive(Clone, Default)]
+    struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 
-        #[derive(Clone, Default)]
-        struct Capture(Arc<Mutex<Vec<u8>>>);
-        impl Write for Capture {
-            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(buf);
-                Ok(buf.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
+    impl std::io::Write for Capture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
         }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
+    impl Capture {
+        fn text(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).expect("utf-8 tracing")
+        }
+    }
+
+    /// A cache worker whose events are captured at INFO, so both the granted (info) and the refused
+    /// (warn) warm-policy decisions are observable through one seam.
+    fn start_capturing_cache_worker(
+    ) -> (mpsc::Sender<GeneratorJob>, Capture, thread::JoinHandle<()>) {
         let (tx, rx) = mpsc::channel::<GeneratorJob>();
         let capture = Capture::default();
         let writer = capture.clone();
         let subscriber = tracing_subscriber::fmt()
-            .with_max_level(tracing::Level::WARN)
+            .with_max_level(tracing::Level::INFO)
             .with_writer(move || writer.clone())
             .with_ansi(false)
             .with_target(false)
@@ -2541,9 +2581,30 @@ mod tests {
         let worker = thread::spawn(move || {
             tracing::dispatcher::with_default(&dispatch, || run_generator_cache_worker(rx, None))
         });
+        (tx, capture, worker)
+    }
+
+    /// A stub that attests the staged-residency lifecycle, which is what makes a warm switch
+    /// grantable at all (`OffloadPolicy::Sequential` is advisory in gen-core).
+    fn staging_stub_load(_spec: &gen_core::LoadSpec) -> gen_core::Result<Box<dyn Generator>> {
+        let mut descriptor = stub_descriptor();
+        descriptor.capabilities.supports_sequential_offload = true;
+        Ok(Box::new(StubGenerator { descriptor }))
+    }
+
+    /// sc-18317: a warm hit whose request asks for a strictly tighter execution shape than the load
+    /// chose is GRANTED — the provider re-materializes components inside the already-loaded generator
+    /// — and the decision is reported exactly once. The previous behavior warned and silently
+    /// substituted the cold-load policy, so no caller could tell a granted switch from a dropped one.
+    #[tokio::test]
+    async fn production_seam_grants_a_tighter_warm_switch_without_constructing_a_generator() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let (tx, capture, worker) = start_capturing_cache_worker();
         let weights = tempfile::tempdir().expect("weights tempdir");
         let resident = LoadSpec::new(WeightsSource::Dir(weights.path().to_path_buf()));
-        let requested_resident = ExecutionPolicy::from_load_spec(&resident);
+        let loaded_policy = ExecutionPolicy::from_load_spec(&resident);
         let staged = resident
             .clone()
             .with_offload_policy(OffloadPolicy::Sequential)
@@ -2559,11 +2620,9 @@ mod tests {
             "stub load",
             move |_id, spec| {
                 cold_loads.fetch_add(1, Ordering::SeqCst);
-                stub_load(spec)
+                staging_stub_load(spec)
             },
-            |_, cache_state, loaded_policy, requested_policy, _| {
-                Ok((cache_state, loaded_policy, requested_policy))
-            },
+            |_, cache_state, loaded, effective, _| Ok((cache_state, loaded, effective)),
         )
         .await
         .expect("cold request succeeds");
@@ -2576,41 +2635,43 @@ mod tests {
             "stub load",
             move |_id, spec| {
                 warm_loads.fetch_add(1, Ordering::SeqCst);
-                stub_load(spec)
+                staging_stub_load(spec)
             },
-            |_, cache_state, loaded_policy, requested_policy, _| {
-                Ok((cache_state, loaded_policy, requested_policy))
-            },
+            |_, cache_state, loaded, effective, _| Ok((cache_state, loaded, effective)),
         )
         .await
         .expect("warm request succeeds");
 
         assert_eq!(
             cold,
-            (
-                MemoryCacheState::Cold,
-                requested_resident,
-                requested_resident
-            )
+            (MemoryCacheState::Cold, loaded_policy, loaded_policy),
+            "a cold load has no switch to decide: it ran under exactly the selected policy"
         );
         assert_eq!(
             warm,
-            (MemoryCacheState::Warm, requested_resident, requested_staged),
-            "the warm request must run the resident generator while preserving its own intent"
+            (MemoryCacheState::Warm, loaded_policy, requested_staged),
+            "the granted switch must reach the caller as the effective policy, while admission keeps \
+             the loaded one"
         );
         assert_eq!(
             loads.load(Ordering::SeqCst),
             1,
-            "policy-only changes must not construct another generator"
+            "a granted switch is component re-materialization, never another generator"
         );
 
         drop(tx);
         worker.join().expect("cache worker exits");
-        let text = String::from_utf8(capture.0.lock().unwrap().clone()).expect("utf-8 tracing");
-
-        assert_eq!(text.matches("generator_cache_policy_mismatch").count(), 1);
+        let text = capture.text();
+        assert_eq!(
+            text.matches("generator_cache_warm_policy_decision").count(),
+            1,
+            "exactly one decision event per warm hit: {text:?}"
+        );
         for expected in [
             "engine=\"sc3724_stub\"",
+            "decision=\"rematerialized\"",
+            "reason=\"components_rematerialized_in_place\"",
+            "source=\"reopenable\"",
             "loadedOffloadPolicy=Resident",
             "loadedLoadShape=EagerMaterialization",
             "requestedOffloadPolicy=Sequential",
@@ -2618,6 +2679,139 @@ mod tests {
         ] {
             assert!(text.contains(expected), "missing {expected:?} in {text:?}");
         }
+    }
+
+    /// sc-18317 single-file interlock: an imported checkpoint has no re-openable source, so
+    /// `gen_core::Residency::resident` answers any staging request with `Error::Unsupported`
+    /// part-way through generation. The switch is refused HERE instead and the request still runs.
+    #[tokio::test]
+    async fn production_seam_refuses_a_warm_switch_on_a_non_reopenable_imported_source() {
+        let (tx, capture, worker) = start_capturing_cache_worker();
+        let weights = tempfile::tempdir().expect("weights tempdir");
+        let checkpoint = weights.path().join("imported.safetensors");
+        std::fs::write(&checkpoint, b"imported checkpoint bytes").expect("write checkpoint");
+        let resident = LoadSpec::new(WeightsSource::File(checkpoint.clone()));
+        let loaded_policy = ExecutionPolicy::from_load_spec(&resident);
+        let staged = resident
+            .clone()
+            .with_offload_policy(OffloadPolicy::Sequential)
+            .with_load_shape(LoadShape::DeferredMaterialization);
+
+        let cold = with_cached_generator_for_request_using_on(
+            &tx,
+            "sc3724_stub",
+            resident,
+            "stub load",
+            |_id, spec| staging_stub_load(spec),
+            |_, cache_state, loaded, effective, _| Ok((cache_state, loaded, effective)),
+        )
+        .await
+        .expect("cold request succeeds");
+        assert_eq!(cold, (MemoryCacheState::Cold, loaded_policy, loaded_policy));
+
+        let warm = with_cached_generator_for_request_using_on(
+            &tx,
+            "sc3724_stub",
+            staged,
+            "stub load",
+            |_id, spec| staging_stub_load(spec),
+            |_, cache_state, loaded, effective, _| Ok((cache_state, loaded, effective)),
+        )
+        .await
+        .expect("a refused switch must still serve the request, never fail it");
+        assert_eq!(
+            warm,
+            (MemoryCacheState::Warm, loaded_policy, loaded_policy),
+            "a refused switch must leave the effective policy at the loaded one"
+        );
+
+        drop(tx);
+        worker.join().expect("cache worker exits");
+        let text = capture.text();
+        assert_eq!(
+            text.matches("generator_cache_warm_policy_decision").count(),
+            1
+        );
+        for expected in [
+            "decision=\"refused_switch\"",
+            "reason=\"source_not_reopenable\"",
+            "source=\"single_file_not_reopenable\"",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in {text:?}");
+        }
+    }
+
+    /// A provider that does not declare selectable staged residency is not offered a switch it would
+    /// silently ignore, and the reason names that rather than blaming the source.
+    #[tokio::test]
+    async fn production_seam_declines_a_switch_a_non_staging_provider_would_ignore() {
+        let (tx, capture, worker) = start_capturing_cache_worker();
+        let weights = tempfile::tempdir().expect("weights tempdir");
+        let resident = LoadSpec::new(WeightsSource::Dir(weights.path().to_path_buf()));
+        let loaded_policy = ExecutionPolicy::from_load_spec(&resident);
+        let staged = resident
+            .clone()
+            .with_offload_policy(OffloadPolicy::Sequential);
+
+        with_cached_generator_for_request_using_on(
+            &tx,
+            "sc3724_stub",
+            resident,
+            "stub load",
+            |_id, spec| stub_load(spec),
+            |_, cache_state, _, _, _| Ok(cache_state),
+        )
+        .await
+        .expect("cold request succeeds");
+        let warm = with_cached_generator_for_request_using_on(
+            &tx,
+            "sc3724_stub",
+            staged,
+            "stub load",
+            |_id, spec| stub_load(spec),
+            |_, cache_state, loaded, effective, _| Ok((cache_state, loaded, effective)),
+        )
+        .await
+        .expect("warm request succeeds");
+        assert_eq!(warm, (MemoryCacheState::Warm, loaded_policy, loaded_policy));
+
+        drop(tx);
+        worker.join().expect("cache worker exits");
+        let text = capture.text();
+        for expected in [
+            "decision=\"served_as_is\"",
+            "reason=\"provider_does_not_select_staging\"",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in {text:?}");
+        }
+    }
+
+    /// The common case must stay silent: an identical warm request logs nothing, so the decision event
+    /// cannot become per-request noise.
+    #[tokio::test]
+    async fn an_identical_warm_request_emits_no_decision_event() {
+        let (tx, capture, worker) = start_capturing_cache_worker();
+        let weights = tempfile::tempdir().expect("weights tempdir");
+        let spec = LoadSpec::new(WeightsSource::Dir(weights.path().to_path_buf()));
+        for _ in 0..2 {
+            with_cached_generator_for_request_using_on(
+                &tx,
+                "sc3724_stub",
+                spec.clone(),
+                "stub load",
+                |_id, spec| staging_stub_load(spec),
+                |_, cache_state, _, _, _| Ok(cache_state),
+            )
+            .await
+            .expect("request succeeds");
+        }
+        drop(tx);
+        worker.join().expect("cache worker exits");
+        let text = capture.text();
+        assert!(
+            !text.contains("generator_cache_warm_policy_decision"),
+            "an unchanged policy must not log: {text:?}"
+        );
     }
 
     #[tokio::test]
@@ -2958,9 +3152,9 @@ mod tests {
         // generator was materialized, not which weights it is, so they moved onto `ExecutionPolicy`
         // and out of the reusable cache key — see `execution_policy_does_not_change_load_identity`
         // for that contract, `warm_hit_keeps_cold_load_policy_but_gets_fresh_access_state` for what
-        // a warm hit then reports, and `log_warm_policy_mismatch` for the seam that surfaces a
-        // request whose policy differs from the resident's. Only fields that change WHICH TENSORS
-        // become resident belong in this list.
+        // a warm hit then reports, and `resolve_warm_policy` for the seam that DECIDES a request
+        // whose policy differs from the resident's. Only fields that change WHICH TENSORS become
+        // resident belong in this list.
         for (field, changed) in [("precision", precision), ("adapters", adapted)] {
             assert_ne!(
                 key,

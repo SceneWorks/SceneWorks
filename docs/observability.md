@@ -150,14 +150,57 @@ shared code) when it drops its resident generator after the idle timeout: `engin
 level. It correlates with the worker releasing cached GPU allocations (Metal/MLX or
 CUDA) before the next generation cold-loads weights again.
 
-### Generator cache policy mismatch — `generator_cache_policy_mismatch`
+### Warm execution-policy decision — `generator_cache_warm_policy_decision` (Rust worker, sc-18317)
 
-Emitted at warn level on a warm cache hit when a request asks for an execution policy
-different from the resident generator's cold-load policy. Fields: `engine`,
-`loadedOffloadPolicy`, `loadedLoadShape`, `requestedOffloadPolicy`, and
-`requestedLoadShape`. Until the request planner can switch a resident generator's staged
-components, the worker logs the mismatch and safely serves the cached generator under its
-loaded policy; the event does not indicate a reload or an execution failure.
+Emitted on a warm cache hit when the request asks for an execution policy different from
+the one the resident generator was loaded under. **Silent when the policies match**, so it
+never becomes per-request noise. It replaces `generator_cache_policy_mismatch`, which only
+reported that a difference existed and always served the cold-load policy.
+
+| field | meaning |
+| --- | --- |
+| `decision` | `rematerialized` \| `served_as_is` \| `refused_switch` |
+| `reason` | `components_rematerialized_in_place` \| `loaded_policy_bounds_the_peak` \| `provider_does_not_select_staging` \| `declaration_authority_only` \| `source_not_reopenable` |
+| `source` | `reopenable` \| `single_file_not_reopenable` — whether the resident weights can re-open a dropped component |
+| `engine` | the gen-core engine id |
+| `loadedOffloadPolicy`, `loadedLoadShape`, `loadedLoadShapeDeclarationResult` | the resident generator's cold-load policy |
+| `requestedOffloadPolicy`, `requestedLoadShape`, `requestedLoadShapeDeclarationResult` | what this request asked for |
+
+- `rematerialized` (info) — **the switch was granted.** The request asked for a strictly
+  tighter shape at peak (more staging and/or deferred materialization), which is inside the
+  envelope admission already proved, and the source can re-open its components. gen-core's
+  request-scoped residency driver evicts and rebuilds the affected components inside the
+  already-loaded generator: **no new generator is constructed and the cache entry is not
+  evicted**, so this is never a reload and never a cache miss.
+- `loaded_policy_bounds_the_peak` (info, `served_as_is`) — the request asked to run *less*
+  staged / *more* resident than the load chose. Admission was proved against the loaded
+  shape, so honoring it could execute above the proved peak. Expected and benign.
+- `provider_does_not_select_staging` (info, `served_as_is`) — the provider's descriptor
+  declares no selectable staged residency, so `OffloadPolicy::Sequential` is advisory-only
+  for it and the switch would change nothing it honors.
+- `declaration_authority_only` (info, `served_as_is`) — only
+  `LoadShapeDeclarationResult` differs. That records who decided the shape, not what runs.
+- `refused_switch` / `source_not_reopenable` (**warn**) — the only outcome worth acting on.
+  The resident weights are a bare single-file / imported checkpoint with no prepared
+  re-openable pin, so the provider's residency driver would answer any staging request with
+  `unsupported: resident-only component source cannot stage or rematerialize components`.
+  The worker refuses the switch *before* asking and serves under the loaded policy, so the
+  job still completes — but that route will never receive the staged/streamed memory ladder
+  until its source becomes re-openable. Recurring warns for a model that is expected to
+  stage means it is being loaded from an import rather than a snapshot directory.
+
+Memory admission always uses the **loaded** policy regardless of the decision: it names the
+shape the resident weights are actually in, which is what the budget was proved against.
+
+### Typed execution domains — `execution_domains_selected` (Rust worker, sc-18317)
+
+Emitted at info level, once per generation, only when the planner actually selected a typed
+execution domain for the request — so it is absent for every provider that declares none.
+Fields: `engine`, and whichever of `graphEvalCadenceBlocks`, `ffnChunkRows`, `cfgBatching`
+were chosen. Selections come exclusively from the provider's own
+`Capabilities::execution` declaration, so a value here is always one the provider accepts;
+an unset domain means the provider's historical default. Absence of this event is the normal
+state, not a fault.
 
 ### API errors — `api_error` (API)
 
