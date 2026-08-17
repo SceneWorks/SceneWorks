@@ -7,6 +7,8 @@ import test from "node:test";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
+import { validateWatchdogEventChain } from "./run-ltx-safety-canary.mjs";
+
 const execFileAsync = promisify(execFile);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const WATCHDOG = path.join(ROOT, "scripts/memory-calibration-watchdog.py");
@@ -140,6 +142,7 @@ async function runWithMockedProductionTelemetry(files, childCommand, options = {
   const {
     telemetryTimeout = 0.5, actualHostMemory = 1000, requestedHostMemory = 1000,
     childAttestationTimeout = 1,
+    requireProviderPhases = false,
     memoryFreePercent = 90, memoryFreeBytes = 900, swapFreeBytes = 900,
     pressureSamples = [[memoryFreePercent, memoryFreeBytes, swapFreeBytes]],
     pressureFailureAt = null,
@@ -173,7 +176,8 @@ sys.argv = [${JSON.stringify(WATCHDOG)},
     "--telemetry-timeout", ${JSON.stringify(String(telemetryTimeout))},
     "--child-attestation-timeout", ${JSON.stringify(String(childAttestationTimeout))},
     "--term-grace", "0.1", "--event-file", ${JSON.stringify(files.events)},
-    "--require-child-attestation", "--", *${JSON.stringify(childCommand)}]
+    "--require-child-attestation", ${requireProviderPhases ? '"--require-provider-phases",' : ""}
+    "--", *${JSON.stringify(childCommand)}]
 raise SystemExit(module.guard(module.parse_args()))
 `);
   return execFileAsync("python3", [launcher], { timeout: 10_000, env: environment });
@@ -334,6 +338,96 @@ while True:
   assert.ok(events.some((event) => event.event === "child_completed"));
   assert.ok(events.some((event) => event.event === "sample" && event.swapFreeBytes === 0),
     "swap telemetry remains present without imposing an arbitrary free-capacity floor");
+});
+
+test("authenticated provider phases are exact, monotonic and bound to terminal evidence", async () => {
+  const files = await fixture();
+  const attester = `${files.program}.phases.py`;
+  const phases = [
+    "common_load", "primary_conditioning", "primary_denoise", "primary_decode",
+    "lifecycle_warm_repeat", "lifecycle_cancel", "lifecycle_cancel_recovery",
+    "lifecycle_error", "lifecycle_error_recovery", "cleanup",
+  ];
+  await writeFile(attester, String.raw`import json, os, socket
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.connect(os.environ["SCENEWORKS_MEMORY_WATCHDOG_SOCKET"])
+def line():
+    data = b""
+    while not data.endswith(b"\n"): data += sock.recv(1)
+    return data.decode().strip()
+payload = json.loads(line()); nonce = payload["nonce"]
+assert payload["providerPhaseProtocol"] == "sceneworks-provider-phase-v1"
+assert payload["providerPhases"] == ${JSON.stringify(phases)}
+sock.sendall(f"ACK {nonce}\n".encode()); assert line() == f"GO {nonce}"
+for sequence, name in enumerate(payload["providerPhases"], 1):
+    sock.sendall(f"PHASE {nonce} {sequence} {name}\n".encode())
+    while True:
+        acknowledgement = line()
+        if acknowledgement == f"PING {nonce}": continue
+        assert acknowledgement == f"PHASE_ACK {nonce} {sequence} {name}"
+        break
+sock.sendall(f"DONE {nonce}\n".encode())
+while True:
+    message = line()
+    if message == f"BYE {nonce}": break
+    assert message == f"PING {nonce}"
+`);
+  await runWithMockedProductionTelemetry(files, ["python3", attester], {
+    requireProviderPhases: true,
+  });
+  const events = (await readFile(files.events, "utf8")).trim().split("\n").map(JSON.parse);
+  const markers = events.filter((event) => event.event === "provider_phase");
+  assert.deepEqual(markers.map((event) => event.providerPhase.name), phases);
+  assert.ok(markers.every((event) => event.authenticated === true));
+  const completed = events.find((event) => event.event === "child_completed");
+  assert.deepEqual(completed.providerPhase, { sequence: 10, name: "cleanup" });
+  for (const event of events.filter((event) => event.event === "sample"
+      && event.providerPhase !== null)) {
+    const preceding = markers.filter((marker) => marker.at <= event.at).at(-1);
+    assert.deepEqual(event.providerPhase, preceding.providerPhase);
+  }
+  assert.deepEqual(events.map((event) => event.eventSequence),
+    events.map((_, index) => index + 1));
+  assert.equal(events[0].previousEventHash, "0".repeat(64));
+  for (let index = 1; index < events.length; index += 1) {
+    assert.equal(events[index].previousEventHash, events[index - 1].eventHash);
+  }
+  assert.ok(events.every((event) => /^[0-9a-f]{64}$/.test(event.eventHash)));
+  validateWatchdogEventChain(events);
+});
+
+test("reordered or foreign provider phases hard-stop the owned group", async () => {
+  for (const [statement, expectedReason] of [
+    ['sock.sendall(f"PHASE {nonce} 2 primary_conditioning\\n".encode())', /reordered_provider_phase/],
+    ['sock.sendall(b"PHASE foreign 1 common_load\\n")', /foreign_provider_phase_nonce/],
+  ]) {
+    const files = await fixture();
+    const attester = `${files.program}.bad-phase.py`;
+    await writeFile(attester, String.raw`import json, os, socket, time
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.connect(os.environ["SCENEWORKS_MEMORY_WATCHDOG_SOCKET"])
+def line():
+    data = b""
+    while not data.endswith(b"\n"): data += sock.recv(1)
+    return data.decode().strip()
+payload = json.loads(line()); nonce = payload["nonce"]
+sock.sendall(f"ACK {nonce}\n".encode()); assert line() == f"GO {nonce}"
+${statement}
+time.sleep(60)
+`);
+    let status = 0;
+    try {
+      await runWithMockedProductionTelemetry(files, ["python3", attester], {
+        requireProviderPhases: true,
+      });
+    } catch (error) {
+      status = error.code;
+    }
+    assert.equal(status, 97);
+    const events = (await readFile(files.events, "utf8")).trim().split("\n").map(JSON.parse);
+    assert.match(events.find((event) => event.event === "hard_stop").reason, expectedReason);
+    assert.equal(events.at(-1).event, "terminated");
+  }
 });
 
 test("child attestation uses a short socket path when TMPDIR is a long external path", async (t) => {

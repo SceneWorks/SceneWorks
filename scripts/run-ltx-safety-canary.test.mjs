@@ -15,6 +15,7 @@ import {
   CAMPAIGN_ENTRY_IDENTITY,
   CAMPAIGN_ENTRY_LOGICAL_CASE_ID,
   CAMPAIGN_ENTRY_PROVIDER,
+  CAMPAIGN_FAILURE_RECEIPT_TYPE,
   CHILD_ATTESTATION_TIMEOUT_SECONDS,
   CanaryInterrupted,
   MAX_FOOTPRINT_BYTES,
@@ -22,10 +23,15 @@ import {
   MIN_PREFLIGHT_FREE_BYTES,
   MIN_RUNTIME_FREE_BYTES,
   PREPARATION_SCHEMA_VERSION,
+  PROVIDER_PHASES,
   PRODUCT_ENVELOPE_CANARY_PROFILE,
+  acquireCampaignEntryOutcome,
   acquirePreparationLock,
   campaignEntryAdapterRequest,
   campaignEntryCanonicalFragment,
+  campaignEntryFailurePath,
+  campaignEntryFailureReceipt,
+  campaignEntryOutcomeReservationPath,
   campaignEntryPlan,
   canaryWatchdogEnvironment,
   canaryRequest,
@@ -44,6 +50,10 @@ import {
   prepareCanaryCache,
   privateArtifactRoots,
   preservePrimaryFailure,
+  preserveFailureReceiptSuppression,
+  publishCampaignEntryCanonicalOutcome,
+  publishCampaignEntryFailureReceipt,
+  releaseUnpublishedCampaignEntryOutcome,
   preflightFreeFloor,
   repositoryToolchain,
   runtimeFreeFloor,
@@ -52,6 +62,8 @@ import {
   telemetryResolutionBytes,
   validateCampaignEntryAdapterResponse,
   validateCampaignEntryBundle,
+  validateCampaignEntryFailureEvents,
+  validateCampaignEntryFailureReceipt,
   validateCampaignEntryHarnessRequest,
   validateCampaignEntryWatchdogEvents,
   validateCanaryResponse,
@@ -60,7 +72,7 @@ import {
 } from "./run-ltx-safety-canary.mjs";
 
 import { hashArtifactInventory } from "./hash-artifact-inventory.mjs";
-import { canonicalJson, runProviderPlan } from "./memory-calibration-harness.mjs";
+import { canonicalJson, runProviderPlan, validateBundle } from "./memory-calibration-harness.mjs";
 
 const TEXT_ENCODER_INVENTORY = {
   root: "/models/gemma",
@@ -192,6 +204,122 @@ function campaignEntryRuntimeResponse(hostMemoryBytes = 128 * 1024 ** 3) {
     loadability: { result: "passed", resolvedPathFingerprint: "exact@campaign-entry:q4" },
     capturedAt: "2026-08-17T12:00:00Z",
   };
+}
+
+const PROCESS_IDENTITIES = [
+  { pid: 1234, pgid: 1234, started: "Sun Aug 17 12:00:00 2026" },
+  { pid: 1235, pgid: 1234, started: "Sun Aug 17 12:00:01 2026" },
+];
+
+function stableCompactJson(value) {
+  if (Array.isArray(value)) return `[${value.map(stableCompactJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) =>
+      `${JSON.stringify(key)}:${stableCompactJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function chainWatchdogEvents(events) {
+  let previousEventHash = "0".repeat(64);
+  for (const [index, event] of events.entries()) {
+    delete event.eventSequence;
+    delete event.previousEventHash;
+    delete event.eventHash;
+    Object.assign(event, { eventSequence: index + 1, previousEventHash });
+    event.eventHash = createHash("sha256").update(stableCompactJson(event)).digest("hex");
+    previousEventHash = event.eventHash;
+  }
+  return events;
+}
+
+function campaignFailureEvents(hostMemoryBytes = 128 * 1024 ** 3, phaseCount = 1) {
+  const runtimeFloor = runtimeFreeFloor(hostMemoryBytes);
+  let at = 1;
+  const events = [
+    {
+      at: at++, event: "started", pid: 1234, pgid: 1234,
+      providerPhase: null, processIdentities: PROCESS_IDENTITIES,
+    },
+    {
+      at: at++, event: "sample", phase: "before_child_release", providerPhase: null,
+      physicalFootprintBytes: 1, memoryFreeBytes: runtimeFloor, swapFreeBytes: 0,
+    },
+    {
+      at: at++, event: "sample", phase: "child_attested_before_allocation", providerPhase: null,
+      physicalFootprintBytes: 2, memoryFreeBytes: runtimeFloor, swapFreeBytes: 0,
+    },
+    { at: at++, event: "child_attested", providerPhase: null },
+  ];
+  let providerPhase = null;
+  for (let index = 0; index < phaseCount; index += 1) {
+    providerPhase = { sequence: index + 1, name: PROVIDER_PHASES[index] };
+    events.push({
+      at: at++, event: "provider_phase", providerPhase, authenticated: true,
+    });
+  }
+  const physicalFootprintBytes = MAX_FOOTPRINT_BYTES + 1;
+  const reason = `physical_footprint_at_or_above_${MAX_FOOTPRINT_BYTES}:observed_${physicalFootprintBytes}`;
+  events.push({
+    at: at++, event: "sample", phase: "runtime", providerPhase,
+    physicalFootprintBytes, memoryFreeBytes: runtimeFloor, swapFreeBytes: 0,
+  });
+  events.push({
+    at: at++, event: "hard_stop", reason, providerPhase,
+    processIdentities: PROCESS_IDENTITIES,
+  });
+  events.push({
+    at: at++, event: "terminated", reason, providerPhase,
+    processIdentities: PROCESS_IDENTITIES,
+  });
+  return chainWatchdogEvents(events);
+}
+
+function campaignSuccessEvents(hostMemoryBytes = 128 * 1024 ** 3) {
+  const events = campaignFailureEvents(hostMemoryBytes, PROVIDER_PHASES.length);
+  const sample = events.at(-3);
+  sample.physicalFootprintBytes = 3;
+  events.splice(-2, 2, {
+    at: events.at(-2).at, event: "child_completed",
+    providerPhase: { sequence: PROVIDER_PHASES.length, name: PROVIDER_PHASES.at(-1) },
+  });
+  return chainWatchdogEvents(events);
+}
+
+function campaignFailurePreparation(
+  root = "/private/prepared", sceneWorksRevision = "1".repeat(40),
+  inferenceRevision = "3".repeat(40),
+) {
+  const identity = preparationIdentity("a".repeat(40), "b".repeat(40), "1.97.1");
+  const key = preparationCacheKey(identity);
+  const preparationRoot = path.join(root, key);
+  const fileIdentity = (name, mode, digest) => ({
+    path: path.join(preparationRoot, "adapter", name), sha256: digest.repeat(64),
+    device: "1", inode: name === "mlx.metallib" ? "2" : "3", size: 100,
+    mtimeNs: "4", ctimeNs: "5", mode,
+  });
+  const prepared = {
+    adapter: fileIdentity("memory-mlx-adapter", 0o500, "d"),
+    metallib: fileIdentity("mlx.metallib", 0o400, "c"),
+  };
+  const manifestIdentity = (file) => ({
+    sha256: file.sha256, size: file.size,
+    seal: {
+      device: file.device, inode: file.inode, mtimeNs: file.mtimeNs,
+      ctimeNs: file.ctimeNs, mode: file.mode,
+    },
+  });
+  prepared.manifest = {
+    schemaVersion: PREPARATION_SCHEMA_VERSION, key, identity,
+    preparedFrom: { sceneWorksRevision, inferenceRevision },
+    artifacts: {
+      numericTier: { content: identity.artifact.numericTier, seal: {} },
+      textEncoder: { content: identity.artifact.textEncoder, seal: {} },
+    },
+    adapter: manifestIdentity(prepared.adapter),
+    metallib: manifestIdentity(prepared.metallib),
+  };
+  return { identity, key, preparationRoot, prepared };
 }
 
 async function cleanCampaignHarnessRepo(t) {
@@ -384,34 +512,210 @@ test("SC-20191 rejects carrier, cleanup and watchdog mutations", () => {
   }
 
   const runtimeFloor = runtimeFreeFloor(hostMemoryBytes);
-  const validEvents = [
-    { event: "started" },
-    {
-      event: "sample", phase: "before_child_release", physicalFootprintBytes: 1,
-      memoryFreeBytes: runtimeFloor, swapFreeBytes: 0,
-    },
-    {
-      event: "sample", phase: "child_attested_before_allocation", physicalFootprintBytes: 2,
-      memoryFreeBytes: runtimeFloor, swapFreeBytes: 0,
-    },
-    { event: "child_attested" },
-    {
-      event: "sample", phase: "running", physicalFootprintBytes: 3,
-      memoryFreeBytes: runtimeFloor, swapFreeBytes: 0,
-    },
-    { event: "child_completed" },
-  ];
+  const validEvents = campaignSuccessEvents(hostMemoryBytes);
   assert.equal(validateCampaignEntryWatchdogEvents(validEvents, hostMemoryBytes), 3);
   for (const events of [
     validEvents.filter((event) => event.event !== "child_completed"),
-    validEvents.filter((event) => event.phase !== "running"),
+    validEvents.filter((event) => event.phase !== "runtime"),
+    validEvents.filter((event) => event.providerPhase?.name !== "lifecycle_cancel"),
+    [...validEvents.slice(0, -1), structuredClone(validEvents.find((event) =>
+      event.providerPhase?.name === "cleanup" && event.event === "provider_phase")), validEvents.at(-1)],
     [validEvents[0], ...validEvents.slice(1).reverse()],
     [...validEvents, { event: "hard_stop" }],
     validEvents.map((event) => event.phase === "before_child_release"
       ? { ...event, physicalFootprintBytes: MAX_FOOTPRINT_BYTES } : event),
     validEvents.map((event) => event.phase === "before_child_release"
       ? { ...event, memoryFreeBytes: runtimeFloor - 1 } : event),
-  ]) assert.throws(() => validateCampaignEntryWatchdogEvents(events, hostMemoryBytes), /SC-20191/);
+  ]) assert.throws(() => validateCampaignEntryWatchdogEvents(events, hostMemoryBytes), /SC-20(?:191|216)/);
+});
+
+test("SC-20216 failure receipt is phase-authenticated, non-ingestible and mutation-sensitive", () => {
+  const hostMemoryBytes = 128 * 1024 ** 3;
+  const { identity, key, preparationRoot, prepared } = campaignFailurePreparation();
+  const events = campaignFailureEvents(hostMemoryBytes);
+  const canonicalOutput = "/private/results/canonical.json";
+  const outcome = {
+    canonicalOutput,
+    failureOutput: campaignEntryFailurePath(canonicalOutput),
+    reservation: campaignEntryOutcomeReservationPath(canonicalOutput),
+    choice: `${campaignEntryOutcomeReservationPath(canonicalOutput)}.choice`,
+    outcomeChoice: "failure",
+    canonicalBundleAbsentAtPublication: true,
+    outcomeReservationHeldAtPublication: true,
+  };
+  const receipt = campaignEntryFailureReceipt({
+    sceneWorksRevision: "1".repeat(40), sceneWorksTree: "a".repeat(40),
+    inferenceRevision: "3".repeat(40), inferenceTree: "b".repeat(40),
+    identity, preparationKey: key, preparationRoot,
+    prepared, hostMemoryBytes, events, outcome,
+  });
+  assert.equal(receipt.recordType, CAMPAIGN_FAILURE_RECEIPT_TYPE);
+  assert.equal(receipt.ingestible, false);
+  assert.equal(receipt.canonicalBundlePublished, false);
+  assert.equal(receipt.watchdog.failure.terminalProviderPhase.name, "common_load");
+  assert.equal(receipt.watchdog.failure.firstViolatingSample.physicalFootprintBytes,
+    MAX_FOOTPRINT_BYTES + 1);
+  assert.throws(() => validateBundle(receipt), /schema|object|property|records|required/i);
+  validateCampaignEntryFailureReceipt(receipt);
+
+  const mutations = [
+    (value) => { value.ingestible = true; },
+    (value) => { value.outcome.canonicalBundleAbsentAtPublication = false; },
+    (value) => { value.outcome.outcomeChoice = "canonical"; },
+    (value) => { value.outcome.choice += ".mutated"; },
+    (value) => { value.cleanup.runRootEmpty = false; },
+    (value) => { value.cleanup = {}; },
+    (value) => { value.campaignCase.target.geometry.frames = 120; },
+    (value) => { value.artifacts.metallib.sha256 = "0".repeat(64); },
+    (value) => { value.artifacts.preparation.manifest.preparedFrom.sceneWorksRevision
+      = "9".repeat(40); },
+    (value) => { value.artifacts.preparation.manifest.artifacts.numericTier.content.bytes += 1; },
+    (value) => { value.artifacts.preparation.root = value.artifacts.preparation.key; },
+    (value) => { delete value.watchdog.events[0].providerPhase; },
+    (value) => { value.watchdog.events.at(-1).processIdentities
+      = [value.watchdog.events.at(-1).processIdentities[0]]; },
+    (value) => { value.watchdog.events.find((event) => event.event === "provider_phase")
+      .providerPhase.sequence = 2; },
+    (value) => { value.watchdog.events.find((event) => event.event === "provider_phase")
+      .providerPhase.name = "primary_decode"; },
+    (value) => { value.watchdog.events.find((event) => event.event === "provider_phase")
+      .authenticated = false; },
+    (value) => { value.watchdog.events.find((event) => event.event === "hard_stop")
+      .providerPhase = null; },
+    (value) => { value.watchdog.events.find((event) => event.event === "hard_stop")
+      .reason = "physical_footprint_at_or_above_mutated"; },
+    (value) => { value.watchdog.events.at(-1).at = 0; },
+    (value) => { value.watchdog.eventChain.head = "0".repeat(64); },
+    (value) => { value.watchdog.events.splice(1, 1); },
+    (value) => { [value.watchdog.events[1], value.watchdog.events[2]]
+      = [value.watchdog.events[2], value.watchdog.events[1]]; },
+    (value) => { value.watchdog.events.splice(2, 0, structuredClone(value.watchdog.events[1])); },
+    (value) => { value.watchdog.failure.firstViolatingEventIndex += 1; },
+  ];
+  for (const mutate of mutations) {
+    const changed = structuredClone(receipt);
+    mutate(changed);
+    assert.throws(() => validateCampaignEntryFailureReceipt(changed), /SC-20216/);
+  }
+
+  const interrupted = campaignFailureEvents(hostMemoryBytes);
+  interrupted.at(-3).physicalFootprintBytes = 3;
+  interrupted.at(-2).reason = "monitor_signal_SIGTERM";
+  interrupted.at(-1).reason = "monitor_signal_SIGTERM";
+  chainWatchdogEvents(interrupted);
+  const interruption = validateCampaignEntryFailureEvents(interrupted, hostMemoryBytes);
+  assert.equal(interruption.firstViolatingSample, null);
+  assert.equal(interruption.reason, "monitor_signal_SIGTERM");
+
+  const thresholdWithoutSample = campaignFailureEvents(hostMemoryBytes);
+  thresholdWithoutSample.at(-3).physicalFootprintBytes = 3;
+  chainWatchdogEvents(thresholdWithoutSample);
+  assert.throws(
+    () => validateCampaignEntryFailureEvents(thresholdWithoutSample, hostMemoryBytes),
+    /threshold hard stop omitted its exact first violating sample/,
+  );
+
+  const unequalTerminalIdentities = campaignFailureEvents(hostMemoryBytes);
+  unequalTerminalIdentities.at(-2).processIdentities = [
+    ...unequalTerminalIdentities.at(-2).processIdentities,
+    { pid: 1236, pgid: 1234, started: "Sun Aug 17 12:00:02 2026" },
+  ];
+  chainWatchdogEvents(unequalTerminalIdentities);
+  assert.throws(
+    () => validateCampaignEntryFailureEvents(unequalTerminalIdentities, hostMemoryBytes),
+    /exact process termination identity/,
+  );
+});
+
+test("SC-20216 publishes only after validation and never overwrites a failure receipt", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "sc20216-failure-publish-"));
+  t.after(() => cleanupCanaryScratch(root));
+  const canonical = path.join(root, "canonical.json");
+  const outcome = await acquireCampaignEntryOutcome(canonical);
+  const output = outcome.failureOutput;
+  const hostMemoryBytes = 128 * 1024 ** 3;
+  const { identity, key, preparationRoot, prepared } = campaignFailurePreparation(root);
+  const order = [];
+  const build = (publication) => {
+    order.push("build");
+    return campaignEntryFailureReceipt({
+      sceneWorksRevision: "1".repeat(40), sceneWorksTree: "a".repeat(40),
+      inferenceRevision: "3".repeat(40), inferenceTree: "b".repeat(40),
+      identity, preparationKey: key, preparationRoot,
+      prepared, hostMemoryBytes, events: campaignFailureEvents(hostMemoryBytes),
+      outcome: publication,
+    });
+  };
+  await assert.rejects(() => publishCampaignEntryFailureReceipt(outcome, {
+    verify: async () => { throw new Error("residue remained"); }, build,
+  }), /residue remained/);
+  assert.equal(await readFile(output, "utf8").catch(() => null), null);
+  assert.deepEqual(order, []);
+  await publishCampaignEntryFailureReceipt(outcome, {
+    verify: async () => { order.push("cleanup-and-identity-verified"); }, build,
+  });
+  order.push("published");
+  assert.deepEqual(order, ["cleanup-and-identity-verified", "build", "published"]);
+  assert.equal(await readFile(canonical, "utf8").catch(() => null), null);
+  validateCampaignEntryFailureReceipt(JSON.parse(await readFile(output, "utf8")));
+  await assert.rejects(() => publishCampaignEntryFailureReceipt(outcome, {
+    verify: async () => {}, build,
+  }), /EEXIST/);
+  await assert.rejects(() => acquireCampaignEntryOutcome(canonical), /EEXIST/);
+});
+
+test("SC-20216 jointly reserves canonical and failure outcomes across races and stale state", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "sc20216-outcome-race-"));
+  t.after(() => cleanupCanaryScratch(root));
+  const canonical = path.join(root, "canonical.json");
+  const raced = await Promise.allSettled([
+    acquireCampaignEntryOutcome(canonical), acquireCampaignEntryOutcome(canonical),
+  ]);
+  assert.equal(raced.filter((result) => result.status === "fulfilled").length, 1);
+  assert.equal(raced.filter((result) => result.status === "rejected").length, 1);
+  const outcome = raced.find((result) => result.status === "fulfilled").value;
+  const hostMemoryBytes = 128 * 1024 ** 3;
+  const { identity, key, preparationRoot, prepared } = campaignFailurePreparation(root);
+  const publications = await Promise.allSettled([
+    publishCampaignEntryCanonicalOutcome(outcome, { canonical: true }),
+    publishCampaignEntryFailureReceipt(outcome, {
+      verify: async () => {},
+      build: (publication) => campaignEntryFailureReceipt({
+        sceneWorksRevision: "1".repeat(40), sceneWorksTree: "a".repeat(40),
+        inferenceRevision: "3".repeat(40), inferenceTree: "b".repeat(40),
+        identity, preparationKey: key, preparationRoot, prepared, hostMemoryBytes,
+        events: campaignFailureEvents(hostMemoryBytes), outcome: publication,
+      }),
+    }),
+  ]);
+  assert.equal(publications.filter((result) => result.status === "fulfilled").length, 1);
+  assert.equal(publications.filter((result) => result.status === "rejected").length, 1);
+  const [canonicalBytes, failureBytes] = await Promise.all([
+    readFile(canonical, "utf8").catch(() => null),
+    readFile(outcome.failureOutput, "utf8").catch(() => null),
+  ]);
+  assert.notEqual(canonicalBytes === null, failureBytes === null,
+    "exactly one jointly reserved outcome must publish");
+
+  const retryDirectory = path.join(root, "retry");
+  await mkdir(retryDirectory);
+  const retry = path.join(retryDirectory, "retry.json");
+  const unpublished = await acquireCampaignEntryOutcome(retry);
+  await releaseUnpublishedCampaignEntryOutcome(unpublished);
+  const reacquired = await acquireCampaignEntryOutcome(retry);
+  await releaseUnpublishedCampaignEntryOutcome(reacquired);
+  await writeFile(campaignEntryOutcomeReservationPath(retry), "stale-owner\n", { flag: "wx" });
+  await assert.rejects(() => acquireCampaignEntryOutcome(retry), /EEXIST/);
+
+  const partialDirectory = path.join(root, "partial");
+  await mkdir(partialDirectory);
+  const partialOutput = path.join(partialDirectory, "canonical.json");
+  const partial = await acquireCampaignEntryOutcome(partialOutput);
+  await assert.rejects(() => publishCampaignEntryCanonicalOutcome(partial, { invalid: 1n }),
+    /BigInt/);
+  await releaseUnpublishedCampaignEntryOutcome(partial);
+  await assert.rejects(() => acquireCampaignEntryOutcome(partialOutput), /EEXIST/,
+    "a claimed but interrupted outcome must remain fail-closed");
 });
 
 test("SC-20191 publishes one schema-valid canonical runtime record after stripping private evidence", async (t) => {
@@ -893,6 +1197,16 @@ test("scratch cleanup cannot mask the primary watchdog or signal failure", () =>
   assert.strictEqual(preservePrimaryFailure(null, cleanup), cleanup);
 });
 
+test("a stale failure receipt cannot mask the primary watchdog failure", () => {
+  const primary = new Error("watchdog hard stop");
+  const collision = Object.assign(new Error("destination exists"), { code: "EEXIST" });
+  const combined = preserveFailureReceiptSuppression(primary, collision);
+  assert.equal(combined, primary);
+  assert.match(combined.message, /watchdog hard stop/);
+  assert.match(combined.message, /failure receipt suppressed: destination exists/);
+  assert.equal(combined.cause, collision);
+});
+
 test("the production runner can only launch through the identity-checked watchdog", async () => {
   const source = await readFile(new URL("./run-ltx-safety-canary.mjs", import.meta.url), "utf8");
   assert.match(source, /scripts\/memory-calibration-watchdog\.py/);
@@ -944,6 +1258,7 @@ test("the production runner can only launch through the identity-checked watchdo
   assert.match(source, /Cargo inference source tree differs from the verified checkout/);
   assert.match(source, /response\?\.inferenceRevision !== expectedInferenceRevision/);
   assert.match(source, /--require-child-attestation/);
+  assert.match(source, /--require-provider-phases/);
   assert.equal(CHILD_ATTESTATION_TIMEOUT_SECONDS, 30);
   assert.match(source, /--child-attestation-timeout", String\(CHILD_ATTESTATION_TIMEOUT_SECONDS\)/);
   assert.match(source, /event\.event === "child_attested"/);
@@ -960,6 +1275,23 @@ test("the production runner can only launch through the identity-checked watchdo
   const cleanup = source.indexOf("await cleanupCanaryScratch(runScratch)");
   assert.ok(failureRead >= 0 && cleanup > failureRead,
     "watchdog failure reason must be read before scratch cleanup");
+  const failurePublisher = source.slice(
+    source.indexOf("export async function publishCampaignEntryFailureReceipt("),
+    source.indexOf("async function assertPreparationHasNoTransientResidue("),
+  );
+  assert.ok(failurePublisher.indexOf("await verify()")
+    < failurePublisher.indexOf('return publishCampaignEntryOutcome(outcome, "failure"'),
+  "failure validation and cleanup must precede atomic publication");
+  const failureHandling = source.slice(
+    source.indexOf("if (status.code !== 0 || status.signal)"),
+    source.indexOf("signal?.throwIfAborted()", source.indexOf("if (status.code !== 0 || status.signal)")),
+  );
+  assert.ok(failureHandling.indexOf("const watchdogError = new Error(watchdogFailureSummary")
+    < failureHandling.indexOf("validateCampaignEntryFailureEvents"),
+  "the original watchdog failure must exist before receipt or postcondition validation");
+  assert.match(failureHandling, /preserveFailureReceiptSuppression\(watchdogError, error\)/);
+  assert.match(source, /acquireCampaignEntryOutcome\(output\)/);
+  assert.match(source, /canonicalBundleAbsentAtPublication: true/);
   assert.equal(source.match(/await assertHostPreflight\(/g)?.length, 2,
     "each contained execution profile has one immediate model-release check");
   assert.doesNotMatch(source, /300_000|5 \* 60 \* 1_000/);
@@ -988,7 +1320,8 @@ test("the production runner can only launch through the identity-checked watchdo
     "validateCampaignEntryBundle(bundle)",
   ]) {
     assert.ok(campaignController.indexOf(operation) >= 0
-      && campaignController.indexOf(operation) < campaignController.indexOf("await publishExclusiveJson("),
+      && campaignController.indexOf(operation)
+        < campaignController.indexOf("await publishCampaignEntryCanonicalOutcome("),
     `${operation} must precede atomic canonical publication`);
   }
   assert.match(source, /cancellation\.abort\(new CanaryInterrupted\(signalName\)\)/);

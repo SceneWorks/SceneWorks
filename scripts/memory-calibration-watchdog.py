@@ -9,6 +9,7 @@ available only behind an explicit test-only flag.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import secrets
@@ -22,6 +23,19 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 HARD_STOP_EXIT = 97
+PROVIDER_PHASE_PROTOCOL = "sceneworks-provider-phase-v1"
+PROVIDER_PHASES = (
+    "common_load",
+    "primary_conditioning",
+    "primary_denoise",
+    "primary_decode",
+    "lifecycle_warm_repeat",
+    "lifecycle_cancel",
+    "lifecycle_cancel_recovery",
+    "lifecycle_error",
+    "lifecycle_error_recovery",
+    "cleanup",
+)
 
 
 @dataclass(frozen=True)
@@ -415,15 +429,42 @@ class OwnedGroup:
             raise RuntimeError(f"owned process group retained live identities: {survivors}")
 
 
-def emit(event_file: Path | None, event: dict[str, object]) -> None:
-    line = json.dumps({"at": time.time(), **event}, separators=(",", ":"))
-    if event_file:
-        with event_file.open("a") as output:
-            output.write(f"{line}\n")
-            output.flush()
-            os.fsync(output.fileno())
-    else:
-        print(line, file=sys.stderr, flush=True)
+class EventChain:
+    """Append-only event evidence with deletion/reorder/mutation detection."""
+
+    def __init__(self, event_file: Path | None):
+        self.event_file = event_file
+        self.sequence = 0
+        self.previous_hash = "0" * 64
+
+    def emit(self, event: dict[str, object]) -> None:
+        self.sequence += 1
+        payload = {
+            "eventSequence": self.sequence,
+            "previousEventHash": self.previous_hash,
+            "at": time.time(),
+            **event,
+        }
+        event_hash = hashlib.sha256(json.dumps(
+            payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+        ).encode()).hexdigest()
+        line = json.dumps({**payload, "eventHash": event_hash}, separators=(",", ":"))
+        self.previous_hash = event_hash
+        if self.event_file:
+            with self.event_file.open("a") as output:
+                output.write(f"{line}\n")
+                output.flush()
+                os.fsync(output.fileno())
+        else:
+            print(line, file=sys.stderr, flush=True)
+
+
+def identity_json(identity: Identity) -> dict[str, object]:
+    return {
+        "pid": identity.pid,
+        "pgid": identity.pgid,
+        "started": identity.started,
+    }
 
 
 class MonitorSignal(Exception):
@@ -467,6 +508,7 @@ def observe_group(
 
 
 def guard(args: argparse.Namespace) -> int:
+    events = EventChain(args.event_file)
     attested_initial_memory_free_bytes = None
     if args.require_child_attestation:
         actual_host_memory = DarwinHostPressureSampler.actual_host_memory_bytes(
@@ -561,6 +603,77 @@ def guard(args: argparse.Namespace) -> int:
     attestation_nonce = None
     attestation_buffer = bytearray()
     child_reported_done = False
+    completion_released = False
+    provider_phase: dict[str, object] | None = None
+    provider_phase_sequence = 0
+
+    def process_attestation_lines() -> str | None:
+        nonlocal attestation_buffer, child_reported_done
+        nonlocal provider_phase, provider_phase_sequence
+        while b"\n" in attestation_buffer:
+            line, remainder = bytes(attestation_buffer).split(b"\n", 1)
+            attestation_buffer = bytearray(remainder)
+            try:
+                decoded = line.decode()
+            except UnicodeDecodeError:
+                return "child_returned_non_utf8_attestation"
+            fields = decoded.split()
+            if fields[:1] == ["PHASE"]:
+                if child_reported_done:
+                    return "child_returned_provider_phase_after_completion"
+                if not args.require_provider_phases or len(fields) != 4:
+                    return "child_returned_invalid_provider_phase"
+                if fields[1] != attestation_nonce:
+                    return "child_returned_foreign_provider_phase_nonce"
+                try:
+                    sequence = int(fields[2])
+                except ValueError:
+                    return "child_returned_non_integer_provider_phase_sequence"
+                expected_sequence = provider_phase_sequence + 1
+                if sequence != expected_sequence or sequence > len(PROVIDER_PHASES):
+                    return (
+                        "child_returned_reordered_provider_phase:"
+                        f"expected_{expected_sequence}:observed_{sequence}"
+                    )
+                expected_name = PROVIDER_PHASES[sequence - 1]
+                if fields[3] != expected_name:
+                    return (
+                        "child_returned_invalid_provider_phase_name:"
+                        f"expected_{expected_name}:observed_{fields[3]}"
+                    )
+                provider_phase_sequence = sequence
+                provider_phase = {"sequence": sequence, "name": expected_name}
+                events.emit({
+                    "event": "provider_phase",
+                    "providerPhase": provider_phase,
+                    "authenticated": True,
+                })
+                try:
+                    assert attestation_stream is not None
+                    attestation_stream.setblocking(True)
+                    attestation_stream.settimeout(args.telemetry_timeout)
+                    attestation_stream.sendall(
+                        f"PHASE_ACK {attestation_nonce} {sequence} {expected_name}\n".encode())
+                except (OSError, TimeoutError) as error:
+                    return f"provider_phase_ack_failed:{type(error).__name__}:{error}"
+                finally:
+                    if attestation_stream is not None:
+                        attestation_stream.setblocking(False)
+                continue
+            if fields == ["DONE", str(attestation_nonce)]:
+                if child_reported_done:
+                    return "child_returned_duplicate_completion_attestation"
+                if args.require_provider_phases and provider_phase_sequence != len(PROVIDER_PHASES):
+                    return (
+                        "child_completed_before_provider_phase_sequence:"
+                        f"observed_{provider_phase_sequence}"
+                    )
+                child_reported_done = True
+                continue
+            return "child_returned_invalid_completion_attestation"
+        if len(attestation_buffer) > 4096:
+            return "child_attestation_message_exceeded_size_bound"
+        return None
 
     def check_observation(footprint: int, pressure: HostPressure | None) -> str | None:
         if footprint >= args.max_footprint_bytes:
@@ -599,6 +712,7 @@ def guard(args: argparse.Namespace) -> int:
     def emit_sample(footprint: int, pressure: HostPressure | None, phase: str) -> None:
         event: dict[str, object] = {
             "event": "sample", "phase": phase, "physicalFootprintBytes": footprint,
+            "providerPhase": provider_phase,
         }
         if pressure is not None:
             event.update({
@@ -606,7 +720,7 @@ def guard(args: argparse.Namespace) -> int:
                 "memoryFreeBytes": pressure.memory_free_bytes,
                 "swapFreeBytes": pressure.swap_free_bytes,
             })
-        emit(args.event_file, event)
+        events.emit(event)
 
     def bounded_telemetry_timeout() -> float:
         if runtime_deadline is None:
@@ -620,7 +734,12 @@ def guard(args: argparse.Namespace) -> int:
         # A signal pending from the blocked launch window is delivered here, inside the cleanup
         # try, never in the gap between establishing the group and arming cleanup.
         signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
-        emit(args.event_file, {"event": "started", "pid": group.child.pid, "pgid": group.pgid})
+        events.emit({
+            "event": "started", "pid": group.child.pid, "pgid": group.pgid,
+            "providerPhase": provider_phase,
+            "processIdentities": [identity_json(item) for item in sorted(
+                group.retained, key=lambda item: item.pid)],
+        })
         try:
             _, footprint, pressure, _ = observe_group(
                 group, sampler, host_sampler, args.telemetry_timeout,
@@ -651,6 +770,11 @@ def guard(args: argparse.Namespace) -> int:
                 "minInitialMemoryFreeBytes": attested_initial_memory_free_bytes,
                 "minMemoryFreeBytes": args.min_memory_free_bytes,
             }
+            if args.require_provider_phases:
+                attestation.update({
+                    "providerPhaseProtocol": PROVIDER_PHASE_PROTOCOL,
+                    "providerPhases": list(PROVIDER_PHASES),
+                })
             if args.min_swap_free_bytes is not None:
                 attestation["minSwapFreeBytes"] = args.min_swap_free_bytes
             try:
@@ -782,7 +906,9 @@ def guard(args: argparse.Namespace) -> int:
                     hard_stop, footprint, pressure = observe_startup()
                     if hard_stop is None:
                         emit_sample(footprint, pressure, "child_attested_before_allocation")
-                        emit(args.event_file, {"event": "child_attested"})
+                        events.emit({
+                            "event": "child_attested", "providerPhase": provider_phase,
+                        })
                         remaining = startup_deadline - time.monotonic()
                         if remaining <= 0:
                             hard_stop = startup_deadline_reason()
@@ -825,6 +951,36 @@ def guard(args: argparse.Namespace) -> int:
                     return status
                 hard_stop = f"launch_sentinel_failed_with_live_group:status_{status}"
                 break
+            if attestation_stream is not None and not child_reported_done:
+                try:
+                    while True:
+                        chunk = attestation_stream.recv(4096)
+                        if not chunk:
+                            hard_stop = "child_attestation_channel_lost_before_done"
+                            break
+                        attestation_buffer.extend(chunk)
+                        if len(chunk) < 4096:
+                            break
+                except BlockingIOError:
+                    pass
+                except ConnectionResetError:
+                    hard_stop = "child_attestation_channel_lost_before_done"
+                if hard_stop is None:
+                    hard_stop = process_attestation_lines()
+                if hard_stop is not None:
+                    break
+                if args.require_provider_phases and provider_phase is None:
+                    time.sleep(min(args.sample_interval, bounded_telemetry_timeout()))
+                    continue
+            if attestation_stream is not None and child_reported_done and not completion_released:
+                attestation_stream.setblocking(True)
+                attestation_stream.settimeout(args.telemetry_timeout)
+                attestation_stream.sendall(f"BYE {attestation_nonce}\n".encode())
+                completion_released = True
+                events.emit({
+                    "event": "child_completed", "providerPhase": provider_phase,
+                })
+                attestation_stream.setblocking(False)
             try:
                 _, footprint, pressure, _ = observe_group(
                     group, sampler, host_sampler, bounded_telemetry_timeout(),
@@ -859,29 +1015,32 @@ def guard(args: argparse.Namespace) -> int:
                     hard_stop = "child_attestation_channel_lost_before_done"
                     break
                 try:
-                    chunk = attestation_stream.recv(4096)
-                    if not chunk:
-                        hard_stop = "child_attestation_channel_lost_before_done"
-                        break
-                    attestation_buffer.extend(chunk)
+                    while True:
+                        chunk = attestation_stream.recv(4096)
+                        if not chunk:
+                            hard_stop = "child_attestation_channel_lost_before_done"
+                            break
+                        attestation_buffer.extend(chunk)
+                        if len(chunk) < 4096:
+                            break
                 except BlockingIOError:
                     pass
                 except ConnectionResetError:
                     hard_stop = "child_attestation_channel_lost_before_done"
                     break
-                if len(attestation_buffer) > 4096:
-                    hard_stop = "child_completion_attestation_exceeded_size_bound"
+                if hard_stop is None:
+                    hard_stop = process_attestation_lines()
+                if hard_stop is not None:
                     break
-                if b"\n" in attestation_buffer:
-                    line, remainder = bytes(attestation_buffer).split(b"\n", 1)
-                    if remainder or line.decode() != f"DONE {attestation_nonce}":
-                        hard_stop = "child_returned_invalid_completion_attestation"
-                        break
+                if child_reported_done and not completion_released:
                     attestation_stream.setblocking(True)
                     attestation_stream.settimeout(args.telemetry_timeout)
                     attestation_stream.sendall(f"BYE {attestation_nonce}\n".encode())
-                    child_reported_done = True
-                    emit(args.event_file, {"event": "child_completed"})
+                    completion_released = True
+                    events.emit({
+                        "event": "child_completed", "providerPhase": provider_phase,
+                    })
+                    attestation_stream.setblocking(False)
             sleep_seconds = args.sample_interval
             if runtime_deadline is not None:
                 sleep_seconds = min(sleep_seconds, max(0.0, runtime_deadline - time.monotonic()))
@@ -900,12 +1059,22 @@ def guard(args: argparse.Namespace) -> int:
     finally:
         if hard_stop is not None:
             try:
-                emit(args.event_file, {"event": "hard_stop", "reason": hard_stop})
+                events.emit({
+                    "event": "hard_stop", "reason": hard_stop,
+                    "providerPhase": provider_phase,
+                    "processIdentities": [identity_json(item) for item in sorted(
+                        group.retained, key=lambda item: item.pid)],
+                })
             except Exception:
                 pass
             group.terminate(args.term_grace)
             try:
-                emit(args.event_file, {"event": "terminated", "reason": hard_stop})
+                events.emit({
+                    "event": "terminated", "reason": hard_stop,
+                    "providerPhase": provider_phase,
+                    "processIdentities": [identity_json(item) for item in sorted(
+                        group.retained, key=lambda item: item.pid)],
+                })
             except Exception:
                 pass
         if attestation_stream is not None:
@@ -937,6 +1106,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--host-pressure-file", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--allow-synthetic-telemetry", action="store_true")
     parser.add_argument("--require-child-attestation", action="store_true")
+    parser.add_argument("--require-provider-phases", action="store_true")
     parser.add_argument("--synthetic-spawn-delay", type=float, default=0.0, help=argparse.SUPPRESS)
     parser.add_argument("--synthetic-launch-ready-file", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("command", nargs=argparse.REMAINDER)
@@ -976,6 +1146,8 @@ def parse_args() -> argparse.Namespace:
             or args.synthetic_spawn_delay != 0
             or args.synthetic_launch_ready_file is not None):
         parser.error("child attestation requires production Darwin telemetry and launch controls")
+    if args.require_provider_phases and not args.require_child_attestation:
+        parser.error("provider phases require child attestation")
     return args
 
 
