@@ -11,6 +11,10 @@ import { setTimeout as delay } from "node:timers/promises";
 
 import {
   CARGO_METADATA_TIMEOUT_MS,
+  CAMPAIGN_ENTRY_FIXTURE,
+  CAMPAIGN_ENTRY_IDENTITY,
+  CAMPAIGN_ENTRY_LOGICAL_CASE_ID,
+  CAMPAIGN_ENTRY_PROVIDER,
   CHILD_ATTESTATION_TIMEOUT_SECONDS,
   CanaryInterrupted,
   MAX_FOOTPRINT_BYTES,
@@ -20,6 +24,9 @@ import {
   PREPARATION_SCHEMA_VERSION,
   PRODUCT_ENVELOPE_CANARY_PROFILE,
   acquirePreparationLock,
+  campaignEntryAdapterRequest,
+  campaignEntryCanonicalFragment,
+  campaignEntryPlan,
   canaryWatchdogEnvironment,
   canaryRequest,
   cargoSourceStatusIsClean,
@@ -43,12 +50,17 @@ import {
   runOwnedCommand,
   sealedArtifactIdentity,
   telemetryResolutionBytes,
+  validateCampaignEntryAdapterResponse,
+  validateCampaignEntryBundle,
+  validateCampaignEntryHarnessRequest,
+  validateCampaignEntryWatchdogEvents,
   validateCanaryResponse,
   validatePreparedCache,
   watchdogFailureSummary,
 } from "./run-ltx-safety-canary.mjs";
 
 import { hashArtifactInventory } from "./hash-artifact-inventory.mjs";
+import { canonicalJson, runProviderPlan } from "./memory-calibration-harness.mjs";
 
 const TEXT_ENCODER_INVENTORY = {
   root: "/models/gemma",
@@ -56,6 +68,151 @@ const TEXT_ENCODER_INVENTORY = {
   bytes: 26_427_894_918,
   sha256: "abde2d155aa8991747cc2999d40688d29a50261c080c0d51fac20357653928d7",
 };
+
+async function campaignEntryFixture() {
+  const config = JSON.parse(await readFile(new URL(
+    "../docs/calibration/sc-18946/ltx-mlx-single-pass-sweep.json",
+    import.meta.url,
+  ), "utf8"));
+  const { provider, planned } = campaignEntryPlan(config);
+  const request = {
+    action: "run",
+    planned,
+    repositories: {
+      sceneWorks: {
+        revision: "1".repeat(40), dirty: false, matrixSourceRevision: "1".repeat(40),
+      },
+      inference: { revision: "2".repeat(40), dirty: false, closureDigest: "3".repeat(64) },
+    },
+    repositoryPaths: { sceneWorks: "/scene", inference: "/inference" },
+    hardware: { probe: "mlx", memoryBytes: 128 * 1024 ** 3 },
+  };
+  return { config, provider, planned, request };
+}
+
+function campaignEntryResponse(hostMemoryBytes = 128 * 1024 ** 3) {
+  const diagnostics = [
+    ["renderedFrames", 121], ["outputFps", 30], ["audioTrackDecoded", 1],
+    ["decodeTilingEngaged", 0], ["decodeTileSpatialPx", 0],
+    ["decodeTileOverlapPx", 0], ["latentTemporalDepth", 16], ["latentTokens", 6_144],
+  ].map(([name, value]) => ({ name, unit: "count", value }));
+  return {
+    status: "runtime_complete",
+    loadShape: "eager_materialization",
+    artifact: {
+      repository: "SceneWorks/ltx-2.3-mlx",
+      resolvedRevision: "01df27d308466533aa09d251e3aebdcc627d07eb",
+      variant: "q4",
+    },
+    strategy: {
+      rung: "staged_residency", engagedRungs: ["resident", "staged_residency"], parameters: {},
+    },
+    output: {
+      frames: 121, fps: 30,
+      audio: { present: true, samples: 48_000, sampleRate: 48_000, channels: 2 },
+      firstFrameNondegenerate: true,
+    },
+    diagnostics: {
+      adapter: "memory-mlx-adapter:ltx-2-3-provider-contract-video",
+      execution: "executed",
+      blockers: [],
+      measurements: diagnostics,
+    },
+    _campaignEntry: {
+      identity: CAMPAIGN_ENTRY_IDENTITY,
+      inferenceRevision: "2".repeat(40),
+      watchdog: {
+        required: true,
+        protocol: "sceneworks-memory-watchdog-v1",
+        maxFootprintBytes: MAX_FOOTPRINT_BYTES,
+        maxRuntimeSeconds: MAX_RUNTIME_SECONDS,
+        hostMemoryBytes,
+        minInitialMemoryFreeBytes: preflightFreeFloor(hostMemoryBytes),
+        minMemoryFreeBytes: runtimeFreeFloor(hostMemoryBytes),
+      },
+      mlxLimits: { memoryLimitBytes: MAX_FOOTPRINT_BYTES, wiredLimitBytes: MAX_FOOTPRINT_BYTES },
+      cleanup: {
+        preProviderActiveBytes: 0,
+        preProviderCacheBytes: 0,
+        expectedPersistentActive: {
+          identity: "mlx-gen-ltx-transformer-ones-cache-av-bfloat16-v1",
+          videoDimension: 4_096,
+          audioDimension: 2_048,
+          dtype: "bfloat16",
+          bytesPerElement: 2,
+          bytes: 12_288,
+        },
+        postCleanupActiveBytes: 12_288,
+        postCleanupCacheBytes: 0,
+      },
+    },
+  };
+}
+
+function campaignEntryRuntimeResponse(hostMemoryBytes = 128 * 1024 ** 3) {
+  const response = campaignEntryResponse(hostMemoryBytes);
+  const phase = (value) => ({
+    activeBytes: value, allocatorBytes: value + 10, reclaimableBytes: 10,
+  });
+  return {
+    ...response,
+    sweep: { axes: [], cases: [{ parameters: {}, result: "passed" }], rangeVerified: true },
+    scenarios: [
+      { name: "exact_fit", result: "passed", predictedBytes: 200, effectiveBudgetBytes: 200 },
+      { name: "unknown_budget", result: "passed", reason: "unknown budget rejected" },
+      { name: "stale_evidence", result: "passed", reason: "stale evidence rejected" },
+      { name: "warm_repeat", result: "passed", reason: "warm repeat stayed deterministic" },
+      {
+        name: "cancel", result: "passed", reason: "cancel cleaned and recovered",
+        cleanupVerified: true, warmFollowUpPassed: true,
+      },
+      {
+        name: "error", result: "passed", reason: "error cleaned and recovered",
+        cleanupVerified: true, warmFollowUpPassed: true,
+      },
+      { name: "loadability", result: "passed" },
+      { name: "overlay", result: "not_applicable", reason: "base-only runtime record" },
+    ],
+    predictedPeakBytes: { conditioning: 100, denoise: 200, decode: 150, overall: 200 },
+    observedMemory: {
+      conditioning: phase(100), denoise: phase(200), decode: phase(150), overall: phase(200),
+    },
+    quality: {
+      contract: "exact campaign-entry repeat determinism",
+      identicalInputs: true,
+      result: "passed",
+      maximumError: 0,
+      meanError: 0,
+      rootMeanSquareError: 0,
+      maximumErrorThreshold: 0.08,
+      meanErrorThreshold: 0.01,
+      rootMeanSquareErrorThreshold: 0.02,
+    },
+    negativeMutation: null,
+    loadability: { result: "passed", resolvedPathFingerprint: "exact@campaign-entry:q4" },
+    capturedAt: "2026-08-17T12:00:00Z",
+  };
+}
+
+async function cleanCampaignHarnessRepo(t) {
+  const root = await mkdtemp(path.join(tmpdir(), "sc20191-harness-repo-"));
+  t.after(() => cleanupCanaryScratch(root));
+  await mkdir(path.join(root, "docs/generated"), { recursive: true });
+  await writeFile(path.join(root, "docs/generated/memory-matrix.json"), JSON.stringify({
+    generatedFrom: { sceneWorksRevision: `source-tree:${"a".repeat(64)}` },
+  }));
+  for (const args of [
+    ["init", root],
+    ["-C", root, "config", "user.email", "fixture@example.invalid"],
+    ["-C", root, "config", "user.name", "Fixture"],
+    ["-C", root, "add", "docs/generated/memory-matrix.json"],
+    ["-C", root, "commit", "-m", "fixture"],
+  ]) {
+    const result = spawnSync("git", args, { encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+  }
+  return root;
+}
 
 async function cacheFixture(t) {
   const root = await mkdtemp(path.join(tmpdir(), "sc19741-cache-test-"));
@@ -138,6 +295,184 @@ test("the runner freezes the exact tiny bounded-decode canary", () => {
     sha256: "4e811932e87bb258f642ada790525e36ef2a55959c520e755f1807caf6fa225a",
   });
   assert.throws(() => canaryRequest(128 * 1024 ** 3));
+});
+
+test("SC-20191 transforms only the exact canonical harness row without changing its identity", async () => {
+  const { config, provider, planned, request } = await campaignEntryFixture();
+  assert.equal(planned.logicalCaseId, CAMPAIGN_ENTRY_LOGICAL_CASE_ID);
+  assert.equal(planned.fixture, CAMPAIGN_ENTRY_FIXTURE);
+  assert.equal(provider.name, CAMPAIGN_ENTRY_PROVIDER);
+  assert.deepEqual(planned.target.geometry, {
+    width: 768, height: 512, batch: 1, frames: 121,
+  });
+  assert.deepEqual(planned.strategy, {
+    rung: "staged_residency", engagedRungs: ["resident", "staged_residency"], parameters: {},
+  });
+  const original = structuredClone(request);
+  const expectedSource = {
+    sceneWorksRevision: "1".repeat(40),
+    inferenceRevision: "2".repeat(40),
+    sceneWorksRepo: "/scene",
+    inferenceRepo: "/inference",
+  };
+  validateCampaignEntryHarnessRequest(request, planned, expectedSource);
+  const adapter = campaignEntryAdapterRequest(request, planned, expectedSource);
+  assert.deepEqual(request, original, "the canonical harness request must remain untouched");
+  assert.equal(adapter.action, "campaign_entry");
+  assert.equal(adapter.planned.logicalCaseId, CAMPAIGN_ENTRY_LOGICAL_CASE_ID);
+  assert.equal(adapter.planned._campaignEntry.identity, CAMPAIGN_ENTRY_IDENTITY);
+  assert.equal(adapter.planned._watchdog.maxFootprintBytes, MAX_FOOTPRINT_BYTES);
+  const mutatedConfig = structuredClone(config);
+  mutatedConfig.providers.find((entry) => entry.name === CAMPAIGN_ENTRY_PROVIDER)
+    .target.geometry.frames = 97;
+  assert.throws(() => campaignEntryPlan(mutatedConfig), /frozen campaign-entry provider changed/);
+
+  for (const mutate of [
+    (value) => { value.action = "run_batch"; },
+    (value) => { value.planned.logicalCaseId = "implan-mutated"; },
+    (value) => { value.planned.target.geometry.frames = 97; },
+    (value) => { value.planned.target.tier = "q8"; },
+    (value) => { value.planned.fixture = CAMPAIGN_ENTRY_FIXTURE.replace("seed18946", "seed1"); },
+    (value) => { value.planned.strategy.parameters = { decodeTileEdge: 192 }; },
+    (value) => { value.planned.evidenceScope = "fixture"; },
+    (value) => { value.planned.modelLoadPolicy = "batch_rungs"; },
+    (value) => { value.repositories.sceneWorks.dirty = true; },
+    (value) => { value.repositories.inference.revision = "4".repeat(40); },
+    (value) => { value.repositoryPaths.sceneWorks = "/foreign"; },
+    (value) => { value.hardware.memoryBytes = 0; },
+    (value) => { value.planned._watchdog = {}; },
+  ]) {
+    const mutated = structuredClone(request);
+    mutate(mutated);
+    assert.throws(
+      () => campaignEntryAdapterRequest(mutated, planned, expectedSource),
+      /SC-20191|canonical SC-18946/,
+    );
+  }
+});
+
+test("SC-20191 rejects carrier, cleanup and watchdog mutations", () => {
+  const hostMemoryBytes = 128 * 1024 ** 3;
+  const response = campaignEntryResponse(hostMemoryBytes);
+  validateCampaignEntryAdapterResponse(response, {
+    inferenceRevision: "2".repeat(40), hostMemoryBytes,
+  });
+  for (const mutate of [
+    (value) => { value.output.audio.present = false; },
+    (value) => { value.output.audio.samples = 0; },
+    (value) => { value.output.frames = 120; },
+    (value) => { value.strategy.parameters = { decodeTileEdge: 192 }; },
+    (value) => { value.diagnostics.measurements.find((entry) =>
+      entry.name === "decodeTilingEngaged").value = 1; },
+    (value) => { value.diagnostics.measurements.find((entry) =>
+      entry.name === "latentTokens").value = 6_143; },
+    (value) => { value._campaignEntry.watchdog.maxFootprintBytes -= 1; },
+    (value) => { value._campaignEntry.watchdog.minSwapFreeBytes = 1; },
+    (value) => { value._campaignEntry.mlxLimits.memoryLimitBytes -= 1; },
+    (value) => { value._campaignEntry.cleanup.expectedPersistentActive.bytes += 1; },
+    (value) => { value._campaignEntry.cleanup.postCleanupActiveBytes += 1; },
+    (value) => { value._campaignEntry.cleanup.postCleanupCacheBytes = 1; },
+  ]) {
+    const mutated = structuredClone(response);
+    mutate(mutated);
+    assert.throws(
+      () => validateCampaignEntryAdapterResponse(mutated, {
+        inferenceRevision: "2".repeat(40), hostMemoryBytes,
+      }),
+      /SC-20191/,
+    );
+  }
+
+  const runtimeFloor = runtimeFreeFloor(hostMemoryBytes);
+  const validEvents = [
+    { event: "started" },
+    {
+      event: "sample", phase: "before_child_release", physicalFootprintBytes: 1,
+      memoryFreeBytes: runtimeFloor, swapFreeBytes: 0,
+    },
+    {
+      event: "sample", phase: "child_attested_before_allocation", physicalFootprintBytes: 2,
+      memoryFreeBytes: runtimeFloor, swapFreeBytes: 0,
+    },
+    { event: "child_attested" },
+    {
+      event: "sample", phase: "running", physicalFootprintBytes: 3,
+      memoryFreeBytes: runtimeFloor, swapFreeBytes: 0,
+    },
+    { event: "child_completed" },
+  ];
+  assert.equal(validateCampaignEntryWatchdogEvents(validEvents, hostMemoryBytes), 3);
+  for (const events of [
+    validEvents.filter((event) => event.event !== "child_completed"),
+    validEvents.filter((event) => event.phase !== "running"),
+    [validEvents[0], ...validEvents.slice(1).reverse()],
+    [...validEvents, { event: "hard_stop" }],
+    validEvents.map((event) => event.phase === "before_child_release"
+      ? { ...event, physicalFootprintBytes: MAX_FOOTPRINT_BYTES } : event),
+    validEvents.map((event) => event.phase === "before_child_release"
+      ? { ...event, memoryFreeBytes: runtimeFloor - 1 } : event),
+  ]) assert.throws(() => validateCampaignEntryWatchdogEvents(events, hostMemoryBytes), /SC-20191/);
+});
+
+test("SC-20191 publishes one schema-valid canonical runtime record after stripping private evidence", async (t) => {
+  const { provider } = await campaignEntryFixture();
+  const repo = await cleanCampaignHarnessRepo(t);
+  let runRequests = 0;
+  const result = await runProviderPlan({
+    config: { providers: [provider] },
+    providerCommand: ["synthetic-contained-provider"],
+    sceneWorksRepo: repo,
+    inferenceRepo: repo,
+    backend: "mlx",
+    providerName: CAMPAIGN_ENTRY_PROVIDER,
+    closureDigestFor: async () => "b".repeat(64),
+    executeProvider: async (_command, _args, input) => {
+      const request = JSON.parse(input);
+      if (request.action === "probe") {
+        return canonicalJson({
+          hardware: {
+            probe: "synthetic contained MLX provider",
+            memoryBytes: 128 * 1024 ** 3,
+            model: "MacFixture",
+            chip: "Apple Fixture",
+            osVersion: "macOS fixture",
+            metalDevice: "Apple Fixture",
+            mlxMemoryLimitBytes: 96 * 1024 ** 3,
+            wiredLimitBytes: 64 * 1024 ** 3,
+          },
+        });
+      }
+      assert.equal(request.action, "run");
+      runRequests += 1;
+      const response = campaignEntryRuntimeResponse(request.hardware.memoryBytes);
+      response._campaignEntry.inferenceRevision = request.repositories.inference.revision;
+      validateCampaignEntryAdapterResponse(response, {
+        inferenceRevision: request.repositories.inference.revision,
+        hostMemoryBytes: request.hardware.memoryBytes,
+      });
+      return canonicalJson(campaignEntryCanonicalFragment(response, 1_234));
+    },
+  });
+  assert.equal(runRequests, 1);
+  validateCampaignEntryBundle(result);
+  assert.equal(result.records.length, 1);
+  assert.equal(result.records[0].status, "runtime_complete");
+  assert.equal(Object.hasOwn(result.records[0], "output"), false);
+  assert.equal(Object.hasOwn(result.records[0], "containment"), false);
+  assert.equal(Object.hasOwn(result.records[0], "_campaignEntry"), false);
+
+  for (const mutate of [
+    (record) => { record.scenarios.find((entry) => entry.name === "cancel").cleanupVerified = false; },
+    (record) => { record.scenarios.find((entry) => entry.name === "error").result = "not_run"; },
+    (record) => { record.diagnostics.measurements.find((entry) =>
+      entry.name === "campaignOwnedProcessGroupResidue").value = 1; },
+    (record) => { record.diagnostics.measurements.find((entry) =>
+      entry.name === "campaignWatchdogMaxObservedFootprintBytes").value = MAX_FOOTPRINT_BYTES; },
+  ]) {
+    const changed = structuredClone(result);
+    mutate(changed.records[0]);
+    assert.throws(() => validateCampaignEntryBundle(changed), /runtime lifecycle|schema|SC-20191/);
+  }
 });
 
 test("the runner freezes the distinct full-A/V product-envelope canary", () => {
@@ -625,15 +960,37 @@ test("the production runner can only launch through the identity-checked watchdo
   const cleanup = source.indexOf("await cleanupCanaryScratch(runScratch)");
   assert.ok(failureRead >= 0 && cleanup > failureRead,
     "watchdog failure reason must be read before scratch cleanup");
-  assert.equal(source.match(/await assertHostPreflight\(/g)?.length, 1,
-    "foreign-heavy work is checked only at model release");
+  assert.equal(source.match(/await assertHostPreflight\(/g)?.length, 2,
+    "each contained execution profile has one immediate model-release check");
   assert.doesNotMatch(source, /300_000|5 \* 60 \* 1_000/);
   assert.match(
     source,
     /const preLaunchHost = await assertHostPreflight\(memoryBytes, signal\);\n\s*const status = await new Promise\(\(resolve, reject\) => \{\n\s*const childProcess = spawn/,
     "the fresh host gate must be the final operation before watchdog launch",
   );
+  assert.match(
+    source,
+    /await assertHostPreflight\(hostMemoryBytes, signal\);\n\s*const status = await new Promise\(\(resolve, reject\) => \{\n\s*const child = spawn/,
+    "the campaign entry host gate must also be the final operation before watchdog launch",
+  );
   assert.match(source, /sourceAfterRun: \{ sceneWorks: sceneWorksAfterRun, inference: inferenceAfterRun \}/);
+  const campaignController = source.slice(
+    source.indexOf("async function runCampaignEntryController("),
+    source.indexOf("async function controller("),
+  );
+  assert.doesNotMatch(campaignController, /onProviderCheckpoint/,
+    "the one-row campaign entry must never publish a partial harness checkpoint");
+  for (const operation of [
+    "await cleanupCanaryScratch(runRoot)",
+    "await assertCampaignSourceState(providerOptions, signal)",
+    "await assertRuntimeAssetIdentities(prepared.adapter, prepared.metallib, signal)",
+    "await assertPreparationHasNoTransientResidue(preparationRoot)",
+    "validateCampaignEntryBundle(bundle)",
+  ]) {
+    assert.ok(campaignController.indexOf(operation) >= 0
+      && campaignController.indexOf(operation) < campaignController.indexOf("await publishExclusiveJson("),
+    `${operation} must precede atomic canonical publication`);
+  }
   assert.match(source, /cancellation\.abort\(new CanaryInterrupted\(signalName\)\)/);
   assert.match(source, /process\.exitCode = error instanceof CanaryInterrupted \? error\.exitCode : 1/);
 });

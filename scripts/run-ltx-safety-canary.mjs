@@ -13,6 +13,9 @@ import { isDeepStrictEqual, promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
 import { hashArtifactInventory } from "./hash-artifact-inventory.mjs";
+import {
+  canonicalJson, expandPlan, runProviderPlan, validateBundle,
+} from "./memory-calibration-harness.mjs";
 
 const execFileAsync = promisify(execFile);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -32,6 +35,31 @@ const PROVIDER = "ltx_2_3";
 const FINGERPRINT = "sc-19109-ltx-2-3-mlx-memory-ladder-v1";
 export const SAFETY_CANARY_PROFILE = "safety";
 export const PRODUCT_ENVELOPE_CANARY_PROFILE = "product-envelope";
+export const CAMPAIGN_ENTRY_PROFILE = "campaign-entry";
+export const CAMPAIGN_ENTRY_PROVIDER =
+  "mlx-ltx-2-3-q4-768x512-f121-fps30-staged_residency";
+export const CAMPAIGN_ENTRY_FIXTURE =
+  "ltx-2-3-mlx-q4-768x512-f121-fps30-seed18946";
+export const CAMPAIGN_ENTRY_LOGICAL_CASE_ID = "implan-9b107d4d1ca0d61d4faa";
+export const CAMPAIGN_ENTRY_IDENTITY = "sc-20191-q4-768x512-f121-fps30-staged-v1";
+const CAMPAIGN_ENTRY_ACTION = "campaign_entry";
+const CAMPAIGN_ENTRY_PLAN = "docs/calibration/sc-18946/ltx-mlx-single-pass-sweep.json";
+const CAMPAIGN_ENTRY_SAFETY = Object.freeze({
+  disposition: "safety_refused_open",
+  tierInventoryBytes: 20_467_690_460,
+  incidentCrashFootprintBytes: 96_970_084_480,
+  incidentCase: "mlx-ltx-2-3-q4-1280x704-f305-fps30-bounded_decode",
+  commonLoad: "complete numeric tier plus shared Gemma stack before geometry-specific work",
+  predictedDecodeBytes: 19_476_906_240,
+  incidentPredictedDecodeBytes: 18_540_396_800,
+  incidentCalibratedProjectionBytes: 97_906_593_920,
+  projectionAssumptions: Object.freeze([
+    "pinned provider decode cost is the only geometry-varying term used",
+    "immutable tier inventory delta is added byte-for-byte",
+    "incident binding phase is unknown, so the projection is not a physical-footprint bound and cannot admit execution",
+  ]),
+  reason: "incident-calibrated projection is diagnostic only; no proved bound or hard containment admits this row",
+});
 const CANARY_PROFILES = Object.freeze({
   [SAFETY_CANARY_PROFILE]: Object.freeze({
     action: "canary",
@@ -424,6 +452,346 @@ export function canaryRequest(
       },
     },
   };
+}
+
+export function campaignEntryPlan(config) {
+  const matches = config?.providers?.filter((provider) =>
+    provider.name === CAMPAIGN_ENTRY_PROVIDER) ?? [];
+  if (matches.length !== 1) fail("SC-20191 requires exactly one frozen campaign-entry provider");
+  const provider = matches[0];
+  const exactProvider = {
+    name: CAMPAIGN_ENTRY_PROVIDER,
+    _role: "fit",
+    _campaignPhase: "original_fit",
+    _coverageExpectation: "captured_or_attempted_or_arithmetic_unmeasurable",
+    _latentTokens: 6_144,
+    _writableFrameCap: 682,
+    _outputVoxels: 47_579_136,
+    _measurementSafety: structuredClone(CAMPAIGN_ENTRY_SAFETY),
+    evidenceScope: "authoritative",
+    backend: "mlx",
+    loadShape: "eager_materialization",
+    target: {
+      provider: PROVIDER,
+      modelId: PROVIDER,
+      tier: "q4",
+      mode: "text_to_video",
+      overlay: "none",
+      geometry: { width: 768, height: 512, batch: 1, frames: 121 },
+    },
+    rung: "staged_residency",
+    engagedRungs: ["resident", "staged_residency"],
+    calibrationFingerprint: FINGERPRINT,
+    fixture: CAMPAIGN_ENTRY_FIXTURE,
+    cases: [{ parameters: {}, expectedResult: "passed" }],
+  };
+  if (!isDeepStrictEqual(provider, exactProvider)) {
+    fail("SC-20191 frozen campaign-entry provider changed");
+  }
+  const planned = expandPlan({ providers: [provider] });
+  if (planned.length !== 1
+      || planned[0].logicalCaseId !== CAMPAIGN_ENTRY_LOGICAL_CASE_ID
+      || planned[0].modelLoadPolicy !== "fresh_per_case"
+      || planned[0].modelLoadGroup !== null) {
+    fail("SC-20191 campaign-entry logical identity changed");
+  }
+  return { provider, planned: planned[0] };
+}
+
+export function validateCampaignEntryHarnessRequest(request, expectedPlanned, {
+  sceneWorksRevision, inferenceRevision, sceneWorksRepo, inferenceRepo,
+} = {}) {
+  if (request?.action !== "run"
+      || !isDeepStrictEqual(request?.planned, expectedPlanned)
+      || request.planned.logicalCaseId !== CAMPAIGN_ENTRY_LOGICAL_CASE_ID
+      || request.planned.evidenceScope !== "authoritative"
+      || request.planned.fixture !== CAMPAIGN_ENTRY_FIXTURE
+      || request.planned.negative !== false
+      || request.planned.expectedResult !== "passed"
+      || request.planned.modelLoadPolicy !== "fresh_per_case"
+      || request.planned.modelLoadGroup !== null
+      || request.repositories?.sceneWorks?.dirty !== false
+      || request.repositories?.inference?.dirty !== false
+      || (sceneWorksRevision !== undefined
+        && request.repositories.sceneWorks.revision !== sceneWorksRevision)
+      || (inferenceRevision !== undefined
+        && request.repositories.inference.revision !== inferenceRevision)
+      || (sceneWorksRepo !== undefined && request.repositoryPaths?.sceneWorks !== sceneWorksRepo)
+      || (inferenceRepo !== undefined && request.repositoryPaths?.inference !== inferenceRepo)
+      || !Number.isSafeInteger(request.hardware?.memoryBytes)
+      || request.hardware.memoryBytes <= 0) {
+    fail("SC-20191 provider wrapper received a non-canonical harness request");
+  }
+  for (const privateField of ["_watchdog", "_campaignEntry", "_measurementSafety"]) {
+    if (Object.hasOwn(request.planned, privateField)) {
+      fail(`canonical SC-18946 request unexpectedly contains ${privateField}`);
+    }
+  }
+  return request;
+}
+
+export function campaignEntryAdapterRequest(request, expectedPlanned, expectedSource) {
+  validateCampaignEntryHarnessRequest(request, expectedPlanned, expectedSource);
+  const transformed = structuredClone(request);
+  transformed.action = CAMPAIGN_ENTRY_ACTION;
+  transformed.planned._watchdog = { maxFootprintBytes: MAX_FOOTPRINT_BYTES };
+  transformed.planned._measurementSafety = structuredClone(CAMPAIGN_ENTRY_SAFETY);
+  transformed.planned._campaignEntry = {
+    identity: CAMPAIGN_ENTRY_IDENTITY,
+    artifact: {
+      repository: ARTIFACT_REPOSITORY,
+      revision: ARTIFACT_REVISION,
+      numericTierInventory: {
+        files: 11, bytes: Q4_INVENTORY_BYTES, sha256: Q4_INVENTORY_SHA256,
+      },
+      textEncoderInventory: {
+        files: TEXT_ENCODER_INVENTORY_FILES,
+        bytes: TEXT_ENCODER_INVENTORY_BYTES,
+        sha256: TEXT_ENCODER_INVENTORY_SHA256,
+      },
+    },
+  };
+  return transformed;
+}
+
+function diagnosticMeasurements(response) {
+  const measurements = response?.diagnostics?.measurements;
+  if (!Array.isArray(measurements)) fail("SC-20191 response omitted typed diagnostics");
+  const values = new Map();
+  for (const measurement of measurements) {
+    if (typeof measurement?.name !== "string" || !Number.isSafeInteger(measurement?.value)
+        || measurement.value < 0 || values.has(measurement.name)) {
+      fail("SC-20191 response diagnostics are malformed or duplicated");
+    }
+    values.set(measurement.name, measurement.value);
+  }
+  return values;
+}
+
+export function validateCampaignEntryAdapterResponse(response, {
+  inferenceRevision, hostMemoryBytes,
+} = {}) {
+  const diagnostics = diagnosticMeasurements(response);
+  for (const [name, expected] of [
+    ["renderedFrames", 121], ["outputFps", 30], ["audioTrackDecoded", 1],
+    ["decodeTilingEngaged", 0], ["decodeTileSpatialPx", 0],
+    ["decodeTileOverlapPx", 0], ["latentTemporalDepth", 16], ["latentTokens", 6_144],
+  ]) {
+    if (diagnostics.get(name) !== expected) {
+      fail(`SC-20191 response diagnostic ${name} must be ${expected}`);
+    }
+  }
+  const sidecar = response?._campaignEntry;
+  if (response?.status !== "runtime_complete"
+      || response?.loadShape !== "eager_materialization"
+      || response?.artifact?.repository !== ARTIFACT_REPOSITORY
+      || response?.artifact?.resolvedRevision !== ARTIFACT_REVISION
+      || response?.artifact?.variant !== "q4"
+      || !isDeepStrictEqual(response?.strategy, {
+        rung: "staged_residency", engagedRungs: ["resident", "staged_residency"], parameters: {},
+      })
+      || response?.output?.frames !== 121
+      || response?.output?.fps !== 30
+      || response?.output?.audio?.present !== true
+      || !Number.isSafeInteger(response?.output?.audio?.samples)
+      || response.output.audio.samples <= 0
+      || !Number.isSafeInteger(response?.output?.audio?.sampleRate)
+      || response.output.audio.sampleRate <= 0
+      || !Number.isSafeInteger(response?.output?.audio?.channels)
+      || response.output.audio.channels <= 0
+      || response?.output?.firstFrameNondegenerate !== true
+      || sidecar?.identity !== CAMPAIGN_ENTRY_IDENTITY
+      || (inferenceRevision !== undefined && sidecar?.inferenceRevision !== inferenceRevision)
+      || sidecar?.watchdog?.required !== true
+      || sidecar?.watchdog?.protocol !== "sceneworks-memory-watchdog-v1"
+      || sidecar?.watchdog?.maxFootprintBytes !== MAX_FOOTPRINT_BYTES
+      || sidecar?.watchdog?.maxRuntimeSeconds !== MAX_RUNTIME_SECONDS
+      || (hostMemoryBytes !== undefined && sidecar?.watchdog?.hostMemoryBytes !== hostMemoryBytes)
+      || sidecar?.watchdog?.minInitialMemoryFreeBytes
+        !== preflightFreeFloor(sidecar?.watchdog?.hostMemoryBytes)
+      || sidecar?.watchdog?.minMemoryFreeBytes
+        !== runtimeFreeFloor(sidecar?.watchdog?.hostMemoryBytes)
+      || Object.hasOwn(sidecar?.watchdog ?? {}, "minSwapFreeBytes")
+      || Object.hasOwn(sidecar?.watchdog ?? {}, "minInitialMemoryFreePercent")
+      || sidecar?.mlxLimits?.memoryLimitBytes !== MAX_FOOTPRINT_BYTES
+      || !Number.isSafeInteger(sidecar?.mlxLimits?.wiredLimitBytes)
+      || sidecar.mlxLimits.wiredLimitBytes <= 0
+      || sidecar.mlxLimits.wiredLimitBytes > MAX_FOOTPRINT_BYTES) {
+    fail("SC-20191 adapter response changed the exact contained campaign entry");
+  }
+  const cleanup = sidecar.cleanup;
+  for (const field of [
+    "preProviderActiveBytes", "preProviderCacheBytes",
+    "postCleanupActiveBytes", "postCleanupCacheBytes",
+  ]) {
+    if (!Number.isSafeInteger(cleanup?.[field]) || cleanup[field] < 0) {
+      fail(`SC-20191 cleanup ${field} must be a non-negative safe integer`);
+    }
+  }
+  if (cleanup.preProviderCacheBytes !== 0
+      || !isDeepStrictEqual(cleanup.expectedPersistentActive, {
+        identity: LTX_ONES_CACHE_IDENTITY,
+        videoDimension: LTX_ONES_CACHE_VIDEO_DIMENSION,
+        audioDimension: LTX_ONES_CACHE_AUDIO_DIMENSION,
+        dtype: "bfloat16",
+        bytesPerElement: BFLOAT16_BYTES_PER_ELEMENT,
+        bytes: ltxOnesCacheBytes(),
+      })) {
+    fail("SC-20191 cleanup changed the exact named ONES_CACHE contract");
+  }
+  const expectedPostActive = cleanup.preProviderActiveBytes + cleanup.expectedPersistentActive.bytes;
+  if (!Number.isSafeInteger(expectedPostActive)) fail("SC-20191 cleanup active-byte arithmetic overflowed");
+  if (cleanup.postCleanupActiveBytes !== expectedPostActive
+      || cleanup.postCleanupCacheBytes !== cleanup.preProviderCacheBytes) {
+    fail("SC-20191 cleanup did not return to the exact intentional persistent baseline");
+  }
+  return response;
+}
+
+export function validateCampaignEntryWatchdogEvents(events, hostMemoryBytes) {
+  if (!Array.isArray(events) || events.length === 0) fail("SC-20191 watchdog stream is empty");
+  const startedIndex = events.findIndex((event) => event.event === "started");
+  const attestedIndex = events.findIndex((event) => event.event === "child_attested");
+  const completedIndex = events.findIndex((event) => event.event === "child_completed");
+  const samples = events.filter((event) => event.event === "sample");
+  const runtimeFloor = runtimeFreeFloor(hostMemoryBytes);
+  if (events.filter((event) => event.event === "started").length !== 1
+      || events.filter((event) => event.event === "child_attested").length !== 1
+      || events.filter((event) => event.event === "child_completed").length !== 1
+      || startedIndex < 0
+      || attestedIndex < 0
+      || completedIndex < 0
+      || startedIndex >= attestedIndex
+      || completedIndex <= attestedIndex
+      || !events.slice(0, attestedIndex).some((event) =>
+        event.event === "sample" && event.phase === "before_child_release")
+      || !events.slice(0, attestedIndex).some((event) =>
+        event.event === "sample" && event.phase === "child_attested_before_allocation")
+      || !events.slice(attestedIndex + 1, completedIndex).some((event) =>
+        event.event === "sample")
+      || samples.length === 0
+      || samples.some((event) =>
+        !Number.isSafeInteger(event.physicalFootprintBytes)
+        || event.physicalFootprintBytes < 0
+        || event.physicalFootprintBytes >= MAX_FOOTPRINT_BYTES
+        || !Number.isSafeInteger(event.memoryFreeBytes)
+        || event.memoryFreeBytes < runtimeFloor
+        || !Number.isSafeInteger(event.swapFreeBytes)
+        || event.swapFreeBytes < 0)
+      || events.some((event) => event.event === "hard_stop" || event.event === "terminated")) {
+    fail("SC-20191 watchdog stream is incomplete or crossed a safety boundary");
+  }
+  return Math.max(...samples.map((event) => event.physicalFootprintBytes));
+}
+
+export function campaignEntryCanonicalFragment(response, maxObservedFootprintBytes) {
+  if (!Number.isSafeInteger(maxObservedFootprintBytes)
+      || maxObservedFootprintBytes < 0
+      || maxObservedFootprintBytes >= MAX_FOOTPRINT_BYTES) {
+    fail("SC-20191 canonical fragment requires a contained physical-footprint maximum");
+  }
+  const canonical = structuredClone(response);
+  const sidecar = canonical._campaignEntry;
+  const output = canonical.output;
+  if (!sidecar || !output) fail("SC-20191 canonical fragment omitted private validated evidence");
+  delete canonical._campaignEntry;
+  delete canonical.output;
+  const measurements = canonical.diagnostics?.measurements;
+  if (!Array.isArray(measurements)) fail("SC-20191 canonical fragment omitted diagnostics");
+  const existing = new Set(measurements.map((measurement) => measurement.name));
+  const append = (name, unit, value) => {
+    if (existing.has(name) || !Number.isSafeInteger(value) || value < 0) {
+      fail(`SC-20191 canonical diagnostic ${name} is duplicated or invalid`);
+    }
+    existing.add(name);
+    measurements.push({ name, unit, value });
+  };
+  append("campaignWatchdogMaxFootprintBytes", "bytes", sidecar.watchdog.maxFootprintBytes);
+  append("campaignWatchdogMaxObservedFootprintBytes", "bytes", maxObservedFootprintBytes);
+  append("campaignWatchdogMaxRuntimeSeconds", "seconds", sidecar.watchdog.maxRuntimeSeconds);
+  append("campaignWatchdogHostMemoryBytes", "bytes", sidecar.watchdog.hostMemoryBytes);
+  append("campaignWatchdogMinInitialMemoryFreeBytes", "bytes",
+    sidecar.watchdog.minInitialMemoryFreeBytes);
+  append("campaignWatchdogMinMemoryFreeBytes", "bytes", sidecar.watchdog.minMemoryFreeBytes);
+  append("campaignMlxMemoryLimitBytes", "bytes", sidecar.mlxLimits.memoryLimitBytes);
+  append("campaignMlxWiredLimitBytes", "bytes", sidecar.mlxLimits.wiredLimitBytes);
+  append("campaignPreProviderActiveBytes", "bytes", sidecar.cleanup.preProviderActiveBytes);
+  append("campaignPreProviderCacheBytes", "bytes", sidecar.cleanup.preProviderCacheBytes);
+  append("campaignExpectedPersistentActiveBytes", "bytes",
+    sidecar.cleanup.expectedPersistentActive.bytes);
+  append("campaignPostCleanupActiveBytes", "bytes", sidecar.cleanup.postCleanupActiveBytes);
+  append("campaignPostCleanupCacheBytes", "bytes", sidecar.cleanup.postCleanupCacheBytes);
+  append("campaignOutputAudioSamples", "count", output.audio.samples);
+  append("campaignOutputAudioSampleRate", "hertz", output.audio.sampleRate);
+  append("campaignOutputAudioChannels", "count", output.audio.channels);
+  append("campaignFirstFrameNondegenerate", "boolean", output.firstFrameNondegenerate ? 1 : 0);
+  append("campaignOwnedProcessGroupResidue", "count", 0);
+  append("campaignProviderContainmentComplete", "boolean", 1);
+  return canonical;
+}
+
+export function validateCampaignEntryBundle(bundle) {
+  validateBundle(bundle);
+  if (bundle.records.length !== 1 || (bundle.sourceSessions?.length ?? 0) !== 0) {
+    fail("SC-20191 must publish exactly one canonical record and no synthetic source session");
+  }
+  const record = bundle.records[0];
+  if (record.logicalCaseId !== CAMPAIGN_ENTRY_LOGICAL_CASE_ID
+      || record.status !== "runtime_complete"
+      || record.evidenceScope !== "authoritative"
+      || record.fixture !== CAMPAIGN_ENTRY_FIXTURE
+      || !isDeepStrictEqual(record.target, {
+        provider: PROVIDER, modelId: PROVIDER, tier: "q4", mode: "text_to_video",
+        overlay: "none", geometry: { width: 768, height: 512, batch: 1, frames: 121 },
+      })
+      || !isDeepStrictEqual(record.strategy, {
+        rung: "staged_residency", engagedRungs: ["resident", "staged_residency"], parameters: {},
+      })) {
+    fail("SC-20191 canonical bundle changed identity");
+  }
+  const diagnostics = diagnosticMeasurements(record);
+  for (const [name, expected] of [
+    ["renderedFrames", 121], ["outputFps", 30], ["audioTrackDecoded", 1],
+    ["decodeTilingEngaged", 0], ["decodeTileSpatialPx", 0],
+    ["decodeTileOverlapPx", 0], ["latentTemporalDepth", 16], ["latentTokens", 6_144],
+    ["campaignWatchdogMaxFootprintBytes", MAX_FOOTPRINT_BYTES],
+    ["campaignWatchdogMaxRuntimeSeconds", MAX_RUNTIME_SECONDS],
+    ["campaignMlxMemoryLimitBytes", MAX_FOOTPRINT_BYTES],
+    ["campaignPreProviderCacheBytes", 0],
+    ["campaignExpectedPersistentActiveBytes", ltxOnesCacheBytes()],
+    ["campaignPostCleanupCacheBytes", 0],
+    ["campaignFirstFrameNondegenerate", 1],
+    ["campaignOwnedProcessGroupResidue", 0],
+    ["campaignProviderContainmentComplete", 1],
+  ]) {
+    if (diagnostics.get(name) !== expected) {
+      fail(`SC-20191 canonical bundle diagnostic ${name} must be ${expected}`);
+    }
+  }
+  const pre = diagnostics.get("campaignPreProviderActiveBytes");
+  const post = diagnostics.get("campaignPostCleanupActiveBytes");
+  const observed = diagnostics.get("campaignWatchdogMaxObservedFootprintBytes");
+  const hostMemory = diagnostics.get("campaignWatchdogHostMemoryBytes");
+  for (const name of [
+    "campaignOutputAudioSamples", "campaignOutputAudioSampleRate", "campaignOutputAudioChannels",
+    "campaignMlxWiredLimitBytes", "campaignWatchdogHostMemoryBytes",
+    "campaignWatchdogMinInitialMemoryFreeBytes", "campaignWatchdogMinMemoryFreeBytes",
+  ]) {
+    if (!Number.isSafeInteger(diagnostics.get(name)) || diagnostics.get(name) <= 0) {
+      fail(`SC-20191 canonical bundle diagnostic ${name} must be positive`);
+    }
+  }
+  if (!Number.isSafeInteger(pre) || !Number.isSafeInteger(post)
+      || post !== pre + ltxOnesCacheBytes()
+      || hostMemory !== record.hardware.memoryBytes
+      || diagnostics.get("campaignWatchdogMinInitialMemoryFreeBytes")
+        !== preflightFreeFloor(hostMemory)
+      || diagnostics.get("campaignWatchdogMinMemoryFreeBytes") !== runtimeFreeFloor(hostMemory)
+      || diagnostics.get("campaignMlxWiredLimitBytes") > MAX_FOOTPRINT_BYTES
+      || !Number.isSafeInteger(observed) || observed < 0 || observed >= MAX_FOOTPRINT_BYTES) {
+    fail("SC-20191 canonical bundle cleanup or footprint attestation changed");
+  }
+  return bundle;
 }
 
 function sameInventory(left, right) {
@@ -1355,6 +1723,235 @@ export function canaryWatchdogEnvironment(baseEnvironment, roots, metallibPath, 
   };
 }
 
+async function readStandardInput() {
+  const chunks = [];
+  for await (const chunk of process.stdin) chunks.push(chunk);
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+async function runProtocolCommand(executable, input, { env, signal, cwd = ROOT } = {}) {
+  signal?.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    let stdout = "";
+    let stderr = "";
+    let spawnError = null;
+    let stdinError = null;
+    const child = spawn(executable, [], {
+      cwd, env, detached: true, stdio: ["pipe", "pipe", "pipe"],
+    });
+    const terminate = () => killProcessGroup(child, "SIGKILL");
+    const onAbort = () => terminate();
+    if (signal) signal.addEventListener("abort", onAbort, { once: true });
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("error", (error) => { spawnError = error; terminate(); });
+    child.stdin.on("error", (error) => { stdinError = error; });
+    child.on("close", (code, childSignal) => {
+      if (signal) signal.removeEventListener("abort", onAbort);
+      if (spawnError) return reject(spawnError);
+      if (stdinError) return reject(stdinError);
+      if (signal?.aborted) return reject(signal.reason ?? new Error("protocol command aborted"));
+      return code === 0 && childSignal === null
+        ? resolve(stdout)
+        : reject(new Error(
+          `campaign adapter failed: code=${code} signal=${childSignal}: ${stderr.trim() || "no stderr"}`,
+        ));
+    });
+    child.stdin.end(input);
+  });
+}
+
+export function ownedProcessGroupResidue(processTable, pgid) {
+  if (!Number.isSafeInteger(pgid) || pgid <= 0) fail("watchdog PGID must be a positive integer");
+  return processTable.split("\n").map((line) => line.trim()).filter(Boolean).filter((line) => {
+    const match = line.match(/^(\d+)\s+(\d+)\s+(.+)$/);
+    return match !== null && Number(match[2]) === pgid;
+  });
+}
+
+async function assertRunRootEmpty(runRoot) {
+  const entries = await readdir(runRoot).catch((error) => {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  });
+  if (entries.length !== 0) fail(`SC-20191 run scratch retained residue: ${entries.join(", ")}`);
+}
+
+async function assertCampaignSourceState(options, signal) {
+  const pairs = [
+    [ROOT, "SceneWorks", options["scene-revision"], options["scene-tree"]],
+    [options["inference-repo"], "inference", options["inference-revision"], options["inference-tree"]],
+  ];
+  for (const [repo, label, revision, tree] of pairs) {
+    if (await cleanHead(repo, label, signal) !== revision
+        || await git(repo, ["rev-parse", "HEAD^{tree}"], signal) !== tree) {
+      fail(`${label} source changed during SC-20191 campaign entry`);
+    }
+  }
+}
+
+function campaignProviderOptions(argv) {
+  const options = parseArgs(argv);
+  for (const name of [
+    "inference-repo", "preparation-root", "preparation-key", "run-root",
+    "scene-revision", "scene-tree", "inference-revision", "inference-tree",
+  ]) {
+    if (!options[name]) fail(`campaign provider requires --${name}`);
+  }
+  const unexpected = Object.keys(options).filter((name) => ![
+    "inference-repo", "preparation-root", "preparation-key", "run-root",
+    "scene-revision", "scene-tree", "inference-revision", "inference-tree",
+  ].includes(name));
+  if (unexpected.length) fail(`unsupported campaign provider option(s): ${unexpected.join(", ")}`);
+  for (const name of ["inference-repo", "preparation-root", "run-root"]) {
+    options[name] = path.resolve(options[name]);
+  }
+  return options;
+}
+
+async function campaignProviderInvocation(options, input, {
+  signal, setActiveWatchdog = () => {},
+} = {}) {
+  signal?.throwIfAborted();
+  const request = JSON.parse(input);
+  const config = JSON.parse(await readFile(path.join(ROOT, CAMPAIGN_ENTRY_PLAN), "utf8"));
+  const { planned } = campaignEntryPlan(config);
+  const toolchainChannel = await repositoryToolchain();
+  const identity = preparationIdentity(
+    options["scene-tree"], options["inference-tree"], toolchainChannel,
+  );
+  if (preparationCacheKey(identity) !== options["preparation-key"]) {
+    fail("SC-20191 campaign provider preparation key changed");
+  }
+  await assertCampaignSourceState(options, signal);
+  const prepared = await validatePreparedCache(
+    options["preparation-root"], options["preparation-key"], identity, signal,
+  );
+  if (prepared === null) fail("SC-20191 prepared cache disappeared before provider invocation");
+  await assertRuntimeAssetIdentities(prepared.adapter, prepared.metallib, signal);
+  await mkdir(options["run-root"], { recursive: true, mode: 0o700 });
+  await assertRunRootEmpty(options["run-root"]);
+  const runScratch = await mkdtemp(path.join(options["run-root"], "sc-20191-run-"));
+  let operationError = null;
+  let cleanupError = null;
+  let output = null;
+  try {
+    const runtimeHome = path.join(runScratch, "home");
+    await mkdir(runtimeHome, { mode: 0o700 });
+    await exactMetadata(runtimeHome, "directory", 0o700);
+    await exactEntries(runtimeHome, []);
+    const environment = canaryWatchdogEnvironment(
+      process.env, prepared.roots, prepared.metallib.path, runtimeHome,
+    );
+    if (request.action === "probe") {
+      const probeOutput = await runProtocolCommand(prepared.adapter.path, input, {
+        env: environment, signal,
+      });
+      JSON.parse(probeOutput);
+      await assertCampaignSourceState(options, signal);
+      await assertRuntimeAssetIdentities(prepared.adapter, prepared.metallib, signal);
+      if (await validatePreparedCache(
+        options["preparation-root"], options["preparation-key"], identity, signal,
+      ) === null) fail("SC-20191 prepared cache disappeared after provider probe");
+      output = probeOutput;
+    } else {
+      const adapterRequest = campaignEntryAdapterRequest(request, planned, {
+        sceneWorksRevision: options["scene-revision"],
+        inferenceRevision: options["inference-revision"],
+        sceneWorksRepo: ROOT,
+        inferenceRepo: options["inference-repo"],
+      });
+      const requestPath = path.join(runScratch, "request.json");
+      const responsePath = path.join(runScratch, "response.json");
+      const eventsPath = path.join(runScratch, "watchdog.jsonl");
+      await writeFile(requestPath, canonicalJson(adapterRequest), { flag: "wx" });
+      const hostMemoryBytes = request.hardware.memoryBytes;
+      const runtimeMemoryFreeFloor = runtimeFreeFloor(hostMemoryBytes);
+      const watchdogArgs = [
+        path.join(ROOT, "scripts/memory-calibration-watchdog.py"),
+        "--max-footprint-bytes", String(MAX_FOOTPRINT_BYTES),
+        "--max-runtime-seconds", String(MAX_RUNTIME_SECONDS),
+        "--host-memory-bytes", String(hostMemoryBytes),
+        "--min-memory-free-bytes", String(runtimeMemoryFreeFloor),
+        "--sample-interval", "0.25",
+        "--telemetry-timeout", "1",
+        "--child-attestation-timeout", String(CHILD_ATTESTATION_TIMEOUT_SECONDS),
+        "--term-grace", "1",
+        "--event-file", eventsPath,
+        "--require-child-attestation",
+        "--",
+        "/bin/sh", "-c", 'set -C; exec "$1" <"$2" >"$3"',
+        "sc-20191-campaign-entry", prepared.adapter.path, requestPath, responsePath,
+      ];
+      await assertCampaignSourceState(options, signal);
+      await assertRuntimeAssetIdentities(prepared.adapter, prepared.metallib, signal);
+      if (await validatePreparedCache(
+        options["preparation-root"], options["preparation-key"], identity, signal,
+      ) === null) fail("SC-20191 prepared cache disappeared before model release");
+      // This immediate actual-GPU-owner and two-boundary pressure check is deliberately the final
+      // operation before the watchdog takes ownership of the model process.
+      await assertHostPreflight(hostMemoryBytes, signal);
+      const status = await new Promise((resolve, reject) => {
+        const child = spawn("/usr/bin/python3", watchdogArgs, {
+          stdio: "inherit", env: environment,
+        });
+        setActiveWatchdog(child);
+        const onAbort = () => child.kill(signal.reason?.signalName ?? "SIGTERM");
+        if (signal) signal.addEventListener("abort", onAbort, { once: true });
+        child.on("error", reject);
+        child.on("close", (code, childSignal) => {
+          if (signal) signal.removeEventListener("abort", onAbort);
+          setActiveWatchdog(null);
+          resolve({ code, signal: childSignal });
+        });
+      });
+      signal?.throwIfAborted();
+      const eventBytes = await readFile(eventsPath, "utf8").catch(() => "");
+      if (status.code !== 0 || status.signal) fail(watchdogFailureSummary(status, eventBytes));
+      const response = JSON.parse(await readFile(responsePath, "utf8"));
+      const events = eventBytes.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+      validateCampaignEntryAdapterResponse(response, {
+        inferenceRevision: options["inference-revision"], hostMemoryBytes,
+      });
+      const maxObservedFootprintBytes = validateCampaignEntryWatchdogEvents(
+        events, hostMemoryBytes,
+      );
+      const started = events.find((event) => event.event === "started");
+      const processTable = (await execFileAsync(
+        "/bin/ps", ["-ww", "-axo", "pid=,pgid=,command="],
+        { encoding: "utf8", timeout: 2_000 },
+      )).stdout;
+      const residue = ownedProcessGroupResidue(processTable, started?.pgid);
+      if (residue.length) fail(`SC-20191 watchdog process group retained residue:\n${residue.join("\n")}`);
+      await assertCampaignSourceState(options, signal);
+      await assertRuntimeAssetIdentities(prepared.adapter, prepared.metallib, signal);
+      if (await validatePreparedCache(
+        options["preparation-root"], options["preparation-key"], identity, signal,
+      ) === null) fail("SC-20191 prepared cache disappeared after campaign entry");
+      output = canonicalJson(campaignEntryCanonicalFragment(response, maxObservedFootprintBytes));
+    }
+  } catch (error) {
+    operationError = error;
+  } finally {
+    try {
+      await cleanupCanaryScratch(runScratch);
+      await assertRunRootEmpty(options["run-root"]);
+    } catch (error) {
+      cleanupError = error;
+    }
+  }
+  const finalError = preservePrimaryFailure(operationError, cleanupError);
+  if (finalError !== null) throw finalError;
+  return output;
+}
+
+async function campaignProvider(argv) {
+  const output = await campaignProviderInvocation(
+    campaignProviderOptions(argv), await readStandardInput(),
+  );
+  process.stdout.write(output);
+}
+
 function parseArgs(argv) {
   const options = {};
   for (let index = 0; index < argv.length; index += 2) {
@@ -1364,6 +1961,107 @@ function parseArgs(argv) {
     options[name.slice(2)] = value;
   }
   return options;
+}
+
+async function publishExclusiveJson(output, value, signal) {
+  await mkdir(path.dirname(output), { recursive: true });
+  signal?.throwIfAborted();
+  const temporary = `${output}.tmp-${process.pid}-${randomUUID()}`;
+  try {
+    await writeFile(temporary, canonicalJson(value), { flag: "wx" });
+    signal?.throwIfAborted();
+    await link(temporary, output);
+  } finally {
+    await unlink(temporary).catch((error) => { if (error.code !== "ENOENT") throw error; });
+  }
+}
+
+async function assertPreparationHasNoTransientResidue(preparationRoot) {
+  const parent = path.dirname(preparationRoot);
+  const key = path.basename(preparationRoot);
+  const entries = await readdir(parent).catch((error) => {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  });
+  const residue = entries.filter((name) =>
+    name === `.${key}.lock`
+    || name.startsWith(`.${key}.stage-`)
+    || name.startsWith(`.${key}.build-`)
+    || name.startsWith(`.${key}.tmp-`));
+  if (residue.length) fail(`SC-20191 preparation retained transient residue: ${residue.join(", ")}`);
+}
+
+async function runCampaignEntryController({
+  output, inferenceRepo, sceneWorksRevision, inferenceRevision,
+  sceneWorksTree, inferenceTree, identity, preparationKey, preparationRoot,
+  prepared, signal, setActiveWatchdog,
+}) {
+  const config = JSON.parse(await readFile(path.join(ROOT, CAMPAIGN_ENTRY_PLAN), "utf8"));
+  campaignEntryPlan(config);
+  const runRoot = path.join(path.dirname(output), "runs");
+  await mkdir(runRoot, { recursive: true, mode: 0o700 });
+  await assertRunRootEmpty(runRoot);
+  const providerOptions = {
+    "inference-repo": inferenceRepo,
+    "preparation-root": preparationRoot,
+    "preparation-key": preparationKey,
+    "run-root": runRoot,
+    "scene-revision": sceneWorksRevision,
+    "scene-tree": sceneWorksTree,
+    "inference-revision": inferenceRevision,
+    "inference-tree": inferenceTree,
+  };
+  const providerCommand = [fileURLToPath(import.meta.url), "--campaign-provider"];
+  let operationError = null;
+  let cleanupError = null;
+  let bundle = null;
+  try {
+    bundle = await runProviderPlan({
+      config,
+      providerCommand,
+      sceneWorksRepo: ROOT,
+      inferenceRepo,
+      backend: "mlx",
+      providerName: CAMPAIGN_ENTRY_PROVIDER,
+      onProviderInvocation: ({ action, cases }) => {
+        if (action !== "run" || cases.length !== 1
+            || cases[0].logicalCaseId !== CAMPAIGN_ENTRY_LOGICAL_CASE_ID) {
+          fail("SC-20191 attempted a batch or a foreign logical case");
+        }
+      },
+      // No checkpoint callback: no partial or pre-validation bundle may reach the output path.
+      executeProvider: async (command, args, input) => {
+        if (command !== providerCommand[0]
+            || !isDeepStrictEqual(args, providerCommand.slice(1))) {
+          fail("SC-20191 harness attempted a foreign provider command");
+        }
+        return campaignProviderInvocation(providerOptions, input, {
+          signal, setActiveWatchdog,
+        });
+      },
+    });
+    signal.throwIfAborted();
+    await cleanupCanaryScratch(runRoot);
+    await assertCampaignSourceState(providerOptions, signal);
+    await assertRuntimeAssetIdentities(prepared.adapter, prepared.metallib, signal);
+    if (await validatePreparedCache(
+      preparationRoot, preparationKey, identity, signal,
+    ) === null) fail("SC-20191 prepared cache disappeared before publication");
+    await assertPreparationHasNoTransientResidue(preparationRoot);
+    validateCampaignEntryBundle(bundle);
+    await publishExclusiveJson(output, bundle, signal);
+  } catch (error) {
+    operationError = error;
+  } finally {
+    try {
+      if (await pathExists(runRoot)) await cleanupCanaryScratch(runRoot);
+    } catch (error) {
+      cleanupError = error;
+    }
+  }
+  const finalError = preservePrimaryFailure(operationError, cleanupError);
+  if (finalError !== null) throw finalError;
+  process.stdout.write(`${output}\n`);
 }
 
 async function controller(argv) {
@@ -1377,7 +2075,8 @@ async function controller(argv) {
   );
   if (unexpected.length) fail(`unsupported option(s): ${unexpected.join(", ")}`);
   const profileName = options.profile ?? SAFETY_CANARY_PROFILE;
-  const profile = canaryProfile(profileName);
+  const campaignEntry = profileName === CAMPAIGN_ENTRY_PROFILE;
+  const profile = campaignEntry ? { story: "sc-20191" } : canaryProfile(profileName);
   const inferenceRepo = path.resolve(options["inference-repo"]);
   const output = path.resolve(options.output);
   const relativeOutput = path.relative(ROOT, output);
@@ -1512,6 +2211,23 @@ async function controller(argv) {
     const textEncoderInventory = inventoryAtRoot(
       identity.artifact.textEncoder, privateTextEncoderRoot,
     );
+    if (campaignEntry) {
+      await runCampaignEntryController({
+        output,
+        inferenceRepo,
+        sceneWorksRevision,
+        inferenceRevision,
+        sceneWorksTree,
+        inferenceTree,
+        identity,
+        preparationKey,
+        preparationRoot,
+        prepared,
+        signal,
+        setActiveWatchdog: (child) => { activeWatchdog = child; },
+      });
+      return;
+    }
     const runRoot = path.join(path.dirname(output), "runs");
     await mkdir(runRoot, { recursive: true, mode: 0o700 });
     runScratch = await mkdtemp(path.join(runRoot, `${profile.story}-run-`));
@@ -1678,7 +2394,11 @@ async function controller(argv) {
 
 try {
   if (process.argv[1] === fileURLToPath(import.meta.url)) {
-    await controller(process.argv.slice(2));
+    if (process.argv[2] === "--campaign-provider") {
+      await campaignProvider(process.argv.slice(3));
+    } else {
+      await controller(process.argv.slice(2));
+    }
   }
 } catch (error) {
   process.stderr.write(`${error.stack ?? error}\n`);

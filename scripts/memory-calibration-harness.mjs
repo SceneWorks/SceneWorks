@@ -649,10 +649,16 @@ function validateRuntimeComplete(record) {
   for (const name of ["exact_fit", "unknown_budget", "stale_evidence", "loadability"]) {
     if (scenarios.get(name)?.result !== "passed") fail(`${record.id}: ${name} must pass for runtime activation`);
   }
-  for (const name of ["warm_repeat", "cancel", "error"]) {
-    const scenario = scenarios.get(name);
-    if (scenario?.result !== "not_run") fail(`${record.id}: ${name} must remain explicitly not_run`);
-    text(scenario.reason, `${record.id}.${name}.reason`);
+  const lifecycle = ["warm_repeat", "cancel", "error"].map((name) => scenarios.get(name));
+  const lifecycleNotRun = lifecycle.every((scenario) => scenario?.result === "not_run");
+  const lifecyclePassed = lifecycle.every((scenario) => scenario?.result === "passed")
+    && lifecycle.slice(1).every((scenario) =>
+      scenario.cleanupVerified === true && scenario.warmFollowUpPassed === true);
+  if (!lifecycleNotRun && !lifecyclePassed) {
+    fail(`${record.id}: runtime lifecycle must be entirely not_run or fully passed with cleanup and recovery`);
+  }
+  for (const [index, name] of ["warm_repeat", "cancel", "error"].entries()) {
+    text(lifecycle[index].reason, `${record.id}.${name}.reason`);
   }
   const exact = scenarios.get("exact_fit");
   number(exact.predictedBytes, `${record.id}.exact_fit.predictedBytes`);
@@ -1362,6 +1368,9 @@ export async function runProviderPlan({
   // sc-17774: injectable so the runner's own tests can drive synthetic repositories, which have no
   // inference crate layout to derive a real closure from. Production always uses the default.
   closureDigestFor = null,
+  // SC-20191 keeps the canonical request/record assembly here while allowing the one contained
+  // campaign entry to transport the provider request through its sealed watchdog wrapper.
+  executeProvider = execute,
 }) {
   if (!Array.isArray(providerCommand) || !providerCommand.length) fail("provider command must be a JSON argv array");
   if (Boolean(rawLogDir) !== Boolean(sourcePathPrefix)) {
@@ -1475,7 +1484,7 @@ export async function runProviderPlan({
   if (backends.size !== 1) {
     fail(`provider run must select exactly one backend; pass --backend mlx|candle (selected: ${[...backends].join(", ")})`);
   }
-  const probe = JSON.parse(await execute(
+  const probe = JSON.parse(await executeProvider(
     providerCommand[0],
     providerCommand.slice(1),
     canonicalJson({ action: "probe", repositories }),
@@ -1563,7 +1572,7 @@ export async function runProviderPlan({
       repositoryPaths: { sceneWorks: sceneWorksRepo, inference: inferenceRepo },
       hardware: probe.hardware,
     });
-    const providerOutput = await execute(
+    const providerOutput = await executeProvider(
       providerCommand[0],
       providerCommand.slice(1),
       providerRequest,
