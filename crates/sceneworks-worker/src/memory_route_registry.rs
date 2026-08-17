@@ -5922,6 +5922,11 @@ mod tests {
                 )
             );
         }
+        // `style_variations` is deliberately absent from every expectation below. Both parents of
+        // this branch withdrew it independently: the epic sync dropped it from these models'
+        // advertised `capabilities` (06f8ac80d, "complete backend capability reconciliation"), and
+        // the rail withdrew the `control` overlay from the base Z-Image MLX rows. A declaration may
+        // not name a mode the model no longer advertises, so both withdrawals flow through here.
         for id in ["chroma1_hd", "chroma1_base", "chroma1_flash"] {
             assert_eq!(
                 axes(id),
@@ -5929,7 +5934,7 @@ mod tests {
                     id.to_owned(),
                     vec![serde_json::json!({
                         "tiers": ["bf16", "q4", "q8"],
-                        "modes": ["text_to_image", "style_variations"],
+                        "modes": ["text_to_image"],
                         "overlays": ["none"],
                     })]
                 )
@@ -5941,7 +5946,7 @@ mod tests {
                 "z_image".to_owned(),
                 vec![serde_json::json!({
                     "tiers": ["bf16", "q4", "q8"],
-                    "modes": ["text_to_image", "style_variations"],
+                    "modes": ["text_to_image"],
                     "overlays": ["none", "lora"],
                 })]
             )
@@ -5952,7 +5957,7 @@ mod tests {
             .expect("base Z implementations")
             .iter()
             .all(|row| {
-                row["modes"] == serde_json::json!(["text_to_image", "style_variations"])
+                row["modes"] == serde_json::json!(["text_to_image"])
                     && row["overlays"] == serde_json::json!(["none", "lora"])
             }));
         assert_eq!(
@@ -5973,17 +5978,61 @@ mod tests {
                 vec![
                     serde_json::json!({
                         "tiers": ["bf16"],
-                        "modes": ["text_to_image", "edit_image", "character_image", "style_variations"],
+                        "modes": ["text_to_image", "edit_image", "character_image"],
                         "overlays": ["none", "identity"],
                     }),
                     serde_json::json!({
                         "tiers": ["q4", "q8"],
-                        "modes": ["text_to_image", "edit_image", "character_image", "style_variations"],
+                        "modes": ["text_to_image", "edit_image", "character_image"],
                         "overlays": ["none", "lora", "identity"],
                     }),
                 ]
             )
         );
+
+        // The "nonoverlapping" half of this test's name, asserted rather than merely implied by the
+        // literals above: within one model's rung-4 declaration no two rows may both admit the same
+        // (tier, mode, overlay) point. Kolors is the case that matters — it splits bf16 from q4/q8
+        // precisely so the wider `lora` overlay rides only the packed tiers — and an accidental
+        // widening of either row would otherwise make two rows race for the same cell with no
+        // defined winner. This is the assertion with teeth; the per-model literals above are the
+        // recorded populations that go with it.
+        for id in [
+            "anima_base",
+            "anima_aesthetic",
+            "anima_turbo",
+            "chroma1_hd",
+            "chroma1_base",
+            "chroma1_flash",
+            "z_image",
+            "z_image_edit",
+            "kolors",
+        ] {
+            let (_provider, rows) = axes(id);
+            let mut seen = std::collections::BTreeSet::new();
+            for row in &rows {
+                let strings = |key: &str| {
+                    row[key]
+                        .as_array()
+                        .unwrap_or_else(|| panic!("{id}: {key} must be an array"))
+                        .iter()
+                        .map(|value| value.as_str().expect("string axis value").to_owned())
+                        .collect::<Vec<_>>()
+                };
+                for tier in strings("tiers") {
+                    for mode in strings("modes") {
+                        for overlay in strings("overlays") {
+                            assert!(
+                                seen.insert((tier.clone(), mode.clone(), overlay.clone())),
+                                "{id}: two rung-4 rows both admit ({tier}, {mode}, {overlay}); \
+                                 an exact declaration cannot have two candidates for one cell"
+                            );
+                        }
+                    }
+                }
+            }
+            assert!(!seen.is_empty(), "{id}: rung-4 declaration admits nothing");
+        }
     }
 
     #[test]
