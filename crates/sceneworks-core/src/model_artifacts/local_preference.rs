@@ -35,8 +35,6 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 pub struct LocalArtifactOverlayEntry {
     pub repository: String,
     pub revision: String,
-    /// `<bundle>/models--<safe>/` — the local mirror of the source library's repository root.
-    pub repository_root: PathBuf,
     /// `<bundle>/models--<safe>/snapshots/<revision>/` — what a snapshot resolver returns.
     pub snapshot_root: PathBuf,
 }
@@ -120,14 +118,13 @@ pub fn overlay_entries_for_artifact(
             )));
         }
         let safe = safe_repository_dir(&member.source.repository)?;
-        let repository_root = root.join(format!("models--{safe}"));
-        let snapshot_root = repository_root
+        let snapshot_root = root
+            .join(format!("models--{safe}"))
             .join("snapshots")
             .join(&member.source.revision);
         let entry = LocalArtifactOverlayEntry {
             repository: member.source.repository.clone(),
             revision: member.source.revision.clone(),
-            repository_root,
             snapshot_root,
         };
         if !entries.contains(&entry) {
