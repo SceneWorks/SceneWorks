@@ -56,12 +56,7 @@ fn payload_reference_spec(job_type: &JobType) -> &'static [PayloadModelRef] {
 /// request's own data (engine/flags) — never on a model name. Referenced ids are ordinary catalog
 /// manifest entries; adding a model or utility changes manifest data, not this seam.
 fn fixed_runtime_model_ids(job_type: &JobType, payload: &JsonObject) -> Vec<&'static str> {
-    let payload_flag = |key: &str| {
-        payload
-            .get(key)
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-    };
+    let payload_flag = |key: &str| payload.get(key).and_then(Value::as_bool).unwrap_or(false);
     match job_type {
         JobType::ImageVqa | JobType::ImageInterleave => vec!["sensenova_u1_8b"],
         JobType::PersonDetect => vec!["person_detector"],
@@ -287,20 +282,10 @@ pub(crate) async fn resolve_model_manifest_entry_by_repo(
         .await?
         .into_iter()
         .find(|entry| declares_repository(entry))
-        .and_then(|entry| {
-            entry
-                .get("id")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        });
+        .and_then(|entry| entry.get("id").and_then(Value::as_str).map(str::to_owned));
     if resolved.is_none() {
         resolved = crate::models::embedded_builtin_catalog_entry(&declares_repository)?
-            .and_then(|entry| {
-                entry
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            });
+            .and_then(|entry| entry.get("id").and_then(Value::as_str).map(str::to_owned));
     }
     let model_id = resolved.ok_or_else(|| {
         ApiError::model_artifact_conflict(
@@ -349,12 +334,8 @@ pub(crate) fn availability_for_entry(
     let configured_library = sceneworks_core::hf_home::model_source_library(data_dir)
         .root()
         .to_path_buf();
-    let selected = selected_requirements_for_model(
-        entry,
-        std::env::consts::OS,
-        requested_variant,
-        data_dir,
-    );
+    let selected =
+        selected_requirements_for_model(entry, std::env::consts::OS, requested_variant, data_dir);
     resolve_model_availability(
         data_dir,
         &configured_library,
@@ -433,7 +414,9 @@ pub(crate) async fn refresh_live_external_availability(
         Ok::<_, ApiError>(models)
     })
     .await
-    .map_err(|error| ApiError::internal(format!("external availability probe failed: {error}")))??;
+    .map_err(|error| {
+        ApiError::internal(format!("external availability probe failed: {error}"))
+    })??;
     Ok(())
 }
 

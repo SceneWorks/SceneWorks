@@ -509,7 +509,8 @@ fn resolver_prefers_covering_local_artifact_and_rejects_variant_mismatch() {
     let artifact = covering_local_artifact(&temp.path().join("resolved"));
 
     // Library never existed / is unavailable: local artifact still resolves LocalReady.
-    let local = resolve_model_availability(&data, &library, &requirements, true, &[artifact.clone()]);
+    let local =
+        resolve_model_availability(&data, &library, &requirements, true, &[artifact.clone()]);
     assert_eq!(local.availability, ModelAvailability::LocalReady);
     local.validate().unwrap();
 

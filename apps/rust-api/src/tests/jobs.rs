@@ -293,8 +293,10 @@ async fn generic_jobs_route_still_serves_non_generation_types() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
 
-    for (job_type, expected_model) in [("image_upscale", "real_esrgan"), ("image_detail", "realvisxl")]
-    {
+    for (job_type, expected_model) in [
+        ("image_upscale", "real_esrgan"),
+        ("image_detail", "realvisxl"),
+    ] {
         let (status, body) = request(
             app.clone(),
             "POST",
@@ -318,9 +320,7 @@ async fn generic_jobs_route_still_serves_non_generation_types() {
         );
         let stamped = body["payload"]["modelManifestEntries"]
             .as_array()
-            .unwrap_or_else(|| {
-                panic!("{job_type} must carry its fixed model entry, got {body}")
-            })
+            .unwrap_or_else(|| panic!("{job_type} must carry its fixed model entry, got {body}"))
             .iter()
             .filter_map(|entry| entry.get("id").and_then(|id| id.as_str()))
             .collect::<Vec<_>>();

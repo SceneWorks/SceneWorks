@@ -2005,11 +2005,8 @@ pub(crate) fn max_model_upload_bytes() -> usize {
 /// those paths (sc-4169).
 pub(crate) async fn model_catalog(state: &AppState) -> Result<Vec<Value>, ApiError> {
     let mut models = model_catalog_snapshot(state).await?.as_ref().clone();
-    crate::model_sources::refresh_live_external_availability(
-        &state.settings.data_dir,
-        &mut models,
-    )
-    .await?;
+    crate::model_sources::refresh_live_external_availability(&state.settings.data_dir, &mut models)
+        .await?;
     Ok(models)
 }
 
@@ -2025,11 +2022,8 @@ pub(crate) async fn model_catalog_sized(state: &AppState) -> Result<Vec<Value>, 
     let (size_estimates, snapshot) = tokio::join!(size_estimates, snapshot);
     let size_estimates = size_estimates?;
     let mut models = snapshot?.as_ref().clone();
-    crate::model_sources::refresh_live_external_availability(
-        &state.settings.data_dir,
-        &mut models,
-    )
-    .await?;
+    crate::model_sources::refresh_live_external_availability(&state.settings.data_dir, &mut models)
+        .await?;
     for model in &mut models {
         let context = model_download_context(model)?;
         let live_estimate = context.as_ref().and_then(|context| {
@@ -4474,12 +4468,8 @@ fn apply_model_catalog_entry(
     // this host, through the ONE shared resolver. Catalog nuances layered on top of it:
     // an install living in an app-owned path is local-ready regardless of the library, and an
     // installed-but-incomplete cache stays `incomplete` rather than `missing`.
-    let availability_resolution = crate::model_sources::availability_for_entry(
-        data_dir,
-        &model,
-        None,
-        local_artifacts,
-    );
+    let availability_resolution =
+        crate::model_sources::availability_for_entry(data_dir, &model, None, local_artifacts);
     use sceneworks_core::model_artifacts::external_library::ModelAvailability;
     let managed_models = data_dir.join("models");
     let installed_in_app_owned_path = state.installed
@@ -4509,8 +4499,9 @@ fn apply_model_catalog_entry(
         .ok_or_else(|| ApiError::internal("Model manifest entry must be an object"))?;
     object.insert(
         "modelAvailability".to_owned(),
-        serde_json::to_value(&availability)
-            .map_err(|error| ApiError::internal(format!("serialize model availability: {error}")))?,
+        serde_json::to_value(&availability).map_err(|error| {
+            ApiError::internal(format!("serialize model availability: {error}"))
+        })?,
     );
     object.insert(
         "modelResolution".to_owned(),

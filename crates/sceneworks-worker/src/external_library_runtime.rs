@@ -74,10 +74,9 @@ impl RuntimeSourceGuard {
         }
 
         let requested_variant = requested_runtime_variant(payload);
-        let configured_library =
-            sceneworks_core::hf_home::model_source_library(&settings.data_dir)
-                .root()
-                .to_path_buf();
+        let configured_library = sceneworks_core::hf_home::model_source_library(&settings.data_dir)
+            .root()
+            .to_path_buf();
         let mut resolutions = Vec::new();
         for entry in &model_entries {
             let has_hf_downloads = entry
@@ -198,10 +197,9 @@ impl RuntimeSourceGuard {
         settings: &Settings,
         original: WorkerError,
     ) -> WorkerError {
-        let configured_library =
-            sceneworks_core::hf_home::model_source_library(&settings.data_dir)
-                .root()
-                .to_path_buf();
+        let configured_library = sceneworks_core::hf_home::model_source_library(&settings.data_dir)
+            .root()
+            .to_path_buf();
         let source_became_unavailable = self.resolutions.iter().any(|resolution| {
             resolution.availability == ModelAvailability::ExternalReady
                 && resolve_model_availability(
@@ -406,9 +404,9 @@ mod tests {
     }
 
     fn write_receipts(data_dir: &Path, repo: &str, receipts: Value) {
-        let managed = data_dir.join("models").join(
-            sceneworks_core::model_artifacts::artifact_selection::safe_download_dir(repo),
-        );
+        let managed = data_dir
+            .join("models")
+            .join(sceneworks_core::model_artifacts::artifact_selection::safe_download_dir(repo));
         std::fs::create_dir_all(&managed).unwrap();
         std::fs::write(
             managed.join(".sceneworks-download-complete.json"),
@@ -484,7 +482,9 @@ mod tests {
             let error = RuntimeSourceGuard::begin(&JobType::ImageGenerate, &payload, &settings)
                 .unwrap_err();
             assert!(matches!(error, WorkerError::ExternalLibraryUnavailable(_)));
-            assert!(error.to_string().contains(EXTERNAL_LIBRARY_UNAVAILABLE_CODE));
+            assert!(error
+                .to_string()
+                .contains(EXTERNAL_LIBRARY_UNAVAILABLE_CODE));
             // Installed state is never lost: receipts are byte-identical after the disconnect.
             assert_eq!(
                 std::fs::read(receipt_path.join(".sceneworks-download-complete.json")).unwrap(),
@@ -622,7 +622,11 @@ mod tests {
         let data = temp.path().join("data");
         let library = temp.path().join("external-hf");
         let this_os = std::env::consts::OS;
-        let other_os = if this_os == "macos" { "windows" } else { "macos" };
+        let other_os = if this_os == "macos" {
+            "windows"
+        } else {
+            "macos"
+        };
         seed_snapshot(&library, "owner/native", REV_A, "model.safetensors");
         write_receipts(
             &data,
@@ -687,7 +691,10 @@ mod tests {
                 &settings,
                 WorkerError::Engine("No such file or directory (os error 2)".to_owned()),
             );
-            assert!(matches!(remapped, WorkerError::ExternalLibraryUnavailable(_)));
+            assert!(matches!(
+                remapped,
+                WorkerError::ExternalLibraryUnavailable(_)
+            ));
             assert!(
                 !remapped.to_string().contains("os error 2"),
                 "a proven disconnect must never surface as a raw ENOENT"
@@ -805,4 +812,3 @@ mod tests {
         assert!(RuntimeSourceGuard::begin(&JobType::LoraTrain, &real, &settings).is_err());
     }
 }
-

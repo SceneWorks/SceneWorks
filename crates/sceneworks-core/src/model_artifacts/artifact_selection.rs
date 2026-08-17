@@ -276,7 +276,11 @@ fn receipt_entries(managed_path: &Path) -> Vec<Value> {
         .unwrap_or_else(|| vec![receipt])
 }
 
-fn receipt_file_sets(managed_path: &Path, repo: &str, model_id: Option<&str>) -> Vec<ReceiptFileSet> {
+fn receipt_file_sets(
+    managed_path: &Path,
+    repo: &str,
+    model_id: Option<&str>,
+) -> Vec<ReceiptFileSet> {
     receipt_entries(managed_path)
         .into_iter()
         .filter_map(|entry| {
@@ -566,7 +570,8 @@ mod tests {
         // Selecting q4 must judge ONLY the q4 closure: exactly one requirement, primary, and the
         // sibling q8 receipt must not appear (a model-wide union would mark q4 incomplete when
         // q8 was removed, or vice versa).
-        let q4 = selected_requirements_for_model(&model, std::env::consts::OS, Some("q4"), temp.path());
+        let q4 =
+            selected_requirements_for_model(&model, std::env::consts::OS, Some("q4"), temp.path());
         assert!(q4.receipt_backed);
         let q4 = q4.requirements;
         assert_eq!(q4.len(), 1);
@@ -584,7 +589,8 @@ mod tests {
                  "resolvedFiles":["q4/model.safetensors"], "snapshotRevision": REV_A}
             ]),
         );
-        let q4_after = selected_requirements_for_model(&model, std::env::consts::OS, Some("q4"), temp.path());
+        let q4_after =
+            selected_requirements_for_model(&model, std::env::consts::OS, Some("q4"), temp.path());
         assert_eq!(q4, q4_after.requirements);
         assert!(q4_after.receipt_backed);
     }
@@ -697,6 +703,9 @@ mod tests {
             requested_runtime_variant(&payload(json!({"advanced": {"mlxQuantize": 16}}))),
             Some("bf16".to_owned())
         );
-        assert_eq!(requested_runtime_variant(&payload(json!({"model": "x"}))), None);
+        assert_eq!(
+            requested_runtime_variant(&payload(json!({"model": "x"}))),
+            None
+        );
     }
 }
