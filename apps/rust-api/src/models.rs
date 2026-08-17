@@ -4274,35 +4274,68 @@ fn tier_subdir_has_weights(tier_dir: &FsPath) -> bool {
 /// testable on both lanes from either platform.
 fn apply_imported_lora_advertisement(object: &mut JsonObject) {
     let mlx_lane = cfg!(target_os = "macos");
-    apply_imported_lora_advertisement_for_lanes(object, mlx_lane, !mlx_lane);
+    // Resolved as a VERDICT rather than by checking whether the first pass wrote anything:
+    // `apply_model_manifest_defaults` can already have synthesized a `loraCompatibility` object, so
+    // "the key exists" says nothing about whether this projection decided anything.
+    let verdict = imported_lora_advertisement_verdict(object, mlx_lane, !mlx_lane).or_else(|| {
+        // This build's lane had NO OPINION, which is not the same as "adapters are fine". Leaving
+        // the entry untouched restores the permissive `family` fallback — the precise silent
+        // re-advertisement sc-15328 fixed, where the API accepted a LoRA submission no worker could
+        // claim and the job queued forever with no error. A generated Mage full fine-tune on any
+        // non-macOS deployment is exactly that shape: candle registers no `mage-flow` imported
+        // provider, so only MLX can say "serves the family, refuses adapters".
+        //
+        // So a WITHDRAWAL crosses lanes; a positive advertisement never does. Offering adapters
+        // this build cannot claim is the same hang pointed the other way, which is what the filter
+        // to the refusing verdict prevents.
+        imported_lora_advertisement_verdict(object, !mlx_lane, mlx_lane).filter(|serves| !serves)
+    });
+    if let Some(serves_loras) = verdict {
+        write_imported_lora_advertisement(object, serves_loras);
+    }
 }
 
+/// Test-facing lane-scoped projection: resolve ONE lane pair and write its verdict verbatim, with no
+/// cross-lane fallback. Production goes through [`apply_imported_lora_advertisement`], which adds
+/// the withdrawal fallback; keeping this seam separate is what lets a test state each lane's own
+/// truth from either platform without the fallback blurring the two.
+#[cfg(test)]
 fn apply_imported_lora_advertisement_for_lanes(
     object: &mut JsonObject,
     mlx_lane_available: bool,
     candle_lane_available: bool,
 ) {
-    if object.get("type").and_then(Value::as_str) != Some("image") {
-        return;
-    }
-    let Some(id) = object
-        .get("id")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .filter(|id| !id.is_empty())
+    let Some(serves_loras) =
+        imported_lora_advertisement_verdict(object, mlx_lane_available, candle_lane_available)
     else {
         return;
     };
-    let Some(family) = object
+    write_imported_lora_advertisement(object, serves_loras);
+}
+
+/// The advertisement verdict for one lane pair, with no mutation: `Some(true)` serves adapters,
+/// `Some(false)` serves the family and refuses them, `None` is "not on this seam at all" (a builtin,
+/// a non-image row, or a family no supplied lane registers).
+fn imported_lora_advertisement_verdict(
+    object: &JsonObject,
+    mlx_lane_available: bool,
+    candle_lane_available: bool,
+) -> Option<bool> {
+    if object.get("type").and_then(Value::as_str) != Some("image") {
+        return None;
+    }
+    let id = object
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .filter(|id| !id.is_empty())?;
+    let family = object
         .get("family")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|family| !family.is_empty())
-        .map(str::to_owned)
-    else {
-        return;
-    };
-    let Some(source) = object
+        .map(str::to_owned)?;
+    let source = object
         .get("importSourceShape")
         .and_then(Value::as_str)
         .map(str::trim)
@@ -4311,18 +4344,26 @@ fn apply_imported_lora_advertisement_for_lanes(
                 *source,
                 "transformer_file" | "fused_checkpoint" | "transformer_directory" | "comfy_ui_tree"
             )
-        })
-    else {
-        return;
-    };
-    let serves_loras = sceneworks_core::jobs_store::imported_image_model_lora_advertisement(
+        })?;
+    sceneworks_core::jobs_store::imported_image_model_lora_advertisement(
         &id,
         &family,
         source,
         mlx_lane_available,
         candle_lane_available,
-    );
-    let Some(serves_loras) = serves_loras else {
+    )
+}
+
+/// Write the verdict onto the entry. Split from the resolution above so the production binding can
+/// resolve twice — its own lane, then a cross-lane withdrawal — without projecting twice.
+fn write_imported_lora_advertisement(object: &mut JsonObject, serves_loras: bool) {
+    let Some(family) = object
+        .get("family")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|family| !family.is_empty())
+        .map(str::to_owned)
+    else {
         return;
     };
     let compatibility = object
@@ -8624,6 +8665,39 @@ mod imported_lora_advertisement_tests {
         assert_eq!(
             on_candle, untouched,
             "candle declares no mage-flow imported provider, so there is no promise to withdraw"
+        );
+    }
+
+    /// The LANE-SCOPED verdict above is per-lane truth; the PRODUCTION binding must still publish a
+    /// withdrawal on a candle-only deployment. sc-15328's hang was exactly this shape — no explicit
+    /// empty family list, so `families_from_value_chain` fell back to `family`, the API accepted a
+    /// LoRA submission, and no worker could claim it. That regressed on every non-macOS build the
+    /// moment the advertisement became facts-derived, because candle registers no `mage-flow`
+    /// imported provider and therefore answers "no opinion" rather than "refuses adapters".
+    #[test]
+    fn a_candle_only_build_still_withdraws_mage_adapters_from_the_other_lane() {
+        let mut object = entry("finetune_9f3c", "mage-flow");
+        // The production binding's own lane (candle) has no opinion here.
+        assert_eq!(
+            imported_lora_advertisement_verdict(&object, false, true),
+            None
+        );
+        // MLX is the lane that serves the family and refuses adapters, and that refusal is what
+        // must reach the entry regardless of which engine this build links.
+        assert_eq!(
+            imported_lora_advertisement_verdict(&object, true, false),
+            Some(false)
+        );
+        write_imported_lora_advertisement(&mut object, false);
+        assert!(withdrawn(&object), "{object:?}");
+        assert_eq!(object["loraCompatibility"]["families"], json!([]));
+
+        // A positive advertisement must NOT cross lanes: offering adapters this build cannot claim
+        // is the same hang pointed the other way.
+        let krea = entry("user_kreamania_variant5", "krea_2");
+        assert_eq!(
+            imported_lora_advertisement_verdict(&krea, true, false),
+            Some(true)
         );
     }
 
