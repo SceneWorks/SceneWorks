@@ -1,7 +1,7 @@
 {
   "schemaVersion": 7,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:87f325d52113c93455c5f1706b000d1d38a22dc673f2f300c616b09fcb63dac8",
+    "sceneWorksRevision": "source-tree:4f2b334923690397f30dcb9b205b6d24e48dd52bdcac93d14cdf028dcf0d58fc",
     "inferenceRevision": "717f43b5283d3449d9d19b7539045a82be1ef7bd",
     "sources": {
       "manifest": {
@@ -62,11 +62,11 @@
       },
       "engineCapabilitiesMlx": {
         "path": "config/engine-capabilities/capabilities.mlx.json",
-        "sha256": "b708283392ce945ed248813c26349744a57c9f2347bf12268b132190122ab236"
+        "sha256": "385651e15fb9015b04819cbf6258b5f6bfac5f302b5ede1f66f3c43dcba575b5"
       },
       "engineCapabilitiesCandle": {
         "path": "config/engine-capabilities/capabilities.candle.json",
-        "sha256": "7d0dfdc0cdaf86ec1a960d6d7f74002fa7443fe142037be216eb5bb679d346f0"
+        "sha256": "6494a9249a7fb65a2e1ea4e8578e06c0c4b4786b2f0f999ca67fb5f471ceda7a"
       },
       "cargo": {
         "path": "Cargo.toml",
@@ -154,11 +154,14 @@
     },
     "currentCalibrationRuns": 0,
     "memoryContractReconciliation": {
-      "providers": 0,
-      "bespokeWaivers": 0,
-      "mismatches": 0,
-      "byLeg": {},
-      "unavailable": "engine capability facts for mlx are keyed to 931366f62a4e5800c54e0586b7fb34e3a4079e3b, but Cargo pins 717f43b5283d3449d9d19b7539045a82be1ef7bd"
+      "providers": 72,
+      "bespokeWaivers": 1,
+      "mismatches": 470,
+      "byLeg": {
+        "engine_manifest": 275,
+        "manifest_route": 70,
+        "survey_engine": 125
+      }
     },
     "rung4Survey": {
       "story": 15969,
