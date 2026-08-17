@@ -408,6 +408,162 @@ pub(crate) async fn duplicate_job(
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
+/// The character-route inline LoRA links a job's PERSISTED payload already carried — the ONLY
+/// adapters a retry/duplicate of that job may re-validate as inline. Empty for every other job.
+///
+/// `characters.rs`'s test-job route is the one image-generation boundary that validates with inline
+/// LoRAs allowed. A character's attached adapters are inline links, not catalog rows:
+/// `character_store::attach_lora` mints `id: "character_lora_<hex>"` with `category: "character"` and
+/// a `sourcePath`/`projectPath`, copies the file into the project, and registers it in NO LoRA
+/// catalog. Re-validating that set as catalog-backed refuses it with "LoRA not found" — which broke
+/// even a no-op retry of a character test job when this boundary's gate was first mirrored.
+///
+/// ## Why the link SHAPE and not the `characterId` / `mode` markers
+///
+/// Both of those look server-stamped but are caller-settable: `ImageJobRequest` exposes
+/// `character_id` and `mode`, so `POST /api/v1/image/jobs { mode: "character_image", loras: [] }` is
+/// an ordinary image job that create admits (the LoRA gate no-ops on an empty set) while bearing
+/// both markers. Deriving permission from them would let that job's retry attach an arbitrary
+/// path-bearing adapter and have it accepted as "inline".
+///
+/// The link shape cannot be forged the same way, because it can only have been PERSISTED by a
+/// boundary that already allowed inline LoRAs:
+/// - `create_image_job` / `create_video_job` validate with `allow_inline_loras = false`, so a
+///   non-catalog adapter is refused before any job row exists.
+/// - `POST /api/v1/jobs` refuses image/video generation job types outright (`typed_generation_route`).
+/// - retry/duplicate reach this function, which is where the permission is being decided.
+///
+/// So the only way a persisted `image_generate` payload holds a character link is the character
+/// route. Requiring a non-empty `characterId` as well costs nothing (that route stamps it onto the
+/// same payload it writes the links into) and keeps the predicate honest about what it identifies.
+///
+/// An empty persisted set deliberately yields an empty permit: the gate no-ops on it anyway, and a
+/// character job whose character had no adapters must not become a hole through which a retry can add
+/// inline ones — attaching them to the character is the supported path.
+fn persisted_character_inline_loras(persisted_payload: &JsonObject) -> Vec<Value> {
+    let has_character = persisted_payload
+        .get("characterId")
+        .and_then(Value::as_str)
+        .is_some_and(|id| !id.trim().is_empty());
+    if !has_character {
+        return Vec::new();
+    }
+    persisted_payload
+        .get("loras")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|lora| {
+            lora.get("category").and_then(Value::as_str) == Some("character")
+                || lora
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| id.starts_with("character_lora_"))
+        })
+        .cloned()
+        .collect()
+}
+
+/// Whether `candidate` IS one of the persisted character links in `permitted`, and therefore may be
+/// hydrated inline.
+///
+/// Identity is the link id AND agreement on every path field the candidate carries. Matching on the
+/// id alone would leave the narrowing hollow: `normalize_inline_job_lora` passes a caller's object
+/// through almost verbatim, so replaying a persisted link id with a swapped `sourcePath` would carry
+/// an arbitrary file into the enqueued payload. A candidate that omits a path field is still a match
+/// — it is asking for the persisted link, not redirecting it.
+fn matches_permitted_inline_lora(candidate: &Value, permitted: &[Value]) -> bool {
+    let Some(candidate_id) = job_lora_id(candidate) else {
+        return false;
+    };
+    permitted.iter().any(|link| {
+        if job_lora_id(link) != Some(candidate_id) {
+            return false;
+        }
+        ["sourcePath", "projectPath"].iter().all(|field| {
+            match (
+                candidate.get(*field).and_then(Value::as_str),
+                link.get(*field).and_then(Value::as_str),
+            ) {
+                (Some(requested), Some(persisted)) => requested == persisted,
+                // The candidate names no path for this field, so it cannot redirect it.
+                (None, _) => true,
+                // The candidate names a path the persisted link does not have at all.
+                (Some(_), None) => false,
+            }
+        })
+    })
+}
+
+/// Re-validate a merged retry/duplicate payload's `loras`, granting inline hydration ONLY to the
+/// adapters the persisted payload already carried (`permitted_inline`) and requiring catalog backing
+/// for everything else — including any ADDITION to a genuine character job's set.
+///
+/// A single `allow_inline_loras = true` would have covered the whole merged array, so a retry of a
+/// real character job could swap in arbitrary inline path-bearing adapters. Splitting the array is
+/// verdict-preserving: `validate_lora_specs_for_model` decides each attached adapter independently
+/// (no cross-adapter state), so validating two sub-arrays yields exactly the per-adapter verdicts one
+/// pass over the whole array would, and the original order is restored afterwards.
+async fn validate_merged_job_loras(
+    state: &AppState,
+    project_id: Option<&str>,
+    merged: &mut JsonObject,
+    permitted_inline: &[Value],
+) -> Result<(), ApiError> {
+    // No inline permit (every job but a character test job's replay): one catalog-only pass, which
+    // is the create path's own posture.
+    if permitted_inline.is_empty() {
+        return validate_job_lora_compatibility(state, project_id, merged, false).await;
+    }
+    let Some(loras) = merged
+        .get("loras")
+        .and_then(Value::as_array)
+        .filter(|loras| !loras.is_empty())
+        .cloned()
+    else {
+        return Ok(());
+    };
+
+    // Partition, remembering each adapter's slot so the normalized array keeps the caller's order.
+    let mut inline_slots = Vec::new();
+    let mut catalog_slots = Vec::new();
+    for (slot, lora) in loras.iter().enumerate() {
+        if matches_permitted_inline_lora(lora, permitted_inline) {
+            inline_slots.push((slot, lora.clone()));
+        } else {
+            catalog_slots.push((slot, lora.clone()));
+        }
+    }
+
+    let mut normalized = vec![Value::Null; loras.len()];
+    for (allow_inline, slots) in [(true, inline_slots), (false, catalog_slots)] {
+        if slots.is_empty() {
+            continue;
+        }
+        let mut probe = merged.clone();
+        probe.insert(
+            "loras".to_owned(),
+            Value::Array(slots.iter().map(|(_, lora)| lora.clone()).collect()),
+        );
+        validate_job_lora_compatibility(state, project_id, &mut probe, allow_inline).await?;
+        let validated = probe
+            .get("loras")
+            .and_then(Value::as_array)
+            .ok_or_else(|| ApiError::internal("LoRA validation dropped the adapter array"))?;
+        // `validate_lora_specs_for_model` may legitimately SKIP an entry (an unusable spec that
+        // `hydrate_lora_spec` returns `None` for), so pair by position over what came back rather
+        // than assuming a 1:1 mapping.
+        for ((slot, _), value) in slots.iter().zip(validated) {
+            normalized[*slot] = value.clone();
+        }
+    }
+    merged.insert(
+        "loras".to_owned(),
+        Value::Array(normalized.into_iter().filter(|v| !v.is_null()).collect()),
+    );
+    Ok(())
+}
+
 /// Validate and canonicalize the exact payload a retry/duplicate will enqueue. Existing job
 /// payloads are immutable, so reading and merging before the create transaction cannot race with a
 /// payload update. Returning the complete merged payload is intentional: the store's shallow merge
@@ -423,6 +579,11 @@ async fn validate_and_canonicalize_merged_generation_payload(
     let job_type = job.job_type.clone();
     let project_id = job.project_id.clone();
     let mut merged = job.payload;
+    // Resolved from the PERSISTED payload, BEFORE the merge below, because inline-LoRA permission is
+    // a property of how the job was originally created and `payload_changes` must not be able to
+    // mint it. Carries the specific adapters permitted, not a blanket flag — see
+    // [`persisted_character_inline_loras`] and [`validate_merged_job_loras`].
+    let permitted_inline_loras = persisted_character_inline_loras(&merged);
     merged.extend(payload_changes.clone());
     if generation_job_model_is_path_backed(&job_type) {
         validate_payload_model(&merged)?;
@@ -435,6 +596,13 @@ async fn validate_and_canonicalize_merged_generation_payload(
         if let Some(advanced) = merged.get("advanced").and_then(Value::as_object) {
             validate_image_pose_count(advanced)?;
         }
+        // PRECEDENCE DIVERGENCE, deliberate: `create_image_job` resolves the control overlay AFTER
+        // its LoRA gate, this boundary resolves it BEFORE. Acceptance is equivalent — the two read
+        // disjoint fields (`advanced.controlWeights.overlayId` vs the top-level `loras` array) and
+        // neither can change the other's verdict — so no payload is admitted here that create would
+        // refuse, or vice versa. Only the FIRST error reported for a payload that is invalid on both
+        // axes differs. Left as-is rather than reordered: this call predates the gate mirror and the
+        // existing ordering is pinned by the sc-13639 control-weights reauthorization tests.
         crate::control_overlays::resolve_control_overlay_selection(
             state,
             project_id.as_deref(),
@@ -456,8 +624,75 @@ async fn validate_and_canonicalize_merged_generation_payload(
                 .to_owned();
             resolve_selected_image_text_encoder(state, &merged, &model_id, &mut manifest_entry)
                 .await?;
+            // The `create_image_job` capability gates this boundary did not run, applied to the
+            // SAME merged object the queue transaction will persist (sc-18420). `payload_changes`
+            // is a SHALLOW merge, so both `advanced` and the top-level `loras` array arrive
+            // REPLACED WHOLESALE: without these, a retry/duplicate could enqueue a decoder+`usePid`
+            // pair, an uninstalled or wrong-backend decoder, a family-incompatible or uninstalled
+            // LoRA set, or an imported request shape — every one of which the create path 400s, and
+            // all of them exactly the combinations this boundary's own doc comment claims it
+            // re-validates.
+            //
+            // Order mirrors `create_image_job`: the decoder gate reads the rebuilt entry directly,
+            // the entry is then stamped, the LoRA gate runs (it also NORMALIZES `loras` in place,
+            // and the canonical object returned from here is what gets persisted), and the imported
+            // gate runs last so it sees the server-owned row and the normalized adapter list rather
+            // than anything the caller sent.
+            crate::generation::validate_selected_decoder_for_manifest(
+                crate::generation::enqueue_backend(state),
+                &merged,
+                &manifest_entry,
+            )?;
             merged.insert("modelManifestEntry".to_owned(), manifest_entry);
+            validate_merged_job_loras(
+                state,
+                project_id.as_deref(),
+                &mut merged,
+                &permitted_inline_loras,
+            )
+            .await?;
+            crate::generation::validate_imported_submission(state, &model_id, &merged)?;
         }
+    } else if matches!(
+        job_type,
+        JobType::VideoGenerate
+            | JobType::VideoExtend
+            | JobType::VideoBridge
+            | JobType::PersonReplace
+    ) {
+        // The video half of the same bypass — `create_video_job` runs both of these too.
+        // `canonicalize_image_model_payload` is image-only, so there is no rebuilt entry to gate
+        // against here; resolve the catalog row for the merged model exactly as `create_video_job`
+        // does and gate on that. Read-only on purpose — this closes the bypass without taking on
+        // video's separate entry-canonicalization question.
+        //
+        // The decoder gate is keyed off an actually-present `advanced.decoder`, which is precisely
+        // when it stops being a no-op, so the overwhelmingly common decoder-less replay costs no
+        // extra catalog resolution. The LoRA gate needs no such guard: it returns before touching a
+        // catalog when `loras` is absent or empty.
+        let selects_decoder = merged
+            .get("advanced")
+            .and_then(Value::as_object)
+            .is_some_and(|advanced| advanced.contains_key("decoder"));
+        if let Some(model_id) = merged
+            .get("model")
+            .and_then(Value::as_str)
+            .filter(|_| selects_decoder)
+        {
+            let entry = crate::models::resolve_model_manifest_entry(state, model_id).await?;
+            crate::generation::validate_selected_decoder_for_manifest(
+                crate::generation::enqueue_backend(state),
+                &merged,
+                &entry,
+            )?;
+        }
+        validate_merged_job_loras(
+            state,
+            project_id.as_deref(),
+            &mut merged,
+            &permitted_inline_loras,
+        )
+        .await?;
     }
     Ok(merged)
 }

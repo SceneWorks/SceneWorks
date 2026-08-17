@@ -4273,6 +4273,10 @@ fn tier_subdir_has_weights(tier_dir: &FsPath) -> bool {
 /// The lane split is a ONE-LINE binding here and a parameter below precisely so the behaviour is
 /// testable on both lanes from either platform.
 fn apply_imported_lora_advertisement(object: &mut JsonObject) {
+    // Deliberately the BUILD's linked engines, not `generation::enqueue_backend` — see that
+    // function's "Scope" note. The pair is consulted asymmetrically below (a withdrawal crosses
+    // lanes, a positive advertisement never does), which a one-hot routing answer cannot express,
+    // and a macOS build links no candle engine to derive a positive candle verdict from.
     let mlx_lane = cfg!(target_os = "macos");
     // Resolved as a VERDICT rather than by checking whether the first pass wrote anything:
     // `apply_model_manifest_defaults` can already have synthesized a `loraCompatibility` object, so
@@ -4402,6 +4406,8 @@ fn write_imported_lora_advertisement(object: &mut JsonObject, serves_loras: bool
 /// are never unioned: a Krea transformer file, SDXL fused checkpoint, Mage directory, and external
 /// ComfyUI tree each see only registrations for their structural loader.
 fn apply_imported_provider_surface(object: &mut JsonObject) {
+    // The BUILD's linked engines, like its `apply_imported_lora_advertisement` sibling — not
+    // `generation::enqueue_backend`. See that function's "Scope" note.
     let mlx_lane = cfg!(target_os = "macos");
     apply_imported_provider_surface_for_lanes(object, mlx_lane, !mlx_lane);
 }
@@ -4656,6 +4662,9 @@ fn apply_mac_and_mlx_fields(object: &mut JsonObject, data_dir: &FsPath) {
     if let Ok(mac_support) = serde_json::to_value(mac_support) {
         object.insert("macSupport".to_owned(), mac_support);
     }
+    // A LOCAL DISK probe for MLX convert-output tier dirs, so it is a platform fact and must NOT go
+    // through `generation::enqueue_backend`: keying it off `candle_required` would hide `mlxTiers`
+    // and its per-tier state from the Studio on macOS for directories that are genuinely present.
     let mlx_status = if cfg!(target_os = "macos") {
         mlx_catalog_status(object, data_dir)
     } else {

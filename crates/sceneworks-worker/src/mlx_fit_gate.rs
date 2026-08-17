@@ -5582,26 +5582,31 @@ mod tests {
         ))
         .expect("builtin.models.jsonc parses");
         let models = manifest["models"].as_array().expect("manifest models");
+        // Which routes ship a P9 corpus, and the family each resolves through. The per-model
+        // (rows, admitted) pair that used to sit here, and the 69/69 total below it, were populations
+        // of the frozen corpus: a re-collection that widened or narrowed a sweep failed here with
+        // nothing to say about what changed, and the only available repair was to renew the numbers.
+        // What the pair was standing in for is asserted directly instead — one row per distinct
+        // geometry, every advertised resolution covered, and every shipped row admitted — which holds
+        // however many coordinates a re-collection sweeps. `expected` stays exhaustive because the
+        // final loop refuses P9 evidence on any route missing from it.
         let expected = [
-            ("chroma1_base", "chroma", 4_usize, 4_usize),
-            ("chroma1_flash", "chroma", 4, 4),
-            ("chroma1_hd", "chroma", 4, 4),
-            ("illustrious_xl_v1", "sdxl", 10, 10),
-            ("illustrious_xl_v2", "sdxl", 10, 10),
-            ("kolors", "kolors", 7, 7),
-            ("realvisxl", "sdxl", 10, 10),
-            ("realvisxl_lightning", "sdxl", 10, 10),
-            ("sdxl", "sdxl", 10, 10),
+            ("chroma1_base", "chroma"),
+            ("chroma1_flash", "chroma"),
+            ("chroma1_hd", "chroma"),
+            ("illustrious_xl_v1", "sdxl"),
+            ("illustrious_xl_v2", "sdxl"),
+            ("kolors", "kolors"),
+            ("realvisxl", "sdxl"),
+            ("realvisxl_lightning", "sdxl"),
+            ("sdxl", "sdxl"),
         ];
         let expected_ids = expected
             .iter()
             .map(|(id, ..)| *id)
             .collect::<std::collections::BTreeSet<_>>();
-        let mut all_rows = 0_usize;
-        let mut all_admitted = 0_usize;
-        let mut quality_stamps = std::collections::BTreeSet::new();
 
-        for (model_id, family, row_count, admitted_count) in expected {
+        for (model_id, family) in expected {
             let model = models
                 .iter()
                 .find(|model| model["id"] == model_id)
@@ -5626,7 +5631,10 @@ mod tests {
 
             let rows = decode_quality_policies_from_manifest(model_object, model_id)
                 .unwrap_or_else(|error| panic!("{model_id}: shipped quality corpus: {error}"));
-            assert_eq!(rows.len(), row_count, "{model_id}: sealed row count");
+            assert!(
+                !rows.is_empty(),
+                "{model_id}: sealed quality corpus is empty"
+            );
             assert!(rows.iter().all(|row| {
                 row.resolved_route == model_id
                     && row.family == family
@@ -5644,17 +5652,14 @@ mod tests {
                         .bytes()
                         .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
             }));
-            quality_stamps.extend(
+            // Every shipped row is admitted evidence. A refused row on a route that still advertises
+            // its coordinate would advertise a geometry the physical planner then declines to bound —
+            // the condition the per-model admitted count was standing in for, stated as the property.
+            assert!(
                 rows.iter()
-                    .map(|row| row.implementation_fingerprint.clone()),
+                    .all(|row| matches!(row.disposition, MemoryDecodeQualityDisposition::Admitted)),
+                "{model_id}: the sealed corpus must carry only admitted decode evidence"
             );
-            let admitted = rows
-                .iter()
-                .filter(|row| matches!(row.disposition, MemoryDecodeQualityDisposition::Admitted))
-                .count();
-            assert_eq!(admitted, admitted_count, "{model_id}: admitted row count");
-            all_rows += rows.len();
-            all_admitted += admitted;
 
             let q4 = model["downloads"]
                 .as_array()
@@ -5684,6 +5689,15 @@ mod tests {
                 .iter()
                 .map(|row| format!("{}x{}", row.geometry.width, row.geometry.height))
                 .collect::<std::collections::BTreeSet<_>>();
+            // One row per distinct geometry. This is the sealed-ness the row count used to spell as a
+            // population: a re-collection may legitimately sweep more or fewer coordinates, but it may
+            // never ship two rows for the same coordinate — the planner would then hold two exact
+            // policies for one request and the winner would be collection order.
+            assert_eq!(
+                rows.len(),
+                measured_resolutions.len(),
+                "{model_id}: sealed corpus carries a duplicate geometry"
+            );
             for resolution in model["limits"]["resolutions"]
                 .as_array()
                 .expect("advertised resolutions")
@@ -5711,9 +5725,13 @@ mod tests {
             plan.engine_id = model_id;
             plan.model_id = model_id.to_owned();
 
-            if let Some(row) = rows
+            // EVERY admitted row, not just the first one found. With the admitted count gone this is
+            // what carries the coverage claim, and it is strictly stronger than the count ever was: a
+            // row that stopped reaching the planner is now a failure rather than an unvisited element
+            // the count still added up correctly.
+            for row in rows
                 .iter()
-                .find(|row| matches!(row.disposition, MemoryDecodeQualityDisposition::Admitted))
+                .filter(|row| matches!(row.disposition, MemoryDecodeQualityDisposition::Admitted))
             {
                 let result = synthesize_estimate_ladder(
                     contract,
@@ -5732,7 +5750,9 @@ mod tests {
                                 == Some(row.tile_edge)
                             && candidate.selection.parameters.decode_overlap == Some(row.overlap)
                     }),
-                    "{model_id}: admitted row must create its exact physical decode candidate"
+                    "{model_id}: admitted {}x{} row must create its exact physical decode candidate",
+                    row.geometry.width,
+                    row.geometry.height
                 );
             }
             let unmeasured_geometry = MemoryGeometry {
@@ -5771,12 +5791,15 @@ mod tests {
             assert!(matched.is_empty(), "{model_id}: unmeasured policy query");
         }
 
-        assert_eq!((all_rows, all_admitted), (69, 69));
-        assert_eq!(
-            quality_stamps.len(),
-            10,
-            "the sealed corpus retains each collection-time source closure"
-        );
+        // `quality_stamps.len() == 10` used to sit here, over `implementation_fingerprint`. That axis
+        // is a FORENSIC stamp, not an admission gate: gen-core seals it into
+        // `production_evidence_sha256`, so it cannot be edited after collection, and inference sc-19728
+        // deliberately removed the comparison against the running build because a closure spanning
+        // whole crates plus `Cargo.lock` made every dependency bump restamp every row. Counting the
+        // distinct stamps re-created exactly that — a population any re-collection invalidates, over a
+        // value the production path already refuses to accept unsealed. The per-row shape check above
+        // (64 lowercase hex) is the part that is ours to make; the binding is gen-core's, and the
+        // `adopt_decode_geometry_policies` call above is where it fails closed.
         for model in models {
             let id = model["id"].as_str().expect("model id");
             if !expected_ids.contains(id) {
