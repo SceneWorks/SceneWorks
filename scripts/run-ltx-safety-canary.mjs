@@ -20,7 +20,7 @@ export const MAX_FOOTPRINT_BYTES = 53_347_146_863;
 export const MAX_RUNTIME_SECONDS = 1_800;
 export const CHILD_ATTESTATION_TIMEOUT_SECONDS = 30;
 export const CARGO_METADATA_TIMEOUT_MS = 15 * 60 * 1000;
-export const PREPARATION_SCHEMA_VERSION = 2;
+export const PREPARATION_SCHEMA_VERSION = 3;
 export const PREPARATION_LOCK_POLL_MS = 50;
 export const PREPARATION_LOCK_ORPHAN_GRACE_MS = 30_000;
 // Free swap capacity is not a safety margin: the prelaunch free-memory floor is already more than
@@ -543,12 +543,13 @@ export async function repositoryToolchain() {
 
 export async function exactToolchain(scratch, signal) {
   const home = process.env.HOME ?? fail("HOME is required to resolve the pinned rustup toolchain");
+  const resolvedRustupHome = path.resolve(process.env.RUSTUP_HOME ?? path.join(home, ".rustup"));
   const resolutionEnv = Object.fromEntries([
-    "HOME", "RUSTUP_HOME", "SSL_CERT_FILE", "SSL_CERT_DIR",
+    "HOME", "SSL_CERT_FILE", "SSL_CERT_DIR",
   ].flatMap((name) => process.env[name] === undefined ? [] : [[name, process.env[name]]]));
-  resolutionEnv.PATH = [
-    path.join(home, ".cargo/bin"), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin",
-  ].join(":");
+  resolutionEnv.RUSTUP_HOME = resolvedRustupHome;
+  const systemPath = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"].join(":");
+  resolutionEnv.PATH = [path.join(home, ".cargo/bin"), systemPath].join(":");
   const rustup = (await runOwnedCommand("/usr/bin/which", ["rustup"], {
     cwd: ROOT, env: resolutionEnv, timeout: 2_000, signal,
   })).stdout.trim();
@@ -571,17 +572,30 @@ export async function exactToolchain(scratch, signal) {
   if (!new RegExp(`^release: ${channel.replaceAll(".", "\\.")}$`, "m").test(version)) {
     fail(`resolved rustc does not match pinned channel ${channel}`);
   }
+  const privateHome = path.join(scratch, "home");
   const privateTemp = path.join(scratch, "tmp");
-  await mkdir(privateTemp, { recursive: true, mode: 0o700 });
+  const privateCargoHome = path.join(scratch, "cargo-home");
+  const privateTarget = path.join(scratch, "target");
+  await Promise.all([
+    mkdir(privateHome, { recursive: true, mode: 0o700 }),
+    mkdir(privateTemp, { recursive: true, mode: 0o700 }),
+    mkdir(privateCargoHome, { recursive: true, mode: 0o700 }),
+    mkdir(privateTarget, { recursive: true, mode: 0o700 }),
+  ]);
+  await exactMetadata(privateHome, "directory", 0o700);
+  await exactEntries(privateHome, []);
   return {
     cargo,
     channel,
     env: {
       ...resolutionEnv,
+      HOME: privateHome,
+      PATH: systemPath,
       CARGO_BUILD_JOBS: "2",
-      CARGO_HOME: path.join(scratch, "cargo-home"),
-      CARGO_TARGET_DIR: path.join(scratch, "target"),
+      CARGO_HOME: privateCargoHome,
+      CARGO_TARGET_DIR: privateTarget,
       CARGO_TERM_COLOR: "never",
+      RUSTC: rustc,
       RUSTUP_TOOLCHAIN: channel,
       TMPDIR: privateTemp,
     },
@@ -711,16 +725,16 @@ async function exactEntries(directory, expected) {
   }
 }
 
-function adapterManifestIdentity(adapter) {
+function preparedFileManifestIdentity(file) {
   return {
-    sha256: adapter.sha256,
-    size: adapter.size,
+    sha256: file.sha256,
+    size: file.size,
     seal: {
-      device: adapter.device,
-      inode: adapter.inode,
-      mtimeNs: adapter.mtimeNs,
-      ctimeNs: adapter.ctimeNs,
-      mode: adapter.mode,
+      device: file.device,
+      inode: file.inode,
+      mtimeNs: file.mtimeNs,
+      ctimeNs: file.ctimeNs,
+      mode: file.mode,
     },
   };
 }
@@ -743,7 +757,7 @@ async function validatePreparedStructure(preparationRoot) {
   await exactEntries(modelDirectory, ["snapshots"]);
   await exactEntries(snapshotsDirectory, [ARTIFACT_REVISION]);
   await exactEntries(revisionDirectory, ["gemma", "q4"]);
-  await exactEntries(adapterDirectory, ["memory-mlx-adapter"]);
+  await exactEntries(adapterDirectory, ["memory-mlx-adapter", "mlx.metallib"]);
   return roots;
 }
 
@@ -786,10 +800,15 @@ export async function validatePreparedCache(preparationRoot, key, identity, sign
   }
   const adapterPath = path.join(preparationRoot, "adapter", "memory-mlx-adapter");
   const adapter = await adapterIdentity(adapterPath, signal);
-  if (!sameJson(adapterManifestIdentity(adapter), manifest?.adapter)) {
+  if (!sameJson(preparedFileManifestIdentity(adapter), manifest?.adapter)) {
     fail("prepared canary adapter changed");
   }
-  return { manifest, roots, adapter, reused: true };
+  const metallibPath = path.join(preparationRoot, "adapter", "mlx.metallib");
+  const metallib = await metallibIdentity(metallibPath, signal);
+  if (!sameJson(preparedFileManifestIdentity(metallib), manifest?.metallib)) {
+    fail("prepared canary metallib changed");
+  }
+  return { manifest, roots, adapter, metallib, reused: true };
 }
 
 async function sealPreparationDirectories(directory) {
@@ -817,13 +836,15 @@ async function writePreparedManifest(stage, key, identity, preparedFrom, builtAr
     };
   }
   const adapter = await adapterIdentity(path.join(stage, "adapter", "memory-mlx-adapter"), signal);
+  const metallib = await metallibIdentity(path.join(stage, "adapter", "mlx.metallib"), signal);
   const manifest = {
     schemaVersion: PREPARATION_SCHEMA_VERSION,
     key,
     identity,
     preparedFrom,
     artifacts,
-    adapter: adapterManifestIdentity(adapter),
+    adapter: preparedFileManifestIdentity(adapter),
+    metallib: preparedFileManifestIdentity(metallib),
   };
   const bytes = `${JSON.stringify(manifest, null, 2)}\n`;
   const manifestPath = path.join(stage, "prepared.json");
@@ -1063,15 +1084,15 @@ export async function inferenceCargoSource(
   return cargoSource;
 }
 
-async function adapterIdentity(adapterPath, signal) {
-  const metadata = await lstat(adapterPath, { bigint: true });
+async function preparedFileIdentity(filePath, expectedMode, label, signal) {
+  const metadata = await lstat(filePath, { bigint: true });
   if (!metadata.isFile() || metadata.isSymbolicLink()
-      || Number(metadata.mode & 0o777n) !== 0o500) {
-    fail("prepared canary adapter must be a read-only executable regular file");
+      || Number(metadata.mode & 0o777n) !== expectedMode) {
+    fail(`prepared canary ${label} must be a read-only regular file with mode ${expectedMode.toString(8)}`);
   }
   return {
-    path: adapterPath,
-    sha256: await sha256(adapterPath, signal),
+    path: filePath,
+    sha256: await sha256(filePath, signal),
     device: metadata.dev.toString(),
     inode: metadata.ino.toString(),
     size: Number(metadata.size),
@@ -1081,11 +1102,55 @@ async function adapterIdentity(adapterPath, signal) {
   };
 }
 
+async function adapterIdentity(adapterPath, signal) {
+  return preparedFileIdentity(adapterPath, 0o500, "adapter executable", signal);
+}
+
+async function metallibIdentity(metallibPath, signal) {
+  return preparedFileIdentity(metallibPath, 0o400, "metallib", signal);
+}
+
 async function assertAdapterIdentity(expected, signal) {
   const actual = await adapterIdentity(expected.path, signal);
   if (JSON.stringify(actual) !== JSON.stringify(expected)) {
     fail("canary adapter identity changed after its exact build");
   }
+}
+
+async function assertMetallibIdentity(expected, signal) {
+  const actual = await metallibIdentity(expected.path, signal);
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+    fail("canary metallib identity changed after its exact build");
+  }
+}
+
+async function assertRuntimeAssetIdentities(adapter, metallib, signal) {
+  await Promise.all([
+    assertAdapterIdentity(adapter, signal),
+    assertMetallibIdentity(metallib, signal),
+  ]);
+}
+
+export async function locateBuiltMetallib(target) {
+  const buildDirectory = path.join(target, "release", "build");
+  const metallibs = [];
+  for (const entry of await readdir(buildDirectory, { withFileTypes: true })) {
+    if (!entry.name.startsWith("pmetal-mlx-sys-") || !entry.isDirectory()) continue;
+    const candidate = path.join(buildDirectory, entry.name, "out", "build", "lib", "mlx.metallib");
+    const metadata = await lstat(candidate).catch((error) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    });
+    if (metadata === null) continue;
+    if (!metadata.isFile() || metadata.isSymbolicLink()) {
+      fail(`built pmetal metallib is not a regular file: ${candidate}`);
+    }
+    metallibs.push(candidate);
+  }
+  if (metallibs.length !== 1) {
+    fail(`exactly one built pmetal metallib is required, found ${metallibs.length}`);
+  }
+  return metallibs[0];
 }
 
 async function buildExactAdapter(
@@ -1120,13 +1185,38 @@ async function buildExactAdapter(
   }
   await inferenceCargoSource(cargo, cargoEnv, inferenceRepo, inferenceRevision, signal);
   const built = path.join(target, "release/memory-mlx-adapter");
+  const builtMetallib = await locateBuiltMetallib(target);
   const adapterDirectory = path.join(preparationRoot, "adapter");
   const adapterPath = path.join(adapterDirectory, "memory-mlx-adapter");
+  const metallibPath = path.join(adapterDirectory, "mlx.metallib");
   await mkdir(adapterDirectory, { mode: 0o700 });
   await copyFile(built, adapterPath, fsConstants.COPYFILE_EXCL);
+  await copyFile(builtMetallib, metallibPath, fsConstants.COPYFILE_EXCL);
   await chmod(adapterPath, 0o500);
+  await chmod(metallibPath, 0o400);
   await chmod(adapterDirectory, 0o500);
-  return adapterIdentity(adapterPath, signal);
+  return Promise.all([
+    adapterIdentity(adapterPath, signal),
+    metallibIdentity(metallibPath, signal),
+  ]);
+}
+
+export function canaryWatchdogEnvironment(baseEnvironment, roots, metallibPath, privateHome) {
+  if (!path.isAbsolute(metallibPath)) fail("prepared canary metallib path must be absolute");
+  if (!path.isAbsolute(privateHome)) fail("private canary runtime HOME must be absolute");
+  const environment = { ...baseEnvironment };
+  for (const name of ["HOME", "PMETAL_METALLIB_PATH", "PMETAL_CACHE_DIR", "XDG_CACHE_HOME"]) {
+    delete environment[name];
+  }
+  return {
+    ...environment,
+    HOME: privateHome,
+    // The pinned pmetal resolver reads this before its mutable user cache. Keep the override after
+    // the inherited environment so a concurrent build can never redirect this prepared adapter.
+    PMETAL_METALLIB_PATH: metallibPath,
+    SCENEWORKS_LTX_ROOT: roots.numericTier,
+    SCENEWORKS_LTX_TEXT_ENCODER_ROOT: roots.textEncoder,
+  };
 }
 
 function parseArgs(argv) {
@@ -1278,12 +1368,17 @@ async function controller(argv) {
       textEncoder: privateTextEncoderRoot,
     } = prepared.roots;
     const adapter = prepared.adapter;
+    const metallib = prepared.metallib;
     const textEncoderInventory = inventoryAtRoot(
       identity.artifact.textEncoder, privateTextEncoderRoot,
     );
     const runRoot = path.join(path.dirname(output), "runs");
     await mkdir(runRoot, { recursive: true, mode: 0o700 });
     runScratch = await mkdtemp(path.join(runRoot, "sc19741-run-"));
+    const runtimeHome = path.join(runScratch, "home");
+    await mkdir(runtimeHome, { mode: 0o700 });
+    await exactMetadata(runtimeHome, "directory", 0o700);
+    await exactEntries(runtimeHome, []);
     const requestPath = path.join(runScratch, "request.json");
     const responsePath = path.join(runScratch, "response.json");
     const eventsPath = path.join(runScratch, "watchdog.jsonl");
@@ -1293,7 +1388,9 @@ async function controller(argv) {
       preparationRoot, preparationKey, identity, signal,
     );
     if (launchPrepared === null) fail("prepared canary cache disappeared before launch");
-    await assertAdapterIdentity(launchPrepared.adapter, signal);
+    await assertRuntimeAssetIdentities(
+      launchPrepared.adapter, launchPrepared.metallib, signal,
+    );
     const watchdog = path.join(ROOT, "scripts/memory-calibration-watchdog.py");
     const runtimeMemoryFreeFloor = runtimeFreeFloor(memoryBytes);
     const watchdogArgs = [
@@ -1312,11 +1409,12 @@ async function controller(argv) {
       "/bin/sh", "-c", 'set -C; exec "$1" <"$2" >"$3"',
       "sc19741-canary", adapter.path, requestPath, responsePath,
     ];
-    const watchdogEnv = {
-      ...process.env,
-      SCENEWORKS_LTX_ROOT: privateNumericTierRoot,
-      SCENEWORKS_LTX_TEXT_ENCODER_ROOT: privateTextEncoderRoot,
-    };
+    const watchdogEnv = canaryWatchdogEnvironment(
+      process.env,
+      { numericTier: privateNumericTierRoot, textEncoder: privateTextEncoderRoot },
+      metallib.path,
+      runtimeHome,
+    );
     if (await cleanHead(ROOT, "SceneWorks", signal) !== sceneWorksRevision
         || await cleanHead(inferenceRepo, "inference", signal) !== inferenceRevision
         || await git(ROOT, ["rev-parse", "HEAD^{tree}"], signal) !== sceneWorksTree
@@ -1343,7 +1441,7 @@ async function controller(argv) {
       const eventBytes = await readFile(eventsPath, "utf8").catch(() => "");
       fail(watchdogFailureSummary(status, eventBytes));
     }
-    await assertAdapterIdentity(adapter, signal);
+    await assertRuntimeAssetIdentities(adapter, metallib, signal);
     if (await validatePreparedCache(preparationRoot, preparationKey, identity, signal) === null) {
       fail("prepared canary cache disappeared after the run");
     }
@@ -1386,6 +1484,7 @@ async function controller(argv) {
     sceneWorksRevision,
     inferenceRevision,
     adapter,
+    metallib,
     preparation: {
       key: preparationKey,
       root: preparationRoot,
