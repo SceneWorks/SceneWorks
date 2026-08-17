@@ -177,6 +177,16 @@ pub struct ResolvedBundleClosure {
     pub members: Vec<ResolvedBundleMember>,
 }
 
+/// One exact source file and its final logical output path. Indices refer back to the canonical
+/// closure so callers do not duplicate identity, role, component, tier, size, or hash fields.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedBundleFileLocation {
+    pub member_index: usize,
+    pub file_index: usize,
+    pub source_path: PathBuf,
+    pub output_path: PathBuf,
+}
+
 impl ResolvedBundleClosure {
     pub fn new(mut members: Vec<ResolvedBundleMember>) -> Result<Self, ArtifactContractError> {
         for member in &mut members {
@@ -223,67 +233,66 @@ impl ResolvedBundleClosure {
     }
 
     pub fn validate_at_root(&self, root: &Path) -> Result<(), ArtifactContractError> {
-        if Self::new(self.members.clone())? != *self {
-            return Err(ArtifactContractError(
-                "artifact closure is not in canonical sorted form".to_owned(),
-            ));
-        }
+        self.validate_canonical()?;
         let root = canonical_or_absolute(root)?;
         for member in &self.members {
             member.validate()?;
             let member_root = rebase_under(&root, &member.destination)?;
             for file in &member.files {
                 let path = rebase_under(&member_root, &file.relative_path)?;
-                let metadata = std::fs::metadata(&path).map_err(|error| {
-                    ArtifactContractError(format!(
-                        "artifact closure file {} is unavailable: {error}",
-                        path.display()
-                    ))
-                })?;
-                if !metadata.is_file() {
-                    return Err(ArtifactContractError(format!(
-                        "artifact closure entry {} is not a file",
-                        path.display()
-                    )));
-                }
-                if file
-                    .size_bytes
-                    .is_some_and(|expected| expected != metadata.len())
-                {
-                    return Err(ArtifactContractError(format!(
-                        "artifact closure size changed for {}",
-                        path.display()
-                    )));
-                }
-                if let Some(expected) = &file.sha256 {
-                    use std::io::Read;
-                    let mut input = std::fs::File::open(&path).map_err(|error| {
-                        ArtifactContractError(format!("cannot hash {}: {error}", path.display()))
-                    })?;
-                    let mut digest = Sha256::new();
-                    let mut buffer = [0_u8; 64 * 1024];
-                    loop {
-                        let read = input.read(&mut buffer).map_err(|error| {
-                            ArtifactContractError(format!(
-                                "cannot hash {}: {error}",
-                                path.display()
-                            ))
-                        })?;
-                        if read == 0 {
-                            break;
-                        }
-                        digest.update(&buffer[..read]);
-                    }
-                    if format!("sha256:{:x}", digest.finalize()) != *expected {
-                        return Err(ArtifactContractError(format!(
-                            "artifact closure hash changed for {}",
-                            path.display()
-                        )));
-                    }
-                }
+                validate_artifact_file(&path, file)?;
             }
         }
         Ok(())
+    }
+
+    /// Resolve every member from its exact repository, immutable revision and source subpath.
+    /// Hugging Face's normal final-file symlink into the same repository's `blobs` directory is
+    /// accepted; intermediate links and links into another repository or arbitrary host path fail
+    /// closed. Returned source paths are canonical targets selected during validation, so a later
+    /// swap of a snapshot-visible link cannot redirect the materializer outside the repository.
+    pub fn source_file_locations(
+        &self,
+        primary_identity: &ArtifactIdentity,
+        primary_snapshot_root: &Path,
+    ) -> Result<Vec<ResolvedBundleFileLocation>, ArtifactContractError> {
+        self.validate_canonical()?;
+        primary_identity.validate()?;
+        let library = source_library_for_primary_snapshot(primary_identity, primary_snapshot_root)?;
+        let primary = self
+            .members
+            .iter()
+            .find(|member| member.role == ArtifactMemberRole::Primary)
+            .expect("canonical closure has exactly one primary");
+        if &primary.source != primary_identity {
+            return Err(ArtifactContractError(
+                "primary bundle member identity differs from artifact identity".to_owned(),
+            ));
+        }
+
+        let mut locations = Vec::new();
+        for (member_index, member) in self.members.iter().enumerate() {
+            member.validate()?;
+            let (_, snapshot) = library
+                .discover_snapshot(&member.source.repository, Some(&member.source.revision))?;
+            validate_source_snapshot(&library, &member.source, &snapshot)?;
+            let member_root = snapshot.join(&member.source_subpath);
+            validate_source_ancestors(&snapshot, &member_root)?;
+            for (file_index, file) in member.files.iter().enumerate() {
+                let source_path = member_root.join(&file.relative_path);
+                let source_path =
+                    validate_source_file(&library, &member.source, &snapshot, &source_path, file)?;
+                let output_path = member.destination.join(&file.relative_path);
+                validate_relative_path(&output_path, "artifact output file")?;
+                locations.push(ResolvedBundleFileLocation {
+                    member_index,
+                    file_index,
+                    source_path,
+                    output_path,
+                });
+            }
+        }
+        Ok(locations)
     }
 
     pub fn rebased_paths(&self, root: &Path) -> Result<Vec<PathBuf>, ArtifactContractError> {
@@ -297,6 +306,15 @@ impl ResolvedBundleClosure {
                 })
             })
             .collect()
+    }
+
+    fn validate_canonical(&self) -> Result<(), ArtifactContractError> {
+        if Self::new(self.members.clone())? != *self {
+            return Err(ArtifactContractError(
+                "artifact closure is not in canonical sorted form".to_owned(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -378,7 +396,13 @@ impl ResolvedModelArtifact {
                 "artifact is not complete and runtime-loadable".to_owned(),
             ));
         }
-        self.closure.validate_at_root(self.location.root())
+        match &self.location {
+            ArtifactLocation::SourceLibrary { root } => {
+                self.closure.source_file_locations(&self.identity, root)?;
+                Ok(())
+            }
+            ArtifactLocation::ResolvedLocal { root } => self.closure.validate_at_root(root),
+        }
     }
 
     /// Stable key over the versioned immutable identity, full sorted closure and provenance.
@@ -926,6 +950,265 @@ fn primary_tier(closure: &ResolvedBundleClosure) -> Option<String> {
         .and_then(|member| member.tier.clone())
 }
 
+fn validate_artifact_file(path: &Path, file: &ArtifactFile) -> Result<(), ArtifactContractError> {
+    let metadata = std::fs::metadata(path).map_err(|error| {
+        ArtifactContractError(format!(
+            "artifact closure file {} is unavailable: {error}",
+            path.display()
+        ))
+    })?;
+    if !metadata.is_file() {
+        return Err(ArtifactContractError(format!(
+            "artifact closure entry {} is not a file",
+            path.display()
+        )));
+    }
+    if file
+        .size_bytes
+        .is_some_and(|expected| expected != metadata.len())
+    {
+        return Err(ArtifactContractError(format!(
+            "artifact closure size changed for {}",
+            path.display()
+        )));
+    }
+    if let Some(expected) = &file.sha256 {
+        use std::io::Read;
+        let mut input = std::fs::File::open(path).map_err(|error| {
+            ArtifactContractError(format!("cannot hash {}: {error}", path.display()))
+        })?;
+        let mut digest = Sha256::new();
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let read = input.read(&mut buffer).map_err(|error| {
+                ArtifactContractError(format!("cannot hash {}: {error}", path.display()))
+            })?;
+            if read == 0 {
+                break;
+            }
+            digest.update(&buffer[..read]);
+        }
+        if format!("sha256:{:x}", digest.finalize()) != *expected {
+            return Err(ArtifactContractError(format!(
+                "artifact closure hash changed for {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn source_library_for_primary_snapshot(
+    identity: &ArtifactIdentity,
+    snapshot: &Path,
+) -> Result<ArtifactSourceLibrary, ArtifactContractError> {
+    let revision = snapshot.file_name().and_then(|value| value.to_str());
+    let snapshots = snapshot.parent();
+    let repository = snapshots.and_then(Path::parent);
+    let library = repository.and_then(Path::parent);
+    if revision != Some(identity.revision.as_str())
+        || snapshots
+            .and_then(Path::file_name)
+            .and_then(|value| value.to_str())
+            != Some("snapshots")
+    {
+        return Err(ArtifactContractError(format!(
+            "source snapshot {} does not encode the artifact revision",
+            snapshot.display()
+        )));
+    }
+    let library = library.ok_or_else(|| {
+        ArtifactContractError(format!(
+            "source snapshot {} is outside a Hugging Face repository",
+            snapshot.display()
+        ))
+    })?;
+    let library = ArtifactSourceLibrary::new(library)?;
+    let expected = library
+        .repository_root(&identity.repository)?
+        .join("snapshots")
+        .join(&identity.revision);
+    if canonical_or_absolute(&expected)? != canonical_or_absolute(snapshot)? {
+        return Err(ArtifactContractError(format!(
+            "source snapshot {} does not match {}@{}",
+            snapshot.display(),
+            identity.repository,
+            identity.revision
+        )));
+    }
+    validate_source_snapshot(&library, identity, snapshot)?;
+    Ok(library)
+}
+
+fn validate_source_snapshot(
+    library: &ArtifactSourceLibrary,
+    identity: &ArtifactIdentity,
+    snapshot: &Path,
+) -> Result<(), ArtifactContractError> {
+    let repository = library.repository_root(&identity.repository)?;
+    let snapshots = repository.join("snapshots");
+    let expected = snapshots.join(&identity.revision);
+    if canonical_or_absolute(&expected)? != canonical_or_absolute(snapshot)? {
+        return Err(ArtifactContractError(format!(
+            "source snapshot {} differs from the exact immutable repository location",
+            snapshot.display()
+        )));
+    }
+    for (path, label) in [
+        (&repository, "source repository"),
+        (&snapshots, "source snapshots directory"),
+        (&expected, "source snapshot"),
+    ] {
+        let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+            ArtifactContractError(format!(
+                "{label} {} is unavailable: {error}",
+                path.display()
+            ))
+        })?;
+        if metadata.file_type().is_symlink()
+            || metadata_is_reparse_point(&metadata)
+            || !metadata.is_dir()
+        {
+            return Err(ArtifactContractError(format!(
+                "{label} {} is a link, reparse point, or not a directory",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_source_ancestors(
+    snapshot: &Path,
+    descendant: &Path,
+) -> Result<(), ArtifactContractError> {
+    let relative = descendant.strip_prefix(snapshot).map_err(|_| {
+        ArtifactContractError(format!(
+            "artifact source path escaped snapshot: {}",
+            descendant.display()
+        ))
+    })?;
+    let mut cursor = snapshot.to_path_buf();
+    for component in relative.components() {
+        cursor.push(component.as_os_str());
+        match std::fs::symlink_metadata(&cursor) {
+            Ok(metadata)
+                if metadata.file_type().is_symlink() || metadata_is_reparse_point(&metadata) =>
+            {
+                return Err(ArtifactContractError(format!(
+                    "artifact source ancestor {} is a link or reparse point",
+                    cursor.display()
+                )));
+            }
+            Ok(metadata) if !metadata.is_dir() => {
+                return Err(ArtifactContractError(format!(
+                    "artifact source ancestor {} is not a directory",
+                    cursor.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(error) => {
+                return Err(ArtifactContractError(format!(
+                    "artifact source ancestor {} is unavailable: {error}",
+                    cursor.display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_source_file(
+    library: &ArtifactSourceLibrary,
+    identity: &ArtifactIdentity,
+    snapshot: &Path,
+    path: &Path,
+    file: &ArtifactFile,
+) -> Result<PathBuf, ArtifactContractError> {
+    let parent = path.parent().ok_or_else(|| {
+        ArtifactContractError(format!(
+            "artifact source file {} has no parent",
+            path.display()
+        ))
+    })?;
+    validate_source_ancestors(snapshot, parent)?;
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        ArtifactContractError(format!(
+            "artifact closure file {} is unavailable: {error}",
+            path.display()
+        ))
+    })?;
+    if metadata_is_reparse_point(&metadata) && !metadata.file_type().is_symlink() {
+        return Err(ArtifactContractError(format!(
+            "artifact source file {} is a reparse point",
+            path.display()
+        )));
+    }
+    let canonical = std::fs::canonicalize(path).map_err(|error| {
+        ArtifactContractError(format!(
+            "cannot resolve artifact source file {}: {error}",
+            path.display()
+        ))
+    })?;
+    if metadata.file_type().is_symlink() {
+        let repository = library.repository_root(&identity.repository)?;
+        let blobs = repository.join("blobs");
+        let blobs_metadata = std::fs::symlink_metadata(&blobs).map_err(|error| {
+            ArtifactContractError(format!(
+                "source blobs directory {} is unavailable: {error}",
+                blobs.display()
+            ))
+        })?;
+        if blobs_metadata.file_type().is_symlink()
+            || metadata_is_reparse_point(&blobs_metadata)
+            || !blobs_metadata.is_dir()
+        {
+            return Err(ArtifactContractError(format!(
+                "source blobs directory {} is linked, reparsed, or not a directory",
+                blobs.display()
+            )));
+        }
+        let canonical_repository = std::fs::canonicalize(&repository).map_err(|error| {
+            ArtifactContractError(format!(
+                "source repository {} is unavailable: {error}",
+                repository.display()
+            ))
+        })?;
+        let blobs = std::fs::canonicalize(&blobs).map_err(|error| {
+            ArtifactContractError(format!(
+                "source blobs directory {} is unavailable: {error}",
+                blobs.display()
+            ))
+        })?;
+        if blobs.parent() != Some(canonical_repository.as_path()) || !canonical.starts_with(&blobs)
+        {
+            return Err(ArtifactContractError(format!(
+                "artifact source link {} escapes its repository blobs",
+                path.display()
+            )));
+        }
+    } else if !canonical.starts_with(canonical_or_absolute(snapshot)?) {
+        return Err(ArtifactContractError(format!(
+            "artifact source file {} escapes its immutable snapshot",
+            path.display()
+        )));
+    }
+    validate_artifact_file(&canonical, file)?;
+    Ok(canonical)
+}
+
+#[cfg(windows)]
+fn metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn metadata_is_reparse_point(_metadata: &std::fs::Metadata) -> bool {
+    false
+}
+
 fn validate_relative_path_allow_empty(
     path: &Path,
     label: &str,
@@ -1068,6 +1351,18 @@ mod tests {
     use super::*;
 
     const REV: &str = "0123456789abcdef0123456789abcdef01234567";
+    const OTHER_REV: &str = "1111111111111111111111111111111111111111";
+
+    fn snapshot(root: &Path, repository: &str, revision: &str) -> PathBuf {
+        let library = ArtifactSourceLibrary::new(root).unwrap();
+        let snapshot = library
+            .repository_root(repository)
+            .unwrap()
+            .join("snapshots")
+            .join(revision);
+        std::fs::create_dir_all(&snapshot).unwrap();
+        snapshot
+    }
 
     fn primary(destination: &str, file: &str) -> ResolvedBundleMember {
         ResolvedBundleMember {
@@ -1118,16 +1413,14 @@ mod tests {
         assert_eq!(a, b);
 
         let root = tempfile::tempdir().unwrap();
-        std::fs::write(root.path().join("model.safetensors"), b"model").unwrap();
-        std::fs::create_dir(root.path().join("optional")).unwrap();
-        std::fs::write(root.path().join("optional/adapter.safetensors"), b"adapter").unwrap();
+        let snapshot = snapshot(root.path(), "SceneWorks/model", REV);
+        std::fs::write(snapshot.join("model.safetensors"), b"model").unwrap();
+        std::fs::write(snapshot.join("adapter.safetensors"), b"adapter").unwrap();
         let identity = ArtifactIdentity::pinned("SceneWorks/model", REV, "q8").unwrap();
         let artifact = ResolvedModelArtifact {
             schema_version: MODEL_ARTIFACT_CONTRACT_VERSION,
             identity: identity.clone(),
-            location: ArtifactLocation::SourceLibrary {
-                root: root.path().to_owned(),
-            },
+            location: ArtifactLocation::SourceLibrary { root: snapshot },
             closure: a,
             provenance: ArtifactProvenance {
                 identity,
@@ -1413,6 +1706,137 @@ mod tests {
         assert!(
             from_source.validate().is_err(),
             "usable-stale still requires its exact closure"
+        );
+    }
+
+    #[test]
+    fn source_enumeration_resolves_multi_repo_tier_and_derived_members_exactly() {
+        let source = tempfile::tempdir().unwrap();
+        let primary_snapshot = snapshot(source.path(), "SceneWorks/model", REV);
+        let tokenizer_snapshot = snapshot(source.path(), "SceneWorks/tokenizer", OTHER_REV);
+        std::fs::create_dir_all(primary_snapshot.join("q8")).unwrap();
+        std::fs::create_dir_all(primary_snapshot.join("derived")).unwrap();
+        std::fs::create_dir_all(tokenizer_snapshot.join("tokenizer")).unwrap();
+        std::fs::write(primary_snapshot.join("q8/model.safetensors"), b"model").unwrap();
+        std::fs::write(
+            primary_snapshot.join("derived/tokenizer_config.json"),
+            b"derived",
+        )
+        .unwrap();
+        std::fs::write(
+            tokenizer_snapshot.join("tokenizer/tokenizer.json"),
+            b"tokenizer",
+        )
+        .unwrap();
+
+        let identity = ArtifactIdentity::pinned("SceneWorks/model", REV, "q8").unwrap();
+        let mut primary = primary("", "model.safetensors");
+        primary.source_subpath = PathBuf::from("q8");
+        let mut tokenizer = component(
+            ArtifactMemberRole::CoRequisite,
+            "tokenizer",
+            "tokenizer",
+            "tokenizer.json",
+        );
+        tokenizer.source =
+            ArtifactIdentity::pinned("SceneWorks/tokenizer", OTHER_REV, "default").unwrap();
+        tokenizer.source_subpath = PathBuf::from("tokenizer");
+        let mut derived = component(
+            ArtifactMemberRole::DerivedOverlay,
+            "tokenizer-config",
+            "tokenizer",
+            "tokenizer_config.json",
+        );
+        derived.source_subpath = PathBuf::from("derived");
+        let closure = ResolvedBundleClosure::new(vec![tokenizer, primary, derived]).unwrap();
+        let artifact = ResolvedModelArtifact {
+            schema_version: MODEL_ARTIFACT_CONTRACT_VERSION,
+            identity: identity.clone(),
+            location: ArtifactLocation::SourceLibrary {
+                root: primary_snapshot.clone(),
+            },
+            closure,
+            provenance: ArtifactProvenance {
+                identity,
+                fixed_artifact_tier: Some("q8".to_owned()),
+            },
+            completeness: ArtifactCompleteness::Complete,
+            availability: ArtifactAvailability::Available,
+        };
+        artifact.validate().unwrap();
+        let locations = artifact
+            .closure
+            .source_file_locations(&artifact.identity, &primary_snapshot)
+            .unwrap();
+        assert_eq!(locations.len(), 3);
+        assert!(locations.iter().any(|location| {
+            location.source_path
+                == std::fs::canonicalize(tokenizer_snapshot.join("tokenizer/tokenizer.json"))
+                    .unwrap()
+                && location.output_path == Path::new("tokenizer/tokenizer.json")
+        }));
+        assert!(locations.iter().any(|location| {
+            location.source_path
+                == std::fs::canonicalize(primary_snapshot.join("derived/tokenizer_config.json"))
+                    .unwrap()
+                && location.output_path == Path::new("tokenizer/tokenizer_config.json")
+        }));
+
+        std::fs::remove_file(tokenizer_snapshot.join("tokenizer/tokenizer.json")).unwrap();
+        assert!(artifact.validate().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_accepts_only_same_repository_blob_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let source = tempfile::tempdir().unwrap();
+        let snapshot = snapshot(source.path(), "SceneWorks/model", REV);
+        let repository = ArtifactSourceLibrary::new(source.path())
+            .unwrap()
+            .repository_root("SceneWorks/model")
+            .unwrap();
+        let blobs = repository.join("blobs");
+        std::fs::create_dir_all(&blobs).unwrap();
+        std::fs::write(blobs.join("model-blob"), b"model").unwrap();
+        symlink("../../blobs/model-blob", snapshot.join("model.safetensors")).unwrap();
+        let closure = ResolvedBundleClosure::new(vec![primary("", "model.safetensors")]).unwrap();
+        let identity = ArtifactIdentity::pinned("SceneWorks/model", REV, "q8").unwrap();
+        let artifact = ResolvedModelArtifact {
+            schema_version: MODEL_ARTIFACT_CONTRACT_VERSION,
+            identity: identity.clone(),
+            location: ArtifactLocation::SourceLibrary {
+                root: snapshot.clone(),
+            },
+            closure,
+            provenance: ArtifactProvenance {
+                identity,
+                fixed_artifact_tier: Some("q8".to_owned()),
+            },
+            completeness: ArtifactCompleteness::Complete,
+            availability: ArtifactAvailability::Available,
+        };
+        artifact.validate().unwrap();
+
+        std::fs::remove_file(snapshot.join("model.safetensors")).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("model-blob"), b"model").unwrap();
+        symlink(
+            outside.path().join("model-blob"),
+            snapshot.join("model.safetensors"),
+        )
+        .unwrap();
+        assert!(artifact.validate().is_err());
+
+        std::fs::remove_file(snapshot.join("model.safetensors")).unwrap();
+        std::fs::remove_dir_all(&blobs).unwrap();
+        symlink(outside.path(), &blobs).unwrap();
+        symlink("../../blobs/model-blob", snapshot.join("model.safetensors")).unwrap();
+        assert!(artifact.validate().is_err());
+        assert_eq!(
+            std::fs::read(outside.path().join("model-blob")).unwrap(),
+            b"model"
         );
     }
 
