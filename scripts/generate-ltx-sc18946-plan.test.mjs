@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,6 +14,7 @@ import {
   RATIFIED_BOUNDED_FIXTURE,
   RATIFIED_BOUNDED_PARAMETERS,
   RATIFIED_BOUNDED_PROVIDER,
+  RATIFIED_BOUNDED_TIERS,
   RUNG2_PARAMETERS,
   SAFETY_DISPOSITIONS,
   SEED,
@@ -102,11 +104,24 @@ test("the flip bands, deep anchors, original six and held-out transfer cells are
   ]) assert.ok(cells.has(cell), cell);
 });
 
-test("rung two preserves the six 384 by 64 rows and appends one exact ratified carrier", () => {
+test("rung two preserves the six 384 by 64 rows and appends three matched bounded anchors", () => {
   const rows = plans["ltx-mlx-rung2-sweep.json"].providers;
-  assert.equal(rows.length, 7);
+  assert.equal(rows.length, 9);
+  const originalSeventyOne = Object.entries(plans).flatMap(([name, plan]) =>
+    name === "ltx-mlx-rung2-sweep.json" ? plan.providers.slice(0, 7) : plan.providers);
+  assert.equal(originalSeventyOne.length, 71);
+  assert.equal(
+    createHash("sha256").update(JSON.stringify(originalSeventyOne)).digest("hex"),
+    "473fc389fc12a2ffd4ae2eb1680f24033fc48a5c55503951570124d69b3d97f6",
+    "all 71 pre-SC-20430 rows must remain byte-identical and ordered",
+  );
+  assert.equal(
+    createHash("sha256").update(JSON.stringify(rows.slice(0, 7))).digest("hex"),
+    "1618f6cb8a0589652da550a3cbd27f472c36748995a141cc9199d7847ebdf64a",
+    "the pre-SC-20430 rung-2 rows must remain byte-identical and ordered",
+  );
   const frozen = rows.slice(0, 6);
-  const [ratified] = rows.slice(6);
+  const ratified = rows.slice(6);
   assert.deepEqual(TIERS, ["q4", "q8", "bf16"]);
   assert.deepEqual(
     frozen.map((row) => `${row.target.geometry.frames}:${row.target.tier}`),
@@ -125,19 +140,25 @@ test("rung two preserves the six 384 by 64 rows and appends one exact ratified c
   const predicted = Object.fromEntries(frozen.filter((row) => row.target.tier === "q8").map((row) => [row.target.geometry.frames, row._predictedDecodeBytes]));
   assert.equal(predicted[305], 18_540_396_800);
   assert.equal(predicted[449], 23_730_848_000);
-  assert.equal(ratified.name, RATIFIED_BOUNDED_PROVIDER);
-  assert.equal(ratified.fixture, RATIFIED_BOUNDED_FIXTURE);
-  assert.equal(ratified._role, "bounded_carrier_entry");
-  assert.equal(ratified._campaignPhase, "bounded_carrier_ratification");
-  assert.deepEqual(ratified.target.geometry, {
-    width: 768, height: 512, batch: 1, frames: 121,
-  });
-  assert.deepEqual(ratified.cases, [{
-    parameters: RATIFIED_BOUNDED_PARAMETERS, expectedResult: "passed",
-  }]);
-  assert.equal(ratified._measurementSafety.disposition, SAFETY_DISPOSITIONS.SAFETY_REFUSED_OPEN);
-  assert.equal(ratified._measurementSafety.predictedDecodeBytes, 6_264_848_640);
-  assert.equal(ratified._measurementSafety.incidentCalibratedProjectionBytes, 84_694_536_320);
+  assert.deepEqual(ratified.map((row) => row.target.tier), RATIFIED_BOUNDED_TIERS);
+  assert.equal(ratified[0].name, RATIFIED_BOUNDED_PROVIDER);
+  assert.equal(ratified[0].fixture, RATIFIED_BOUNDED_FIXTURE);
+  for (const row of ratified) {
+    assert.equal(row._role, "bounded_carrier_entry");
+    assert.equal(row._campaignPhase, "bounded_carrier_ratification");
+    assert.deepEqual(row.target.geometry, {
+      width: 768, height: 512, batch: 1, frames: 121,
+    });
+    assert.deepEqual(row.cases, [{
+      parameters: RATIFIED_BOUNDED_PARAMETERS, expectedResult: "passed",
+    }]);
+    assert.equal(row._measurementSafety.disposition, SAFETY_DISPOSITIONS.SAFETY_REFUSED_OPEN);
+    assert.equal(row._measurementSafety.predictedDecodeBytes, 6_264_848_640);
+    assert.equal(
+      row._measurementSafety.incidentCalibratedProjectionBytes,
+      84_694_536_320 + TIER_INVENTORY_BYTES[row.target.tier] - TIER_INVENTORY_BYTES.q4,
+    );
+  }
 });
 
 test("host-risk coverage is explicitly planned rather than absent", () => {
@@ -159,7 +180,7 @@ test("host-risk coverage is explicitly planned rather than absent", () => {
 
 test("SC-19642 classifies every row for pre-load refusal without inventing a safe host fraction", () => {
   const rows = Object.values(plans).flatMap((plan) => plan.providers);
-  assert.equal(rows.length, 71);
+  assert.equal(rows.length, 73);
   assert.equal(Q4_F305_CRASH_FOOTPRINT_BYTES, 96_970_084_480);
   assert.deepEqual(TIER_INVENTORY_BYTES, {
     q4: 20_467_690_460,

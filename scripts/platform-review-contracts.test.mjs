@@ -1998,7 +1998,10 @@ test("the MLX LTX arm's manifest constants match the shipped ltx_2_3 limits", as
 });
 
 test("the LTX real-weight safety canary cannot relax or masquerade as campaign evidence", async () => {
-  const adapter = await source("crates/sceneworks-memory-adapter/src/bin/mlx.rs");
+  const [adapter, runner] = await Promise.all([
+    source("crates/sceneworks-memory-adapter/src/bin/mlx.rs"),
+    source("scripts/run-ltx-safety-canary.mjs"),
+  ]);
   const historical = JSON.parse(await source("docs/generated/ltx-mlx-video-sc-18808.json"));
   const costaged = historical.records[0].diagnostics.measurements.find(
     (entry) => entry.name === "costagedGiantsBytes",
@@ -2028,9 +2031,38 @@ test("the LTX real-weight safety canary cannot relax or masquerade as campaign e
     "the campaign must still refuse before model-path/provider/weights access",
   );
   const campaignRows = Object.values(buildLtxPlans()).flatMap((plan) => plan.providers);
-  assert.equal(campaignRows.length, 71, "SC-20318 must explicitly inventory 71 rows");
+  assert.equal(campaignRows.length, 73, "SC-20430 must explicitly inventory 73 rows");
   const ratified = campaignRows.filter((row) => row._role === "bounded_carrier_entry");
-  assert.equal(ratified.length, 1, "only one bounded carrier may be ratified");
+  assert.equal(ratified.length, 3, "exactly one matched bounded carrier per tier may be ratified");
+  assert.deepEqual(ratified.map((row) => row.target.tier), ["q4", "q8", "bf16"]);
+  const crossLayer = {
+    q8: {
+      logicalCaseId: "implan-d47640caa0c469f2ee13",
+      identity: "sc-20430-q8-768x512-f121-fps30-bounded-192-64-authoritative-v1",
+      inventorySha256: "bb0bb7577157a158ca39494837d64cb36ded0380ca7ee0c930fea7311f22a247",
+    },
+    bf16: {
+      logicalCaseId: "implan-b3926164bf6bfbee98e1",
+      identity: "sc-20430-bf16-768x512-f121-fps30-bounded-192-64-authoritative-v1",
+      inventorySha256: "006caeaa9a8638b337cdf5a8622ce8535380b18ebaf90b36c3e2d5d15354f2a8",
+    },
+  };
+  for (const row of ratified.filter(({ target }) => target.tier !== "q4")) {
+    const exact = crossLayer[row.target.tier];
+    for (const [label, value] of [
+      ["provider", row.name], ["fixture", row.fixture],
+      ["logical case", exact.logicalCaseId], ["private identity", exact.identity],
+      ["inventory SHA", exact.inventorySha256],
+    ]) {
+      assert.ok(runner.includes(value), `${row.target.tier} runner ${label} changed`);
+      if (label !== "provider") {
+        assert.ok(adapter.includes(value), `${row.target.tier} adapter ${label} changed`);
+      }
+    }
+  }
+  assert.match(runner,
+    /process\.argv\[2\] === "--bounded-selector-report"[\s\S]*boundedSelectorReportController/,
+    "SC-20430 matched phase anchors must remain executable as a CPU-only report path");
   const originalRows = campaignRows.filter((row) => row._role !== "bounded_carrier_entry");
   assert.equal(originalRows.length, 70, "all original campaign rows must remain present");
   for (const row of originalRows) {
@@ -2314,7 +2346,11 @@ test("the SC-20318 provider phase profile is exact across runner, watchdog and a
   assert.match(runner,
     /export const BOUNDED_CAMPAIGN_ENTRY_PROFILE = "bounded-campaign-entry";/);
   assert.match(runner,
-    /phaseProfile: "bounded-campaign-entry",\n\s*childName: "sc-20318-bounded-campaign-entry"/);
+    /export const BOUNDED_CAMPAIGN_ENTRY_Q8_PROFILE = "bounded-campaign-entry-q8";/);
+  assert.match(runner,
+    /export const BOUNDED_CAMPAIGN_ENTRY_BF16_PROFILE = "bounded-campaign-entry-bf16";/);
+  assert.match(runner,
+    /phaseProfile: "bounded-campaign-entry",\n\s*childName: `\$\{boundedSpec\.story\}-\$\{boundedSpec\.tier\}-bounded-campaign-entry`/);
 
   assert.deepEqual(quotedValues(
     adapter,
