@@ -99,6 +99,8 @@ pub(crate) async fn create_job(
     }
     validate_raw_job_payload(&state, &payload.job_type, &payload.payload)?;
     canonicalize_image_model_payload(&state, &payload.job_type, &mut payload.payload).await?;
+    crate::models::ensure_runtime_model_sources(&state, &payload.job_type, &mut payload.payload)
+        .await?;
     let job = store_call(state.clone(), move |store, _timeout| {
         store.create_job(CreateJob {
             job_type: payload.job_type,

@@ -77,8 +77,8 @@
 //! So the walk is a closure that grows only through functions defined in files that are already
 //! `JobTime` entries on [`DOWNLOAD_SITES`] — see [`download_wrappers`] for why that loses nothing and
 //! why the `Installer` dispatchers are excluded. It converges, and finding the fixpoint added
-//! sixteen files the one-hop scan could not see (`kps_jobs.rs`, `face_analysis_jobs.rs`,
-//! `catalog_semantic_jobs.rs` and the rest reach weights through two hops, not one).
+//! eleven files the one-hop scan could not see (`kps_jobs.rs`, `catalog_semantic_jobs.rs` and the
+//! rest reach downloads through two hops, not one).
 //!
 //! Matching is restricted to **free-function** calls. Method calls have to be excluded or the walk is
 //! worthless: `load`, `build` and `detect` are `impl` methods on a dozen unrelated types, and one of
@@ -190,9 +190,8 @@ const DOWNLOAD_SITES: &[(&str, DownloadRole)] = &[
     ("image_jobs/kolors_ipadapter.rs", DownloadRole::JobTime),
     ("image_jobs/sdxl_ipadapter.rs", DownloadRole::JobTime),
     // Identity stacks. `pulid.rs` builds a `DownloadContext` literal of its own, so it is caught
-    // without any wrapper resolution; `image_jobs/kolors.rs`, `sdxl.rs` and `sensenova.rs` are the
-    // files that genuinely need it — they name no primitive and no context, reaching Hugging Face
-    // only through `image_jobs/base.rs`'s `stage_likeness`.
+    // without any wrapper resolution. The shared likeness/face-analysis callers left this list when
+    // `ensure_face_stack_dir` became a pinned snapshot-only resolver in SC-19708.
     ("image_jobs/instantid.rs", DownloadRole::JobTime),
     ("image_jobs/pulid.rs", DownloadRole::JobTime),
     ("image_jobs/pulid_candle.rs", DownloadRole::JobTime),
@@ -214,17 +213,9 @@ const DOWNLOAD_SITES: &[(&str, DownloadRole)] = &[
     ("catalog_image_fetch.rs", DownloadRole::JobTime),
     ("catalog_semantic_jobs.rs", DownloadRole::JobTime),
     ("dataset_parquet_jobs.rs", DownloadRole::JobTime),
-    // Analyzer lanes that stage the InstantID face stack mid-job. `control_training_jobs.rs` left
-    // in sc-17634: DWPose was the only weight it staged, and it now resolves that through the
-    // cache-only `pose_jobs::require_dwpose_weights`, which takes no `DownloadContext`. The three
-    // below remain because the InstantID face stack is still job-time (sc-17631).
-    ("face_analysis_jobs.rs", DownloadRole::JobTime),
-    ("face_likeness_compare_jobs.rs", DownloadRole::JobTime),
+    // Standalone KPS still stages SCRFD through the remaining InstantID download helper. The face
+    // analysis/likeness routes now require the complete pinned face-stack snapshot and never fetch.
     ("kps_jobs.rs", DownloadRole::JobTime),
-    // Identity likeness staging shared by the SDXL-family lanes (`image_jobs/base.rs`).
-    ("image_jobs/kolors.rs", DownloadRole::JobTime),
-    ("image_jobs/sdxl.rs", DownloadRole::JobTime),
-    ("image_jobs/sensenova.rs", DownloadRole::JobTime),
     // Bernini tier staging, reached from the image lane as well as the video one.
     ("image_jobs/bernini.rs", DownloadRole::JobTime),
     // The candle video dispatcher stages Mochi/Wan tiers.
@@ -241,7 +232,7 @@ const DOWNLOAD_SITES: &[(&str, DownloadRole)] = &[
 ///
 /// **Only ever goes down.** Each migration slice deletes its entry and lowers this in the same
 /// commit.
-const JOB_TIME_DOWNLOAD_SITES_REMAINING: usize = 41;
+const JOB_TIME_DOWNLOAD_SITES_REMAINING: usize = 36;
 
 /// What a `<data_dir>/cache/<subdir>` destination holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

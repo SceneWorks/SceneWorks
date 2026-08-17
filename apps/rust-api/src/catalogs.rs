@@ -1660,19 +1660,34 @@ pub(crate) async fn run_catalog_analysis(
         Ok((catalog.descriptor().name.clone(), analyzer_config))
     })
     .await?;
+    let mut model_manifest_entries = Vec::new();
+    if analyzer_config.settings.vision_analysis_enabled {
+        model_manifest_entries.push(
+            crate::models::resolve_model_manifest_entry(&state, "vision_caption_qwen3vl_8b")
+                .await?,
+        );
+    }
+    if analyzer_config.settings.semantic_embeddings_enabled {
+        model_manifest_entries
+            .push(crate::models::resolve_model_manifest_entry(&state, "clip_vit_l14").await?);
+    }
     let requested_gpu = crate::requested_gpu_or_auto(request.requested_gpu);
     let batch_size = request.batch_size;
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "provider": "catalog",
         "kind": "catalog_analysis",
         "catalogId": catalog_id,
         "catalogName": catalog_name,
         "analyzerConfigRevision": analyzer_config.revision,
+        "structuredAnalysisEnabled": analyzer_config.settings.structured_analysis_enabled,
         "batchSize": batch_size,
+        "modelManifestEntries": model_manifest_entries,
     })
     .as_object()
     .cloned()
     .expect("catalog analysis payload object");
+    crate::models::ensure_runtime_model_sources(&state, &JobType::CatalogAnalysis, &mut payload)
+        .await?;
     let job = crate::store_call(state.clone(), move |store, _timeout| {
         store.create_job(CreateJob {
             job_type: JobType::CatalogAnalysis,

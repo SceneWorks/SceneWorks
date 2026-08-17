@@ -13,6 +13,7 @@ pub enum WorkerError {
         code: Option<String>,
     },
     InvalidPayload(String),
+    ExternalLibraryUnavailable(String),
     Engine(String),
     Canceled(String),
 }
@@ -33,6 +34,11 @@ impl fmt::Display for WorkerError {
                 None => write!(formatter, "API {status}: {detail}"),
             },
             Self::InvalidPayload(detail) => formatter.write_str(detail),
+            Self::ExternalLibraryUnavailable(detail) => write!(
+                formatter,
+                "[{}] {detail}",
+                sceneworks_core::model_artifacts::external_library::EXTERNAL_LIBRARY_UNAVAILABLE_CODE
+            ),
             Self::Engine(detail) => formatter.write_str(detail),
             Self::Canceled(detail) => formatter.write_str(detail),
         }

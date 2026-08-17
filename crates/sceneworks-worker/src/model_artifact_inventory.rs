@@ -33,6 +33,7 @@ pub enum TypedResolverEntrypoint {
     PinnedComponent,
     ReceiptProvenance,
     SourceLibrary,
+    ExternalAvailability,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,6 +49,24 @@ use ConsumerCategory as Category;
 use ConsumerResolution as Resolution;
 
 pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
+    ModelConsumerInventoryEntry {
+        source_files: &["crates/sceneworks-worker/src/external_library_runtime.rs"],
+        categories: &[
+            Category::Image,
+            Category::Video,
+            Category::Audio,
+            Category::CaptioningUtility,
+            Category::Training,
+            Category::LoraControl,
+            Category::Primary,
+            Category::OptionalComponent,
+            Category::CoRequisite,
+            Category::ImportedConverted,
+        ],
+        resolution: Resolution::SharedContract {
+            entrypoint: TypedResolverEntrypoint::ExternalAvailability,
+        },
+    },
     ModelConsumerInventoryEntry {
         source_files: &[
             "crates/sceneworks-worker/src/image_jobs.rs",
@@ -724,6 +743,15 @@ mod tests {
                 "crates/sceneworks-core/src/hf_home.rs",
                 &["ArtifactSourceLibrary", "model_source_library(data_dir)"][..],
             ),
+            (
+                TypedResolverEntrypoint::ExternalAvailability,
+                "crates/sceneworks-worker/src/external_library_runtime.rs",
+                &[
+                    "ExternalLibraryBindingStore::new(",
+                    "probe_resolution(resolution)",
+                    "ExternalSourceSession::begin(",
+                ][..],
+            ),
         ];
         let used = PRODUCTION_MODEL_CONSUMERS
             .iter()
@@ -746,6 +774,81 @@ mod tests {
                     "{entrypoint:?} no longer proves typed resolution via {marker:?} in {source_file}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn every_dispatched_job_crosses_the_external_availability_guard_before_routing() {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let source = std::fs::read_to_string(repository.join("crates/sceneworks-worker/src/lib.rs"))
+            .expect("read worker dispatcher");
+        let function = source
+            .split_once("async fn run_utility_job(")
+            .expect("runtime dispatcher exists")
+            .1;
+        let guard = function
+            .find("RuntimeSourceGuard::begin(")
+            .expect("dispatcher enters typed source guard");
+        let routing = function
+            .find("match job.job_type")
+            .expect("dispatcher routes by job type");
+        assert!(
+            guard < routing,
+            "typed source availability must be checked before any job handler is selected"
+        );
+        assert!(function.contains("source_guard.classify_failure(settings, error)"));
+    }
+
+    #[test]
+    fn production_submitters_stamp_every_external_model_utility_identity() {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let training = std::fs::read_to_string(repository.join("apps/rust-api/src/training.rs"))
+            .expect("read training submitters");
+        for required in [
+            "resolve_model_manifest_entry(&state, &target.base_model)",
+            "\"baseModelManifestEntry\".to_owned()",
+            "resolve_model_manifest_entry_by_repo(&state, &model_name_or_path)",
+            "\"modelManifestEntry\": model_manifest_entry",
+            "resolve_model_manifest_entry(&state, &embedder)",
+        ] {
+            assert!(
+                training.contains(required),
+                "training/caption/semantic admission no longer stamps {required:?}"
+            );
+        }
+
+        let prompts = std::fs::read_to_string(repository.join("apps/rust-api/src/prompts.rs"))
+            .expect("read prompt utility submitter");
+        assert!(prompts.contains("resolve_model_manifest_entry_by_repo(&state, repository)"));
+        assert!(prompts.contains("\"prompt_refine_anubis_8b\""));
+        assert!(prompts.contains("\"modelManifestEntry\".to_owned()"));
+
+        let catalogs = std::fs::read_to_string(repository.join("apps/rust-api/src/catalogs.rs"))
+            .expect("read catalog semantic submitter");
+        for required in [
+            "\"vision_caption_qwen3vl_8b\"",
+            "\"clip_vit_l14\"",
+            "\"modelManifestEntries\": model_manifest_entries",
+        ] {
+            assert!(
+                catalogs.contains(required),
+                "catalog semantic admission no longer stamps {required:?}"
+            );
+        }
+
+        let runtime = std::fs::read_to_string(
+            repository.join("crates/sceneworks-worker/src/external_library_runtime.rs"),
+        )
+        .expect("read worker availability runtime");
+        for required in [
+            "\"modelManifestEntry\"",
+            "\"baseModelManifestEntry\"",
+            "\"modelManifestEntries\"",
+        ] {
+            assert!(
+                runtime.contains(required),
+                "worker no longer consumes stamped resolution carrier {required}"
+            );
         }
     }
 

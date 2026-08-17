@@ -161,6 +161,19 @@ pub(crate) async fn create_prompt_refine_job(
         }
     }
 
+    // Utility jobs name providers by repository rather than catalog id, but they load the same
+    // external HF artifacts. Stamp the exact server-owned catalog entry so worker admission can
+    // re-probe physical identity immediately before constructing the text/vision loader.
+    let model_manifest_entry = match job_payload.get("model").and_then(Value::as_str) {
+        Some(repository) => {
+            crate::models::resolve_model_manifest_entry_by_repo(&state, repository).await?
+        }
+        None => {
+            crate::models::resolve_model_manifest_entry(&state, "prompt_refine_anubis_8b").await?
+        }
+    };
+    job_payload.insert("modelManifestEntry".to_owned(), model_manifest_entry);
+
     let job = create_generation_job(
         state,
         JobType::PromptRefine,

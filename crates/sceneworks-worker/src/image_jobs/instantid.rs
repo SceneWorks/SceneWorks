@@ -442,31 +442,30 @@ pub(crate) async fn ensure_scrfd_weights(
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 pub(crate) async fn ensure_face_stack_dir(
-    api: &ApiClient,
+    _api: &ApiClient,
     settings: &Settings,
-    job: &JobSnapshot,
+    _job: &JobSnapshot,
 ) -> WorkerResult<PathBuf> {
-    let client = crate::downloads::streaming_download_client();
-    let context = DownloadContext {
-        api,
-        client: &client,
-        settings,
-        job_id: &job.id,
-        cancel_message: "Canceled while fetching face-stack weights.",
-        fresh_download: false,
-    };
-    let bundle_dir = std::env::var("SCENEWORKS_INSTANTID_WEIGHTS")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| settings.data_dir.join("cache").join("instantid-mlx"));
-    ensure_instantid_file(&context, INSTANTID_MLX_REPO, &bundle_dir, INSTANTID_SCRFD_FILE).await?;
-    ensure_instantid_file(
-        &context,
+    let snapshot = crate::model_jobs::huggingface_pinned_snapshot_dir(
+        &settings.data_dir,
         INSTANTID_MLX_REPO,
-        &bundle_dir,
-        INSTANTID_ARCFACE_FILE,
+        INSTANTID_MLX_REVISION,
     )
-    .await?;
-    Ok(bundle_dir)
+    .ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "InstantID face stack {INSTANTID_MLX_REPO}@{INSTANTID_MLX_REVISION} is not installed; install or reconnect the configured model library and retry"
+        ))
+    })?;
+    for file in [INSTANTID_SCRFD_FILE, INSTANTID_ARCFACE_FILE] {
+        let path = snapshot.join(file);
+        if !path.is_file() {
+            return Err(WorkerError::InvalidPayload(format!(
+                "InstantID face stack is incomplete: {} is missing",
+                path.display()
+            )));
+        }
+    }
+    Ok(snapshot)
 }
 
 /// Resolve all InstantID weight inputs, downloading the small converted bundle + the stock

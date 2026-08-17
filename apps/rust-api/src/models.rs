@@ -2004,7 +2004,9 @@ pub(crate) fn max_model_upload_bytes() -> usize {
 /// byte-accurate download size — so an unreachable huggingface.co can't stall
 /// those paths (sc-4169).
 pub(crate) async fn model_catalog(state: &AppState) -> Result<Vec<Value>, ApiError> {
-    Ok(model_catalog_snapshot(state).await?.as_ref().clone())
+    let mut models = model_catalog_snapshot(state).await?.as_ref().clone();
+    refresh_live_external_availability(&state.settings.data_dir, &mut models).await?;
+    Ok(models)
 }
 
 /// Catalog with live Hugging Face download-size estimates (negative-cached on
@@ -2019,6 +2021,7 @@ pub(crate) async fn model_catalog_sized(state: &AppState) -> Result<Vec<Value>, 
     let (size_estimates, snapshot) = tokio::join!(size_estimates, snapshot);
     let size_estimates = size_estimates?;
     let mut models = snapshot?.as_ref().clone();
+    refresh_live_external_availability(&state.settings.data_dir, &mut models).await?;
     for model in &mut models {
         let context = model_download_context(model)?;
         let live_estimate = context.as_ref().and_then(|context| {
@@ -2029,6 +2032,106 @@ pub(crate) async fn model_catalog_sized(state: &AppState) -> Result<Vec<Value>, 
         });
         apply_model_catalog_size_fields(model, context.as_ref(), live_estimate)?;
         apply_runtime_text_encoder_options(model, &state.settings.data_dir)?;
+    }
+    Ok(models)
+}
+
+async fn refresh_live_external_availability(
+    data_dir: &FsPath,
+    models: &mut Vec<Value>,
+) -> Result<(), ApiError> {
+    let data_dir = data_dir.to_path_buf();
+    let input = std::mem::take(models);
+    *models = tokio::task::spawn_blocking(move || {
+        refresh_live_external_availability_blocking(&data_dir, input)
+    })
+    .await
+    .map_err(|error| {
+        ApiError::internal(format!("external availability probe failed: {error}"))
+    })??;
+    Ok(())
+}
+
+fn refresh_live_external_availability_blocking(
+    data_dir: &FsPath,
+    mut models: Vec<Value>,
+) -> Result<Vec<Value>, ApiError> {
+    use sceneworks_core::model_artifacts::external_library::{
+        ExternalLibraryBindingStore, ExternalLibraryProbeStatus, ModelAvailability, ModelResolution,
+    };
+
+    let store = ExternalLibraryBindingStore::new(data_dir)
+        .map_err(|error| ApiError::internal(format!("open external-library binding: {error}")))?;
+    for model in &mut models {
+        let Some(resolution_value) = model
+            .get("modelResolution")
+            .filter(|value| !value.is_null())
+        else {
+            continue;
+        };
+        let Ok(mut resolution) =
+            serde_json::from_value::<ModelResolution>(resolution_value.clone())
+        else {
+            continue;
+        };
+        if !matches!(
+            resolution.availability,
+            ModelAvailability::ExternalReady | ModelAvailability::InstalledExternalUnavailable
+        ) {
+            continue;
+        }
+        let outcome = if resolution.expected_library.is_some() {
+            store
+                .probe_resolution(&resolution)
+                .map(|probe| (resolution.expected_library.clone(), probe.status))
+        } else {
+            store
+                .bind_or_probe_validated(
+                    &resolution.configured_library_path,
+                    &resolution.requirements,
+                )
+                .map(|(binding, probe)| (Some(binding), probe.status))
+        };
+        match outcome {
+            Ok((binding, ExternalLibraryProbeStatus::Available)) => {
+                resolution.expected_library = binding;
+                resolution.availability = ModelAvailability::ExternalReady;
+            }
+            Ok((binding, _)) => {
+                resolution.expected_library = binding;
+                resolution.availability = ModelAvailability::InstalledExternalUnavailable;
+            }
+            Err(_) => {
+                let source_available = resolution.expected_library.as_ref().map_or_else(
+                    || resolution.configured_library_path.is_dir(),
+                    |binding| {
+                        store
+                            .probe_bound(&resolution.configured_library_path, binding)
+                            .status
+                            == ExternalLibraryProbeStatus::Available
+                    },
+                );
+                resolution.availability = if source_available {
+                    ModelAvailability::Incomplete
+                } else {
+                    ModelAvailability::InstalledExternalUnavailable
+                };
+            }
+        }
+        if let Some(object) = model.as_object_mut() {
+            object.insert(
+                "modelAvailability".to_owned(),
+                serde_json::to_value(&resolution.availability).map_err(|error| {
+                    ApiError::internal(format!("serialize live model availability: {error}"))
+                })?,
+            );
+            object.insert(
+                "modelResolution".to_owned(),
+                serde_json::to_value(&resolution).map_err(|error| {
+                    ApiError::internal(format!("serialize live model resolution: {error}"))
+                })?,
+            );
+        }
     }
     Ok(models)
 }
@@ -2220,12 +2323,15 @@ struct ModelCatalogEntryState {
     cache_incomplete: bool,
     missing_required_files: Vec<String>,
     update_available: bool,
+    availability: sceneworks_core::model_artifacts::external_library::ModelAvailability,
+    resolution: Option<sceneworks_core::model_artifacts::external_library::ModelResolution>,
 }
 
 #[derive(Debug, PartialEq)]
 struct ReceiptFileSet {
     files: Vec<String>,
     revision: Option<String>,
+    variant: Option<String>,
 }
 
 fn receipt_entries(managed_path: &FsPath) -> Vec<Value> {
@@ -2273,7 +2379,17 @@ fn receipt_file_sets(
                 .get("snapshotRevision")
                 .and_then(Value::as_str)
                 .map(str::to_owned);
-            (!files.is_empty()).then_some(ReceiptFileSet { files, revision })
+            let variant = entry
+                .get("variant")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned);
+            (!files.is_empty()).then_some(ReceiptFileSet {
+                files,
+                revision,
+                variant,
+            })
         })
         .collect()
 }
@@ -2648,7 +2764,8 @@ mod download_receipt_tests {
             primary,
             vec![ReceiptFileSet {
                 files: vec!["model.safetensors".to_owned()],
-                revision: Some("primary-rev".to_owned())
+                revision: Some("primary-rev".to_owned()),
+                variant: None,
             }]
         );
         let dependency = receipt_file_sets(&managed, "owner/corequisite", None);
@@ -2656,8 +2773,84 @@ mod download_receipt_tests {
             dependency,
             vec![ReceiptFileSet {
                 files: vec!["encoder.safetensors".to_owned()],
-                revision: Some("dependency-rev".to_owned())
+                revision: Some("dependency-rev".to_owned()),
+                variant: None,
             }]
+        );
+    }
+
+    #[test]
+    fn receipt_requirements_preserve_exact_variant_file_closures() {
+        let temp = tempfile::tempdir().unwrap();
+        let managed = temp
+            .path()
+            .join("models")
+            .join(safe_download_dir("owner/matrix"));
+        std::fs::create_dir_all(&managed).unwrap();
+        std::fs::write(
+            managed.join(".sceneworks-download-complete.json"),
+            serde_json::to_vec(&json!({
+                "receipts": [
+                    {"repo":"owner/matrix", "modelId":"matrix", "variant":"q4", "resolvedFiles":["q4/model.safetensors"], "snapshotRevision":"0123456789abcdef0123456789abcdef01234567"},
+                    {"repo":"owner/matrix", "modelId":"matrix", "variant":"q8", "resolvedFiles":["q8/model.safetensors"], "snapshotRevision":"89abcdef0123456789abcdef0123456789abcdef"}
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let model = json!({
+            "id": "matrix",
+            "downloads": [
+                {"provider":"huggingface", "repo":"owner/matrix", "variant":"q4", "files":["q4/*"]},
+                {"provider":"huggingface", "repo":"owner/matrix", "variant":"q8", "files":["q8/*"]}
+            ]
+        });
+        let requirements = receipt_requirements_for_model(&model, temp.path());
+        assert_eq!(requirements.len(), 2);
+        assert!(requirements.iter().any(|requirement| {
+            requirement.variant == "q4"
+                && requirement.files == [PathBuf::from("q4/model.safetensors")]
+        }));
+        assert!(requirements.iter().any(|requirement| {
+            requirement.variant == "q8"
+                && requirement.files == [PathBuf::from("q8/model.safetensors")]
+        }));
+
+        let selected = selected_model_artifact_closure(&model, std::env::consts::OS, Some("q4"));
+        let requirements = receipt_requirements_for_model(&selected, temp.path());
+        assert_eq!(requirements.len(), 1);
+        assert_eq!(requirements[0].variant, "q4");
+        assert!(requirements[0].is_primary);
+    }
+
+    #[test]
+    fn selected_closure_uses_worker_platform_and_matching_tier_corequisites() {
+        let model = json!({
+            "id": "cross-platform",
+            "downloads": [
+                {"provider":"huggingface", "repo":"owner/mac", "variant":"q4", "default":true, "files":["q4/*"], "platforms":["macos"]},
+                {"provider":"huggingface", "repo":"owner/windows", "variant":"q4", "default":true, "files":["q4/*"], "platforms":["windows", "linux"]},
+                {"provider":"huggingface", "repo":"owner/candle-component", "variant":"q4", "coRequisite":true, "files":["encoder.safetensors"], "platforms":["windows", "linux"]},
+                {"provider":"huggingface", "repo":"owner/wrong-tier", "variant":"q8", "coRequisite":true, "files":["encoder.safetensors"], "platforms":["windows", "linux"]}
+            ]
+        });
+        let mac = selected_model_artifact_closure(&model, "macos", Some("q4"));
+        let windows = selected_model_artifact_closure(&model, "windows", Some("q4"));
+        let repositories = |entry: &Value| {
+            entry["downloads"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|download| download["repo"].as_str().map(str::to_owned))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(repositories(&mac), vec!["owner/mac".to_owned()]);
+        assert_eq!(
+            repositories(&windows),
+            vec![
+                "owner/windows".to_owned(),
+                "owner/candle-component".to_owned()
+            ]
         );
     }
 
@@ -3568,6 +3761,9 @@ fn install_state_for(
                 || co_requisite_incomplete,
             missing_required_files,
             update_available: stale_files_present || soft_co_requisite_update,
+            availability:
+                sceneworks_core::model_artifacts::external_library::ModelAvailability::Missing,
+            resolution: None,
         }
     } else if let Some(installed_path) = model_manifest_installed_path(model, data_dir) {
         ModelCatalogEntryState {
@@ -3577,6 +3773,9 @@ fn install_state_for(
             cache_incomplete: false,
             missing_required_files: Vec::new(),
             update_available: false,
+            availability:
+                sceneworks_core::model_artifacts::external_library::ModelAvailability::Missing,
+            resolution: None,
         }
     } else {
         ModelCatalogEntryState {
@@ -3586,6 +3785,414 @@ fn install_state_for(
             cache_incomplete: false,
             missing_required_files: Vec::new(),
             update_available: false,
+            availability:
+                sceneworks_core::model_artifacts::external_library::ModelAvailability::Missing,
+            resolution: None,
+        }
+    }
+}
+
+fn receipt_requirements_for_model(
+    model: &Value,
+    data_dir: &FsPath,
+) -> Vec<sceneworks_core::model_artifacts::external_library::ExternalArtifactRequirement> {
+    use sceneworks_core::model_artifacts::external_library::ExternalArtifactRequirement;
+
+    let model_id = model.get("id").and_then(Value::as_str);
+    let mut requirements = Vec::new();
+    let mut downloads = model
+        .get("downloads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|download| is_supported_model_download(download));
+    for download in downloads.by_ref() {
+        if is_co_requisite_download(download)
+            && download.get("required").and_then(Value::as_str) == Some("soft")
+        {
+            continue;
+        }
+        let Some(repo) = download.get("repo").and_then(Value::as_str) else {
+            continue;
+        };
+        let managed = data_dir.join("models").join(safe_download_dir(repo));
+        let receipt_model_id = (!is_co_requisite_download(download))
+            .then_some(model_id)
+            .flatten();
+        let variant = download
+            .get("variant")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("default")
+            .to_owned();
+        let declared_files = string_array_field(download, "files");
+        for receipt in receipt_file_sets(&managed, repo, receipt_model_id) {
+            if receipt
+                .variant
+                .as_deref()
+                .is_some_and(|receipt_variant| receipt_variant != variant)
+                || (receipt.variant.is_none()
+                    && !declared_files.is_empty()
+                    && !receipt
+                        .files
+                        .iter()
+                        .any(|file| allow_pattern_matches(file, &declared_files)))
+            {
+                continue;
+            }
+            let requirement = ExternalArtifactRequirement {
+                repository: repo.to_owned(),
+                revision: receipt.revision,
+                variant: variant.clone(),
+                files: receipt.files.into_iter().map(PathBuf::from).collect(),
+                is_primary: !is_co_requisite_download(download),
+            };
+            if !requirements.contains(&requirement) {
+                requirements.push(requirement);
+            }
+        }
+    }
+    requirements.sort_by(|left, right| {
+        (&left.repository, &left.revision, &left.variant, &left.files).cmp(&(
+            &right.repository,
+            &right.revision,
+            &right.variant,
+            &right.files,
+        ))
+    });
+    requirements
+}
+
+fn declared_exact_requirements_for_model(
+    model: &Value,
+) -> Vec<sceneworks_core::model_artifacts::external_library::ExternalArtifactRequirement> {
+    use sceneworks_core::model_artifacts::external_library::ExternalArtifactRequirement;
+
+    let mut requirements = Vec::new();
+    for download in model
+        .get("downloads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|download| is_supported_model_download(download))
+        .filter(|download| download.get("required").and_then(Value::as_str) != Some("soft"))
+    {
+        let Some(repository) = download.get("repo").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(revision) = download
+            .get("revision")
+            .and_then(Value::as_str)
+            .filter(|revision| {
+                revision.len() == 40
+                    && revision
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
+        else {
+            continue;
+        };
+        let files = string_array_field(download, "files");
+        if files.is_empty()
+            || files.iter().any(|file| {
+                file.bytes()
+                    .any(|byte| matches!(byte, b'*' | b'?' | b'[' | b']'))
+            })
+        {
+            continue;
+        }
+        requirements.push(ExternalArtifactRequirement {
+            repository: repository.to_owned(),
+            revision: Some(revision.to_owned()),
+            variant: download
+                .get("variant")
+                .and_then(Value::as_str)
+                .unwrap_or("default")
+                .to_owned(),
+            files: files.into_iter().map(PathBuf::from).collect(),
+            is_primary: !is_co_requisite_download(download),
+        });
+    }
+    requirements
+}
+
+fn selected_requirements_for_model(
+    model: &Value,
+    data_dir: &FsPath,
+    configured_library: &FsPath,
+) -> Vec<sceneworks_core::model_artifacts::external_library::ExternalArtifactRequirement> {
+    use sceneworks_core::model_artifacts::external_library::{
+        validate_requirements_at_root, ExternalLibraryBindingStore,
+    };
+
+    let mut requirements = receipt_requirements_for_model(model, data_dir);
+    for declared in declared_exact_requirements_for_model(model) {
+        if !requirements.iter().any(|requirement| {
+            requirement.repository == declared.repository
+                && requirement.variant == declared.variant
+                && requirement.is_primary == declared.is_primary
+        }) {
+            requirements.push(declared);
+        }
+    }
+    if requirements
+        .iter()
+        .filter(|requirement| requirement.is_primary)
+        .count()
+        != 1
+    {
+        return Vec::new();
+    }
+    requirements.sort_by(|left, right| {
+        (
+            !left.is_primary,
+            &left.repository,
+            &left.variant,
+            &left.files,
+        )
+            .cmp(&(
+                !right.is_primary,
+                &right.repository,
+                &right.variant,
+                &right.files,
+            ))
+    });
+    if validate_requirements_at_root(configured_library, &requirements).is_ok() {
+        return requirements;
+    }
+    ExternalLibraryBindingStore::new(data_dir)
+        .and_then(|store| store.validated_closures())
+        .ok()
+        .and_then(|closures| {
+            closures
+                .into_iter()
+                .find(|closure| closure == &requirements)
+        })
+        .unwrap_or_default()
+}
+
+/// Reduce a manifest to the exact primary tier and hard co-requisites a worker on `platform`
+/// will load. The public catalog may retain every installable tier, but source availability is a
+/// runtime decision and must never union receipts from sibling variants or from the API host OS.
+fn selected_model_artifact_closure(
+    model: &Value,
+    platform: &str,
+    requested_variant: Option<&str>,
+) -> Value {
+    let mut selected = model.clone();
+    retain_downloads_for_os(&mut selected, platform);
+    let primary = requested_variant
+        .and_then(|variant| model_download_for_variant(&selected, variant))
+        .or_else(|| model_download(&selected));
+    let selected_variant = primary
+        .as_ref()
+        .and_then(|download| download.get("variant"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let mut downloads = primary.into_iter().collect::<Vec<_>>();
+    downloads.extend(
+        model_co_requisite_downloads_for_variant(&selected, selected_variant.as_deref())
+            .into_iter()
+            .filter(|download| download.get("required").and_then(Value::as_str) != Some("soft")),
+    );
+    if let Some(object) = selected.as_object_mut() {
+        object.insert("downloads".to_owned(), Value::Array(downloads));
+    }
+    selected
+}
+
+fn local_artifact_for_requirements(
+    artifacts: &[sceneworks_core::model_artifacts::ResolvedModelArtifact],
+    requirements: &[sceneworks_core::model_artifacts::external_library::ExternalArtifactRequirement],
+) -> Option<sceneworks_core::model_artifacts::ResolvedModelArtifact> {
+    if requirements.is_empty() {
+        return None;
+    }
+    artifacts.iter().find_map(|artifact| {
+        let primary_identity_matches = requirements
+            .iter()
+            .find(|requirement| requirement.is_primary)
+            .is_some_and(|primary| {
+                artifact.identity.repository == primary.repository
+                    && primary
+                        .revision
+                        .as_deref()
+                        .map_or(true, |revision| artifact.identity.revision == revision)
+                    && artifact.identity.variant == primary.variant
+                    && artifact.closure.members.iter().any(|member| {
+                        member.role == sceneworks_core::model_artifacts::ArtifactMemberRole::Primary
+                            && member.source == artifact.identity
+                    })
+            });
+        let covers = primary_identity_matches
+            && requirements.iter().all(|requirement| {
+                let available_files = artifact
+                    .closure
+                    .members
+                    .iter()
+                    .filter(|member| {
+                        member.source.repository == requirement.repository
+                            && requirement
+                                .revision
+                                .as_deref()
+                                .map_or(true, |expected| member.source.revision == expected)
+                            && member.source.variant == requirement.variant
+                    })
+                    .flat_map(|member| {
+                        member
+                            .files
+                            .iter()
+                            .map(|file| member.source_subpath.join(&file.relative_path))
+                    })
+                    .collect::<std::collections::HashSet<_>>();
+                requirement
+                    .files
+                    .iter()
+                    .all(|file| available_files.contains(file))
+            });
+        covers.then(|| artifact.clone())
+    })
+}
+
+fn apply_external_availability(
+    state: &mut ModelCatalogEntryState,
+    model: &Value,
+    data_dir: &FsPath,
+    local_artifacts: &[sceneworks_core::model_artifacts::ResolvedModelArtifact],
+) {
+    let selected = selected_model_artifact_closure(model, std::env::consts::OS, None);
+    let configured_library = sceneworks_core::hf_home::model_source_library(data_dir)
+        .root()
+        .to_path_buf();
+    apply_external_availability_at(
+        state,
+        &selected,
+        data_dir,
+        local_artifacts,
+        configured_library,
+    );
+}
+
+fn apply_external_availability_at(
+    state: &mut ModelCatalogEntryState,
+    model: &Value,
+    data_dir: &FsPath,
+    local_artifacts: &[sceneworks_core::model_artifacts::ResolvedModelArtifact],
+    configured_library: PathBuf,
+) {
+    use sceneworks_core::model_artifacts::external_library::{
+        ExternalLibraryBindingStore, ExternalLibraryProbeStatus, ModelAvailability, ModelResolution,
+    };
+
+    let requirements = selected_requirements_for_model(model, data_dir, &configured_library);
+    if let Some(artifact) = local_artifact_for_requirements(local_artifacts, &requirements) {
+        if let Ok(resolution) = ModelResolution::local_ready(artifact) {
+            state.availability = ModelAvailability::LocalReady;
+            state.resolution = Some(resolution);
+            state.installed = true;
+            state.cache_incomplete = false;
+            return;
+        }
+    }
+
+    let managed_models = data_dir.join("models");
+    let installed_in_app_owned_path = state.installed
+        && state
+            .installed_path
+            .as_deref()
+            .map(FsPath::new)
+            .is_some_and(|path| path.starts_with(&managed_models));
+    if installed_in_app_owned_path {
+        state.availability = ModelAvailability::LocalReady;
+        return;
+    }
+
+    if requirements.is_empty() {
+        state.availability = if state.cache_incomplete {
+            ModelAvailability::Incomplete
+        } else {
+            ModelAvailability::Missing
+        };
+        state.resolution =
+            ModelResolution::not_ready(state.availability.clone(), configured_library, Vec::new())
+                .ok();
+        return;
+    }
+
+    let Ok(store) = ExternalLibraryBindingStore::new(data_dir) else {
+        state.availability = ModelAvailability::InstalledExternalUnavailable;
+        state.resolution = Some(ModelResolution::unavailable(
+            configured_library,
+            None,
+            requirements,
+        ));
+        return;
+    };
+    match store.bind_or_probe_validated(&configured_library, &requirements) {
+        Ok((binding, probe)) if probe.status == ExternalLibraryProbeStatus::Available => {
+            // The receipt-derived closure can only name artifacts that completed installation.
+            // Preserve the existing install-state gate when a hard co-requisite has no receipt (or
+            // is otherwise incomplete); validating the primary's remembered files must not promote
+            // that partial model back to ready.
+            if !state.installed {
+                state.availability = ModelAvailability::Incomplete;
+                state.resolution = ModelResolution::not_ready(
+                    ModelAvailability::Incomplete,
+                    configured_library,
+                    requirements,
+                )
+                .ok();
+                return;
+            }
+            if let Ok(resolution) =
+                ModelResolution::external_ready(configured_library, binding, requirements)
+            {
+                state.availability = ModelAvailability::ExternalReady;
+                state.resolution = Some(resolution);
+                state.installed = true;
+                state.cache_incomplete = false;
+            }
+        }
+        Ok((binding, _)) => {
+            state.availability = ModelAvailability::InstalledExternalUnavailable;
+            state.resolution = Some(ModelResolution::unavailable(
+                configured_library,
+                Some(binding),
+                requirements,
+            ));
+            state.installed = true;
+            state.cache_incomplete = false;
+        }
+        Err(_) => {
+            let existing_binding = store.load().ok().flatten();
+            let source_is_physically_available = existing_binding.as_ref().map_or_else(
+                || configured_library.is_dir(),
+                |binding| {
+                    store.probe_bound(&configured_library, binding).status
+                        == ExternalLibraryProbeStatus::Available
+                },
+            );
+            if source_is_physically_available {
+                state.availability = ModelAvailability::Incomplete;
+                state.resolution = ModelResolution::not_ready(
+                    ModelAvailability::Incomplete,
+                    configured_library,
+                    requirements,
+                )
+                .ok();
+                return;
+            }
+            // Receipt identity is durable even when the configured source cannot currently be
+            // opened. Keep it installed-but-unavailable; never rewrite the receipt or download.
+            state.availability = ModelAvailability::InstalledExternalUnavailable;
+            state.resolution = Some(ModelResolution::unavailable(
+                configured_library,
+                existing_binding,
+                requirements,
+            ));
+            state.installed = true;
+            state.cache_incomplete = false;
         }
     }
 }
@@ -4451,13 +5058,17 @@ fn apply_model_catalog_size_fields(
 
 fn apply_model_catalog_entry(
     mut model: Value,
-    download_context: Option<DownloadContext>,
+    _download_context: Option<DownloadContext>,
     data_dir: &FsPath,
     user_model_ids: &std::collections::HashSet<String>,
+    local_artifacts: &[sceneworks_core::model_artifacts::ResolvedModelArtifact],
 ) -> Result<Value, ApiError> {
     #[cfg(test)]
     test_delay_catalog_probe(&model);
-    let state = install_state_for(download_context, &model, data_dir);
+    let selected_model = selected_model_artifact_closure(&model, std::env::consts::OS, None);
+    let selected_context = model_download_context(&selected_model)?;
+    let mut state = install_state_for(selected_context, &selected_model, data_dir);
+    apply_external_availability(&mut state, &model, data_dir, local_artifacts);
     let object = model
         .as_object_mut()
         .ok_or_else(|| ApiError::internal("Model manifest entry must be an object"))?;
@@ -4468,6 +5079,22 @@ fn apply_model_catalog_entry(
         Value::String(if user_managed { "user" } else { "builtin" }.to_owned()),
     );
     object.insert("downloadable".to_owned(), Value::Bool(state.downloadable));
+    object.insert(
+        "modelAvailability".to_owned(),
+        serde_json::to_value(&state.availability).map_err(|error| {
+            ApiError::internal(format!("serialize model availability: {error}"))
+        })?,
+    );
+    object.insert(
+        "modelResolution".to_owned(),
+        state
+            .resolution
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|error| ApiError::internal(format!("serialize model resolution: {error}")))?
+            .unwrap_or(Value::Null),
+    );
     object.insert(
         "installState".to_owned(),
         Value::String(
@@ -4784,8 +5411,21 @@ async fn build_model_catalog_snapshot(state: &AppState) -> Result<Vec<Value>, Ap
     crate::test_note_model_catalog_build();
     let (models, download_contexts, user_model_ids) = load_model_catalog_inputs(state).await?;
 
+    let local_artifacts = if state.settings.resolved_cache.enabled {
+        sceneworks_core::model_artifacts::resolved_cache::ResolvedCacheStore::enumerate_existing(
+            &state.settings.data_dir,
+        )
+        .map_err(|error| ApiError::internal(format!("inspect resolved model cache: {error}")))?
+        .into_iter()
+        .filter_map(|entry| entry.metadata.map(|metadata| metadata.artifact))
+        .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+
     let data_dir = Arc::new(state.settings.data_dir.clone());
     let user_model_ids = Arc::new(user_model_ids);
+    let local_artifacts = Arc::new(local_artifacts);
     let work_items = models
         .into_iter()
         .zip(download_contexts.clone())
@@ -4793,6 +5433,7 @@ async fn build_model_catalog_snapshot(state: &AppState) -> Result<Vec<Value>, Ap
     let work_groups = group_model_catalog_work_items(work_items);
     let data_dir_for_sweep = data_dir.clone();
     let user_model_ids_for_sweep = user_model_ids.clone();
+    let local_artifacts_for_sweep = local_artifacts.clone();
 
     // sc-14530: each model's install-state resolution is independent but may spend seconds
     // waiting on network-volume metadata. Dispatch bounded blocking tasks per primary-repo group
@@ -4807,6 +5448,7 @@ async fn build_model_catalog_snapshot(state: &AppState) -> Result<Vec<Value>, Ap
                     download_context,
                     &data_dir_for_sweep,
                     &user_model_ids_for_sweep,
+                    &local_artifacts_for_sweep,
                 )
             })
             .collect::<Result<Vec<_>, _>>()
@@ -4897,8 +5539,1511 @@ pub(crate) async fn resolve_model_manifest_entry(
             .cloned()
     };
     let mut entry = merge_model_manifest_entry(find(&builtin), find(&user));
+    if entry.as_object().map_or(true, JsonObject::is_empty) {
+        if let Some(embedded) = embedded_builtin_catalog_entry(|candidate| {
+            candidate.get("id").and_then(Value::as_str) == Some(model_id)
+        })? {
+            entry = embedded;
+        }
+    }
+    // Preserve the complete cross-platform manifest and attach an independently evaluated exact
+    // default-tier closure for every worker OS. A macOS API must never bless only the MLX subset
+    // while forwarding Candle-only co-requisites to a Windows/Linux worker.
+    attach_runtime_model_resolutions(state, &mut entry, None)?;
     inject_converted_model_path(&mut entry, &state.settings.data_dir);
+    prepare_catalog_model_entry(state, model_id, entry)
+}
+
+fn attach_runtime_model_resolutions(
+    state: &AppState,
+    entry: &mut Value,
+    requested_variant: Option<&str>,
+) -> Result<(), ApiError> {
+    use sceneworks_core::model_artifacts::external_library::ModelAvailability;
+
+    if entry.as_object().map_or(true, serde_json::Map::is_empty) {
+        return Ok(());
+    }
+    let local_artifacts = if state.settings.resolved_cache.enabled {
+        sceneworks_core::model_artifacts::resolved_cache::ResolvedCacheStore::enumerate_existing(
+            &state.settings.data_dir,
+        )
+        .map_err(|error| ApiError::internal(format!("inspect resolved model cache: {error}")))?
+        .into_iter()
+        .filter_map(|item| item.metadata.map(|metadata| metadata.artifact))
+        .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let configured_library =
+        sceneworks_core::hf_home::model_source_library(&state.settings.data_dir)
+            .root()
+            .to_path_buf();
+    let mut resolutions = serde_json::Map::new();
+    let mut host_state = None;
+    for platform in ["macos", "windows", "linux"] {
+        let selected = selected_model_artifact_closure(entry, platform, requested_variant);
+        let context = model_download_context(&selected)?;
+        let mut selected_state = install_state_for(context, &selected, &state.settings.data_dir);
+        apply_external_availability_at(
+            &mut selected_state,
+            &selected,
+            &state.settings.data_dir,
+            &local_artifacts,
+            configured_library.clone(),
+        );
+        let resolution = selected_state
+            .resolution
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|error| ApiError::internal(format!("serialize model resolution: {error}")))?
+            .unwrap_or(Value::Null);
+        resolutions.insert(platform.to_owned(), resolution);
+        if platform == std::env::consts::OS {
+            host_state = Some(selected_state);
+        }
+    }
+    if let Some(object) = entry.as_object_mut() {
+        object.insert(
+            "modelResolutionsByPlatform".to_owned(),
+            Value::Object(resolutions),
+        );
+        if let Some(state) = host_state {
+            object.insert(
+                "modelAvailability".to_owned(),
+                serde_json::to_value(&state.availability).map_err(|error| {
+                    ApiError::internal(format!("serialize model availability: {error}"))
+                })?,
+            );
+            object.insert(
+                "modelResolution".to_owned(),
+                state
+                    .resolution
+                    .map(|resolution| serde_json::to_value(resolution))
+                    .transpose()
+                    .map_err(|error| {
+                        ApiError::internal(format!("serialize model resolution: {error}"))
+                    })?
+                    .unwrap_or_else(|| {
+                        debug_assert_eq!(state.availability, ModelAvailability::LocalReady);
+                        Value::Null
+                    }),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn requested_runtime_variant(payload: &JsonObject) -> Option<String> {
+    if let Some(variant) = payload
+        .get("variant")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(variant.to_ascii_lowercase());
+    }
+    let advanced = payload.get("advanced").and_then(Value::as_object)?;
+    if let Some(tier) = advanced
+        .get("quantTier")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Some(tier.to_ascii_lowercase());
+    }
+    let bits = advanced.get("mlxQuantize").and_then(|value| {
+        value
+            .as_i64()
+            .or_else(|| value.as_str()?.trim().parse::<i64>().ok())
+    })?;
+    Some(
+        match bits {
+            1..=4 => "q4",
+            5..=8 => "q8",
+            _ => "bf16",
+        }
+        .to_owned(),
+    )
+}
+
+/// Re-stamp all server-owned model entries at the final queue boundary, after presets and request
+/// normalization have selected the tier. This is synchronous/read-only and therefore cannot race a
+/// later payload mutation between admission and persistence.
+pub(crate) fn restamp_runtime_model_resolutions(
+    state: &AppState,
+    payload: &mut JsonObject,
+) -> Result<(), ApiError> {
+    let variant = requested_runtime_variant(payload);
+    for key in ["modelManifestEntry", "baseModelManifestEntry"] {
+        if let Some(entry) = payload.get_mut(key) {
+            attach_runtime_model_resolutions(state, entry, variant.as_deref())?;
+        }
+    }
+    if let Some(entries) = payload
+        .get_mut("modelManifestEntries")
+        .and_then(Value::as_array_mut)
+    {
+        for entry in entries {
+            attach_runtime_model_resolutions(state, entry, variant.as_deref())?;
+        }
+    }
+    Ok(())
+}
+
+fn payload_has_model_entry(payload: &JsonObject, model_id: &str) -> bool {
+    ["modelManifestEntry", "baseModelManifestEntry"]
+        .into_iter()
+        .filter_map(|key| payload.get(key))
+        .chain(
+            payload
+                .get("modelManifestEntries")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten(),
+        )
+        .any(|entry| entry.get("id").and_then(Value::as_str) == Some(model_id))
+}
+
+const RUNTIME_FACE_STACK_ID: &str = "__runtime_instantid_face_stack";
+
+fn runtime_exact_artifact_entry(
+    id: &str,
+    name: &str,
+    repository: &str,
+    revision: &str,
+    files: &[&str],
+) -> Value {
+    json!({
+        "id": id,
+        "name": name,
+        "family": "runtime-auxiliary",
+        "type": "utility",
+        "downloads": [{
+            "provider": "huggingface",
+            "repo": repository,
+            "revision": revision,
+            "files": files,
+        }],
+    })
+}
+
+fn runtime_face_stack_entry() -> Value {
+    runtime_exact_artifact_entry(
+        RUNTIME_FACE_STACK_ID,
+        "InstantID face analysis stack",
+        "SceneWorks/instantid-mlx",
+        "bca0cacf8e5e04529bb2b326a521361b02be84fd",
+        &["scrfd_10g.safetensors", "arcface_iresnet100.safetensors"],
+    )
+}
+
+fn payload_string<'a>(payload: &'a JsonObject, key: &str) -> Option<&'a str> {
+    payload
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn payload_uses_identity(payload: &JsonObject) -> bool {
+    ["characterId", "referenceAssetId"]
+        .into_iter()
+        .any(|key| payload_string(payload, key).is_some())
+        || payload
+            .get("referenceAssetIds")
+            .and_then(Value::as_array)
+            .is_some_and(|values| !values.is_empty())
+}
+
+fn payload_has_poses(payload: &JsonObject) -> bool {
+    payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("poses"))
+        .and_then(Value::as_array)
+        .is_some_and(|poses| !poses.is_empty())
+}
+
+fn payload_requests_strict_control(payload: &JsonObject) -> bool {
+    let Some(advanced) = payload.get("advanced").and_then(Value::as_object) else {
+        return false;
+    };
+    advanced
+        .get("poses")
+        .and_then(Value::as_array)
+        .is_some_and(|poses| !poses.is_empty())
+        || advanced.contains_key("controlMode")
+}
+
+fn payload_requests_pid(payload: &JsonObject) -> bool {
+    payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("usePid"))
+        .is_some_and(|value| {
+            value.as_bool().unwrap_or_else(|| {
+                value
+                    .as_str()
+                    .is_some_and(|text| text.trim().eq_ignore_ascii_case("true"))
+            })
+        })
+}
+
+fn runtime_pid_model_id(model_id: &str) -> Option<&'static str> {
+    match model_id {
+        "qwen_image"
+        | "qwen_image_edit"
+        | "qwen_image_edit_2509"
+        | "qwen_image_edit_2511"
+        | "qwen_image_edit_2511_lightning"
+        | "krea_2_turbo"
+        | "krea_2_raw" => Some("pid_qwenimage"),
+        "flux_dev" | "flux_schnell" | "boogu_image" | "boogu_image_turbo" | "boogu_image_edit"
+        | "chroma1_hd" | "chroma1_base" | "chroma1_flash" | "z_image_turbo" | "z_image_edit" => {
+            Some("pid_flux")
+        }
+        "flux2_dev"
+        | "flux2_klein_9b"
+        | "flux2_klein_9b_kv"
+        | "flux2_klein_9b_true_v2"
+        | "lens"
+        | "lens_turbo"
+        | "ideogram_4"
+        | "ideogram_4_turbo" => Some("pid_flux2"),
+        "sdxl"
+        | "realvisxl"
+        | "realvisxl_lightning"
+        | "kolors"
+        | "instantid_realvisxl"
+        | "illustrious_xl_v1"
+        | "illustrious_xl_v2" => Some("pid_sdxl"),
+        _ => None,
+    }
+}
+
+fn default_runtime_control_weight(
+    model_id: &str,
+    requested_variant: Option<&str>,
+) -> Option<&'static sceneworks_core::control_weights::ShippedControlWeight> {
+    use sceneworks_core::control_weights::{shipped_control_weight, SHIPPED_CONTROL_WEIGHTS};
+
+    let (engine_id, file) = match model_id {
+        "flux_dev" => ("flux1_dev_control", "diffusion_pytorch_model.safetensors"),
+        "flux2_dev" => (
+            "flux2_dev_control",
+            "FLUX.2-dev-Fun-Controlnet-Union-2602.safetensors",
+        ),
+        "z_image_turbo" => (
+            "z_image_turbo_control",
+            "Z-Image-Turbo-Fun-Controlnet-Union-2.1-8steps.safetensors",
+        ),
+        // The base Z-Image overlay has a platform-specific filename. Its caller builds a manifest
+        // entry with independently selected platform rows instead of choosing by the API host.
+        "z_image" => return None,
+        "qwen_image" => (
+            "qwen_image_control",
+            match requested_variant.unwrap_or("q4") {
+                "q8" => "q8/model.safetensors",
+                "bf16" => "bf16/model.safetensors",
+                _ => "q4/model.safetensors",
+            },
+        ),
+        "kolors" => ("kolors_control", "diffusion_pytorch_model.safetensors"),
+        "krea_2_turbo" => ("krea_2_turbo_control", "control_step5000.safetensors"),
+        _ => return None,
+    };
+    let repo = SHIPPED_CONTROL_WEIGHTS
+        .iter()
+        .find(|weight| weight.engine_id == engine_id && weight.file == file)?
+        .repo;
+    shipped_control_weight(engine_id, repo, file)
+}
+
+/// Exact non-primary artifacts selected by real worker routes but intentionally kept out of the
+/// user-facing model manifest. Stamping them here prevents a source disconnect from turning an
+/// on-demand helper into a network re-download or a second app-owned cache.
+fn runtime_auxiliary_entries(payload: &JsonObject) -> Result<Vec<Value>, ApiError> {
+    let model_id = payload_string(payload, "model")
+        .or_else(|| payload_string(payload, "modelId"))
+        .unwrap_or_default();
+    let mut entries = Vec::new();
+    let mut push_exact = |id: &str, name: &str, repo: &str, revision: &str, files: &[&str]| {
+        entries.push(runtime_exact_artifact_entry(
+            id, name, repo, revision, files,
+        ));
+    };
+
+    if model_id == "instantid_realvisxl" {
+        push_exact(
+            "__runtime_instantid_bundle",
+            "InstantID identity bundle",
+            "SceneWorks/instantid-mlx",
+            "bca0cacf8e5e04529bb2b326a521361b02be84fd",
+            &[
+                "ip-adapter.safetensors",
+                "scrfd_10g.safetensors",
+                "arcface_iresnet100.safetensors",
+            ],
+        );
+        push_exact(
+            "__runtime_instantid_controlnet",
+            "InstantID IdentityNet",
+            "InstantX/InstantID",
+            "57b32dfee076092ad2930c71fd6d439c2c3b1820",
+            &[
+                "ControlNetModel/config.json",
+                "ControlNetModel/diffusion_pytorch_model.safetensors",
+            ],
+        );
+        if payload_has_poses(payload) {
+            push_exact(
+                "__runtime_instantid_openpose",
+                "InstantID OpenPose ControlNet",
+                "xinsir/controlnet-openpose-sdxl-1.0",
+                "23f966cd5cfdd3f7729c903e243d87152162d2b7",
+                &["config.json", "diffusion_pytorch_model.safetensors"],
+            );
+        }
+    }
+
+    if model_id == "pulid_flux_dev" {
+        push_exact(
+            "__runtime_pulid_adapter",
+            "PuLID adapter",
+            "guozinan/PuLID",
+            "492b1451255dc9d9bc3c857259690b5f8b998d4a",
+            &["pulid_flux_v0.9.1.safetensors"],
+        );
+        push_exact(
+            "__runtime_pulid_encoder",
+            "PuLID EVA and BiSeNet bundle",
+            "SceneWorks/pulid-flux-mlx",
+            "78ef91f977eae16d66fb191caf003154b7a0a0b8",
+            &[
+                "eva02_clip_l_336.safetensors",
+                "bisenet_parsing.safetensors",
+            ],
+        );
+        push_exact(
+            RUNTIME_FACE_STACK_ID,
+            "InstantID face analysis stack",
+            "SceneWorks/instantid-mlx",
+            "bca0cacf8e5e04529bb2b326a521361b02be84fd",
+            &["scrfd_10g.safetensors", "arcface_iresnet100.safetensors"],
+        );
+    }
+
+    if payload_uses_identity(payload) {
+        match model_id {
+            "sdxl" | "realvisxl" | "illustrious_xl_v1" | "illustrious_xl_v2" => {
+                push_exact(
+                    "__runtime_sdxl_ip_adapter",
+                    "SDXL IP-Adapter",
+                    "h94/IP-Adapter",
+                    "018e402774aeeddd60609b4ecdb7e298259dc729",
+                    &[
+                        "sdxl_models/ip-adapter-plus_sdxl_vit-h.safetensors",
+                        "models/image_encoder/config.json",
+                        "models/image_encoder/model.safetensors",
+                    ],
+                );
+            }
+            "flux_dev" | "flux_schnell" => {
+                push_exact(
+                    "__runtime_flux_ip_adapter",
+                    "FLUX IP-Adapter",
+                    "XLabs-AI/flux-ip-adapter",
+                    "18f6940238ab5dc3744df7a8e30315892279d5f9",
+                    &["ip_adapter.safetensors"],
+                );
+                push_exact(
+                    "__runtime_flux_ip_encoder",
+                    "FLUX IP-Adapter image encoder",
+                    "openai/clip-vit-large-patch14",
+                    "32bd64288804d66eefd0ccbe215aa642df71cc41",
+                    &["model.safetensors"],
+                );
+            }
+            "kolors" => push_exact(
+                "__runtime_kolors_ip_adapter",
+                "Kolors IP-Adapter",
+                "Kwai-Kolors/Kolors-IP-Adapter-Plus",
+                "5c72aa86cd8d9d23ff406d293c5473820e09e1d9",
+                &[
+                    "ip_adapter_plus_general.safetensors",
+                    "image_encoder/config.json",
+                    "image_encoder/model.safetensors",
+                ],
+            ),
+            _ => {}
+        }
+    }
+
+    if model_id == "qwen_image_edit_2511_lightning" {
+        push_exact(
+            "__runtime_qwen_edit_lightning",
+            "Qwen Image Edit Lightning distill LoRA",
+            "lightx2v/Qwen-Image-Edit-2511-Lightning",
+            "d74eba145674fd7e31b949324e148e21e7118abd",
+            &["Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"],
+        );
+    }
+
+    let selected_control = payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("controlWeights"))
+        .and_then(Value::as_object);
+    let platform_specific_z_control = selected_control.is_none()
+        && payload_requests_strict_control(payload)
+        && model_id == "z_image";
+    if let Some(weights) = selected_control {
+        if let (Some(repo), Some(file)) = (
+            weights.get("repo").and_then(Value::as_str),
+            weights.get("filename").and_then(Value::as_str),
+        ) {
+            let revision = weights
+                .get("revision")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .or_else(|| {
+                    sceneworks_core::control_weights::shipped_control_weight_by_repo_file(
+                        repo, file,
+                    )
+                    .map(|weight| weight.revision)
+                })
+                .ok_or_else(|| {
+                    ApiError::bad_request(
+                        "selected hosted control overlay has no immutable revision",
+                    )
+                })?;
+            push_exact(
+                "__runtime_selected_control_overlay",
+                "Selected control overlay",
+                repo,
+                revision,
+                &[file],
+            );
+        }
+    } else if payload_requests_strict_control(payload) {
+        if let Some(weight) =
+            default_runtime_control_weight(model_id, requested_runtime_variant(payload).as_deref())
+        {
+            push_exact(
+                "__runtime_default_control_overlay",
+                "Default strict-control overlay",
+                weight.repo,
+                weight.revision,
+                &[weight.file],
+            );
+        }
+    }
+
+    let requests_depth = payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("controlMode"))
+        .and_then(Value::as_str)
+        .is_some_and(|mode| mode.eq_ignore_ascii_case("depth"));
+    if requests_depth {
+        push_exact(
+            "__runtime_depth_anything_v2",
+            "Depth Anything V2 Small",
+            "depth-anything/Depth-Anything-V2-Small-hf",
+            "5426e4f0f36572d16453bbda7a8389317b1bef99",
+            &["model.safetensors"],
+        );
+    }
+
+    drop(push_exact);
+    if platform_specific_z_control {
+        entries.push(json!({
+            "id": "__runtime_default_control_overlay",
+            "name": "Default strict-control overlay",
+            "family": "runtime-auxiliary",
+            "type": "utility",
+            "downloads": [
+                {
+                    "provider": "huggingface",
+                    "repo": "alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1",
+                    "revision": "755999a934909bd5832e20718bb7c639d2a63eb9",
+                    "files": ["Z-Image-Fun-Controlnet-Union-2.1.safetensors"],
+                    "platforms": ["macos"],
+                },
+                {
+                    "provider": "huggingface",
+                    "repo": "alibaba-pai/Z-Image-Fun-Controlnet-Union-2.1",
+                    "revision": "755999a934909bd5832e20718bb7c639d2a63eb9",
+                    "files": ["diffusion_pytorch_model.safetensors"],
+                    "platforms": ["windows", "linux"],
+                },
+            ],
+        }));
+    }
+    if payload_requests_pid(payload) {
+        if let Some(pid_id) = runtime_pid_model_id(model_id) {
+            // The PiD catalog entry already carries the exact checkpoint and Gemma co-requisite.
+            entries.push(json!({ "catalogModelId": pid_id }));
+        }
+    }
+
+    Ok(entries)
+}
+
+fn fixed_runtime_model_ids(job_type: &JobType, payload: &JsonObject) -> Vec<&'static str> {
+    let mut ids = match job_type {
+        JobType::ImageVqa | JobType::ImageInterleave => vec!["sensenova_u1_8b"],
+        JobType::PersonDetect => vec!["person_detector"],
+        JobType::PersonTrack => vec!["person_detector", "sam3_person_segment"],
+        JobType::PoseDetect => vec!["dwpose_pose_detector"],
+        JobType::ImageSegment => vec!["sam3_person_segment"],
+        JobType::ImageDetail
+            if payload
+                .get("model")
+                .and_then(Value::as_str)
+                .map_or(true, |model| model.trim().is_empty()) =>
+        {
+            vec!["realvisxl"]
+        }
+        JobType::VideoUpscale => vec!["seedvr2_upscaler"],
+        JobType::ImageUpscale => {
+            let seedvr2 = payload
+                .get("engine")
+                .and_then(Value::as_str)
+                .is_some_and(|engine| engine.eq_ignore_ascii_case("seedvr2"));
+            vec![if seedvr2 {
+                "seedvr2_upscaler"
+            } else {
+                "real_esrgan"
+            }]
+        }
+        JobType::DatasetUpscale => vec!["real_esrgan"],
+        JobType::PromptRefine => vec!["prompt_refine_anubis_8b"],
+        JobType::DatasetFaceAnalysis | JobType::FaceLikenessCompare | JobType::KpsExtract => {
+            vec![RUNTIME_FACE_STACK_ID]
+        }
+        JobType::CatalogAnalysis
+            if payload
+                .get("structuredAnalysisEnabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false) =>
+        {
+            vec![
+                "person_detector",
+                "dwpose_pose_detector",
+                RUNTIME_FACE_STACK_ID,
+            ]
+        }
+        _ => Vec::new(),
+    };
+    if matches!(
+        job_type,
+        JobType::ImageGenerate | JobType::ImageEdit | JobType::ImageDetail
+    ) {
+        if payload_uses_identity(payload) {
+            ids.push(RUNTIME_FACE_STACK_ID);
+        }
+        if let Some(upscale) = payload.get("upscale").and_then(Value::as_object) {
+            if upscale
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                ids.push(
+                    if upscale
+                        .get("engine")
+                        .and_then(Value::as_str)
+                        .is_some_and(|engine| engine.eq_ignore_ascii_case("seedvr2"))
+                    {
+                        "seedvr2_upscaler"
+                    } else {
+                        "real_esrgan"
+                    },
+                );
+            }
+        }
+    }
+    ids
+}
+
+/// Complete API-side carrier admission for the final job shape. Existing server-owned entries are
+/// retained, while utility routes that historically selected hard-coded worker models receive exact
+/// catalog entries here. Explicit downloads carry a distinct typed operation because their desired
+/// destination is intentionally missing and must not masquerade as a ready runtime source.
+pub(crate) async fn ensure_runtime_model_sources(
+    state: &AppState,
+    job_type: &JobType,
+    payload: &mut JsonObject,
+) -> Result<(), ApiError> {
+    if matches!(job_type, JobType::ModelImport) {
+        // Imports consume the request-owned staged upload, never a Hugging Face source library.
+        return Ok(());
+    }
+    if matches!(job_type, JobType::ModelDownload | JobType::LoraDownload) {
+        payload.insert(
+            "modelArtifactOperation".to_owned(),
+            json!({ "schemaVersion": 1, "kind": "explicit_download" }),
+        );
+        return Ok(());
+    }
+    if matches!(job_type, JobType::ModelConvert) {
+        let repository = payload
+            .get("sourceRepo")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| ApiError::bad_request("model_convert requires sourceRepo"))?;
+        let entry = resolve_model_manifest_entry_by_repo(state, repository).await?;
+        // The conversion's source repository, not its output model id, is the immutable runtime
+        // input. Replace any client carrier so a mismatched id cannot bless different source bytes.
+        payload.remove("modelManifestEntry");
+        payload.insert("modelManifestEntries".to_owned(), json!([entry]));
+        return Ok(());
+    }
+
+    let mut ids = fixed_runtime_model_ids(job_type, payload)
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if !payload.contains_key("modelManifestEntry") {
+        if let Some(model_id) = payload
+            .get("model")
+            .or_else(|| payload.get("modelId"))
+            .or_else(|| payload.get("embedder"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            ids.push(model_id.to_owned());
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    for model_id in ids {
+        if payload_has_model_entry(payload, &model_id) {
+            continue;
+        }
+        let entry = if model_id == RUNTIME_FACE_STACK_ID {
+            let mut entry = runtime_face_stack_entry();
+            attach_runtime_model_resolutions(state, &mut entry, None)?;
+            entry
+        } else {
+            resolve_model_manifest_entry(state, &model_id).await?
+        };
+        if entry.as_object().map_or(true, serde_json::Map::is_empty) {
+            return Err(ApiError::model_artifact_conflict(
+                format!("Runtime model '{model_id}' is not registered in the model catalog."),
+                "model_artifact_incomplete",
+            ));
+        }
+        payload
+            .entry("modelManifestEntries".to_owned())
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+            .ok_or_else(|| ApiError::bad_request("modelManifestEntries must be an array"))?
+            .push(entry);
+    }
+    for mut entry in runtime_auxiliary_entries(payload)? {
+        if let Some(model_id) = entry
+            .get("catalogModelId")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        {
+            entry = resolve_model_manifest_entry(state, &model_id).await?;
+            if entry.as_object().map_or(true, serde_json::Map::is_empty) {
+                return Err(ApiError::model_artifact_conflict(
+                    format!("Runtime model '{model_id}' is not registered in the model catalog."),
+                    "model_artifact_incomplete",
+                ));
+            }
+        } else {
+            attach_runtime_model_resolutions(state, &mut entry, None)?;
+        }
+        let entry_id = entry.get("id").and_then(Value::as_str).unwrap_or_default();
+        if payload_has_model_entry(payload, entry_id) {
+            continue;
+        }
+        payload
+            .entry("modelManifestEntries".to_owned())
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+            .ok_or_else(|| ApiError::bad_request("modelManifestEntries must be an array"))?
+            .push(entry);
+    }
+    restamp_runtime_model_resolutions(state, payload)
+}
+
+/// Resolve the exact catalog model whose supported download names `repository`.
+///
+/// Utility jobs historically carried provider repository strings rather than catalog ids. They now
+/// enter the same typed availability/preflight seam without trusting the caller to supply a parallel
+/// identity. An unregistered repository fails closed instead of bypassing durable source binding.
+pub(crate) async fn resolve_model_manifest_entry_by_repo(
+    state: &AppState,
+    repository: &str,
+) -> Result<Value, ApiError> {
+    let entry = model_catalog(state)
+        .await?
+        .into_iter()
+        .find(|entry| {
+            entry
+                .get("downloads")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter(|download| is_supported_model_download(download))
+                .any(|download| download.get("repo").and_then(Value::as_str) == Some(repository))
+        })
+        .or(embedded_builtin_catalog_entry(|entry| {
+            entry
+                .get("downloads")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter(|download| is_supported_model_download(download))
+                .any(|download| download.get("repo").and_then(Value::as_str) == Some(repository))
+        })?)
+        .ok_or_else(|| {
+            ApiError::model_artifact_conflict(
+                format!("Model source repository '{repository}' is not registered in the model catalog."),
+                "model_artifact_incomplete",
+            )
+        })?;
+    let model_id = entry
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::internal("catalog model has no id"))?
+        .to_owned();
+    resolve_model_manifest_entry(state, &model_id).await
+}
+
+fn embedded_builtin_catalog_entry(
+    predicate: impl Fn(&Value) -> bool,
+) -> Result<Option<Value>, ApiError> {
+    let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
+    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+        .map_err(|error| ApiError::internal(format!("embedded model manifest invalid: {error}")))?;
+    let entry = manifest
+        .get("models")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|entry| predicate(entry))
+        .cloned();
+    // Keep this fallback manifest complete. The caller attaches one exact closure per worker
+    // platform before applying host-side preflight; filtering here would let a macOS API omit
+    // Candle-only co-requisites from a Windows/Linux worker carrier.
     Ok(entry)
+}
+
+fn prepare_catalog_model_entry(
+    state: &AppState,
+    model_id: &str,
+    mut entry: Value,
+) -> Result<Value, ApiError> {
+    preflight_model_availability(state, model_id, &entry)?;
+    if entry.get("modelAvailability").and_then(Value::as_str) == Some("local_ready") {
+        let local_root = entry
+            .get("modelResolution")
+            .cloned()
+            .and_then(|resolution| {
+                serde_json::from_value::<
+                    sceneworks_core::model_artifacts::external_library::ModelResolution,
+                >(resolution)
+                .ok()
+            })
+            .and_then(|resolution| {
+                resolution
+                    .local_artifact
+                    .map(|artifact| artifact.location.root().to_path_buf())
+            });
+        if let Some(root) = local_root {
+            if let Some(object) = entry.as_object_mut() {
+                object.insert(
+                    "modelPath".to_owned(),
+                    Value::String(root.display().to_string()),
+                );
+            }
+        }
+    }
+    Ok(entry)
+}
+
+fn preflight_model_availability(
+    state: &AppState,
+    model_id: &str,
+    entry: &Value,
+) -> Result<(), ApiError> {
+    preflight_model_availability_at(&state.settings.data_dir, model_id, entry)
+}
+
+fn preflight_model_availability_at(
+    data_dir: &FsPath,
+    model_id: &str,
+    entry: &Value,
+) -> Result<(), ApiError> {
+    use sceneworks_core::model_artifacts::external_library::ModelAvailability;
+
+    let Some(value) = entry.get("modelAvailability") else {
+        // User/imported and synthesized external-root models predate the HF-library contract and
+        // carry explicit app-confined paths. Their existing path admission remains authoritative.
+        return Ok(());
+    };
+    let availability: ModelAvailability =
+        serde_json::from_value(value.clone()).map_err(|error| {
+            ApiError::internal(format!(
+                "invalid model availability for {model_id}: {error}"
+            ))
+        })?;
+    match availability {
+        ModelAvailability::LocalReady => Ok(()),
+        ModelAvailability::ExternalReady => {
+            let resolution = entry.get("modelResolution").cloned().unwrap_or(Value::Null);
+            let resolution: sceneworks_core::model_artifacts::external_library::ModelResolution =
+                serde_json::from_value(resolution).map_err(|error| {
+                    ApiError::model_artifact_conflict(
+                        format!("Model '{model_id}' has no validated external source: {error}"),
+                        "model_artifact_incomplete",
+                    )
+                })?;
+            resolution.validate().map_err(|error| {
+                ApiError::model_artifact_conflict(
+                    format!("Model '{model_id}' has an invalid source contract: {error}"),
+                    "model_artifact_incomplete",
+                )
+            })?;
+            let store = sceneworks_core::model_artifacts::external_library::ExternalLibraryBindingStore::new(
+                data_dir,
+            )
+            .map_err(|error| ApiError::internal(format!("open external-library binding: {error}")))?;
+            let probe = match store.probe_resolution(&resolution) {
+                Ok(probe) => probe,
+                Err(error) => {
+                    let binding = resolution.expected_library.as_ref().ok_or_else(|| {
+                        ApiError::model_artifact_conflict(
+                            format!("Model '{model_id}' has no validated source binding."),
+                            "model_artifact_incomplete",
+                        )
+                    })?;
+                    let identity =
+                        store.probe_bound(&resolution.configured_library_path, binding);
+                    if identity.status
+                        == sceneworks_core::model_artifacts::external_library::ExternalLibraryProbeStatus::Available
+                    {
+                        return Err(ApiError::model_artifact_conflict(
+                            format!("Model '{model_id}' has incomplete required components: {error}"),
+                            "model_artifact_incomplete",
+                        ));
+                    }
+                    return Err(ApiError::external_model_library_unavailable(format!(
+                        "Model '{model_id}' source library changed during selection. Reconnect it and retry."
+                    )));
+                }
+            };
+            if probe.status
+                != sceneworks_core::model_artifacts::external_library::ExternalLibraryProbeStatus::Available
+            {
+                return Err(ApiError::external_model_library_unavailable(format!(
+                    "Model '{model_id}' source library changed during selection. Reconnect it and retry."
+                )));
+            }
+            Ok(())
+        }
+        ModelAvailability::InstalledExternalUnavailable => Err(
+            ApiError::external_model_library_unavailable(format!(
+                "Model '{model_id}' is installed on an unavailable external model library. Reconnect the configured library and retry."
+            )),
+        ),
+        // Preserve established download/on-demand behavior for genuinely missing or incomplete
+        // installs. SC-19708 adds a new admission stop only for an install whose durable identity
+        // proves it lives on a currently unavailable external library.
+        ModelAvailability::Incomplete | ModelAvailability::Missing => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod external_library_admission_tests {
+    use super::*;
+    use sceneworks_core::model_artifacts::external_library::{
+        ExternalArtifactRequirement, ExternalLibraryBindingStore, ModelAvailability,
+        ModelResolution, EXTERNAL_LIBRARY_UNAVAILABLE_CODE,
+    };
+    use sceneworks_core::model_artifacts::{
+        ArtifactAvailability, ArtifactCompleteness, ArtifactFile, ArtifactIdentity,
+        ArtifactLocation, ArtifactMemberRole, ArtifactProvenance, ResolvedBundleClosure,
+        ResolvedBundleMember, ResolvedModelArtifact, MODEL_ARTIFACT_CONTRACT_VERSION,
+    };
+    use tempfile::TempDir;
+
+    const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    fn auxiliary_repositories(payload: Value) -> Vec<String> {
+        let payload = payload.as_object().unwrap();
+        runtime_auxiliary_entries(payload)
+            .unwrap()
+            .into_iter()
+            .filter_map(|entry| {
+                entry
+                    .get("downloads")
+                    .and_then(Value::as_array)
+                    .and_then(|downloads| downloads.first())
+                    .and_then(|download| download.get("repo"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .or_else(|| {
+                        entry
+                            .get("catalogModelId")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                    })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn exact_dynamic_identity_and_selected_optional_artifacts_are_stamped() {
+        let instantid = runtime_auxiliary_entries(
+            json!({
+                "model": "instantid_realvisxl",
+                "referenceAssetId": "reference",
+                "advanced": { "poses": [{}], "usePid": true }
+            })
+            .as_object()
+            .unwrap(),
+        )
+        .unwrap();
+        let repositories = instantid
+            .iter()
+            .flat_map(|entry| entry["downloads"].as_array().into_iter().flatten())
+            .filter_map(|download| download["repo"].as_str())
+            .collect::<Vec<_>>();
+        assert!(repositories.contains(&"SceneWorks/instantid-mlx"));
+        assert!(repositories.contains(&"InstantX/InstantID"));
+        assert!(repositories.contains(&"xinsir/controlnet-openpose-sdxl-1.0"));
+        assert!(instantid
+            .iter()
+            .any(|entry| entry["catalogModelId"] == "pid_sdxl"));
+        let bundle = instantid
+            .iter()
+            .find(|entry| entry["id"] == "__runtime_instantid_bundle")
+            .unwrap();
+        assert_eq!(
+            bundle["downloads"][0]["files"],
+            json!([
+                "ip-adapter.safetensors",
+                "scrfd_10g.safetensors",
+                "arcface_iresnet100.safetensors"
+            ])
+        );
+
+        assert_eq!(
+            auxiliary_repositories(json!({
+                "model": "qwen_image_edit_2511_lightning"
+            })),
+            vec!["lightx2v/Qwen-Image-Edit-2511-Lightning"]
+        );
+    }
+
+    #[test]
+    fn reference_routes_stamp_their_exact_ip_adapter_repositories() {
+        for (model, expected) in [
+            ("sdxl", vec!["h94/IP-Adapter"]),
+            (
+                "flux_dev",
+                vec!["XLabs-AI/flux-ip-adapter", "openai/clip-vit-large-patch14"],
+            ),
+            ("kolors", vec!["Kwai-Kolors/Kolors-IP-Adapter-Plus"]),
+            (
+                "pulid_flux_dev",
+                vec![
+                    "guozinan/PuLID",
+                    "SceneWorks/pulid-flux-mlx",
+                    "SceneWorks/instantid-mlx",
+                ],
+            ),
+        ] {
+            let actual = auxiliary_repositories(json!({
+                "model": model,
+                "referenceAssetId": "reference"
+            }));
+            for repository in expected {
+                assert!(
+                    actual.iter().any(|actual| actual == repository),
+                    "{model} omitted {repository}: {actual:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn strict_control_carriers_are_exact_and_platform_selection_is_not_api_host_bound() {
+        let selected = runtime_auxiliary_entries(
+            json!({
+                "model": "flux2_dev",
+                "advanced": {
+                    "controlMode": "depth",
+                    "controlWeights": {
+                        "repo": "alibaba-pai/FLUX.2-dev-Fun-Controlnet-Union",
+                        "filename": "FLUX.2-dev-Fun-Controlnet-Union-2602.safetensors"
+                    }
+                }
+            })
+            .as_object()
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(selected.iter().any(|entry| {
+            entry["downloads"][0]["revision"] == "b3dcd7836a0e926248dac3ccba8fc0853495764b"
+        }));
+        assert!(selected.iter().any(|entry| {
+            entry["downloads"][0]["repo"] == "depth-anything/Depth-Anything-V2-Small-hf"
+        }));
+
+        let z_image = runtime_auxiliary_entries(
+            json!({ "model": "z_image", "advanced": { "poses": [{}] } })
+                .as_object()
+                .unwrap(),
+        )
+        .unwrap();
+        let downloads = z_image
+            .iter()
+            .find(|entry| entry["id"] == "__runtime_default_control_overlay")
+            .unwrap()["downloads"]
+            .as_array()
+            .unwrap();
+        assert_eq!(downloads.len(), 2);
+        assert_eq!(downloads[0]["platforms"], json!(["macos"]));
+        assert_eq!(downloads[1]["platforms"], json!(["windows", "linux"]));
+    }
+
+    #[test]
+    fn embedded_manifest_fallback_retains_remote_platform_corequisites() {
+        let entry = embedded_builtin_catalog_entry(|entry| {
+            entry.get("id").and_then(Value::as_str) == Some("instantid_realvisxl")
+        })
+        .unwrap()
+        .unwrap();
+        let candle_components = entry["downloads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|download| {
+                download
+                    .get("platforms")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .any(|platform| platform.as_str() == Some("windows"))
+                    && download.get("coRequisite").and_then(Value::as_bool) == Some(true)
+            })
+            .count();
+        assert_eq!(candle_components, 3);
+    }
+
+    fn external_entry(temp: &TempDir) -> (PathBuf, PathBuf, Value) {
+        let data = temp.path().join("data");
+        let library = temp.path().join("library");
+        let snapshot = library
+            .join("models--owner--model")
+            .join("snapshots")
+            .join(REVISION);
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::write(snapshot.join("model.safetensors"), b"weights").unwrap();
+        let requirement = ExternalArtifactRequirement {
+            repository: "owner/model".to_owned(),
+            revision: Some(REVISION.to_owned()),
+            variant: "default".to_owned(),
+            files: vec![PathBuf::from("model.safetensors")],
+            is_primary: true,
+        };
+        let store = ExternalLibraryBindingStore::new(&data).unwrap();
+        let (binding, _) = store
+            .bind_or_probe_validated(&library, std::slice::from_ref(&requirement))
+            .unwrap();
+        let resolution =
+            ModelResolution::external_ready(library.clone(), binding, vec![requirement]).unwrap();
+        (
+            data,
+            library,
+            json!({
+                "id": "model",
+                "modelAvailability": "external_ready",
+                "modelResolution": resolution,
+            }),
+        )
+    }
+
+    fn local_artifact(root: &FsPath, relative_file: &str) -> ResolvedModelArtifact {
+        std::fs::create_dir_all(root).unwrap();
+        std::fs::write(root.join(relative_file), b"resolved weights").unwrap();
+        let identity = ArtifactIdentity::pinned("owner/model", REVISION, "default").unwrap();
+        ResolvedModelArtifact {
+            schema_version: MODEL_ARTIFACT_CONTRACT_VERSION,
+            identity: identity.clone(),
+            location: ArtifactLocation::ResolvedLocal {
+                root: root.to_path_buf(),
+            },
+            closure: ResolvedBundleClosure::new(vec![ResolvedBundleMember {
+                role: ArtifactMemberRole::Primary,
+                component_id: None,
+                source: identity.clone(),
+                tier: None,
+                source_subpath: PathBuf::new(),
+                destination: PathBuf::new(),
+                files: vec![ArtifactFile::new(relative_file).unwrap()],
+            }])
+            .unwrap(),
+            provenance: ArtifactProvenance {
+                identity,
+                fixed_artifact_tier: None,
+            },
+            completeness: ArtifactCompleteness::Complete,
+            availability: ArtifactAvailability::Available,
+        }
+    }
+
+    #[test]
+    fn local_ready_requires_a_nonempty_exact_file_closure_match() {
+        let temp = TempDir::new().unwrap();
+        let artifact = local_artifact(&temp.path().join("resolved"), "model.safetensors");
+        let primary = ExternalArtifactRequirement {
+            repository: "owner/model".to_owned(),
+            revision: Some(REVISION.to_owned()),
+            variant: "default".to_owned(),
+            files: vec![PathBuf::from("model.safetensors")],
+            is_primary: true,
+        };
+        assert_eq!(
+            local_artifact_for_requirements(
+                std::slice::from_ref(&artifact),
+                std::slice::from_ref(&primary)
+            ),
+            Some(artifact.clone())
+        );
+        assert!(local_artifact_for_requirements(std::slice::from_ref(&artifact), &[]).is_none());
+
+        let mut incomplete = primary;
+        incomplete.files.push(PathBuf::from("encoder.safetensors"));
+        assert!(local_artifact_for_requirements(&[artifact], &[incomplete]).is_none());
+    }
+
+    #[test]
+    fn matching_corequisite_files_cannot_masquerade_as_the_selected_primary() {
+        let temp = TempDir::new().unwrap();
+        let mut artifact = local_artifact(&temp.path().join("resolved"), "model.safetensors");
+        let corequisite =
+            ArtifactIdentity::pinned("owner/corequisite", REVISION, "default").unwrap();
+        artifact.identity = corequisite.clone();
+        artifact.provenance.identity = corequisite.clone();
+        artifact.closure.members[0].source = corequisite;
+        let primary = ExternalArtifactRequirement {
+            repository: "owner/model".to_owned(),
+            revision: Some(REVISION.to_owned()),
+            variant: "default".to_owned(),
+            files: vec![PathBuf::from("model.safetensors")],
+            is_primary: true,
+        };
+        assert!(local_artifact_for_requirements(&[artifact], &[primary]).is_none());
+    }
+
+    #[test]
+    fn api_admission_reprobes_and_returns_stable_unavailable_code_after_disconnect() {
+        let temp = TempDir::new().unwrap();
+        let (data, library, entry) = external_entry(&temp);
+        preflight_model_availability_at(&data, "model", &entry).unwrap();
+
+        std::fs::rename(&library, temp.path().join("detached")).unwrap();
+        let error = preflight_model_availability_at(&data, "model", &entry).unwrap_err();
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.code, Some(EXTERNAL_LIBRARY_UNAVAILABLE_CODE));
+        assert!(!error.detail.contains("No such file"));
+    }
+
+    #[test]
+    fn api_admission_keeps_connected_component_loss_distinct_from_library_unavailability() {
+        let temp = TempDir::new().unwrap();
+        let (data, library, entry) = external_entry(&temp);
+        let file = library
+            .join("models--owner--model")
+            .join("snapshots")
+            .join(REVISION)
+            .join("model.safetensors");
+        std::fs::remove_file(file).unwrap();
+
+        let error = preflight_model_availability_at(&data, "model", &entry).unwrap_err();
+        assert_eq!(error.status, StatusCode::CONFLICT);
+        assert_eq!(error.code, Some("model_artifact_incomplete"));
+        assert_ne!(error.code, Some(EXTERNAL_LIBRARY_UNAVAILABLE_CODE));
+    }
+
+    #[test]
+    fn admission_blocks_only_the_new_unavailable_state() {
+        let temp = TempDir::new().unwrap();
+        let unavailable = json!({ "modelAvailability": "installed_external_unavailable" });
+        let error =
+            preflight_model_availability_at(temp.path(), "model", &unavailable).unwrap_err();
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.code, Some(EXTERNAL_LIBRARY_UNAVAILABLE_CODE));
+        for availability in ["incomplete", "missing"] {
+            let entry = json!({ "modelAvailability": availability });
+            preflight_model_availability_at(temp.path(), "model", &entry).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn live_catalog_overlay_tracks_disconnect_and_reconnect_without_reinstall() {
+        let temp = TempDir::new().unwrap();
+        let (data, library, entry) = external_entry(&temp);
+        let mut catalog = vec![entry];
+        refresh_live_external_availability(&data, &mut catalog)
+            .await
+            .unwrap();
+        assert_eq!(catalog[0]["modelAvailability"], "external_ready");
+
+        let detached = temp.path().join("detached");
+        std::fs::rename(&library, &detached).unwrap();
+        refresh_live_external_availability(&data, &mut catalog)
+            .await
+            .unwrap();
+        assert_eq!(
+            catalog[0]["modelAvailability"],
+            "installed_external_unavailable"
+        );
+
+        std::fs::rename(&detached, &library).unwrap();
+        refresh_live_external_availability(&data, &mut catalog)
+            .await
+            .unwrap();
+        assert_eq!(catalog[0]["modelAvailability"], "external_ready");
+    }
+
+    #[tokio::test]
+    async fn live_catalog_overlay_revalidates_the_full_required_closure() {
+        let temp = TempDir::new().unwrap();
+        let (data, library, entry) = external_entry(&temp);
+        let required_file = library
+            .join("models--owner--model")
+            .join("snapshots")
+            .join(REVISION)
+            .join("model.safetensors");
+        std::fs::remove_file(required_file).unwrap();
+
+        let mut catalog = vec![entry];
+        refresh_live_external_availability(&data, &mut catalog)
+            .await
+            .unwrap();
+
+        assert_eq!(catalog[0]["modelAvailability"], "incomplete");
+        assert_eq!(catalog[0]["modelResolution"]["availability"], "incomplete");
+    }
+
+    #[test]
+    fn catalog_classification_preserves_receipt_identity_across_disconnect_and_reconnect() {
+        let temp = TempDir::new().unwrap();
+        let data = temp.path().join("data");
+        let library = temp.path().join("library");
+        let snapshot = library
+            .join("models--owner--model")
+            .join("snapshots")
+            .join(REVISION);
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::write(snapshot.join("model.safetensors"), b"weights").unwrap();
+        let managed = data.join("models").join(safe_download_dir("owner/model"));
+        std::fs::create_dir_all(&managed).unwrap();
+        let receipt_path = managed.join(".sceneworks-download-complete.json");
+        let receipt = serde_json::to_vec(&json!({
+            "repo": "owner/model",
+            "modelId": "model",
+            "snapshotRevision": REVISION,
+            "resolvedFiles": ["model.safetensors"],
+        }))
+        .unwrap();
+        std::fs::write(&receipt_path, &receipt).unwrap();
+        let model = json!({
+            "id": "model",
+            "downloads": [{
+                "provider": "huggingface",
+                "repo": "owner/model",
+                "files": ["model.safetensors"]
+            }]
+        });
+        let state = || ModelCatalogEntryState {
+            downloadable: true,
+            installed_path: Some(library.display().to_string()),
+            installed: true,
+            cache_incomplete: false,
+            missing_required_files: Vec::new(),
+            update_available: false,
+            availability: ModelAvailability::Missing,
+            resolution: None,
+        };
+
+        let mut connected = state();
+        apply_external_availability_at(&mut connected, &model, &data, &[], library.clone());
+        assert_eq!(connected.availability, ModelAvailability::ExternalReady);
+
+        let detached = temp.path().join("detached");
+        std::fs::rename(&library, &detached).unwrap();
+        let mut disconnected = state();
+        apply_external_availability_at(&mut disconnected, &model, &data, &[], library.clone());
+        assert_eq!(
+            disconnected.availability,
+            ModelAvailability::InstalledExternalUnavailable
+        );
+        assert!(disconnected.installed);
+        assert_eq!(std::fs::read(&receipt_path).unwrap(), receipt);
+
+        std::fs::rename(&detached, &library).unwrap();
+        let mut reconnected = state();
+        apply_external_availability_at(&mut reconnected, &model, &data, &[], library);
+        assert_eq!(reconnected.availability, ModelAvailability::ExternalReady);
+        assert_eq!(std::fs::read(receipt_path).unwrap(), receipt);
+    }
+
+    #[test]
+    fn a_valid_primary_receipt_never_hides_an_uninstalled_hard_corequisite() {
+        let temp = TempDir::new().unwrap();
+        let data = temp.path().join("data");
+        let library = temp.path().join("library");
+        let snapshot = library
+            .join("models--owner--primary")
+            .join("snapshots")
+            .join(REVISION);
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::write(snapshot.join("model.safetensors"), b"weights").unwrap();
+        let managed = data.join("models").join(safe_download_dir("owner/primary"));
+        std::fs::create_dir_all(&managed).unwrap();
+        std::fs::write(
+            managed.join(".sceneworks-download-complete.json"),
+            serde_json::to_vec(&json!({
+                "repo": "owner/primary",
+                "modelId": "model",
+                "snapshotRevision": REVISION,
+                "resolvedFiles": ["model.safetensors"],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let model = json!({
+            "id": "model",
+            "downloads": [
+                {
+                    "provider": "huggingface",
+                    "repo": "owner/primary",
+                    "files": ["model.safetensors"]
+                },
+                {
+                    "provider": "huggingface",
+                    "repo": "owner/required-encoder",
+                    "files": ["encoder.safetensors"],
+                    "coRequisite": true
+                }
+            ]
+        });
+        let mut state = ModelCatalogEntryState {
+            downloadable: true,
+            installed_path: Some(library.display().to_string()),
+            installed: false,
+            cache_incomplete: true,
+            missing_required_files: vec!["owner/required-encoder".to_owned()],
+            update_available: false,
+            availability: ModelAvailability::Missing,
+            resolution: None,
+        };
+
+        apply_external_availability_at(&mut state, &model, &data, &[], library);
+
+        assert_eq!(state.availability, ModelAvailability::Incomplete);
+        assert!(!state.installed);
+        assert_eq!(
+            state
+                .resolution
+                .as_ref()
+                .map(|resolution| &resolution.availability),
+            Some(&ModelAvailability::Incomplete)
+        );
+    }
+
+    #[test]
+    fn an_external_corequisite_is_part_of_the_typed_unavailable_admission_boundary() {
+        let temp = TempDir::new().unwrap();
+        let data = temp.path().join("data");
+        let library = temp.path().join("library");
+        for (repo, file) in [
+            ("owner/primary", "model.safetensors"),
+            ("owner/encoder", "encoder.safetensors"),
+        ] {
+            let snapshot = library
+                .join(format!(
+                    "models--{}",
+                    sceneworks_core::hf_home::safe_repo_dir_name(repo).unwrap()
+                ))
+                .join("snapshots")
+                .join(REVISION);
+            std::fs::create_dir_all(&snapshot).unwrap();
+            std::fs::write(snapshot.join(file), b"weights").unwrap();
+            let managed = data.join("models").join(safe_download_dir(repo));
+            std::fs::create_dir_all(&managed).unwrap();
+            std::fs::write(
+                managed.join(".sceneworks-download-complete.json"),
+                serde_json::to_vec(&json!({
+                    "repo": repo,
+                    "snapshotRevision": REVISION,
+                    "resolvedFiles": [file],
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        let model = json!({
+            "id": "model",
+            "downloads": [
+                {
+                    "provider": "huggingface",
+                    "repo": "owner/primary",
+                    "files": ["model.safetensors"]
+                },
+                {
+                    "provider": "huggingface",
+                    "repo": "owner/encoder",
+                    "files": ["encoder.safetensors"],
+                    "coRequisite": true
+                }
+            ]
+        });
+        let fresh_state = || ModelCatalogEntryState {
+            downloadable: true,
+            installed_path: Some(library.display().to_string()),
+            installed: true,
+            cache_incomplete: false,
+            missing_required_files: Vec::new(),
+            update_available: false,
+            availability: ModelAvailability::Missing,
+            resolution: None,
+        };
+        let mut connected = fresh_state();
+        apply_external_availability_at(&mut connected, &model, &data, &[], library.clone());
+        assert_eq!(connected.availability, ModelAvailability::ExternalReady);
+        assert_eq!(connected.resolution.as_ref().unwrap().requirements.len(), 2);
+
+        std::fs::rename(&library, temp.path().join("detached")).unwrap();
+        let mut unavailable = fresh_state();
+        apply_external_availability_at(&mut unavailable, &model, &data, &[], library);
+        assert_eq!(
+            unavailable.availability,
+            ModelAvailability::InstalledExternalUnavailable
+        );
+        let entry = json!({
+            "modelAvailability": unavailable.availability,
+            "modelResolution": unavailable.resolution,
+        });
+        let error = preflight_model_availability_at(&data, "model", &entry).unwrap_err();
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.code, Some(EXTERNAL_LIBRARY_UNAVAILABLE_CODE));
+    }
 }
 
 /// Populate the `modelPath` seam for convert-at-install MLX models. The worker's

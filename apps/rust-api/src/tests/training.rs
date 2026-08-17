@@ -264,6 +264,7 @@ async fn parquet_import_job_queues_for_empty_dataset_and_finalizes_staged_items(
 
 #[tokio::test]
 async fn training_dataset_routes_persist_and_validate_project_assets() {
+    let _env = isolate_hf_cache();
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     let app = create_app(settings.clone()).expect("app creates");
@@ -457,7 +458,7 @@ async fn training_dataset_routes_persist_and_validate_project_assets() {
         }),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(status, StatusCode::CREATED, "{caption_job}");
     assert_eq!(caption_job["type"], "training_caption");
     assert_eq!(caption_job["payload"]["captioner"], "joy_caption");
     assert_eq!(

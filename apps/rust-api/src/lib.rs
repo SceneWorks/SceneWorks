@@ -3050,10 +3050,11 @@ async fn create_generation_job_with_status(
     job_type: JobType,
     project_id: Option<String>,
     project_name: Option<String>,
-    payload: JsonObject,
+    mut payload: JsonObject,
     requested_gpu: String,
     initial_status: Option<JobStatus>,
 ) -> Result<JobSnapshot, ApiError> {
+    models::ensure_runtime_model_sources(&state, &job_type, &mut payload).await?;
     let job = store_call(state.clone(), move |store, _timeout| {
         store.create_job(CreateJob {
             job_type,

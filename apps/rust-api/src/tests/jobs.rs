@@ -305,10 +305,12 @@ async fn generic_jobs_route_still_serves_non_generation_types() {
             StatusCode::CREATED,
             "{job_type} must still enqueue: {body}"
         );
-        assert_eq!(
-            body["payload"],
-            json!({ "sourceAssetId": "asset-1" }),
-            "legacy raw payloads without a catalog model must remain unchanged"
+        assert_eq!(body["payload"]["sourceAssetId"], "asset-1");
+        assert!(
+            body["payload"]["modelManifestEntries"]
+                .as_array()
+                .is_some_and(|entries| !entries.is_empty()),
+            "HF-backed utility routes must carry an authoritative typed source: {body}"
         );
     }
 }
@@ -800,7 +802,7 @@ async fn raw_model_convert_rejects_unrecoverable_output_before_enqueue() {
             "requestedGpu": "auto",
             "payload": {
                 "modelId": "model-1",
-                "sourceRepo": "owner/source",
+                "sourceRepo": "SceneWorks/z-image-turbo-mlx",
                 "outputDir": output_dir.display().to_string(),
             },
         })
@@ -817,6 +819,11 @@ async fn raw_model_convert_rejects_unrecoverable_output_before_enqueue() {
         status,
         StatusCode::CREATED,
         "backup-looking model names remain valid in the disjoint recovery design: {accepted}"
+    );
+    assert_eq!(
+        accepted["payload"]["modelManifestEntries"][0]["downloads"][0]["repo"],
+        "SceneWorks/z-image-turbo-mlx",
+        "conversion admission must stamp the source repository rather than the output model id"
     );
 
     for (output_dir, expected) in [

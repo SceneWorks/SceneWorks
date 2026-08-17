@@ -77,6 +77,26 @@ fn make_complete(
     metadata
 }
 
+#[test]
+fn read_only_catalog_enumeration_never_stamps_usage_or_creates_a_runtime_session() {
+    let temp = TempDir::new().unwrap();
+    let source = temp.path().join("source");
+    let store = ResolvedCacheStore::open(temp.path()).unwrap();
+    let candidate = source_candidate(&source, REVISION_A);
+    make_complete(&store, &candidate, &source);
+    let sessions = store.root().join("sessions");
+    let before_sessions = std::fs::read_dir(&sessions).unwrap().count();
+
+    let entries = ResolvedCacheStore::enumerate_existing(temp.path()).unwrap();
+
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].metadata.as_ref().unwrap().last_used_at, None);
+    assert_eq!(
+        std::fs::read_dir(sessions).unwrap().count(),
+        before_sessions
+    );
+}
+
 fn resolver(root: &Path, registry: ActiveArtifactLeaseRegistry) -> ModelArtifactResolver {
     ModelArtifactResolver::with_lease_registry(ArtifactSourceLibrary::new(root).unwrap(), registry)
 }
