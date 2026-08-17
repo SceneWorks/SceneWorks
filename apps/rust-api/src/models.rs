@@ -1059,6 +1059,95 @@ pub(crate) async fn create_model_convert_job(
     Ok((StatusCode::CREATED, Json(job)))
 }
 
+/// Distinct source repositories a model owns. Co-requisite downloads are excluded: they are
+/// shared dependencies rather than this model's own source, and resolved-cache entries are
+/// selected by *primary* provenance.
+fn owned_source_repositories(model: &Value) -> Vec<String> {
+    let mut repositories = model
+        .get("downloads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|entry| !is_co_requisite_download(entry))
+        .filter_map(|entry| entry.get("repo").and_then(Value::as_str))
+        .filter(|repo| !repo.trim().is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    repositories.sort();
+    repositories.dedup();
+    repositories
+}
+
+/// Reconciles the resolved-model hot cache with a source that has just been deleted (sc-19710).
+///
+/// Without this, entries whose authoritative source is gone can never be reclaimed: automatic
+/// retention refuses to evict an artifact it cannot re-verify as a second copy, so an orphaned
+/// entry would be held `SourceUnverified` forever — exactly the stranded state the epic forbids.
+///
+/// Reconciliation failures never fail the delete, whose files are already removed; they are logged
+/// and returned as warnings so the orphan is surfaced rather than silently stranded.
+async fn reconcile_deleted_source(
+    state: &AppState,
+    selectors: Vec<sceneworks_core::model_artifacts::resolved_cache::SourceLifecycleSelector>,
+) -> Vec<String> {
+    use sceneworks_core::model_artifacts::resolved_cache::ResolvedCacheStore;
+
+    if selectors.is_empty() {
+        return Vec::new();
+    }
+    let data_dir = state.settings.data_dir.clone();
+    // Reconcile whenever a managed store exists, even if the policy was since disabled: entries
+    // materialized while it was enabled must still be reconciled rather than orphaned. Never
+    // create the store as a side effect of a delete.
+    if !data_dir.join("models").join("resolved").exists() {
+        return Vec::new();
+    }
+    let now = sceneworks_core::time::now_unix_seconds().max(0) as u64;
+    let outcome = tokio::task::spawn_blocking(move || {
+        let store = ResolvedCacheStore::open(&data_dir)?;
+        let mut warnings = Vec::new();
+        for selector in selectors {
+            let report = store.reconcile_removed_source(&selector, now)?;
+            for deferred in report.deferred {
+                warnings.push(format!(
+                    "A cached copy of {} is still in use and will be reclaimed after it is released.",
+                    selector.repository
+                ));
+                tracing::info!(
+                    repository = %selector.repository,
+                    cache_key = %deferred.cache_key,
+                    hold = %deferred.hold,
+                    "resolved-cache reconciliation deferred an in-use entry"
+                );
+            }
+            for stranded in report.unmatched_unreadable {
+                warnings.push(format!(
+                    "A damaged resolved-cache entry ({stranded}) could not be matched to {} and was left in place.",
+                    selector.repository
+                ));
+            }
+        }
+        Ok::<_, sceneworks_core::model_artifacts::resolved_cache::ResolvedCacheError>(warnings)
+    })
+    .await;
+    match outcome {
+        Ok(Ok(warnings)) => warnings,
+        Ok(Err(error)) => {
+            tracing::warn!(error = %error, "resolved-cache reconciliation failed after a source delete");
+            vec![format!(
+                "Cached copies of this model could not be reconciled and may still occupy disk: {error}"
+            )]
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "resolved-cache reconciliation task failed");
+            vec![
+                "Cached copies of this model could not be reconciled and may still occupy disk."
+                    .to_owned(),
+            ]
+        }
+    }
+}
+
 pub(crate) async fn delete_model(
     State(state): State<AppState>,
     Path(model_id): Path<String>,
@@ -1140,8 +1229,25 @@ pub(crate) async fn delete_model(
             "Built-in model catalog entries are read-only unless local files are installed",
         ));
     }
-    let warnings =
+    let mut warnings =
         catalog_delete_warnings(&state, "model", &model_id, None, Some(&catalogs)).await?;
+    // The source is gone; reclaim (or surface) every resolved-cache entry that depended on it.
+    warnings.extend(
+        reconcile_deleted_source(
+            &state,
+            owned_source_repositories(cleanup_source)
+                .into_iter()
+                .map(|repository| {
+                    sceneworks_core::model_artifacts::resolved_cache::SourceLifecycleSelector {
+                        repository,
+                        revision: None,
+                        tier: None,
+                    }
+                })
+                .collect(),
+        )
+        .await,
+    );
     let policy = if removed_entry.is_some() {
         "Removed the model registry entry and SceneWorks-owned local model files."
     } else {
@@ -1278,10 +1384,27 @@ pub(crate) async fn delete_model_variant(
             "Tier '{variant}' is not installed"
         )));
     }
+    // A single-tier delete only orphans resolved-cache entries built from that tier; entries for
+    // the model's other tiers stay valid, so the selector is scoped by tier.
+    let cache_warnings = reconcile_deleted_source(
+        &state,
+        owned_source_repositories(&model)
+            .into_iter()
+            .map(|repository| {
+                sceneworks_core::model_artifacts::resolved_cache::SourceLifecycleSelector {
+                    repository,
+                    revision: None,
+                    tier: Some(variant.clone()),
+                }
+            })
+            .collect(),
+    )
+    .await;
     Ok(Json(json!({
         "id": model_id,
         "variant": variant,
         "kind": "model-variant",
+        "warnings": cache_warnings,
         // Permanent delete: no OS trash, no undo (sc-12088).
         "trashed": false,
         // A tier delete NEVER removes the registry entry: the model stays in the catalog so the

@@ -1117,8 +1117,15 @@ fn selector_matches(selector: &SourceLifecycleSelector, metadata: &ResolvedCache
             .revision
             .as_deref()
             .map_or(true, |revision| identity.revision == revision)
+        // Tier labels reach this seam from routes that lowercase them, so match case-insensitively
+        // rather than letting a "Q8"/"q8" mismatch silently strand an orphaned entry.
         && selector.tier.as_deref().map_or(true, |tier| {
-            metadata.artifact.provenance.fixed_artifact_tier.as_deref() == Some(tier)
+            metadata
+                .artifact
+                .provenance
+                .fixed_artifact_tier
+                .as_deref()
+                .is_some_and(|current| current.eq_ignore_ascii_case(tier))
         })
 }
 
