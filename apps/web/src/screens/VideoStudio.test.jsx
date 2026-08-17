@@ -863,6 +863,110 @@ describe("VideoStudio SCAIL-2 character animation + replacement backend", () => 
     expect(container.textContent).toContain("SCAIL-2 full-character replacement");
   });
 
+  it("does not offer a Replacement mode SCAIL-2 cannot honor, and never sends one (sc-20262)", async () => {
+    // The knobs sweep (inference #669) found this select rendered and user-settable for SCAIL-2
+    // while EVERY scail2 conditioning site in the worker emits `ReplacementMode::default()`
+    // literally — so the choice never reached the engine. sc-20262 made the engine REFUSE a
+    // non-default mode, which turns a silently-dropped knob into an instant refusal. Hiding it is
+    // the honest surface. sc-20262 is also the story that would make it honored; if that lands,
+    // this test and `replacementModeApplies` go together.
+    //
+    // The panel already carried a guidance strip saying the mode "does not apply" — PROSE IS NOT A
+    // GATE, and that strip is why this looked covered. It is asserted below as copy, alongside the
+    // control's absence, so neither can stand in for the other.
+    const modeLabel = () =>
+      [...container.querySelectorAll("label")].find((el) =>
+        el.textContent.includes("Replacement mode"),
+      );
+
+    // Wan-VACE inpaints the masked region and DOES honor the mode: the control is unchanged there.
+    // This leg is what makes the assertion per-model rather than a global removal.
+    const context = baseContext({ videoModels: [WAN, SCAIL2], assets: [clip] });
+    await render(context);
+    await click(modeButton("Replace person"));
+    expect(modeLabel(), "Wan-VACE honors the mode and must keep the control").toBeTruthy();
+    expect([...modeLabel().querySelector("select").options].map((o) => o.value)).toEqual([
+      "face_only",
+      "full_person_keep_outfit",
+      "full_person_replace_outfit",
+    ]);
+
+    // Switching the engine to SCAIL-2 withdraws it.
+    const engineSelect = [...container.querySelectorAll("label")]
+      .find((el) => el.textContent.includes("Replacement engine"))
+      .querySelector("select");
+    const setSelectValue = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, "value").set;
+    await act(async () => {
+      setSelectValue.call(engineSelect, "scail2_14b");
+      engineSelect.dispatchEvent(new window.Event("change", { bubbles: true }));
+    });
+    expect(modeLabel(), "SCAIL-2 must not offer a mode it cannot honor").toBeFalsy();
+    // The explanation survives the control — withdrawing it silently would be its own gap.
+    expect(container.textContent).toContain("SCAIL-2 full-character replacement");
+    expect(container.textContent).toContain("no Replacement mode to choose");
+
+    // …and switching back restores it, so this is a gate rather than a one-way delete.
+    await act(async () => {
+      setSelectValue.call(engineSelect, "wan_2_2");
+      engineSelect.dispatchEvent(new window.Event("change", { bubbles: true }));
+    });
+    expect(modeLabel(), "the control returns for an engine that honors it").toBeTruthy();
+  });
+
+  it("sends the default Replacement mode for SCAIL-2 even when one was set elsewhere (sc-20262)", async () => {
+    // Hiding a control does not unset the state behind it. A user who picks "Full Person, Keep
+    // Outfit" on Wan-VACE and then switches the engine to SCAIL-2 would otherwise send that value
+    // into a job whose engine now REFUSES it — the same shape `referenceAudioAssetIds` was fixed
+    // for (a selection made on Ref2VA riding into a model with no audio cap once the picker
+    // unmounted). Restored from a snapshot because that is the cheapest way to reach a submittable
+    // replace_person job, and it is also the realistic path: the value is persisted per project.
+    window.localStorage.setItem(
+      "sceneworks-studio-video-project_1",
+      JSON.stringify({
+        mode: "replace_person",
+        model: "scail2_14b",
+        sourceClipAssetId: "vid_src",
+        personTrackId: "track_1",
+        characterId: "char_1",
+        replacementMode: "full_person_keep_outfit",
+      }),
+    );
+    const context = baseContext({
+      videoModels: [WAN, SCAIL2],
+      assets: [clip, character],
+      characters: [{ id: "char_1", name: "Ada", projectId: "project_1" }],
+      personTracks: [
+        {
+          id: "track_1",
+          name: "Selected person",
+          projectId: "project_1",
+          sourceAssetId: "vid_src",
+          status: {},
+          frames: [],
+        },
+      ],
+    });
+    await render(context);
+
+    // Precondition: the snapshot really did restore a NON-default mode, so the assertion below is
+    // about the gate rather than about a value that was never set.
+    expect(context.createVideoJob).not.toHaveBeenCalled();
+    // The submit CTA's LABEL is per-mode ("Replace person" here), so target the CTA by class
+    // rather than by a label that changes with the mode under test.
+    const submitCta = container.querySelector(".prompt-cta");
+    expect(submitCta.disabled, "the restored snapshot must be submittable").toBe(false);
+    await click(submitCta);
+
+    expect(context.createVideoJob).toHaveBeenCalledTimes(1);
+    const payload = context.createVideoJob.mock.calls[0][0];
+    expect(payload.mode).toBe("replace_person");
+    expect(payload.model).toBe("scail2_14b");
+    expect(payload.replacementMode).toBe("face_only");
+    // The recipe's human-readable echo follows the same gate, so a replayed SCAIL-2 recipe cannot
+    // display a mode the job never carried.
+    expect(payload.advanced.replacementModeLabel).toBe("Face Only");
+  });
+
   it("hides the replacement engine picker when only one backend can replace", async () => {
     const context = baseContext({ videoModels: [WAN], assets: [clip] });
     await render(context);

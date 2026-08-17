@@ -10,6 +10,31 @@ import { presetLoraIssues } from "./generationValidation.js";
 import { promptBudget } from "./styleComposer.js";
 import { issue } from "./validation/issues.js";
 
+// SCAIL-2's catalog id, named once so the panel that HIDES the Replacement mode control and the
+// studio that stops SENDING it key on one spelling rather than two literals that can drift.
+export const SCAIL2_MODEL_ID = "scail2_14b";
+
+// Whether a replacement engine actually consumes `replacementMode`. Today it is a single negative
+// fact rather than a per-model table: SCAIL-2 re-renders the whole tracked person from the character
+// reference, so face-only / keep-outfit has nothing to select, and every scail2 conditioning site in
+// the worker emits `ReplacementMode::default()` LITERALLY — the user's choice never reached the
+// engine. The engine now refuses a non-default mode outright (sc-20262), so a control that can still
+// set one is a refusal waiting to happen rather than a knob. The Wan-VACE inpainting engines DO
+// honor it and are unchanged.
+//
+// It lives HERE, rather than beside the control in `ReplacePersonPanel.jsx`, for two reasons that
+// both point the same way. `ReplacePersonPanel.jsx` imports this module and not the reverse, so
+// there is no cycle; and this file is a fingerprinted source of `config/backend-capabilities/
+// matrix.json` (`webVideoValidation`) while the panel is not — a predicate that decides what the
+// studio SENDS must sit inside that fingerprint, or it could be edited without the derived matrix
+// noticing. `VideoStudio.jsx` is fingerprinted too, so both readers are covered.
+//
+// sc-20262 is the story that would make the mode honored. If it lands, delete this predicate rather
+// than adding a second model to it.
+export function replacementModeApplies(modelId) {
+  return modelId !== SCAIL2_MODEL_ID;
+}
+
 export function videoGenerateValidation({
   activeProject,
   promptless,

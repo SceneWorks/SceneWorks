@@ -21,11 +21,13 @@ Two entries ship from the same family:
 > - **H3-Context-IR**, the hosted prompt-understanding front end. Prompts here go to the model
 >   verbatim, so **prompt adherence differs from the API** no matter how the port is written. Write
 >   more explicitly than you would for the hosted product.
-> - **H3-Regenerate-2K**, the in-context 2K upscaler. **2K is not reachable from these weights.** The
->   checkpoint's canvas budget is about 1.03 megapixels — 1344x768 at 16:9 — and a request over the
->   budget is refused rather than refitted. A 2K frame is more than twice that area, so plan the
->   shot at the sizes below — and note that the bound is the AREA, so a wider canvas buys you a
->   shorter one rather than more pixels.
+> - **H3-Regenerate-2K**, the in-context 2K upscaler. **No render from these weights is natively
+>   2K.** The checkpoint's canvas budget is about 1.03 megapixels — 1344x768 at 16:9 — and a request
+>   over the budget is refused rather than refitted. A 2K frame is more than twice that area, so plan
+>   the shot at the sizes below — and note that the bound is the AREA, so a wider canvas buys you a
+>   shorter one rather than more pixels. There is a separate video upscaler in the Studio that will
+>   take a finished clip past 2K; it is a different operation with different trade-offs, and *Past
+>   the canvas — the upscale route* below is where they are set out.
 > - **Sparse-attention inference.** The open weights run *dense* attention, which is why renders are
 >   measured in hours at the large canvas. It is not what caps the clip at 14.38 s — that ceiling is
 >   the checkpoint's own — but it is why the long end of the range is expensive.
@@ -48,6 +50,17 @@ timings on real weights:
 The *shortest* clip at the default 1344x768 canvas already costs about two hours. The *entire*
 duration range is comfortable at 576x320. **Choose the small canvas while you are still iterating on
 the prompt**, and move up only once you have a shot you want at full size.
+
+Those are **dense 50-step** timings, and they are the reference numbers — not the ones you will
+usually see. The **Turbo** control is on by default and is the mitigation for exactly this table: the
+same 1344x768 / 5.17 s shot that takes about two hours dense was measured at **12.6 minutes** with
+the 4-step 768p adapter. It is a different sample rather than the same picture faster — see
+*Turbo — The Control That Changes The Cost Table* below before you rely on it.
+
+**Wall-clock cost and the length cap are separate things.** Turbo changes how long a render takes;
+it does not change which lengths exist. The fourteen clip lengths below, and the 14.38 s ceiling at
+the top of them, come from the frame lattice and the checkpoint's own clamp — no step count, adapter
+or attention implementation moves them.
 
 ## Fourteen Clip Lengths, And Nothing In Between
 
@@ -87,6 +100,31 @@ canvas is not automatically a bigger one.
 
 A keyframe is **stretched** onto the canvas, not letterboxed — crop your reference to the target
 shape first or the subject will distort.
+
+### Past The Canvas — The Upscale Route
+
+Video Studio's **Advanced** panel carries a **Video upscale** card, and it accepts a finished H3
+clip. That is the route to a frame larger than the canvas above, and it is worth being precise about
+what it is: **an upscale of a sub-2K render, not native 2K.** `H3-Regenerate-2K` upsampled *inside*
+the diffusion, with the model resolving detail it had generated; this runs SeedVR2 over the finished
+pixels afterwards. Different operation, different artifact.
+
+Three things to know before you reach for it:
+
+- **The factors are 2x and 4x, and nothing between.** Two times the full 1344x768 canvas is
+  2688x1536 — **larger than 2K on both axes**, not a way to land on it. There is no ~1.5x rung, so
+  2K is not a target you can hit; it is a number you pass.
+- **The audio is re-encoded.** H3's whole point is that the soundtrack arrives with the picture, and
+  the upscale path demuxes, re-encodes to AAC and re-muxes. The clip keeps its full length — the
+  truncation bug that used to shorten it was fixed — but the audio is no longer the original stream.
+- **Start from a clip you have already accepted.** An upscale costs its own render and cannot fix
+  composition, motion or sound, so iterate at 576x320, settle the shot at the canvas you want, and
+  upscale once at the end.
+
+This is an interim route rather than the shape of the feature. MiniMax has stated publicly, on the
+model's Hugging Face discussion board, that `H3-Regenerate-2K` will be open-sourced "once this set of
+technologies becomes stable" — no date attached. If that lands, native in-context 2K becomes possible
+and this section is what gets replaced.
 
 ## No Negative Prompt, No Guidance
 
@@ -177,14 +215,17 @@ open text encoder has no trained representation for them — the embedding rows 
 indistinguishable from the model's unused padding. They almost certainly belong to the withheld
 H3-Context-IR front end, which is not in this loop.
 
-**Nothing strips or repairs the markers.** They are not removed, not rewritten and not warned about
-at submit time. Two features can still change what the text encoder sees, and both are things you
-switched on yourself:
+**At submit time nothing strips or repairs the markers.** Whatever is in the box goes to the text
+encoder as you typed it — not removed, not rewritten and not warned about. Two features can still
+change what the text encoder sees, and both are things you switched on yourself:
 
 - The **Refine** button hands your prompt *and this guide* to a language model and shows you the
   rewrite as a suggestion. The box does not change until you press **Apply** — *Keep original*
-  leaves it exactly as you typed it. But because the model has just read this page, a rewrite you
-  do apply may well drop the markers.
+  leaves it exactly as you typed it. **A rewrite you apply is guaranteed marker-free**: the H3
+  refiner is instructed never to write them, and the worker strips any that survive that instruction
+  before the suggestion is shown to you. So this is the one path that removes a marker, it removes
+  every one of them rather than most, and it only runs because you asked for a rewrite and then
+  accepted it.
 - A **Style Catalog** entry or a **preset stack** is folded into the outgoing prompt at submit time.
   There is no confirmation step: the Studio previews the composed string above the Generate button,
   and then sends it.
@@ -238,6 +279,10 @@ Turbo is not "the same picture, faster". It is a **different sample** of the sam
 on the validated shot it carried *more* detail and *more* motion than the 50-step base, but the
 adapters are distilled at 544p/768p and MiniMax's own roadmap lists improving Turbo's fine detail as
 open work. Turn it off for the reference schedule; leave it on for everything else.
+
+What it does **not** change is the length: the fourteen clip lengths and the 14.38 s ceiling are
+properties of the frame lattice and the checkpoint's clamp, and no adapter moves them. Turbo buys
+back wall-clock time and nothing else.
 
 Each published adapter carries its own schedule, which is why the control is a menu rather than a
 switch:
