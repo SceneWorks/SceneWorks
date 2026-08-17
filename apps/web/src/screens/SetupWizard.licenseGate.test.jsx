@@ -228,6 +228,40 @@ describe("SetupWizard license gate (sc-17227 / sc-17137 review)", () => {
     expect(container.querySelector(".setup-wizard-refusals")).toBeNull();
   });
 
+  // sc-17137 review, item 4. `writeLicenseAck` swallows a storage failure by design (private
+  // browsing, quota), so the wizard's mirrored `licenseAcks` can say "accepted" over a store that
+  // never took it — and the choke point reads the STORE. Gating the pre-flight on the mirror let
+  // that row fall through to the downstream refusal, whose message ("download did not start") names
+  // neither the licence nor the cause. The gate must stay closed AND say why.
+  it("names the storage failure when the acknowledgment could not be persisted", async () => {
+    const setItem = vi.spyOn(window.Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("QuotaExceededError");
+    });
+    try {
+      await render([GATED_MODEL]);
+      const checkbox = await tickLicenseAck();
+      // The tick is mirrored in component state, so the box LOOKS accepted…
+      expect(checkbox.checked).toBe(true);
+      // …but the store the choke point reads never took it.
+      expect(window.localStorage.getItem("sceneworks-license-ack:flux1_dev")).toBeNull();
+
+      await downloadSelected();
+      // Fail CLOSED: nothing leaves the client, and the row is not claimed started.
+      expect(downloadPosts()).toHaveLength(0);
+      expect(rowMeta("FLUX.1 [dev]")).not.toBe("Download started");
+      const refusal = container.querySelector(".setup-wizard-refusals");
+      expect(refusal, "the refusal notice").toBeTruthy();
+      expect(refusal.textContent).toContain(
+        "FLUX.1 [dev] was not downloaded — this browser could not save the license acknowledgment",
+      );
+      // Neither the generic downstream refusal nor "accept it first" — the user did accept.
+      expect(refusal.textContent).not.toContain("download did not start");
+      expect(refusal.textContent).not.toContain("accept its license above first");
+    } finally {
+      setItem.mockRestore();
+    }
+  });
+
   it("seeds a prior acknowledgment from the store, so a returning user is not re-asked", async () => {
     window.localStorage.setItem("sceneworks-license-ack:flux1_dev", "true");
     await render([GATED_MODEL]);

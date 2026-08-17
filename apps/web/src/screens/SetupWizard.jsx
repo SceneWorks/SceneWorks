@@ -1,8 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
+import { LicenseGateNotice, gatedRepoUrl } from "../components/LicenseGateNotice.jsx";
 import { Logo } from "../components/Logo.jsx";
 import { terminalStatuses } from "../constants.js";
 import {
+  licenseAcknowledgmentBlocked,
   offerableWithoutLicenseUi,
   readLicenseAck,
   requiresLicenseAcknowledgment,
@@ -10,7 +12,6 @@ import {
 } from "../licenseAcknowledgment.js";
 import { audioModelUsable } from "../modelEligibility.js";
 import { isDesktop, tauriInvoke } from "../runtime.js";
-import { safeExternalUrl } from "../urls.js";
 
 // The curated "getting started" set is catalog-driven: a model is recommended when
 // its manifest entry carries `recommended: true` (config/manifests/builtin.models.jsonc).
@@ -57,17 +58,6 @@ function isOfferable(model, caps) {
     offerableWithoutLicenseUi(model) &&
     (model.type !== "audio" || audioModelUsable(model, caps))
   );
-}
-
-// The Hugging Face page of a gated model's primary download repo — where the user clicks
-// "Agree and access" to be granted access with their token. Same derivation as the Models
-// screen's `gatedRepoUrl` (sc-5999): first HF download repo, falling back to the mlx repo.
-function gatedRepoUrl(model) {
-  const host = model.credentialHost || "huggingface.co";
-  const repo =
-    (model.downloads ?? []).find((entry) => entry.provider === "huggingface" && entry.repo)?.repo ??
-    model.mlx?.repo;
-  return repo ? `https://${host}/${repo}` : null;
 }
 
 function downloadSizeText(model) {
@@ -230,10 +220,24 @@ export function SetupWizard({
     try {
       for (const model of pendingSelection) {
         const name = model.name ?? model.id;
-        if (requiresLicenseAcknowledgment(model) && !licenseAcks.has(model.id)) {
+        // Ask the STORE, not this component's mirror. The choke point
+        // (`createModelDownloadJob`) reads the persisted ack, so the mirror is the wrong
+        // authority: when `writeLicenseAck` cannot persist (private mode, quota) it swallows the
+        // failure by design, leaving the checkbox ticked over a store that never took it. Gating on
+        // the mirror let that row sail past this branch and get refused downstream with the generic
+        // "download did not start", which names neither the licence nor the cause. Reading the store
+        // keeps the gate fail-CLOSED (an unreadable store answers "not acknowledged") and puts the
+        // licence-specific message on the path that actually happens.
+        if (licenseAcknowledgmentBlocked(model)) {
           // Refuse locally with the wizard's own remedy: the checkbox is on this row, so pointing
-          // at the Models screen (the choke point's message) would be a detour.
-          refusedNow.push(`${name} was not downloaded — accept its license above first.`);
+          // at the Models screen (the choke point's message) would be a detour. When the mirror and
+          // the store DISAGREE the user already did accept, so "accept it first" would be a lie —
+          // name the storage failure instead, since re-ticking the box cannot fix it.
+          refusedNow.push(
+            licenseAcks.has(model.id)
+              ? `${name} was not downloaded — this browser could not save the license acknowledgment (private browsing, or site storage is full). Allow site storage for SceneWorks, then accept the license above again.`
+              : `${name} was not downloaded — accept its license above first.`,
+          );
           continue;
         }
         const job = await onDownloadModel(model);
@@ -329,8 +333,6 @@ export function SetupWizard({
                       // `gated` implies the requirement, so this covers every credential-gated
                       // model the wizard has always offered.
                       const licenseGate = requiresLicenseAcknowledgment(model) && !installed && !downloading;
-                      const repoUrl = model.gated ? safeExternalUrl(gatedRepoUrl(model)) : null;
-                      const licenseUrl = safeExternalUrl(model.licenseUrl);
                       return (
                         <React.Fragment key={model.id}>
                           <label className={`setup-wizard-model${installed ? " installed" : ""}`}>
@@ -351,36 +353,16 @@ export function SetupWizard({
                             </span>
                           </label>
                           {licenseGate ? (
-                            <div className="model-gated-notice setup-wizard-license">
-                              <p className="inline-warning">
-                                {model.gated
-                                  ? `Gated download. It also needs a ${model.credentialHost ?? "huggingface.co"} token with access granted on the model page (add one in Settings after setup). Accept the license below to download.`
-                                  : "License acknowledgment required. These weights carry a license that binds you directly — read it and accept before downloading."}
-                              </p>
-                              {model.licenseNotice ? <p className="model-license-terms">{model.licenseNotice}</p> : null}
-                              {repoUrl || licenseUrl ? (
-                                <div className="model-gated-actions">
-                                  {repoUrl ? (
-                                    <a href={repoUrl} target="_blank" rel="noreferrer noopener">
-                                      Request access on Hugging Face
-                                    </a>
-                                  ) : null}
-                                  {licenseUrl && licenseUrl !== repoUrl ? (
-                                    <a href={licenseUrl} target="_blank" rel="noreferrer noopener">
-                                      Review license
-                                    </a>
-                                  ) : null}
-                                </div>
-                              ) : null}
-                              <label className="model-license-ack">
-                                <input
-                                  type="checkbox"
-                                  checked={licenseAcks.has(model.id)}
-                                  onChange={(event) => toggleLicenseAck(model, event.target.checked)}
-                                />
-                                <span>I have read and accept this model&rsquo;s license.</span>
-                              </label>
-                            </div>
+                            <LicenseGateNotice
+                              acknowledged={licenseAcks.has(model.id)}
+                              credentialRequired={model.gated === true}
+                              host={model.credentialHost}
+                              licenseNotice={model.licenseNotice}
+                              licenseUrl={model.licenseUrl}
+                              onAcknowledgeChange={(checked) => toggleLicenseAck(model, checked)}
+                              repoUrl={gatedRepoUrl(model)}
+                              variant="onboarding"
+                            />
                           ) : null}
                         </React.Fragment>
                       );

@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
+import { LicenseGateNotice, gatedRepoUrl } from "../components/LicenseGateNotice.jsx";
 import { WorkPanel } from "../components/WorkPanel.jsx";
 import { WAN_MOE_PAIRED_LORA_MODEL_IDS, terminalStatuses } from "../constants.js";
 import { hasPresentCredential, loadCredentials } from "../credentials.js";
@@ -24,7 +25,6 @@ import {
 import { hostMemoryGbForBackend } from "../hostMemory.js";
 import { tierLabel } from "../quantTier.js";
 import { blanketFloorGb, suggestTier, tierFits } from "../tierSuggestion.js";
-import { safeExternalUrl } from "../urls.js";
 
 function matchesFamily(item, familyFilter) {
   if (familyFilter === "all") {
@@ -211,18 +211,6 @@ function loraGroupKey(lora) {
   return lora.family ?? extractFamilies(lora)[0] ?? "";
 }
 
-// The Hugging Face page of a gated model's primary download repo — where the user
-// clicks "Agree and access" to be granted access with their token (sc-5999). Derived
-// from the first HF download repo (or the mlx repo), so it covers every gated model
-// without a per-model manifest field. Falls back to `licenseUrl` when no repo is known.
-function gatedRepoUrl(model) {
-  const host = model.credentialHost || "huggingface.co";
-  const repo =
-    (model.downloads ?? []).find((entry) => entry.provider === "huggingface" && entry.repo)?.repo ??
-    model.mlx?.repo;
-  return repo ? `https://${host}/${repo}` : null;
-}
-
 // Per-model license acknowledgment (sc-7872). Gated models (FLUX.2 [dev],
 // SD3.5 Large/Turbo/Medium, …) carry a non-commercial / community license the
 // user must accept on Hugging Face before access is granted; we also require an
@@ -236,81 +224,9 @@ function gatedRepoUrl(model) {
 // this screen is only ONE of the surfaces that can start a download, and the gate is now enforced
 // at the shared choke point (`createModelDownloadJob`) plus server-side, with the same predicate.
 // See that module for why the acknowledgment is independent of the Hugging Face credential.
-
-// The pre-download license gate. Two independent requirements share one box (sc-17227):
-//
-//   * CREDENTIAL (`credentialRequired`, from the catalog's `gated` — sc-1898). Gated models
-//     (e.g. FLUX.1 [dev]) need a saved token on `credentialHost` plus access granted on the
-//     model page before the download can succeed. When the matching credential is already
-//     present we soften the notice to a ready state; otherwise we point the user at the
-//     Settings credential screen. `present` is undefined while presence is still unknown
-//     (e.g. the credential list hasn't loaded) — we still show the link then. `repoUrl` links
-//     the gated repo so the user can request access (sc-5999); shown alongside `licenseUrl`
-//     only when the license lives on a different page (e.g. Ideogram 4, whose terms are on
-//     the source repo but access is on the SceneWorks repo).
-//   * ACKNOWLEDGMENT (always, whenever this notice renders — sc-7872). The download button
-//     stays disabled until `acknowledged`. `licenseNotice` is the manifest's statement of the
-//     restrictions the user is accepting; MiniMax H3 Community License §V.2 obliges us to
-//     notify each user that its use restrictions apply, and a bare "accept the license"
-//     checkbox does not do that.
-//
-// A model can need the second without the first: a PUBLIC repo (no token, nothing to request)
-// under a licence that still binds the user. Rendering the credential half unconditionally
-// would tell that user to add a token that does not exist.
-function LicenseGateNotice({
-  credentialRequired,
-  host,
-  repoUrl,
-  licenseUrl,
-  licenseNotice,
-  present,
-  acknowledged,
-  onAcknowledgeChange,
-  onOpenSettings,
-}) {
-  const hostLabel = host || "the required service";
-  const safeRepoUrl = credentialRequired ? safeExternalUrl(repoUrl) : null;
-  const safeLicenseUrl = safeExternalUrl(licenseUrl);
-  const showSeparateLicense = safeLicenseUrl && safeLicenseUrl !== safeRepoUrl;
-  const ready = credentialRequired && present;
-  return (
-    <div className={ready ? "model-gated-notice ready" : "model-gated-notice"}>
-      <p className={ready ? "inline-success" : "inline-warning"}>
-        {!credentialRequired
-          ? "License acknowledgment required. These weights carry a license that binds you directly — read it and accept before downloading."
-          : present
-            ? `Credential for ${hostLabel} saved — request access on the model page, then download.`
-            : `Gated download. Add a ${hostLabel} token, then request access on the model page and accept the license before downloading.`}
-      </p>
-      {licenseNotice ? <p className="model-license-terms">{licenseNotice}</p> : null}
-      <div className="model-gated-actions">
-        {credentialRequired && !present ? (
-          <button type="button" onClick={onOpenSettings}>
-            Add token in Settings
-          </button>
-        ) : null}
-        {safeRepoUrl ? (
-          <a href={safeRepoUrl} target="_blank" rel="noreferrer noopener">
-            Request access on Hugging Face
-          </a>
-        ) : null}
-        {showSeparateLicense ? (
-          <a href={safeLicenseUrl} target="_blank" rel="noreferrer noopener">
-            Review license
-          </a>
-        ) : null}
-      </div>
-      <label className="model-license-ack">
-        <input
-          type="checkbox"
-          checked={acknowledged}
-          onChange={(event) => onAcknowledgeChange(event.target.checked)}
-        />
-        <span>I have read and accept this model&rsquo;s license.</span>
-      </label>
-    </div>
-  );
-}
+// The MARKUP — the notice, `gatedRepoUrl`, the links and the checkbox — moved to
+// `../components/LicenseGateNotice.jsx` (sc-17137 review) once the Setup Wizard grew a second
+// copy of it; this screen renders the `"card"` variant of that one component.
 
 function referencedPresetNames(recipePresets, kind, id) {
   return recipePresets
