@@ -408,6 +408,58 @@ pub(crate) async fn duplicate_job(
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
+/// Whether a job's PERSISTED payload carries the character route's inline LoRA links, i.e. whether
+/// re-validating its adapters must use `allow_inline_loras = true`.
+///
+/// `characters.rs`'s test-job route is the one image-generation boundary that validates with inline
+/// LoRAs allowed. A character's attached adapters are inline links, not catalog rows:
+/// `character_store::attach_lora` mints `id: "character_lora_<hex>"` with `category: "character"` and
+/// a `sourcePath`/`projectPath`, copies the file into the project, and registers it in NO LoRA
+/// catalog. Re-validating that set as catalog-backed refuses it with "LoRA not found" — which broke
+/// even a no-op retry of a character test job when this boundary's gate was first mirrored.
+///
+/// ## Why the link SHAPE and not the `characterId` / `mode` markers
+///
+/// Both of those look server-stamped but are caller-settable: `ImageJobRequest` exposes
+/// `character_id` and `mode`, so `POST /api/v1/image/jobs { mode: "character_image", loras: [] }` is
+/// an ordinary image job that create admits (the LoRA gate no-ops on an empty set) while bearing
+/// both markers. Deriving permission from them would let that job's retry attach an arbitrary
+/// path-bearing adapter and have it accepted as "inline".
+///
+/// The link shape cannot be forged the same way, because it can only have been PERSISTED by a
+/// boundary that already allowed inline LoRAs:
+/// - `create_image_job` / `create_video_job` validate with `allow_inline_loras = false`, so a
+///   non-catalog adapter is refused before any job row exists.
+/// - `POST /api/v1/jobs` refuses image/video generation job types outright (`typed_generation_route`).
+/// - retry/duplicate reach this function, which is where the permission is being decided.
+///
+/// So the only way a persisted `image_generate` payload holds a character link is the character
+/// route. Requiring a non-empty `characterId` as well costs nothing (that route stamps it onto the
+/// same payload it writes the links into) and keeps the predicate honest about what it identifies.
+///
+/// An empty persisted set deliberately yields `false`: the gate no-ops on it anyway, and a character
+/// job whose character had no adapters must not become a hole through which a retry can add inline
+/// ones — attaching them to the character is the supported path.
+fn job_carries_character_inline_loras(persisted_payload: &JsonObject) -> bool {
+    let has_character = persisted_payload
+        .get("characterId")
+        .and_then(Value::as_str)
+        .is_some_and(|id| !id.trim().is_empty());
+    has_character
+        && persisted_payload
+            .get("loras")
+            .and_then(Value::as_array)
+            .is_some_and(|loras| {
+                loras.iter().any(|lora| {
+                    lora.get("category").and_then(Value::as_str) == Some("character")
+                        || lora
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .is_some_and(|id| id.starts_with("character_lora_"))
+                })
+            })
+}
+
 /// Validate and canonicalize the exact payload a retry/duplicate will enqueue. Existing job
 /// payloads are immutable, so reading and merging before the create transaction cannot race with a
 /// payload update. Returning the complete merged payload is intentional: the store's shallow merge
@@ -423,6 +475,10 @@ async fn validate_and_canonicalize_merged_generation_payload(
     let job_type = job.job_type.clone();
     let project_id = job.project_id.clone();
     let mut merged = job.payload;
+    // Resolved from the PERSISTED payload, BEFORE the merge below, because inline-LoRA permission is
+    // a property of how the job was originally created and `payload_changes` must not be able to
+    // mint it. See [`job_carries_character_inline_loras`].
+    let allow_inline_loras = job_carries_character_inline_loras(&merged);
     merged.extend(payload_changes.clone());
     if generation_job_model_is_path_backed(&job_type) {
         validate_payload_model(&merged)?;
@@ -435,6 +491,13 @@ async fn validate_and_canonicalize_merged_generation_payload(
         if let Some(advanced) = merged.get("advanced").and_then(Value::as_object) {
             validate_image_pose_count(advanced)?;
         }
+        // PRECEDENCE DIVERGENCE, deliberate: `create_image_job` resolves the control overlay AFTER
+        // its LoRA gate, this boundary resolves it BEFORE. Acceptance is equivalent — the two read
+        // disjoint fields (`advanced.controlWeights.overlayId` vs the top-level `loras` array) and
+        // neither can change the other's verdict — so no payload is admitted here that create would
+        // refuse, or vice versa. Only the FIRST error reported for a payload that is invalid on both
+        // axes differs. Left as-is rather than reordered: this call predates the gate mirror and the
+        // existing ordering is pinned by the sc-13639 control-weights reauthorization tests.
         crate::control_overlays::resolve_control_overlay_selection(
             state,
             project_id.as_deref(),
@@ -476,8 +539,13 @@ async fn validate_and_canonicalize_merged_generation_payload(
                 &manifest_entry,
             )?;
             merged.insert("modelManifestEntry".to_owned(), manifest_entry);
-            validate_job_lora_compatibility(state, project_id.as_deref(), &mut merged, false)
-                .await?;
+            validate_job_lora_compatibility(
+                state,
+                project_id.as_deref(),
+                &mut merged,
+                allow_inline_loras,
+            )
+            .await?;
             crate::generation::validate_imported_submission(state, &model_id, &merged)?;
         }
     } else if matches!(
@@ -513,7 +581,13 @@ async fn validate_and_canonicalize_merged_generation_payload(
                 &entry,
             )?;
         }
-        validate_job_lora_compatibility(state, project_id.as_deref(), &mut merged, false).await?;
+        validate_job_lora_compatibility(
+            state,
+            project_id.as_deref(),
+            &mut merged,
+            allow_inline_loras,
+        )
+        .await?;
     }
     Ok(merged)
 }

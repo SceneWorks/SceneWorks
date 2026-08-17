@@ -3097,6 +3097,188 @@ async fn retry_and_duplicate_gate_a_merged_lora_set_the_create_path_refuses() {
     );
 }
 
+/// sc-18420: the retry/duplicate LoRA gate must honour the ORIGINAL job's inline-LoRA provenance.
+///
+/// `characters.rs`'s test-job route creates `image_generate` jobs with `allow_inline_loras = true`,
+/// and a character's adapters are inline links (`character_lora_<hex>`, `category: "character"`,
+/// path-bearing) that `character_store::attach_lora` registers in NO catalog. Mirroring the gate
+/// with a hard-coded `false` refused that persisted set with "LoRA not found" — breaking even a
+/// retry with EMPTY `payloadChanges`.
+///
+/// Both directions, because the obvious fix opens a hole: `characterId` and `mode` are
+/// caller-settable (`ImageJobRequest` exposes both), so permission must come from the persisted
+/// LINK SHAPE, which only the character route can have put there. An ordinary image job wearing
+/// those markers must NOT be able to smuggle an inline path-bearing adapter through
+/// `payloadChanges`.
+#[tokio::test]
+async fn retry_honours_character_inline_lora_provenance_without_letting_others_borrow_it() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_lora_gate_catalog(&temp_dir);
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Character Retry" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let (_, character) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/characters"),
+        json!({ "name": "Mira", "type": "person" }),
+    )
+    .await;
+    let character_id = character["id"].as_str().expect("character id").to_owned();
+    let source = temp_dir.path().join("data/loras/character.safetensors");
+    write_test_safetensors(&source);
+    let (status, attached) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/characters/{character_id}/loras"),
+        json!({
+            "name": "Character Style",
+            "sourcePath": source.display().to_string(),
+            // Compatible with `gate_image` so the test-job itself is admitted; the family gate is
+            // pinned elsewhere and is not what this test is about.
+            "compatibility": { "families": ["z-image"] }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{attached}");
+
+    let (status, character_job) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/characters/{character_id}/test-jobs"),
+        json!({ "prompt": "portrait", "model": "gate_image" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{character_job}");
+    let character_job_id = character_job["id"].as_str().expect("job id").to_owned();
+    let inline_lora = character_job["payload"]["loras"][0].clone();
+    assert_eq!(
+        inline_lora["category"], "character",
+        "the fixture must really be an inline character link, or this test proves nothing: \
+         {character_job}"
+    );
+    let inline_lora_id = inline_lora["id"].as_str().expect("link id").to_owned();
+    assert!(
+        inline_lora_id.starts_with("character_lora_"),
+        "got: {inline_lora_id}"
+    );
+
+    // DIRECTION 1: the character job's own inline set survives retry AND duplicate, including the
+    // no-op replay that the hard-coded `false` broke.
+    for operation in ["retry", "duplicate"] {
+        let (status, replayed) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{character_job_id}/{operation}"),
+            json!({ "payloadChanges": {} }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "{operation} of a character test job must not refuse its own inline links: {replayed}"
+        );
+        assert_eq!(
+            replayed["payload"]["loras"][0]["id"], inline_lora_id,
+            "{operation} must preserve the character link"
+        );
+    }
+    // And a real change alongside them still works.
+    let (status, replayed) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{character_job_id}/retry"),
+        json!({ "payloadChanges": { "prompt": "portrait, side light" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{replayed}");
+    assert_eq!(replayed["payload"]["prompt"], "portrait, side light");
+
+    // DIRECTION 2: an ORDINARY image job that wears both caller-settable markers must not borrow
+    // that permission. Create is happy to make it — the LoRA gate no-ops on an empty set — which is
+    // exactly why provenance cannot be read from the markers.
+    let smuggler = temp_dir.path().join("data/loras/smuggled.safetensors");
+    write_test_safetensors(&smuggler);
+    let (status, ordinary) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "character_image",
+            "characterId": "character_not_really_mine",
+            "prompt": "mist over hills",
+            "model": "gate_image",
+            "count": 1,
+            "referenceAssetIds": [],
+            "loras": [],
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "the marker-wearing decoy must be creatable for the smuggle attempt to be meaningful: \
+         {ordinary}"
+    );
+    let ordinary_id = ordinary["id"].as_str().expect("job id").to_owned();
+
+    let (_, before) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    let before = before.as_array().expect("jobs array").len();
+
+    for operation in ["retry", "duplicate"] {
+        let (status, error) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{ordinary_id}/{operation}"),
+            json!({
+                "payloadChanges": {
+                    "loras": [{
+                        "id": "character_lora_forged",
+                        "name": "Forged",
+                        "category": "character",
+                        "sourcePath": smuggler.display().to_string(),
+                        "compatibility": { "families": ["z-image"] }
+                    }]
+                }
+            }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{operation} must not accept an inline adapter for a job whose PERSISTED set had none: \
+             {error}"
+        );
+        assert_eq!(error["detail"], "LoRA not found: character_lora_forged");
+    }
+
+    let (_, after) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(
+        after.as_array().expect("jobs array").len(),
+        before,
+        "a refused smuggle must not persist a job"
+    );
+
+    // The decoy still validates a CATALOG adapter normally, so the refusal above is about inline
+    // permission and not about the job being unable to take adapters at all.
+    let (status, replayed) = request(
+        app,
+        "POST",
+        &format!("/api/v1/jobs/{ordinary_id}/duplicate"),
+        json!({ "payloadChanges": { "loras": [{ "id": "good_style" }] } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{replayed}");
+    assert_eq!(replayed["payload"]["loras"][0]["id"], "good_style");
+}
+
 /// The video half of the same LoRA bypass — `create_video_job` runs the identical gate.
 #[tokio::test]
 async fn retry_and_duplicate_gate_a_merged_video_lora_set_the_create_path_refuses() {
