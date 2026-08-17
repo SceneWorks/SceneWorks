@@ -4884,3 +4884,140 @@ async fn deleting_a_model_reconciles_its_resolved_cache_entries() {
         "the reconciled entry must no longer be loadable"
     );
 }
+
+/// Deleting ONE quant tier must reconcile only that tier's resolved-cache entries (sc-19710).
+/// The sibling tier's entry stays valid, and the tier match is case-insensitive because routes
+/// lowercase the variant while a stored artifact tier keeps whatever case the catalog used — a
+/// mismatch there would silently strand exactly the orphan this story exists to prevent.
+#[tokio::test]
+async fn deleting_one_tier_reconciles_only_that_tiers_resolved_cache_entries() {
+    use sceneworks_core::model_artifacts::resolved_cache::{
+        MaterializationCancellation, MaterializationOutcome, ResolvedCacheMaterializer,
+        ResolvedCacheStore,
+    };
+    use sceneworks_core::model_artifacts::{
+        ArtifactAvailability, ArtifactCompleteness, ArtifactFile, ArtifactIdentity,
+        ArtifactLocation, ArtifactMemberRole, ArtifactProvenance, ArtifactSourceLibrary,
+        PromotionCandidate, ResolvedBundleClosure, ResolvedBundleMember, ResolvedModelArtifact,
+        MODEL_ARTIFACT_CONTRACT_VERSION,
+    };
+
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let data_dir = temp_dir.path().join("data");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+
+    let revision = "b".repeat(40);
+    let library = sceneworks_core::hf_home::model_source_library(&data_dir)
+        .root()
+        .to_owned();
+    let snapshot = ArtifactSourceLibrary::new(&library)
+        .expect("library root")
+        .repository_root("owner/tiered-model")
+        .expect("repository root")
+        .join("snapshots")
+        .join(&revision);
+    std::fs::create_dir_all(&snapshot).expect("snapshot dir creates");
+    std::fs::write(snapshot.join("q8.safetensors"), b"q8-weights").expect("q8 writes");
+    std::fs::write(snapshot.join("q4.safetensors"), b"q4-weights").expect("q4 writes");
+
+    let store = ResolvedCacheStore::open(&data_dir).expect("store opens");
+    let materializer = ResolvedCacheMaterializer::new(store.clone());
+    // `Q8` is stored upper-case on purpose: the route will ask to reconcile `q8`.
+    let mut keys = Vec::new();
+    for (tier, file) in [("Q8", "q8.safetensors"), ("q4", "q4.safetensors")] {
+        let identity =
+            ArtifactIdentity::pinned("owner/tiered-model", &revision, tier).expect("identity");
+        let closure = ResolvedBundleClosure::new(vec![ResolvedBundleMember {
+            role: ArtifactMemberRole::Primary,
+            component_id: None,
+            source: identity.clone(),
+            tier: Some(tier.to_owned()),
+            source_subpath: std::path::PathBuf::new(),
+            destination: std::path::PathBuf::new(),
+            files: vec![ArtifactFile::new(file).expect("file")],
+        }])
+        .expect("closure");
+        let artifact = ResolvedModelArtifact {
+            schema_version: MODEL_ARTIFACT_CONTRACT_VERSION,
+            identity: identity.clone(),
+            location: ArtifactLocation::SourceLibrary {
+                root: snapshot.clone(),
+            },
+            closure,
+            provenance: ArtifactProvenance {
+                identity,
+                fixed_artifact_tier: Some(tier.to_owned()),
+            },
+            completeness: ArtifactCompleteness::Complete,
+            availability: ArtifactAvailability::Available,
+        };
+        let candidate = PromotionCandidate {
+            cache_key: artifact.cache_key().expect("cache key"),
+            artifact,
+        };
+        match materializer
+            .materialize(
+                &candidate,
+                &library,
+                "test:tiered_model",
+                &MaterializationCancellation::default(),
+            )
+            .expect("materialization runs")
+        {
+            MaterializationOutcome::Published(_) => {}
+            other => panic!("fixture must publish, got {other:?}"),
+        }
+        keys.push(candidate.cache_key);
+    }
+    let q8_entry = store.entry_path(&keys[0]).expect("q8 entry path");
+    let q4_entry = store.entry_path(&keys[1]).expect("q4 entry path");
+    assert!(q8_entry.exists() && q4_entry.exists());
+
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{
+              "schemaVersion": 1,
+              "models": [{
+                "id": "tiered_model",
+                "name": "Tiered Model",
+                "type": "image",
+                "family": "z-image",
+                "downloads": [
+                  { "provider": "huggingface", "repo": "owner/tiered-model", "variant": "q8", "files": ["q8.safetensors"] },
+                  { "provider": "huggingface", "repo": "owner/tiered-model", "variant": "q4", "files": ["q4.safetensors"] }
+                ]
+              }]
+            }"#,
+    )
+    .expect("user models writes");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, _body) = request(
+        app,
+        "DELETE",
+        "/api/v1/models/tiered_model/variants/q8",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !q8_entry.exists(),
+        "the deleted tier's cached copy must be reconciled away even though its stored tier is \
+         upper-case and the route asked for the lower-case one"
+    );
+    assert!(
+        q4_entry.exists(),
+        "a sibling tier's cached copy must stay valid"
+    );
+    assert!(store
+        .lookup_complete(&keys[1])
+        .expect("sibling lookup succeeds")
+        .is_some());
+}

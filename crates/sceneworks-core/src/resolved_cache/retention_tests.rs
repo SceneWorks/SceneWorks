@@ -1059,6 +1059,116 @@ fn the_source_rehash_runs_before_the_exclusive_artifact_lock_is_taken() {
     );
 }
 
+/// The sole-copy proof brackets its hash pass with a stat taken before and after, so a source
+/// rewritten *while it is being hashed* cannot be certified. Capturing the identity only after the
+/// hash would record the new stat against a hash of the old bytes, and the cheap under-lock
+/// recheck would then find nothing wrong — the entry would be deleted on the strength of a proof
+/// about content that no longer exists.
+#[test]
+fn a_source_rewritten_during_the_hash_pass_is_never_accepted_as_a_second_copy() {
+    let scratch = TempDir::new().unwrap();
+    let library = scratch.path().join("library");
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let candidate = flat_candidate(&library, "SceneWorks/m-a", REV_A, "q8", b"0123456789");
+    materialize_complete(&store, &library, &candidate);
+    stamp_activity(&store, &candidate.cache_key, Some(1_000), 500);
+    let source_file = snapshot(&library, "SceneWorks/m-a", REV_A).join("model.safetensors");
+    let bundle_file = store
+        .bundle_path(&candidate.cache_key)
+        .unwrap()
+        .join("model.safetensors");
+
+    // Rewrite the source in the hash→stat window, at identical length. The hash pass has already
+    // finished, so it cannot notice; only comparing against the pre-hash capture can.
+    let rewritten = source_file.clone();
+    set_post_hash_observer(move || {
+        std::fs::write(&rewritten, b"9876543210").unwrap();
+    });
+
+    let report = store.enforce_retention(&policy(1, 1), FAR_FUTURE).unwrap();
+    assert!(
+        report.evicted.is_empty(),
+        "a source mutated after it was hashed must never authorize a deletion"
+    );
+    assert_eq!(
+        retained_hold(&report, &candidate.cache_key),
+        RetentionHold::SourceUnverified
+    );
+    assert_eq!(
+        std::fs::read(&bundle_file).unwrap(),
+        b"0123456789",
+        "the resolved copy must survive"
+    );
+}
+
+/// An unreachable source library is a *disconnect*, never an uninstall. A whole external library
+/// going away — an unplugged drive, an unmounted share — must retain every entry and report them
+/// as unverified, so an offline disk can never be mistaken for "the user removed these models".
+/// Only the explicit lifecycle reconciliation path removes anything.
+#[test]
+fn a_disconnected_source_library_retains_and_reports_but_never_removes() {
+    let scratch = TempDir::new().unwrap();
+    let library = scratch.path().join("library");
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let candidate_a = flat_candidate(&library, "SceneWorks/m-a", REV_A, "q8", b"0123456789");
+    let candidate_b = flat_candidate(&library, "SceneWorks/m-b", REV_A, "q8", b"0123456789");
+    materialize_complete(&store, &library, &candidate_a);
+    materialize_complete(&store, &library, &candidate_b);
+    for candidate in [&candidate_a, &candidate_b] {
+        stamp_activity(&store, &candidate.cache_key, Some(1_000), 500);
+    }
+
+    // The entire library disappears, as if its volume were unmounted.
+    std::fs::remove_dir_all(&library).unwrap();
+
+    let report = store.enforce_retention(&policy(1, 1), FAR_FUTURE).unwrap();
+    assert!(
+        report.evicted.is_empty(),
+        "a disconnected library must never authorize a deletion"
+    );
+    assert!(report.failed.is_empty());
+    assert_eq!(
+        report
+            .retained
+            .iter()
+            .filter(|record| record.hold == RetentionHold::SourceUnverified)
+            .count(),
+        2,
+        "both entries must be reported as unverified so the condition is surfaced, not silent"
+    );
+    for candidate in [&candidate_a, &candidate_b] {
+        assert!(store
+            .lookup_complete(&candidate.cache_key)
+            .unwrap()
+            .is_some());
+    }
+}
+
+/// The same protection at the other edge of the window: a source rewritten *while* it is being
+/// hashed is refused by the hash itself.
+#[test]
+fn a_source_rewritten_before_the_hash_pass_is_never_accepted_as_a_second_copy() {
+    let scratch = TempDir::new().unwrap();
+    let library = scratch.path().join("library");
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let candidate = flat_candidate(&library, "SceneWorks/m-b", REV_A, "q8", b"0123456789");
+    materialize_complete(&store, &library, &candidate);
+    stamp_activity(&store, &candidate.cache_key, Some(1_000), 500);
+    let source_file = snapshot(&library, "SceneWorks/m-b", REV_A).join("model.safetensors");
+
+    let rewritten = source_file.clone();
+    set_source_hash_observer(move || {
+        std::fs::write(&rewritten, b"9876543210").unwrap();
+    });
+
+    let report = store.enforce_retention(&policy(1, 1), FAR_FUTURE).unwrap();
+    assert!(report.evicted.is_empty());
+    assert_eq!(
+        retained_hold(&report, &candidate.cache_key),
+        RetentionHold::SourceUnverified
+    );
+}
+
 /// A reservation whose interruption cannot be recorded must leave the entry conservatively
 /// `Materializing` (never silently "clean"), so a later pass still treats it as this session's
 /// live work rather than as an eviction candidate.
@@ -1215,10 +1325,12 @@ fn windows_shared_reader_without_a_lease_does_not_protect_an_expired_entry() {
 /// closes finishes the removal exactly once.
 ///
 /// The handle deliberately shares READ and WRITE but withholds DELETE. Sharing reads is what makes
-/// this test exercise the *removal* stage: every pre-eviction check reopens the bundle file (the
-/// enriched closure is size- and sha256-verified), so a fully exclusive `share_mode(0)` handle
-/// would instead fail that verification and retain the entry as unverifiable — correct fail-safe
-/// behavior, but a different code path than the one under test here.
+/// this test exercise the *removal* stage: the pre-eviction checks still open every bundle file to
+/// confirm it is present and the recorded size (retention validates with
+/// `ContentVerification::PathsAndSizesOnly`, so it no longer re-hashes contents), and a fully
+/// exclusive `share_mode(0)` handle would fail those opens and retain the entry as unverifiable —
+/// correct fail-safe behavior, but a different code path than the one under test here. Withholding
+/// only DELETE lets verification pass so the confined deleter is what fails.
 #[cfg(windows)]
 #[test]
 fn windows_sharing_violation_keeps_the_eviction_pending_until_it_converges() {

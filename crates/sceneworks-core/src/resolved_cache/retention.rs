@@ -956,6 +956,13 @@ impl ResolvedCacheStore {
     /// This is the expensive half of eviction and runs with no artifact lock held. It returns the
     /// exact identity of what it verified so the decision can be re-confirmed cheaply under the
     /// lock; see [`revalidate_source_snapshot`].
+    ///
+    /// The identity is captured **both before and after** the hash pass and both must agree. Only
+    /// capturing it afterwards would leave the recorded identity unprovably tied to the bytes that
+    /// were actually hashed: a source rewritten during the hash→stat window would be certified by
+    /// a hash of its old contents while the snapshot recorded its new stat, and the cheap
+    /// under-lock recheck would then find nothing wrong. Bracketing the hash closes that window,
+    /// which is what the previous under-lock re-hash gave us for free.
     fn verify_source_complete(
         &self,
         metadata: &ResolvedCacheMetadata,
@@ -966,29 +973,33 @@ impl ResolvedCacheStore {
             .map_err(|error| error.to_string())?
             .join("snapshots")
             .join(&metadata.artifact.identity.revision);
-        let locations = metadata
+        // Resolve the paths without hashing first, so the pre-hash identity can be captured. This
+        // pass still validates reachability, confinement, presence and sizes.
+        let paths_only = artifact_without_content_hashes(&metadata.artifact);
+        let locations = paths_only
+            .closure
+            .source_file_locations(&metadata.artifact.identity, &snapshot)
+            .map_err(|error| error.to_string())?;
+        let before = stat_verified_sources(&locations)?;
+        #[cfg(test)]
+        run_source_hash_observer();
+        // The expensive pass: re-reads and re-hashes every source file against the enriched
+        // closure.
+        metadata
             .artifact
             .closure
             .source_file_locations(&metadata.artifact.identity, &snapshot)
             .map_err(|error| error.to_string())?;
         #[cfg(test)]
-        run_source_hash_observer();
-        let mut files = Vec::with_capacity(locations.len());
-        for location in locations {
-            let file_metadata =
-                std::fs::symlink_metadata(&location.source_path).map_err(|error| {
-                    format!(
-                        "verified source file {} became unavailable: {error}",
-                        location.source_path.display()
-                    )
-                })?;
-            files.push(VerifiedSourceFile {
-                len: file_metadata.len(),
-                modified: file_metadata.modified().ok(),
-                path: location.source_path,
-            });
+        run_post_hash_observer();
+        let after = stat_verified_sources(&locations)?;
+        if before != after {
+            return Err(
+                "source files changed while they were being verified as a complete second copy"
+                    .to_owned(),
+            );
         }
-        Ok(SourceSnapshot { files })
+        Ok(SourceSnapshot { files: after })
     }
 
     /// Advisory source probe for manual-removal warnings: reachability plus per-file existence
@@ -1058,6 +1069,31 @@ fn run_source_hash_observer() {
     });
 }
 
+#[cfg(test)]
+thread_local! {
+    static POST_HASH_OBSERVER: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs once in the hash→stat window: after every source file has been re-hashed, before the
+/// closing identity capture. A mutation here is invisible to the hash that already ran, so only
+/// the bracketing pre-hash capture can catch it.
+#[cfg(test)]
+fn set_post_hash_observer(observer: impl FnOnce() + 'static) {
+    POST_HASH_OBSERVER.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(observer));
+    });
+}
+
+#[cfg(test)]
+fn run_post_hash_observer() {
+    POST_HASH_OBSERVER.with(|slot| {
+        if let Some(observer) = slot.borrow_mut().take() {
+            observer();
+        }
+    });
+}
+
 /// Actual on-disk bytes of one entry, falling back to the logical closure sum when the entry
 /// cannot be walked. Materialization hard-links files repeated inside a bundle, so the logical sum
 /// over-reports what a removal would reclaim; measuring keeps reporting and size enforcement honest.
@@ -1071,11 +1107,47 @@ struct SourceSnapshot {
     files: Vec<VerifiedSourceFile>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct VerifiedSourceFile {
     path: PathBuf,
     len: u64,
     modified: Option<std::time::SystemTime>,
+    /// Unix change time, which — unlike mtime — cannot be set backwards by a writer, so a rewrite
+    /// that forges an identical length and mtime is still caught.
+    #[cfg(unix)]
+    changed: (i64, i64),
+}
+
+fn stat_verified_sources(
+    locations: &[crate::model_artifacts::ResolvedBundleFileLocation],
+) -> Result<Vec<VerifiedSourceFile>, String> {
+    locations
+        .iter()
+        .map(|location| {
+            let metadata = std::fs::symlink_metadata(&location.source_path).map_err(|error| {
+                format!(
+                    "verified source file {} became unavailable: {error}",
+                    location.source_path.display()
+                )
+            })?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(format!(
+                    "verified source file {} is not a regular file",
+                    location.source_path.display()
+                ));
+            }
+            Ok(VerifiedSourceFile {
+                path: location.source_path.clone(),
+                len: metadata.len(),
+                modified: metadata.modified().ok(),
+                #[cfg(unix)]
+                changed: {
+                    use std::os::unix::fs::MetadataExt;
+                    (metadata.ctime(), metadata.ctime_nsec())
+                },
+            })
+        })
+        .collect()
 }
 
 /// Cheap re-confirmation of an already-hashed source, run under the exclusive lock: every verified
@@ -1095,7 +1167,13 @@ fn revalidate_source_snapshot(snapshot: &SourceSnapshot) -> Result<(), String> {
                 file.path.display()
             ));
         }
-        if current.len() != file.len || current.modified().ok() != file.modified {
+        let unchanged = current.len() == file.len && current.modified().ok() == file.modified;
+        #[cfg(unix)]
+        let unchanged = unchanged && {
+            use std::os::unix::fs::MetadataExt;
+            (current.ctime(), current.ctime_nsec()) == file.changed
+        };
+        if !unchanged {
             return Err(format!(
                 "verified source file {} changed while the eviction was being authorized",
                 file.path.display()
