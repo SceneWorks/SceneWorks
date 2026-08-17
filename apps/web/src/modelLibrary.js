@@ -65,6 +65,35 @@ export function relocateModelLibrary(token, path) {
   });
 }
 
+// The one place that reacts to an unavailable model library, registered by the app shell. Module
+// level — the same pattern as `setUnauthorizedHandler` — so EVERY submission path participates
+// without threading a callback through six job creators and two studios, and so a path added later
+// is covered by construction rather than by remembering.
+let blockedHandler = null;
+
+export function setModelLibraryHandler(handler) {
+  const next = typeof handler === "function" ? handler : null;
+  blockedHandler = next;
+  return () => {
+    if (blockedHandler === next) blockedHandler = null;
+  };
+}
+
+// Hand a rejection to the prompt. Returns true when the prompt owns it, so the caller suppresses
+// its own error surface — a raw filesystem/loader message must never reach the user for this case.
+export function handleModelLibraryRejection(error, action) {
+  const context = modelLibraryContext(error);
+  if (!context) return false;
+  return blockedHandler?.(context, action) === true;
+}
+
+// Raise the prompt for a model the catalog already reports as unavailable (selection time), with
+// no queued action: the recovery is the point, and there is nothing to resume.
+export function raiseModelLibraryPrompt(context) {
+  if (!context) return false;
+  return blockedHandler?.(context, null) === true;
+}
+
 const IDLE = Object.freeze({
   status: "idle",
   context: null,

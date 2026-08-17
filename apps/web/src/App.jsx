@@ -1,4 +1,12 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { apiFetch, isAbortError } from "./api.js";
 import {
   beginAssetRequest,
@@ -60,6 +68,13 @@ import {
 import { buildWorkersById } from "./workers.js";
 import { createEditorScratchRegistry } from "./editorScratch.js";
 import { appConfirm, ConfirmHost } from "./appConfirm.jsx";
+import { ModelLibraryDialog } from "./components/ModelLibraryDialog.jsx";
+import {
+  createModelLibraryGate,
+  fetchModelLibraryStatus,
+  relocateModelLibrary,
+  setModelLibraryHandler,
+} from "./modelLibrary.js";
 import { isDesktop as isDesktopShell, tauriInvoke } from "./runtime.js";
 // Simple UI (design handoff "Simple UI for creative studios") — an ALTERNATIVE shell that
 // renders instead of this workspace when the sidebar switch is on Simple. The workspace
@@ -695,6 +710,42 @@ export function App() {
     saveToken,
     lockRemote,
   } = useAccessGate({ setError, pushNotice, dismissNoticeKind });
+  // The unavailable-model-library prompt (sc-19709). One gate for the whole app: it holds at most
+  // one blocked action and resumes it at most once, so a reconnect (or an impatient second click)
+  // can never turn one blocked generation into two jobs. Registered as the module-level handler so
+  // every submission path — and the studios' selection check — reaches it without prop threading.
+  const modelLibraryGate = useMemo(
+    () =>
+      createModelLibraryGate({
+        probe: () => fetchModelLibraryStatus(token),
+        relocate: (path) => relocateModelLibrary(token, path),
+        // Durable persistence of a relocated library is desktop state: the API validated and
+        // re-bound the identity, and hands back the exact HF_HOME the shell must store. Same
+        // field, file and normalization as the first-run storage step.
+        persist: async (adopted) => {
+          if (!isDesktopShell || !adopted?.hfHome) return;
+          await tauriInvoke("set_model_library", { path: adopted.hfHome });
+        },
+      }),
+    [token],
+  );
+  const modelLibraryState = useSyncExternalStore(
+    modelLibraryGate.subscribe,
+    modelLibraryGate.getState,
+  );
+  useEffect(() => setModelLibraryHandler(modelLibraryGate.block), [modelLibraryGate]);
+  const chooseModelLibraryLocation = useCallback(async () => {
+    if (!isDesktopShell) return;
+    const picked = await tauriInvoke("choose_folder").catch(() => null);
+    if (!picked) return;
+    const adopted = await modelLibraryGate.relocate(picked);
+    if (adopted?.hfHome) {
+      pushNotice(
+        "general",
+        `Model library set to ${adopted.hfHome} — restart SceneWorks to apply it.`,
+      );
+    }
+  }, [modelLibraryGate, pushNotice]);
   // The drop guard that stops a stray file from navigating the webview (issue #1308) is
   // installed further down, next to `useWorkflowDrop` — it now hands the unclaimed file to
   // the workflow inspector (sc-15951), which needs the active project and `importAsset`.
@@ -3867,6 +3918,17 @@ export function App() {
           navTo — resolve through a real React dialog instead of window.confirm (which
           silently no-ops in the Tauri WebView). Renders nothing until a confirm is asked. */}
       <ConfirmHost />
+
+      {/* The unavailable-model-library prompt (sc-19709). Mounted once at the app root so a
+          blocked submission from any studio — and a selection that is already blocked — raise the
+          same single dialog. Renders nothing while the gate is idle, which is every normal run. */}
+      <ModelLibraryDialog
+        canRelocate={isDesktopShell}
+        onCancel={modelLibraryGate.cancel}
+        onRelocate={chooseModelLibraryLocation}
+        onRetry={modelLibraryGate.retry}
+        state={modelLibraryState}
+      />
 
       {/* "Workflow found" (sc-15951) — opened by a drop no in-app dropzone claimed, and only
           after the file turned out to carry a recipe. Renders nothing otherwise, which is the
