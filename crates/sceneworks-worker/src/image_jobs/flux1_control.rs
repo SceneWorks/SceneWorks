@@ -393,7 +393,7 @@ async fn generate_flux1_dev_control_stream(
         move |generator,
               initial_cache_state,
               loaded_policy,
-              _requested_policy,
+              warm_policy,
               external_committed_bytes,
               tx,
               cancel| {
@@ -430,7 +430,8 @@ async fn generate_flux1_dev_control_stream(
                     &memory_inputs,
                     cache_state,
                     loaded_policy.offload_policy,
-                    external_committed_bytes,
+                                        warm_policy,
+external_committed_bytes,
                 )?;
                 cache_state = gen_core::MemoryCacheState::Warm;
                 let _request_memory_limit = memory_evaluation

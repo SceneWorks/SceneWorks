@@ -152,45 +152,73 @@ CUDA) before the next generation cold-loads weights again.
 
 ### Warm execution-policy decision — `generator_cache_warm_policy_decision` (Rust worker, sc-18317)
 
-Emitted on a warm cache hit when the request asks for an execution policy different from
-the one the resident generator was loaded under. **Silent when the policies match**, so it
-never becomes per-request noise. It replaces `generator_cache_policy_mismatch`, which only
-reported that a difference existed and always served the cold-load policy.
+Emitted once per request evaluation on a warm cache hit whose request asks for an
+execution policy different from the one the resident generator was loaded under.
+**Silent when the policies match**, so it never becomes per-request noise. It replaces
+`generator_cache_policy_mismatch`, which only reported that a difference existed and
+always served the cold-load policy.
+
+The event is emitted by whoever SETTLES the decision, not by the cache seam that made
+it, and that distinction is the whole point: the seam can tell a switch is safe and
+performable, but per-request staging is chosen by the memory ladder's candidate set, so
+only the request-scoped planner knows whether honoring the switch changed anything.
+`rematerialized` therefore means the selection actually moved.
 
 | field | meaning |
 | --- | --- |
 | `decision` | `rematerialized` \| `served_as_is` \| `refused_switch` |
-| `reason` | `components_rematerialized_in_place` \| `loaded_policy_bounds_the_peak` \| `provider_does_not_select_staging` \| `declaration_authority_only` \| `source_not_reopenable` |
-| `source` | `reopenable` \| `single_file_not_reopenable` — whether the resident weights can re-open a dropped component |
+| `reason` | see below |
+| `source` | `reopenable` \| `single_file_not_reopenable` — the base weights source |
+| `staging` | `staging_implemented` \| `staging_not_implemented` — what the LOADED instance's own memory contract declares |
 | `engine` | the gen-core engine id |
 | `loadedOffloadPolicy`, `loadedLoadShape`, `loadedLoadShapeDeclarationResult` | the resident generator's cold-load policy |
 | `requestedOffloadPolicy`, `requestedLoadShape`, `requestedLoadShapeDeclarationResult` | what this request asked for |
 
-- `rematerialized` (info) — **the switch was granted.** The request asked for a strictly
-  tighter shape at peak (more staging and/or deferred materialization), which is inside the
-  envelope admission already proved, and the source can re-open its components. gen-core's
-  request-scoped residency driver evicts and rebuilds the affected components inside the
-  already-loaded generator: **no new generator is constructed and the cache entry is not
-  evicted**, so this is never a reload and never a cache miss.
-- `loaded_policy_bounds_the_peak` (info, `served_as_is`) — the request asked to run *less*
-  staged / *more* resident than the load chose. Admission was proved against the loaded
-  shape, so honoring it could execute above the proved peak. Expected and benign.
-- `provider_does_not_select_staging` (info, `served_as_is`) — the provider's descriptor
-  declares no selectable staged residency, so `OffloadPolicy::Sequential` is advisory-only
-  for it and the switch would change nothing it honors.
-- `declaration_authority_only` (info, `served_as_is`) — only
-  `LoadShapeDeclarationResult` differs. That records who decided the shape, not what runs.
+- `rematerialized` / `components_rematerialized_in_place` (info) — **the switch was
+  granted AND it changed the plan.** The request asked for a strictly tighter shape at
+  peak, which is inside the envelope admission already proved; the source re-opens; the
+  loaded instance declares staging; and flooring the ladder to staged candidates produced
+  a selection the baseline would not have made. gen-core's request-scoped residency driver
+  evicts and rebuilds the affected components inside the already-loaded generator, so
+  **no new generator is constructed and the cache entry is not evicted** — never a reload,
+  never a cache miss.
+- `served_as_is` — the resident generator ran under its loaded policy. The `reason` says
+  why, and each one names its own cause rather than blaming the source generically:
+  - `loaded_policy_bounds_the_peak` — the request asked to run *less* staged / *more*
+    resident than the load chose. Admission was proved against the loaded shape. Expected
+    and benign.
+  - `loaded_contract_does_not_implement_staging` — the LOADED instance's memory contract
+    does not declare staged residency, so `OffloadPolicy::Sequential` is advisory-only for
+    it. Read per-instance, not from the engine's static descriptor bit.
+  - `selection_already_staged` — the switch was granted but the ladder had already chosen a
+    staged selection, so the floor was a no-op.
+  - `no_staged_candidate_for_this_request` — no candidate in this request's ladder engages
+    staged residency.
+  - `staged_candidate_did_not_fit` — a staged candidate existed but did not fit this
+    request's budget. Not a refusal: the same fit check every selection passes.
+  - `declaration_authority_only` — only `LoadShapeDeclarationResult` differs, which records
+    who decided the shape rather than what runs.
+  - `route_has_no_request_scoped_memory` — this route assembles its provider request
+    without a `GenerationMemory` block, so it has no seam a switch could act through.
 - `refused_switch` / `source_not_reopenable` (**warn**) — the only outcome worth acting on.
-  The resident weights are a bare single-file / imported checkpoint with no prepared
-  re-openable pin, so the provider's residency driver would answer any staging request with
+  The resident weights are a single-file / imported base source, so the provider's residency
+  driver could answer a staging request with
   `unsupported: resident-only component source cannot stage or rematerialize components`.
-  The worker refuses the switch *before* asking and serves under the loaded policy, so the
-  job still completes — but that route will never receive the staged/streamed memory ladder
-  until its source becomes re-openable. Recurring warns for a model that is expected to
-  stage means it is being loaded from an import rather than a snapshot directory.
+  The worker refuses *before* asking and serves under the loaded policy, so the job still
+  completes — but that route will never receive the staged/streamed memory ladder while it
+  loads from an import. Recurring warns for a model expected to stage mean it is being
+  loaded from a single file rather than a snapshot directory.
+
+  A prepared re-openable pin does **not** lift this, deliberately: a pin proves the file
+  re-reads, not that the provider retained a loader to re-read it with, and at the current
+  inference pin the one provider that takes a single-file base under `Resident` obtains such
+  a pin and then discards it. The `staging` field will read `staging_implemented` for that
+  instance — its contract cannot see the difference — which is exactly why the refusal keys
+  on the source.
 
 Memory admission always uses the **loaded** policy regardless of the decision: it names the
-shape the resident weights are actually in, which is what the budget was proved against.
+shape the resident weights are actually in, which is what the budget was proved against. A
+granted switch only ever lowers the predicted peak, so it stays inside that envelope.
 
 ### Typed execution domains — `execution_domains_selected` (Rust worker, sc-18317)
 

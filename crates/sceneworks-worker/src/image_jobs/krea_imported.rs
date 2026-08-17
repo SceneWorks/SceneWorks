@@ -854,7 +854,7 @@ async fn generate_krea_imported_control_stream(
         move |model,
               initial_cache_state,
               loaded_policy,
-              _requested_policy,
+              warm_policy,
               external_committed_bytes,
               tx,
               cancel| {
@@ -891,7 +891,8 @@ async fn generate_krea_imported_control_stream(
                     &memory_inputs,
                     cache_state,
                     loaded_policy.offload_policy,
-                    external_committed_bytes,
+                                        warm_policy,
+external_committed_bytes,
                 )?;
                 cache_state = gen_core::MemoryCacheState::Warm;
                 let (out_w, out_h, pixels) = krea_control_generate_one(
@@ -1630,6 +1631,7 @@ fn drive_krea_imported_mlx_items<E>(
     memory_inputs: &crate::mlx_fit_gate::MlxRequestInputs,
     initial_cache_state: gen_core::MemoryCacheState,
     loaded_offload_policy: gen_core::OffloadPolicy,
+    warm_policy: crate::execution_planner::WarmPolicyProposal,
     external_committed_bytes: u64,
     work: Vec<(i64, String)>,
     width: u32,
@@ -1651,6 +1653,7 @@ where
         &crate::mlx_fit_gate::MlxRequestInputs,
         gen_core::MemoryCacheState,
         gen_core::OffloadPolicy,
+        crate::execution_planner::WarmPolicyProposal,
         u64,
     ) -> WorkerResult<crate::mlx_fit_gate::MlxRequestEvaluation>,
 {
@@ -1665,6 +1668,7 @@ where
             memory_inputs,
             cache_state,
             loaded_offload_policy,
+            warm_policy,
             external_committed_bytes,
         )?;
         cache_state = gen_core::MemoryCacheState::Warm;
@@ -1892,7 +1896,7 @@ async fn generate_krea_imported_stream(
         move |model,
               initial_cache_state,
               loaded_policy,
-              _requested_policy,
+              warm_policy,
               external_committed_bytes,
               tx,
               cancel| {
@@ -1902,6 +1906,7 @@ async fn generate_krea_imported_stream(
                 &memory_inputs,
                 initial_cache_state,
                 loaded_policy.offload_policy,
+                warm_policy,
                 external_committed_bytes,
                 work,
                 width,

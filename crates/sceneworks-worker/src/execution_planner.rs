@@ -9,8 +9,9 @@
 //!    [`ExecutionPolicy`] than the resident generator was loaded under used to be served under the
 //!    cold-load policy with nothing but a `tracing::warn`, so no caller could tell a granted switch
 //!    from a silently substituted one. [`decide_warm_policy`] turns that into a real, fail-closed
-//!    decision plus one structured event, and [`effective_policy`] names the policy the request
-//!    actually executes under.
+//!    decision, [`WarmPolicyProposal`] carries it to the request-scoped planner that can act on it,
+//!    and the planner floors the memory ladder's candidate set so a granted switch actually changes
+//!    what runs. `WarmPolicyProposal::requires_staged_residency` is the seam the planner reads.
 //!
 //! 2. **Typed execution-domain selection.** gen-core carries [`GraphEvalCadence`] / [`FfnChunk`] /
 //!    [`CfgBatching`] on [`GenerationMemory`], declared per provider through
@@ -36,39 +37,140 @@
 //! reverse — a staged load asked to run fully resident — would execute above what admission proved,
 //! so it is served as loaded. That asymmetry, not a cost model, is the decision.
 //!
-//! ## Why re-openability is a hard interlock
+//! ## Why a grant needs TWO signals, and why neither is enough alone
 //!
 //! `gen_core::Residency::resident(text, heavy)` has no reload loaders (`rebuildable == false`), and
 //! any request that asks it to stage or re-materialize returns
 //! `Error::Unsupported("resident-only component source cannot stage or rematerialize components …")`.
-//! An imported single-file checkpoint with no prepared pin is exactly that source. Granting a switch
-//! for one would fail the job with a capability error part-way through generation, so
-//! [`SourceReopenability`] classifies the [`LoadSpec`] up front and the switch is refused explicitly
-//! instead. That is the "single-file interlock" the story names: treat imported checkpoints as
-//! stream-ineligible, fail closed, never assume.
+//! Granting such a switch would fail the job with a capability error part-way through generation, so
+//! the switch must be refused before the provider is asked. Two independent things can put an
+//! instance in that state, and they need separate questions:
+//!
+//! - The SOURCE is a single file. [`SourceReopenability`], read off the [`LoadSpec`]. This is the
+//!   "single-file interlock" the story names — treat imported checkpoints as stream-ineligible, fail
+//!   closed, never assume — and it is deliberately conservative: a prepared pin does NOT lift it,
+//!   because at the pinned revision `mlx-gen-sdxl`'s fused-LDM Resident load obtains a valid pin and
+//!   then discards it along with any means of using it.
+//! - The INSTANCE declares rung 1 unimplemented, or publishes no contract at all. That is
+//!   [`StagingAttestation`], read off the loaded generator's own `MemoryProviderContract`.
+//!
+//! A grant requires both to admit it, and each refusal names its own cause so the event never blames
+//! the source for a declaration decision or the reverse.
+//!
+//! Neither signal is a substitute for the other, and — verified, not assumed — the attestation cannot
+//! see the sdxl case: that instance declares rung 1 `Implemented` and passes `validate_selection`. The
+//! source proxy is what stops it. `StagingAttestation`'s docs record that gap and name the upstream
+//! fix; do not "simplify" this to one signal on the strength of the contract looking authoritative.
+//!
+//! ## Why a grant is a proposal until the selection confirms it
+//!
+//! The cache seam knows a switch is safe and performable. It does NOT know whether honoring it changes
+//! anything, because per-request staging is not chosen by this policy at all — it is chosen by the
+//! memory ladder in [`crate::mlx_fit_gate`], which picks the first fitting candidate in
+//! resident → staged → bounded-decode → … order. A policy the ladder never reads cannot move a
+//! request, and the first version of this module emitted `rematerialized` from the seam while the
+//! request went on to run fully resident.
+//!
+//! So the grant is threaded into the planner as a request-scoped FLOOR on the candidate set: when a
+//! grant asks for more staging than the load chose, only candidates that engage
+//! `MemoryStrategy::StagedResidency` are offered to the selector. The selector applies the same budget
+//! and margins it always does, so a floored selection that comes back `Selected` has passed exactly
+//! the same fit check — monotonicity is preserved by construction rather than asserted. The event is
+//! then emitted by [`WarmPolicyProposal::settle_with_selection`] from the outcome the selector
+//! actually produced, so `rematerialized` means the selection moved and nothing else.
 
 use gen_core::{
     CfgBatching, CfgBatchingDomain, ExecutionSurface, ExecutionValueDomain, FfnChunk,
-    GenerationMemory, GraphEvalCadence, LoadShape, LoadSpec, OffloadPolicy,
-    StagedResidencyAvailability, WeightsSource,
+    GenerationMemory, GraphEvalCadence, LoadShape, LoadSpec, OffloadPolicy, WeightsSource,
 };
 
 use crate::generator_cache::ExecutionPolicy;
+
+/// Whether the LOADED generator's own contract declares staged residency implemented.
+///
+/// A per-instance signal — the contract is built from the spec the generator was actually loaded with
+/// — and it catches a provider that declares rung 1 `Missing` or publishes no contract at all. Both
+/// absent cases are `NotImplemented`, so it is fail-closed in its own right.
+///
+/// **What it CANNOT detect, verified against the pinned revision.** Rebuildability is a property of
+/// the `gen_core::Residency` the provider CONSTRUCTED, and no published surface reports it. At
+/// 717f43b5 exactly one production site builds the non-rebuildable `Residency::resident`:
+/// `mlx-gen-sdxl`'s `load_from_ldm_file` under `OffloadPolicy::Resident`, which reads through a
+/// perfectly valid file pin and then drops it, installing error-returning loaders. That instance
+/// nonetheless reports `staged_residency_availability() == Selectable` from its static descriptor,
+/// declares rung 1 `Implemented` through this contract (its builder derives only `load_shape` and
+/// rung 4 from the spec), and passes `validate_selection` — rung 1 declares no prerequisite, and
+/// `MemoryStrategyPrerequisite` has no variant that could express "this load retained reload
+/// loaders". The failure surfaces only inside `generate`, from `Residency::ensure_rebuildable`, as
+/// `Error::Unsupported`.
+///
+/// So this attestation is necessary but NOT sufficient, and it is deliberately not the thing standing
+/// between a grant and that crash. [`SourceReopenability`] is, and it is conservative for exactly the
+/// shape that triggers it. Closing the gap properly is an upstream change (sdxl declaring rung 1
+/// `Missing` for `File` + `Resident`, mirroring what it already does for rung 4, or retaining the pin
+/// and using `from_policy_with_resident`); until then the worker must not trust the declaration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StagingAttestation {
+    Implemented,
+    NotImplemented,
+}
+
+impl StagingAttestation {
+    /// Read the attestation off the loaded generator's contract.
+    pub(crate) fn of_contract(contract: Option<&gen_core::MemoryProviderContract>) -> Self {
+        let implemented = contract
+            .and_then(|contract| contract.capability(gen_core::MemoryStrategy::StagedResidency))
+            .is_some_and(|capability| {
+                matches!(
+                    capability.support,
+                    gen_core::MemoryStrategySupport::Implemented
+                )
+            });
+        if implemented {
+            Self::Implemented
+        } else {
+            Self::NotImplemented
+        }
+    }
+
+    pub(crate) fn of_generator(generator: &dyn gen_core::Generator) -> Self {
+        Self::of_contract(generator.memory_strategy_contract())
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Implemented => "staging_implemented",
+            Self::NotImplemented => "staging_not_implemented",
+        }
+    }
+}
 
 /// Whether the weights behind a resident generator can be re-opened for component
 /// re-materialization.
 ///
 /// Derived from the [`LoadSpec`] the generator was loaded from, never from the engine id: one engine
-/// serves both a snapshot directory and an imported single file, and only the former can rebuild a
-/// component it dropped.
+/// serves both a snapshot directory and an imported single file.
+///
+/// **A single-file base source is classified NOT re-openable even when it carries a valid prepared
+/// pin, and that is deliberate rather than an oversight.** A pin proves the FILE can be re-read under
+/// a stable identity; it does not prove the PROVIDER retained loaders that would use it. At the pinned
+/// revision the one provider that accepts a `WeightsSource::File` base under
+/// `OffloadPolicy::Resident` -- `mlx-gen-sdxl`'s fused-LDM path -- obtains exactly such a pin, reads
+/// through it once, drops it, and installs `Residency::resident`'s error-returning loaders. Trusting
+/// the pin there would hand that instance a staging request and fail the job mid-generation with
+/// `Error::Unsupported`, because nothing between here and the tensor code refuses it (see
+/// [`StagingAttestation`] for why the contract does not).
+///
+/// So this is the conservative half of the interlock and the half that actually holds the line: `Dir`
+/// re-opens, every `File` does not. It costs a grant on some future single-file provider that does
+/// retain its loaders, which is the right way round -- a missed optimization, never a failed render.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SourceReopenability {
-    /// A snapshot directory, or a single file carried with a prepared re-openable pin
-    /// (`gen_core::PinnedWeightsFile`, which exists precisely so a streamed provider can reopen a
-    /// lexical path under the same identity on every phase).
+    /// A snapshot directory. Every provider that takes one retains reload loaders at the pinned
+    /// revision.
     Reopenable,
-    /// A bare single-file / imported source with no prepared pin. The provider holds it resident-only
-    /// and cannot rebuild a component it drops.
+    /// Any single-file / imported base source, pinned or not. The one provider that loads this shape
+    /// resident holds it resident-only and cannot rebuild a component it drops.
     SingleFileNotReopenable,
 }
 
@@ -82,13 +184,10 @@ impl SourceReopenability {
     pub(crate) fn of_spec(spec: &LoadSpec) -> Self {
         match &spec.weights {
             WeightsSource::Dir(_) => Self::Reopenable,
-            WeightsSource::File(path) => match spec.prepared_file_pin_for(path) {
-                Ok(Some(_)) => Self::Reopenable,
-                // An unprepared spec and an unreadable prepared receipt are the same answer here:
-                // neither PROVES the source reopens, and "cannot prove it" must not become "assume
-                // it does".
-                Ok(None) | Err(_) => Self::SingleFileNotReopenable,
-            },
+            // Prepared or not. See the type docs: a pin proves the file re-reads, not that the
+            // provider kept a loader to re-read it with, and the one provider taking this shape under
+            // Resident does not.
+            WeightsSource::File(_) => Self::SingleFileNotReopenable,
         }
     }
 
@@ -129,9 +228,23 @@ pub(crate) enum ServedAsIsReason {
     /// The request asks to run less staged / more resident than the load chose. Admission was proved
     /// against the loaded shape and the requested shape peaks above it.
     LoadedPolicyBoundsThePeak,
-    /// The provider declares no selectable staged residency, so `Sequential` is advisory-only for it
-    /// and granting the switch would change nothing the provider honors.
-    ProviderDoesNotSelectStaging,
+    /// The LOADED generator's own contract does not implement staged residency, so `Sequential` is
+    /// advisory-only for this instance and granting the switch would change nothing it honors. Read
+    /// from the instance's `MemoryProviderContract`, not from the engine's static descriptor bit —
+    /// see [`StagingAttestation`].
+    LoadedContractDoesNotImplementStaging,
+    /// The grant survived the decision but the request-scoped ladder had no candidate that engages
+    /// staged residency, so honoring it would have changed nothing about the selection.
+    NoStagedCandidateForThisRequest,
+    /// The ladder's staged candidate did not fit this request's budget, so the baseline selection
+    /// stands. Not a refusal: the fit check is the same one every selection passes.
+    StagedCandidateDidNotFit,
+    /// The grant survived and a staged candidate existed, but the selection it produced is the one the
+    /// baseline had already chosen — the request was ALREADY going to stage.
+    SelectionAlreadyStaged,
+    /// This route assembles its provider request without a request-scoped `GenerationMemory`, so it
+    /// has no seam through which a policy switch could take effect.
+    RouteHasNoRequestScopedMemory,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -160,8 +273,20 @@ impl WarmPolicyDecision {
             Self::ServedAsIs(ServedAsIsReason::LoadedPolicyBoundsThePeak) => {
                 "loaded_policy_bounds_the_peak"
             }
-            Self::ServedAsIs(ServedAsIsReason::ProviderDoesNotSelectStaging) => {
-                "provider_does_not_select_staging"
+            Self::ServedAsIs(ServedAsIsReason::LoadedContractDoesNotImplementStaging) => {
+                "loaded_contract_does_not_implement_staging"
+            }
+            Self::ServedAsIs(ServedAsIsReason::NoStagedCandidateForThisRequest) => {
+                "no_staged_candidate_for_this_request"
+            }
+            Self::ServedAsIs(ServedAsIsReason::StagedCandidateDidNotFit) => {
+                "staged_candidate_did_not_fit"
+            }
+            Self::ServedAsIs(ServedAsIsReason::SelectionAlreadyStaged) => {
+                "selection_already_staged"
+            }
+            Self::ServedAsIs(ServedAsIsReason::RouteHasNoRequestScopedMemory) => {
+                "route_has_no_request_scoped_memory"
             }
             Self::Rematerialized => "components_rematerialized_in_place",
             Self::RefusedSwitch(RefusalReason::SourceNotReopenable) => "source_not_reopenable",
@@ -202,14 +327,19 @@ fn differs_in_execution(loaded: ExecutionPolicy, requested: ExecutionPolicy) -> 
 
 /// Decide what a warm hit does with a requested policy that differs from the loaded one.
 ///
-/// `staged_availability` is the provider's own attestation
-/// (`gen_core::Capabilities::staged_residency_availability`); `reopenability` classifies the resident
-/// weights. Pure — the caller owns the event and the effective policy.
+/// A `Rematerialized` result here is a PROPOSAL, not a fact: it says the switch is safe and the
+/// instance can perform it. Only the request-scoped selection can confirm that honoring it actually
+/// changes what runs, which is why the event is emitted by
+/// [`WarmPolicyProposal::settle`] and not here. Pure.
+///
+/// Both `reopenability` (a property of the SOURCE) and `attestation` (a property of the loaded
+/// INSTANCE) must admit the switch. They answer different questions and either one alone is
+/// insufficient — see the doc comments on both types.
 pub(crate) fn decide_warm_policy(
     loaded: ExecutionPolicy,
     requested: ExecutionPolicy,
     reopenability: SourceReopenability,
-    staged_availability: StagedResidencyAvailability,
+    attestation: StagingAttestation,
 ) -> WarmPolicyDecision {
     if loaded == requested {
         return WarmPolicyDecision::Unchanged;
@@ -226,36 +356,188 @@ pub(crate) fn decide_warm_policy(
     if !reopenability.is_reopenable() {
         return WarmPolicyDecision::RefusedSwitch(RefusalReason::SourceNotReopenable);
     }
-    let wants_more_staging = requested.offload_policy == OffloadPolicy::Sequential
-        && loaded.offload_policy == OffloadPolicy::Resident;
-    if wants_more_staging && staged_availability == StagedResidencyAvailability::Absent {
-        return WarmPolicyDecision::ServedAsIs(ServedAsIsReason::ProviderDoesNotSelectStaging);
+    if attestation == StagingAttestation::NotImplemented {
+        // The source can reopen but THIS instance's contract cannot stage — the sdxl-loaded-Resident
+        // shape. Reporting it as a source refusal would blame the wrong thing, so it is a truthful
+        // served-as-is and the grant dies here.
+        return WarmPolicyDecision::ServedAsIs(
+            ServedAsIsReason::LoadedContractDoesNotImplementStaging,
+        );
     }
     WarmPolicyDecision::Rematerialized
 }
 
-/// The policy the request actually executes under, after the decision.
-pub(crate) fn effective_policy(
+/// A warm-hit policy decision travelling from the cache seam to the request-scoped planner that can
+/// act on it.
+///
+/// This type exists because a grant is only half a fact at the cache seam. The seam knows the switch
+/// is SAFE (monotone at peak) and PERFORMABLE (source re-openable, instance attests staging); it does
+/// not know whether honoring it changes anything, because per-request staging is chosen by the memory
+/// ladder from the candidate set, not by this policy. Emitting `rematerialized` at the seam therefore
+/// claimed a re-materialization that the ladder might never perform.
+///
+/// So the seam produces a proposal and the consumer settles it exactly once:
+///
+/// - [`Self::settle_with_selection`] — the MLX request planner, which floored the candidate set with
+///   the grant and can say whether the selection actually moved.
+/// - [`Self::decline`] — a route with no request-scoped `GenerationMemory` seam, which downgrades a
+///   grant to a truthful served-as-is rather than reporting a switch it cannot perform.
+///
+/// Marked `#[must_use]` so a consumer that neither settles nor declines is a compiler warning rather
+/// than a silently dropped observation.
+#[must_use = "a warm-policy proposal must be settled or declined, or the decision goes unreported"]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct WarmPolicyProposal {
+    engine_id: &'static str,
+    decision: WarmPolicyDecision,
     loaded: ExecutionPolicy,
     requested: ExecutionPolicy,
-    decision: WarmPolicyDecision,
-) -> ExecutionPolicy {
-    if decision.grants_requested_policy() {
-        requested
-    } else {
-        loaded
+    reopenability: SourceReopenability,
+    attestation: StagingAttestation,
+}
+
+/// What the request-scoped selection did with a granted proposal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GrantOutcome {
+    /// The grant changed the selection: the request now engages staged residency where the baseline
+    /// candidate set would have run it resident. This is the only outcome that reports
+    /// `rematerialized`.
+    SelectionMovedToStaged,
+    /// No candidate in this request's ladder engages staged residency.
+    NoStagedCandidate,
+    /// A staged candidate existed but did not fit the budget, so the baseline selection stands.
+    StagedCandidateDidNotFit,
+    /// The baseline selection already engaged staged residency, so the floor was a no-op.
+    AlreadyStaged,
+}
+
+impl WarmPolicyProposal {
+    /// The proposal for one warm (or cold) access.
+    pub(crate) fn new(
+        engine_id: &'static str,
+        decision: WarmPolicyDecision,
+        loaded: ExecutionPolicy,
+        requested: ExecutionPolicy,
+        reopenability: SourceReopenability,
+        attestation: StagingAttestation,
+    ) -> Self {
+        Self {
+            engine_id,
+            decision,
+            loaded,
+            requested,
+            reopenability,
+            attestation,
+        }
+    }
+
+    /// A proposal with nothing to decide, for a route or test seam whose execution policy never
+    /// varies from the loaded one. Settling it is silent.
+    pub(crate) fn inert(engine_id: &'static str) -> Self {
+        let policy = ExecutionPolicy {
+            offload_policy: OffloadPolicy::Resident,
+            load_shape: LoadShape::EagerMaterialization,
+            load_shape_declaration_result: gen_core::LoadShapeDeclarationResult::NotEvaluated,
+        };
+        Self::new(
+            engine_id,
+            WarmPolicyDecision::Unchanged,
+            policy,
+            policy,
+            SourceReopenability::Reopenable,
+            StagingAttestation::Implemented,
+        )
+    }
+
+    /// The policy this request executes under. For a granted proposal this is the tighter requested
+    /// policy; otherwise the loaded one.
+    ///
+    /// This is an EXECUTION intent, never an admission input: admission reads the separate
+    /// `loaded_policy` slot the cache seam passes alongside this proposal, because that names the shape
+    /// the resident weights are actually in.
+    #[cfg(test)]
+    pub(crate) fn effective_policy(self) -> ExecutionPolicy {
+        if self.decision.grants_requested_policy() {
+            self.requested
+        } else {
+            self.loaded
+        }
+    }
+
+    /// Whether the request-scoped ladder must be floored to candidates that engage staged residency.
+    ///
+    /// True only for a granted proposal whose effective policy asks for more staging than the load
+    /// chose. A grant that only tightens `LoadShape` needs no candidate floor: materialization shape
+    /// is not a ladder rung.
+    pub(crate) fn requires_staged_residency(self) -> bool {
+        self.decision.grants_requested_policy()
+            && self.requested.offload_policy == OffloadPolicy::Sequential
+            && self.loaded.offload_policy == OffloadPolicy::Resident
+    }
+
+    /// Settle a proposal against what the request-scoped selection actually did.
+    ///
+    /// `outcome` is ignored for a non-granted proposal: its decision was already final at the seam.
+    pub(crate) fn settle_with_selection(self, outcome: GrantOutcome) {
+        let decision = if self.decision.grants_requested_policy() {
+            match outcome {
+                GrantOutcome::SelectionMovedToStaged => WarmPolicyDecision::Rematerialized,
+                GrantOutcome::NoStagedCandidate => WarmPolicyDecision::ServedAsIs(
+                    ServedAsIsReason::NoStagedCandidateForThisRequest,
+                ),
+                GrantOutcome::StagedCandidateDidNotFit => {
+                    WarmPolicyDecision::ServedAsIs(ServedAsIsReason::StagedCandidateDidNotFit)
+                }
+                GrantOutcome::AlreadyStaged => {
+                    WarmPolicyDecision::ServedAsIs(ServedAsIsReason::SelectionAlreadyStaged)
+                }
+            }
+        } else {
+            self.decision
+        };
+        self.log(decision);
+    }
+
+    /// Settle a proposal on a route that has no request-scoped memory seam to honor it through.
+    pub(crate) fn decline(self, reason: ServedAsIsReason) {
+        let decision = if self.decision.grants_requested_policy() {
+            WarmPolicyDecision::ServedAsIs(reason)
+        } else {
+            self.decision
+        };
+        self.log(decision);
+    }
+
+    fn log(self, decision: WarmPolicyDecision) {
+        log_warm_policy_decision(
+            self.engine_id,
+            decision,
+            self.loaded,
+            self.requested,
+            self.reopenability,
+            self.attestation,
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn decision(self) -> WarmPolicyDecision {
+        self.decision
     }
 }
 
 /// Emit the single documented warm-policy decision event (`docs/observability.md`).
 ///
-/// `Unchanged` is silent: the overwhelmingly common warm hit must not log once per request.
-pub(crate) fn log_warm_policy_decision(
+/// Private: every caller goes through [`WarmPolicyProposal::settle_with_selection`] or
+/// [`WarmPolicyProposal::decline`], so a `rematerialized` event cannot be emitted without a selection
+/// that actually moved. `Unchanged` is silent — the overwhelmingly common warm hit must not log once
+/// per request.
+fn log_warm_policy_decision(
     engine_id: &str,
     decision: WarmPolicyDecision,
     loaded: ExecutionPolicy,
     requested: ExecutionPolicy,
     reopenability: SourceReopenability,
+    attestation: StagingAttestation,
 ) {
     if matches!(decision, WarmPolicyDecision::Unchanged) {
         return;
@@ -269,6 +551,7 @@ pub(crate) fn log_warm_policy_decision(
             decision = decision.label(),
             reason = decision.reason(),
             source = reopenability.label(),
+            staging = attestation.label(),
             loadedOffloadPolicy = ?loaded.offload_policy,
             loadedLoadShape = ?loaded.load_shape,
             loadedLoadShapeDeclarationResult = ?loaded.load_shape_declaration_result,
@@ -284,6 +567,7 @@ pub(crate) fn log_warm_policy_decision(
             decision = decision.label(),
             reason = decision.reason(),
             source = reopenability.label(),
+            staging = attestation.label(),
             loadedOffloadPolicy = ?loaded.offload_policy,
             loadedLoadShape = ?loaded.load_shape,
             loadedLoadShapeDeclarationResult = ?loaded.load_shape_declaration_result,
@@ -403,6 +687,19 @@ mod tests {
         }
     }
 
+    /// The policy a decision executes under — the accessor's rule, exercised directly.
+    fn effective_policy(
+        loaded: ExecutionPolicy,
+        requested: ExecutionPolicy,
+        decision: WarmPolicyDecision,
+    ) -> ExecutionPolicy {
+        if decision.grants_requested_policy() {
+            requested
+        } else {
+            loaded
+        }
+    }
+
     fn resident_eager() -> ExecutionPolicy {
         policy(OffloadPolicy::Resident, LoadShape::EagerMaterialization)
     }
@@ -421,7 +718,7 @@ mod tests {
                 resident_eager(),
                 resident_eager(),
                 SourceReopenability::Reopenable,
-                StagedResidencyAvailability::Selectable,
+                StagingAttestation::Implemented,
             ),
             WarmPolicyDecision::Unchanged
         );
@@ -435,7 +732,7 @@ mod tests {
             resident_eager(),
             requested,
             SourceReopenability::Reopenable,
-            StagedResidencyAvailability::Selectable,
+            StagingAttestation::Implemented,
         );
         assert_eq!(
             decision,
@@ -455,7 +752,7 @@ mod tests {
             resident_eager(),
             staged_deferred(),
             SourceReopenability::Reopenable,
-            StagedResidencyAvailability::Selectable,
+            StagingAttestation::Implemented,
         );
         assert_eq!(decision, WarmPolicyDecision::Rematerialized);
         assert!(decision.grants_requested_policy());
@@ -473,7 +770,7 @@ mod tests {
             staged_deferred(),
             resident_eager(),
             SourceReopenability::Reopenable,
-            StagedResidencyAvailability::Selectable,
+            StagingAttestation::Implemented,
         );
         assert_eq!(
             decision,
@@ -496,7 +793,7 @@ mod tests {
                 loaded,
                 requested,
                 SourceReopenability::Reopenable,
-                StagedResidencyAvailability::Selectable,
+                StagingAttestation::Implemented,
             ),
             WarmPolicyDecision::ServedAsIs(ServedAsIsReason::LoadedPolicyBoundsThePeak)
         );
@@ -513,7 +810,7 @@ mod tests {
                 resident_eager(),
                 requested,
                 SourceReopenability::SingleFileNotReopenable,
-                StagedResidencyAvailability::Selectable,
+                StagingAttestation::Implemented,
             );
             assert_eq!(
                 decision,
@@ -537,33 +834,33 @@ mod tests {
                 staged_deferred(),
                 resident_eager(),
                 SourceReopenability::SingleFileNotReopenable,
-                StagedResidencyAvailability::Selectable,
+                StagingAttestation::Implemented,
             ),
             WarmPolicyDecision::ServedAsIs(ServedAsIsReason::LoadedPolicyBoundsThePeak)
         );
     }
 
     #[test]
-    fn a_provider_without_selectable_staging_is_not_offered_a_no_op_switch() {
+    fn a_loaded_instance_whose_contract_omits_staging_is_not_offered_a_no_op_switch() {
         let decision = decide_warm_policy(
             resident_eager(),
             policy(OffloadPolicy::Sequential, LoadShape::EagerMaterialization),
             SourceReopenability::Reopenable,
-            StagedResidencyAvailability::Absent,
+            StagingAttestation::NotImplemented,
         );
         assert_eq!(
             decision,
-            WarmPolicyDecision::ServedAsIs(ServedAsIsReason::ProviderDoesNotSelectStaging)
+            WarmPolicyDecision::ServedAsIs(ServedAsIsReason::LoadedContractDoesNotImplementStaging)
         );
     }
 
     #[test]
-    fn an_unconditionally_staging_provider_still_grants_a_deferred_shape() {
+    fn a_staging_instance_grants_a_deferred_shape() {
         let decision = decide_warm_policy(
             resident_eager(),
             staged_deferred(),
             SourceReopenability::Reopenable,
-            StagedResidencyAvailability::UnconditionallyEngaged,
+            StagingAttestation::Implemented,
         );
         assert_eq!(decision, WarmPolicyDecision::Rematerialized);
     }
@@ -574,7 +871,7 @@ mod tests {
             WarmPolicyDecision::Unchanged,
             WarmPolicyDecision::ServedAsIs(ServedAsIsReason::DeclarationAuthorityOnly),
             WarmPolicyDecision::ServedAsIs(ServedAsIsReason::LoadedPolicyBoundsThePeak),
-            WarmPolicyDecision::ServedAsIs(ServedAsIsReason::ProviderDoesNotSelectStaging),
+            WarmPolicyDecision::ServedAsIs(ServedAsIsReason::LoadedContractDoesNotImplementStaging),
             WarmPolicyDecision::Rematerialized,
             WarmPolicyDecision::RefusedSwitch(RefusalReason::SourceNotReopenable),
         ];
@@ -598,7 +895,7 @@ mod tests {
     }
 
     #[test]
-    fn reopenability_is_read_off_the_base_weights_source() {
+    fn every_single_file_base_source_is_conservatively_not_reopenable() {
         let dir = tempfile::tempdir().expect("weights tempdir");
         assert_eq!(
             SourceReopenability::of_spec(&LoadSpec::new(WeightsSource::Dir(
@@ -613,6 +910,11 @@ mod tests {
             SourceReopenability::SingleFileNotReopenable,
             "an unprepared imported checkpoint cannot prove it reopens"
         );
+        // A prepared pin does NOT lift the classification, and that is the load-bearing case: at the
+        // pinned revision `mlx-gen-sdxl`'s fused-LDM Resident load obtains exactly such a pin, reads
+        // through it once, drops it, and installs `Residency::resident`'s error-returning loaders. Its
+        // contract still declares rung 1 implemented, so this proxy is the only thing between a grant
+        // and an `Error::Unsupported` part-way through generation.
         let mut prepared = LoadSpec::new(WeightsSource::File(file.clone()));
         prepared
             .prepare_with_file_pins([
@@ -621,8 +923,8 @@ mod tests {
             .expect("install the prepared pin");
         assert_eq!(
             SourceReopenability::of_spec(&prepared),
-            SourceReopenability::Reopenable,
-            "a prepared pin is exactly the re-openable single-file receipt"
+            SourceReopenability::SingleFileNotReopenable,
+            "a pin proves the FILE re-reads, never that the provider kept a loader to use it"
         );
         assert_eq!(
             SourceReopenability::of_spec(&LoadSpec::new(WeightsSource::File(

@@ -416,6 +416,7 @@ fn c1_unmeasured_cell_engages_a_deep_rung_and_renders() {
                     &request_inputs,
                     gen_core::MemoryCacheState::Cold,
                     load_policy,
+                    crate::execution_planner::WarmPolicyProposal::inert("ladder_e2e"),
                     0,
                 )?;
                 Ok::<_, crate::WorkerError>((generator, evaluation, load_policy))
@@ -746,6 +747,7 @@ fn c0_production_loadspec_probe() {
                     &request_inputs,
                     gen_core::MemoryCacheState::Warm,
                     load_policy,
+                    crate::execution_planner::WarmPolicyProposal::inert("ladder_e2e"),
                     0,
                 )
             })
@@ -830,6 +832,7 @@ fn c2_measured_current_cell_selection() {
                     &request_inputs,
                     gen_core::MemoryCacheState::Warm,
                     gen_core::OffloadPolicy::Resident,
+                    crate::execution_planner::WarmPolicyProposal::inert("ladder_e2e"),
                     0,
                 )
             })
@@ -924,6 +927,7 @@ fn c3_current_lane_enforces_exact_static_boundary() {
                     &request_inputs,
                     gen_core::MemoryCacheState::Warm,
                     gen_core::OffloadPolicy::Resident,
+                    crate::execution_planner::WarmPolicyProposal::inert("ladder_e2e"),
                     0,
                 )
             })
@@ -1143,6 +1147,7 @@ fn c5_fitted_curve_estimate_is_synthesized_and_admitted() {
                     &request_inputs,
                     gen_core::MemoryCacheState::Cold,
                     load_policy,
+                    crate::execution_planner::WarmPolicyProposal::inert("ladder_e2e"),
                     0,
                 )
             })
@@ -1268,6 +1273,7 @@ fn c4_oversized_request_is_refused_not_oom_killed() {
                     &request_inputs,
                     gen_core::MemoryCacheState::Warm,
                     gen_core::OffloadPolicy::Resident,
+                    crate::execution_planner::WarmPolicyProposal::inert("ladder_e2e"),
                     0,
                 )
             })
@@ -1307,6 +1313,7 @@ fn c4_oversized_request_is_refused_not_oom_killed() {
                     &request_inputs,
                     gen_core::MemoryCacheState::Warm,
                     gen_core::OffloadPolicy::Resident,
+                    crate::execution_planner::WarmPolicyProposal::inert("ladder_e2e"),
                     0,
                 )
             })

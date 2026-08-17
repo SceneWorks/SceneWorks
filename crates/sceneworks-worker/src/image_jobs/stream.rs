@@ -432,10 +432,15 @@ where
         move |generator,
               _cache_state,
               _loaded_policy,
-              _requested_policy,
+              warm_policy: crate::execution_planner::WarmPolicyProposal,
               _external_committed_bytes,
               tx,
               cancel| {
+            // `start_cached_gen_stream` exposes only the generator, so this route has no
+            // request-scoped memory block a policy switch could act through. Decline truthfully.
+            warm_policy.decline(
+                crate::execution_planner::ServedAsIsReason::RouteHasNoRequestScopedMemory,
+            );
             drive(generator, tx, cancel)
         },
     )
@@ -504,8 +509,11 @@ where
             move |generator,
                   _cache_state,
                   _loaded_policy,
-                  _requested_policy,
+                  warm_policy: crate::execution_planner::WarmPolicyProposal,
                   _external_committed_bytes| {
+                warm_policy.decline(
+                    crate::execution_planner::ServedAsIsReason::RouteHasNoRequestScopedMemory,
+                );
                 emit_load_event(
                     "image_pipeline_load_complete",
                     &job_id,
@@ -520,9 +528,15 @@ where
     (cancel, rx, blocking)
 }
 
-/// Cached stream seam that exposes cold/warm state, the actual cold-load execution policy, and the
-/// current request's policy intent to the callback. Geometry and request strategy remain absent from
-/// the generator load identity.
+/// Cached stream seam that exposes cold/warm state, the LOADED execution policy, and this request's
+/// vetted [`crate::execution_planner::WarmPolicyProposal`] to the callback. Geometry and request
+/// strategy remain absent from the generator load identity.
+///
+/// The two policy slots have different jobs and must not be swapped: `loaded_policy` is what the
+/// resident weights actually are, so it is the ADMISSION input; the proposal carries this request's
+/// own policy intent after vetting, and the callback owes it exactly one settlement — thread it into
+/// `mlx_fit_gate::evaluate_request` (which floors the memory ladder with it and reports what the
+/// selection did) or `decline` it. It is `#[must_use]`, so forgetting is a compiler warning.
 fn start_cached_gen_stream_with_request_state<D>(
     job_id: String,
     engine_id: &'static str,
@@ -540,7 +554,7 @@ where
             &dyn Generator,
             gen_core::MemoryCacheState,
             crate::generator_cache::ExecutionPolicy,
-            crate::generator_cache::ExecutionPolicy,
+            crate::execution_planner::WarmPolicyProposal,
             u64,
             tokio::sync::mpsc::Sender<GenEvent>,
             CancelFlag,
@@ -565,7 +579,7 @@ where
             move |generator,
                   cache_state,
                   loaded_policy,
-                  requested_policy,
+                  warm_policy,
                   external_committed_bytes| {
                 emit_load_event(
                     "image_pipeline_load_complete",
@@ -577,7 +591,7 @@ where
                     generator,
                     cache_state,
                     loaded_policy,
-                    requested_policy,
+                    warm_policy,
                     external_committed_bytes,
                     tx,
                     blocking_cancel,

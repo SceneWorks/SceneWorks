@@ -315,7 +315,7 @@ async fn generate_krea_edit_stream(
         move |generator,
               cache_state,
               loaded_policy,
-              _requested_policy,
+              warm_policy,
               external_committed_bytes,
               tx,
               cancel| {
@@ -330,7 +330,8 @@ async fn generate_krea_edit_stream(
                     &memory_inputs,
                     request_cache_state,
                     loaded_policy.offload_policy,
-                    external_committed_bytes,
+                                        warm_policy,
+external_committed_bytes,
                 )?;
                 request_cache_state = gen_core::MemoryCacheState::Warm;
                 let _request_memory_limit = memory_evaluation

@@ -2796,6 +2796,10 @@ fn verified_lower_geometry(
 /// Pure request selector used by production and unit/hardware seams. Additional provider evidence is
 /// accepted explicitly; absent exact verified cells, only the resident baseline can be admitted.
 #[allow(clippy::too_many_arguments)]
+/// The pre-sc-18317 shape, kept for the fixture suite: an evaluation with nothing to decide about the
+/// request's execution policy. Production always goes through
+/// [`evaluate_request_with_budget_and_warm_policy`] so a grant cannot be dropped on the way in.
+#[cfg(test)]
 fn evaluate_request_with_budget(
     generator: &dyn gen_core::Generator,
     plan: &MlxRequestPlan,
@@ -2807,12 +2811,41 @@ fn evaluate_request_with_budget(
     external_committed_bytes: u64,
     additional_evidence: &[MemoryEvidence],
 ) -> WorkerResult<MlxRequestEvaluation> {
+    evaluate_request_with_budget_and_warm_policy(
+        generator,
+        plan,
+        inputs,
+        cache_state,
+        load_policy,
+        crate::execution_planner::WarmPolicyProposal::inert(plan.engine_id),
+        budget,
+        total_peak_bytes,
+        external_committed_bytes,
+        additional_evidence,
+    )
+}
+
+/// [`evaluate_request_with_budget`] carrying this request's warm-policy proposal (sc-18317).
+#[allow(clippy::too_many_arguments)]
+fn evaluate_request_with_budget_and_warm_policy(
+    generator: &dyn gen_core::Generator,
+    plan: &MlxRequestPlan,
+    inputs: &MlxRequestInputs,
+    cache_state: MemoryCacheState,
+    load_policy: OffloadPolicy,
+    warm_policy: crate::execution_planner::WarmPolicyProposal,
+    budget: MemoryBudget,
+    total_peak_bytes: u64,
+    external_committed_bytes: u64,
+    additional_evidence: &[MemoryEvidence],
+) -> WorkerResult<MlxRequestEvaluation> {
     evaluate_request_with_budget_using_bundle(
         generator,
         plan,
         inputs,
         cache_state,
         load_policy,
+        warm_policy,
         budget,
         total_peak_bytes,
         external_committed_bytes,
@@ -2829,6 +2862,7 @@ fn evaluate_request_with_budget_using_bundle(
     inputs: &MlxRequestInputs,
     cache_state: MemoryCacheState,
     load_policy: OffloadPolicy,
+    warm_policy: crate::execution_planner::WarmPolicyProposal,
     budget: MemoryBudget,
     total_peak_bytes: u64,
     external_committed_bytes: u64,
@@ -3394,29 +3428,104 @@ fn evaluate_request_with_budget_using_bundle(
             },
         )
         .collect::<Vec<_>>();
-    let selection = crate::memory_strategy::select_strategy(
-        RequestScope {
-            resolved_route: plan.engine_id,
-            backend: "mlx",
-            tier: plan.tier,
-            mode: mode_key,
-            overlay: inputs.overlay.as_deref(),
-            geometry,
-            expected_closure_digest: &live_closure_digest,
+    let request_scope = RequestScope {
+        resolved_route: plan.engine_id,
+        backend: "mlx",
+        tier: plan.tier,
+        mode: mode_key,
+        overlay: inputs.overlay.as_deref(),
+        geometry,
+        expected_closure_digest: &live_closure_digest,
+    };
+    let selector_budget = Some(Budget {
+        available_gb: budget.total_bytes.saturating_sub(budget.committed_bytes) as f64
+            / BYTES_PER_GIB,
+        reclaimable_gb: budget.reclaimable_bytes as f64 / BYTES_PER_GIB,
+        total_gb: budget.total_bytes as f64 / BYTES_PER_GIB,
+        reserved_headroom_gb: if admission.path == AdmissionPath::Evidence {
+            0.0
+        } else {
+            budget.reserved_headroom_bytes as f64 / BYTES_PER_GIB
         },
+    });
+    let baseline = crate::memory_strategy::select_strategy(
+        request_scope,
         contract,
-        Some(Budget {
-            available_gb: budget.total_bytes.saturating_sub(budget.committed_bytes) as f64
-                / BYTES_PER_GIB,
-            reclaimable_gb: budget.reclaimable_bytes as f64 / BYTES_PER_GIB,
-            total_gb: budget.total_bytes as f64 / BYTES_PER_GIB,
-            reserved_headroom_gb: if admission.path == AdmissionPath::Evidence {
-                0.0
-            } else {
-                budget.reserved_headroom_bytes as f64 / BYTES_PER_GIB
-            },
-        }),
+        selector_budget,
         &candidates,
+    );
+    // sc-18317: a GRANTED warm-policy switch takes effect HERE or nowhere.
+    //
+    // `select_strategy` picks the first fitting candidate in resident -> staged -> bounded-decode
+    // order, so a request whose weights fit resident never stages no matter what policy the caller
+    // asked for. Honoring a grant therefore means removing the looser candidates from the set: offer
+    // only those that engage `StagedResidency` and let the selector apply the SAME budget and margins
+    // it always does. A floored selection that comes back `Selected` has passed exactly the fit check
+    // the baseline would have had to pass, so it cannot exceed the admitted envelope — monotonicity is
+    // preserved by construction rather than asserted after the fact.
+    //
+    // The outcome (not the seam's proposal) is what gets reported: `rematerialized` is emitted only
+    // when the floor actually moved the selection.
+    let (selection, grant_outcome) = if warm_policy.requires_staged_residency() {
+        let staged = candidates
+            .iter()
+            .filter(|candidate| {
+                contract.engages(
+                    candidate.selection.strategy,
+                    MemoryStrategy::StagedResidency,
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let baseline_stages = matches!(&baseline, Selection::Selected { selection, .. }
+            if contract.engages(selection.strategy, MemoryStrategy::StagedResidency));
+        if baseline_stages {
+            (
+                baseline,
+                Some(crate::execution_planner::GrantOutcome::AlreadyStaged),
+            )
+        } else if staged.is_empty() {
+            (
+                baseline,
+                Some(crate::execution_planner::GrantOutcome::NoStagedCandidate),
+            )
+        } else {
+            let floored = crate::memory_strategy::select_strategy(
+                request_scope,
+                contract,
+                selector_budget,
+                &staged,
+            );
+            match (&floored, &baseline) {
+                // The floor produced a fitting staged selection the baseline would not have made.
+                (
+                    Selection::Selected {
+                        selection: chosen, ..
+                    },
+                    _,
+                ) if !matches!(&baseline, Selection::Selected { selection: base, .. } if base == chosen) => {
+                    (
+                        floored,
+                        Some(crate::execution_planner::GrantOutcome::SelectionMovedToStaged),
+                    )
+                }
+                // A staged candidate existed but does not fit this request's budget. The baseline
+                // stands; this is not a refusal, it is the ordinary fit check.
+                (Selection::Selected { .. }, _) => (
+                    baseline,
+                    Some(crate::execution_planner::GrantOutcome::AlreadyStaged),
+                ),
+                _ => (
+                    baseline,
+                    Some(crate::execution_planner::GrantOutcome::StagedCandidateDidNotFit),
+                ),
+            }
+        }
+    } else {
+        (baseline, None)
+    };
+    warm_policy.settle_with_selection(
+        grant_outcome.unwrap_or(crate::execution_planner::GrantOutcome::AlreadyStaged),
     );
     let (selection, mut needed_gb, mut available_gb) = match selection {
         Selection::Selected {
@@ -3664,17 +3773,19 @@ pub(crate) fn evaluate_request(
     inputs: &MlxRequestInputs,
     cache_state: MemoryCacheState,
     load_policy: OffloadPolicy,
+    warm_policy: crate::execution_planner::WarmPolicyProposal,
     external_committed_bytes: u64,
 ) -> WorkerResult<MlxRequestEvaluation> {
     let geometry = request_geometry(inputs);
     let budget = live_request_budget(plan.engine_id)?;
     let total_peak_bytes = request_total_peak_bytes(plan, geometry);
-    evaluate_request_with_budget(
+    evaluate_request_with_budget_and_warm_policy(
         generator,
         plan,
         inputs,
         cache_state,
         load_policy,
+        warm_policy,
         budget,
         total_peak_bytes,
         external_committed_bytes,
@@ -6432,6 +6543,7 @@ mod tests {
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
             0,
         )
         .expect("a covered qwen cell must be admitted");
@@ -7853,6 +7965,7 @@ mod tests {
             &fixture_inputs(1024, 1024),
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
             fixture_budget(8.0),
             gib_to_bytes(6.0),
             0,
@@ -7907,6 +8020,7 @@ mod tests {
                 &inputs,
                 MemoryCacheState::Cold,
                 OffloadPolicy::Resident,
+                crate::execution_planner::WarmPolicyProposal::inert("fixture"),
                 fixture_budget(budget_gib),
                 gib_to_bytes(130.0),
                 0,
@@ -7978,6 +8092,7 @@ mod tests {
             &exact_896,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
             fixture_budget(83.0),
             gib_to_bytes(130.0),
             0,
@@ -8087,6 +8202,7 @@ mod tests {
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
             fixture_budget(60.0),
             gib_to_bytes(130.0),
             0,
@@ -9163,6 +9279,294 @@ mod tests {
             );
             assert_eq!(evaluation.process_limit_bytes, None);
         }
+    }
+
+    /// The shipped plain-SDXL registry contract driven through the real request seam, so a
+    /// warm-policy grant is graded by production code rather than by a hand-built contract.
+    #[cfg(target_os = "macos")]
+    struct SdxlSelectorFixture {
+        root: tempfile::TempDir,
+    }
+
+    #[cfg(target_os = "macos")]
+    impl SdxlSelectorFixture {
+        fn new() -> Self {
+            let root = tempfile::tempdir().expect("sdxl fixture tempdir");
+            for component in ["text_encoder", "text_encoder_2", "unet", "vae"] {
+                let directory = root.path().join(component);
+                std::fs::create_dir_all(&directory).unwrap();
+                let header = br#"{"w":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}"#;
+                let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+                bytes.extend_from_slice(header);
+                bytes.extend_from_slice(&0_f32.to_le_bytes());
+                std::fs::write(directory.join("model.safetensors"), bytes).unwrap();
+            }
+            std::fs::write(
+                root.path().join("unet").join("config.json"),
+                r#"{"quantization":{"bits":4,"group_size":64}}"#,
+            )
+            .unwrap();
+            Self { root }
+        }
+
+        fn spec(&self, policy: OffloadPolicy) -> LoadSpec {
+            LoadSpec::new(WeightsSource::Dir(self.root.path().to_owned()))
+                .with_quant(gen_core::Quant::Q4)
+                .with_offload_policy(policy)
+                .with_load_shape(gen_core::LoadShape::DeferredMaterialization)
+        }
+
+        fn generator(&self, policy: OffloadPolicy) -> RequestGenerator {
+            let mut contract = crate::inference_runtime::media()
+                .memory_strategy_contract("sdxl", &self.spec(policy))
+                .unwrap()
+                .expect("the shipped plain SDXL registry contract");
+            contract.asset_facts.base_bytes = gib_to_bytes(6.0);
+            contract.asset_facts.conditioning_bytes = gib_to_bytes(1.0);
+            contract.asset_facts.transformer_bytes = gib_to_bytes(5.0);
+            contract.asset_facts.decoder_bytes = 0;
+            RequestGenerator {
+                descriptor: gen_core::ModelDescriptor {
+                    id: "sdxl",
+                    family: "sdxl",
+                    backend: "mlx",
+                    modality: gen_core::Modality::Image,
+                    capabilities: gen_core::Capabilities::default(),
+                    encoder_contract: None,
+                    denoiser_output_latent_space: None,
+                    required_components: &[],
+                    control_kinds: None,
+                },
+                contract: Some(contract),
+            }
+        }
+
+        /// A proposal in the exact state the cache seam produces for a granted switch: loaded
+        /// resident/eager, request asking for staged/deferred, snapshot directory, contract implements
+        /// staging.
+        fn granted_proposal(&self) -> crate::execution_planner::WarmPolicyProposal {
+            let loaded = crate::generator_cache::ExecutionPolicy {
+                offload_policy: OffloadPolicy::Resident,
+                load_shape: gen_core::LoadShape::EagerMaterialization,
+                load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
+            };
+            let requested = crate::generator_cache::ExecutionPolicy {
+                offload_policy: OffloadPolicy::Sequential,
+                load_shape: gen_core::LoadShape::DeferredMaterialization,
+                load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
+            };
+            let decision = crate::execution_planner::decide_warm_policy(
+                loaded,
+                requested,
+                crate::execution_planner::SourceReopenability::Reopenable,
+                crate::execution_planner::StagingAttestation::Implemented,
+            );
+            assert!(
+                decision.grants_requested_policy(),
+                "the fixture must actually be a grant, got {decision:?}"
+            );
+            crate::execution_planner::WarmPolicyProposal::new(
+                "sdxl",
+                decision,
+                loaded,
+                requested,
+                crate::execution_planner::SourceReopenability::Reopenable,
+                crate::execution_planner::StagingAttestation::Implemented,
+            )
+        }
+
+        fn evaluate(
+            &self,
+            load_policy: OffloadPolicy,
+            warm_policy: crate::execution_planner::WarmPolicyProposal,
+            budget: MemoryBudget,
+        ) -> WorkerResult<MlxRequestEvaluation> {
+            let plan = MlxRequestPlan {
+                engine_id: "sdxl",
+                model_id: "sdxl".to_owned(),
+                tier: MemoryNumericTier {
+                    precision: gen_core::Precision::Bf16,
+                    quant: Some(gen_core::Quant::Q4),
+                    component_precision_floors: &[],
+                },
+                asset_bytes: gib_to_bytes(6.0),
+                folded_control_bytes: 0,
+                folded_adapter_bytes: 0,
+                activation_headroom_bytes: gib_to_bytes(6.0),
+                fixed_reserve_bytes: gib_to_bytes(2.0),
+                calibration: MlxCalibrationConfig::Absent,
+                load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
+            };
+            evaluate_request_with_budget_and_warm_policy(
+                &self.generator(load_policy),
+                &plan,
+                &fixture_inputs(1024, 1024),
+                MemoryCacheState::Warm,
+                load_policy,
+                warm_policy,
+                budget,
+                gib_to_bytes(12.0),
+                0,
+                &[],
+            )
+        }
+    }
+
+    /// Capture this thread's tracing output so a settled decision can be graded by the event it emits.
+    #[cfg(target_os = "macos")]
+    struct EventCapture {
+        sink: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+        _guard: tracing::subscriber::DefaultGuard,
+    }
+
+    #[cfg(target_os = "macos")]
+    impl EventCapture {
+        fn install() -> Self {
+            #[derive(Clone)]
+            struct Sink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+            impl std::io::Write for Sink {
+                fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                    self.0.lock().unwrap().extend_from_slice(buf);
+                    Ok(buf.len())
+                }
+                fn flush(&mut self) -> std::io::Result<()> {
+                    Ok(())
+                }
+            }
+            let sink = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let writer = Sink(std::sync::Arc::clone(&sink));
+            let subscriber = tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::INFO)
+                .with_writer(move || writer.clone())
+                .with_ansi(false)
+                .with_target(false)
+                .without_time()
+                .finish();
+            let guard = tracing::subscriber::set_default(subscriber);
+            Self {
+                sink,
+                _guard: guard,
+            }
+        }
+
+        fn text(&self) -> String {
+            String::from_utf8(self.sink.lock().unwrap().clone()).expect("utf-8 tracing")
+        }
+    }
+
+    /// sc-18317 MAJOR fix: a granted warm-policy switch must CHANGE WHAT RUNS.
+    ///
+    /// The first version of this feature threaded a vetted "effective policy" to the run callback,
+    /// where all eight production consumers bound it as `_requested_policy` and dropped it. Per-request
+    /// staging is chosen HERE, by `select_strategy` over the candidate set, so the grant was inert and
+    /// a `rematerialized` event could fire while the request ran fully resident.
+    ///
+    /// This drives the real seam on a ROOMY budget, where the baseline selector prefers `Resident`, and
+    /// asserts the grant floors the candidate set into a staged selection instead. It is the mutation
+    /// sentinel for the threading: delete the floor in `evaluate_request_with_budget_using_bundle` and
+    /// the staged assertions below go red.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_granted_warm_switch_moves_the_selection_and_stays_inside_the_admitted_peak() {
+        let fixture = SdxlSelectorFixture::new();
+        let roomy = fixture_budget(20.0);
+
+        let baseline = fixture
+            .evaluate(
+                OffloadPolicy::Resident,
+                crate::execution_planner::WarmPolicyProposal::inert("sdxl"),
+                roomy,
+            )
+            .expect("a roomy host must admit resident SDXL");
+        assert_eq!(
+            baseline.context.selection.strategy,
+            MemoryStrategy::Resident,
+            "the baseline must prefer resident, or this test proves nothing about the floor"
+        );
+        assert!(
+            !baseline.memory.stage_residency,
+            "a resident baseline must not stage"
+        );
+
+        let granted = fixture
+            .evaluate(OffloadPolicy::Resident, fixture.granted_proposal(), roomy)
+            .expect("a granted switch must still admit the request");
+        assert_ne!(
+            granted.context.selection.strategy,
+            MemoryStrategy::Resident,
+            "the grant must move the selection off resident, not merely be reported"
+        );
+        assert!(
+            granted.memory.stage_residency,
+            "the granted request must reach the provider asking for staged residency — that field is \
+             what `gen_core::Residency::run_request_scoped` reads, and it is the whole point"
+        );
+
+        // Memory safety, asserted rather than assumed: the granted selection's predicted peak never
+        // exceeds the baseline's, so it stays inside the envelope admission proved against
+        // `loaded_policy`. Both runs were admitted under the SAME loaded policy and the same budget.
+        assert!(
+            granted.context.predicted_peak_bytes <= baseline.context.predicted_peak_bytes,
+            "granted peak {} must not exceed the admitted baseline peak {}",
+            granted.context.predicted_peak_bytes,
+            baseline.context.predicted_peak_bytes
+        );
+        assert_eq!(
+            granted.context.budget, baseline.context.budget,
+            "a grant is an execution intent and must never move an admission input"
+        );
+    }
+
+    /// The event may not claim a re-materialization the selector did not perform.
+    ///
+    /// On a constrained budget the baseline ALREADY stages, so the floor is a no-op and the honest
+    /// report is `served_as_is` / `selection_already_staged`. Mutation sentinel for the false-fire:
+    /// settle a granted proposal with `SelectionMovedToStaged` unconditionally and this goes red.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_grant_that_changes_nothing_reports_served_as_is_rather_than_rematerialized() {
+        let fixture = SdxlSelectorFixture::new();
+        let capture = EventCapture::install();
+        let constrained = fixture
+            .evaluate(
+                OffloadPolicy::Sequential,
+                fixture.granted_proposal(),
+                fixture_budget(11.0),
+            )
+            .expect("a constrained host must still reach an estimate rung");
+        assert!(
+            constrained.memory.stage_residency,
+            "the constrained baseline already stages"
+        );
+        let text = capture.text();
+        assert!(
+            text.contains("generator_cache_warm_policy_decision")
+                && text.contains("decision=\"served_as_is\"")
+                && text.contains("reason=\"selection_already_staged\""),
+            "a no-op grant must report the truth: {text:?}"
+        );
+        assert!(
+            !text.contains("decision=\"rematerialized\""),
+            "no re-materialization happened, so none may be claimed: {text:?}"
+        );
+    }
+
+    /// A granted proposal on a route with no request-scoped memory seam must not report a switch.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_declined_grant_reports_the_route_limit_rather_than_a_switch() {
+        let fixture = SdxlSelectorFixture::new();
+        let capture = EventCapture::install();
+        fixture
+            .granted_proposal()
+            .decline(crate::execution_planner::ServedAsIsReason::RouteHasNoRequestScopedMemory);
+        let text = capture.text();
+        assert!(
+            text.contains("decision=\"served_as_is\"")
+                && text.contains("reason=\"route_has_no_request_scoped_memory\""),
+            "a declined grant must name the route limit: {text:?}"
+        );
+        assert!(!text.contains("decision=\"rematerialized\""), "{text:?}");
     }
 
     #[cfg(target_os = "macos")]
@@ -10565,6 +10969,7 @@ mod tests {
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
             fixture_budget(8.0),
             gib_to_bytes(4.0),
             0,
@@ -10585,6 +10990,7 @@ mod tests {
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
             fixture_budget(6.0),
             gib_to_bytes(5.0),
             0,
@@ -10619,6 +11025,7 @@ mod tests {
             &fixture_inputs(1024, 1024),
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
             fixture_budget(8.0),
             gib_to_bytes(4.0),
             0,
@@ -10662,6 +11069,7 @@ mod tests {
                 &fixture_inputs(1024, 1024),
                 MemoryCacheState::Cold,
                 OffloadPolicy::Resident,
+                crate::execution_planner::WarmPolicyProposal::inert("fixture"),
                 fixture_budget(8.0),
                 gib_to_bytes(4.0),
                 0,
@@ -10803,6 +11211,7 @@ mod tests {
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
             fixture_budget(64.0),
             gib_to_bytes(9.0),
             0,
@@ -10899,6 +11308,7 @@ mod tests {
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
             fixture_budget(64.0),
             gib_to_bytes(9.0),
             0,
@@ -10960,6 +11370,7 @@ mod tests {
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
             fixture_budget(64.0),
             gib_to_bytes(9.0),
             0,
@@ -11028,6 +11439,7 @@ mod tests {
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
             fixture_budget(64.0),
             gib_to_bytes(9.0),
             0,
@@ -11204,6 +11616,7 @@ mod tests {
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
             fixture_budget(64.0),
             gib_to_bytes(9.0),
             0,
@@ -11239,6 +11652,7 @@ mod tests {
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
             fixture_budget(64.0),
             gib_to_bytes(9.0),
             0,
@@ -11310,6 +11724,7 @@ mod tests {
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
             fixture_budget(64.0),
             gib_to_bytes(9.0),
             0,
@@ -11344,6 +11759,7 @@ mod tests {
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
             fixture_budget(64.0),
             gib_to_bytes(9.0),
             0,
@@ -12955,6 +13371,7 @@ mod tests {
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
             fixture_budget(9.5),
             gib_to_bytes(4.0),
             0,
@@ -12984,6 +13401,7 @@ mod tests {
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
             fixture_budget(9.1),
             gib_to_bytes(4.0),
             0,
@@ -13006,6 +13424,7 @@ mod tests {
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
             fixture_budget(9.1),
             gib_to_bytes(4.0),
             0,
@@ -13032,6 +13451,7 @@ mod tests {
             &off_geometry,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
             fixture_budget(8.0),
             gib_to_bytes(12.0),
             0,
@@ -13051,6 +13471,7 @@ mod tests {
             &off_geometry,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
             fixture_budget(8.0),
             gib_to_bytes(12.0),
             0,
@@ -13110,6 +13531,7 @@ mod tests {
                 &inputs,
                 cache_state,
                 OffloadPolicy::Resident,
+                crate::execution_planner::WarmPolicyProposal::inert("fixture"),
                 MemoryBudget {
                     committed_bytes,
                     ..fixture_budget(8.0)
@@ -13155,6 +13577,7 @@ mod tests {
                 &inputs,
                 MemoryCacheState::Cold,
                 OffloadPolicy::Resident,
+                crate::execution_planner::WarmPolicyProposal::inert("fixture"),
                 fixture_budget(total_gib),
                 gib_to_bytes(4.0),
                 0,
@@ -13302,6 +13725,7 @@ mod tests {
                 &fixture_inputs(1024, 1024),
                 MemoryCacheState::Cold,
                 OffloadPolicy::Resident,
+                crate::execution_planner::WarmPolicyProposal::inert("fixture"),
                 fixture_budget(total_gib),
                 gib_to_bytes(4.0),
                 0,
@@ -13338,6 +13762,7 @@ mod tests {
             &fixture_inputs(1024, 1024),
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
             fixture_budget(10.0),
             gib_to_bytes(4.0),
             0,
@@ -15874,6 +16299,7 @@ mod tests {
             &fixture_inputs(1024, 1024),
             MemoryCacheState::Warm,
             OffloadPolicy::Resident,
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
             0,
         )
         .expect("the reported generation must be admitted, not refused");

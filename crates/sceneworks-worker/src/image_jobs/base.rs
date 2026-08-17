@@ -7868,7 +7868,7 @@ async fn generate_stream(
         move |generator,
               cache_state,
               loaded_policy,
-              _requested_policy,
+              warm_policy,
               external_committed_bytes,
               tx,
               cancel| {
@@ -7914,7 +7914,8 @@ async fn generate_stream(
                     &mlx_request_inputs,
                     cache_state,
                     loaded_policy.offload_policy,
-                    request_external_committed_bytes,
+                                        warm_policy,
+request_external_committed_bytes,
                 )?;
                 // Exact promoted MLX evidence may tighten the soft process limit for this request.
                 // The RAII guard restores the process-global/user limit after all retries and never
