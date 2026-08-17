@@ -13696,6 +13696,97 @@ details[open] > summary.lora-scope-group-heading::before,
   gap: 10px;
 }
 
+.queue-priority-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+
+.queue-move-to-top {
+  min-height: 34px;
+  padding: 0 14px;
+  border: 1px solid var(--accent);
+  border-radius: var(--r-sm);
+  background: var(--accent);
+  color: var(--accent-contrast, var(--text));
+  font: inherit;
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.queue-move-to-top:hover:not(:disabled) {
+  filter: brightness(1.05);
+}
+
+.queue-move-to-top:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.queue-job-entry {
+  display: grid;
+  min-width: 0;
+}
+
+.queue-job-selection {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: -1px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md) var(--r-md) 0 0;
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.queue-job-selection label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+}
+
+.queue-job-selection input {
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.queue-job-entry:has(.queue-job-selection) .worker-progress-card {
+  border-radius: 0 0 var(--r-md) var(--r-md);
+}
+
+.queue-job-entry.selected .queue-job-selection,
+.queue-job-entry.selected .worker-progress-card {
+  border-color: var(--accent);
+}
+
+.queue-priority-badge {
+  padding: 2px 8px;
+  border: 1px solid color-mix(in oklch, var(--accent) 45%, var(--border));
+  border-radius: var(--r-pill);
+  background: color-mix(in oklch, var(--accent) 12%, transparent);
+  color: var(--accent-strong);
+  font-weight: 700;
+}
+
+@media (max-width: 720px) {
+  .queue-priority-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
+
 .empty-panel {
   padding: 18px;
   color: var(--text-muted);
@@ -14902,6 +14993,12 @@ details[open] > summary.lora-scope-group-heading::before,
   gap: 8px;
 }
 
+.worker-progress-card__title-content {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
 .worker-progress-card__title {
   margin: 0;
   font-size: 15px;
@@ -14912,6 +15009,34 @@ details[open] > summary.lora-scope-group-heading::before,
   -webkit-line-clamp: 2;
   overflow: hidden;
   overflow-wrap: anywhere;
+}
+
+.worker-progress-card__title.expanded {
+  display: block;
+  overflow: visible;
+  -webkit-line-clamp: unset;
+}
+
+.worker-progress-card__title-toggle {
+  width: fit-content;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.35;
+  cursor: pointer;
+}
+
+.worker-progress-card__title-toggle:hover {
+  text-decoration: underline;
+}
+
+.worker-progress-card__title-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 2px;
 }
 
 .worker-progress-card__id {

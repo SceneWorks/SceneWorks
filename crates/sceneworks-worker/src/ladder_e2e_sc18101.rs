@@ -110,6 +110,9 @@ impl Tee {
 /// Field ordering inside a `tracing` event is the macro's, not a map's, so the captured text is
 /// deterministic for a given build — which is what makes the cross-commit diff meaningful.
 pub(crate) fn with_captured_tracing<T>(body: impl FnOnce() -> T) -> (T, String) {
+    // Concurrent subscriber-less tests can first-hit the captured callsites and cache
+    // `Interest::never`, silently dropping events from this capture (see test_env).
+    crate::test_env::install_tracing_interest_floor();
     let tee = Tee::default();
     let writer = tee.clone();
     let subscriber = tracing_subscriber::fmt()

@@ -2629,6 +2629,10 @@ mod tests {
     fn tracing_records_stale_admission_and_the_widened_peak() {
         use std::io::Write;
 
+        // Concurrent subscriber-less tests also drive these callsites; without the floor their
+        // first hit can cache `Interest::never` and silently empty this capture (see test_env).
+        crate::test_env::install_tracing_interest_floor();
+
         #[derive(Clone, Default)]
         struct Capture(Arc<Mutex<Vec<u8>>>);
         impl Write for Capture {
@@ -2957,6 +2961,10 @@ mod tests {
     #[test]
     fn tracing_records_estimate_admission_with_its_basis_and_the_widened_peak() {
         use std::io::Write;
+
+        // Concurrent subscriber-less tests also drive these callsites; without the floor their
+        // first hit can cache `Interest::never` and silently empty this capture (see test_env).
+        crate::test_env::install_tracing_interest_floor();
 
         #[derive(Clone, Default)]
         struct Capture(Arc<Mutex<Vec<u8>>>);
