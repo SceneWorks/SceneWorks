@@ -1,10 +1,12 @@
 // sc-17227 BLOCKER 1 — the licence acknowledgment enforced at the CHOKE POINT.
 //
 // The gate used to live only on the Models screen's card. Three other surfaces start a download
-// without ever rendering it: the Simple UI's model manager, the first-run Setup Wizard, and the
-// studio availability gates (`ModelAvailabilityGate`, whose offers come from `downloadOffersFor`,
-// which falls back to ALL eligible models when no recommended one is eligible). All of them call
-// `createModelDownloadJob`, so that is where the gate has to bind.
+// without ever rendering it: the Simple UI's model manager, the first-run Setup Wizard (which has
+// since grown its own gate UI for the gated models it offers — SetupWizard.licenseGate.test.jsx
+// drives that composition), and the studio availability gates (`ModelAvailabilityGate`, whose
+// offers come from `downloadOffersFor`, which falls back to ALL eligible models when no
+// recommended one is eligible). All of them call `createModelDownloadJob`, so that is where the
+// gate has to bind.
 //
 // Why this became load-bearing with MiniMax-H3: every previously gated model was ALSO credential-
 // gated, and Hugging Face answers 401 without a saved token, so an unacknowledged download failed
@@ -144,11 +146,20 @@ describe("createModelDownloadJob license-acknowledgment choke point (sc-17227)",
   });
 
   it("covers a credential-gated model too, and leaves an unlicensed model's body unchanged", async () => {
+    // `gated` implies the acknowledgment, so the refusal fires HERE, client-side, before any
+    // request exists — there is no "unchanged 401 backstop" in this path (the account the Setup
+    // Wizard test used to carry): Hugging Face is never asked. Every surface that offers a gated
+    // model therefore has to be able to take the acknowledgment (the Models screen's card, and
+    // now the wizard's own gate) or the refusal below is what its user hits.
     await mount();
     await act(async () => {
       await hookApi.createModelDownloadJob(GATED_MODEL);
     });
     expect(downloadPosts()).toHaveLength(0);
+    // Refused BY NAME, pointing at a surface that can take the acknowledgment.
+    expect(errors.at(-1)).toBe(
+      "FLUX.1 [dev] requires accepting its license first. Open Models and accept the license on the FLUX.1 [dev] card before downloading.",
+    );
 
     // A model with no licence requirement must not gain a gate or a body field — the flag is sent
     // only where it is required, so no other download's request shape changes.

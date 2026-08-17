@@ -14208,6 +14208,32 @@ details[open] > summary.lora-scope-group-heading::before,
   margin-top: 4px;
 }
 
+/* The wizard's rendering of the Models screen's licence gate (sc-17227 / sc-17137 review):
+   reuses .model-gated-notice / .model-license-ack / .model-license-terms so the two surfaces
+   cannot drift apart visually, indented under its model row. */
+.setup-wizard-license {
+  margin: -2px 0 10px 28px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-2);
+  text-align: left;
+}
+
+/* Per-click "these rows did NOT start" notice — the app error banner is hidden behind the
+   wizard overlay, so refusals must be named here. */
+.setup-wizard-refusals {
+  width: 100%;
+  display: grid;
+  gap: 4px;
+  margin-top: 8px;
+  text-align: left;
+}
+
+.setup-wizard-refusals p {
+  margin: 0;
+}
+
 .setup-wizard-actions {
   display: flex;
   gap: 10px;

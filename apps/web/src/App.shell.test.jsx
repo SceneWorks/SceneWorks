@@ -132,7 +132,10 @@ describe("SceneWorks app shell", () => {
     const props = {
       models: wizardModels,
       jobs: [],
-      onDownloadModel: vi.fn(),
+      // Must resolve to a job: the wizard marks a row "started" only when the download choke
+      // point actually produced one (sc-17137 review — a null/undefined return means REFUSED,
+      // and the row would stay pending instead of disabling the button).
+      onDownloadModel: vi.fn(async () => ({ id: "job-wizard", type: "model_download" })),
       onCreateProject: vi.fn(async (name) => ({ id: "project-new", name })),
       onComplete: vi.fn(async () => {}),
       onOpenQueue: vi.fn(),

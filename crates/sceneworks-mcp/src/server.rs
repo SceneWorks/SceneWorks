@@ -366,7 +366,7 @@ impl SceneWorksMcp {
     }
 
     #[tool(
-        description = "List the generation model catalog. Returns compact entries: id (use as the model for a job), name, family, type (image/video), capabilities, installState, defaults (resolution/steps/guidanceScale/count), the supported resolutions/durations/fps menus, minSteps, the reference-media caps (maxReferenceAssets / maxSourceClipAssets / maxReferenceAudioAssets / maxCombinedReferenceAssets), promptGuide, and any licence-required attribution string. A duration or fps menu is EXHAUSTIVE — a value not in it is refused, never rounded to the nearest one."
+        description = "List the generation model catalog. Returns compact entries: id (use as the model for a job), name, family, type (image/video), capabilities, installState, defaults (resolution/steps/guidanceScale/count), the supported resolutions/durations/fps menus, minSteps, the reference-media caps (maxReferenceAssets / maxSourceClipAssets / maxReferenceAudioAssets / maxCombinedReferenceAssets), promptGuide, and any licence-required attribution string. An fps menu is EXHAUSTIVE — an off-menu fps is refused, never rounded. A durations menu lists the model's exactly renderable clip lengths: a duration outside the model's hard min/max bounds is refused, but an in-range off-menu value is silently snapped onto the model's frame lattice (MiniMax-H3 rounds UP to the next 17n+5 rung) — send a menu value to get exactly the length you asked for."
     )]
     async fn list_models(&self) -> Result<CallToolResult, ErrorData> {
         let models = self
@@ -603,7 +603,7 @@ impl SceneWorksMcp {
     }
 
     #[tool(
-        description = "Submit a video generation job WITHOUT waiting for it (video renders for minutes). Modes: \"generate\" (text-to-video; add sourceAssetId for image-to-video, plus lastFrameAssetId for first/last-frame), \"reference\" (render from reference media — images and/or video clips, optionally with audio clips), \"extend\" (continue a clip), \"bridge\" (fill between two clips), \"person_replace\" (swap a tracked person for a Character), \"video_to_video\" (edit a clip), \"reference_video_to_video\" (edit a clip guided by reference images), \"multi_video_to_video\" (blend two or more clips), \"ads2v\" (edit a clip using a reference video plus reference images), \"animate_character\" (animate a reference character with a driving video). Check list_models first: each model serves only some of these, and duration, fps and resolution menus are exhaustive per model — an off-menu value is refused rather than rounded. Returns the job id + initial snapshot; poll get_job_status, then fetch links with get_job_result once completed."
+        description = "Submit a video generation job WITHOUT waiting for it (video renders for minutes). Modes: \"generate\" (text-to-video; add sourceAssetId for image-to-video, plus lastFrameAssetId for first/last-frame), \"reference\" (render from reference media — images and/or video clips, optionally with audio clips), \"extend\" (continue a clip), \"bridge\" (fill between two clips), \"person_replace\" (swap a tracked person for a Character), \"video_to_video\" (edit a clip), \"reference_video_to_video\" (edit a clip guided by reference images), \"multi_video_to_video\" (blend two or more clips), \"ads2v\" (edit a clip using a reference video plus reference images), \"animate_character\" (animate a reference character with a driving video). Check list_models first: each model serves only some of these, its fps menu is exhaustive (an off-menu fps is refused, never rounded), its durations menu lists the exactly renderable clip lengths (out-of-bounds durations are refused; an in-range off-menu value is silently snapped onto the model's frame lattice — MiniMax-H3 rounds UP to the next rung — so send a menu value), and its resolutions menu lists the geometry buckets it renders at. Returns the job id + initial snapshot; poll get_job_status, then fetch links with get_job_result once completed."
     )]
     async fn submit_video_job(
         &self,
@@ -2238,8 +2238,10 @@ mod tests {
     ///
     /// Resolutions alone were survivable while every video model took a continuous duration range.
     /// MiniMax-H3 is not that shape — fourteen `17n + 5` rungs, a one-entry fps menu and a 2-step
-    /// floor — so a caller that cannot see the menus guesses an off-menu value and is refused,
-    /// never rounded. The reference caps are here for the same reason: MiniMax-H3 Ref2VA's per-list
+    /// floor — so a caller that cannot see the menus guesses an off-menu value and is refused (an
+    /// off-menu fps, an out-of-bounds duration) or silently snapped up the frame lattice (an
+    /// in-range off-menu duration) — either way, not the request it made.
+    /// The reference caps are here for the same reason: MiniMax-H3 Ref2VA's per-list
     /// caps sum PAST its combined ceiling, so the combined number is not derivable from the others.
     #[test]
     fn compact_models_carries_the_request_shaping_limits_and_attribution() {

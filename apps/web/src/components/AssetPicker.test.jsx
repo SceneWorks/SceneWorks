@@ -2,7 +2,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { ImageEditSourcePickerField, VideoSourcePickerField } from "./AssetPicker.jsx";
+import { AssetPickerField, ImageEditSourcePickerField, VideoSourcePickerField } from "./AssetPicker.jsx";
 
 // The picker was previously "Change"/"Select"-only: once an optional source (img2img reference,
 // control image, second edit image) was picked there was no way to un-pick it, so it kept driving
@@ -367,5 +367,157 @@ describe("VideoSourcePickerField video-only sources", () => {
     expect(document.body.textContent).toContain("2 selected");
     await click([...document.body.querySelectorAll("button")].find((button) => button.textContent === "Use Selection"));
     expect(onChange).toHaveBeenCalledWith(["plain-image", "uploaded-image-1"]);
+  });
+});
+
+// sc-17137 review, item 2. `AssetPickerModal` grew an upload/dropzone import path so a picker
+// scoped to a media kind the project has none of is not a dead end — the case that forced it is
+// VideoStudio's REFERENCE AUDIO field, which is a plain `AssetPickerField` (categories hidden,
+// `mediaKind="audio"`, `importAsset` wired) rather than one of the `MediaSourcePickerModal`
+// pickers the tests above drive. That modal is a DIFFERENT component with a different upload
+// path, so its coverage says nothing about this one. These drive the real field and mock only the
+// transport boundary (`importAsset`), the same seam the video/image import tests mock.
+describe("AssetPickerField audio import (VideoStudio reference audio)", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+    vi.clearAllMocks();
+  });
+
+  const click = async (el) =>
+    act(async () => el.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+
+  // What VideoStudio hands the field: audio-only assets, categories hidden, multi-select.
+  const audioAssets = [{ id: "voice-1", type: "audio", projectId: "p1", displayName: "Voice Take 1" }];
+
+  async function openPicker(props) {
+    await act(async () => {
+      root.render(
+        <AssetPickerField
+          assets={audioAssets}
+          buttonLabel="Select audio"
+          label="Reference audio"
+          mediaKind="audio"
+          multiple
+          showCategories={false}
+          values={[]}
+          {...props}
+        />,
+      );
+    });
+    await click(container.querySelector('button[aria-haspopup="dialog"]'));
+    return document.body.querySelector('input[type="file"]');
+  }
+
+  async function chooseFiles(input, files) {
+    Object.defineProperty(input, "files", { configurable: true, value: files });
+    await act(async () => input.dispatchEvent(new Event("change", { bubbles: true })));
+  }
+
+  it("imports a browsed audio file and confirms it alongside the existing selection", async () => {
+    const onChange = vi.fn();
+    const importAsset = vi.fn(async () => ({ id: "uploaded-audio", type: "audio", projectId: "p1" }));
+    const input = await openPicker({ importAsset, onChange, values: ["voice-1"] });
+
+    // Scoped to the picker's kind, and multi because the field is.
+    expect(input.accept).toBe("audio/*");
+    expect(input.multiple).toBe(true);
+    expect(document.body.textContent).toContain("Drop audio files here");
+
+    const file = new File(["audio"], "take.wav", { type: "audio/wav" });
+    await chooseFiles(input, [file]);
+
+    // `select: false` — a field-scoped picker must not hijack the app-wide Library selection.
+    expect(importAsset).toHaveBeenCalledWith(file, { select: false, throwOnError: true });
+    expect(onChange).toHaveBeenCalledWith(["voice-1", "uploaded-audio"]);
+    expect(document.body.querySelector('[role="dialog"]')).toBeFalsy();
+  });
+
+  it("imports a DROPPED audio file through the same path", async () => {
+    const onChange = vi.fn();
+    const importAsset = vi.fn(async () => ({ id: "dropped-audio", type: "audio", projectId: "p1" }));
+    await openPicker({ importAsset, onChange });
+
+    const zone = document.body.querySelector(".dataset-add-dropzone");
+    expect(zone, "the picker's dropzone").toBeTruthy();
+    const file = new File(["audio"], "dropped.mp3", { type: "audio/mpeg" });
+    await act(async () => {
+      const event = new Event("drop", { bubbles: true, cancelable: true });
+      event.dataTransfer = { files: [file] };
+      zone.dispatchEvent(event);
+    });
+
+    expect(importAsset).toHaveBeenCalledWith(file, { select: false, throwOnError: true });
+    expect(onChange).toHaveBeenCalledWith(["dropped-audio"]);
+  });
+
+  it("rejects a non-audio file before any import is attempted", async () => {
+    const onChange = vi.fn();
+    const importAsset = vi.fn();
+    const input = await openPicker({ importAsset, onChange });
+
+    await chooseFiles(input, [new File(["image"], "cover.png", { type: "image/png" })]);
+
+    expect(importAsset).not.toHaveBeenCalled();
+    expect(onChange).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("Choose audio files only.");
+  });
+
+  it("accepts a backend-supported audio extension when the browser reports a generic MIME", async () => {
+    const onChange = vi.fn();
+    const importAsset = vi.fn(async () => ({ id: "uploaded-flac", type: "audio", projectId: "p1" }));
+    const input = await openPicker({ importAsset, onChange });
+
+    // Browsers routinely hand .flac/.m4a back as application/octet-stream, and the backend takes
+    // them — an extension fallback the MIME-only check would refuse.
+    const file = new File(["audio"], "master.flac", { type: "application/octet-stream" });
+    await chooseFiles(input, [file]);
+
+    expect(importAsset).toHaveBeenCalledWith(file, { select: false, throwOnError: true });
+    expect(onChange).toHaveBeenCalledWith(["uploaded-flac"]);
+  });
+
+  it("does not select an import that came back as the wrong kind", async () => {
+    const onChange = vi.fn();
+    // The importer answers for whatever the project made of the bytes; a row that is not audio
+    // cannot drive an audio-conditioned render, so it must not silently become the selection.
+    const importAsset = vi.fn(async () => ({ id: "not-audio", type: "image", projectId: "p1" }));
+    const input = await openPicker({ importAsset, onChange });
+
+    await chooseFiles(input, [new File(["audio"], "take.wav", { type: "audio/wav" })]);
+
+    expect(importAsset).toHaveBeenCalledTimes(1);
+    expect(onChange).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("Could not import the selected audio file.");
+  });
+
+  it("surfaces a failed import instead of confirming an empty selection", async () => {
+    const onChange = vi.fn();
+    const importAsset = vi.fn().mockRejectedValue(new Error("disk full"));
+    const input = await openPicker({ importAsset, onChange });
+
+    await chooseFiles(input, [new File(["audio"], "take.wav", { type: "audio/wav" })]);
+
+    expect(onChange).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("Could not import the selected audio file.");
+    expect(document.body.querySelector('[role="dialog"]')).toBeTruthy();
+  });
+
+  it("renders no dropzone without an importer, so every other caller is unchanged", async () => {
+    // `canImport` needs BOTH `importAsset` and `mediaKind`; the character/preview pickers pass
+    // neither, and must stay byte-identical to before the affordance existed.
+    await openPicker({ onChange: vi.fn() });
+    expect(document.body.querySelector('input[type="file"]')).toBeFalsy();
+    expect(document.body.querySelector(".dataset-add-dropzone")).toBeFalsy();
   });
 });

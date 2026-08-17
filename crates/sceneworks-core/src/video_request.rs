@@ -516,13 +516,19 @@ pub fn duration_limit_error(
 /// way to say "this engine REFUSES below N denoise steps" at all — the constraint could only be
 /// written as a manifest comment, which nothing reads.
 ///
-/// MiniMax-H3 is the case that forced it. Its scheduler builds the sigma grid as
-/// `linspace(1, 0, steps)` — the terminal `0` is a **grid point**, not a sentinel appended
-/// afterwards — so `steps` points drive `steps - 1` model evaluations, and one point is a schedule
-/// with no evaluation in it. The reference raises
-/// ``"`set_timesteps` requires … `num_inference_steps` >= 2, got 1"`` rather than rendering anything
-/// (diffusers `MiniMaxH3Scheduler::set_timesteps`, `scheduling_minimax_h3.py`). A `steps: 1` request
-/// is therefore not a fast render there, it is an unrenderable one.
+/// MiniMax-H3 is the case that forced it, and its floor is a **product judgement, not an engine
+/// limit** (the corrected sc-18726 account, carried by the manifest's `hardMinSteps` comment).
+/// The unit everywhere in SceneWorks is MODEL EVALUATIONS (NFE): the engine builds the sigma grid
+/// as `linspace(1, 0, steps + 1)`, appending the terminal `0` itself
+/// (`JointSchedule::with_shifts(evaluations + 1, ..)`), so a `steps: 1` request is a legal
+/// 2-point grid that renders — as noise, because one evaluation is a single Euler jump from pure
+/// randomness; 2 is the smallest schedule with an intermediate sigma. This doc previously carried
+/// the retracted "`steps` points drive `steps - 1` evaluations, so `steps: 1` is unrenderable"
+/// account — that describes diffusers' `num_inference_steps` grid-point convention, which is NOT
+/// what this key counts. Pinned by
+/// `minimax_h3_turbo_steps_are_model_evaluations_not_grid_points` (this crate). Either way the
+/// floor is REFUSED rather than quietly raised, the same reject-never-clamp posture the duration
+/// bounds take.
 ///
 /// Absent ⇒ no floor, so every model that declares nothing is byte-identical to before this key had
 /// a reader — the same never-block-without-evidence posture [`hard_min_duration`] takes, and the
@@ -2475,10 +2481,11 @@ mod tests {
         ("bernini", None, None),
         ("scail2_14b", None, None),
         ("krea_realtime_14b", None, None),
-        // The sigma grid is `linspace(1, 0, steps)` with the terminal 0 INCLUDED, so `steps` points
-        // drive `steps - 1` model evaluations and one point is a schedule with no evaluation in it.
-        // The reference raises rather than rendering (sc-19426). A FLOOR, not a menu: everything at
-        // or above 2 renders fine.
+        // `steps` counts MODEL EVALUATIONS (NFE): the engine appends the terminal sigma itself
+        // (`linspace(1, 0, steps + 1)`), so 1 renders — as noise, a single Euler jump from pure
+        // randomness. The floor of 2 is the corrected sc-18726 product judgement (see
+        // `hard_min_steps`), not an engine limit. A FLOOR, not a menu: everything at or above 2
+        // renders fine.
         ("minimax_h3", Some(2), None),
         ("minimax_h3_ref", Some(2), None),
     ];
