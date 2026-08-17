@@ -5940,15 +5940,27 @@ mod tests {
                 )
             );
         }
+        // Base Z-Image MLX declares its control lane as its OWN row bound to the registered
+        // `z_image_control` runtime provider, rather than folding `control` into the base row. That
+        // split is the engine truth at pin 931366f62 — `mlx-gen-z-image` registers `z_image_control`
+        // and the MLX dump exports all five rungs for it — so the two rows here are the shape, and the
+        // `overlays` sets being disjoint is what the non-overlap walk below then proves.
         assert_eq!(
             axes("z_image"),
             (
                 "z_image".to_owned(),
-                vec![serde_json::json!({
-                    "tiers": ["bf16", "q4", "q8"],
-                    "modes": ["text_to_image"],
-                    "overlays": ["none", "lora"],
-                })]
+                vec![
+                    serde_json::json!({
+                        "tiers": ["bf16", "q4", "q8"],
+                        "modes": ["text_to_image"],
+                        "overlays": ["none", "lora"],
+                    }),
+                    serde_json::json!({
+                        "tiers": ["bf16", "q4", "q8"],
+                        "modes": ["text_to_image"],
+                        "overlays": ["control"],
+                    }),
+                ]
             )
         );
         let base_z = shipped_model("z_image");
@@ -5958,8 +5970,22 @@ mod tests {
             .iter()
             .all(|row| {
                 row["modes"] == serde_json::json!(["text_to_image"])
-                    && row["overlays"] == serde_json::json!(["none", "lora"])
+                    && (row["overlays"] == serde_json::json!(["none", "lora"])
+                        || row["overlays"] == serde_json::json!(["control"]))
             }));
+        // Every control row carries the control provider, and no base row does — the split is exact in
+        // both directions, so a control declaration can never ride the base identity or vice versa.
+        for row in base_z["mlx"]["memoryStrategyContract"]["implementations"]
+            .as_array()
+            .expect("base Z implementations")
+        {
+            let is_control = row["overlays"] == serde_json::json!(["control"]);
+            assert_eq!(
+                row["runtimeProvider"] == serde_json::json!("z_image_control"),
+                is_control,
+                "control rows and only control rows bind the z_image_control provider: {row}"
+            );
+        }
         assert_eq!(
             axes("z_image_edit"),
             (

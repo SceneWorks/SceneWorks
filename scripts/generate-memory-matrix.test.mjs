@@ -1717,12 +1717,23 @@ test("an implemented family is Implemented/unverified only where the provider ac
         cell.rung === rung,
     );
     assert.ok(cells.length > 0);
+    // RESTATED 2026-08-17: the Turbo control cell used to be required Missing, which read the absence
+    // of a declaration as the invariant. Engine truth at pin 931366f62 overrides that —
+    // `candle-gen-z-image` registers `z_image_turbo_control` as its own `provider_id`/`route_id` with
+    // its own `control_contract`, and the candle dump exports all five rungs for it. SC-18460 declared
+    // it (`runtimeProvider: "z_image_turbo_control"`), so it is now Implemented by its OWN contract.
+    //
+    // The anti-leak intent is what mattered and is preserved exactly: base Z-Image's declaration must
+    // not reach the Turbo control route. That is now asserted as identity rather than as absence — a
+    // Turbo control cell may be Implemented, but ONLY while resolving to `z_image_turbo_control`. If it
+    // ever went Implemented under the base `z_image_turbo` identity, that IS the leak, and this reds.
     assert.ok(
       cells.every((cell) =>
         cell.modelId === "z_image"
           ? ["Implemented/unverified", "Verified"].includes(cell.state)
           : cell.overlay === "control"
-            ? cell.state === "Missing"
+            ? cell.resolvedRoute === "z_image_turbo_control" &&
+              ["Implemented/unverified", "Verified"].includes(cell.state)
             : cell.state === "Implemented/unverified",
       ),
       `${rung} must reach base control without leaking to the Turbo control route`,
@@ -1935,7 +1946,13 @@ test("PuLID's closed overlay contract does not redefine legacy Candle resident c
   const expectedResident = [
     "flux_dev:flux1_dev:candle:q4:text_to_image:lora:resident",
     "qwen_image:qwen_image:candle:q4:text_to_image:control:resident",
-    "z_image_turbo:z_image_turbo:candle:q4:text_to_image:control:resident",
+    // RESTATED 2026-08-17: this coordinate's provider segment moved from the base `z_image_turbo` to
+    // the registered `z_image_turbo_control` when SC-18460 declared the control route's own runtime
+    // provider (`candle-gen-z-image` registers it with its own `control_contract`; the candle dump
+    // exports all five rungs). The cell and its state are unchanged — only the identity it resolves
+    // under. The point of this test, that PuLID's closed identity contract does not redefine somebody
+    // else's generic resident fallback, is untouched.
+    "z_image_turbo:z_image_turbo_control:candle:q4:text_to_image:control:resident",
   ];
   for (const id of expectedResident) {
     assert.equal(
