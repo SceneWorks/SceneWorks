@@ -4612,10 +4612,14 @@ mod measured_mlx_load_shape_tests {
 
         let turbo = apply_measured_mlx_load_shape("lens_turbo", bf16.clone());
         assert_eq!(turbo.load_shape, gen_core::LoadShape::DeferredMaterialization);
+        // sc-18605 (inference) declared the Lens and Lens-Turbo MLX rung-4 ladders and made them
+        // reachable, so the dense Lens-Turbo rung no longer needs `Sequential` to appear. It is
+        // Implemented at the deferred load shape alone; the Sequential case below still holds and
+        // is kept because it pins the rung's window parameters, not merely its presence.
         assert_eq!(
             rung_four_support("lens_turbo", &turbo),
-            MemoryStrategySupport::Missing,
-            "the legacy dense Lens-Turbo rung still requires Sequential"
+            MemoryStrategySupport::Implemented,
+            "the Lens-Turbo rung-4 ladder is reachable at the deferred load shape"
         );
         let turbo = turbo.with_offload_policy(OffloadPolicy::Sequential);
         let turbo_contract = crate::inference_runtime::media()

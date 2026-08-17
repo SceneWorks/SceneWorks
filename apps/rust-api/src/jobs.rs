@@ -497,9 +497,32 @@ pub(crate) async fn canonicalize_image_model_payload(
             return Err(ApiError::bad_request("model is required"));
         }
         reject_image_detail_packed_tier(payload)?;
-        // Never forward metadata that cannot be tied to an explicit catalog id. Removing a forged
-        // entry is the only safe no-model behavior and leaves the established `{}` contract exact.
+        // Never forward CATALOG metadata that cannot be tied to an explicit catalog id — a forged
+        // entry is the thing this drop exists to destroy, and the established `{}` contract stays
+        // exact.
+        //
+        // The server-resolved text encoder is the one exception, and it is not an exception to the
+        // rule so much as a different kind of value: `resolvedTextEncoder` is written by the API
+        // itself when it resolves the client's opaque option id, it is worker-private rather than
+        // client-authored, and the worker claim is required to retain it (sc-18314). Dropping it
+        // here would silently strip a resolution the client never supplied and could not forge,
+        // and would leave the public projection with nothing to key its path redaction on — so the
+        // private path would then survive in any sibling payload field instead of being scrubbed.
+        // Keep only that sub-object; everything else in the entry still goes.
+        let resolved_text_encoder = payload
+            .get_mut("modelManifestEntry")
+            .and_then(Value::as_object_mut)
+            .and_then(|entry| entry.remove("resolvedTextEncoder"));
         payload.remove("modelManifestEntry");
+        if let Some(resolution) = resolved_text_encoder {
+            payload.insert(
+                "modelManifestEntry".to_owned(),
+                Value::Object(serde_json::Map::from_iter([(
+                    "resolvedTextEncoder".to_owned(),
+                    resolution,
+                )])),
+            );
+        }
         return Ok(None);
     };
     validate_model_id(&model_id)?;

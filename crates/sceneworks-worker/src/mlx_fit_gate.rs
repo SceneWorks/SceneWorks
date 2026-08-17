@@ -11154,9 +11154,14 @@ mod tests {
         require_exact_source_bound_inventory(&source_inventory, &classified_inventory).expect(
             "the executable audit must classify the exact source-bound candidate inventory",
         );
+        // 32 -> 18 with the inference pin advance. Resident-only means "this cell has no ladder to
+        // fall back to", so the number SHRINKS as ladders are declared and made reachable — the
+        // advance brought the Bernini, Lens/Lens-Turbo, SANA and SD3.5 rung-4 ladders (sc-18609,
+        // sc-18605, sc-18607, sc-18606), which is 14 cells that now have somewhere to go. A rise
+        // here would be the alarming direction and is what this recorded result exists to catch.
         assert_eq!(
             cells.len(),
-            32,
+            18,
             "the source-derived Resident-only inventory changed; update the recorded audit result"
         );
         let legacy_reserve_bytes = gib_to_bytes(crate::fit_gate::legacy_unified_reserve(48.0).gb);
@@ -11313,19 +11318,16 @@ mod tests {
                 .iter()
                 .map(|(model, provider, tier, host, ..)| (*model, *provider, *tier, *host))
                 .collect::<Vec<_>>(),
+            // The Lens and SD3.5 rows are gone with the inference pin advance, and for the same
+            // reason the Resident-only inventory above shrank 32 -> 18: sc-18605 and sc-18606 gave
+            // those providers reachable rung-4 ladders, so they are no longer Resident-only and
+            // have no estimate band left to flip. The four that remain have no ladder yet, which is
+            // what keeps this list a live audit rather than a formality.
             vec![
                 ("flux2_dev", "flux2_dev", "bf16", 128),
                 ("flux2_dev", "flux2_dev_control", "q4", 64),
                 ("ideogram_4", "ideogram_4", "q8", 48),
                 ("ideogram_4_turbo", "ideogram_4_turbo", "q8", 48),
-                ("lens", "lens", "q8", 48),
-                ("sd3_5_large", "sd3_5_large", "q4", 48),
-                ("sd3_5_large", "sd3_5_large", "q8", 48),
-                ("sd3_5_large_turbo", "sd3_5_large_turbo", "q4", 48),
-                ("sd3_5_large_turbo", "sd3_5_large_turbo", "q8", 48),
-                ("sd3_5_medium", "sd3_5_medium", "bf16", 48),
-                ("sd3_5_medium", "sd3_5_medium", "q4", 48),
-                ("sd3_5_medium", "sd3_5_medium", "q8", 48),
             ],
             "the source-bound resident-only audit changed; update the recorded result, \
              not only this expectation: {flips:?}"
