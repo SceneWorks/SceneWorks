@@ -1611,7 +1611,12 @@ export function strategyStatus({
       parameters: {
         ...(staticImplementation?.parameters ?? {}),
         ...JSON.parse(parameters[0]),
-        ...(staticImplementation
+        // sc-20246: keyed on the declaration actually HAVING ranges, not on a declaration existing.
+        // The engine-derived projection publishes no `parameterRanges` (the dumps carry none), and an
+        // empty `publishedRanges: {}` on a cell whose parameters came from a calibration reads as
+        // "the declaration published an empty range set" rather than "it published none". All 153
+        // hand-authored rows declare `parameterRanges`, so this is inert for them.
+        ...(staticImplementation?.parameterRanges
           ? { publishedRanges: publishableParameterRanges(staticImplementation) }
           : {}),
       },
@@ -1632,7 +1637,28 @@ export function strategyStatus({
       true,
     );
   }
-  if (staticImplementation) {
+  // sc-20246: a COVERAGE-ONLY declaration must not displace richer evidence.
+  //
+  // The engine-derived projection (`scripts/generate-manifest-memory-declarations.mjs`) writes rows
+  // that state only rung x tier x mode x overlay coverage — the engine dumps publish no
+  // `parameters`, so the projection omits them rather than guessing. Such a row was outranking every
+  // source below it: 37 published cells lost their measured decode/attention/window values to a
+  // stale-but-real calibration binding being skipped, and the rung-4 survey's window parameters were
+  // replaced by `{}` on the Lens cells. A declaration that names no parameters has nothing to say
+  // about parameters, so it now yields to whatever does and is used only where nothing else answers
+  // (see `coverageStatus` at the tail). Provably inert for hand-authored rows: all 153 of them carry
+  // both `parameters` and `parameterRanges`.
+  const coverageDeclaration =
+    staticImplementation && !staticImplementation.parameters ? staticImplementation : null;
+  const coverageStatus = () =>
+    coverageDeclaration
+      ? {
+          state: "Implemented/unverified",
+          source: coverageDeclaration.source,
+          parameters: {},
+        }
+      : { state: "Missing", source: null, parameters: {} };
+  if (staticImplementation && !coverageDeclaration) {
     return {
       // This declaration inventories production capability only. Exact runtime evidence must still
       // pass calibrationBinding before the cell can be promoted to Verified.
@@ -1640,7 +1666,9 @@ export function strategyStatus({
       source: staticImplementation.source,
       parameters: {
         ...staticImplementation.parameters,
-        publishedRanges: publishableParameterRanges(staticImplementation),
+        ...(staticImplementation.parameterRanges
+          ? { publishedRanges: publishableParameterRanges(staticImplementation) }
+          : {}),
       },
       calibrationFingerprint: staticImplementation.fingerprint,
       engagedRungs: staticImplementation.engagedRungs,
@@ -1840,9 +1868,9 @@ export function strategyStatus({
         parameters: implementationParameters,
       };
     }
-    return { state: "Missing", source: null, parameters: {} };
+    return coverageStatus();
   }
-  return { state: "Missing", source: null, parameters: {} };
+  return coverageStatus();
 }
 
 function validateMatrix(

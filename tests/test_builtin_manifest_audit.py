@@ -240,8 +240,28 @@ def _assert_mage_tier_layout(model, model_id, repo, revision):
 
 
 def _assert_mage_candle_ladder(model: dict, model_id: str) -> None:
-    """sc-15813: every Candle Mage route declares the same truthful shared ladder contract."""
-    assert model["candle"] == {
+    """sc-15813: every Candle Mage route declares the same truthful shared ladder contract.
+
+    sc-20246: `memoryStrategyContract` is now ENGINE-PROJECTED per variant
+    (scripts/generate-manifest-memory-declarations.mjs), so it is necessarily NOT shared — each
+    variant names its own provider and its own catalog modes. The shared-ladder pin below therefore
+    covers the hand-authored, measured keys, and the projected contract is asserted separately in
+    shape terms: it must be wholly engine-sourced and must never claim a rung this same block
+    declares structurally exempt.
+    """
+    contract = model["candle"].get("memoryStrategyContract")
+    assert contract is not None, model_id
+    exempt = set(model["candle"].get("memoryStrategyStructuralExemptions", {}))
+    for implementation in contract["implementations"]:
+        assert implementation["source"].startswith("config/engine-capabilities/"), model_id
+        assert implementation["rung"] not in exempt, (model_id, implementation["rung"])
+    assert contract["provider"] == model_id, model_id
+
+    assert {
+        key: value
+        for key, value in model["candle"].items()
+        if key != "memoryStrategyContract"
+    } == {
         "minMemoryGb": 17,
         "vramGbByTier": {"q4": 14.67, "q8": 16.95, "bf16": 20.41},
         "vramMeasuredPixels": 1024 * 1024,

@@ -1071,8 +1071,35 @@
                     "uniqueItems": true,
                     "items": {
                       "type": "object",
-                      "required": ["rung", "fingerprint", "tiers", "modes", "overlays", "engagedRungs", "parameters", "parameterRanges", "source"],
+                      "required": ["rung", "tiers", "modes", "overlays", "source"],
                       "additionalProperties": false,
+                      "allOf": [
+                        {
+                          "description": "Two row shapes, told apart by `source` (sc-20246). A MEASURED row is hand-authored from provider code and must name its fingerprint, engaged ladder composition and parameter shape. An ENGINE-PROJECTED row is written by scripts/generate-manifest-memory-declarations.mjs from the committed capability dumps, which publish rung x tier coverage and the route witnesses and nothing else — it must therefore NOT carry those four fields, because there is no engine fact behind them and a generator filling them in would be inventing measurement. It must name loadProfiles, which the witnesses do publish.",
+                          "if": {
+                            "required": ["source"],
+                            "properties": { "source": { "pattern": "^config/engine-capabilities/" } }
+                          },
+                          "then": {
+                            "required": ["loadProfiles"],
+                            "not": {
+                              "anyOf": [
+                                { "required": ["fingerprint"] },
+                                { "required": ["engagedRungs"] },
+                                { "required": ["parameters"] },
+                                { "required": ["parameterRanges"] },
+                                { "required": ["requestContexts"] },
+                                { "required": ["providerOverlay"] },
+                                { "required": ["requiredOffloadPolicy"] },
+                                { "required": ["sourceKinds"] }
+                              ]
+                            }
+                          },
+                          "else": {
+                            "required": ["fingerprint", "engagedRungs", "parameters", "parameterRanges"]
+                          }
+                        }
+                      ],
                       "properties": {
                         "rung": { "enum": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"] },
                         "runtimeProvider": {

@@ -1,12 +1,12 @@
 {
   "schemaVersion": 7,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:65d42ce6c7b362520e194417f82e21e01f2ebfa08aea3150b063649fe2d8785a",
+    "sceneWorksRevision": "source-tree:cb36157d6401dbeb31bef12d24fc3599654d9c6e679878fb72476607cc58658b",
     "inferenceRevision": "931366f62a4e5800c54e0586b7fb34e3a4079e3b",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "5d04cc9dda5e5b99d2ea1ea514ceefeb7ccf62a5725b67b0ba537cf4a7567568"
+        "sha256": "1a4cdb6da05704c9fac48b193ac41e6b945c342b8af816e635050af1e3aca5fa"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -140,8 +140,8 @@
     "publishedCells": 163,
     "elidedCells": 7042,
     "elidedByState": {
-      "Implemented/unverified": 2331,
-      "Missing": 4711
+      "Implemented/unverified": 2338,
+      "Missing": 4704
     },
     "publicationPredicate": "A coordinate is published when it is PLANNED (an entry in config/memory-calibration-plan.json targets it), MEASURED (memoryCharacterization is not `unmeasured`), BOUND to a calibration record in docs/generated/memory-calibration-evidence.json, or CITES evidence of its own (historical, current-environment, strategy-parameter, or structural). Every elided coordinate is therefore unplanned, unmeasured, unbound and uncited; its `state` and its per-rung population are counted in `summary.elidedByState` and `coverage`, never dropped.",
     "mlxStagedStaticCoverage": 38,
@@ -156,9 +156,9 @@
     "memoryContractReconciliation": {
       "providers": 72,
       "bespokeWaivers": 1,
-      "mismatches": 624,
+      "mismatches": 468,
       "byLeg": {
-        "engine_manifest": 429,
+        "engine_manifest": 273,
         "manifest_route": 70,
         "survey_engine": 125
       }
@@ -8798,9 +8798,24 @@
       "coordinates": 6,
       "published": 0,
       "elided": 6,
-      "implemented": 0,
+      "implemented": 1,
       "states": {
-        "Missing": 6
+        "Implemented/unverified": 1,
+        "Missing": 5
+      },
+      "implementedBy": {
+        "tier": {
+          "bf16": 1,
+          "q4": 0,
+          "q8": 0
+        },
+        "mode": {
+          "text_to_image": 1
+        },
+        "overlay": {
+          "lora": 0,
+          "none": 1
+        }
       }
     },
     {
@@ -8810,9 +8825,24 @@
       "coordinates": 6,
       "published": 0,
       "elided": 6,
-      "implemented": 0,
+      "implemented": 1,
       "states": {
-        "Missing": 6
+        "Implemented/unverified": 1,
+        "Missing": 5
+      },
+      "implementedBy": {
+        "tier": {
+          "bf16": 1,
+          "q4": 0,
+          "q8": 0
+        },
+        "mode": {
+          "text_to_image": 1
+        },
+        "overlay": {
+          "lora": 0,
+          "none": 1
+        }
       }
     },
     {
@@ -8993,9 +9023,24 @@
       "coordinates": 6,
       "published": 0,
       "elided": 6,
-      "implemented": 0,
+      "implemented": 1,
       "states": {
-        "Missing": 6
+        "Implemented/unverified": 1,
+        "Missing": 5
+      },
+      "implementedBy": {
+        "tier": {
+          "bf16": 0,
+          "q4": 1,
+          "q8": 0
+        },
+        "mode": {
+          "text_to_image": 1
+        },
+        "overlay": {
+          "lora": 0,
+          "none": 1
+        }
       }
     },
     {
@@ -9005,9 +9050,24 @@
       "coordinates": 6,
       "published": 0,
       "elided": 6,
-      "implemented": 0,
+      "implemented": 1,
       "states": {
-        "Missing": 6
+        "Implemented/unverified": 1,
+        "Missing": 5
+      },
+      "implementedBy": {
+        "tier": {
+          "bf16": 0,
+          "q4": 1,
+          "q8": 0
+        },
+        "mode": {
+          "text_to_image": 1
+        },
+        "overlay": {
+          "lora": 0,
+          "none": 1
+        }
       }
     },
     {
@@ -12736,25 +12796,9 @@
       "coordinates": 9,
       "published": 0,
       "elided": 9,
-      "implemented": 6,
+      "implemented": 9,
       "states": {
-        "Implemented/unverified": 6,
-        "Missing": 3
-      },
-      "implementedBy": {
-        "tier": {
-          "bf16": 2,
-          "q4": 2,
-          "q8": 2
-        },
-        "mode": {
-          "text_to_image": 6
-        },
-        "overlay": {
-          "control": 0,
-          "lora": 3,
-          "none": 3
-        }
+        "Implemented/unverified": 9
       }
     },
     {

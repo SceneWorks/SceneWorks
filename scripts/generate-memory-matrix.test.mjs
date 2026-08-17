@@ -674,12 +674,28 @@ test("Qwen MLX static ladder contracts expose every shipped entry and promote on
   for (const modelId of qwenEntries) {
     const implementations = manifest.models.find((model) => model.id === modelId)
       .mlx.memoryStrategyContract.implementations;
+    // sc-20246: scoped to the HAND-AUTHORED rows. The engine-derived projection
+    // (`scripts/generate-manifest-memory-declarations.mjs`) publishes rung x tier coverage and
+    // nothing else — the capability dumps carry no fingerprint, so a projected row has none to
+    // carry and asserting one would be asserting a value the generator would have to invent. The
+    // exemption cannot hide a hand row that dropped its fingerprint: the second assertion pins every
+    // fingerprint-less row to the engine dump as its source.
+    const [projected, handAuthored] = [
+      implementations.filter((implementation) => implementation.fingerprint === undefined),
+      implementations.filter((implementation) => implementation.fingerprint !== undefined),
+    ];
     assert.ok(
-      implementations.every(
+      handAuthored.every(
         (implementation) =>
           implementation.fingerprint === "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       ),
       `${modelId} must keep load shape separate from the provider content fingerprint`,
+    );
+    assert.ok(
+      projected.every((implementation) =>
+        implementation.source?.startsWith("config/engine-capabilities/"),
+      ),
+      `${modelId} rows without a fingerprint must be engine-projected, not hand-authored`,
     );
   }
   const boundedRungs = [
@@ -2411,7 +2427,26 @@ test("only the independently wired base Z-Image Candle control route exposes sta
       .filter((cell) => cell.modelId === "z_image")
       .every((cell) => ["Implemented/unverified", "Verified"].includes(cell.state)),
   );
-  assert.ok(cells.filter((cell) => cell.modelId === "z_image_turbo").every((cell) => cell.state === "Missing"));
+  // RESTATED 2026-08-17 (sc-20246), for the same reason and in the same shape as the sibling
+  // restatement in "an implemented family is Implemented/unverified only where the provider actually
+  // exposes it": the Turbo control cell used to be required Missing, which read the absence of a
+  // declaration as the invariant. `candle-gen-z-image` registers `z_image_turbo_control` as its own
+  // provider with its own contract, and the candle dump exports staged residency for it, so the
+  // engine-derived projection declares it under `runtimeProvider: "z_image_turbo_control"`.
+  //
+  // The anti-leak intent is what mattered and is preserved exactly: base Z-Image's declaration must
+  // not reach the Turbo control route. That is asserted as identity rather than as absence — a Turbo
+  // control cell may be Implemented, but ONLY while resolving to `z_image_turbo_control`. If it ever
+  // went Implemented under the base `z_image_turbo` identity, that IS the leak, and this reds.
+  assert.ok(
+    cells
+      .filter((cell) => cell.modelId === "z_image_turbo")
+      .every(
+        (cell) =>
+          cell.resolvedRoute === "z_image_turbo_control" &&
+          ["Implemented/unverified", "Verified"].includes(cell.state),
+      ),
+  );
 });
 
 test("a survey verdict that reaches no cell is rejected, not silently carried", async () => {
