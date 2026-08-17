@@ -488,6 +488,66 @@ describe("MiniMax-H3 in the Video Studio (sc-17161)", () => {
     expect(payload.referenceAudioAssetIds).toEqual([]);
   });
 
+  // --------------------------------------------------------------- refine
+
+  it("offers Refine for both H3 partitions and names the model the worker keys on (sc-17162)", async () => {
+    // sc-17162 ships a TAILORED H3 refiner — an H3-keyed system prompt in the worker
+    // (`prompt_refine_jobs.rs`, `build_rewrite_system_prompt`) standing in for the withheld hosted
+    // `H3-Context-IR`. That branch is selected by the job payload's `modelId`, so the studio has to
+    // (a) render the control at all for this family and (b) hand it the H3 catalog id. Declaration
+    // is not reachability: a worker branch nothing routes to is not delivered.
+    //
+    // The control is gated only on `promptless`, which H3 does not declare — asserted off the
+    // shipped manifest rather than assumed, so a future entry that DID declare it would fail here
+    // instead of silently losing the refiner.
+    //
+    // Set-derived over the family, so the day a third partition ships it is covered.
+    for (const model of manifestModels.filter((entry) => entry.family === "minimax-h3")) {
+      expect(model.promptless, `${model.id} must not be promptless`).toBeFalsy();
+      const refinePrompt = vi.fn(async () => "integrated_multimodal_description: a rewritten shot.");
+      await render(baseContext({ videoModels: [shipped(model.id)], refinePrompt }));
+
+      const button = [...container.querySelectorAll("button")].find(
+        (node) => node.textContent.trim() === "Refine my prompt",
+      );
+      expect(button, `${model.id} must offer the Refine control`).toBeTruthy();
+
+      const promptBox = container.querySelector('textarea[aria-label="Prompt"]');
+      await act(async () => {
+        const setter = Object.getOwnPropertyDescriptor(
+          window.HTMLTextAreaElement.prototype,
+          "value",
+        ).set;
+        setter.call(promptBox, "a fox on a snowy log");
+        promptBox.dispatchEvent(new window.Event("input", { bubbles: true }));
+      });
+      await click(button);
+
+      expect(refinePrompt).toHaveBeenCalledTimes(1);
+      const call = refinePrompt.mock.calls[0][0];
+      // The id the worker's family predicate reads. Without it every H3 refine falls back to the
+      // generic rewrite rules and the tailored branch is dead code.
+      expect(call.modelId).toBe(model.id);
+      expect(call.workflow).toBe("video");
+      expect(call.prompt).toBe("a fox on a snowy log");
+
+      // Opt-in stays opt-in: the suggestion is offered for review and the composer is UNCHANGED
+      // until Apply. This is the story's own acceptance criterion — no silent prompt rewriting.
+      expect(container.querySelector(".refine-review")).toBeTruthy();
+      expect(container.querySelector('textarea[aria-label="Prompt"]').value).toBe(
+        "a fox on a snowy log",
+      );
+      const apply = [...container.querySelectorAll(".refine-review-actions button")].find(
+        (node) => node.textContent.trim() === "Apply",
+      );
+      expect(apply, "the rewrite is applied by an explicit button, not on arrival").toBeTruthy();
+      await click(apply);
+      expect(container.querySelector('textarea[aria-label="Prompt"]').value).toBe(
+        "integrated_multimodal_description: a rewritten shot.",
+      );
+    }
+  });
+
   // ------------------------------------------------------------- attribution
 
   it("carries the licence-required attribution on the studio", async () => {

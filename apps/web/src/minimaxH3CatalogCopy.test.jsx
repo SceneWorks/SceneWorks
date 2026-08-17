@@ -258,29 +258,104 @@ describe("MiniMax-H3 prompt guide (sc-17162)", () => {
     }
   });
 
-  it("does not offer an upscale as a route to the withheld 2K", () => {
-    // The compensating question — whether SceneWorks offers a 2K upscale path for this family — is
-    // an open product decision on sc-17162 and is NOT settled. Until it is, the guide must not send
-    // a user off to do it: `H3-Regenerate-2K` was an IN-CONTEXT upsample the DiT performed, and a
-    // post-hoc upscale of a 1344px render is a different artifact, so telling someone to "run an
-    // upscaler afterwards" quietly re-advertises the capability the paragraph just withdrew.
+  it("routes past-the-canvas at the real upscaler, labelled as an upscale rather than 2K (sc-17162)", () => {
+    // DECIDED, and this assertion inverted when it was. It previously FORBADE mentioning an
+    // upscale, because whether SceneWorks offered one for this family was an open product question
+    // and pointing at one while it was open would have quietly re-advertised the capability the
+    // paragraph above withdraws. Michael's ruling (story activity 20258) settled it the other way:
+    // the SeedVR2 video-upscale card in Video Studio Advanced already accepts an H3 clip — it is
+    // rendered with NO family gate (`VideoStudio.jsx` → `<VideoUpscalePanel>`) — so the old copy
+    // created a dead end whose answer was three clicks away on the same screen.
     //
-    // Scoped to a SENTENCE and order-insensitive, because the previous `[^.]{0,40}` form was three
-    // separate one-character evasions away from useless: "afterward" (no trailing s) missed the
-    // alternation, any phrasing longer than 40 characters ran past the window, and "then upscale
-    // it" put the time word FIRST so the upscale verb never led. None of those are hypothetical
-    // rewrites — they are the three most natural ways to write the sentence this must catch.
-    const UPSCALE = /\bupscal(?:e|es|ed|ing|er|ers)?\b/i;
-    const POST_HOC =
-      /\b(?:afterwards?|later|then|subsequently|post[- ]?hoc|second pass|after the render|after the fact|once (?:it|the clip) is (?:done|rendered))\b/i;
-    for (const sentence of guide.split(/(?<=[.!?])[\s\n]+/)) {
-      expect(
-        UPSCALE.test(sentence) && POST_HOC.test(sentence),
-        `guide must not route the withheld 2K through a post-hoc upscale — found both in: ${sentence.trim().slice(0, 160)}`,
-      ).toBe(false);
-    }
-    // What it must say instead: the ceiling is enforced, so 1344 is the number to plan against.
+    // What the ruling did NOT concede is the label. `H3-Regenerate-2K` upsampled INSIDE the
+    // diffusion; SeedVR2 runs over finished pixels. So the guide may route, and must simultaneously
+    // say that what it routes to is a different artifact — otherwise the route re-advertises the
+    // withheld component under a new name, which is the failure the old ban existed to prevent.
+    expect(
+      /an upscale of a sub-2K render, not native 2K/.test(guide),
+      "the route must be labelled an upscale rather than 2K",
+    ).toBe(true);
+    // The route has to be findable: naming the surface, not just the concept.
+    expect(/Video upscale/.test(guide), "guide must name the Studio card that does it").toBe(true);
+    expect(/SeedVR2/.test(guide), "guide must name the engine behind it").toBe(true);
+
+    // The two factors are 2 and 4 (`VIDEO_UPSCALE_ENGINES` in `VideoUpscalePanel.jsx`), so 2x of
+    // the full canvas OVERSHOOTS 2K on both axes and there is no rung that lands on it. A guide
+    // that said "upscale to 2K" would be promising a target the control cannot produce.
+    expect(
+      /larger than 2K on both axes/.test(guide),
+      "guide must say the 2x result overshoots 2K rather than reaching it",
+    ).toBe(true);
+    expect(/2688x1536/.test(guide), "guide must show the arithmetic, not assert it").toBe(true);
+    expect(/no ~?1\.5x rung/.test(guide), "guide must say there is no intermediate factor").toBe(true);
+
+    // H3's headline is joint audio+video, and this path demuxes and re-encodes the audio
+    // (`video_jobs/seedvr2.rs`). A user picking H3 FOR the sound has to be told before they run it.
+    // The length-truncation defect on the same path was fixed in sc-19549, so the caveat is the
+    // re-encode alone — overstating it would be its own inaccuracy.
+    const audioSentence = guide
+      .split(/\n\n+/)
+      .find((block) => /re-encode/i.test(block) && /audio/i.test(block));
+    expect(audioSentence, "guide must caveat the audio re-encode on the upscale path").toBeTruthy();
+    expect(
+      /keeps its full length/i.test(audioSentence),
+      "the -shortest truncation was fixed (sc-19549) — the caveat must not still claim it",
+    ).toBe(true);
+
+    // And it must read as INTERIM. MiniMax committed publicly (HF discussion #39, undated) to
+    // open-sourcing `H3-Regenerate-2K` "once this set of technologies becomes stable"; without that
+    // line the upscale route reads as the product's identity rather than a stand-in.
+    expect(
+      /once this set of\s+technologies becomes stable/.test(guide),
+      "guide must carry the upstream open-sourcing commitment so the route reads as interim",
+    ).toBe(true);
+    expect(
+      /\bno date\b/i.test(guide),
+      "the commitment is undated — the guide must not imply a timeline it does not have",
+    ).toBe(true);
+
+    // Unchanged by the ruling: the canvas ceiling is ENFORCED, so 1344 is still the number to plan
+    // the render against. The upscale is what happens after that, not a way around it.
     expect(/refused rather than refitted/.test(guide), "guide must say an over-size request is refused").toBe(true);
+    expect(
+      // Tolerates the markdown blockquote continuation (`\n>   `) the claim wraps across.
+      /No render from these weights is natively[\s>]+2K\./.test(guide),
+      "the withdrawal of native 2K survives the routing",
+    ).toBe(true);
+  });
+
+  it("keeps the 14.38s cap a LATTICE ceiling, distinct from wall-clock cost (sc-17162)", () => {
+    // Three different things on this page could be mistaken for the reason clips stop at 14.38 s —
+    // the dense-attention cost table, the Turbo adapter, and the withheld sparse-attention path —
+    // and all three are about WALL CLOCK. The ceiling is the `17n + 5` lattice meeting the
+    // checkpoint's own 5-15 s clamp. Every one of the three has to disclaim it in its own section,
+    // because a reader who only reads the Turbo section never sees the sparse-attention bullet.
+    expect(
+      /Wall-clock cost and the length cap are separate things/.test(guide),
+      "the cost section must separate the two",
+    ).toBe(true);
+    expect(
+      /Turbo changes how long a render takes;\s*\n?\s*it does not change which lengths exist/.test(guide),
+      "the cost section must say Turbo moves the clock, not the cap",
+    ).toBe(true);
+    expect(
+      /the fourteen clip lengths and the 14\.38 s ceiling are\s*\n?\s*properties of the frame lattice/.test(guide),
+      "the Turbo section must disclaim the cap on its own",
+    ).toBe(true);
+
+    // Turbo is presented as the MITIGATION for the dense table, with its measured figure and its
+    // caveat — a cost table with no mitigation next to it reads as the whole story.
+    expect(/\b12\.6 minutes\b/.test(guide), "guide must give Turbo's measured wall clock").toBe(true);
+    expect(
+      /different sample/.test(guide),
+      "Turbo's softer-detail caveat must ride with the mitigation, not be dropped for it",
+    ).toBe(true);
+
+    // The dense table itself is unchanged: it is the reference schedule and the honest worst case.
+    for (const row of ["576x320", "1344x768"]) {
+      expect(guide.includes(row), `the dense cost table must still carry ${row}`).toBe(true);
+    }
+    expect(/~2 hours|~ 2 hours|\*\*~2 hours\*\*/.test(guide), "the two-hour dense figure stays").toBe(true);
   });
 
   it("offers every canvas the entries advertise, and no more", () => {
@@ -296,8 +371,31 @@ describe("MiniMax-H3 prompt guide (sc-17162)", () => {
     for (const bucket of advertised) {
       expect(guide.includes(bucket), `guide must name the advertised bucket ${bucket}`).toBe(true);
     }
+    // sc-17162 adds ONE dimension that is deliberately not a render bucket: the 2x upscale of the
+    // full canvas. It is in the copy precisely to show that the upscale OVERSHOOTS 2K rather than
+    // reaching it, so it must not be silently admitted as a size the model can render — it is
+    // excepted by name, and derived from the advertised canvas times the panel's factor so a change
+    // to either side is red rather than absorbed.
+    const FULL_CANVAS = "1344x768";
+    const UPSCALE_FACTOR = 2;
+    expect(advertised.has(FULL_CANVAS)).toBe(true);
+    const [w, h] = FULL_CANVAS.split("x").map(Number);
+    const upscaled = `${w * UPSCALE_FACTOR}x${h * UPSCALE_FACTOR}`;
+    expect(advertised.has(upscaled), `${upscaled} must NOT be an advertised render bucket`).toBe(false);
     for (const named of guide.match(/\b\d{3,4}x\d{3,4}\b/g) ?? []) {
+      if (named === upscaled) continue;
       expect(advertised.has(named), `guide names ${named}, which no entry advertises`).toBe(true);
+    }
+    // The excepted dimension is only allowed where it is labelled an upscale result.
+    const upscaleBlocks = guide
+      .split(/\n\n+/)
+      .filter((block) => block.includes(upscaled));
+    expect(upscaleBlocks.length).toBeGreaterThan(0);
+    for (const block of upscaleBlocks) {
+      expect(
+        /upscal/i.test(block),
+        `${upscaled} appears outside the upscale section: ${block.slice(0, 120)}`,
+      ).toBe(true);
     }
   });
 
