@@ -10,6 +10,7 @@ mod embedded_web;
 mod jobs;
 mod mcp;
 mod media;
+mod model_library;
 mod projects;
 mod prompt_batches;
 mod recipe_presets;

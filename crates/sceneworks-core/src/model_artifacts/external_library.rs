@@ -824,13 +824,13 @@ impl std::fmt::Display for LibraryRelocationError {
 }
 
 /// A validated relocation choice: the Hugging Face hub root SceneWorks binds, plus the `HF_HOME`
-/// value that resolves to it. The two are always related as `library_root == huggingface_home/hub`
+/// value that resolves to it. The two are always related as `library_root == hf_home/hub`
 /// because that is exactly what [`crate::hf_home::huggingface_hub_cache_dir`] computes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RelocationTarget {
     pub library_root: PathBuf,
-    pub huggingface_home: PathBuf,
+    pub hf_home: PathBuf,
 }
 
 /// Map a folder the operator picked to the pair of paths relocation needs.
@@ -856,7 +856,7 @@ pub fn resolve_relocation_target(
     {
         return Ok(RelocationTarget {
             library_root: hub,
-            huggingface_home: picked,
+            hf_home: picked,
         });
     }
     if !has_repository_layout(&canonical) {
@@ -869,7 +869,7 @@ pub fn resolve_relocation_target(
     match (is_hub, parent) {
         (true, Some(home)) => Ok(RelocationTarget {
             library_root: picked,
-            huggingface_home: home,
+            hf_home: home,
         }),
         _ => Err(LibraryRelocationRejection::HubDirectoryExpected),
     }

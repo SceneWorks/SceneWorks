@@ -193,12 +193,12 @@ mod tests {
         seed_snapshot(&hub, "owner/model");
         let target = resolve_relocation_target(&home).unwrap();
         assert_eq!(target.library_root, hub);
-        assert_eq!(target.huggingface_home, home);
+        assert_eq!(target.hf_home, home);
 
         // Picking the hub directory itself resolves to the same pair.
         let target = resolve_relocation_target(&hub).unwrap();
         assert_eq!(target.library_root, hub);
-        assert_eq!(target.huggingface_home, home);
+        assert_eq!(target.hf_home, home);
     }
 
     /// Relocation must never orphan installed weights: a library that lacks a recorded closure is
