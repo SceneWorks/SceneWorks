@@ -8871,9 +8871,10 @@ mod ltx_tests {
 
     #[test]
     fn the_ltx_canary_process_global_limits_are_serialized_and_restore_memory() {
-        let previous = get_memory_limit();
+        let previous;
         {
             let mut limits = LtxCanaryLimits::install().expect("install exact canary limits");
+            previous = limits.previous_memory;
             assert_eq!(get_memory_limit(), LTX_CANARY_MAX_FOOTPRINT_BYTES as usize);
             limits.restore();
             assert_eq!(get_memory_limit(), previous);
@@ -8881,6 +8882,9 @@ mod ltx_tests {
             set_wired_limit(restored_wired);
             assert_eq!(restored_wired, limits.previous_wired);
         }
+        let _restoration_guard = LTX_MEMORY_LIMIT_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(get_memory_limit(), previous);
     }
 
