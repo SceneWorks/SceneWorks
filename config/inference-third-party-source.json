@@ -1,7 +1,7 @@
 {
-  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory. Permanent epic merge 0e4adc6f publishes the cross-backend video memory contracts and corrects MMAudio's canonical DFN5B repository identity. The exact scanner finds 625 provenance candidates and 94 production-Rust crate prefixes. One newly marker-bearing Candle LTX file and two changed marker hashes remain covered by their existing architecture areas; 44 other classified blobs changed while their normalized markers and source-area classifications remained stable. MMAudio's NOTICE corrects the DFN5B source from the 384 alias to the canonical 378 repository under the same Apple license. No LICENSE file, production include_str!/include_bytes! site, crate prefix, or crate-prefix classification changed.",
+  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory. Pin 931366f6 advances the epic 18304 inference train (MLX rung-4 ladder reachability for bernini/lens/sana/sd3, the fused-QKV opt-in, and inference main's LTX VAE fix). The exact scanner finds 626 provenance candidates and 94 production-Rust crate prefixes. The single population change is one ADDED path, crates/media/candle-gen/candle-gen-z-image/src/common.rs, which carries the same architecture:crates/media/candle-gen/candle-gen-z-image marker as its siblings and is therefore covered by an already-classified source area; no path was removed and no normalized marker changed. Every other row differs only in git_blob_sha1, which is not a licensing signal. No LICENSE file, production include_str!/include_bytes! site, crate prefix, or crate-prefix classification changed.",
   "inferenceRevision": "931366f62a4e5800c54e0586b7fb34e3a4079e3b",
-  "auditDigest": "4b8cae68991a6a3dd17d38934077f9af76881b8b27ea6020d21f2749f0b44f30",
+  "auditDigest": "4e199c06c5e05c9e4c432264f807ec9d9caeea45af53e5f082160801f787bd66",
   "artifacts": [
     {
       "id": "cmudict",
@@ -21,7 +21,7 @@
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
-    "matchedFiles": 625,
+    "matchedFiles": 626,
     "populationSha256": "dcbf93f359aa7b0c261929a86ef81456e0a01233853f810bad7c2f67fa8f0188"
   },
   "portedSourceAreas": [

@@ -48,7 +48,11 @@ def test_matrix_accounts_for_all_models_and_pinned_mlx_staged_coverage():
     # SC-18218 closes FLUX.2-dev to its measured Resident-only provider contract, and the current
     # inference pin deliberately omits sequential offload from Bernini's descriptor. Neither lane
     # may contribute a generic staged-route claim to this census.
-    assert matrix["summary"]["mlxStagedStaticCoverage"] == 37
+    # 38, not 37: inference sc-18609 made bernini_image's DECLARED MLX rung-4 ladder reachable, so
+    # it re-enters the implemented staged set it had dropped out of while the ladder was
+    # declared-but-unreachable. FLUX.2-dev stays excluded (SC-18218) — this is bernini rejoining,
+    # not that exclusion being reversed. Mirrors EXPECTED_MLX_STAGED_COUNT in the generator.
+    assert matrix["summary"]["mlxStagedStaticCoverage"] == 38
     assert matrix["summary"]["mlxStagedStaticCoverageDenominator"] == 53
     assert len(matrix["models"]) == len(matrix["modelSlices"]) == 53
     assert {model["id"] for model in matrix["models"]} == set(matrix["modelSlices"])
@@ -185,16 +189,17 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         for run in matrix["calibrationRuns"]
         if run["record"]["status"] == "runtime_complete"
     ]
-    # sc-16915 measured seventeen Full-complete runs at the then-live closure; those records are now
-    # historical. SC-18237 and SC-18353 later added fifteen Qwen records at their then-live
-    # provider closure. SC-18306 advances beyond that audited closure, so those records fail closed
-    # as historical. SC-19753 then re-captures exactly five Z-Image records at the current closure.
+    # sc-16915 measured seventeen Full-complete runs at the then-live closure; SC-18237 and SC-18353
+    # later added fifteen Qwen records, and SC-19753 five Z-Image records, each at the closure live
+    # when it ran. The epic's pin advance moved past all of them, so every Full-complete run is now
+    # historical — an accepted floor, not a re-capture work order.
     #
-    # Pinned as an exact set AND an exact count, the same way it was when runs were current: a bare
-    # `<= {"current", "historical"}` would accept any mixture, and a count alone would let one
-    # family's promotion mask another's demotion.
-    assert {run["semantics"] for run in full_runs} == {"current", "historical"}
-    assert sum(1 for run in full_runs if run["semantics"] == "current") == 5
+    # Still pinned as an exact set AND an exact count, the same way it was when runs were current: a
+    # bare `<= {"current", "historical"}` would accept any mixture, and a count alone would let one
+    # family's promotion mask another's demotion. Holding the current count at exactly 0 is what
+    # makes a record silently surviving the closure change fail here.
+    assert {run["semantics"] for run in full_runs} == {"historical"}
+    assert sum(1 for run in full_runs if run["semantics"] == "current") == 0
     expected_candle_flux2_runtime = {
         "imc-998b89c5d76dbcc84332": "bounded_attention",
         "imc-b4113eedf503e409ad1b": "resident",
@@ -655,26 +660,22 @@ def test_complete_calibration_schema_fails_closed_on_adversarial_mutations():
 def test_current_z_image_capture_promotes_only_its_exact_five_rungs():
     matrix = load_matrix()
     assert matrix["summary"]["fullModels"] == 0
-    # sc-16915 recaptured the Qwen and Krea MLX evidence at its then-current pin. SC-18306 advances
-    # beyond those audited provider closures, so their retained evidence fails closed as historical.
-    # SC-19753 re-captures only the exact five Z-Image q4 coordinates below at the current closure.
+    # sc-16915 recaptured the Qwen and Krea MLX evidence at its then-current pin, and SC-19753
+    # captured the five Z-Image q4 coordinates at the closure live when it ran. The epic's pin has
+    # since advanced past all of them, so every shipped capture is now an ACCEPTED FLOOR rather than
+    # current verification — a pin bump staling calibration records is the fail-closed design
+    # working, not a re-capture work order.
     #
-    # Stated as the exact verified SET rather than as `== []`. A bare emptiness check stopped
-    # being meaningful the moment anything was verified, and a count would let one model's
-    # promotion silently cover another's regression.
+    # Still stated as the exact SET rather than a count: a count would let one model's promotion
+    # silently cover another's regression, and an exact empty set still fails the moment any record
+    # survives the closure change as current.
     verified = {
         (cell["modelId"], cell["backend"], cell["tier"], cell["rung"])
         for cell in matrix["cells"]
         if cell["state"] == "Verified"
     }
-    # No historical family may remain Verified merely because it was current at an older pin.
-    assert verified == {
-        ("z_image_turbo", "mlx", "q4", "resident"),
-        ("z_image_turbo", "mlx", "q4", "staged_residency"),
-        ("z_image_turbo", "mlx", "q4", "bounded_decode"),
-        ("z_image_turbo", "mlx", "q4", "bounded_attention"),
-        ("z_image_turbo", "mlx", "q4", "bounded_transformer_residency"),
-    }
+    # No family may remain Verified merely because it was current at an older pin.
+    assert verified == set()
     current_z_image_turbo = [
         cell
         for cell in matrix["cells"]
@@ -685,12 +686,7 @@ def test_current_z_image_capture_promotes_only_its_exact_five_rungs():
         and cell["overlay"] == "none"
         and cell["evidence"]["currentEnvironmentVerification"]
     ]
-    assert len(current_z_image_turbo) == 5
-    assert all(
-        cell["state"] == "Verified"
-        and cell["evidence"]["currentEnvironmentVerification"]
-        for cell in current_z_image_turbo
-    )
+    assert current_z_image_turbo == []
     historical_z_image = [
         cell
         for cell in matrix["cells"]

@@ -914,14 +914,15 @@ test("Windows preserves exact fresh capability facts when verification fails", a
     tail,
     /actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/,
   );
-  assert.match(
-    tail,
-    /engine-capability-facts-verify\/capabilities\.candle\.json/,
-  );
-  assert.match(
-    tail,
-    /engine-capability-facts-verify\/audio\/capabilities\.candle\.json/,
-  );
+  // The whole scratch DIRECTORY, not an enumerated file list, and that distinction has already
+  // been load-bearing once. The dumper writes three files — `capabilities.candle.json`,
+  // `audio/capabilities.candle.json`, and the rich `runtime/capabilities.candle.json` — and the
+  // runtime descriptor is the one the backend capability matrix cannot be rebuilt without. The
+  // enumerated two-file spelling this used to assert predates that third file, so an artifact
+  // produced under it looks complete and silently cannot repair the matrix. Pin the directory and
+  // the artifact name the repair instructions actually tell you to download.
+  assert.match(tail, /name: backend-capability-facts-candle/);
+  assert.match(tail, /path: \$\{\{ runner\.temp \}\}\/engine-capability-facts-verify\s/);
   assert.match(tail, /if-no-files-found: warn/);
 });
 
