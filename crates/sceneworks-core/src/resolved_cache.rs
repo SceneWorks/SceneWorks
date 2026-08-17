@@ -2021,13 +2021,43 @@ fn sync_tree(path: &Path) -> Result<(), ResolvedCacheError> {
         }
         sync_dir(path)?;
     } else if metadata.is_file() {
-        File::open(path)?.sync_all()?;
+        sync_regular_file(path)?;
     } else {
         return Err(ResolvedCacheError::new(format!(
             "cannot sync unmanaged filesystem entry {}",
             path.display()
         )));
     }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn sync_regular_file(path: &Path) -> Result<(), ResolvedCacheError> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_SHARE_READ_WRITE_DELETE: u32 = 0x0000_0001 | 0x0000_0002 | 0x0000_0004;
+
+    // FlushFileBuffers requires a write-capable handle on Windows. Open the file itself rather
+    // than following a late replacement, then recheck the opened handle before flushing it.
+    let file = OpenOptions::new()
+        .write(true)
+        .share_mode(FILE_SHARE_READ_WRITE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata_is_reparse_point(&metadata) {
+        return Err(ResolvedCacheError::new(format!(
+            "cannot sync linked managed path {}",
+            path.display()
+        )));
+    }
+    file.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn sync_regular_file(path: &Path) -> Result<(), ResolvedCacheError> {
+    File::open(path)?.sync_all()?;
     Ok(())
 }
 
