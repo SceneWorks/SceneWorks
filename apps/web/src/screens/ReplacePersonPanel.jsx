@@ -4,6 +4,25 @@ import { VideoSourcePickerField } from "../components/AssetPicker.jsx";
 import { AssetMedia } from "../components/assetMedia.jsx";
 import { StudioUpdateBadge, StudioUpdateNotice, updateOptionLabel } from "../components/StudioUpdateNotice.jsx";
 
+// SCAIL-2's catalog id, exported so the panel that HIDES the Replacement mode control and the
+// studio that stops SENDING it (`VideoStudio.jsx`) key on one spelling rather than two literals
+// that can drift apart. See `REPLACEMENT_MODE_HONORED_BY` below.
+export const SCAIL2_MODEL_ID = "scail2_14b";
+
+// Whether a replacement engine actually consumes `replacementMode`. Today it is a single negative
+// fact rather than a per-model table: SCAIL-2 re-renders the whole tracked person from the
+// character reference, so face-only / keep-outfit has nothing to select, and every scail2
+// conditioning site in the worker emits `ReplacementMode::default()` LITERALLY — the user's choice
+// never reached the engine. The engine now refuses a non-default mode outright (sc-20262), so a
+// control that can still set one is a refusal waiting to happen rather than a knob.
+//
+// The Wan-VACE inpainting engines DO honor it, so the control is hidden for SCAIL-2 alone and is
+// unchanged everywhere else. sc-20262 is the story that would make this honored — if it lands,
+// delete this predicate rather than adding a second model to it.
+export function replacementModeApplies(modelId) {
+  return modelId !== SCAIL2_MODEL_ID;
+}
+
 const MASK_STATE_COPY = {
   active: "Per-frame segmentation masks generated for tracked frames.",
   generated: "Per-frame segmentation masks generated for most tracked frames.",
@@ -612,24 +631,31 @@ export function ReplacePersonPanel({
       {replacementModels.length === 1 ? <StudioUpdateBadge item={selectedReplacementModel} /> : null}
       <StudioUpdateNotice item={selectedReplacementModel} onUpdate={createModelDownloadJob} />
 
-      {model === "scail2_14b" ? (
+      {replacementModeApplies(model) ? null : (
         <div className="guidance-strip">
           <strong>SCAIL-2 full-character replacement</strong>
           <span>
-            SCAIL-2 re-renders the whole tracked person from the character reference, so the
-            Replacement mode below (face-only / keep-outfit) does not apply.
+            SCAIL-2 re-renders the whole tracked person from the character reference, so there is no
+            Replacement mode to choose — face-only and keep-outfit have nothing to select.
           </span>
         </div>
-      ) : null}
+      )}
 
-      <label>
-        Replacement mode
-        <select onChange={(event) => setReplacementMode(event.target.value)} value={replacementMode}>
-          <option value="face_only">Face Only</option>
-          <option value="full_person_keep_outfit">Full Person, Keep Outfit</option>
-          <option value="full_person_replace_outfit">Full Person, Replace Outfit</option>
-        </select>
-      </label>
+      {/* Hidden rather than rendered-and-ignored for SCAIL-2 (sc-20262): the worker's scail2
+          conditioning sites emit `ReplacementMode::default()` literally, so a value set here never
+          reached the engine, and the engine now refuses a non-default one. The guidance strip above
+          said so in prose while the control stayed settable — prose is not a gate. Unchanged for the
+          Wan-VACE inpainting engines, which honor it. */}
+      {replacementModeApplies(model) ? (
+        <label>
+          Replacement mode
+          <select onChange={(event) => setReplacementMode(event.target.value)} value={replacementMode}>
+            <option value="face_only">Face Only</option>
+            <option value="full_person_keep_outfit">Full Person, Keep Outfit</option>
+            <option value="full_person_replace_outfit">Full Person, Replace Outfit</option>
+          </select>
+        </label>
+      ) : null}
     </div>
   );
 }

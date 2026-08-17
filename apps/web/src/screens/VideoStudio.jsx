@@ -57,7 +57,7 @@ import {
   useQuantTierPicker,
   useSavePreset,
 } from "../components/generationStudio.jsx";
-import { ReplacePersonPanel } from "./ReplacePersonPanel.jsx";
+import { ReplacePersonPanel, replacementModeApplies } from "./ReplacePersonPanel.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { videoGenerateValidation } from "../videoStudioValidation.js";
@@ -1568,14 +1568,25 @@ export function VideoStudio() {
         // Bernini ads2v reference video (sc-5425).
         referenceClipAssetId: mode === "ads2v" ? referenceClipAssetId || null : null,
         personTrackId: mode === "replace_person" ? personTrackId || null : null,
-        replacementMode: mode === "replace_person" ? replacementMode : "face_only",
+        // Gated on the MODEL as well as the mode (sc-20262), for the same reason
+        // `referenceAudioAssetIds` above is: hiding a control does not unset the state behind it,
+        // so a mode picked on a Wan-VACE engine would otherwise ride into a SCAIL-2 job once the
+        // control unmounted — and SCAIL-2's engine refuses a non-default mode. `replacementMode`
+        // is only meaningful where `replacementModeApplies`.
+        replacementMode:
+          mode === "replace_person" && replacementModeApplies(model) ? replacementMode : "face_only",
         loras: selectedLoras.map((lora) => serializeLora(lora, { weight: effectiveLoraWeight(lora) })),
         advanced: {
           resolution,
           durationHint,
           motion,
           selectedPersonTrack: selectedTrack ?? null,
-          replacementModeLabel: replacementModeLabels[replacementMode],
+          // The recipe's human-readable echo of the field above, so it follows the same gate — a
+          // replayed SCAIL-2 recipe must not display a Replacement mode the job never carried.
+          replacementModeLabel:
+            replacementModeLabels[
+              replacementModeApplies(model) ? replacementMode : "face_only"
+            ],
           // Style Catalog round-trip (sc-13136, mirrors image sc-13132): record the picked style id
           // and the RAW pre-style prompt so replay re-selects the picker and recomposes the identical
           // prompt without double-wrapping. Rides advanced → rawAdapterSettings (cloned verbatim by
