@@ -828,6 +828,36 @@ fn incomplete_complete_entry_is_never_available_or_reconstructed() {
     assert_eq!(std::fs::read(bundle_file).unwrap(), b"short");
 }
 
+/// Publication's pre-rename walk must never reopen staged files by path: the reopen is the
+/// TOCTOU window (a parent junction swap between validation and reopen flushes the wrong file)
+/// and a write-capable reopen cannot even be assumed possible (read-only staged content,
+/// `FlushFileBuffers` denials on Windows). Content durability is bound to the copy-time write
+/// handle in `copy_and_verify`; the walk only validates entries and syncs directories. A
+/// read-only staged file therefore must not fail the walk — under both earlier reopen-flush
+/// revisions this failed on Windows with `ERROR_ACCESS_DENIED`.
+#[test]
+fn publish_walk_accepts_read_only_staged_files_without_reopening_them() {
+    let scratch = TempDir::new().unwrap();
+    let staged = scratch.path().join("staged");
+    std::fs::create_dir_all(staged.join("nested")).unwrap();
+    std::fs::write(staged.join("model.safetensors"), b"weights").unwrap();
+    std::fs::write(staged.join("nested/config.json"), b"{}").unwrap();
+    for file in ["model.safetensors", "nested/config.json"] {
+        let path = staged.join(file);
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&path, permissions).unwrap();
+    }
+    sync_tree(&staged).unwrap();
+    for file in ["model.safetensors", "nested/config.json"] {
+        let path = staged.join(file);
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&path, permissions).unwrap();
+    }
+}
+
 #[test]
 fn checked_enumeration_rejects_overflow() {
     let scratch = TempDir::new().unwrap();

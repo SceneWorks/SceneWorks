@@ -1076,8 +1076,13 @@ impl ResolvedCacheReservation {
             let metadata = self.store.read_metadata_locked(&self.digest)?;
             self.verify_ownership(&metadata)?;
         }
-        std::fs::rename(&self.staging_path, &bundle)?;
-        sync_dir(&entry)?;
+        publish_rename(&self.staging_path, &bundle)?;
+        sync_dir(&entry).map_err(|error| {
+            ResolvedCacheError::new(format!(
+                "sync published entry directory {}: {error}",
+                entry.display()
+            ))
+        })?;
         artifact.location = ArtifactLocation::ResolvedLocal { root: bundle };
         self.record_complete(artifact)
     }
@@ -1739,9 +1744,11 @@ fn windows_confined_directory(
     reject_link_or_reparse(path, "managed cache directory")?;
     #[cfg(test)]
     run_windows_directory_after_validation_hook();
+    // FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE: this handle must never make a
+    // concurrent owner's rename or delete of the managed parent fail while we hold it open.
     let parent = OpenOptions::new()
         .read(true)
-        .share_mode(0x0000_0001 | 0x0000_0002)
+        .share_mode(0x0000_0001 | 0x0000_0002 | 0x0000_0004)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
         .open(managed_parent)?;
     let mut options = fs_at::OpenOptions::default();
@@ -1901,7 +1908,14 @@ fn checked_artifact_bytes(artifact: &ResolvedModelArtifact) -> Result<u64, Resol
         .map_err(|error| ResolvedCacheError::new(error.to_string()))?
         .into_iter()
         .try_fold(0_u64, |total, path| {
-            let size = std::fs::metadata(&path)?.len();
+            let size = std::fs::metadata(&path)
+                .map_err(|error| {
+                    ResolvedCacheError::new(format!(
+                        "measure resolved artifact file {}: {error}",
+                        path.display()
+                    ))
+                })?
+                .len();
             total.checked_add(size).ok_or_else(|| {
                 ResolvedCacheError::new("resolved artifact verified byte total overflow")
             })
@@ -1997,7 +2011,9 @@ fn atomic_write_json(path: &Path, value: &impl Serialize) -> Result<(), Resolved
     if result.is_err() {
         let _ = std::fs::remove_file(&temporary);
     }
-    result
+    result.map_err(|error| {
+        ResolvedCacheError::new(format!("write cache record {}: {error}", path.display()))
+    })
 }
 
 fn write_synced_file(path: &Path, body: &[u8]) -> Result<(), ResolvedCacheError> {
@@ -2007,8 +2023,28 @@ fn write_synced_file(path: &Path, body: &[u8]) -> Result<(), ResolvedCacheError>
     Ok(())
 }
 
+/// Directory-entry durability walk over a fully staged tree, run immediately before
+/// publication.
+///
+/// File *content* durability is deliberately NOT re-established here. `copy_and_verify`
+/// already calls `File::sync_all` on the very write handle that produced the verified
+/// bytes, which binds the flush to the verified identity by construction — no path
+/// reopen, no TOCTOU window. Reopening each staged file by path here (as earlier
+/// revisions did) reintroduced exactly that window on Windows: a parent-directory
+/// junction swap or delete-and-recreate between validation and the reopen would flush
+/// the wrong file while publication proceeded. It also required a write-capable reopen
+/// for `FlushFileBuffers`, which failed closed (`ERROR_ACCESS_DENIED`) or handed
+/// interference filters (AV/indexers) a fresh dirty-close to scan right before the
+/// publish rename. So this walk only:
+/// - re-validates that every staged entry is still a regular file or directory, and
+/// - on Unix, syncs each directory so the entries naming the already-durable inodes are
+///   durable before the rename. Windows has no POSIX directory fsync (`sync_dir` is a
+///   no-op there); journaled NTFS metadata plus the write-through publish rename cover
+///   that side.
 fn sync_tree(path: &Path) -> Result<(), ResolvedCacheError> {
-    let metadata = std::fs::symlink_metadata(path)?;
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        ResolvedCacheError::new(format!("inspect staged path {}: {error}", path.display()))
+    })?;
     if metadata.file_type().is_symlink() || metadata_is_reparse_point(&metadata) {
         return Err(ResolvedCacheError::new(format!(
             "cannot sync linked managed path {}",
@@ -2016,48 +2052,30 @@ fn sync_tree(path: &Path) -> Result<(), ResolvedCacheError> {
         )));
     }
     if metadata.is_dir() {
-        for item in std::fs::read_dir(path)? {
-            sync_tree(&item?.path())?;
+        let items = std::fs::read_dir(path).map_err(|error| {
+            ResolvedCacheError::new(format!(
+                "enumerate staged directory {}: {error}",
+                path.display()
+            ))
+        })?;
+        for item in items {
+            let item = item.map_err(|error| {
+                ResolvedCacheError::new(format!(
+                    "enumerate staged directory {}: {error}",
+                    path.display()
+                ))
+            })?;
+            sync_tree(&item.path())?;
         }
-        sync_dir(path)?;
-    } else if metadata.is_file() {
-        sync_regular_file(path)?;
-    } else {
+        sync_dir(path).map_err(|error| {
+            ResolvedCacheError::new(format!("sync staged directory {}: {error}", path.display()))
+        })?;
+    } else if !metadata.is_file() {
         return Err(ResolvedCacheError::new(format!(
             "cannot sync unmanaged filesystem entry {}",
             path.display()
         )));
     }
-    Ok(())
-}
-
-#[cfg(windows)]
-fn sync_regular_file(path: &Path) -> Result<(), ResolvedCacheError> {
-    use std::os::windows::fs::OpenOptionsExt;
-    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-    const FILE_SHARE_READ_WRITE_DELETE: u32 = 0x0000_0001 | 0x0000_0002 | 0x0000_0004;
-
-    // FlushFileBuffers requires a write-capable handle on Windows. Open the file itself rather
-    // than following a late replacement, then recheck the opened handle before flushing it.
-    let file = OpenOptions::new()
-        .write(true)
-        .share_mode(FILE_SHARE_READ_WRITE_DELETE)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)?;
-    let metadata = file.metadata()?;
-    if !metadata.is_file() || metadata_is_reparse_point(&metadata) {
-        return Err(ResolvedCacheError::new(format!(
-            "cannot sync linked managed path {}",
-            path.display()
-        )));
-    }
-    file.sync_all()?;
-    Ok(())
-}
-
-#[cfg(not(windows))]
-fn sync_regular_file(path: &Path) -> Result<(), ResolvedCacheError> {
-    File::open(path)?.sync_all()?;
     Ok(())
 }
 
@@ -2070,6 +2088,61 @@ fn sync_dir(path: &Path) -> Result<(), ResolvedCacheError> {
 #[cfg(not(unix))]
 fn sync_dir(_path: &Path) -> Result<(), ResolvedCacheError> {
     Ok(())
+}
+
+/// Atomically renames the validated staging tree onto its bundle path.
+#[cfg(not(windows))]
+fn publish_rename(staging: &Path, bundle: &Path) -> Result<(), ResolvedCacheError> {
+    std::fs::rename(staging, bundle).map_err(|error| publish_rename_error(staging, bundle, &error))
+}
+
+/// Atomically renames the validated staging tree onto its bundle path.
+///
+/// Windows refuses to rename a directory while ANY handle is open on it or a descendant —
+/// including handles the process never opened: antivirus and search-indexer filters briefly open
+/// freshly written files after their write handles close. Those transient
+/// `ERROR_ACCESS_DENIED`/`ERROR_SHARING_VIOLATION` holds are retried with a bounded backoff
+/// before failing closed with the operation and both paths named. Durability of the rename
+/// record itself relies on journaled NTFS metadata: Windows has no POSIX directory fsync, std
+/// `fs::rename` does not expose `MOVEFILE_WRITE_THROUGH`, and this workspace forbids the direct
+/// `unsafe` FFI that reaching it would need.
+#[cfg(windows)]
+fn publish_rename(staging: &Path, bundle: &Path) -> Result<(), ResolvedCacheError> {
+    const ERROR_ACCESS_DENIED: i32 = 5;
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    const ATTEMPTS: u32 = 8;
+
+    let mut delay = std::time::Duration::from_millis(30);
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        match std::fs::rename(staging, bundle) {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if attempt < ATTEMPTS
+                    && matches!(
+                        error.raw_os_error(),
+                        Some(ERROR_ACCESS_DENIED | ERROR_SHARING_VIOLATION)
+                    ) =>
+            {
+                std::thread::sleep(delay);
+                delay = delay.saturating_mul(2);
+            }
+            Err(error) => return Err(publish_rename_error(staging, bundle, &error)),
+        }
+    }
+}
+
+fn publish_rename_error(
+    staging: &Path,
+    bundle: &Path,
+    error: &std::io::Error,
+) -> ResolvedCacheError {
+    ResolvedCacheError::new(format!(
+        "publish staged bundle {} -> {}: {error}",
+        staging.display(),
+        bundle.display()
+    ))
 }
 
 fn random_id() -> Result<String, ResolvedCacheError> {

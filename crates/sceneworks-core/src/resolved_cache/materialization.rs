@@ -372,22 +372,45 @@ fn copy_and_verify(
         if cancellation.is_cancelled() {
             return Err(ResolvedCacheError::new("materialization cancelled"));
         }
-        let read = source.input.read(&mut buffer)?;
+        let read = source.input.read(&mut buffer).map_err(|error| {
+            ResolvedCacheError::new(format!(
+                "read materialization source {}: {error}",
+                source.location.source_path.display()
+            ))
+        })?;
         if read == 0 {
             break;
         }
-        output.write_all(&buffer[..read])?;
+        output.write_all(&buffer[..read]).map_err(|error| {
+            ResolvedCacheError::new(format!(
+                "write staged file {}: {error}",
+                destination.display()
+            ))
+        })?;
         digest.update(&buffer[..read]);
         size_bytes = size_bytes
             .checked_add(read as u64)
             .ok_or_else(|| ResolvedCacheError::new("materialized byte count overflow"))?;
     }
-    output.sync_all()?;
+    // The only content-durability point for this file: flush through the very write handle that
+    // produced the verified bytes. Publication never reopens staged files by path to flush them
+    // again — that reopen is what a parent-junction swap could redirect (see `sync_tree`).
+    output.sync_all().map_err(|error| {
+        ResolvedCacheError::new(format!(
+            "sync staged file {}: {error}",
+            destination.display()
+        ))
+    })?;
     let sha256 = format!("sha256:{:x}", digest.finalize());
     let verified = VerifiedFile { size_bytes, sha256 };
     verify_expected(&source.location.source_path, expected, &verified)?;
     source.validate_unchanged()?;
-    let destination_metadata = output.metadata()?;
+    let destination_metadata = output.metadata().map_err(|error| {
+        ResolvedCacheError::new(format!(
+            "inspect staged file {}: {error}",
+            destination.display()
+        ))
+    })?;
     if !destination_metadata.is_file() || destination_metadata.len() != size_bytes {
         return Err(ResolvedCacheError::new(format!(
             "materialized destination verification failed for {}",
@@ -572,7 +595,12 @@ fn create_confined_output(root: &Path, relative: &Path) -> Result<File, Resolved
         .follow(false)
         .write(OpenOptionsWriteMode::Write)
         .create_new(true);
-    Ok(options.open_at(&parent, file_name)?)
+    options.open_at(&parent, file_name).map_err(|error| {
+        ResolvedCacheError::new(format!(
+            "create staged file {}: {error}",
+            root.join(relative).display()
+        ))
+    })
 }
 
 #[cfg(windows)]
