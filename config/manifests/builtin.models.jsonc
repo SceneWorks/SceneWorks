@@ -1741,7 +1741,7 @@
               "rung": "bounded_decode",
               "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
               "tiers": ["bf16", "q4", "q8"],
-              "modes": ["text_to_image", "style_variations"],
+              "modes": ["text_to_image"],
               "overlays": ["none", "lora"],
               "engagedRungs": ["resident", "staged_residency", "bounded_decode"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 },
@@ -1753,7 +1753,7 @@
               "runtimeProvider": "z_image_turbo_control",
               "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
               "tiers": ["bf16", "q4", "q8"],
-              "modes": ["text_to_image", "style_variations"],
+              "modes": ["text_to_image"],
               "overlays": ["control"],
               "engagedRungs": ["resident", "staged_residency", "bounded_decode"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 },
@@ -1764,7 +1764,7 @@
               "rung": "bounded_attention",
               "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
               "tiers": ["bf16", "q4", "q8"],
-              "modes": ["text_to_image", "style_variations"],
+              "modes": ["text_to_image"],
               "overlays": ["none", "lora"],
               "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 67108864 },
@@ -1776,7 +1776,7 @@
               "runtimeProvider": "z_image_turbo_control",
               "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
               "tiers": ["bf16", "q4", "q8"],
-              "modes": ["text_to_image", "style_variations"],
+              "modes": ["text_to_image"],
               "overlays": ["control"],
               "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 67108864 },
@@ -1787,7 +1787,7 @@
               "rung": "bounded_transformer_residency",
               "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
               "tiers": ["bf16", "q4", "q8"],
-              "modes": ["text_to_image", "style_variations"],
+              "modes": ["text_to_image"],
               "overlays": ["none", "lora"],
               "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
@@ -1799,7 +1799,7 @@
               "runtimeProvider": "z_image_turbo_control",
               "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
               "tiers": ["bf16", "q4", "q8"],
-              "modes": ["text_to_image", "style_variations"],
+              "modes": ["text_to_image"],
               "overlays": ["control"],
               "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
@@ -4397,68 +4397,68 @@
           "implementations": [
             {
               "rung": "resident", "fingerprint": "flux-one-static-registry-behavior-v2-schnell",
-              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image", "style_variations"], "overlays": ["none"],
+              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image"], "overlays": ["none"],
               "loadProfiles": ["plain"], "sourceKinds": ["dir"], "providerOverlay": "none",
-              "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }, { "mode": "style_variations", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }],
+              "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }],
               "engagedRungs": ["resident"], "parameters": {}, "parameterRanges": {}, "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
             },
             {
               "rung": "staged_residency", "fingerprint": "flux-one-static-registry-behavior-v2-schnell", "requiredOffloadPolicy": "sequential",
-              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image", "style_variations"], "overlays": ["none"],
+              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image"], "overlays": ["none"],
               "loadProfiles": ["plain"], "sourceKinds": ["dir"], "providerOverlay": "none",
-              "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }, { "mode": "style_variations", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }],
+              "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }],
               "engagedRungs": ["resident", "staged_residency"], "parameters": {}, "parameterRanges": {}, "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
             },
             {
               "rung": "bounded_decode", "fingerprint": "flux-one-static-registry-behavior-v2-schnell",
-              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image", "style_variations"], "overlays": ["none"],
+              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image"], "overlays": ["none"],
               "loadProfiles": ["plain"], "sourceKinds": ["dir"], "providerOverlay": "none",
-              "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }, { "mode": "style_variations", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }],
+              "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }],
               "engagedRungs": ["resident", "bounded_decode"], "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 }, "parameterRanges": { "decodeTileEdges": [768, 640, 512], "decodeOverlaps": [64] }, "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
             },
             {
               "rung": "bounded_attention", "fingerprint": "flux-one-static-registry-behavior-v2-schnell",
-              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image", "style_variations"], "overlays": ["none"],
+              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image"], "overlays": ["none"],
               "loadProfiles": ["plain"], "sourceKinds": ["dir"], "providerOverlay": "none",
-              "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }, { "mode": "style_variations", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }],
+              "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }],
               "engagedRungs": ["resident", "bounded_decode", "bounded_attention"], "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 }, "parameterRanges": { "decodeTileEdges": [768, 640, 512], "decodeOverlaps": [64], "attentionChunkSizes": [67108864] }, "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
             },
             {
               "rung": "bounded_transformer_residency", "fingerprint": "flux-one-static-registry-behavior-v2-schnell", "requiredOffloadPolicy": "sequential",
-              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image", "style_variations"], "overlays": ["none"],
+              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image"], "overlays": ["none"],
               "loadProfiles": ["plain"], "sourceKinds": ["dir"], "providerOverlay": "none",
-              "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }, { "mode": "style_variations", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }],
+              "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }],
               "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"], "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" }, "parameterRanges": { "decodeTileEdges": [768, 640, 512], "decodeOverlaps": [64], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit"] }, "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
             },
             {
               "rung": "resident", "fingerprint": "flux-one-static-registry-behavior-v2-schnell",
-              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image", "style_variations"], "overlays": ["lora"], "loadProfiles": ["lora"], "sourceKinds": ["dir"], "providerOverlay": "adapters",
-              "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }, { "mode": "style_variations", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }], "engagedRungs": ["resident"], "parameters": {}, "parameterRanges": {}, "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
+              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image"], "overlays": ["lora"], "loadProfiles": ["lora"], "sourceKinds": ["dir"], "providerOverlay": "adapters",
+              "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }], "engagedRungs": ["resident"], "parameters": {}, "parameterRanges": {}, "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
             },
             {
               "rung": "staged_residency", "fingerprint": "flux-one-static-registry-behavior-v2-schnell", "requiredOffloadPolicy": "sequential",
-              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image", "style_variations"], "overlays": ["lora"], "loadProfiles": ["lora"], "sourceKinds": ["dir"], "providerOverlay": "adapters",
-              "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }, { "mode": "style_variations", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }], "engagedRungs": ["resident", "staged_residency"], "parameters": {}, "parameterRanges": {}, "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
+              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image"], "overlays": ["lora"], "loadProfiles": ["lora"], "sourceKinds": ["dir"], "providerOverlay": "adapters",
+              "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }], "engagedRungs": ["resident", "staged_residency"], "parameters": {}, "parameterRanges": {}, "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
             },
             {
               "rung": "resident", "fingerprint": "flux-one-static-registry-behavior-v2-schnell",
-              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image", "style_variations"], "overlays": ["none"], "loadProfiles": ["pid"], "sourceKinds": ["dir"], "providerOverlay": "pid",
-              "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [true], "hasPhases": false }, { "mode": "style_variations", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [true], "hasPhases": false }], "engagedRungs": ["resident"], "parameters": {}, "parameterRanges": {}, "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
+              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image"], "overlays": ["none"], "loadProfiles": ["pid"], "sourceKinds": ["dir"], "providerOverlay": "pid",
+              "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [true], "hasPhases": false }], "engagedRungs": ["resident"], "parameters": {}, "parameterRanges": {}, "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
             },
             {
               "rung": "staged_residency", "fingerprint": "flux-one-static-registry-behavior-v2-schnell", "requiredOffloadPolicy": "sequential",
-              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image", "style_variations"], "overlays": ["none"], "loadProfiles": ["pid"], "sourceKinds": ["dir"], "providerOverlay": "pid",
-              "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [true], "hasPhases": false }, { "mode": "style_variations", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [true], "hasPhases": false }], "engagedRungs": ["resident", "staged_residency"], "parameters": {}, "parameterRanges": {}, "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
+              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image"], "overlays": ["none"], "loadProfiles": ["pid"], "sourceKinds": ["dir"], "providerOverlay": "pid",
+              "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [true], "hasPhases": false }], "engagedRungs": ["resident", "staged_residency"], "parameters": {}, "parameterRanges": {}, "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
             },
             {
               "rung": "resident", "fingerprint": "flux-one-static-registry-behavior-v2-schnell",
-              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image", "style_variations"], "overlays": ["lora"], "loadProfiles": ["lora_pid"], "sourceKinds": ["dir"], "providerOverlay": "adapters-pid",
-              "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [true], "hasPhases": false }, { "mode": "style_variations", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [true], "hasPhases": false }], "engagedRungs": ["resident"], "parameters": {}, "parameterRanges": {}, "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
+              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image"], "overlays": ["lora"], "loadProfiles": ["lora_pid"], "sourceKinds": ["dir"], "providerOverlay": "adapters-pid",
+              "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [true], "hasPhases": false }], "engagedRungs": ["resident"], "parameters": {}, "parameterRanges": {}, "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
             },
             {
               "rung": "staged_residency", "fingerprint": "flux-one-static-registry-behavior-v2-schnell", "requiredOffloadPolicy": "sequential",
-              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image", "style_variations"], "overlays": ["lora"], "loadProfiles": ["lora_pid"], "sourceKinds": ["dir"], "providerOverlay": "adapters-pid",
-              "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [true], "hasPhases": false }, { "mode": "style_variations", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [true], "hasPhases": false }], "engagedRungs": ["resident", "staged_residency"], "parameters": {}, "parameterRanges": {}, "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
+              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image"], "overlays": ["lora"], "loadProfiles": ["lora_pid"], "sourceKinds": ["dir"], "providerOverlay": "adapters-pid",
+              "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [true], "hasPhases": false }], "engagedRungs": ["resident", "staged_residency"], "parameters": {}, "parameterRanges": {}, "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
             }
           ]
         }
@@ -4667,17 +4667,17 @@
         "memoryStrategyContract": {
           "abi": 1, "provider": "flux1_dev", "exhaustive": true,
           "implementations": [
-            {"rung":"resident","fingerprint":"flux-one-static-registry-behavior-v2-dev","tiers":["bf16","q4","q8"],"modes":["text_to_image","style_variations"],"overlays":["none"],"loadProfiles":["plain"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[false],"hasPhases":false},{"mode":"style_variations","providerMode":"text_to_image","referenceCounts":[0],"pid":[false],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
-            {"rung":"staged_residency","fingerprint":"flux-one-static-registry-behavior-v2-dev","requiredOffloadPolicy":"sequential","tiers":["bf16","q4","q8"],"modes":["text_to_image","style_variations"],"overlays":["none"],"loadProfiles":["plain"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[false],"hasPhases":false},{"mode":"style_variations","providerMode":"text_to_image","referenceCounts":[0],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
-            {"rung":"bounded_decode","fingerprint":"flux-one-static-registry-behavior-v2-dev","tiers":["bf16","q4","q8"],"modes":["text_to_image","style_variations"],"overlays":["none"],"loadProfiles":["plain"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[false],"hasPhases":false},{"mode":"style_variations","providerMode":"text_to_image","referenceCounts":[0],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","bounded_decode"],"parameters":{"decodeTileEdge":512,"decodeOverlap":64},"parameterRanges":{"decodeTileEdges":[768,640,512],"decodeOverlaps":[64]},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
-            {"rung":"bounded_attention","fingerprint":"flux-one-static-registry-behavior-v2-dev","tiers":["bf16","q4","q8"],"modes":["text_to_image","style_variations"],"overlays":["none"],"loadProfiles":["plain"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[false],"hasPhases":false},{"mode":"style_variations","providerMode":"text_to_image","referenceCounts":[0],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","bounded_decode","bounded_attention"],"parameters":{"decodeTileEdge":512,"decodeOverlap":64,"attentionChunkSize":67108864},"parameterRanges":{"decodeTileEdges":[768,640,512],"decodeOverlaps":[64],"attentionChunkSizes":[67108864]},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
-            {"rung":"bounded_transformer_residency","fingerprint":"flux-one-static-registry-behavior-v2-dev","requiredOffloadPolicy":"sequential","tiers":["bf16","q4","q8"],"modes":["text_to_image","style_variations"],"overlays":["none"],"loadProfiles":["plain"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[false],"hasPhases":false},{"mode":"style_variations","providerMode":"text_to_image","referenceCounts":[0],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","staged_residency","bounded_decode","bounded_attention","bounded_transformer_residency"],"parameters":{"decodeTileEdge":512,"decodeOverlap":64,"attentionChunkSize":67108864,"transformerWindowSize":1,"transformerWindowComponent":"Dit"},"parameterRanges":{"decodeTileEdges":[768,640,512],"decodeOverlaps":[64],"attentionChunkSizes":[67108864],"transformerWindowSizes":[1],"transformerWindowComponents":["Dit"]},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
-            {"rung":"resident","fingerprint":"flux-one-static-registry-behavior-v2-dev","tiers":["bf16","q4","q8"],"modes":["text_to_image","style_variations"],"overlays":["lora"],"loadProfiles":["lora"],"sourceKinds":["dir"],"providerOverlay":"adapters","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[false],"hasPhases":false},{"mode":"style_variations","providerMode":"text_to_image","referenceCounts":[0],"pid":[false],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
-            {"rung":"staged_residency","fingerprint":"flux-one-static-registry-behavior-v2-dev","requiredOffloadPolicy":"sequential","tiers":["bf16","q4","q8"],"modes":["text_to_image","style_variations"],"overlays":["lora"],"loadProfiles":["lora"],"sourceKinds":["dir"],"providerOverlay":"adapters","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[false],"hasPhases":false},{"mode":"style_variations","providerMode":"text_to_image","referenceCounts":[0],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
-            {"rung":"resident","fingerprint":"flux-one-static-registry-behavior-v2-dev","tiers":["bf16","q4","q8"],"modes":["text_to_image","style_variations"],"overlays":["none"],"loadProfiles":["pid"],"sourceKinds":["dir"],"providerOverlay":"pid","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[true],"hasPhases":false},{"mode":"style_variations","providerMode":"text_to_image","referenceCounts":[0],"pid":[true],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
-            {"rung":"staged_residency","fingerprint":"flux-one-static-registry-behavior-v2-dev","requiredOffloadPolicy":"sequential","tiers":["bf16","q4","q8"],"modes":["text_to_image","style_variations"],"overlays":["none"],"loadProfiles":["pid"],"sourceKinds":["dir"],"providerOverlay":"pid","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[true],"hasPhases":false},{"mode":"style_variations","providerMode":"text_to_image","referenceCounts":[0],"pid":[true],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
-            {"rung":"resident","fingerprint":"flux-one-static-registry-behavior-v2-dev","tiers":["bf16","q4","q8"],"modes":["text_to_image","style_variations"],"overlays":["lora"],"loadProfiles":["lora_pid"],"sourceKinds":["dir"],"providerOverlay":"adapters-pid","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[true],"hasPhases":false},{"mode":"style_variations","providerMode":"text_to_image","referenceCounts":[0],"pid":[true],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
-            {"rung":"staged_residency","fingerprint":"flux-one-static-registry-behavior-v2-dev","requiredOffloadPolicy":"sequential","tiers":["bf16","q4","q8"],"modes":["text_to_image","style_variations"],"overlays":["lora"],"loadProfiles":["lora_pid"],"sourceKinds":["dir"],"providerOverlay":"adapters-pid","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[true],"hasPhases":false},{"mode":"style_variations","providerMode":"text_to_image","referenceCounts":[0],"pid":[true],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
+            {"rung":"resident","fingerprint":"flux-one-static-registry-behavior-v2-dev","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["none"],"loadProfiles":["plain"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[false],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
+            {"rung":"staged_residency","fingerprint":"flux-one-static-registry-behavior-v2-dev","requiredOffloadPolicy":"sequential","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["none"],"loadProfiles":["plain"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
+            {"rung":"bounded_decode","fingerprint":"flux-one-static-registry-behavior-v2-dev","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["none"],"loadProfiles":["plain"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","bounded_decode"],"parameters":{"decodeTileEdge":512,"decodeOverlap":64},"parameterRanges":{"decodeTileEdges":[768,640,512],"decodeOverlaps":[64]},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
+            {"rung":"bounded_attention","fingerprint":"flux-one-static-registry-behavior-v2-dev","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["none"],"loadProfiles":["plain"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","bounded_decode","bounded_attention"],"parameters":{"decodeTileEdge":512,"decodeOverlap":64,"attentionChunkSize":67108864},"parameterRanges":{"decodeTileEdges":[768,640,512],"decodeOverlaps":[64],"attentionChunkSizes":[67108864]},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
+            {"rung":"bounded_transformer_residency","fingerprint":"flux-one-static-registry-behavior-v2-dev","requiredOffloadPolicy":"sequential","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["none"],"loadProfiles":["plain"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","staged_residency","bounded_decode","bounded_attention","bounded_transformer_residency"],"parameters":{"decodeTileEdge":512,"decodeOverlap":64,"attentionChunkSize":67108864,"transformerWindowSize":1,"transformerWindowComponent":"Dit"},"parameterRanges":{"decodeTileEdges":[768,640,512],"decodeOverlaps":[64],"attentionChunkSizes":[67108864],"transformerWindowSizes":[1],"transformerWindowComponents":["Dit"]},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
+            {"rung":"resident","fingerprint":"flux-one-static-registry-behavior-v2-dev","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["lora"],"loadProfiles":["lora"],"sourceKinds":["dir"],"providerOverlay":"adapters","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[false],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
+            {"rung":"staged_residency","fingerprint":"flux-one-static-registry-behavior-v2-dev","requiredOffloadPolicy":"sequential","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["lora"],"loadProfiles":["lora"],"sourceKinds":["dir"],"providerOverlay":"adapters","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
+            {"rung":"resident","fingerprint":"flux-one-static-registry-behavior-v2-dev","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["none"],"loadProfiles":["pid"],"sourceKinds":["dir"],"providerOverlay":"pid","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[true],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
+            {"rung":"staged_residency","fingerprint":"flux-one-static-registry-behavior-v2-dev","requiredOffloadPolicy":"sequential","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["none"],"loadProfiles":["pid"],"sourceKinds":["dir"],"providerOverlay":"pid","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[true],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
+            {"rung":"resident","fingerprint":"flux-one-static-registry-behavior-v2-dev","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["lora"],"loadProfiles":["lora_pid"],"sourceKinds":["dir"],"providerOverlay":"adapters-pid","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[true],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
+            {"rung":"staged_residency","fingerprint":"flux-one-static-registry-behavior-v2-dev","requiredOffloadPolicy":"sequential","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["lora"],"loadProfiles":["lora_pid"],"sourceKinds":["dir"],"providerOverlay":"adapters-pid","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[true],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
             {"rung":"resident","fingerprint":"flux-one-static-registry-behavior-v2-dev","tiers":["bf16","q4","q8"],"modes":["character_image"],"overlays":["identity"],"loadProfiles":["ip_adapter"],"sourceKinds":["dir"],"providerOverlay":"ip-adapter","requestContexts":[{"mode":"character_image","providerMode":"image_to_image","referenceCounts":[1],"pid":[false],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
             {"rung":"staged_residency","fingerprint":"flux-one-static-registry-behavior-v2-dev","requiredOffloadPolicy":"sequential","tiers":["bf16","q4","q8"],"modes":["character_image"],"overlays":["identity"],"loadProfiles":["ip_adapter"],"sourceKinds":["dir"],"providerOverlay":"ip-adapter","requestContexts":[{"mode":"character_image","providerMode":"image_to_image","referenceCounts":[1],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
             {"rung":"resident","fingerprint":"flux-one-static-registry-behavior-v2-dev","tiers":["bf16","q4","q8"],"modes":["character_image"],"overlays":["identity"],"loadProfiles":["lora_ip_adapter"],"sourceKinds":["dir"],"providerOverlay":"adapters-ip-adapter","requestContexts":[{"mode":"character_image","providerMode":"image_to_image","referenceCounts":[1],"pid":[false],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
@@ -4686,10 +4686,10 @@
             {"rung":"staged_residency","fingerprint":"flux-one-static-registry-behavior-v2-dev","requiredOffloadPolicy":"sequential","tiers":["bf16","q4","q8"],"modes":["character_image"],"overlays":["identity"],"loadProfiles":["ip_adapter_pid"],"sourceKinds":["dir"],"providerOverlay":"ip-adapter-pid","requestContexts":[{"mode":"character_image","providerMode":"image_to_image","referenceCounts":[1],"pid":[true],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
             {"rung":"resident","fingerprint":"flux-one-static-registry-behavior-v2-dev","tiers":["bf16","q4","q8"],"modes":["character_image"],"overlays":["identity"],"loadProfiles":["lora_ip_adapter_pid"],"sourceKinds":["dir"],"providerOverlay":"adapters-ip-adapter-pid","requestContexts":[{"mode":"character_image","providerMode":"image_to_image","referenceCounts":[1],"pid":[true],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
             {"rung":"staged_residency","fingerprint":"flux-one-static-registry-behavior-v2-dev","requiredOffloadPolicy":"sequential","tiers":["bf16","q4","q8"],"modes":["character_image"],"overlays":["identity"],"loadProfiles":["lora_ip_adapter_pid"],"sourceKinds":["dir"],"providerOverlay":"adapters-ip-adapter-pid","requestContexts":[{"mode":"character_image","providerMode":"image_to_image","referenceCounts":[1],"pid":[true],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
-            {"rung":"resident","runtimeProvider":"flux1_dev_control","fingerprint":"flux-one-static-registry-behavior-v2-dev-control","tiers":["bf16","q4","q8"],"modes":["text_to_image","style_variations","character_image"],"overlays":["control"],"loadProfiles":["single_control"],"sourceKinds":["dir"],"providerOverlay":"control","requestContexts":[{"mode":"text_to_image","providerMode":"image_to_image","referenceCounts":[1],"pid":[false],"hasPhases":false},{"mode":"style_variations","providerMode":"image_to_image","referenceCounts":[1],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"image_to_image","referenceCounts":[1],"pid":[false],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
-            {"rung":"staged_residency","runtimeProvider":"flux1_dev_control","fingerprint":"flux-one-static-registry-behavior-v2-dev-control","requiredOffloadPolicy":"sequential","tiers":["bf16","q4","q8"],"modes":["text_to_image","style_variations","character_image"],"overlays":["control"],"loadProfiles":["single_control"],"sourceKinds":["dir"],"providerOverlay":"control","requestContexts":[{"mode":"text_to_image","providerMode":"image_to_image","referenceCounts":[1],"pid":[false],"hasPhases":false},{"mode":"style_variations","providerMode":"image_to_image","referenceCounts":[1],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"image_to_image","referenceCounts":[1],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
-            {"rung":"resident","runtimeProvider":"flux1_dev_control","fingerprint":"flux-one-static-registry-behavior-v2-dev-control","tiers":["bf16","q4","q8"],"modes":["text_to_image","style_variations","character_image"],"overlays":["control"],"loadProfiles":["lora_single_control"],"sourceKinds":["dir"],"providerOverlay":"control-adapters","requestContexts":[{"mode":"text_to_image","providerMode":"image_to_image","referenceCounts":[1],"pid":[false],"hasPhases":false},{"mode":"style_variations","providerMode":"image_to_image","referenceCounts":[1],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"image_to_image","referenceCounts":[1],"pid":[false],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
-            {"rung":"staged_residency","runtimeProvider":"flux1_dev_control","fingerprint":"flux-one-static-registry-behavior-v2-dev-control","requiredOffloadPolicy":"sequential","tiers":["bf16","q4","q8"],"modes":["text_to_image","style_variations","character_image"],"overlays":["control"],"loadProfiles":["lora_single_control"],"sourceKinds":["dir"],"providerOverlay":"control-adapters","requestContexts":[{"mode":"text_to_image","providerMode":"image_to_image","referenceCounts":[1],"pid":[false],"hasPhases":false},{"mode":"style_variations","providerMode":"image_to_image","referenceCounts":[1],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"image_to_image","referenceCounts":[1],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"}
+            {"rung":"resident","runtimeProvider":"flux1_dev_control","fingerprint":"flux-one-static-registry-behavior-v2-dev-control","tiers":["bf16","q4","q8"],"modes":["text_to_image", "character_image"],"overlays":["control"],"loadProfiles":["single_control"],"sourceKinds":["dir"],"providerOverlay":"control","requestContexts":[{"mode":"text_to_image","providerMode":"image_to_image","referenceCounts":[1],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"image_to_image","referenceCounts":[1],"pid":[false],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
+            {"rung":"staged_residency","runtimeProvider":"flux1_dev_control","fingerprint":"flux-one-static-registry-behavior-v2-dev-control","requiredOffloadPolicy":"sequential","tiers":["bf16","q4","q8"],"modes":["text_to_image", "character_image"],"overlays":["control"],"loadProfiles":["single_control"],"sourceKinds":["dir"],"providerOverlay":"control","requestContexts":[{"mode":"text_to_image","providerMode":"image_to_image","referenceCounts":[1],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"image_to_image","referenceCounts":[1],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
+            {"rung":"resident","runtimeProvider":"flux1_dev_control","fingerprint":"flux-one-static-registry-behavior-v2-dev-control","tiers":["bf16","q4","q8"],"modes":["text_to_image", "character_image"],"overlays":["control"],"loadProfiles":["lora_single_control"],"sourceKinds":["dir"],"providerOverlay":"control-adapters","requestContexts":[{"mode":"text_to_image","providerMode":"image_to_image","referenceCounts":[1],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"image_to_image","referenceCounts":[1],"pid":[false],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
+            {"rung":"staged_residency","runtimeProvider":"flux1_dev_control","fingerprint":"flux-one-static-registry-behavior-v2-dev-control","requiredOffloadPolicy":"sequential","tiers":["bf16","q4","q8"],"modes":["text_to_image", "character_image"],"overlays":["control"],"loadProfiles":["lora_single_control"],"sourceKinds":["dir"],"providerOverlay":"control-adapters","requestContexts":[{"mode":"text_to_image","providerMode":"image_to_image","referenceCounts":[1],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"image_to_image","referenceCounts":[1],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"}
           ]
         }
       },
@@ -7616,36 +7616,33 @@
             },
             {
               "rung": "resident", "runtimeProvider": "flux2_klein_9b_edit", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b-edit",
-              "tiers": ["bf16", "q4", "q8"], "modes": ["edit_image", "character_image", "style_variations"], "overlays": ["none"],
+              "tiers": ["bf16", "q4", "q8"], "modes": ["edit_image", "character_image"], "overlays": ["none"],
               "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
               "requestContexts": [
                 { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
-                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
-                { "mode": "style_variations", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
+                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
               ],
               "engagedRungs": ["resident"], "parameters": {}, "parameterRanges": {},
               "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
             },
             {
               "rung": "staged_residency", "runtimeProvider": "flux2_klein_9b_edit", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b-edit", "requiredOffloadPolicy": "sequential",
-              "tiers": ["bf16", "q4", "q8"], "modes": ["edit_image", "character_image", "style_variations"], "overlays": ["none"],
+              "tiers": ["bf16", "q4", "q8"], "modes": ["edit_image", "character_image"], "overlays": ["none"],
               "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
               "requestContexts": [
                 { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
-                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
-                { "mode": "style_variations", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
+                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
               ],
               "engagedRungs": ["resident", "staged_residency"], "parameters": {}, "parameterRanges": {},
               "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
             },
             {
               "rung": "bounded_decode", "runtimeProvider": "flux2_klein_9b_edit", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b-edit",
-              "tiers": ["bf16", "q4", "q8"], "modes": ["edit_image", "character_image", "style_variations"], "overlays": ["none"],
+              "tiers": ["bf16", "q4", "q8"], "modes": ["edit_image", "character_image"], "overlays": ["none"],
               "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
               "requestContexts": [
                 { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
-                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
-                { "mode": "style_variations", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
+                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
               ],
               "engagedRungs": ["resident", "bounded_decode"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 },
@@ -7654,12 +7651,11 @@
             },
             {
               "rung": "bounded_attention", "runtimeProvider": "flux2_klein_9b_edit", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b-edit",
-              "tiers": ["bf16", "q4", "q8"], "modes": ["edit_image", "character_image", "style_variations"], "overlays": ["none"],
+              "tiers": ["bf16", "q4", "q8"], "modes": ["edit_image", "character_image"], "overlays": ["none"],
               "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
               "requestContexts": [
                 { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
-                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
-                { "mode": "style_variations", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
+                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
               ],
               "engagedRungs": ["resident", "bounded_decode", "bounded_attention"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 67108864 },
@@ -7668,12 +7664,11 @@
             },
             {
               "rung": "bounded_transformer_residency", "runtimeProvider": "flux2_klein_9b_edit", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b-edit", "requiredOffloadPolicy": "sequential",
-              "tiers": ["bf16", "q4", "q8"], "modes": ["edit_image", "character_image", "style_variations"], "overlays": ["none"],
+              "tiers": ["bf16", "q4", "q8"], "modes": ["edit_image", "character_image"], "overlays": ["none"],
               "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
               "requestContexts": [
                 { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
-                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
-                { "mode": "style_variations", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
+                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
               ],
               "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
@@ -7941,36 +7936,33 @@
             },
             {
               "rung": "resident", "runtimeProvider": "flux2_klein_9b_kv_edit", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b-kv-edit",
-              "tiers": ["bf16", "q4", "q8"], "modes": ["edit_image", "character_image", "style_variations"], "overlays": ["none"],
+              "tiers": ["bf16", "q4", "q8"], "modes": ["edit_image", "character_image"], "overlays": ["none"],
               "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
               "requestContexts": [
                 { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
-                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
-                { "mode": "style_variations", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
+                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
               ],
               "engagedRungs": ["resident"], "parameters": {}, "parameterRanges": {},
               "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
             },
             {
               "rung": "staged_residency", "runtimeProvider": "flux2_klein_9b_kv_edit", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b-kv-edit", "requiredOffloadPolicy": "sequential",
-              "tiers": ["bf16", "q4", "q8"], "modes": ["edit_image", "character_image", "style_variations"], "overlays": ["none"],
+              "tiers": ["bf16", "q4", "q8"], "modes": ["edit_image", "character_image"], "overlays": ["none"],
               "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
               "requestContexts": [
                 { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
-                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
-                { "mode": "style_variations", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
+                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
               ],
               "engagedRungs": ["resident", "staged_residency"], "parameters": {}, "parameterRanges": {},
               "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
             },
             {
               "rung": "bounded_decode", "runtimeProvider": "flux2_klein_9b_kv_edit", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b-kv-edit",
-              "tiers": ["bf16", "q4", "q8"], "modes": ["edit_image", "character_image", "style_variations"], "overlays": ["none"],
+              "tiers": ["bf16", "q4", "q8"], "modes": ["edit_image", "character_image"], "overlays": ["none"],
               "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
               "requestContexts": [
                 { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
-                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
-                { "mode": "style_variations", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
+                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
               ],
               "engagedRungs": ["resident", "bounded_decode"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 },
@@ -7979,12 +7971,11 @@
             },
             {
               "rung": "bounded_attention", "runtimeProvider": "flux2_klein_9b_kv_edit", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b-kv-edit",
-              "tiers": ["bf16", "q4", "q8"], "modes": ["edit_image", "character_image", "style_variations"], "overlays": ["none"],
+              "tiers": ["bf16", "q4", "q8"], "modes": ["edit_image", "character_image"], "overlays": ["none"],
               "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
               "requestContexts": [
                 { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
-                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
-                { "mode": "style_variations", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
+                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
               ],
               "engagedRungs": ["resident", "bounded_decode", "bounded_attention"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 67108864 },
@@ -7993,12 +7984,11 @@
             },
             {
               "rung": "bounded_transformer_residency", "runtimeProvider": "flux2_klein_9b_kv_edit", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b-kv-edit", "requiredOffloadPolicy": "sequential",
-              "tiers": ["bf16", "q4", "q8"], "modes": ["edit_image", "character_image", "style_variations"], "overlays": ["none"],
+              "tiers": ["bf16", "q4", "q8"], "modes": ["edit_image", "character_image"], "overlays": ["none"],
               "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
               "requestContexts": [
                 { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
-                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
-                { "mode": "style_variations", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
+                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
               ],
               "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
@@ -8215,36 +8205,33 @@
             },
             {
               "rung": "resident", "runtimeProvider": "flux2_klein_9b_edit", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b-edit",
-              "tiers": ["bf16"], "modes": ["edit_image", "character_image", "style_variations"], "overlays": ["none"],
+              "tiers": ["bf16"], "modes": ["edit_image", "character_image"], "overlays": ["none"],
               "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
               "requestContexts": [
                 { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
-                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
-                { "mode": "style_variations", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
+                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
               ],
               "engagedRungs": ["resident"], "parameters": {}, "parameterRanges": {},
               "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
             },
             {
               "rung": "staged_residency", "runtimeProvider": "flux2_klein_9b_edit", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b-edit", "requiredOffloadPolicy": "sequential",
-              "tiers": ["bf16"], "modes": ["edit_image", "character_image", "style_variations"], "overlays": ["none"],
+              "tiers": ["bf16"], "modes": ["edit_image", "character_image"], "overlays": ["none"],
               "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
               "requestContexts": [
                 { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
-                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
-                { "mode": "style_variations", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
+                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
               ],
               "engagedRungs": ["resident", "staged_residency"], "parameters": {}, "parameterRanges": {},
               "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
             },
             {
               "rung": "bounded_decode", "runtimeProvider": "flux2_klein_9b_edit", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b-edit",
-              "tiers": ["bf16"], "modes": ["edit_image", "character_image", "style_variations"], "overlays": ["none"],
+              "tiers": ["bf16"], "modes": ["edit_image", "character_image"], "overlays": ["none"],
               "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
               "requestContexts": [
                 { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
-                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
-                { "mode": "style_variations", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
+                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
               ],
               "engagedRungs": ["resident", "bounded_decode"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 },
@@ -8253,12 +8240,11 @@
             },
             {
               "rung": "bounded_attention", "runtimeProvider": "flux2_klein_9b_edit", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b-edit",
-              "tiers": ["bf16"], "modes": ["edit_image", "character_image", "style_variations"], "overlays": ["none"],
+              "tiers": ["bf16"], "modes": ["edit_image", "character_image"], "overlays": ["none"],
               "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
               "requestContexts": [
                 { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
-                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
-                { "mode": "style_variations", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
+                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
               ],
               "engagedRungs": ["resident", "bounded_decode", "bounded_attention"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 67108864 },
@@ -8267,12 +8253,11 @@
             },
             {
               "rung": "bounded_transformer_residency", "runtimeProvider": "flux2_klein_9b_edit", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b-edit", "requiredOffloadPolicy": "sequential",
-              "tiers": ["bf16"], "modes": ["edit_image", "character_image", "style_variations"], "overlays": ["none"],
+              "tiers": ["bf16"], "modes": ["edit_image", "character_image"], "overlays": ["none"],
               "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
               "requestContexts": [
                 { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
-                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
-                { "mode": "style_variations", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
+                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
               ],
               "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
@@ -8794,9 +8779,7 @@
               "tiers": [
                 "q4"
               ],
-              "modes": [
-                "text_to_image"
-              ],
+              "modes": ["text_to_image"],
               "overlays": [
                 "none"
               ],
@@ -9290,9 +9273,7 @@
               "tiers": [
                 "q4"
               ],
-              "modes": [
-                "text_to_image"
-              ],
+              "modes": ["text_to_image"],
               "overlays": [
                 "none"
               ],
@@ -9732,9 +9713,7 @@
               "tiers": [
                 "q4"
               ],
-              "modes": [
-                "text_to_image"
-              ],
+              "modes": ["text_to_image"],
               "overlays": [
                 "none"
               ],
@@ -10240,9 +10219,7 @@
               "tiers": [
                 "q4"
               ],
-              "modes": [
-                "text_to_image"
-              ],
+              "modes": ["text_to_image"],
               "overlays": [
                 "none"
               ],
@@ -12413,9 +12390,7 @@
               "tiers": [
                 "q4"
               ],
-              "modes": [
-                "text_to_image"
-              ],
+              "modes": ["text_to_image"],
               "overlays": [
                 "none"
               ],
@@ -13364,9 +13339,7 @@
               "tiers": [
                 "q4"
               ],
-              "modes": [
-                "text_to_image"
-              ],
+              "modes": ["text_to_image"],
               "overlays": [
                 "none"
               ],
@@ -14331,9 +14304,7 @@
               "tiers": [
                 "q4"
               ],
-              "modes": [
-                "text_to_image"
-              ],
+              "modes": ["text_to_image"],
               "overlays": [
                 "none"
               ],
@@ -15246,9 +15217,7 @@
               "tiers": [
                 "q4"
               ],
-              "modes": [
-                "text_to_image"
-              ],
+              "modes": ["text_to_image"],
               "overlays": [
                 "none"
               ],
@@ -16176,9 +16145,7 @@
               "tiers": [
                 "q4"
               ],
-              "modes": [
-                "text_to_image"
-              ],
+              "modes": ["text_to_image"],
               "overlays": [
                 "none"
               ],

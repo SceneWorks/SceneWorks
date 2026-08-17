@@ -1,12 +1,12 @@
 {
   "schemaVersion": 7,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:a3d2568605061e8b6a8591b9e26057bd92618e9e8bb6ce7195c558ade0a84888",
+    "sceneWorksRevision": "source-tree:65d42ce6c7b362520e194417f82e21e01f2ebfa08aea3150b063649fe2d8785a",
     "inferenceRevision": "931366f62a4e5800c54e0586b7fb34e3a4079e3b",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "c72852139cfa3804d77dc683b205f50b7473d3a38beaf9128d8130228bd8a216"
+        "sha256": "5d04cc9dda5e5b99d2ea1ea514ceefeb7ccf62a5725b67b0ba537cf4a7567568"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -156,10 +156,10 @@
     "memoryContractReconciliation": {
       "providers": 72,
       "bespokeWaivers": 1,
-      "mismatches": 646,
+      "mismatches": 624,
       "byLeg": {
         "engine_manifest": 429,
-        "manifest_route": 92,
+        "manifest_route": 70,
         "survey_engine": 125
       }
     },

@@ -4092,11 +4092,11 @@ mod tests {
                         .offload_policy,
                         OffloadPolicy::Sequential
                     );
-                    for mode in [
-                        MemoryRouteMode::EditImage,
-                        MemoryRouteMode::CharacterImage,
-                        MemoryRouteMode::StyleVariations,
-                    ] {
+                    // `StyleVariations` deliberately left out of the APPLIED sweep: sc-18481 retired the
+                    // style mode from the whole catalog, so no declaration names it and the route must
+                    // refuse rather than apply. Asserted positively just below, so the retirement is a
+                    // property this test proves instead of a mode it quietly stopped exercising.
+                    for mode in [MemoryRouteMode::EditImage, MemoryRouteMode::CharacterImage] {
                         for reference_count in 1..=8 {
                             let context = MemoryRouteRequestContext {
                                 mode,
@@ -4118,6 +4118,29 @@ mod tests {
                                 "{route} {tier} edit {mode:?} refs={reference_count} pid={use_pid}"
                             );
                         }
+                    }
+                    // The retirement, asserted rather than assumed: the style mode reaches no declaration
+                    // on this route at any reference count, so it can never be applied.
+                    for reference_count in 1..=8 {
+                        assert_ne!(
+                            evaluate(
+                                edit_provider,
+                                tier,
+                                MemoryRouteMode::StyleVariations,
+                                profile,
+                                MemoryRouteRequestContext {
+                                    mode: MemoryRouteMode::StyleVariations,
+                                    reference_count,
+                                    use_pid,
+                                    has_phases: false,
+                                },
+                                klein_spec(route, profile),
+                            )
+                            .load_shape_declaration_result,
+                            LoadShapeDeclarationResult::Applied,
+                            "{route} {tier} the retired style mode must not apply (refs={reference_count} \
+                             pid={use_pid})"
+                        );
                     }
                 }
             }
