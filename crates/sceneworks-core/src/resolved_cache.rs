@@ -249,7 +249,7 @@ pub struct ResolvedCacheEntrySummary {
 
 #[derive(Debug)]
 pub enum ReservationOutcome {
-    Acquired(ResolvedCacheReservation),
+    Acquired(Box<ResolvedCacheReservation>),
     AlreadyComplete(Box<ResolvedCacheMetadata>),
     Contended,
 }
@@ -474,18 +474,20 @@ impl ResolvedCacheStore {
             acquired_at: now,
         };
         let record_path = self.write_session_record(&record)?;
-        Ok(ReservationOutcome::Acquired(ResolvedCacheReservation {
-            store: self.clone(),
-            cache_key: candidate.cache_key.clone(),
-            digest,
-            reservation_id,
-            reservation_owner: logical_model_owner,
-            session_id: self.inner.session_id.clone(),
-            staging_path: staging,
-            record_path,
-            artifact_lock: Some(artifact_lock),
-            finished: false,
-        }))
+        Ok(ReservationOutcome::Acquired(Box::new(
+            ResolvedCacheReservation {
+                store: self.clone(),
+                cache_key: candidate.cache_key.clone(),
+                digest,
+                reservation_id,
+                reservation_owner: logical_model_owner,
+                session_id: self.inner.session_id.clone(),
+                staging_path: staging,
+                record_path,
+                artifact_lock: Some(artifact_lock),
+                finished: false,
+            },
+        )))
     }
 
     pub fn lookup_complete(
@@ -1710,11 +1712,9 @@ fn volume_identity(path: &Path) -> Result<u64, ResolvedCacheError> {
         .read(true)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
         .open(path)?;
-    Ok(u64::from(
-        winapi_util::file::information(&file)
-            .map_err(|error| ResolvedCacheError::new(error.to_string()))?
-            .volume_serial_number(),
-    ))
+    Ok(winapi_util::file::information(&file)
+        .map_err(|error| ResolvedCacheError::new(error.to_string()))?
+        .volume_serial_number())
 }
 
 #[cfg(not(any(unix, windows)))]

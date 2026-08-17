@@ -132,6 +132,14 @@ impl Drop for WindowsDirectoryJunction {
 }
 
 #[test]
+fn reservation_outcome_keeps_the_lock_holding_reservation_behind_indirection() {
+    assert!(
+        std::mem::size_of::<ReservationOutcome>() <= 4 * std::mem::size_of::<usize>(),
+        "ReservationOutcome must not inline the lock-holding reservation"
+    );
+}
+
+#[test]
 fn policy_defaults_are_finite_disabled_and_serde_defaults_upgrade() {
     let policy = ResolvedCachePolicy::default();
     assert!(!policy.enabled);
@@ -981,7 +989,7 @@ fn cross_process_store_child() {
     let candidate = source_candidate(&source, REVISION_A);
     let _held: Box<dyn std::any::Any> = if mode == "reserve" {
         match store.reserve(&candidate, &source, "child:model").unwrap() {
-            ReservationOutcome::Acquired(reservation) => Box::new(reservation),
+            ReservationOutcome::Acquired(reservation) => reservation,
             ReservationOutcome::AlreadyComplete(_) => panic!("child entry is already complete"),
             ReservationOutcome::Contended => panic!("child reservation contended"),
         }
