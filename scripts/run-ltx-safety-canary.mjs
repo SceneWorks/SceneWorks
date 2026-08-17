@@ -888,7 +888,6 @@ async function abortableDelay(milliseconds, signal) {
       reject(signal.reason ?? new Error("preparation lock wait aborted"));
     };
     signal?.addEventListener("abort", onAbort, { once: true });
-    timer.unref();
   });
 }
 
