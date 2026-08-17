@@ -134,6 +134,19 @@ const LTX_Q4_F305_CRASH_FOOTPRINT_BYTES: u64 = 96_970_084_480;
 const LTX_CANARY_MAX_FOOTPRINT_BYTES: u64 = 53_347_146_863;
 const LTX_CANARY_MAX_RUNTIME_SECONDS: f64 = 1_800.0;
 const LTX_CANARY_WATCHDOG_PROTOCOL: &str = "sceneworks-memory-watchdog-v1";
+const LTX_PROVIDER_PHASE_PROTOCOL: &str = "sceneworks-provider-phase-v1";
+const LTX_PROVIDER_PHASE_NAMES: [&str; 10] = [
+    "common_load",
+    "primary_conditioning",
+    "primary_denoise",
+    "primary_decode",
+    "lifecycle_warm_repeat",
+    "lifecycle_cancel",
+    "lifecycle_cancel_recovery",
+    "lifecycle_error",
+    "lifecycle_error_recovery",
+    "cleanup",
+];
 const LTX_CANARY_WIDTH: u32 = 256;
 const LTX_CANARY_HEIGHT: u32 = 256;
 const LTX_CANARY_FRAMES: u32 = 9;
@@ -6579,6 +6592,14 @@ struct LtxLifecycleMetrics {
     max_recovery_post_cleanup: AllocatorState,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct LtxLifecycleInput {
+    geometry: LtxGeometry,
+    fps: u32,
+    seed: u64,
+    fault_phase: MemoryPhase,
+}
+
 /// Execute the provider-owned warm/cancel/error request scope on the exact selected rung. One
 /// cancellation and one injected error target the rung's binding phase, and each is followed by a
 /// deterministic recovery render plus allocator bounds against a clean warm control.
@@ -6586,13 +6607,18 @@ fn verify_ltx_lifecycle(
     generator: &dyn Generator,
     context: &MemoryRunContext,
     selected: &[Image],
-    geometry: LtxGeometry,
-    fps: u32,
-    seed: u64,
-    fault_phase: MemoryPhase,
+    input: LtxLifecycleInput,
+    phase_sink: &mut dyn LtxCampaignPhaseSink,
 ) -> Result<LtxLifecycleMetrics, String> {
+    let LtxLifecycleInput {
+        geometry,
+        fps,
+        seed,
+        fault_phase,
+    } = input;
     clear_cache();
     reset_peak_memory();
+    phase_sink.mark("lifecycle_warm_repeat")?;
     let (clean_warm, _, _) = video_frames(scoped_generate(
         generator,
         ltx_request(geometry, fps, seed),
@@ -6618,6 +6644,7 @@ fn verify_ltx_lifecycle(
         rms_error,
         ..Default::default()
     };
+    phase_sink.mark("lifecycle_cancel")?;
     let cancelled = ltx_request(geometry, fps, seed);
     let cancel_signal = cancelled.cancel.clone();
     let mut cancel_triggered = false;
@@ -6663,6 +6690,7 @@ fn verify_ltx_lifecycle(
         ));
     }
     reset_peak_memory();
+    phase_sink.mark("lifecycle_cancel_recovery")?;
     let (cancel_recovery, _, _) = video_frames(scoped_generate(
         generator,
         ltx_request(geometry, fps, seed),
@@ -6691,6 +6719,7 @@ fn verify_ltx_lifecycle(
         return Err("LTX-2.3 cancellation cleanup changed the warm recovery clip".to_owned());
     }
 
+    phase_sink.mark("lifecycle_error")?;
     let mut injected_failure = None;
     let injected_result = scoped_generate_observed(
         generator,
@@ -6732,6 +6761,7 @@ fn verify_ltx_lifecycle(
         ));
     }
     reset_peak_memory();
+    phase_sink.mark("lifecycle_error_recovery")?;
     let (error_recovery, _, _) = video_frames(scoped_generate(
         generator,
         ltx_request(geometry, fps, seed),
@@ -6965,7 +6995,21 @@ struct LtxCanaryWatchdogAttestation {
 struct LtxCanaryWatchdogLease {
     writer: UnixStream,
     completion: std::sync::mpsc::Receiver<Result<(), String>>,
+    phase_acknowledgements: std::sync::mpsc::Receiver<Result<(usize, String), String>>,
     nonce: String,
+    phase_sequence: usize,
+}
+
+trait LtxCampaignPhaseSink {
+    fn mark(&mut self, name: &'static str) -> Result<(), String>;
+}
+
+struct NoLtxCampaignPhases;
+
+impl LtxCampaignPhaseSink for NoLtxCampaignPhases {
+    fn mark(&mut self, _name: &'static str) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 impl LtxCanaryWatchdogAttestation {
@@ -6982,10 +7026,33 @@ impl LtxCanaryWatchdogAttestation {
             .map_err(|error| format!("configure LTX watchdog lease reader: {error}"))?;
         let expected = self.nonce.clone();
         let (sender, completion) = std::sync::mpsc::sync_channel(1);
+        let (phase_sender, phase_acknowledgements) = std::sync::mpsc::sync_channel(1);
         std::thread::spawn(move || {
             let result = loop {
                 match read_watchdog_line(&mut reader) {
                     Ok(line) if line == format!("PING {expected}") => continue,
+                    Ok(line) if line.starts_with(&format!("PHASE_ACK {expected} ")) => {
+                        let fields = line.split_whitespace().collect::<Vec<_>>();
+                        let acknowledgement = if fields.len() == 4 {
+                            fields[2]
+                                .parse::<usize>()
+                                .map(|sequence| (sequence, fields[3].to_owned()))
+                                .map_err(|_| {
+                                    "SC-20216 watchdog returned a malformed phase acknowledgement"
+                                        .to_owned()
+                                })
+                        } else {
+                            Err(
+                                "SC-20216 watchdog returned a malformed phase acknowledgement"
+                                    .to_owned(),
+                            )
+                        };
+                        if phase_sender.send(acknowledgement).is_err() {
+                            break Err(
+                                "SC-20216 phase acknowledgement receiver disappeared".to_owned()
+                            );
+                        }
+                    }
                     Ok(line) if line == format!("BYE {expected}") => break Ok(()),
                     Ok(_) => {
                         break Err(
@@ -7006,13 +7073,22 @@ impl LtxCanaryWatchdogAttestation {
         Ok(LtxCanaryWatchdogLease {
             writer: stream,
             completion,
+            phase_acknowledgements,
             nonce: self.nonce.clone(),
+            phase_sequence: 0,
         })
     }
 }
 
 impl LtxCanaryWatchdogLease {
     fn complete(mut self) -> Result<(), String> {
+        if self.phase_sequence != 0 && self.phase_sequence != LTX_PROVIDER_PHASE_NAMES.len() {
+            return Err(format!(
+                "SC-20216 provider phase sequence completed at {} of {}",
+                self.phase_sequence,
+                LTX_PROVIDER_PHASE_NAMES.len()
+            ));
+        }
         self.writer
             .write_all(format!("DONE {}\n", self.nonce).as_bytes())
             .map_err(|error| format!("complete LTX canary watchdog lease: {error}"))?;
@@ -7021,6 +7097,51 @@ impl LtxCanaryWatchdogLease {
             .map_err(|error| {
                 format!("wait for LTX canary watchdog completion release: {error}")
             })??;
+        Ok(())
+    }
+}
+
+fn wait_for_ltx_phase_acknowledgement(
+    acknowledgements: &std::sync::mpsc::Receiver<Result<(usize, String), String>>,
+    sequence: usize,
+    name: &str,
+    timeout: Duration,
+) -> Result<(), String> {
+    let acknowledged = acknowledgements.recv_timeout(timeout).map_err(|error| {
+        format!("wait for SC-20216 provider phase {name} acknowledgement: {error}")
+    })??;
+    if acknowledged != (sequence, name.to_owned()) {
+        return Err(format!(
+            "SC-20216 watchdog acknowledged a foreign provider phase: expected {sequence} {name}, got {} {}",
+            acknowledged.0, acknowledged.1
+        ));
+    }
+    Ok(())
+}
+
+impl LtxCampaignPhaseSink for LtxCanaryWatchdogLease {
+    fn mark(&mut self, name: &'static str) -> Result<(), String> {
+        let expected = LTX_PROVIDER_PHASE_NAMES
+            .get(self.phase_sequence)
+            .ok_or_else(|| {
+                "SC-20216 provider phase sequence exceeded its exact bound".to_owned()
+            })?;
+        if name != *expected {
+            return Err(format!(
+                "SC-20216 provider phase reordered: expected {expected}, got {name}"
+            ));
+        }
+        let sequence = self.phase_sequence + 1;
+        self.writer
+            .write_all(format!("PHASE {} {sequence} {name}\n", self.nonce).as_bytes())
+            .map_err(|error| format!("report SC-20216 provider phase {name}: {error}"))?;
+        wait_for_ltx_phase_acknowledgement(
+            &self.phase_acknowledgements,
+            sequence,
+            name,
+            Duration::from_secs(2),
+        )?;
+        self.phase_sequence = sequence;
         Ok(())
     }
 }
@@ -7070,6 +7191,24 @@ fn consume_ltx_canary_watchdog_attestation_stream(
         .map_err(|error| format!("parse LTX canary watchdog attestation: {error}"))?;
     if payload.get("protocol").and_then(Value::as_str) != Some(LTX_CANARY_WATCHDOG_PROTOCOL) {
         return Err("LTX safety canary watchdog protocol changed".to_owned());
+    }
+    let requires_provider_phases =
+        request.get("action").and_then(Value::as_str) == Some(LTX_CAMPAIGN_ENTRY_ACTION);
+    let provider_phase_protocol = payload.get("providerPhaseProtocol").and_then(Value::as_str);
+    let provider_phase_names = payload.get("providerPhases");
+    if requires_provider_phases {
+        if provider_phase_protocol != Some(LTX_PROVIDER_PHASE_PROTOCOL)
+            || provider_phase_names != Some(&json!(LTX_PROVIDER_PHASE_NAMES))
+        {
+            return Err(
+                "SC-20216 watchdog omitted the exact authenticated provider phase protocol"
+                    .to_owned(),
+            );
+        }
+    } else if provider_phase_protocol.is_some() || provider_phase_names.is_some() {
+        return Err(
+            "provider phase telemetry is restricted to the exact campaign-entry action".to_owned(),
+        );
     }
     let nonce = payload
         .get("nonce")
@@ -7418,7 +7557,11 @@ enum LtxRunAdmission {
     CampaignEntry,
 }
 
-fn run_ltx_with_admission(request: &Value, admission: LtxRunAdmission) -> Result<Value, String> {
+fn run_ltx_with_admission(
+    request: &Value,
+    admission: LtxRunAdmission,
+    phase_sink: &mut dyn LtxCampaignPhaseSink,
+) -> Result<Value, String> {
     let geometry = validate_ltx_target(request)?;
     protocol::validate_plain_overlay_target(request, LTX_PLAIN_EXECUTION_PATH)?;
     let load_shape = planned_load_shape(request)?;
@@ -7567,6 +7710,7 @@ fn run_ltx_with_admission(request: &Value, admission: LtxRunAdmission) -> Result
     reset_peak_memory();
     let pre_rung_active = get_active_memory() as u64;
     let pre_rung_cache = get_cache_memory() as u64;
+    phase_sink.mark("primary_conditioning")?;
     let (measured, output_fps, audio) = diagnostic_video_frames(scoped_generate(
         generator.as_ref(),
         ltx_request(geometry, fps, seed),
@@ -7578,11 +7722,19 @@ fn run_ltx_with_admission(request: &Value, admission: LtxRunAdmission) -> Result
                 // phase legitimately spans BOTH giants' materializations; the staging bound below
                 // is what proves they did not co-reside.
                 Progress::Step { current: 1, .. } => {
+                    if let Err(error) = phase_sink.mark("primary_denoise") {
+                        eprintln!("{error}");
+                        std::process::abort();
+                    }
                     conditioning.set(PhaseMemory::capture());
                     denoise_entry.set(AllocatorState::capture_current());
                     reset_peak_memory();
                 }
                 Progress::Decoding => {
+                    if let Err(error) = phase_sink.mark("primary_decode") {
+                        eprintln!("{error}");
+                        std::process::abort();
+                    }
                     denoise.set(PhaseMemory::capture());
                     decode_entry.set(AllocatorState::capture_current());
                     reset_peak_memory();
@@ -7660,10 +7812,13 @@ fn run_ltx_with_admission(request: &Value, admission: LtxRunAdmission) -> Result
         generator.as_ref(),
         &context,
         &measured,
-        geometry,
-        fps,
-        seed,
-        decode_plan.lifecycle_fault_phase(),
+        LtxLifecycleInput {
+            geometry,
+            fps,
+            seed,
+            fault_phase: decode_plan.lifecycle_fault_phase(),
+        },
+        phase_sink,
     )?;
     let maximum_error = lifecycle.maximum_error;
     let mean_error = lifecycle.mean_error;
@@ -7884,14 +8039,17 @@ fn run_ltx_campaign_entry(request: &Value) -> Result<Value, String> {
     // model-path resolution and provider registry construction.
     prevalidate_ltx_campaign_entry(request)?;
     let mut watchdog = consume_ltx_canary_watchdog_attestation(request)?;
-    let watchdog_lease = watchdog.start_lease()?;
+    let mut watchdog_lease = watchdog.start_lease()?;
+    watchdog_lease.mark("common_load")?;
     let limits = LtxCanaryLimits::install()?;
     clear_cache();
     let pre_provider = AllocatorState::capture_current();
     validate_ltx_canary_pre_provider(pre_provider)?;
     let expected_persistent_active = ltx_canary_ones_cache_bytes()?;
-    let mut fragment = run_ltx_with_admission(request, LtxRunAdmission::CampaignEntry)?;
+    let mut fragment =
+        run_ltx_with_admission(request, LtxRunAdmission::CampaignEntry, &mut watchdog_lease)?;
     validate_ltx_campaign_entry_fragment(&fragment)?;
+    watchdog_lease.mark("cleanup")?;
     clear_cache();
     let post_cleanup = AllocatorState::capture_current();
     validate_ltx_canary_cleanup(pre_provider, post_cleanup, expected_persistent_active)?;
@@ -7931,7 +8089,8 @@ fn run_ltx_campaign_entry(request: &Value) -> Result<Value, String> {
 }
 
 fn run_ltx(request: &Value) -> Result<Value, String> {
-    run_ltx_with_admission(request, LtxRunAdmission::Ordinary)
+    let mut phases = NoLtxCampaignPhases;
+    run_ltx_with_admission(request, LtxRunAdmission::Ordinary, &mut phases)
 }
 
 fn run(request: &Value) -> Result<Value, String> {
@@ -9262,6 +9421,128 @@ mod ltx_tests {
             direct.contains("live external watchdog channel"),
             "{direct}"
         );
+    }
+
+    #[test]
+    fn sc_20216_phase_channel_is_exact_monotonic_and_campaign_only() {
+        let request = ltx_campaign_entry_request_json();
+        let host_memory = request["hardware"]["memoryBytes"].as_u64().unwrap();
+        let nonce = "cd".repeat(32);
+        let base = json!({
+            "protocol": LTX_CANARY_WATCHDOG_PROTOCOL,
+            "nonce": nonce,
+            "maxFootprintBytes": LTX_CANARY_MAX_FOOTPRINT_BYTES,
+            "maxRuntimeSeconds": LTX_CANARY_MAX_RUNTIME_SECONDS,
+            "hostMemoryBytes": host_memory,
+            "minInitialMemoryFreeBytes": 2 * LTX_CANARY_MAX_FOOTPRINT_BYTES + host_memory.div_ceil(100),
+            "minMemoryFreeBytes": LTX_CANARY_MAX_FOOTPRINT_BYTES + host_memory.div_ceil(100),
+        });
+        let (mut missing_watchdog, missing_adapter) = UnixStream::pair().unwrap();
+        let missing_thread = std::thread::spawn(move || {
+            missing_watchdog
+                .write_all(format!("{base}\n").as_bytes())
+                .unwrap();
+        });
+        let error = consume_ltx_canary_watchdog_attestation_stream(&request, missing_adapter)
+            .expect_err("campaign entry must require authenticated phases");
+        missing_thread.join().unwrap();
+        assert!(error.contains("authenticated provider phase protocol"));
+
+        let (adapter, mut watchdog) = UnixStream::pair().unwrap();
+        let mut attestation = LtxCanaryWatchdogAttestation {
+            max_footprint_bytes: LTX_CANARY_MAX_FOOTPRINT_BYTES,
+            max_runtime_seconds: LTX_CANARY_MAX_RUNTIME_SECONDS,
+            host_memory_bytes: host_memory,
+            min_initial_memory_free_bytes: 0,
+            min_memory_free_bytes: 0,
+            nonce: nonce.clone(),
+            stream: Some(adapter),
+        };
+        let lease = attestation.start_lease().unwrap();
+        let (marked_sender, marked_receiver) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let mut lease = lease;
+            let result = lease.mark("common_load");
+            marked_sender.send((lease, result)).unwrap();
+        });
+        assert_eq!(
+            read_watchdog_line(&mut watchdog).unwrap(),
+            format!("PHASE {nonce} 1 common_load")
+        );
+        assert!(matches!(
+            marked_receiver.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        watchdog
+            .write_all(format!("PHASE_ACK {nonce} 1 common_load\n").as_bytes())
+            .unwrap();
+        let (mut lease, result) = marked_receiver.recv().unwrap();
+        result.expect("phase entry remains blocked until the watchdog acknowledges it");
+
+        let remaining_nonce = nonce.clone();
+        let peer = std::thread::spawn(move || {
+            for (index, name) in LTX_PROVIDER_PHASE_NAMES.iter().enumerate().skip(1) {
+                assert_eq!(
+                    read_watchdog_line(&mut watchdog).unwrap(),
+                    format!("PHASE {remaining_nonce} {} {name}", index + 1)
+                );
+                watchdog
+                    .write_all(
+                        format!("PHASE_ACK {remaining_nonce} {} {name}\n", index + 1).as_bytes(),
+                    )
+                    .unwrap();
+            }
+            assert_eq!(
+                read_watchdog_line(&mut watchdog).unwrap(),
+                format!("DONE {remaining_nonce}")
+            );
+            watchdog
+                .write_all(format!("BYE {remaining_nonce}\n").as_bytes())
+                .unwrap();
+        });
+        for name in LTX_PROVIDER_PHASE_NAMES.iter().skip(1) {
+            lease.mark(name).expect("exact next phase");
+        }
+        assert!(lease.mark("cleanup").unwrap_err().contains("exceeded"));
+        lease.complete().unwrap();
+        peer.join().unwrap();
+
+        let (_timeout_sender, timeout_receiver) = std::sync::mpsc::sync_channel(1);
+        assert!(wait_for_ltx_phase_acknowledgement(
+            &timeout_receiver,
+            1,
+            "common_load",
+            Duration::ZERO,
+        )
+        .unwrap_err()
+        .contains("acknowledgement"));
+        let (foreign_sender, foreign_receiver) = std::sync::mpsc::sync_channel(1);
+        foreign_sender
+            .send(Ok((2, "primary_conditioning".to_owned())))
+            .unwrap();
+        assert!(wait_for_ltx_phase_acknowledgement(
+            &foreign_receiver,
+            1,
+            "common_load",
+            Duration::ZERO,
+        )
+        .unwrap_err()
+        .contains("foreign provider phase"));
+
+        let (writer, _reader) = UnixStream::pair().unwrap();
+        let (_sender, completion) = std::sync::mpsc::sync_channel(1);
+        let (_phase_sender, phase_acknowledgements) = std::sync::mpsc::sync_channel(1);
+        let mut reordered = LtxCanaryWatchdogLease {
+            writer,
+            completion,
+            phase_acknowledgements,
+            nonce,
+            phase_sequence: 0,
+        };
+        assert!(reordered
+            .mark("primary_decode")
+            .unwrap_err()
+            .contains("reordered"));
     }
 
     #[test]

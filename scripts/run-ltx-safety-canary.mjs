@@ -42,6 +42,21 @@ export const CAMPAIGN_ENTRY_FIXTURE =
   "ltx-2-3-mlx-q4-768x512-f121-fps30-seed18946";
 export const CAMPAIGN_ENTRY_LOGICAL_CASE_ID = "implan-9b107d4d1ca0d61d4faa";
 export const CAMPAIGN_ENTRY_IDENTITY = "sc-20191-q4-768x512-f121-fps30-staged-v1";
+export const CAMPAIGN_FAILURE_RECEIPT_TYPE = "sceneworks_campaign_entry_failure_v1";
+export const PROVIDER_PHASE_PROTOCOL = "sceneworks-provider-phase-v1";
+export const WATCHDOG_EVENT_CHAIN_PROTOCOL = "sceneworks-watchdog-event-chain-v1";
+export const PROVIDER_PHASES = Object.freeze([
+  "common_load",
+  "primary_conditioning",
+  "primary_denoise",
+  "primary_decode",
+  "lifecycle_warm_repeat",
+  "lifecycle_cancel",
+  "lifecycle_cancel_recovery",
+  "lifecycle_error",
+  "lifecycle_error_recovery",
+  "cleanup",
+]);
 const CAMPAIGN_ENTRY_ACTION = "campaign_entry";
 const CAMPAIGN_ENTRY_PLAN = "docs/calibration/sc-18946/ltx-mlx-single-pass-sweep.json";
 const CAMPAIGN_ENTRY_SAFETY = Object.freeze({
@@ -269,6 +284,15 @@ export function preservePrimaryFailure(primary, cleanup) {
   error.message += `; scratch cleanup failed: ${cleanupMessage
     .replaceAll(/[\u0000-\u001f\u007f]/g, " ").slice(0, 512)}`;
   if (error.cause === undefined) error.cause = cleanup;
+  return error;
+}
+
+export function preserveFailureReceiptSuppression(primary, receiptError) {
+  const error = primary instanceof Error ? primary : new Error(String(primary));
+  const detail = receiptError instanceof Error ? receiptError.message : String(receiptError);
+  error.message += `; SC-20216 failure receipt suppressed: ${detail
+    .replaceAll(/[\u0000-\u001f\u007f]/g, " ").slice(0, 512)}`;
+  if (error.cause === undefined) error.cause = receiptError;
   return error;
 }
 
@@ -681,7 +705,160 @@ export function validateCampaignEntryWatchdogEvents(events, hostMemoryBytes) {
       || events.some((event) => event.event === "hard_stop" || event.event === "terminated")) {
     fail("SC-20191 watchdog stream is incomplete or crossed a safety boundary");
   }
+  validateProviderPhaseTimeline(events, { complete: true });
   return Math.max(...samples.map((event) => event.physicalFootprintBytes));
+}
+
+function validProcessIdentities(value) {
+  return Array.isArray(value) && value.length > 0
+    && new Set(value.map((identity) => identity?.pid)).size === value.length
+    && value.every((identity) => Number.isSafeInteger(identity?.pid) && identity.pid > 0
+      && Number.isSafeInteger(identity?.pgid) && identity.pgid > 0
+      && typeof identity?.started === "string" && identity.started.length > 0);
+}
+
+function stableCompactJson(value) {
+  if (Array.isArray(value)) return `[${value.map(stableCompactJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) =>
+      `${JSON.stringify(key)}:${stableCompactJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+export function validateWatchdogEventChain(events) {
+  if (!Array.isArray(events) || events.length === 0) {
+    fail("SC-20216 watchdog event chain is empty");
+  }
+  let previous = "0".repeat(64);
+  for (const [index, event] of events.entries()) {
+    const { eventHash, ...payload } = event ?? {};
+    const expectedHash = createHash("sha256").update(stableCompactJson(payload)).digest("hex");
+    if (event?.eventSequence !== index + 1
+        || event?.previousEventHash !== previous
+        || eventHash !== expectedHash) {
+      fail("SC-20216 watchdog event chain is missing, mutated, duplicated, or reordered");
+    }
+    previous = eventHash;
+  }
+  return {
+    protocol: WATCHDOG_EVENT_CHAIN_PROTOCOL,
+    count: events.length,
+    head: previous,
+  };
+}
+
+export function validateProviderPhaseTimeline(events, { complete = false } = {}) {
+  validateWatchdogEventChain(events);
+  let current = null;
+  let sequence = 0;
+  let previousAt = -Infinity;
+  for (const event of events) {
+    if (typeof event?.at !== "number" || !Number.isFinite(event.at) || event.at < previousAt) {
+      fail("SC-20216 watchdog event timestamps are missing or reordered");
+    }
+    previousAt = event.at;
+    if (event.event === "provider_phase") {
+      const expectedSequence = sequence + 1;
+      const expectedName = PROVIDER_PHASES[sequence];
+      if (event.authenticated !== true
+          || event.providerPhase?.sequence !== expectedSequence
+          || event.providerPhase?.name !== expectedName) {
+        fail("SC-20216 provider phase telemetry is missing, stale, malformed, or reordered");
+      }
+      sequence = expectedSequence;
+      current = { sequence, name: expectedName };
+    } else if ([
+      "started", "sample", "child_attested", "child_completed", "hard_stop", "terminated",
+    ].includes(event.event) && (!Object.hasOwn(event, "providerPhase")
+      || !isDeepStrictEqual(event.providerPhase, current))) {
+      fail("SC-20216 watchdog event is not bound to the latest authenticated provider phase");
+    }
+  }
+  if (sequence === 0 || (complete && sequence !== PROVIDER_PHASES.length)) {
+    fail("SC-20216 watchdog stream omitted required authenticated provider phases");
+  }
+  return current;
+}
+
+export function validateCampaignEntryFailureEvents(events, hostMemoryBytes) {
+  if (!Array.isArray(events) || events.length === 0) fail("SC-20216 failure stream is empty");
+  validateProviderPhaseTimeline(events);
+  const eventChain = validateWatchdogEventChain(events);
+  const hardStops = events.filter((event) => event.event === "hard_stop");
+  const terminated = events.filter((event) => event.event === "terminated");
+  const started = events.filter((event) => event.event === "started");
+  const hardStopIndex = events.findIndex((event) => event.event === "hard_stop");
+  const terminatedIndex = events.findIndex((event) => event.event === "terminated");
+  const attestedIndex = events.findIndex((event) => event.event === "child_attested");
+  const allowedEvents = new Set([
+    "started", "sample", "child_attested", "provider_phase", "hard_stop", "terminated",
+  ]);
+  const samples = events.filter((event) => event.event === "sample");
+  if (started.length !== 1 || hardStops.length !== 1 || terminated.length !== 1
+      || events[0]?.event !== "started"
+      || hardStopIndex < 0 || terminatedIndex !== events.length - 1
+      || terminatedIndex !== hardStopIndex + 1
+      || events.filter((event) => event.event === "child_attested").length !== 1
+      || attestedIndex <= 0 || attestedIndex >= hardStopIndex
+      || events.some((event) => event.event === "child_completed")
+      || events.some((event) => !allowedEvents.has(event.event))
+      || !events.slice(0, attestedIndex).some((event) =>
+        event.event === "sample" && event.phase === "before_child_release")
+      || !events.slice(0, attestedIndex).some((event) =>
+        event.event === "sample" && event.phase === "child_attested_before_allocation")
+      || !events.slice(attestedIndex + 1, hardStopIndex).some((event) =>
+        event.event === "provider_phase")
+      || typeof hardStops[0].reason !== "string" || hardStops[0].reason.length === 0
+      || terminated[0].reason !== hardStops[0].reason
+      || !validProcessIdentities(started[0].processIdentities)
+      || !validProcessIdentities(hardStops[0].processIdentities)
+      || !validProcessIdentities(terminated[0].processIdentities)
+      || !isDeepStrictEqual(hardStops[0].processIdentities, terminated[0].processIdentities)
+      || started[0].processIdentities.every((identity) => identity.pid !== started[0].pid)
+      || [hardStops[0], terminated[0]].some((event) =>
+        started[0].processIdentities.some((startedIdentity) =>
+          !event.processIdentities.some((identity) => isDeepStrictEqual(identity, startedIdentity))))
+      || [started[0], hardStops[0], terminated[0]].some((event) =>
+        event.processIdentities.some((identity) => identity.pgid !== started[0].pgid))) {
+    fail("SC-20216 failure stream is incomplete or lacks exact process termination identity");
+  }
+  const runtimeFloor = runtimeFreeFloor(hostMemoryBytes);
+  if (samples.some((event) => !Number.isSafeInteger(event.physicalFootprintBytes)
+      || event.physicalFootprintBytes < 0
+      || !Number.isSafeInteger(event.memoryFreeBytes)
+      || event.memoryFreeBytes < 0
+      || !Number.isSafeInteger(event.swapFreeBytes)
+      || event.swapFreeBytes < 0)) {
+    fail("SC-20216 failure stream contains malformed watchdog telemetry");
+  }
+  const violating = events.findIndex((event) => event.event === "sample"
+    && (event.physicalFootprintBytes >= MAX_FOOTPRINT_BYTES
+      || event.memoryFreeBytes < runtimeFloor));
+  const thresholdReason = hardStops[0].reason.startsWith("physical_footprint_at_or_above_")
+    || hardStops[0].reason.startsWith("host_memory_free_below_");
+  if (violating >= 0) {
+    const sample = events[violating];
+    const expectedReason = sample.physicalFootprintBytes >= MAX_FOOTPRINT_BYTES
+      ? `physical_footprint_at_or_above_${MAX_FOOTPRINT_BYTES}:observed_${sample.physicalFootprintBytes}`
+      : `host_memory_free_below_${runtimeFloor}:observed_${sample.memoryFreeBytes}`;
+    if (violating !== hardStopIndex - 1 || hardStops[0].reason !== expectedReason
+        || events.slice(0, violating).some((event) => event.event === "sample"
+          && (event.physicalFootprintBytes >= MAX_FOOTPRINT_BYTES
+            || event.memoryFreeBytes < runtimeFloor))) {
+      fail("SC-20216 failure stream does not bind the first exact violating sample and reason");
+    }
+  } else if (thresholdReason) {
+    fail("SC-20216 threshold hard stop omitted its exact first violating sample");
+  }
+  return {
+    reason: hardStops[0].reason,
+    firstViolatingEventIndex: violating >= 0 ? violating : null,
+    firstViolatingSample: violating >= 0 ? structuredClone(events[violating]) : null,
+    terminalProviderPhase: structuredClone(hardStops[0].providerPhase),
+    started: structuredClone(started[0]),
+    eventChain,
+  };
 }
 
 export function campaignEntryCanonicalFragment(response, maxObservedFootprintBytes) {
@@ -792,6 +969,215 @@ export function validateCampaignEntryBundle(bundle) {
     fail("SC-20191 canonical bundle cleanup or footprint attestation changed");
   }
   return bundle;
+}
+
+export function campaignEntryFailurePath(canonicalOutput) {
+  return path.join(path.dirname(canonicalOutput), "sc-20216-campaign-entry-failure.json");
+}
+
+export function campaignEntryOutcomeReservationPath(canonicalOutput) {
+  return path.join(path.dirname(canonicalOutput), ".sc-20216-campaign-entry-outcome");
+}
+
+export function campaignEntryFailureReceipt({
+  sceneWorksRevision, sceneWorksTree, inferenceRevision, inferenceTree,
+  identity, preparationKey, preparationRoot, prepared, hostMemoryBytes, events, outcome,
+}) {
+  const failure = validateCampaignEntryFailureEvents(events, hostMemoryBytes);
+  const receipt = {
+    schemaVersion: 1,
+    recordType: CAMPAIGN_FAILURE_RECEIPT_TYPE,
+    status: "diagnostic_failure",
+    diagnosticOnly: true,
+    promotable: false,
+    ingestible: false,
+    canonicalBundlePublished: false,
+    outcome: structuredClone(outcome),
+    story: "sc-20216",
+    source: {
+      sceneWorks: { revision: sceneWorksRevision, tree: sceneWorksTree },
+      inference: { revision: inferenceRevision, tree: inferenceTree },
+    },
+    campaignCase: {
+      plan: CAMPAIGN_ENTRY_PLAN,
+      provider: CAMPAIGN_ENTRY_PROVIDER,
+      logicalCaseId: CAMPAIGN_ENTRY_LOGICAL_CASE_ID,
+      fixture: CAMPAIGN_ENTRY_FIXTURE,
+      identity: CAMPAIGN_ENTRY_IDENTITY,
+      action: CAMPAIGN_ENTRY_ACTION,
+      target: {
+        provider: PROVIDER, tier: "q4",
+        geometry: { width: 768, height: 512, batch: 1, frames: 121, fps: 30 },
+      },
+      strategy: {
+        rung: "staged_residency", engagedRungs: ["resident", "staged_residency"], parameters: {},
+      },
+    },
+    artifacts: {
+      repository: ARTIFACT_REPOSITORY,
+      revision: ARTIFACT_REVISION,
+      numericTierInventory: structuredClone(identity.artifact.numericTier),
+      textEncoderInventory: structuredClone(identity.artifact.textEncoder),
+      adapter: structuredClone(prepared.adapter),
+      metallib: structuredClone(prepared.metallib),
+      preparation: {
+        key: preparationKey,
+        root: preparationRoot,
+        identity: structuredClone(identity),
+        manifest: structuredClone(prepared.manifest),
+      },
+    },
+    watchdog: {
+      protocol: "sceneworks-memory-watchdog-v1",
+      providerPhaseProtocol: PROVIDER_PHASE_PROTOCOL,
+      providerPhases: [...PROVIDER_PHASES],
+      maxFootprintBytes: MAX_FOOTPRINT_BYTES,
+      maxRuntimeSeconds: MAX_RUNTIME_SECONDS,
+      hostMemoryBytes,
+      minInitialMemoryFreeBytes: preflightFreeFloor(hostMemoryBytes),
+      minMemoryFreeBytes: runtimeFreeFloor(hostMemoryBytes),
+      failure,
+      eventChain: structuredClone(failure.eventChain),
+      events: structuredClone(events),
+    },
+    cleanup: {
+      ownedProcessGroupResidueVerified: true,
+      runScratchRemoved: true,
+      runRootEmpty: true,
+      sourceIdentityVerified: true,
+      runtimeAssetIdentityVerified: true,
+      preparedCacheVerified: true,
+      preparationTransientResidueVerified: true,
+    },
+  };
+  return validateCampaignEntryFailureReceipt(receipt);
+}
+
+export function validateCampaignEntryFailureReceipt(receipt) {
+  let canonicallyIngestible = true;
+  try {
+    validateBundle(receipt);
+  } catch {
+    canonicallyIngestible = false;
+  }
+  const expectedCampaignCase = {
+    plan: CAMPAIGN_ENTRY_PLAN,
+    provider: CAMPAIGN_ENTRY_PROVIDER,
+    logicalCaseId: CAMPAIGN_ENTRY_LOGICAL_CASE_ID,
+    fixture: CAMPAIGN_ENTRY_FIXTURE,
+    identity: CAMPAIGN_ENTRY_IDENTITY,
+    action: CAMPAIGN_ENTRY_ACTION,
+    target: {
+      provider: PROVIDER, tier: "q4",
+      geometry: { width: 768, height: 512, batch: 1, frames: 121, fps: 30 },
+    },
+    strategy: {
+      rung: "staged_residency", engagedRungs: ["resident", "staged_residency"], parameters: {},
+    },
+  };
+  const expectedCleanup = {
+    ownedProcessGroupResidueVerified: true,
+    runScratchRemoved: true,
+    runRootEmpty: true,
+    sourceIdentityVerified: true,
+    runtimeAssetIdentityVerified: true,
+    preparedCacheVerified: true,
+    preparationTransientResidueVerified: true,
+  };
+  if (canonicallyIngestible
+      || receipt?.recordType !== CAMPAIGN_FAILURE_RECEIPT_TYPE
+      || receipt?.status !== "diagnostic_failure"
+      || receipt?.diagnosticOnly !== true
+      || receipt?.promotable !== false
+      || receipt?.ingestible !== false
+      || receipt?.canonicalBundlePublished !== false
+      || receipt?.outcome?.canonicalBundleAbsentAtPublication !== true
+      || receipt?.outcome?.outcomeReservationHeldAtPublication !== true
+      || receipt?.outcome?.outcomeChoice !== "failure"
+      || !path.isAbsolute(receipt?.outcome?.canonicalOutput ?? "")
+      || receipt?.outcome?.failureOutput
+        !== campaignEntryFailurePath(receipt?.outcome?.canonicalOutput ?? "")
+      || receipt?.outcome?.reservation
+        !== campaignEntryOutcomeReservationPath(receipt?.outcome?.canonicalOutput ?? "")
+      || receipt?.outcome?.choice !== `${receipt?.outcome?.reservation}.choice`
+      || receipt?.story !== "sc-20216"
+      || !isDeepStrictEqual(receipt?.campaignCase, expectedCampaignCase)
+      || receipt?.watchdog?.protocol !== "sceneworks-memory-watchdog-v1"
+      || receipt?.watchdog?.providerPhaseProtocol !== PROVIDER_PHASE_PROTOCOL
+      || !isDeepStrictEqual(receipt?.watchdog?.providerPhases, PROVIDER_PHASES)
+      || receipt?.watchdog?.eventChain?.protocol !== WATCHDOG_EVENT_CHAIN_PROTOCOL
+      || receipt?.watchdog?.maxFootprintBytes !== MAX_FOOTPRINT_BYTES
+      || receipt?.watchdog?.maxRuntimeSeconds !== MAX_RUNTIME_SECONDS
+      || receipt?.watchdog?.minInitialMemoryFreeBytes
+        !== preflightFreeFloor(receipt?.watchdog?.hostMemoryBytes)
+      || receipt?.watchdog?.minMemoryFreeBytes
+        !== runtimeFreeFloor(receipt?.watchdog?.hostMemoryBytes)
+      || !isDeepStrictEqual(receipt?.cleanup, expectedCleanup)) {
+    fail("SC-20216 failure receipt is ingestible, incomplete, or identity-drifted");
+  }
+  for (const source of [receipt.source?.sceneWorks, receipt.source?.inference]) {
+    if (!/^[0-9a-f]{40}$/.test(source?.revision ?? "")
+        || !/^[0-9a-f]{40}$/.test(source?.tree ?? "")) {
+      fail("SC-20216 failure receipt source identity is malformed");
+    }
+  }
+  const preparation = receipt.artifacts?.preparation;
+  const identity = preparation?.identity;
+  const validFileIdentity = (file, mode) => path.isAbsolute(file?.path ?? "")
+    && /^[0-9a-f]{64}$/.test(file?.sha256 ?? "")
+    && typeof file?.device === "string" && typeof file?.inode === "string"
+    && Number.isSafeInteger(file?.size) && file.size > 0
+    && typeof file?.mtimeNs === "string" && typeof file?.ctimeNs === "string"
+    && file?.mode === mode;
+  if (receipt.artifacts?.repository !== ARTIFACT_REPOSITORY
+      || receipt.artifacts?.revision !== ARTIFACT_REVISION
+      || !isDeepStrictEqual(receipt.artifacts?.numericTierInventory, {
+        files: 11, bytes: Q4_INVENTORY_BYTES, sha256: Q4_INVENTORY_SHA256,
+      })
+      || !isDeepStrictEqual(receipt.artifacts?.textEncoderInventory, {
+        files: TEXT_ENCODER_INVENTORY_FILES,
+        bytes: TEXT_ENCODER_INVENTORY_BYTES,
+        sha256: TEXT_ENCODER_INVENTORY_SHA256,
+      })
+      || !/^[0-9a-f]{64}$/.test(preparation?.key ?? "")
+      || !path.isAbsolute(preparation?.root ?? "")
+      || path.basename(preparation?.root ?? "") !== preparation.key
+      || preparation?.manifest?.key !== preparation.key
+      || preparation?.manifest?.schemaVersion !== PREPARATION_SCHEMA_VERSION
+      || !isDeepStrictEqual(preparation?.manifest?.identity, identity)
+      || preparation?.manifest?.preparedFrom?.sceneWorksRevision
+        !== receipt.source.sceneWorks.revision
+      || preparation?.manifest?.preparedFrom?.inferenceRevision
+        !== receipt.source.inference.revision
+      || !isDeepStrictEqual(preparation?.manifest?.artifacts?.numericTier?.content,
+        receipt.artifacts.numericTierInventory)
+      || !isDeepStrictEqual(preparation?.manifest?.artifacts?.textEncoder?.content,
+        receipt.artifacts.textEncoderInventory)
+      || identity?.sceneWorksTree !== receipt.source.sceneWorks.tree
+      || identity?.inferenceTree !== receipt.source.inference.tree
+      || identity?.schemaVersion !== PREPARATION_SCHEMA_VERSION
+      || !isDeepStrictEqual(identity?.artifact, {
+        repository: ARTIFACT_REPOSITORY,
+        revision: ARTIFACT_REVISION,
+        numericTier: receipt.artifacts.numericTierInventory,
+        textEncoder: receipt.artifacts.textEncoderInventory,
+      })
+      || !validFileIdentity(receipt.artifacts?.adapter, 0o500)
+      || !validFileIdentity(receipt.artifacts?.metallib, 0o400)
+      || !isDeepStrictEqual(preparation?.manifest?.adapter,
+        preparedFileManifestIdentity(receipt.artifacts.adapter))
+      || !isDeepStrictEqual(preparation?.manifest?.metallib,
+        preparedFileManifestIdentity(receipt.artifacts.metallib))) {
+    fail("SC-20216 failure receipt artifact or sealed-preparation identity changed");
+  }
+  const validated = validateCampaignEntryFailureEvents(
+    receipt.watchdog.events, receipt.watchdog.hostMemoryBytes,
+  );
+  if (!isDeepStrictEqual(receipt.watchdog.failure, validated)
+      || !isDeepStrictEqual(receipt.watchdog.eventChain, validated.eventChain)) {
+    fail("SC-20216 failure receipt summary does not match its complete event stream");
+  }
+  return receipt;
 }
 
 function sameInventory(left, right) {
@@ -1795,15 +2181,20 @@ function campaignProviderOptions(argv) {
   for (const name of [
     "inference-repo", "preparation-root", "preparation-key", "run-root",
     "scene-revision", "scene-tree", "inference-revision", "inference-tree",
+    "canonical-output", "failure-output", "outcome-reservation", "outcome-token",
   ]) {
     if (!options[name]) fail(`campaign provider requires --${name}`);
   }
   const unexpected = Object.keys(options).filter((name) => ![
     "inference-repo", "preparation-root", "preparation-key", "run-root",
     "scene-revision", "scene-tree", "inference-revision", "inference-tree",
+    "canonical-output", "failure-output", "outcome-reservation", "outcome-token",
   ].includes(name));
   if (unexpected.length) fail(`unsupported campaign provider option(s): ${unexpected.join(", ")}`);
-  for (const name of ["inference-repo", "preparation-root", "run-root"]) {
+  for (const name of [
+    "inference-repo", "preparation-root", "run-root", "canonical-output", "failure-output",
+    "outcome-reservation",
+  ]) {
     options[name] = path.resolve(options[name]);
   }
   return options;
@@ -1814,6 +2205,18 @@ async function campaignProviderInvocation(options, input, {
 } = {}) {
   signal?.throwIfAborted();
   const request = JSON.parse(input);
+  const campaignOutcome = {
+    canonicalOutput: options["canonical-output"],
+    failureOutput: options["failure-output"],
+    reservation: options["outcome-reservation"],
+    choice: `${options["outcome-reservation"]}.choice`,
+    token: options["outcome-token"],
+  };
+  if (campaignOutcome.failureOutput !== campaignEntryFailurePath(campaignOutcome.canonicalOutput)
+      || campaignOutcome.reservation
+        !== campaignEntryOutcomeReservationPath(campaignOutcome.canonicalOutput)) {
+    fail("SC-20216 campaign provider outcome paths changed");
+  }
   const config = JSON.parse(await readFile(path.join(ROOT, CAMPAIGN_ENTRY_PLAN), "utf8"));
   const { planned } = campaignEntryPlan(config);
   const toolchainChannel = await repositoryToolchain();
@@ -1834,6 +2237,8 @@ async function campaignProviderInvocation(options, input, {
   const runScratch = await mkdtemp(path.join(options["run-root"], "sc-20191-run-"));
   let operationError = null;
   let cleanupError = null;
+  let failureEvents = null;
+  let failureHostMemoryBytes = null;
   let output = null;
   try {
     const runtimeHome = path.join(runScratch, "home");
@@ -1879,6 +2284,7 @@ async function campaignProviderInvocation(options, input, {
         "--term-grace", "1",
         "--event-file", eventsPath,
         "--require-child-attestation",
+        "--require-provider-phases",
         "--",
         "/bin/sh", "-c", 'set -C; exec "$1" <"$2" >"$3"',
         "sc-20191-campaign-entry", prepared.adapter.path, requestPath, responsePath,
@@ -1905,9 +2311,32 @@ async function campaignProviderInvocation(options, input, {
           resolve({ code, signal: childSignal });
         });
       });
-      signal?.throwIfAborted();
       const eventBytes = await readFile(eventsPath, "utf8").catch(() => "");
-      if (status.code !== 0 || status.signal) fail(watchdogFailureSummary(status, eventBytes));
+      if (status.code !== 0 || status.signal) {
+        const watchdogError = new Error(watchdogFailureSummary(status, eventBytes));
+        try {
+          const events = eventBytes.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+          validateCampaignEntryFailureEvents(events, hostMemoryBytes);
+          const started = events.find((event) => event.event === "started");
+          const processTable = (await execFileAsync(
+            "/bin/ps", ["-ww", "-axo", "pid=,pgid=,command="],
+            { encoding: "utf8", timeout: 2_000 },
+          )).stdout;
+          const residue = ownedProcessGroupResidue(processTable, started?.pgid);
+          if (residue.length) fail(`SC-20216 watchdog process group retained residue:\n${residue.join("\n")}`);
+          await assertCampaignSourceState(options);
+          await assertRuntimeAssetIdentities(prepared.adapter, prepared.metallib);
+          if (await validatePreparedCache(
+            options["preparation-root"], options["preparation-key"], identity,
+          ) === null) fail("SC-20216 prepared cache disappeared after watchdog failure");
+          failureEvents = events;
+          failureHostMemoryBytes = hostMemoryBytes;
+        } catch (error) {
+          throw preserveFailureReceiptSuppression(watchdogError, error);
+        }
+        throw watchdogError;
+      }
+      signal?.throwIfAborted();
       const response = JSON.parse(await readFile(responsePath, "utf8"));
       const events = eventBytes.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
       validateCampaignEntryAdapterResponse(response, {
@@ -1941,7 +2370,43 @@ async function campaignProviderInvocation(options, input, {
     }
   }
   const finalError = preservePrimaryFailure(operationError, cleanupError);
-  if (finalError !== null) throw finalError;
+  if (finalError !== null) {
+    let publicationError = null;
+    if (failureEvents !== null && cleanupError === null) {
+      try {
+        await publishCampaignEntryFailureReceipt(campaignOutcome, {
+          verify: async () => {
+            await assertRunRootEmpty(options["run-root"]);
+            await assertCampaignSourceState(options);
+            await assertRuntimeAssetIdentities(prepared.adapter, prepared.metallib);
+            if (await validatePreparedCache(
+              options["preparation-root"], options["preparation-key"], identity,
+            ) === null) fail("SC-20216 prepared cache disappeared before failure publication");
+            await assertPreparationHasNoTransientResidue(options["preparation-root"]);
+          },
+          build: (outcome) => campaignEntryFailureReceipt({
+            sceneWorksRevision: options["scene-revision"],
+            sceneWorksTree: options["scene-tree"],
+            inferenceRevision: options["inference-revision"],
+            inferenceTree: options["inference-tree"],
+            identity,
+            preparationKey: options["preparation-key"],
+            preparationRoot: options["preparation-root"],
+            prepared,
+            hostMemoryBytes: failureHostMemoryBytes,
+            events: failureEvents,
+            outcome,
+          }),
+        });
+      } catch (error) {
+        publicationError = error;
+      }
+    }
+    if (publicationError !== null) {
+      throw preserveFailureReceiptSuppression(finalError, publicationError);
+    }
+    throw finalError;
+  }
   return output;
 }
 
@@ -1976,6 +2441,75 @@ async function publishExclusiveJson(output, value, signal) {
   }
 }
 
+export async function acquireCampaignEntryOutcome(canonicalOutput) {
+  const outcome = {
+    canonicalOutput,
+    failureOutput: campaignEntryFailurePath(canonicalOutput),
+    reservation: campaignEntryOutcomeReservationPath(canonicalOutput),
+    choice: `${campaignEntryOutcomeReservationPath(canonicalOutput)}.choice`,
+    token: randomUUID(),
+  };
+  await mkdir(path.dirname(canonicalOutput), { recursive: true });
+  await writeFile(outcome.reservation, `${outcome.token}\n`, { flag: "wx", mode: 0o400 });
+  if (await pathExists(outcome.canonicalOutput) || await pathExists(outcome.failureOutput)) {
+    await unlink(outcome.reservation);
+    fail("SC-20216 campaign entry already has an immutable canonical or failure outcome");
+  }
+  return outcome;
+}
+
+async function assertCampaignEntryOutcomeOwner(outcome) {
+  if (await readFile(outcome?.reservation ?? "", "utf8").catch(() => null)
+      !== `${outcome?.token}\n`) {
+    fail("SC-20216 campaign entry outcome reservation ownership changed");
+  }
+}
+
+export async function releaseUnpublishedCampaignEntryOutcome(outcome) {
+  await assertCampaignEntryOutcomeOwner(outcome);
+  if (await pathExists(outcome.choice)
+      || await pathExists(outcome.canonicalOutput) || await pathExists(outcome.failureOutput)) return;
+  await unlink(outcome.reservation);
+}
+
+async function publishCampaignEntryOutcome(outcome, kind, build, signal) {
+  await assertCampaignEntryOutcomeOwner(outcome);
+  const target = kind === "canonical" ? outcome.canonicalOutput : outcome.failureOutput;
+  const other = kind === "canonical" ? outcome.failureOutput : outcome.canonicalOutput;
+  await writeFile(outcome.choice, `${kind}\n`, { flag: "wx", mode: 0o400 });
+  if (await pathExists(target) || await pathExists(other)) {
+    fail("SC-20216 campaign entry outcome is already fixed");
+  }
+  const value = await build();
+  await publishExclusiveJson(target, value, signal);
+  return value;
+}
+
+export async function publishCampaignEntryCanonicalOutcome(outcome, bundle, signal) {
+  await publishCampaignEntryOutcome(outcome, "canonical", async () => bundle, signal);
+}
+
+export async function publishCampaignEntryFailureReceipt(outcome, { verify, build }) {
+  if (typeof verify !== "function" || typeof build !== "function") {
+    fail("SC-20216 failure publication requires validation and receipt builders");
+  }
+  await verify();
+  return publishCampaignEntryOutcome(outcome, "failure", async () => {
+    if (await pathExists(outcome.canonicalOutput)) {
+      fail("SC-20216 canonical outcome already exists; failure receipt suppressed");
+    }
+    return validateCampaignEntryFailureReceipt(await build({
+      canonicalOutput: outcome.canonicalOutput,
+      failureOutput: outcome.failureOutput,
+      reservation: outcome.reservation,
+      choice: outcome.choice,
+      outcomeChoice: "failure",
+      canonicalBundleAbsentAtPublication: true,
+      outcomeReservationHeldAtPublication: true,
+    }));
+  });
+}
+
 async function assertPreparationHasNoTransientResidue(preparationRoot) {
   const parent = path.dirname(preparationRoot);
   const key = path.basename(preparationRoot);
@@ -1998,9 +2532,8 @@ async function runCampaignEntryController({
 }) {
   const config = JSON.parse(await readFile(path.join(ROOT, CAMPAIGN_ENTRY_PLAN), "utf8"));
   campaignEntryPlan(config);
+  const campaignOutcome = await acquireCampaignEntryOutcome(output);
   const runRoot = path.join(path.dirname(output), "runs");
-  await mkdir(runRoot, { recursive: true, mode: 0o700 });
-  await assertRunRootEmpty(runRoot);
   const providerOptions = {
     "inference-repo": inferenceRepo,
     "preparation-root": preparationRoot,
@@ -2010,12 +2543,18 @@ async function runCampaignEntryController({
     "scene-tree": sceneWorksTree,
     "inference-revision": inferenceRevision,
     "inference-tree": inferenceTree,
+    "canonical-output": campaignOutcome.canonicalOutput,
+    "failure-output": campaignOutcome.failureOutput,
+    "outcome-reservation": campaignOutcome.reservation,
+    "outcome-token": campaignOutcome.token,
   };
   const providerCommand = [fileURLToPath(import.meta.url), "--campaign-provider"];
   let operationError = null;
   let cleanupError = null;
   let bundle = null;
   try {
+    await mkdir(runRoot, { recursive: true, mode: 0o700 });
+    await assertRunRootEmpty(runRoot);
     bundle = await runProviderPlan({
       config,
       providerCommand,
@@ -2049,12 +2588,13 @@ async function runCampaignEntryController({
     ) === null) fail("SC-20191 prepared cache disappeared before publication");
     await assertPreparationHasNoTransientResidue(preparationRoot);
     validateCampaignEntryBundle(bundle);
-    await publishExclusiveJson(output, bundle, signal);
+    await publishCampaignEntryCanonicalOutcome(campaignOutcome, bundle, signal);
   } catch (error) {
     operationError = error;
   } finally {
     try {
       if (await pathExists(runRoot)) await cleanupCanaryScratch(runRoot);
+      await releaseUnpublishedCampaignEntryOutcome(campaignOutcome);
     } catch (error) {
       cleanupError = error;
     }

@@ -2018,7 +2018,10 @@ test("the LTX real-weight safety canary cannot relax or masquerade as campaign e
     adapter.indexOf("fn run_ltx(request:"),
     adapter.indexOf("fn run(request:"),
   );
-  assert.match(ordinary, /run_ltx_with_admission\(request, LtxRunAdmission::Ordinary\)/);
+  assert.match(
+    ordinary,
+    /run_ltx_with_admission\(request, LtxRunAdmission::Ordinary, &mut phases\)/,
+  );
   assert.ok(campaign.indexOf("refuse_unsafe_ltx_capture(") >= 0);
   assert.ok(
     campaign.indexOf("refuse_unsafe_ltx_capture(") < campaign.indexOf("ltx_load_spec("),
@@ -2050,7 +2053,18 @@ test("the LTX real-weight safety canary cannot relax or masquerade as campaign e
     "validate_ltx_canary_cleanup(",
     '"_campaignEntry"',
     "watchdog_lease.complete()?",
+    'watchdog_lease.mark("common_load")?',
+    'watchdog_lease.mark("cleanup")?',
   ]) assert.ok(campaignEntry.includes(required), `campaign entry must retain ${required}`);
+  for (const phase of [
+    "primary_conditioning", "primary_denoise", "primary_decode",
+  ]) assert.ok(campaign.includes(`phase_sink.mark("${phase}")`),
+    `campaign execution must report ${phase}`);
+  for (const phase of [
+    "lifecycle_warm_repeat", "lifecycle_cancel", "lifecycle_cancel_recovery",
+    "lifecycle_error", "lifecycle_error_recovery",
+  ]) assert.ok(adapter.includes(`phase_sink.mark("${phase}")`),
+    `campaign lifecycle must report ${phase}`);
   assert.ok(
     campaignEntry.indexOf("prevalidate_ltx_campaign_entry(request)?")
       < campaignEntry.indexOf("consume_ltx_canary_watchdog_attestation(request)?"),
