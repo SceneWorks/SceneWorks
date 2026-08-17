@@ -234,6 +234,50 @@ test("Rust Docker dependency layers include every memory-strategy adapter target
   }
 });
 
+test("both Rust Docker builders carry the mechanically digested web capability sources", async () => {
+  const dockerfile = await source("docker/rust.Dockerfile");
+  const matrix = await source(
+    "crates/sceneworks-core/src/jobs_store/routing/matrix.rs",
+  );
+  const webEmbeds = [
+    ...matrix.matchAll(
+      /include_str!\(\s*"\.\.\/\.\.\/\.\.\/\.\.\/\.\.\/apps\/web\/src\/([^"\n]+)"\s*\)/g,
+    ),
+  ].map((match) => match[1]);
+  assert.ok(webEmbeds.length > 0, "matrix must retain its production web source inputs");
+  const stage = (name) => {
+    const heading = new RegExp(`^FROM [^\\r\\n]+ AS ${name}\\r?$`, "m").exec(
+      dockerfile,
+    );
+    assert.ok(heading, `${name} Docker stage must exist`);
+    const start = heading.index + heading[0].length;
+    const end = dockerfile.indexOf("\nFROM ", start);
+    return dockerfile.slice(start, end === -1 ? undefined : end);
+  };
+  for (const name of ["builder", "candle-builder"]) {
+    assert.match(
+      stage(name),
+      /^COPY apps\/web\/src \.\/apps\/web\/src$/m,
+      `${name} must copy the whole owning source root`,
+    );
+  }
+  for (const relative of webEmbeds) {
+    assert.doesNotMatch(relative, /(?:^|\/)\.\.(?:\/|$)/, relative);
+  }
+});
+
+test("both Rust Docker builders carry the compiled memory-calibration evidence", async () => {
+  const dockerfile = await source("docker/rust.Dockerfile");
+  assert.equal(
+    (
+      dockerfile.match(
+        /^COPY docs\/generated\/memory-calibration-evidence\.json \.\/docs\/generated\/$/gm,
+      ) ?? []
+    ).length,
+    2,
+  );
+});
+
 test("all three manifest scripts import the shared JSONC parser", async () => {
   for (const scriptPath of [
     "scripts/check-scaffold.mjs",
@@ -555,7 +599,9 @@ test("the Rust gate verifies the generated docs derived from Rust sources", asyn
     assert.match(scripts["check:rust-derived-docs"], new RegExp(`\\b${sub}\\b`), sub);
   }
   assert.match(scripts["rust:check"], /\bcheck:rust-derived-docs\b/);
-  assert.match(scripts.check, /\bcheck:rust-derived-docs\b/);
+  // sc-19758 removed the `npm run check` arm of this. That chain was 18 steps of pin-keyed gates
+  // and is now the unit tests alone; the derived-docs check keeps its two other entry points, the
+  // `rust:check` gate above and the pre-push hook below, both of which still run it.
   // The pre-push hook runs it too, on the same trigger as the neither/candle builds.
   assert.match(await source("scripts/git-hooks/pre-push"), /npm run --silent check:rust-derived-docs/);
 });
@@ -703,7 +749,7 @@ test("the MLX memory adapter is guarded on a PR lane, like its Candle twin", asy
   assert.ok(guard < firstDispatchOnly, "MLX adapter guard must precede the dispatch-only steps");
 });
 
-test("both stage-1 lanes verify their own capability dump last among coverage and reachably", async () => {
+test("both stage-1 lanes verify their own capability dump last among coverage, reachably, and publish only its evidence", async () => {
   // sc-17119 (mlx) + sc-17592 (candle). config/engine-capabilities/capabilities.<backend>.json is
   // read as a SOURCE by every other guard: bump-inference.mjs checks only its existence, declared
   // backend and `inferenceRevision`, and the vitest drift guard re-derives the catalog from its
@@ -719,28 +765,54 @@ test("both stage-1 lanes verify their own capability dump last among coverage an
     const lane = await source(path);
     const verifyAt = lane.indexOf(`- name: Verify ${file} is a real dump, not a restamp`);
     assert.ok(verifyAt > 0, `${path} must verify ${file} against a fresh dump`);
+    if (path.endsWith("macos-mlx.yml")) {
+      const hostedAt = lane.indexOf("\n  macos-checks:");
+      const naxAt = lane.indexOf("\n  nax-worker:");
+      assert.ok(
+        hostedAt < verifyAt && verifyAt < naxAt,
+        "the weights-free MLX facts producer belongs on the hosted Mac job, not the M5/NAX pool",
+      );
+      assert.doesNotMatch(
+        lane.slice(naxAt),
+        /Verify capabilities\.mlx\.json|Upload fresh MLX capability facts/,
+        "the NAX-only job must not duplicate the hosted MLX facts producer",
+      );
+    }
     // Re-dump to a SCRATCH dir and compare. Dumping over the checked-in file would make the
     // comparison vacuous and mutate the tree on a red run.
     assert.match(lane, /bin dump-engine-capabilities/, path);
 
     // LAST on the PR path. A step failure aborts the job, and this one goes red on exactly the
     // routine pin-bump PRs where nobody re-dumped — so placed earlier it would cancel the coverage
-    // each lane uniquely carries (macOS: `nax_guard`; Windows: the only PR run of
+    // each lane uniquely carries (macOS: the hosted full workspace suite; Windows: the only PR run of
     // `cargo test -p sceneworks-worker --features backend-candle`). A missing dump must not suppress
     // unrelated verdicts.
     //
-    // "Last" means last among steps that RUN on a pull request, not last in the file: macos-mlx.yml
-    // keeps a long `workflow_dispatch`-only calibration tail after it, which is skipped on every PR
-    // and so cannot be cancelled by this step. Asserting the ordering rather than mere presence is
+    // "Last" means last among steps that RUN in the same job on a pull request. The Mac workflow has
+    // a later, separate NAX job; bounding this scan at the next job key keeps its M5-only steps out.
+    // Asserting the ordering rather than mere presence is
     // the point — nothing else would notice an unconditional step being appended later.
-    for (const block of lane.slice(verifyAt).split(/\n {6}- (?=name: |uses: )/).slice(1)) {
+    const afterVerify = lane.slice(verifyAt);
+    const nextJobAt = afterVerify.search(/\n {2}[A-Za-z0-9_-]+:\n/);
+    const verifyJobTail = nextJobAt < 0 ? afterVerify : afterVerify.slice(0, nextJobAt);
+    for (const block of verifyJobTail.split(/\n {6}- (?=name: |uses: )/).slice(1)) {
+      // The Candle lane publishes its fresh dump ONLY when verification failed, so the upload is
+      // diagnostic evidence for a red run rather than a per-PR measurement publication.
       const candleFailureArtifact =
         path === ".github/workflows/windows-candle.yml" &&
-        block.startsWith("name: Upload fresh Candle capability facts after a verification failure") &&
+        block.startsWith(
+          "name: Upload fresh Candle capability facts after a verification failure",
+        ) &&
         /if: \$\{\{ always\(\) && steps\.verify_candle_capabilities\.outcome == 'failure' \}\}/.test(
           block,
         );
       if (candleFailureArtifact) continue;
+      if (/^name: Upload fresh MLX capability facts/m.test(block)) {
+        assert.match(block, /if: \$\{\{ always\(\) \}\}/);
+        assert.match(block, /uses: actions\/upload-artifact@[0-9a-f]{40}/);
+        assert.match(block, /path: \$\{\{ runner\.temp \}\}\/engine-capability-facts-verify/);
+        continue;
+      }
       assert.match(
         block,
         /if: \$\{\{[^\n]*github\.event_name == 'workflow_dispatch'/,
@@ -749,6 +821,12 @@ test("both stage-1 lanes verify their own capability dump last among coverage an
           "coverage this lane is the only place to have. Move it above the verification step.",
       );
     }
+
+    // The rich runtime descriptor artifact is part of the same native evidence contract. It must
+    // be generated by the one matching-platform producer and byte-diffed beside the legacy preview
+    // projection; hashing a narrow supportsPreview file is not descriptor drift protection.
+    assert.match(lane, /runtime[\\/]capabilities\.(?:mlx|candle)\.json/);
+    assert.match(lane, /backend-capability-facts-(?:mlx|candle)/);
 
     // Reachability. A restamp touches ONLY the facts file, so without this path entry the lane does
     // not run at all on the one PR the step exists to catch — declared but unreachable, the same
@@ -842,14 +920,15 @@ test("Windows preserves exact fresh capability facts when verification fails", a
     tail,
     /actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/,
   );
-  assert.match(
-    tail,
-    /engine-capability-facts-verify\/capabilities\.candle\.json/,
-  );
-  assert.match(
-    tail,
-    /engine-capability-facts-verify\/audio\/capabilities\.candle\.json/,
-  );
+  // The whole scratch DIRECTORY, not an enumerated file list, and that distinction has already
+  // been load-bearing once. The dumper writes three files — `capabilities.candle.json`,
+  // `audio/capabilities.candle.json`, and the rich `runtime/capabilities.candle.json` — and the
+  // runtime descriptor is the one the backend capability matrix cannot be rebuilt without. The
+  // enumerated two-file spelling this used to assert predates that third file, so an artifact
+  // produced under it looks complete and silently cannot repair the matrix. Pin the directory and
+  // the artifact name the repair instructions actually tell you to download.
+  assert.match(tail, /name: backend-capability-facts-candle/);
+  assert.match(tail, /path: \$\{\{ runner\.temp \}\}\/engine-capability-facts-verify\s/);
   assert.match(tail, /if-no-files-found: warn/);
 });
 
@@ -930,6 +1009,7 @@ test("every workspace path a self-hosted lane watches maps to a package that lan
       allowed: [
         "config/manifests/**", // include_str!'d into the worker; the manifest drift guard reads it
         "config/engine-capabilities/capabilities.candle.json", // the restamp-verify step diffs it
+        "config/engine-capabilities/runtime/capabilities.candle.json", // same step diffs rich descriptor + worker facts
         // The audio dump the SAME step also diffs (sc-17593). On BOTH lanes, unlike the media
         // files: AUDIO_BACKEND is candle everywhere, so either box produces this one file and
         // both verify steps open it. That is the test sc-17703 applies — a step here reads it —
@@ -948,6 +1028,7 @@ test("every workspace path a self-hosted lane watches maps to a package that lan
       allowed: [
         "config/manifests/**", // include_str!'d into the worker; the manifest drift guard reads it
         "config/engine-capabilities/capabilities.mlx.json", // the restamp-verify step diffs it
+        "config/engine-capabilities/runtime/capabilities.mlx.json", // same step diffs rich descriptor + worker facts
         // The audio dump the SAME step also diffs (sc-17593). On BOTH lanes, unlike the media
         // files: AUDIO_BACKEND is candle everywhere, so either box produces this one file and
         // both verify steps open it. That is the test sc-17703 applies — a step here reads it —

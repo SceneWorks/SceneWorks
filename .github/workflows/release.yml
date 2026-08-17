@@ -400,7 +400,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
           toolchain: "1.97.1"
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2 (v2.9.1+1)
+      # Save only on `main` — see the note on the `parity-rust` cache step in check.yml. This lane
+      # runs on `refs/tags/v*`, and a tag-scoped cache is readable from no other ref at all, so
+      # saving here only ever consumed budget that the PR lanes needed.
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2 (v2.9.1+1)
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Match the manual Linux packaging lane. gstreamer1.0-libav supplies H.264
       # decoding for WebKitGTK media playback on stock Ubuntu.

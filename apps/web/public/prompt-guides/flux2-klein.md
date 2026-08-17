@@ -2,14 +2,14 @@
 
 ## Best For
 
-A 9B-parameter Black Forest Labs FLUX.2 [klein] checkpoint, 4-step distilled — fast, high-quality text-to-image AND reference-driven editing in a single model. Apple Silicon only (MLX backend); ships in two variants:
+A 9B-parameter Black Forest Labs FLUX.2 [klein] checkpoint, 4-step distilled — fast, high-quality text-to-image AND reference-driven editing in a single model. It runs through native MLX on Apple Silicon and Candle/CUDA on Windows/Linux, and ships in two variants:
 
 - **FLUX.2 [klein] 9B** — text-to-image and reference editing.
 - **FLUX.2 [klein] 9B-KV** — text-to-image and reference editing, plus KV-cache acceleration that makes editing ~2.4× faster than the base 9B edit path. The cache engages automatically when you attach a reference; without one it runs plain text-to-image on par with the base 9B.
 
-> **License:** FLUX Non-Commercial License — gated Hugging Face download. Accept the license at the model card and add a Hugging Face token under Settings → Service credentials before downloading. Generations are for non-commercial use only.
+> **License:** FLUX Non-Commercial License. SceneWorks provides a public, ungated re-host, so download does not require a Hugging Face token or separate license acceptance. Generations are for non-commercial use only.
 
-> **Hardware:** ~36 GB bf16 peak at 1024² on M5 Max. Q8 quantization (default) trades minor quality for ~25 % memory reduction. macOS only.
+> **Hardware:** The MLX bf16 path peaks around 36 GB at 1024² on M5 Max; Q8 reduces that footprint. Off-Mac, the native Candle/CUDA lane uses the selected GPU tier.
 
 ## Prompt Shape
 

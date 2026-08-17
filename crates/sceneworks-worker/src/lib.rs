@@ -371,6 +371,8 @@ mod cuda_preflight_gpu_smoke;
 // packed q4 tier subdir of the `SceneWorks/qwen-image-edit-2511-mlx` turnkey (NOT the upstream snapshot
 // the pre-fix code reached) and that q4 packed-loads + renders a coherent edit on real CUDA.
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod conditioned_image_gpu_smoke;
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod qwen_edit_candle_gpu_smoke;
 // Real-weight GPU smoke for the candle InstantID + PiD super-resolving decode (epic 7840, sc-8386).
 // Test-only + candle-only; drives the bespoke `runtime_cuda::providers::instantid::InstantId` provider across
@@ -694,11 +696,12 @@ mod person_segment;
 // sibling is `person_segment_sam3_candle` below.
 #[cfg(target_os = "macos")]
 mod person_segment_sam3;
-// Smart-select image segmentation (epic 6087, sc-6105): the `image_segment` job runs SAM3
-// box-prompt segmentation in-process to produce an inpaint mask asset for the Image Editor.
-// macOS-only like its `person_segment_sam3` (SAM3) dependency; there is no off-Mac standalone
-// image-segment lane.
-#[cfg(target_os = "macos")]
+// Smart-select image segmentation: native SAM3 box-PVS on both registered runtimes. Candle's
+// pinned SAM3 surface has no point-prompt API, so segment_jobs rejects points before any I/O.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 mod segment_jobs;
 // Off-Mac candle SAM3 text-concept person segmenter (sc-6247, epic 5482 under sc-5062) — the
 // Windows/CUDA sibling of `person_segment_sam3`, driving `candle-gen-sam3`'s `Sam3VideoModel` to
@@ -1732,9 +1735,8 @@ async fn run_utility_job(
             JobType::DatasetParquetImport => run_dataset_parquet_import_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Parquet dataset import failed.", error)),
-            // Dataset Doctor CLIP-embedding analysis (sc-6535): the macOS MLX worker embeds every dataset
-            // image (clip_vit_l14) and POSTs the content-hash sidecar; off-Mac the handler returns a
-            // precise unsupported error (no candle CLIP embedder yet).
+            // Dataset Doctor CLIP-embedding analysis (sc-6535): the native MLX or Candle worker embeds
+            // every dataset image (clip_vit_l14) and POSTs the content-hash sidecar.
             JobType::DatasetAnalysis => run_dataset_analysis_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Dataset analysis failed.", error)),
@@ -1834,9 +1836,12 @@ async fn run_utility_job(
                 .map_err(|error| ("Dataset upscale failed.", error)),
             // Smart-select segmentation (epic 6087, sc-6105): native-MLX SAM3 box-prompt segmentation,
             // served in-process by `segment_jobs::run_image_segment_job` — a box prompt → a binary
-            // inpaint mask asset for the Image Editor. macOS-only (the capability is advertised only by
-            // `mlx_gpu`), so off-Mac this arm is absent and a segment job is never claimed there.
-            #[cfg(target_os = "macos")]
+            // inpaint mask asset for the Image Editor. Advertised by both native workers; Candle
+            // point prompts fail closed because the pinned provider exposes box PVS only.
+            #[cfg(any(
+                target_os = "macos",
+                all(not(target_os = "macos"), feature = "backend-candle")
+            ))]
             JobType::ImageSegment => segment_jobs::run_image_segment_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Smart-select segmentation failed.", error)),

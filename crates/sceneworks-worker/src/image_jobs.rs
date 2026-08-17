@@ -53,9 +53,9 @@ use gen_core::{
 // PuLID path (`image_jobs/pulid.rs`); gate it so the candle lane's `-D warnings` sees no unused import.
 #[cfg(target_os = "macos")]
 use gen_core::IdentityWeights;
-// `AdapterKind` (LoRA/LoKr classification) was MLX-only until sc-5126: the candle Lens lane is the
-// first candle family to take LoRA/LoKr, so it now classifies adapters too and the import moved into
-// the shared block above. `ControlKind` (ControlNet conditioning) was MLX-only until sc-8304: the candle
+// `AdapterKind` (LoRA/LoKr classification) was MLX-only until sc-5126 introduced the first candle
+// adapter lane; it now serves the shared MLX and candle adapter loaders, so the import lives in the
+// shared block above. `ControlKind` (ControlNet conditioning) was MLX-only until sc-8304: the candle
 // strict-control trio (`candle_strict_control.rs`) now shares the cross-platform `strict_control.rs`
 // `(engine_id, supported_kinds)` table + `preprocess_control_entry`, so `ControlKind` is in scope on the
 // candle build too.
@@ -170,13 +170,6 @@ use runtime_cuda::providers::kolors::{KolorsControl, KolorsControlPaths, KolorsC
 // export.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use runtime_cuda::providers::z_image::{ZImageControl, ZImageControlPaths, ZImageControlRequest};
-// Z-Image img2img / edit provider (sc-6595, epic 5480) — the candle (Windows/CUDA) sibling of the MLX
-// `z_image_turbo` `Conditioning::Reference` img2img route, living in `candle-gen-z-image` (the Turbo DiT
-// + a strength-derived source-latent init). Candle-only: macOS keeps the registered MLX generator's
-// img2img path. The bespoke edit route (`image_jobs/zimage_edit_candle.rs`) uses this named runtime
-// utility export.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use runtime_cuda::providers::z_image::{ZImageEdit, ZImageEditPaths, ZImageEditRequest};
 // PuLID-FLUX face-identity provider (sc-5492, epic 5480) — the candle (Windows/CUDA) sibling of the
 // macOS `pulid_flux` registry generator, living in `candle-gen-pulid` (the EVA02-CLIP tower + IDFormer
 // + the 20 PerceiverAttentionCA modules injected into the forked FLUX DiT via the post-block
@@ -194,7 +187,7 @@ const STUB_ADAPTER: &str = "procedural_preview";
 /// Used by the generic candle per-asset stream and its route-derived generation-set label.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const CANDLE_ADAPTER: &str = "candle_sdxl";
-// Shared by the MLX path and the candle Lens lane (sc-5126) — both cap a job's total LoRAs at
+// Shared by the MLX path and every adapter-capable candle image lane: all cap a job's total LoRAs at
 // MAX_JOB_LORAS (`resolve_adapters`), so the const is available on the Windows candle build too.
 // The web pickers enforce a lower user-selectable cap (presetUtils.MAX_USER_JOB_LORAS) that leaves
 // headroom for an auto-applied builtin within this total (sc-8936).
@@ -237,6 +230,204 @@ fn requested_decoder_id(
 /// Takes no `reqwest::Client`: its only use was forwarding one to the inline-upscale post-pass, and
 /// both upscalers became cache-only resolvers (sc-17633 / sc-17632). The likeness/tier staging this
 /// handler still triggers builds its own context inside `image_jobs/base.rs`.
+const PROMPT_ENHANCEMENT_FACT_KEY: &str = "promptEnhancement";
+const PROMPT_ENHANCE_MAX_TOKENS: u64 = 2048;
+const PROMPT_ENHANCE_MAX_TEMPERATURE: f64 = 2.0;
+
+fn parse_prompt_enhancement_fields(
+    advanced: &JsonObject,
+) -> WorkerResult<(bool, Option<f32>, Option<u32>)> {
+    if advanced.contains_key(PROMPT_ENHANCEMENT_FACT_KEY) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "advanced.{PROMPT_ENHANCEMENT_FACT_KEY} is worker-owned"
+        )));
+    }
+    let enabled = match advanced.get("enhancePrompt") {
+        None => false,
+        Some(Value::Bool(enabled)) => *enabled,
+        Some(_) => {
+            return Err(WorkerError::InvalidPayload(
+                "advanced.enhancePrompt must be a boolean".to_owned(),
+            ));
+        }
+    };
+    let temperature = advanced
+        .get("enhanceTemperature")
+        .map(|value| {
+            let value = value
+                .as_f64()
+                .filter(|value| value.is_finite())
+                .ok_or_else(|| {
+                    WorkerError::InvalidPayload(
+                        "advanced.enhanceTemperature must be a finite number".to_owned(),
+                    )
+                })?;
+            if !(0.0..=PROMPT_ENHANCE_MAX_TEMPERATURE).contains(&value) {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "advanced.enhanceTemperature must be between 0 and {PROMPT_ENHANCE_MAX_TEMPERATURE}"
+                )));
+            }
+            Ok(value as f32)
+        })
+        .transpose()?;
+    let max_tokens = advanced
+        .get("enhanceMaxTokens")
+        .map(|value| {
+            let value = value.as_u64().ok_or_else(|| {
+                WorkerError::InvalidPayload(
+                    "advanced.enhanceMaxTokens must be an integer".to_owned(),
+                )
+            })?;
+            if !(1..=PROMPT_ENHANCE_MAX_TOKENS).contains(&value) {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "advanced.enhanceMaxTokens must be between 1 and {PROMPT_ENHANCE_MAX_TOKENS}"
+                )));
+            }
+            Ok(value as u32)
+        })
+        .transpose()?;
+    if !enabled && (temperature.is_some() || max_tokens.is_some()) {
+        return Err(WorkerError::InvalidPayload(
+            "prompt-enhancement tuning requires advanced.enhancePrompt=true".to_owned(),
+        ));
+    }
+    Ok((enabled, temperature, max_tokens))
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn prompt_enhancement_has_edit_input(request: &ImageRequest) -> bool {
+    request
+        .source_asset_id
+        .as_deref()
+        .is_some_and(|id| !id.trim().is_empty())
+        || request
+            .reference_asset_id
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty())
+        || !request.reference_asset_ids.is_empty()
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn prompt_enhancement_has_reference_input(request: &ImageRequest) -> bool {
+    request
+        .reference_asset_id
+        .as_deref()
+        .is_some_and(|id| !id.trim().is_empty())
+        || !request.reference_asset_ids.is_empty()
+}
+
+fn validate_prompt_enhancement_route(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<()> {
+    let mode = request.mode.as_str();
+
+    #[cfg(target_os = "macos")]
+    {
+        let _ = settings;
+        if !matches!(
+            mode,
+            "text_to_image" | "edit_image" | "character_image" | "style_variations"
+        ) {
+            return Err(WorkerError::InvalidPayload(format!(
+                "prompt enhancement on MLX does not support image mode {mode}"
+            )));
+        }
+    }
+
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        if !settings.backend_candle_enabled {
+            return Err(WorkerError::InvalidPayload(
+                "prompt enhancement requires the enabled native Candle backend on this worker"
+                    .to_owned(),
+            ));
+        }
+        if !matches!(mode, "text_to_image" | "edit_image") {
+            return Err(WorkerError::InvalidPayload(format!(
+                "prompt enhancement on Candle supports only text_to_image and edit_image; mode {mode} is unsupported"
+            )));
+        }
+    }
+
+    #[cfg(not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )))]
+    {
+        let _ = (mode, settings);
+        Err(WorkerError::InvalidPayload(
+            "prompt enhancement requires a native MLX or Candle image backend".to_owned(),
+        ))
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    {
+        if mode == "text_to_image" && prompt_enhancement_has_edit_input(request) {
+            return Err(WorkerError::InvalidPayload(
+                "prompt enhancement text_to_image cannot include source or reference image assets"
+                    .to_owned(),
+            ));
+        }
+        if mode == "edit_image" && !prompt_enhancement_has_edit_input(request) {
+            return Err(WorkerError::InvalidPayload(
+                "prompt enhancement edit_image requires a source or reference image asset"
+                    .to_owned(),
+            ));
+        }
+        if matches!(mode, "character_image" | "style_variations")
+            && !prompt_enhancement_has_reference_input(request)
+        {
+            return Err(WorkerError::InvalidPayload(format!(
+                "prompt enhancement {mode} requires a reference image asset"
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Re-check the backend and route at the worker trust boundary. Raw queue writes and legacy stored
+/// jobs need the same fail-closed behavior as typed API creates, including a build with no native
+/// image backend. The route shape is checked before any weight or project asset load.
+fn validate_prompt_enhancement_request(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<()> {
+    let (enabled, _, _) = parse_prompt_enhancement_fields(&request.advanced)?;
+    if !enabled {
+        return Ok(());
+    }
+    if request.model != "flux2_dev" {
+        return Err(WorkerError::InvalidPayload(
+            "prompt enhancement is supported only by FLUX.2-dev; FLUX.2-Klein and other models reject it"
+                .to_owned(),
+        ));
+    }
+    let strict_control = request
+        .advanced
+        .get("poses")
+        .and_then(Value::as_array)
+        .is_some_and(|poses| !poses.is_empty())
+        || request.advanced.contains_key("controlWeights")
+        || request.advanced.contains_key("controlImage")
+        || request.advanced.contains_key("controlMode");
+    if strict_control {
+        return Err(WorkerError::InvalidPayload(
+            "prompt enhancement cannot be combined with FLUX.2-dev strict control".to_owned(),
+        ));
+    }
+    validate_prompt_enhancement_route(request, settings)
+}
+
 pub(crate) async fn run_image_generate_job(
     api: &ApiClient,
     settings: &Settings,
@@ -249,6 +440,7 @@ pub(crate) async fn run_image_generate_job(
         ));
     }
     validate_hires_fix_request(&request)?;
+    validate_prompt_enhancement_request(&request, settings)?;
     if let Some(decoder_id) = requested_decoder_id(&request.advanced)? {
         #[cfg(any(
             target_os = "macos",
@@ -384,6 +576,27 @@ pub(crate) async fn run_image_generate_job(
                     .is_some_and(|route| route.kind().applies_request_loras())
             }
         };
+        // sc-18477: a request-owned adapter stack is part of the generation contract, not an
+        // optional hint. Bespoke routes historically bypassed the generic LoadSpec and several of
+        // them therefore rendered successfully while silently omitting request.loras. Fail before
+        // any model/conditioning load unless the selected executable route explicitly consumes the
+        // stack. Each route moves onto the allow-list only in the same change that wires its actual
+        // provider load, which makes this guard fail closed for direct worker callers as well as API
+        // submissions.
+        if !request.loras.is_empty() && !route_applies_loras {
+            // Label with the route KIND, not the prepared route itself: the prepared value carries
+            // pinned load payloads and is deliberately not `Debug`, and the kind is what names the
+            // lane in the refusal anyway.
+            let route_label = route
+                .as_ref()
+                .map(|selected| format!("{:?}", selected.kind()))
+                .unwrap_or_else(|| "unavailable".to_owned());
+            return Err(WorkerError::InvalidPayload(format!(
+                "{} cannot apply the selected LoRA/LoKr stack through the resolved {} image route; \
+                 choose a model/request shape whose active backend supports adapters",
+                request.model, route_label,
+            )));
+        }
         if plan.workflow_source.is_some() && route_applies_loras {
             plan.loras = trusted_loras_for_share(api, settings, job, &request).await;
         }
@@ -776,14 +989,11 @@ pub(crate) async fn run_image_generate_job(
         false
     };
     // Windows/CUDA candle execution path (sc-3675, epic 3672). The macOS dispatch above is MLX-bound;
-    // candle is a narrow txt2img-only lane, so for a candle-engine model (sdxl/realvisxl) with the
-    // backend enabled we run `generate_candle_stream` (same neutral assetWrites/progress/cancellation
-    // harness). Gated on `backend_candle_enabled` (default off) so production routing is unchanged
-    // until parity is accepted — otherwise it stubs exactly like before.
-    // InstantID (sc-5491, epic 5480) is the exception to "txt2img-only": the candle InstantID provider
-    // gets its own bespoke path (`generate_instantid_stream`, the off-Mac sibling of the macOS
-    // `ImageRoute::InstantId` arm) — checked first since `instantid_realvisxl` is not an inventory
-    // `is_candle_engine` id.
+    // this branch executes the single route selected by `resolve_candle_image_route`, covering the
+    // generic registered-generator stream plus the bespoke edit, reference, identity, control,
+    // imported, and ComfyUI lanes. Every route uses the same neutral assetWrites/progress/cancellation
+    // harness. Gated on `backend_candle_enabled` (default off), so disabling Candle preserves the stub
+    // behavior.
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let handled = match route {
         Some(route) => {
@@ -930,23 +1140,6 @@ pub(crate) async fn run_image_generate_job(
                 // like the MLX `generate_bernini_image_stream`.
                 CandleImageRoute::Bernini => {
                     generate_candle_bernini_image_stream(
-                        api,
-                        settings,
-                        job,
-                        &plan,
-                        &project_path,
-                        backend,
-                        &mut asset_writes,
-                    )
-                    .await?;
-                }
-                // Z-Image identity-init for Image Studio "With Character" (sc-8409, epic 4406) — the
-                // off-Mac sibling of the macOS generic lane's Z-Image identity img2img; reuses the candle
-                // ZImageEdit engine with the identity `referenceAssetId` as the source-latent init + wires
-                // the sc-4411 face-likeness scorer. Diverted before the txt2img arm (else the reference
-                // silently drops).
-                CandleImageRoute::ZimageIdentity => {
-                    generate_candle_zimage_identity_stream(
                         api,
                         settings,
                         job,
@@ -1168,6 +1361,34 @@ pub(crate) async fn run_image_generate_job(
                     )
                     .await?;
                 }
+                CandleImageRoute::KreaImportedControl => {
+                    generate_krea_imported_control_stream(
+                        api,
+                        settings,
+                        job,
+                        &plan,
+                        &project_path,
+                        backend,
+                        &mut asset_writes,
+                    )
+                    .await?;
+                }
+                CandleImageRoute::MageFinetuned => {
+                    let PreparedCandleImageRoute::MageFinetuned(transformer) = route else {
+                        unreachable!("Mage fine-tuned route missing its prepared transformer")
+                    };
+                    generate_mage_finetuned_stream(
+                        api,
+                        settings,
+                        job,
+                        *transformer,
+                        &plan,
+                        &project_path,
+                        backend,
+                        &mut asset_writes,
+                    )
+                    .await?;
+                }
                 CandleImageRoute::SdxlImported => {
                     let PreparedCandleImageRoute::SdxlImported(sources) = route else {
                         unreachable!("SDXL imported route missing its prepared sources")
@@ -1217,7 +1438,10 @@ pub(crate) async fn run_image_generate_job(
                 // Registry-driven candle generation. Mage Edit is named separately by the resolver so
                 // an edit without its required source can never fall through as plain T2I; both variants
                 // use the same generic stream once their request shapes are resolved.
-                CandleImageRoute::MageEdit | CandleImageRoute::CandleTxt2Img => {
+                CandleImageRoute::MageEdit
+                | CandleImageRoute::SenseNovaEdit
+                | CandleImageRoute::KolorsEdit
+                | CandleImageRoute::CandleTxt2Img => {
                     generate_candle_stream(
                         api,
                         settings,
@@ -1968,7 +2192,11 @@ pub(crate) fn upscaled_workflow_share(
 /// Compiled under `test` everywhere for the same reason as [`upscaled_workflow_share`]:
 /// `image_jobs/detail.rs` compiles on macOS only, and the lineage contract should not go untested on
 /// every other platform.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    test
+))]
 pub(crate) fn detail_workflow_share(
     job_payload: &JsonObject,
     model: &str,
@@ -2941,12 +3169,15 @@ include!("image_jobs/krea_imported.rs");
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 include!("image_jobs/sdxl_imported.rs");
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 // Fine-tuned Mage-Flow base checkpoint routing (sc-15036, epic 14034 F6): the `transformer/`-shaped
 // artifact a FULL base fine-tune writes, paired at load with the installed base's shared text
 // encoder + VAE and rendered through the `load_finetuned` entrypoint that skips the pinned-
-// checkpoint identity guard a fine-tune necessarily fails. macOS/MLX only — the Mage generator is
-// `mac_only` and there is no candle Mage engine.
+// checkpoint identity guard a fine-tune necessarily fails. The shared request path uses native MLX
+// on macOS and the native Candle Mage engine on CUDA hosts.
 include!("image_jobs/mage_finetuned.rs");
 #[cfg(target_os = "macos")]
 // SenseNova edit routing.
@@ -3042,7 +3273,8 @@ use conditioning_gate::{admit_conditioning_overlay, admit_conditioning_paths};
 mod base_admission;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use base_admission::{
-    admit_candle_base, admit_candle_load_spec_floor, prepare_cached_candle_base_floor,
+    admit_candle_base, admit_candle_base_floor, admit_candle_base_floor_with_resident_overlay,
+    admit_candle_load_spec_floor, has_candle_tier_peak_row, prepare_cached_candle_base_floor,
     safetensors_tensor_bytes_with_prefixes, CandleBaseEvidence,
 };
 // Shared candle strict-control driver (sc-8304, epic 8236): the `CandleStrictControl` trait + the one
@@ -3122,17 +3354,14 @@ use qwen_comfyui_candle::generate_candle_qwen_comfyui_stream;
 mod flux2_comfyui_candle;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use flux2_comfyui_candle::generate_candle_flux2_comfyui_stream;
-// Z-Image identity-init for Image Studio "With Character" — the Windows/CUDA candle lane ONLY (sc-8409,
-// epic 4406). macOS keeps the MLX `z_image_turbo` generic-lane identity img2img (`generate_stream` ⇒
-// `resolve_zimage_identity_init`); off-Mac this bespoke lane reuses the candle `ZImageEdit` engine with
-// the identity `referenceAssetId` as the source-latent init + wires the sc-4411 face-likeness scorer.
-// Reuses the sibling `zimage_edit_candle.rs` base/steps helpers, so it is included right after it.
+// Z-Image identity-init request gate for Image Studio "With Character" (sc-8409, epic 4406). Both
+// backends now generate through their registered `z_image_turbo` provider; this candle-only helper
+// preserves the off-Mac availability/base-resolution predicate while the generic stream owns Reference
+// conditioning, adapters, provenance, and face-likeness scoring.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod zimage_identity_candle;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use zimage_identity_candle::{
-    generate_candle_zimage_identity_stream, zimage_identity_candle_available,
-};
+use zimage_identity_candle::{zimage_identity_candle_available, zimage_identity_candle_strength};
 // PuLID-FLUX face identity — the Windows/CUDA candle lane ONLY (sc-5492). macOS keeps the
 // inventory-registered `pulid_flux` MLX generator (image_jobs/pulid.rs); the candle `PulidFlux` is a
 // bespoke provider, so this file is candle-gated and distinct from the macOS route.
@@ -3143,20 +3372,21 @@ use pulid_candle::{generate_candle_pulid_stream, pulid_candle_available};
 #[cfg(target_os = "macos")]
 // PuLID-FLUX native routing.
 include!("image_jobs/pulid.rs");
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 // image detail tile-ControlNet routing.
 include!("image_jobs/detail.rs");
 
-/// Off macOS the in-process engine is unavailable; the capability is not advertised and
-/// `image_detail` remains queued (the `mlx` worker is macOS-only).
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
 pub(crate) async fn run_image_detail_job(
     _api: &ApiClient,
     _settings: &Settings,
     _job: &JobSnapshot,
 ) -> WorkerResult<()> {
     Err(WorkerError::InvalidPayload(
-        "image_detail runs on the macOS MLX worker, not this worker".to_owned(),
+        "image_detail requires either the MLX or Candle inference backend".to_owned(),
     ))
 }
 

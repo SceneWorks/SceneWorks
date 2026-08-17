@@ -1,11 +1,12 @@
 use super::{
     admit_conditioning_paths, apply_candle_image_load_shape, candle_artifact_path_matches,
     candle_certified_artifact_path, candle_pinned_hf_artifact_path, consume_gen_events,
-    drive_gen_items_scored, load_reference_image, non_empty, resolve_advanced_or_manifest_f32_with,
-    resolve_advanced_or_manifest_u32_with, resolve_character_image_likeness_source, resolve_seed,
-    stage_likeness, start_gen_stream, ApiClient, Image, ImagePlan, ImageRequest, IpAdapterFlux,
-    IpAdapterFluxPaths, IpAdapterFluxRequest, JobSnapshot, JsonObject, Path, PathBuf, Settings,
-    Value, WorkerError, WorkerResult,
+    drive_gen_items_scored, load_reference_image, non_empty, resolve_adapters,
+    resolve_advanced_or_manifest_f32_with, resolve_advanced_or_manifest_u32_with,
+    resolve_character_image_likeness_source, resolve_seed, stage_likeness, start_gen_stream,
+    ApiClient, Image, ImagePlan, ImageRequest, IpAdapterFlux, IpAdapterFluxPaths,
+    IpAdapterFluxRequest, JobSnapshot, JsonObject, Path, PathBuf, Settings, Value, WorkerError,
+    WorkerResult,
 };
 use super::{advanced, ensure_hf_cached_file, huggingface_snapshot_dir};
 use super::{resolve_app_managed_model_dir, standard_tier_subdir, DownloadContext};
@@ -330,6 +331,7 @@ pub(super) async fn generate_candle_flux_ipadapter_stream(
         .map(|index| (resolve_seed(request, index), request.prompt.clone()))
         .collect();
     let total = work.len();
+    let adapters = resolve_adapters(request, settings)?;
 
     let engine_id = if request.model == "flux_schnell" {
         "flux1_schnell"
@@ -341,8 +343,13 @@ pub(super) async fn generate_candle_flux_ipadapter_stream(
         Some("q8") => "q8",
         _ => "bf16",
     };
+    let adapter_bytes: u64 = adapters
+        .iter()
+        .map(|spec| gen_core::weightsmeta::safetensors_path_bytes(&spec.path))
+        .sum();
     let runtime_overlay_bytes = gen_core::weightsmeta::safetensors_path_bytes(&adapter_file)
-        .saturating_add(gen_core::weightsmeta::safetensors_path_bytes(&encoder_dir));
+        .saturating_add(gen_core::weightsmeta::safetensors_path_bytes(&encoder_dir))
+        .saturating_add(adapter_bytes);
     let strategy_spec = apply_candle_image_load_shape(
         engine_id,
         gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(flux_base.clone()))
@@ -351,6 +358,7 @@ pub(super) async fn generate_candle_flux_ipadapter_stream(
                 "flux_ip_image_encoder",
                 gen_core::WeightsSource::Dir(encoder_dir.clone()),
             )
+            .with_adapters(adapters.clone())
             .with_offload_policy(gen_core::OffloadPolicy::Sequential),
     );
     let raw_budget = crate::vram_gate::apply_vram_cap(
@@ -443,6 +451,7 @@ pub(super) async fn generate_candle_flux_ipadapter_stream(
                 flux_base,
                 ip_adapter: adapter_file,
                 image_encoder: encoder_dir,
+                adapters,
             };
             let model =
                 IpAdapterFlux::load_with_memory(&paths, generation_memory).map_err(|error| {

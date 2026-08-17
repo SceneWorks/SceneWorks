@@ -20,10 +20,8 @@
 //    `is_diffusers_snapshot_dir` exists specifically to REJECT a dir carrying `config.json`, which
 //    is precisely this shape.
 //
-// macOS/MLX only, deliberately: the Mage generator descriptor is `mac_only`, there is no candle
-// Mage engine to route a fine-tune to, and `mage-flow` is correspondingly absent from
-// `CANDLE_ROUTED_FAMILIES`. This file is `include!`d into the `image_jobs` module, sharing its
-// imports.
+// Both native backends serve this lane through their runtime bundle's Mage full-fine-tune loader.
+// This file is `include!`d into the `image_jobs` module, sharing its imports.
 //
 // Scope: plain **txt2img**. The non-edit Mage variants advertise no conditioning at all, and
 // `load_finetuned` refuses adapters outright, so the scheduler's `mage-flow` arm in
@@ -35,6 +33,8 @@
 /// builtin `mage_flow*` registry ids and their `mlx_mage` label).
 #[cfg(target_os = "macos")]
 const MAGE_FINETUNED_ENGINE: &str = "mlx_mage_finetuned";
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const MAGE_FINETUNED_ENGINE: &str = "candle_mage_finetuned";
 
 /// The builtin catalog id whose installed snapshot supplies the shared text encoder + VAE a
 /// fine-tuned transformer is paired with.
@@ -44,7 +44,6 @@ const MAGE_FINETUNED_ENGINE: &str = "mlx_mage_finetuned";
 /// `coRequisite` rows are what name the shared-components mirror. The components are BIT-IDENTICAL
 /// across all six Mage variants (sc-14979), so this resolves the same bytes whichever variant a
 /// user happens to have installed.
-#[cfg(target_os = "macos")]
 const MAGE_FINETUNED_BASE_MODEL: &str = "mage_flow_base";
 
 /// The tier the shared components are staged from: **dense bf16**.
@@ -56,18 +55,14 @@ const MAGE_FINETUNED_BASE_MODEL: &str = "mage_flow_base";
 /// prompt). Pairing dense with dense is the coherent load, and it is the same `bf16` tier the
 /// training run itself resolved (`training_jobs::TRAINING_COMPONENT_TIER`), so a user who could
 /// train has the components installed by construction.
-#[cfg(target_os = "macos")]
 const MAGE_FINETUNED_COMPONENT_TIER: &str = "bf16";
 
 /// Denoise-steps / guidance fallbacks — the undistilled `mage_flow_base` regime a fine-tune
 /// inherits. The Studio normally supplies both from the catalog entry's `defaults`
 /// (`apply_family_studio_surface_defaults`); these apply only when it does not.
-#[cfg(target_os = "macos")]
 const MAGE_FINETUNED_DEFAULT_STEPS: u32 = 30;
-#[cfg(target_os = "macos")]
 const MAGE_FINETUNED_DEFAULT_GUIDANCE: f32 = 5.0;
 
-#[cfg(target_os = "macos")]
 #[derive(Debug, PartialEq, Eq)]
 struct PreparedMageFinetunedTransformer {
     directory: PathBuf,
@@ -89,7 +84,6 @@ struct PreparedMageFinetunedTransformer {
 /// The path is confined by `normalize_app_managed_model_path` (a payload can never point the
 /// checkpoint outside a declared root; LAN jobs API, epic 4484) — the same confinement
 /// `resolve_weights_dir` uses.
-#[cfg(target_os = "macos")]
 fn resolve_mage_finetuned_transformer(
     request: &ImageRequest,
     settings: &Settings,
@@ -158,7 +152,6 @@ fn resolve_mage_finetuned_transformer(
 ///
 /// All-or-nothing, before any compute: a missing component fails the job with the seam's actionable
 /// error naming the component id + repo, rather than a mid-load "No such file or directory".
-#[cfg(target_os = "macos")]
 fn resolve_mage_finetuned_components(
     settings: &Settings,
 ) -> WorkerResult<std::collections::BTreeMap<String, WeightsSource>> {
@@ -205,7 +198,10 @@ fn resolve_mage_finetuned_components(
 /// installed — a missing one surfaces as the loud
 /// [`resolve_mage_finetuned_components`] error in the handler rather than a silent fall-through to
 /// the stub. Mirrors the shape of the other `…_available` predicates.
-#[cfg(all(target_os = "macos", test))]
+/// Test-facing claim probe. Production (both backends) routes through
+/// [`prepare_mage_finetuned_transformer`] so the payload-selected transformer dir stays pinned from
+/// route selection through provider load — the same split `sdxl_imported_available` uses.
+#[cfg(test)]
 fn mage_finetuned_available(request: &ImageRequest, settings: &Settings) -> bool {
     matches!(
         prepare_mage_finetuned_transformer(request, settings),
@@ -216,7 +212,6 @@ fn mage_finetuned_available(request: &ImageRequest, settings: &Settings) -> bool
 /// Validate the exact registered Mage generate shape and retain its pinned transformer files for
 /// dispatch. Production moves this value through [`PreparedImageRoute`] so async admission work
 /// cannot retarget the payload-selected directory between route selection and provider load.
-#[cfg(target_os = "macos")]
 fn prepare_mage_finetuned_transformer(
     request: &ImageRequest,
     settings: &Settings,
@@ -235,7 +230,6 @@ fn prepare_mage_finetuned_transformer(
 }
 
 /// Flat telemetry recorded on assets rendered from a fine-tuned base.
-#[cfg(target_os = "macos")]
 fn mage_finetuned_raw_settings(
     request: &ImageRequest,
     steps: u32,
@@ -263,12 +257,41 @@ fn mage_finetuned_raw_settings(
     raw
 }
 
+/// Build the per-image request for a generated Mage full fine-tune. The checkpoint inherits the
+/// undistilled Base descriptor, including true-CFG negative prompts; keeping this pure makes the
+/// accepted request surface independently testable without loading model weights.
+#[allow(clippy::too_many_arguments)]
+fn mage_finetuned_generation_request(
+    prompt: String,
+    negative_prompt: Option<String>,
+    width: u32,
+    height: u32,
+    seed: i64,
+    steps: u32,
+    guidance: f32,
+    preview: gen_core::PreviewSink,
+    cancel: &CancelFlag,
+) -> GenerationRequest {
+    GenerationRequest {
+        prompt,
+        negative_prompt,
+        width,
+        height,
+        count: 1,
+        seed: Some(seed as u64),
+        steps: Some(steps),
+        guidance: Some(guidance),
+        preview,
+        cancel: cancel.clone(),
+        ..Default::default()
+    }
+}
+
 /// Real fine-tuned Mage-Flow base generation (sc-15036): resolve the trained transformer dir and
 /// the installed base's shared components, load once through `load_finetuned`, and render each
 /// image on the blocking thread. The `Box<dyn Generator>` is bespoke (not registry-cached) — the
 /// checkpoint lives at a user path under a novel id, so there is nothing to key a registry cache
 /// on, exactly like the Krea imported lane.
-#[cfg(target_os = "macos")]
 #[allow(clippy::too_many_arguments)]
 async fn generate_mage_finetuned_stream(
     api: &ApiClient,
@@ -309,6 +332,8 @@ async fn generate_mage_finetuned_stream(
         1.0..=20.0,
     );
     let raw_settings = mage_finetuned_raw_settings(request, steps, guidance, quant_bits);
+    let negative_prompt = (!request.negative_prompt.trim().is_empty())
+        .then(|| request.negative_prompt.clone());
 
     let work: Vec<(i64, String)> = (0..request.count as usize)
         .map(|index| (resolve_seed(request, index), request.prompt.clone()))
@@ -327,8 +352,17 @@ async fn generate_mage_finetuned_stream(
         [transformer.config, transformer.weights],
         "Fine-tuned Mage-Flow source preparation failed",
     )?;
+    #[cfg(target_os = "macos")]
     let spec = crate::mlx_fit_gate::apply_residency_policy(spec, descriptor.id)?;
+    // Candle's pre-load floor is the LoadSpec's own bytes (the trained DiT plus both staged shared
+    // components) — the same seam the imported-SDXL lane admits on.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    admit_candle_load_spec_floor(&request.model, "Mage-Flow fine-tuned base", settings, &spec)
+        .await?;
 
+    // The load itself runs through the registered imported-source descriptor (`descriptor.id`), so
+    // each backend's registry entry supplies its own `load_finetuned` — the entrypoint that skips
+    // the pinned-checkpoint identity guard a full fine-tune necessarily fails.
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         descriptor.id,
@@ -340,18 +374,17 @@ async fn generate_mage_finetuned_stream(
                 if cancel.is_cancelled() {
                     return Ok(None);
                 }
-                let request = GenerationRequest {
+                let request = mage_finetuned_generation_request(
                     prompt,
+                    negative_prompt.clone(),
                     width,
                     height,
-                    count: 1,
-                    seed: Some(seed as u64),
-                    steps: Some(steps),
-                    guidance: Some(guidance),
+                    seed,
+                    steps,
+                    guidance,
                     preview,
-                    cancel: cancel.clone(),
-                    ..Default::default()
-                };
+                    &cancel,
+                );
                 let output = match model.generate(&request, &mut *on_progress) {
                     Ok(output) => output,
                     Err(_) if cancel.is_cancelled() => return Ok(None),

@@ -1,7 +1,7 @@
 {
   "backend": "candle",
   "generatedFrom": {
-    "inferenceRevision": "e58fb08dc6ef622e701ea3a9cb699e5be947593a",
+    "inferenceRevision": "931366f62a4e5800c54e0586b7fb34e3a4079e3b",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities --no-default-features --features backend-candle"
   },
   "engines": [
@@ -1009,6 +1009,28 @@
       }
     },
     {
+      "id": "wan2_2_vace_fun_14b",
+      "modality": "video",
+      "supportsPreview": false,
+      "denoiserOutputLatentSpace": {
+        "channels": 16,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "causal-4x",
+        "normalization": {
+          "kind": "perChannel",
+          "identity": "qwen-wan-z16-v1",
+          "channels": 16,
+          "contentHash": "fnv1a64:9f750a16272a301a"
+        }
+      }
+    },
+    {
       "id": "wan_vace",
       "modality": "video",
       "supportsPreview": false,
@@ -1080,8 +1102,8 @@
       "operation": "generate",
       "providerId": "flux2_dev",
       "conditioning": [],
-      "supportsLora": false,
-      "supportsLokr": false,
+      "supportsLora": true,
+      "supportsLokr": true,
       "supportedQuants": [
         "q4",
         "q8"
@@ -1151,8 +1173,8 @@
       "operation": "generate",
       "providerId": "qwen_image",
       "conditioning": [],
-      "supportsLora": false,
-      "supportsLokr": false,
+      "supportsLora": true,
+      "supportsLokr": true,
       "supportedQuants": [],
       "supportsKvCache": false,
       "supportsSequentialOffload": true,

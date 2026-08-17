@@ -35,6 +35,29 @@ fn catalog() -> &'static platform_runtime::RuntimeCatalog {
     })
 }
 
+/// The linked inference bundle's complete weights-free capability snapshot.
+///
+/// This is the source for the checked-in parity descriptor artifact. Returning JSON keeps the
+/// worker-side artifact schema identical to `runtime-catalog::RuntimeCatalogSnapshot::to_json`
+/// without defining a second copy of the inference contract in SceneWorks.
+pub(crate) fn capability_snapshot_json() -> Option<serde_json::Value> {
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    {
+        Some(catalog().snapshot().to_json())
+    }
+
+    #[cfg(not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )))]
+    {
+        None
+    }
+}
+
 pub(crate) fn media() -> &'static ProviderRegistry {
     #[cfg(any(
         target_os = "macos",
@@ -77,6 +100,15 @@ pub(crate) fn memory_contract_surface_registry() -> gen_core::Result<ProviderReg
     {
         gen_core::ProviderRegistryBuilder::new().build()
     }
+}
+
+/// A registered trainer descriptor without loading model weights. Used by the training dry-run and
+/// real-run shared preflight so both paths validate the active backend's exact network surface.
+pub(crate) fn trainer_descriptor(id: &str) -> Option<gen_core::TrainerDescriptor> {
+    media()
+        .trainers()
+        .map(|registration| (registration.descriptor)())
+        .find(|descriptor| descriptor.id == id)
 }
 
 /// The runtime's dedicated **candle audio** provider registry (SceneWorks Audio Studio, epic 13400 /

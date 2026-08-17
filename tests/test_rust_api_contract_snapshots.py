@@ -31,6 +31,17 @@ from rust_api_harness import (
 pytestmark = pytest.mark.parity
 
 ROOT = Path(__file__).resolve().parents[1]
+# 🔴 REGENERATE ON LINUX WITH DEFAULT FEATURES, NOT ON A MAC. These snapshots record the contract
+# of the build `parity-rust` runs: Linux with NO `backend-candle`, i.e. the "neither" build. Parts
+# of the model manifest are cfg-split, so a Mac serves a DIFFERENT and equally correct response —
+# `encoder_route_for_model` has a real arm under
+# `any(target_os = "macos", all(not(macos), feature = "backend-candle"))` and a `None`-returning
+# stub otherwise, so `textEncoderOptions` is present on macOS and absent on the lane. Running
+# `UPDATE_SNAPSHOTS=1` here therefore bakes macOS-only keys into a Linux contract and turns this
+# suite red on CI while it passes locally — which is exactly how it was broken once.
+#
+# Expect `pytest -m parity` on a Mac to report that field as `only in candidate`. That divergence is
+# the cfg split showing through, not snapshot drift, and it is not a reason to regenerate.
 SNAPSHOT_PATH = ROOT / "tests" / "fixtures" / "rust_api_contract_snapshots" / "snapshots.json"
 UPDATE_SNAPSHOTS = os.getenv(
     "UPDATE_SNAPSHOTS",

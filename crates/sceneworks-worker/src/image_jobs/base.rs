@@ -2,7 +2,7 @@
 // zimage), the candle edit handlers (*_edit_candle.rs), and the video I2V resolve paths
 // (video_jobs.rs). Kept in base.rs — included on macOS AND the `backend-candle` lane (and nowhere
 // else) — so `crate::image_jobs::fit_engine_image` resolves on exactly the lanes that call it. Moved
-// here from the macOS-only flux2.rs (sc-6231; the sc-6139 fit-mode refactor left it macOS-gated, which
+// here from the macOS MLX flux2.rs (sc-6231; the sc-6139 fit-mode refactor left the shared helper macOS-gated, which
 // broke the candle build because video_jobs.rs / the candle edit handlers call it). No `#[cfg]` here:
 // availability follows base.rs's own include cfg, which matches the callers'.
 
@@ -155,18 +155,18 @@ enum ImageRoute {
     /// An imported/user single-file Krea 2 checkpoint (epic 14015 S0c, sc-14018): a non-builtin
     /// `krea_2`-family model whose `modelPath` is a single `.safetensors` DiT → the bespoke in-place
     /// assembly lane, which pairs the imported transformer with a resident `krea_2` base tier (shared
-    /// Qwen3-VL TE / Qwen VAE / tokenizer) and loads via the S0b MLX native single-file entrypoint. A
+    /// Qwen3-VL TE / Qwen VAE / tokenizer) and loads through the native MLX or Candle single-file
+    /// entrypoint. A
     /// builtin Krea id (`krea_2_turbo` / `krea_2_raw`, in `MODEL_TABLE`) never reaches here —
     /// `resolve_imported_krea_dit` returns `None` for it, so the snapshot-dir Krea path is untouched.
-    /// txt2img only (a bare imported DiT carries no conditioning components).
+    /// The resident base tier supplies the img2img/edit conditioning and LoRA/LoKr components.
     KreaImported,
     /// An imported/user single-file Krea 2 checkpoint carrying a **strict-pose set** (a non-empty
     /// `advanced.poses` outside edit mode): the trained pose control-branch overlay rides the
-    /// FILE-LOADED imported DiT via the MLX native control entrypoint
-    /// (`load_control_from_native_dit_file`), one image per pose — the imported twin of
+    /// FILE-LOADED imported DiT via the native MLX or Candle control entrypoint, one image per pose
+    /// — the imported twin of
     /// [`ImageRoute::KreaControl`]. Claimed BEFORE the plain [`ImageRoute::KreaImported`] arm so a
-    /// pose set gets the per-pose count + control render instead of per-image t2i. MLX-only
-    /// (`KREA_IMPORTED_SUPPORTS_POSE_CONTROL`); the candle imported lane has no control path.
+    /// pose set gets the per-pose count + control render instead of per-image generation.
     KreaImportedControl,
     /// A fused SDXL LDM/A1111 single-file checkpoint. The file carries the UNet, both text encoders,
     /// and VAE; tokenizer assets are borrowed from the installed SDXL base turnkey.
@@ -316,9 +316,9 @@ fn resolve_image_route_with_imported_availability(
         // An imported/user single-file Krea 2 checkpoint (epic 14015 S0c, sc-14018): a non-builtin
         // `krea_2`-family model whose `modelPath` is a single `.safetensors` DiT → the bespoke in-place
         // assembly lane. A builtin Krea id never claims this (`resolve_imported_krea_dit` returns `None`
-        // for a `MODEL_TABLE` id), so the generic `mlx_available` snapshot-dir arm below is unchanged for
-        // builtin Krea. The imported id is in no `MODEL_TABLE`, so `mlx_available` is `false` for it — this
-        // arm is what routes it to real MLX generation at all (S0d marked it Mac-routable; this loads it).
+        // for a `MODEL_TABLE` id), so the generic registry-backed snapshot-dir arms are unchanged for
+        // builtin Krea. Imported ids are not in `MODEL_TABLE`; the bespoke MLX/Candle gates claim them
+        // here for text-to-image, img2img/edit, and adapter-bearing generation.
         Some(ImageRoute::KreaImported)
     } else if sdxl_imported_available {
         Some(ImageRoute::SdxlImported)
@@ -513,8 +513,8 @@ impl ImageRoute {
             // Multi-phase (S4) is likewise plain per-image: `count` renders, each its own seed, driven
             // through the phase plan. No angle/pose grouping.
             | ImageRoute::KreaMultiPhase
-            // Imported single-file Krea 2 (S0c) is plain per-image txt2img: `count` renders, each its own
-            // seed. No angle/pose grouping (a bare imported DiT carries no conditioning).
+            // Imported single-file Krea 2 renders `count` images here for text-to-image or reference/edit
+            // conditioning; strict-pose requests use the separate control route above.
             | ImageRoute::KreaImported
             | ImageRoute::SdxlImported
             // A fine-tuned Mage-Flow base (sc-15036) is plain per-image txt2img too: `count`
@@ -563,6 +563,8 @@ enum CandleImageRoute {
     Flux2Edit,
     /// Qwen-Image-Edit reference / dual-latent edit (sc-5487).
     QwenEdit,
+    /// SenseNova-U1 instruction/character edit through the registered Reference/MultiReference path.
+    SenseNovaEdit,
     /// Z-Image img2img / edit (sc-6595).
     ZimageEdit,
     /// Mage-Flow Base/RL/Turbo instruction edit. Uses the generic registry stream, but requires
@@ -596,11 +598,13 @@ enum CandleImageRoute {
     /// the off-Mac twin of [`ImageRoute::KreaImported`], required because imported IDs are not registry
     /// engine IDs and would otherwise fall through to the procedural stub.
     KreaImported,
+    /// Strict-pose control over an imported Krea DiT, one image per pose.
+    KreaImportedControl,
+    /// A generated full-fine-tune Mage transformer paired with the installed Base TE/VAE.
+    MageFinetuned,
     /// Off-Mac twin of [`ImageRoute::SdxlImported`], loaded by candle from the fused checkpoint plus
     /// the three caller-staged SDXL components.
     SdxlImported,
-    /// Z-Image identity-init for Image Studio "With Character" (sc-8409).
-    ZimageIdentity,
     /// SDXL IP-Adapter-Plus reference conditioning (sc-5488).
     SdxlIpAdapter,
     /// Kolors IP-Adapter-Plus reference conditioning (sc-5488).
@@ -613,6 +617,8 @@ enum CandleImageRoute {
     QwenControl,
     /// Kolors strict-pose ControlNet (sc-5489).
     KolorsControl,
+    /// Kolors source-image img2img/edit through the registered generator.
+    KolorsEdit,
     /// Z-Image strict-pose Fun-ControlNet (sc-5489).
     ZimageControl,
     /// FLUX.2-dev strict-pose Fun-Controlnet-Union (sc-7736).
@@ -673,25 +679,199 @@ const WIRED_CANDLE_POSE_FAMILIES: &[&str] = &[
 ];
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_conditioned_angle_set(request: &ImageRequest) -> bool {
+    request.mode == "character_image"
+        && advanced::flag(&request.advanced, "angleSet")
+        && pose_entries(request).is_empty()
+}
+
+/// Seeds/prompts for a Candle reference-edit lane. Angle sets use the canonical 11 prompts with one
+/// shared seed; every other request preserves the ordinary count/per-image seed contract.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn candle_conditioned_edit_work(request: &ImageRequest) -> Vec<(i64, String)> {
+    if candle_conditioned_angle_set(request) {
+        let seed = resolve_seed(request, 0);
+        return sceneworks_core::angle_kps::BUILTIN_ANGLE_SET_ORDER
+            .iter()
+            .map(|angle| (seed, augment_prompt_for_angle(&request.prompt, angle)))
+            .collect();
+    }
+    (0..request.count as usize)
+        .map(|index| (resolve_seed(request, index), request.prompt.clone()))
+        .collect()
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn sensenova_edit_candle_reference_ids(request: &ImageRequest) -> Vec<String> {
+    if !request.reference_asset_ids.is_empty() {
+        return request.reference_asset_ids.iter().take(5).cloned().collect();
+    }
+    if let Some(id) = request
+        .reference_asset_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        return vec![id.to_owned()];
+    }
+    if request.mode == "edit_image" {
+        if let Some(id) = request
+            .source_asset_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
+            return vec![id.to_owned()];
+        }
+    }
+    Vec::new()
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn resolve_sensenova_candle_edit(
+    request: &ImageRequest,
+    settings: &Settings,
+    project_path: &Path,
+) -> WorkerResult<Vec<Image>> {
+    let ids = sensenova_edit_candle_reference_ids(request);
+    if ids.is_empty() {
+        return Err(WorkerError::InvalidPayload(
+            "SenseNova edit requires at least one reference image".to_owned(),
+        ));
+    }
+    ids.iter()
+        .map(|id| {
+            let image = load_reference_image(
+                &settings.data_dir,
+                &request.project_id,
+                id,
+                project_path,
+            )?;
+            if request.fit_mode == "stretch" {
+                Ok(image)
+            } else {
+                fit_engine_image(image, request.width, request.height, &request.fit_mode)
+            }
+        })
+        .collect()
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn resolve_sensenova_candle_true_cfg(request: &ImageRequest) -> f32 {
+    let default = if request.mode == "character_image" {
+        1.5
+    } else {
+        1.0
+    };
+    request
+        .advanced
+        .get("trueCfgScale")
+        .or_else(|| request.advanced.get("imageGuidanceScale"))
+        .and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+        .map(|value| value as f32)
+        .unwrap_or(default)
+        .clamp(1.0, 10.0)
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn resolve_candle_kolors_edit_init(
+    request: &ImageRequest,
+    settings: &Settings,
+    project_path: &Path,
+) -> WorkerResult<Option<(Image, f32)>> {
+    let Some(source_id) = request
+        .source_asset_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    else {
+        return Ok(None);
+    };
+    let source = load_reference_image(
+        &settings.data_dir,
+        &request.project_id,
+        source_id,
+        project_path,
+    )?;
+    let image = if request.fit_mode == "stretch" {
+        source
+    } else {
+        fit_engine_image(source, request.width, request.height, &request.fit_mode)?
+    };
+    Ok(Some((
+        image,
+        advanced::f32_clamped(&request.advanced, "strength", 0.6, 0.05..=1.0),
+    )))
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn is_sensenova_candle_model(model: &str) -> bool {
+    sceneworks_core::mlx_tier_completeness::SENSENOVA_MODELS.contains(&model)
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn sensenova_edit_candle_available(request: &ImageRequest, settings: &Settings) -> bool {
+    is_sensenova_candle_model(&request.model)
+        && matches!(request.mode.as_str(), "edit_image" | "character_image")
+        && !sensenova_edit_candle_reference_ids(request).is_empty()
+        && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn kolors_edit_candle_available(request: &ImageRequest, settings: &Settings) -> bool {
+    request.model == "kolors"
+        && request.mode == "edit_image"
+        && request
+            .source_asset_id
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty())
+        && request.reference_asset_id.is_none()
+        && request.reference_asset_ids.is_empty()
+        && request.mask_asset_id.is_none()
+        && pose_entries(request).is_empty()
+        && matches!(resolve_weights_dir(request, settings), Ok(Some(_)))
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 impl CandleImageRoute {
-    /// True only for routes whose actual load path applies the request's LoRA/LoKr stack. Z-Image
-    /// edit is the registered Turbo alias and therefore participates; the remaining bespoke edit,
-    /// IP-adapter, control, ComfyUI, PuLID and Bernini lanes intentionally do not.
+    /// True only for routes whose actual load path applies the request's LoRA/LoKr stack. This is
+    /// also the provenance contract: adding a route here requires the same change to thread the
+    /// resolved stack into its inference constructor.
     fn applies_request_loras(self, request: &ImageRequest) -> bool {
         match self {
             CandleImageRoute::InstantId
+            | CandleImageRoute::SdxlEdit
+            | CandleImageRoute::SdxlIpAdapter
+            | CandleImageRoute::KolorsIpAdapter
+            | CandleImageRoute::FluxIpAdapter
+            | CandleImageRoute::Pulid
+            | CandleImageRoute::QwenControl
+            | CandleImageRoute::KolorsControl
+            | CandleImageRoute::ZimageControl
+            | CandleImageRoute::Flux2Control
+            | CandleImageRoute::Flux1Control
+            | CandleImageRoute::Flux2Edit
+            | CandleImageRoute::ZimageComfyui
+            | CandleImageRoute::Flux2Comfyui
+            | CandleImageRoute::Bernini
             | CandleImageRoute::QwenEdit
+            | CandleImageRoute::QwenImageComfyui
             | CandleImageRoute::ZimageEdit
+            | CandleImageRoute::KolorsEdit
             | CandleImageRoute::MageEdit
             | CandleImageRoute::KreaEdit
             | CandleImageRoute::KreaTurboOnRaw
             | CandleImageRoute::KreaMultiPhase
             | CandleImageRoute::KreaImported
+            | CandleImageRoute::KreaImportedControl
             | CandleImageRoute::SdxlImported
             | CandleImageRoute::KreaControl => true,
             CandleImageRoute::CandleTxt2Img => {
-                !wants_krea_convrot(request)
-                    && mlx_model(&request.model).is_some_and(|model| model.supports_adapters())
+                mlx_model(&request.model).is_some_and(|model| model.supports_adapters())
             }
             _ => false,
         }
@@ -710,7 +890,21 @@ impl CandleImageRoute {
             | CandleImageRoute::Flux2Control
             | CandleImageRoute::Flux1Control
             | CandleImageRoute::KreaControl => pose_entries(request).len() as u32,
+            CandleImageRoute::KreaImportedControl => pose_entries(request).len() as u32,
             CandleImageRoute::InstantId => instantid_image_count(request, settings),
+            CandleImageRoute::QwenEdit
+                if qwen_edit_candle::qwen_edit_candle_pose_count(request)
+                    .is_some_and(|count| count > 0) =>
+            {
+                qwen_edit_candle::qwen_edit_candle_pose_count(request).unwrap_or_default() as u32
+            }
+            CandleImageRoute::Flux2Edit
+            | CandleImageRoute::QwenEdit
+            | CandleImageRoute::SenseNovaEdit
+                if candle_conditioned_angle_set(request) =>
+            {
+                sceneworks_core::angle_kps::BUILTIN_ANGLE_SET_ORDER.len() as u32
+            }
             // Every other lane (plain txt2img, the edit/reference/identity/comfyui/bernini lanes, and the
             // pose-reject arms — which error before generation) produces the requested count.
             _ => request.count,
@@ -725,6 +919,9 @@ impl CandleImageRoute {
             CandleImageRoute::SdxlEdit => sdxl_edit_candle::SDXL_EDIT_CANDLE_ENGINE,
             CandleImageRoute::Flux2Edit => flux2_edit_candle::FLUX2_EDIT_CANDLE_ENGINE,
             CandleImageRoute::QwenEdit => qwen_edit_candle::QWEN_EDIT_CANDLE_ENGINE,
+            CandleImageRoute::SenseNovaEdit | CandleImageRoute::KolorsEdit => {
+                candle_adapter_label(&request.model)
+            }
             CandleImageRoute::ZimageEdit => candle_adapter_label(&request.model),
             CandleImageRoute::KreaEdit => krea_edit_candle::KREA_EDIT_CANDLE_ENGINE,
             CandleImageRoute::KreaTurboOnRaw | CandleImageRoute::KreaMultiPhase => {
@@ -733,10 +930,9 @@ impl CandleImageRoute {
                     .unwrap_or(STUB_ADAPTER)
             }
             CandleImageRoute::KreaImported => KREA_IMPORTED_ENGINE,
+            CandleImageRoute::KreaImportedControl => KREA_IMPORTED_ENGINE,
+            CandleImageRoute::MageFinetuned => MAGE_FINETUNED_ENGINE,
             CandleImageRoute::SdxlImported => SDXL_IMPORTED_ENGINE,
-            CandleImageRoute::ZimageIdentity => {
-                zimage_identity_candle::ZIMAGE_IDENTITY_CANDLE_ENGINE
-            }
             CandleImageRoute::SdxlIpAdapter => sdxl_ipadapter::SDXL_IPADAPTER_ENGINE,
             CandleImageRoute::KolorsIpAdapter => kolors_ipadapter::KOLORS_IPADAPTER_ENGINE,
             CandleImageRoute::FluxIpAdapter => flux_ipadapter::FLUX_IPADAPTER_ENGINE,
@@ -777,6 +973,7 @@ enum PreparedCandleImageRoute {
     ZimageComfyui(Box<zimage_comfyui_candle::ComfyuiZImagePaths>),
     QwenImageComfyui(Box<qwen_comfyui_candle::ComfyuiQwenPaths>),
     Flux2Comfyui(Box<flux2_comfyui_candle::ComfyuiFlux2Paths>),
+    MageFinetuned(Box<PreparedMageFinetunedTransformer>),
 }
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -789,6 +986,7 @@ impl PreparedCandleImageRoute {
             Self::ZimageComfyui(_) => CandleImageRoute::ZimageComfyui,
             Self::QwenImageComfyui(_) => CandleImageRoute::QwenImageComfyui,
             Self::Flux2Comfyui(_) => CandleImageRoute::Flux2Comfyui,
+            Self::MageFinetuned(_) => CandleImageRoute::MageFinetuned,
         }
     }
 }
@@ -798,6 +996,9 @@ impl PreparedCandleImageRoute {
 /// `else if settings.backend_candle_enabled && <predicate>` ladder EXACTLY — same predicate order,
 /// same `backend_candle_enabled` gating, same handler per family — so routing is byte-identical
 /// (sc-8828). Pure decision: no I/O, no generation.
+// One `…_available` flag per prepared bundle, so the count tracks the number of prepared candle
+// lanes rather than any avoidable grouping.
+#[allow(clippy::too_many_arguments)]
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn resolve_candle_image_route_with_prepared_availability(
     request: &ImageRequest,
@@ -807,6 +1008,7 @@ fn resolve_candle_image_route_with_prepared_availability(
     zimage_comfyui_available: bool,
     qwen_comfyui_available: bool,
     flux2_comfyui_available: bool,
+    mage_finetuned_available: bool,
 ) -> Option<CandleImageRoute> {
     if !settings.backend_candle_enabled {
         return None;
@@ -818,10 +1020,29 @@ fn resolve_candle_image_route_with_prepared_availability(
         Some(CandleImageRoute::InstantId)
     } else if sdxl_edit_candle_available(request, settings) {
         Some(CandleImageRoute::SdxlEdit)
+    } else if matches!(
+        request.model.as_str(),
+        "flux2_dev"
+            | "qwen_image_edit"
+            | "qwen_image_edit_2509"
+            | "qwen_image_edit_2511"
+            | "qwen_image_edit_2511_lightning"
+    ) && candle_conditioned_pose_requires_reject(request)
+    {
+        // Defense in depth for direct worker calls: the scheduler rejects malformed pose carriers
+        // and valid pose sets paired with unsupported conditioned modes. The worker must reject the
+        // same shapes rather than letting typed parsing erase them or falling through to the stub.
+        Some(CandleImageRoute::PoseReject)
+    } else if flux2_control_candle_available(request, settings) {
+        // Character Studio FLUX.2 pose payloads also carry a reference image. The pose/control lane
+        // must win before reference edit so the skeleton is never silently dropped.
+        Some(CandleImageRoute::Flux2Control)
     } else if flux2_edit_candle_available(request, settings) {
         Some(CandleImageRoute::Flux2Edit)
     } else if qwen_edit_candle_available(request, settings) {
         Some(CandleImageRoute::QwenEdit)
+    } else if sensenova_edit_candle_available(request, settings) {
+        Some(CandleImageRoute::SenseNovaEdit)
     } else if zimage_edit_candle_available(request, settings) {
         Some(CandleImageRoute::ZimageEdit)
     } else if is_mage_edit_model(&request.model)
@@ -833,7 +1054,8 @@ fn resolve_candle_image_route_with_prepared_availability(
     {
         Some(CandleImageRoute::MageEdit)
     } else if zimage_identity_candle_available(request, settings) {
-        Some(CandleImageRoute::ZimageIdentity)
+        // The registered Z-Image Turbo generator owns both Reference conditioning and adapters.
+        Some(CandleImageRoute::CandleTxt2Img)
     } else if sdxl_ipadapter_available(request, settings) {
         Some(CandleImageRoute::SdxlIpAdapter)
     } else if kolors_ipadapter_available(request, settings) {
@@ -846,10 +1068,10 @@ fn resolve_candle_image_route_with_prepared_availability(
         Some(CandleImageRoute::QwenControl)
     } else if kolors_control_available(request, settings) {
         Some(CandleImageRoute::KolorsControl)
+    } else if kolors_edit_candle_available(request, settings) {
+        Some(CandleImageRoute::KolorsEdit)
     } else if zimage_control_available(request, settings) {
         Some(CandleImageRoute::ZimageControl)
-    } else if flux2_control_candle_available(request, settings) {
-        Some(CandleImageRoute::Flux2Control)
     } else if flux1_control_candle_available(request, settings) {
         Some(CandleImageRoute::Flux1Control)
     } else if krea_control_candle_available(request, settings) {
@@ -887,10 +1109,20 @@ fn resolve_candle_image_route_with_prepared_availability(
         // for this t2i story (sc-13883). The candle twin of the MLX `resolve_image_route` `KreaTurboOnRaw`
         // arm; placed AFTER the edit lane, BEFORE the generic txt2img arm.
         Some(CandleImageRoute::KreaTurboOnRaw)
+    } else if krea_imported_control_available(request, settings) {
+        // An imported single-file Krea 2 checkpoint + a strict-pose set: the pose control branch rides
+        // the file-loaded imported DiT. Checked BEFORE the plain imported arm so a pose set renders one
+        // pose-locked image per pose instead of falling into per-image t2i (dropping the poses).
+        Some(CandleImageRoute::KreaImportedControl)
     } else if imported_available {
-        // Imported/user Krea 2 single-file t2i: external IDs are absent from `is_candle_engine`, so
-        // this bespoke route must claim them before the generic/external fall-through.
+        // Imported/user Krea 2 single-file generation: external IDs are absent from
+        // `is_candle_engine`, so this bespoke text-to-image/img2img/edit route must claim them before
+        // the generic/external fall-through.
         Some(CandleImageRoute::KreaImported)
+    } else if mage_finetuned_available {
+        // A fine-tuned Mage-Flow base (sc-15036): its id is in no `MODEL_TABLE` / `is_candle_engine`
+        // arm, so this route is what dispatches it to real candle generation at all.
+        Some(CandleImageRoute::MageFinetuned)
     } else if sdxl_imported_available {
         Some(CandleImageRoute::SdxlImported)
     } else if zimage_comfyui_available {
@@ -939,6 +1171,37 @@ fn resolve_candle_image_route_with_prepared_availability(
     }
 }
 
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_conditioned_pose_requires_reject(request: &ImageRequest) -> bool {
+    let pose_count = match request.advanced.get("poses") {
+        None | Some(Value::Null) => return false,
+        Some(Value::Array(poses))
+            if poses.len() <= sceneworks_core::image_request::MAX_JOB_POSES
+                && poses.iter().all(Value::is_object) =>
+        {
+            poses.len()
+        }
+        Some(_) => return true,
+    };
+    if pose_count == 0 {
+        return false;
+    }
+    match request.model.as_str() {
+        // FLUX.2 pose ControlNet serves every non-edit mode; instruction edit plus a pose has no
+        // composition contract and must reject rather than fall through after both specialists say no.
+        "flux2_dev" => request.mode == "edit_image",
+        // Qwen Edit's exact pose recipe is Character Studio with one identity reference; every other
+        // valid pose-bearing mode/reference shape is unsupported and must likewise reject explicitly.
+        "qwen_image_edit"
+        | "qwen_image_edit_2509"
+        | "qwen_image_edit_2511"
+        | "qwen_image_edit_2511_lightning" => {
+            !qwen_edit_candle::qwen_edit_candle_mode(request)
+        }
+        _ => false,
+    }
+}
+
 /// Test-facing pure route probe. Production uses [`prepare_candle_image_route`] so imported File
 /// tokens remain owned across admission and dispatch.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle", test))]
@@ -954,6 +1217,7 @@ fn resolve_candle_image_route(
         zimage_comfyui_candle::zimage_comfyui_available(request, settings),
         qwen_comfyui_candle::qwen_comfyui_available(request, settings),
         flux2_comfyui_candle::flux2_comfyui_available(request, settings),
+        mage_finetuned_available(request, settings),
     )
 }
 
@@ -967,11 +1231,19 @@ fn prepare_candle_image_route(
     if !settings.backend_candle_enabled {
         return Ok(None);
     }
-    let imported = prepare_krea_imported_sources(request, settings)?;
+    // A pose-bearing imported checkpoint is claimed by the `KreaImportedControl` arm, which resolves
+    // its own sources; skip pinning a second File token for the plain imported bundle in that case
+    // (mirrors the macOS `prepare_image_route` guard).
+    let imported = if krea_imported_control_available(request, settings) {
+        None
+    } else {
+        prepare_krea_imported_sources(request, settings)?
+    };
     let sdxl = prepare_sdxl_imported_sources(request, settings)?;
     let zimage = zimage_comfyui_candle::prepare_zimage_comfyui_sources(request, settings)?;
     let qwen = qwen_comfyui_candle::prepare_qwen_comfyui_sources(request, settings)?;
     let flux2 = flux2_comfyui_candle::prepare_flux2_comfyui_sources(request, settings)?;
+    let mage_finetuned = prepare_mage_finetuned_transformer(request, settings)?;
     let Some(kind) = resolve_candle_image_route_with_prepared_availability(
         request,
         settings,
@@ -980,6 +1252,7 @@ fn prepare_candle_image_route(
         zimage.is_some(),
         qwen.is_some(),
         flux2.is_some(),
+        mage_finetuned.is_some(),
     ) else {
         return Ok(None);
     };
@@ -999,6 +1272,9 @@ fn prepare_candle_image_route(
         CandleImageRoute::Flux2Comfyui => PreparedCandleImageRoute::Flux2Comfyui(
             Box::new(flux2.expect("prepared FLUX.2 route lost its sources")),
         ),
+        CandleImageRoute::MageFinetuned => PreparedCandleImageRoute::MageFinetuned(Box::new(
+            mage_finetuned.expect("prepared Mage fine-tuned route lost its transformer"),
+        )),
         route => PreparedCandleImageRoute::Plain(route),
     }))
 }
@@ -3669,9 +3945,8 @@ fn resolve_negative_prompt(request: &ImageRequest, model: &ResolvedModel) -> Opt
 /// doesn't implement — e.g. (IA)³/OFT — has no `lokr_*`/`hada_*` keys, so the engine's LoRA loader
 /// finds nothing and surfaces a loud "matched nothing" error rather than mis-applying.)
 ///
-/// Shared by the MLX path and the candle Lens lane (sc-5126): candle-gen-lens's `merge_adapters`
-/// dispatches on this `kind` (a `lokr`-metadata file declared `Lora` would find no lora_A/B keys and
-/// it surfaces the mismatch loudly), so the same `networkType: lokr` classification feeds both lanes.
+/// Shared by MLX and Candle: every Candle family validates this declared kind against the selected
+/// file before application, so the same `networkType: lokr` classification feeds both backends.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -3731,7 +4006,16 @@ struct PreparedAdapters {
     test
 ))]
 impl PreparedAdapters {
-    #[cfg(all(target_os = "macos", test))]
+    // Gated to exactly where it is used. `imported_edit_requires_the_identity_edit_lora` became
+    // cross-platform when the Kontext edit surface started being served on both native backends, so
+    // a macOS-only helper left the candle test build without it.
+    #[cfg(all(
+        any(
+            target_os = "macos",
+            all(not(target_os = "macos"), feature = "backend-candle")
+        ),
+        test
+    ))]
     fn is_empty(&self) -> bool {
         self.specs.is_empty()
     }
@@ -3769,8 +4053,8 @@ fn resolve_prepared_adapters(
     })
 }
 
-/// Resolve up to 3 request LoRAs into engine adapter specs (path + scale + kind).
-/// Shared by the MLX path and the candle Lens lane (sc-5126).
+/// Resolve up to [`MAX_JOB_LORAS`] request adapters into engine specs (path + scale + kind).
+/// Shared by the MLX and Candle paths so both backends enforce the same stack ceiling.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -4447,10 +4731,14 @@ mod measured_mlx_load_shape_tests {
 
         let turbo = apply_measured_mlx_load_shape("lens_turbo", bf16.clone());
         assert_eq!(turbo.load_shape, gen_core::LoadShape::DeferredMaterialization);
+        // sc-18605 (inference) declared the Lens and Lens-Turbo MLX rung-4 ladders and made them
+        // reachable, so the dense Lens-Turbo rung no longer needs `Sequential` to appear. It is
+        // Implemented at the deferred load shape alone; the Sequential case below still holds and
+        // is kept because it pins the rung's window parameters, not merely its presence.
         assert_eq!(
             rung_four_support("lens_turbo", &turbo),
-            MemoryStrategySupport::Missing,
-            "the legacy dense Lens-Turbo rung still requires Sequential"
+            MemoryStrategySupport::Implemented,
+            "the Lens-Turbo rung-4 ladder is reachable at the deferred load shape"
         );
         let turbo = turbo.with_offload_policy(OffloadPolicy::Sequential);
         let turbo_contract = crate::inference_runtime::media()
@@ -5481,6 +5769,9 @@ mod sampling_knob_tests {
 /// reference image(s) for edit; every other engine ignores the fields, and the dev Image-Studio
 /// toggle (manifest `ui.promptEnhance`) is the only surface that sets `enhancePrompt`, so this is a
 /// no-op for all other models.
+const PROMPT_ENHANCE_MAX_EFFECTIVE_CHARS: usize = 16_000;
+const PROMPT_ENHANCE_MAX_REASON_CHARS: usize = 512;
+
 #[derive(Clone, Default)]
 pub(crate) struct PromptEnhance {
     enabled: bool,
@@ -5489,27 +5780,147 @@ pub(crate) struct PromptEnhance {
 }
 
 impl PromptEnhance {
-    /// Resolve from a job request's `advanced` settings (same keys as the LTX-2.3 video path).
-    pub(crate) fn from_advanced(advanced: &JsonObject) -> Self {
-        PromptEnhance {
-            enabled: advanced::bool(advanced, "enhancePrompt"),
-            temperature: advanced
-                .get("enhanceTemperature")
-                .and_then(Value::as_f64)
-                .map(|value| value as f32),
-            max_tokens: advanced
-                .get("enhanceMaxTokens")
-                .and_then(Value::as_u64)
-                .map(|value| value as u32),
-        }
+    /// Resolve from a job request's `advanced` settings without truthy/string coercions. These
+    /// values drive a native LLM sampler and therefore have one typed, bounded contract shared with
+    /// the API and inference providers.
+    pub(crate) fn from_advanced(advanced: &JsonObject) -> WorkerResult<Self> {
+        let (enabled, temperature, max_tokens) = parse_prompt_enhancement_fields(advanced)?;
+        Ok(Self {
+            enabled,
+            temperature,
+            max_tokens,
+        })
     }
 
     /// Write the resolved enhancement settings onto a `GenerationRequest`.
-    fn apply(&self, request: &mut GenerationRequest) {
+    fn apply(
+        &self,
+        request: &mut GenerationRequest,
+        prompt_enhancement: gen_core::PromptEnhancementSink,
+    ) {
         request.enhance_prompt = self.enabled;
         request.enhance_temperature = self.temperature;
         request.enhance_max_tokens = self.max_tokens;
+        request.prompt_enhancement = if self.enabled {
+            prompt_enhancement
+        } else {
+            gen_core::PromptEnhancementSink::default()
+        };
     }
+}
+
+fn prompt_enhancement_fact(
+    report: gen_core::PromptEnhancementReport,
+    requested_prompt: &str,
+) -> WorkerResult<Value> {
+    if report.original_prompt != requested_prompt {
+        return Err(WorkerError::Engine(
+            "prompt-enhancement report original_prompt did not match the per-image request".to_owned(),
+        ));
+    }
+    if report.effective_prompt.trim().is_empty()
+        || report.effective_prompt.chars().count() > PROMPT_ENHANCE_MAX_EFFECTIVE_CHARS
+    {
+        return Err(WorkerError::Engine(format!(
+            "prompt-enhancement report effective_prompt must contain 1..={PROMPT_ENHANCE_MAX_EFFECTIVE_CHARS} characters"
+        )));
+    }
+    let (outcome, fallback_reason) = match report.outcome {
+        gen_core::PromptEnhancementOutcome::Enhanced => {
+            if report.fallback_reason.is_some() {
+                return Err(WorkerError::Engine(
+                    "enhanced prompt report unexpectedly carried a fallback reason".to_owned(),
+                ));
+            }
+            if report.effective_prompt == report.original_prompt {
+                return Err(WorkerError::Engine(
+                    "enhanced prompt report did not rewrite the original prompt".to_owned(),
+                ));
+            }
+            ("enhanced", None)
+        }
+        gen_core::PromptEnhancementOutcome::Fallback => {
+            if report.effective_prompt != report.original_prompt {
+                return Err(WorkerError::Engine(
+                    "fallback prompt report did not preserve the original prompt".to_owned(),
+                ));
+            }
+            let reason = report
+                .fallback_reason
+                .as_deref()
+                .map(str::trim)
+                .filter(|reason| {
+                    !reason.is_empty()
+                        && reason.chars().count() <= PROMPT_ENHANCE_MAX_REASON_CHARS
+                        && !reason.chars().any(char::is_control)
+                })
+                .ok_or_else(|| {
+                    WorkerError::Engine(
+                        "fallback prompt report did not carry a safe bounded reason".to_owned(),
+                    )
+                })?;
+            ("fallback", Some(reason.to_owned()))
+        }
+        gen_core::PromptEnhancementOutcome::Absent => {
+            return Err(WorkerError::Engine(
+                "enabled prompt enhancement reported an absent outcome".to_owned(),
+            ));
+        }
+    };
+    Ok(json!({
+        "outcome": outcome,
+        "originalPrompt": report.original_prompt,
+        "effectivePrompt": report.effective_prompt,
+        "fallbackReason": fallback_reason,
+    }))
+}
+
+type PromptEnhancementReports = std::collections::HashMap<
+    usize,
+    (String, gen_core::PromptEnhancementReport),
+>;
+
+fn record_prompt_enhancement_report(
+    reports: &mut PromptEnhancementReports,
+    enhancement_expected: bool,
+    image_count: usize,
+    index: usize,
+    expected_prompt: String,
+    report: gen_core::PromptEnhancementReport,
+) -> WorkerResult<()> {
+    if !enhancement_expected {
+        return Err(WorkerError::Engine(
+            "provider emitted a prompt-enhancement report for a disabled request".to_owned(),
+        ));
+    }
+    if index >= image_count {
+        return Err(WorkerError::Engine(
+            "provider emitted a prompt-enhancement report for an unknown image".to_owned(),
+        ));
+    }
+    match reports.entry(index) {
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            entry.insert((expected_prompt, report));
+        }
+        std::collections::hash_map::Entry::Occupied(_) => {
+            return Err(WorkerError::Engine(format!(
+                "provider emitted duplicate prompt-enhancement reports for image {index}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn take_prompt_enhancement_fact(
+    reports: &mut PromptEnhancementReports,
+    index: usize,
+) -> WorkerResult<Value> {
+    let (expected_prompt, report) = reports.remove(&index).ok_or_else(|| {
+        WorkerError::Engine(format!(
+            "provider emitted no prompt-enhancement report for image {index}"
+        ))
+    })?;
+    prompt_enhancement_fact(report, &expected_prompt)
 }
 
 /// Generate one image (RGB8) at the given seed; `on_progress` streams denoise steps.
@@ -5553,6 +5964,7 @@ fn generate_one(
     memory: Option<gen_core::GenerationMemory>,
     memory_strategy_context: Option<&gen_core::MemoryRunContext>,
     enhance: &PromptEnhance,
+    prompt_enhancement: gen_core::PromptEnhancementSink,
     // Live denoise preview (epic 16624, sc-16904): forwarded frames reach the job's progress
     // stream. Inert for engines that don't emit; the default sink costs one branch per step.
     preview: gen_core::PreviewSink,
@@ -5582,7 +5994,7 @@ fn generate_one(
         cancel: cancel.clone(),
         ..Default::default()
     };
-    enhance.apply(&mut request);
+    enhance.apply(&mut request, prompt_enhancement);
     let output = crate::memory_strategy::generate_with_scope(
         generator,
         &mut request,
@@ -5766,6 +6178,7 @@ fn generate_one_with_hires(
     enhance: &PromptEnhance,
     hires_fix: Option<HiresFixPlan>,
     preview: gen_core::PreviewSink,
+    prompt_enhancement: gen_core::PromptEnhancementSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
@@ -5792,6 +6205,7 @@ fn generate_one_with_hires(
             memory,
             memory_strategy_context,
             enhance,
+            prompt_enhancement,
             preview,
             cancel,
             on_progress,
@@ -5816,6 +6230,8 @@ fn generate_one_with_hires(
         Progress::Decoding => {}
         Progress::Loading(phase) => on_progress(Progress::Loading(phase)),
     };
+    // Enhancement belongs to the final persisted pass. Running it on the disposable base pass
+    // would produce two reports for one image and could feed two different prompts into one recipe.
     let (base_width, base_height, base_pixels) = generate_one(
         generator,
         prompt,
@@ -5837,7 +6253,8 @@ fn generate_one_with_hires(
         text_style_gain,
         memory,
         first_pass_context.as_ref(),
-        enhance,
+        &PromptEnhance::default(),
+        gen_core::PromptEnhancementSink::default(),
         preview.clone(),
         cancel,
         &mut first_progress,
@@ -5886,6 +6303,7 @@ fn generate_one_with_hires(
         memory,
         memory_strategy_context,
         enhance,
+        prompt_enhancement,
         preview,
         cancel,
         &mut second_progress,
@@ -6015,7 +6433,8 @@ fn resolve_identity_init(
 /// The single `Conditioning::Reference` this produces is routed by the engine to
 /// `generate_turbo_img2img` (sc-10135), whose `preprocess_init_image` LANCZOS-resizes the reference to
 /// the output W×H — so, like Z-Image's [`resolve_identity_init`], the reference is fed raw (the
-/// `edit_image`-only [`should_fit_edit_source`] crop/pad-fit never applies to Krea's t2i-only surface).
+/// `edit_image`-only [`should_fit_edit_source`] crop/pad-fit never applies to Krea Turbo's
+/// reference-guided img2img surface).
 ///
 /// Available to the candle lane too (sc-10134): the candle `generate_candle_stream` calls this to resolve
 /// the Krea 2 Turbo img2img init off-Mac, feeding the same `(image, strength)` into `generate_one`'s
@@ -6073,6 +6492,18 @@ fn model_supports_img2img(request: &ImageRequest) -> bool {
         .and_then(|ui| ui.get("img2img"))
         .and_then(Value::as_bool)
         .unwrap_or(false)
+}
+
+/// Pure worker-side gate shared by the MLX and Candle generic conditioning resolvers. Scheduler
+/// routing rejects unsupported plural/edit/control shapes before dispatch; this keeps the worker
+/// defensive about the fields it consumes so neither backend silently treats an edit or a missing
+/// reference as img2img.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn uses_generic_img2img(request: &ImageRequest, has_reference: bool) -> bool {
+    model_supports_img2img(request) && has_reference && request.mode != "edit_image"
 }
 
 /// Resolve the Krea "text style" tap-reweight gain (sc-11878; gate fixed in sc-12008). Set ONLY when
@@ -6193,15 +6624,25 @@ pub(crate) fn resolve_character_image_likeness_source(
     settings: &Settings,
     project_path: &Path,
 ) -> Option<(Image, String)> {
-    if request.mode != "character_image" {
-        return None;
-    }
-    // Angle / pose sets are already scored by sc-4409 / sc-4410 through the same shared seam; this is
-    // the PLAIN With-Character path only, so exclude both groupings to avoid double-attaching.
-    if !pose_entries(request).is_empty() || advanced::flag(&request.advanced, "angleSet") {
+    if !character_image_likeness_requested(request) {
         return None;
     }
     resolve_control_identity_source(request, settings, project_path)
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn character_image_likeness_requested(request: &ImageRequest) -> bool {
+    request.mode == "character_image"
+        && request
+            .reference_asset_id
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty())
+        // Angle / pose sets are already scored by sc-4409 / sc-4410 through the shared seam.
+        && pose_entries(request).is_empty()
+        && !advanced::flag(&request.advanced, "angleSet")
 }
 
 /// img2img (Remix) strength for a plain Ideogram 4 edit with no mask — mirrors the sdxl/z-image 0.6
@@ -6822,14 +7263,14 @@ fn resolve_generic_lane_conditioning(
             }),
             None => Ok(LaneConditioning::default()),
         }
-    } else if model_supports_img2img(request) && has_reference && request.mode != "edit_image" {
+    } else if uses_generic_img2img(request, has_reference) {
         // Generic plain-t2i img2img latent-init for any `ui.img2img` model (epic 8588 A4, sc-10189):
         // a `referenceAssetId` + `advanced.strength` seeds the denoise from the VAE-encoded reference,
         // which the engine routes to that model's img2img entrypoint via the single
-        // `Conditioning::Reference`. Krea 2 Turbo (sc-8591 #666) + SD3.5 large/turbo/medium (sc-10189
-        // #667) opt in today; a new text-only model joins by flipping `ui.img2img` + landing its
-        // mlx-gen entrypoint. Sits after the model-specific reference arms (z-image/flux/kolors/ideogram)
-        // so their bespoke surfaces keep precedence. Candle parity per model is a deferred follow-up.
+        // `Conditioning::Reference`. Krea 2 Turbo (sc-8591 #666), SD3.5 large/turbo/medium (sc-10189
+        // #667), and SANA base/Sprint (sc-18475) opt in today; a new text-only model joins by flipping
+        // `ui.img2img` and landing its engine entrypoint. Sits after the model-specific reference arms
+        // (z-image/flux/kolors/ideogram) so their bespoke surfaces keep precedence.
         Ok(LaneConditioning {
             identity_init: resolve_img2img_init_generic(request, settings, project_path)?,
             ..Default::default()
@@ -7194,7 +7635,7 @@ async fn generate_stream(
     let adapter_count = adapters.len();
     // sc-6135: caption upsampling (FLUX.2-dev only; every other engine ignores it). Resolved from
     // the request's advanced `enhancePrompt` toggle, gated to dev by the manifest `ui.promptEnhance`.
-    let enhance = PromptEnhance::from_advanced(&request.advanced);
+    let enhance = PromptEnhance::from_advanced(&request.advanced)?;
     // Per-generation PiD decode (epic 7840, sc-7849): resolve the PiD checkpoint + Gemma for this
     // model's latent space when `advanced.usePid` is set and the snapshots are cached; otherwise keep
     // the native VAE. `use_pid` and `spec.pid` stay in lockstep (the engine rejects a mismatch).
@@ -7463,7 +7904,10 @@ async fn generate_stream(
                 external_committed_bytes
             };
             let likeness_source_ref = likeness_source.as_ref().map(|(_, id)| id.clone());
-            drive_gen_items_scored(tx, seeds, move |_index, seed, preview, on_progress| {
+            drive_gen_items_scored_reported(
+                tx,
+                seeds,
+                move |_index, seed, preview, prompt_enhancement, on_progress| {
                 let memory_evaluation = crate::mlx_fit_gate::evaluate_request(
                     generator,
                     &mlx_request_plan,
@@ -7503,6 +7947,7 @@ async fn generate_stream(
                         &enhance,
                         hires_fix,
                         preview.clone(),
+                        prompt_enhancement.for_prompt(&prompt),
                         &cancel,
                         on_progress,
                     )
@@ -7536,7 +7981,8 @@ async fn generate_stream(
                     )
                 });
                 Ok(Some((final_seed, out_w, out_h, pixels, face_likeness)))
-            })
+                },
+            )
         },
     );
 
@@ -7701,6 +8147,26 @@ fn candle_tier_fit(
             available_gb,
         },
     }
+}
+
+/// FLUX.2-dev's caption-upsample lifecycle has exact bounded high-waters only for the Q4 and Q8
+/// turnkey tiers. `predicted_peak_gb` intentionally falls back to `minMemoryGb` for legacy sparse
+/// manifests, but doing that here would admit the unmeasured 113 GB BF16 tier at the 48 GB Q4 floor.
+/// Keep this route-specific until another provider rotates its calibration identity and needs the
+/// same evidence rule.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) fn validate_candle_tier_memory_evidence(
+    model: &str,
+    manifest_entry: &JsonObject,
+    tier: &str,
+) -> WorkerResult<()> {
+    if model == "flux2_dev" && !has_candle_tier_peak_row(manifest_entry, tier) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{model} cannot run the resolved {tier} Candle tier because no current caption-aware \
+             candle.vramGbByTier evidence exists for it; select Q4/Q8 or update SceneWorks"
+        )));
+    }
+    Ok(())
 }
 
 /// Carry the legacy Candle fit gate's resident/staged choice into the request-scoped runtime
@@ -8839,20 +9305,19 @@ async fn gate_with_evict_reclaim<D>(
     Ok((reclaimed, reclaimed_budget))
 }
 
-/// Windows/CUDA candle execution path (sc-3675 SDXL, generalized in sc-5096). The macOS dispatch is
-/// MLX-bound; candle is a narrow **txt2img-only** lane, so this is a trimmed sibling of
-/// [`generate_stream`] that drives the SAME neutral streaming harness (`start_cached_gen_stream` →
-/// `generate_one` → `consume_gen_events`) against the registry-resolved candle generator.
+/// Windows/CUDA registry-generator path (sc-3675 SDXL, generalized in sc-5096). This is the Candle
+/// sibling of [`generate_stream`], driving the same neutral streaming harness
+/// (`start_cached_gen_stream` → `generate_one` → `consume_gen_events`) for base generation and the
+/// descriptor-backed reference/edit/identity shapes selected by [`resolve_candle_image_route`].
 ///
 /// Backend-neutral resolution (sc-5096): the per-engine repo / steps / guidance / negative prompt all
 /// come from the shared [`mlx_model`] join (`MODEL_TABLE` row + the linked candle descriptor), exactly
 /// like the MLX path — so adding a family needs no new dispatch logic, just its provider crate linked.
-/// Quant + LoRA/LoKr are **descriptor-gated** (sc-5126): resolved (via the same `resolve_quant` /
-/// `resolve_adapters` the MLX path uses) only when the linked candle descriptor advertises them — i.e.
-/// for Lens (Q4/Q8 + LoRA/LoKr); the sc-3675/sc-5096 families advertise neither, so they stay dense +
-/// adapter-free exactly as before. No reference/img2img/control — unsupported shapes are refused
-/// upstream and remain queued (`image_request_candle_eligible`). Reached only when `backend_candle_enabled`
-/// (default off → production routing unchanged until parity).
+/// Quant + LoRA/LoKr are **descriptor-gated** (sc-5126): resolved through the same `resolve_quant` /
+/// `resolve_adapters` seams as MLX only when the linked Candle descriptor advertises them. Bespoke
+/// control/IP/ComfyUI providers divert before this function; unsupported request shapes are refused
+/// upstream and remain queued (`image_request_candle_eligible`). Reached only when
+/// `backend_candle_enabled` (default off → production routing unchanged until parity).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 async fn generate_candle_stream(
     api: &ApiClient,
@@ -8939,7 +9404,7 @@ async fn generate_candle_stream(
     // families → the scale + negative prompt). Identical to the MLX path; quant + LoRA are omitted.
     let steps = resolve_steps(request, &model);
     let guidance = resolve_guidance(request, &model);
-    let true_cfg = resolve_true_cfg(request, &model);
+    let mut true_cfg = resolve_true_cfg(request, &model);
     let hires_fix = resolve_hires_fix_plan(request, steps, guidance, true_cfg);
     let negative_prompt = resolve_negative_prompt(request, &model);
 
@@ -8969,18 +9434,14 @@ async fn generate_candle_stream(
 
     // Adapters do not participate in tier identity. Quant is resolved only after every possible
     // weights-directory rewrite below, so the final LoadSpec and memory receipt share one tier.
-    let adapters = if convrot.is_some() {
-        // ConvRot does not combine with LoRA/LoKr (the int8 DiT is not adapter-wired); skip adapters.
-        Vec::new()
-    } else if model.supports_adapters() {
+    let adapters = if model.supports_adapters() {
+        // Pinned inference applies Krea adapters as additive residuals over ConvRot projections too.
         resolve_adapters(request, settings)?
     } else {
         Vec::new()
     };
     let adapter_count = adapters.len();
 
-    let count = request.count as usize;
-    let seeds: Vec<i64> = (0..count).map(|index| resolve_seed(request, index)).collect();
     // Ideogram 4 (epic 4725, sc-6501) is JSON-caption-only: a raw plain-text prompt is out-of-
     // distribution and stochastically renders the "Image blocked by safety filter" placeholder. Wrap a
     // non-caption prompt into a minimal valid caption — the same worker-side guarantee the macOS path
@@ -8991,6 +9452,16 @@ async fn generate_candle_stream(
     } else {
         request.prompt.clone()
     };
+    let work: Vec<(i64, String)> = if is_sensenova_candle_model(&request.model)
+        && matches!(request.mode.as_str(), "edit_image" | "character_image")
+    {
+        candle_conditioned_edit_work(request)
+    } else {
+        (0..request.count as usize)
+            .map(|index| (resolve_seed(request, index), prompt.clone()))
+            .collect()
+    };
+    let total = work.len();
     // In-lane edit conditioning (sc-6598 Ideogram / sc-7524 Boogu): resolve the source `Reference`
     // (+ optional `Mask` for Ideogram) + strength once, seed-independent — the candle sibling of the MLX
     // `generate_stream` edit path. Both families edit on the SAME engine as their T2I (no separate bespoke
@@ -9000,7 +9471,30 @@ async fn generate_candle_stream(
     // `Reference` — the Qwen3-VL vision tower reads it + it VAE-encodes into the DiT reference latent).
     // Other candle edit families (sdxl/flux2/qwen/z-image) have their own bespoke streams (checked before
     // this dispatch).
-    let (edit_reference, edit_mask) = if is_ideogram {
+    let (edit_reference, edit_mask) = if zimage_identity_candle_strength(request).is_some() {
+        let reference_id = request
+            .reference_asset_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload("Z-Image identity requires a referenceAssetId".to_owned())
+            })?;
+        let reference = load_reference_image(
+            &settings.data_dir,
+            &request.project_id,
+            reference_id,
+            project_path,
+        )?;
+        let reference = fit_engine_image(reference, request.width, request.height, &request.fit_mode)?;
+        (
+            Some((
+                reference,
+                zimage_identity_candle_strength(request).expect("checked above"),
+            )),
+            None,
+        )
+    } else if is_ideogram {
         match resolve_ideogram_edit(request, settings, project_path)? {
             Some((source, strength, mask)) => (Some((source, strength)), mask),
             None => (None, None),
@@ -9009,6 +9503,11 @@ async fn generate_candle_stream(
         // `z_image_edit` is a catalog alias for the registered Turbo provider. Resolve its source
         // into the generic request so memory admission, lifecycle cleanup, and telemetry stay shared.
         (resolve_zimage_edit_init(request, settings, project_path)?, None)
+    } else if request.model == "kolors" && request.mode == "edit_image" {
+        (
+            resolve_candle_kolors_edit_init(request, settings, project_path)?,
+            None,
+        )
     } else {
         (None, None)
     };
@@ -9018,22 +9517,32 @@ async fn generate_candle_stream(
         resolve_boogu_edit(request, settings, project_path)?
     } else if is_mage_edit_model(&request.model) {
         resolve_mage_edit(request, settings, project_path)?
+    } else if is_sensenova_candle_model(&request.model)
+        && matches!(request.mode.as_str(), "edit_image" | "character_image")
+    {
+        resolve_sensenova_candle_edit(request, settings, project_path)?
     } else {
         Vec::new()
     };
+    if is_sensenova_candle_model(&request.model) && !edit_refs.is_empty() {
+        true_cfg = Some(resolve_sensenova_candle_true_cfg(request));
+    }
+    let has_reference = request
+        .reference_asset_id
+        .as_deref()
+        .is_some_and(|id| !id.trim().is_empty());
     // Generic img2img (reference-guided latent-init, sc-10134, epic 8588): a `ui.img2img` model in a
     // NON-edit mode carrying a `referenceAssetId` resolves to the img2img init `(image, advanced.strength)`,
     // threaded to `generate_one` as the single `Conditioning::Reference` the candle engine routes to its
     // img2img entrypoint (VAE-encode the reference → blend at `sigmas[init_time_step]` → denoise; CFG-free
     // for distilled families, two-forward CFG for the base ones like Krea Raw `render_base_img2img`,
     // sc-10226). Model-agnostic here — the candle router gates which ids reach this lane with a reference
-    // (`krea_2_turbo`/`krea_2_raw`, SD3.5, Z-Image, Boogu, Ideogram all wired). Disjoint from the Ideogram
-    // `edit_reference` (edit_image vs text_to_image) and the registry editors' `edit_refs` (guarded here
-    // so a future overlap never double-drives the single `reference` slot).
+    // (`krea_2_turbo`/`krea_2_raw`, SD3.5, SANA base/Sprint, Z-Image, Boogu, Ideogram all wired).
+    // Disjoint from the Ideogram `edit_reference` (edit_image vs text_to_image) and the registry
+    // editors' `edit_refs` (guarded here so a future overlap never double-drives the single slot).
     let img2img_reference = if edit_reference.is_none()
         && edit_refs.is_empty()
-        && request.mode != "edit_image"
-        && model_supports_img2img(request)
+        && uses_generic_img2img(request, has_reference)
     {
         resolve_img2img_init_generic(request, settings, project_path)?
     } else {
@@ -9080,14 +9589,10 @@ async fn generate_candle_stream(
         &job.id,
         backend,
     );
-    // sc-6135 / sc-7458: caption upsampling is FLUX.2-dev-only. On candle (off-Mac) dev now runs here,
-    // but the Mistral3/Pixtral caption-upsampler vision tower is NOT ported (deferred to epic 6564
-    // story 4), so `enhance` degrades to **passthrough**: it is carried onto the `GenerationRequest`
-    // for uniformity, but the candle `Flux2Generator` ignores `enhance_prompt`, so the raw prompt is
-    // used verbatim. Critically this is a no-op, NOT a fall-back to the Python torch worker — the dev
-    // T2I job stays on candle (a future candle enhancer lights up here with no router change). Every
-    // other candle family ignores the fields too.
-    let enhance = PromptEnhance::from_advanced(&request.advanced);
+    // sc-18474: FLUX.2-dev prompt enhancement is native on Candle too. The request-local report
+    // sink below is the proof seam: an enabled request cannot silently run the raw prompt without a
+    // typed, honestly persisted fallback. The stale passthrough-only behavior is no longer allowed.
+    let enhance = PromptEnhance::from_advanced(&request.advanced)?;
     // Record the effective CFG knob (guidance for guided families, else true_cfg) + quant bits in the
     // recipe, so a Lens asset's sidecar reflects the Q4/Q8 it ran at (parity with the MLX path). The
     // recorded repo is the resolved model repo (the MLX turnkey the candle lane now packed-loads from,
@@ -9161,6 +9666,7 @@ async fn generate_candle_stream(
     // The comment above already knew "its footprint is neither the bf16 nor the q8 tier"; now the gate
     // acts on it. Extracted so that mapping has a unit test; this fn cannot be exercised from one.
     let mut tier = candle_resolved_tier_key(request, &weights_dir, convrot.is_some());
+    validate_candle_tier_memory_evidence(&request.model, &request.model_manifest_entry, tier)?;
     let requested_tier = tier;
     // sc-12130: derive Candle residency support from the provider's weights-free descriptor instead of
     // maintaining a second engine-id allowlist in the worker. The capability bit is the provider's
@@ -9991,6 +10497,19 @@ async fn generate_candle_stream(
         .await?;
     }
 
+    // The registered Z-Image identity route retains the shared, non-fatal likeness post-pass from the
+    // retired bespoke stream. This stages only the existing face stack, not an obsolete Z-Image path.
+    let likeness_source = resolve_character_image_likeness_source(request, settings, project_path);
+    let face_stack_dir = stage_likeness(
+        api,
+        settings,
+        job,
+        likeness_source.is_some(),
+        "registered Candle character_image face-stack staging failed; likeness scores omitted",
+    )
+    .await;
+    let likeness_source = face_stack_dir.as_ref().and(likeness_source);
+
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         engine_id,
@@ -9998,7 +10517,17 @@ async fn generate_candle_stream(
         spec,
         format!("candle {engine_id} load failed"),
         move |generator, tx, cancel| {
-            drive_gen_items(tx, seeds, move |_index, seed, preview, on_progress| {
+            let scorer = match (&face_stack_dir, &likeness_source) {
+                (Some(dir), Some((source, _))) => {
+                    crate::face_likeness::build_face_likeness_scorer(dir, source)
+                }
+                _ => None,
+            };
+            let likeness_source_ref = likeness_source.as_ref().map(|(_, id)| id.clone());
+            drive_gen_items_scored_reported(
+                tx,
+                work,
+                move |_index, (seed, prompt), preview, prompt_enhancement, on_progress| {
                 let render = |seed: i64, on_progress: &mut dyn FnMut(Progress)| {
                     generate_one_with_hires(
                         generator,
@@ -10038,6 +10567,7 @@ async fn generate_candle_stream(
                         &enhance,
                         hires_fix,
                         preview.clone(),
+                        prompt_enhancement.for_prompt(&prompt),
                         &cancel,
                         on_progress,
                     )
@@ -10057,8 +10587,20 @@ async fn generate_candle_stream(
                     initial,
                     |retry_seed| render(retry_seed, on_progress),
                 )?;
-                Ok(Some((final_seed, out_w, out_h, pixels)))
-            })
+                let face_likeness = scorer.as_ref().and_then(|scorer| {
+                    crate::face_likeness::score_generated_image(
+                        Some(scorer),
+                        &Image {
+                            width: out_w,
+                            height: out_h,
+                            pixels: pixels.clone(),
+                        },
+                        likeness_source_ref.as_deref(),
+                    )
+                });
+                Ok(Some((final_seed, out_w, out_h, pixels, face_likeness)))
+                },
+            )
         },
     );
 
@@ -10072,7 +10614,7 @@ async fn generate_candle_stream(
         adapter_label,
         &raw_settings,
         auto_tier_streaming.as_ref(),
-        count,
+        total,
         rx,
         cancel,
         blocking,
@@ -10456,6 +10998,11 @@ async fn consume_gen_events_with_disclosure(
     let mut effective_steps: Option<u32> = None;
     // Live denoise preview (sc-16904): the latest frame rides the next progress POST.
     let mut latest_preview: Option<PreviewSlot> = None;
+    let prompt_enhancement_expected = raw_settings
+        .get("enhancePrompt")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mut prompt_enhancement_reports = PromptEnhancementReports::new();
     // Run the event loop capturing its Result so any `?`-error path performs the explicit awaited
     // bounded-join teardown BEFORE returning, instead of drop-and-run (sc-8804, F-003).
     let loop_result: WorkerResult<()> = async {
@@ -10577,6 +11124,20 @@ async fn consume_gen_events_with_disclosure(
                     latest_preview = Some(slot);
                 }
             }
+            GenEvent::PromptEnhancement {
+                index,
+                expected_prompt,
+                report,
+            } => {
+                record_prompt_enhancement_report(
+                    &mut prompt_enhancement_reports,
+                    prompt_enhancement_expected,
+                    total,
+                    index,
+                    expected_prompt,
+                    report,
+                )?;
+            }
             GenEvent::Image {
                 index,
                 seed,
@@ -10602,6 +11163,15 @@ async fn consume_gen_events_with_disclosure(
                 // down views), while every non-scoring path leaves `face_likeness` `None` ⇒ the field
                 // is omitted entirely (the sc-4408 omit-when-absent contract).
                 let mut image_raw_settings = raw_settings.clone();
+                // This key is worker-owned even for legacy/raw jobs. Only the typed provider report
+                // can add it back, after matching it to this image's exact requested prompt.
+                image_raw_settings.remove(PROMPT_ENHANCEMENT_FACT_KEY);
+                if prompt_enhancement_expected {
+                    image_raw_settings.insert(
+                        PROMPT_ENHANCEMENT_FACT_KEY.to_owned(),
+                        take_prompt_enhancement_fact(&mut prompt_enhancement_reports, index)?,
+                    );
+                }
                 if let Some(block) = face_likeness {
                     image_raw_settings.insert(
                         crate::face_likeness::FACE_LIKENESS_FACT_KEY.to_owned(),
@@ -10710,6 +11280,11 @@ async fn consume_gen_events_with_disclosure(
         .await?;
         return Err(WorkerError::Canceled(message.to_owned()));
     }
+    if !prompt_enhancement_reports.is_empty() {
+        return Err(WorkerError::Engine(
+            "provider emitted a prompt-enhancement report without a completed image".to_owned(),
+        ));
+    }
     // Post the effective-settings + per-phase timing block (epic 10402,
     // sc-10405/sc-10406). Best-effort; coalesce-merges with the S2 hardware block
     // (which owns totalMs/backend/peaks) server-side.
@@ -10746,6 +11321,101 @@ async fn consume_gen_events_with_disclosure(
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod candle_label_tests {
     use super::*;
+
+    #[test]
+    fn krea_convrot_load_spec_preserves_adapters() {
+        let request = ImageRequest::from_payload(
+            json!({
+                "model": "krea_2_turbo",
+                "advanced": { "convRot": true }
+            })
+            .as_object()
+            .unwrap(),
+        );
+        assert!(
+            CandleImageRoute::CandleTxt2Img.applies_request_loras(&request),
+            "the fail-closed route guard must admit ConvRot adapters before the load seam"
+        );
+        assert!(
+            CandleImageRoute::KreaImported.applies_request_loras(&request),
+            "the imported Krea lane must preserve the user adapters added by sc-18480"
+        );
+        assert!(
+            CandleImageRoute::KolorsEdit.applies_request_loras(&request),
+            "the registered Kolors edit stream consumes the same adapter-bearing load spec"
+        );
+        assert!(
+            !CandleImageRoute::SenseNovaEdit.applies_request_loras(&request),
+            "SenseNova descriptors expose no user-adapter slot"
+        );
+
+        let adapter = AdapterSpec::new(
+            PathBuf::from("/nonexistent/krea-style-lora.safetensors"),
+            0.6,
+            AdapterKind::Lora,
+        );
+        let spec = load_spec(
+            PathBuf::from("/nonexistent/krea-bf16-surface"),
+            None,
+            vec![adapter.clone()],
+            None,
+        );
+        let convrot = PathBuf::from("/nonexistent/krea-int8-convrot.safetensors");
+        // The ConvRot DiT rides its own named component slot, NOT `text_encoder`: the pinned
+        // gen-core reserves `text_encoder` for the manifest-selected encoder receipt.
+        let spec = spec.with_component(
+            gen_core::KREA_CONVROT_DIT_COMPONENT,
+            WeightsSource::File(convrot.clone()),
+        );
+
+        assert!(matches!(
+            spec.components.get(gen_core::KREA_CONVROT_DIT_COMPONENT),
+            Some(WeightsSource::File(path)) if path == &convrot
+        ));
+        assert!(
+            spec.text_encoder.is_none(),
+            "the ConvRot DiT must not squat on the selected-text-encoder slot"
+        );
+        assert_eq!(spec.adapters.len(), 1);
+        assert_eq!(spec.adapters[0].path, adapter.path);
+    }
+
+    #[test]
+    fn registered_zimage_identity_routes_scored_source_metadata() {
+        let request = ImageRequest::from_payload(
+            json!({
+                "model": "z_image_turbo",
+                "mode": "character_image",
+                "referenceAssetId": "character-42",
+                "advanced": { "referenceStrength": 0.7 }
+            })
+            .as_object()
+            .unwrap(),
+        );
+        assert!(zimage_identity_candle_strength(&request).is_some());
+        assert!(character_image_likeness_requested(&request));
+
+        let fact = json!({ "sourceAssetId": "character-42" })
+            .as_object()
+            .unwrap()
+            .clone();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+        drive_gen_items_scored_reported(
+            tx,
+            [()],
+            move |_index, (), _preview, _reports, _progress| {
+                Ok(Some((17, 1, 1, vec![0_u8; 3], Some(fact.clone()))))
+            },
+        )
+        .unwrap();
+        match rx.try_recv().expect("scored image event") {
+            GenEvent::Image {
+                face_likeness: Some(face_likeness),
+                ..
+            } => assert_eq!(face_likeness["sourceAssetId"], "character-42"),
+            _ => panic!("expected scored image event"),
+        }
+    }
 
     #[test]
     fn mage_edit_preserves_primary_then_ordered_extra_references() {
@@ -10887,6 +11557,117 @@ mod candle_label_tests {
     }
 }
 
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod kolors_edit_worker_contract_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn settings(data_dir: &Path) -> Settings {
+        Settings {
+            api_url: "http://127.0.0.1".to_owned(),
+            access_token: None,
+            data_dir: data_dir.to_path_buf(),
+            config_dir: data_dir.join("config"),
+            worker_id: "test-worker".to_owned(),
+            gpu_id: "gpu-0".to_owned(),
+            is_child_worker: false,
+            poll_seconds: 1,
+            heartbeat_seconds: 1,
+            shutdown_timeout_seconds: 1,
+            huggingface_base_url: DEFAULT_HUGGINGFACE_BASE_URL.to_owned(),
+            huggingface_token: None,
+            credentials: Vec::new(),
+            max_lora_url_bytes: DEFAULT_MAX_LORA_URL_BYTES,
+            max_model_url_bytes: DEFAULT_MAX_MODEL_URL_BYTES,
+            allow_private_lora_urls: false,
+            utility_workers: 1,
+            backend_mlx_enabled: false,
+            backend_candle_enabled: true,
+            gpu_memory_limit_bytes: 0,
+            external_model_roots: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn kolors_edit_route_resolves_the_submitted_source_and_strength() {
+        let data = tempfile::tempdir().expect("data dir");
+        let settings = settings(data.path());
+        let weights = data.path().join("models/kolors-test");
+        std::fs::create_dir_all(&weights).expect("model path");
+
+        let store = ProjectStore::new(settings.data_dir.clone(), "worker");
+        let project = store.create_project("Kolors edit contract").expect("project");
+        let project_path = PathBuf::from(&project.path);
+        let source_file = data.path().join("kolors-source.png");
+        image::RgbImage::from_pixel(48, 32, image::Rgb([180, 40, 90]))
+            .save(&source_file)
+            .expect("source PNG");
+        let asset = store
+            .import_asset(
+                &project.id,
+                sceneworks_core::project_store::UploadAsset {
+                    filename: "kolors-source.png".to_owned(),
+                    content_type: Some("image/png".to_owned()),
+                    source_path: source_file,
+                    source_asset_id: None,
+                    provenance: None,
+                },
+            )
+            .expect("source asset");
+        let asset_id = asset["id"].as_str().expect("asset id");
+        let request = ImageRequest::from_payload(
+            json!({
+                "projectId": project.id,
+                "model": "kolors",
+                "mode": "edit_image",
+                "sourceAssetId": asset_id,
+                "fitMode": "stretch",
+                "advanced": {
+                    "modelPath": weights,
+                    "strength": "0.72"
+                }
+            })
+            .as_object()
+            .expect("request object"),
+        );
+
+        assert_eq!(
+            resolve_candle_image_route(&request, &settings),
+            Some(CandleImageRoute::KolorsEdit)
+        );
+        let (source, strength) = resolve_candle_kolors_edit_init(
+            &request,
+            &settings,
+            &project_path,
+        )
+        .expect("source resolution")
+        .expect("Kolors edit init");
+        assert_eq!((source.width, source.height), (48, 32));
+        assert_eq!(source.pixels[0..3], [180, 40, 90]);
+        assert!((strength - 0.72).abs() < f32::EPSILON);
+
+        let missing_source = ImageRequest::from_payload(
+            json!({
+                "projectId": project.id,
+                "model": "kolors",
+                "mode": "edit_image",
+                "advanced": { "modelPath": weights }
+            })
+            .as_object()
+            .expect("request object"),
+        );
+        assert_ne!(
+            resolve_candle_image_route(&missing_source, &settings),
+            Some(CandleImageRoute::KolorsEdit)
+        );
+        assert!(
+            resolve_candle_kolors_edit_init(&missing_source, &settings, &project_path)
+                .expect("missing source is not an I/O error")
+                .is_none()
+        );
+    }
+}
+
 #[cfg(test)]
 mod boogu_tier_tests {
     use super::*;
@@ -10923,7 +11704,7 @@ mod standard_tier_tests {
     /// A4 (sc-10189): the generic img2img arm keys off the `ui.img2img` manifest flag the catalog
     /// forwards as `modelManifestEntry`, NOT a hardcoded model string — so Krea + SD3.5 + any future
     /// `ui.img2img` model route uniformly, and a model without the flag stays plain txt2img.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
     #[test]
     fn model_supports_img2img_reads_the_ui_manifest_flag() {
         let entry = |manifest: serde_json::Value| {
@@ -10943,6 +11724,40 @@ mod standard_tier_tests {
         )));
         assert!(!model_supports_img2img(&entry(json!({ "family": "sd3" }))));
         assert!(!model_supports_img2img(&entry(json!({ "ui": {} }))));
+    }
+
+    /// sc-18475: both SANA variants use the generic non-edit singular-reference gate on Candle as
+    /// MLX. The scheduler rejects plural/control carriers before dispatch; this covers the worker
+    /// fields after dispatch and prevents an edit or missing reference from becoming img2img.
+    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[test]
+    fn sana_variants_use_the_generic_img2img_worker_gate() {
+        let request = |model: &str, mode: &str, manifest_flag: bool| {
+            ImageRequest::from_payload(
+                json!({
+                    "model": model,
+                    "mode": mode,
+                    "referenceAssetId": "reference-1",
+                    "modelManifestEntry": { "ui": { "img2img": manifest_flag } },
+                })
+                .as_object()
+                .unwrap(),
+            )
+        };
+
+        for model in ["sana_1600m", "sana_sprint_1600m"] {
+            let img2img = request(model, "text_to_image", true);
+            assert!(uses_generic_img2img(&img2img, true));
+            assert!(!uses_generic_img2img(&img2img, false));
+            assert!(!uses_generic_img2img(
+                &request(model, "edit_image", true),
+                true
+            ));
+            assert!(!uses_generic_img2img(
+                &request(model, "text_to_image", false),
+                true
+            ));
+        }
     }
 
     /// A4.5 (sc-10193): on Z-Image t2i the Character Studio identity-init (`referenceStrength`, sc-3619)

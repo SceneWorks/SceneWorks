@@ -7,6 +7,7 @@ import {
   FAMILY_STORIES,
   MODEL_STORIES,
   SOURCE_PATHS,
+  activeCalibrationPlan,
   assertCellOwnershipIsBackendScoped,
   assertCalibrationPlanTargetsResolvedCoordinates,
   assertCellInventoryMatchesCatalog,
@@ -784,13 +785,20 @@ test("Qwen MLX static ladder contracts expose every shipped entry and promote on
       boundedRungs.includes(cell.rung) &&
       cell.state === "Verified",
   );
-  // SC-18311 changes the shared gen-core contract and therefore the provider compile closure. The
-  // older SC-18353 q4/bf16 receipts must remain historical; this fixture deliberately re-stamps only
-  // the retained q8 rung-4 records. Pinned as the SET, not a count: neither admitting a stale sibling
-  // nor losing one of the explicitly refreshed q8 bindings may read as green.
+  // This is the SYNTHETIC current-closure fixture: it re-stamps the shipped records onto whatever
+  // closure is live, so it measures the promotion RULE rather than today's shipped currency. The
+  // q4/bf16 receipts rejoin here because the pin advance moved them into the re-stamped set; the
+  // shipped artifact keeps them historical, which the checked-in assertions below pin separately.
+  // Pinned as the SET, not a count: neither admitting a stale sibling nor losing a refreshed
+  // binding may read as green.
   assert.deepEqual(
     verified.map((cell) => cell.id).sort(),
     [
+      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_attention",
+      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_decode",
+      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_transformer_residency",
+      "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_attention",
+      "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_transformer_residency",
       "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_attention",
       "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_transformer_residency",
     ],
@@ -799,13 +807,18 @@ test("Qwen MLX static ladder contracts expose every shipped entry and promote on
   // Exact per-cell counts, because `>= 1` would accept a cell that had silently lost evidence.
   //
   // q8 carries three records per bound rung because the fixture re-stamps the superseded q8 records
-  // and also includes SC-18237's production-deferred pair. Exact counts keep that fact visible while
-  // ensuring the stale q4/bf16 receipts cannot be promoted by a manifest-only restamp.
+  // and also includes SC-18237's production-deferred pair. The q4/bf16 cells carry one exact record
+  // each. Exact counts keep both facts visible.
   assert.deepEqual(
     Object.fromEntries(
       verified.map((cell) => [cell.id, cell.evidence.currentEnvironmentVerification.length]),
     ),
     {
+      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_attention": 1,
+      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_decode": 1,
+      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_transformer_residency": 1,
+      "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_attention": 1,
+      "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_transformer_residency": 1,
       "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_attention": 3,
       "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_transformer_residency": 3,
     },
@@ -907,13 +920,17 @@ test("FLUX.2-dev MLX exposes only the captured q4/q8 T2I Resident cells and keep
     }],
   );
 
-  const matrix = await buildMatrix({ publish: false });
-  const cells = matrix.cells.filter(
+  const shipped = await buildMatrix({ publish: false });
+  const shippedCells = shipped.cells.filter(
     (cell) => cell.modelId === "flux2_dev" && cell.backend === "mlx",
   );
-  assert.equal(cells.length, 180, "the full 3-tier x 4-mode x 3-overlay x 5-rung slice must exist");
+  assert.equal(
+    shippedCells.length,
+    135,
+    "the full 3-tier x 3-active-mode x 3-overlay x 5-rung slice must exist after style retirement",
+  );
   assert.deepEqual(
-    cells.filter((cell) => cell.state !== "Missing").map((cell) => cell.id).sort(),
+    shippedCells.filter((cell) => cell.state !== "Missing").map((cell) => cell.id).sort(),
     [
       "flux2_dev:flux2_dev:mlx:q4:text_to_image:none:resident",
       "flux2_dev:flux2_dev:mlx:q8:text_to_image:none:resident",
@@ -921,7 +938,7 @@ test("FLUX.2-dev MLX exposes only the captured q4/q8 T2I Resident cells and keep
     "BF16 and every sibling mode, overlay, and rung must remain Missing",
   );
   assert.ok(
-    cells
+    shippedCells
       .filter((cell) => cell.state !== "Missing")
       .every(
         (cell) =>
@@ -961,12 +978,13 @@ test("Z-Image MLX static contracts cover every bounded rung through the actual p
   );
   assert.ok(
     bounded.every((cell) =>
-      cell.calibrationFingerprint.startsWith("z-image-mlx-independent-materialization-v3") &&
+      cell.calibrationFingerprint.startsWith("z-image-mlx-independent-materialization-v4") &&
       cell.evidence.staticImplementation.some((entry) =>
-        entry.source.includes("mlx-gen-z-image/src/memory_strategy.rs"),
+        entry.source.includes("mlx-gen-z-image/src/memory_strategy.rs") ||
+        entry.source.includes("mlx_fit_gate.rs#evidence_admission_route"),
       ),
     ),
-    "historical bindings must not mask the pinned MLX provider contract",
+    "every bounded cell must resolve through either the pinned provider contract or exact admitted evidence",
   );
 
   const turboContract = manifest.models.find((model) => model.id === "z_image_turbo")
@@ -981,7 +999,7 @@ test("Z-Image MLX static contracts cover every bounded rung through the actual p
 
   for (const cell of bounded) {
     const ranges = cell.strategyParameters.publishedRanges;
-    assert.deepEqual(ranges.decodeTileEdges, [2048, 768, 640, 512]);
+    assert.deepEqual(ranges.decodeTileEdges, [2048, 768, 640, 512, 448, 384, 320, 256]);
     assert.deepEqual(ranges.decodeOverlaps, [256, 64]);
     if (cell.rung !== "bounded_decode") {
       assert.deepEqual(ranges.attentionChunkSizes, [67108864]);
@@ -1010,10 +1028,24 @@ test("Z-Image MLX static contracts cover every bounded rung through the actual p
     (cell) => zImageIds.includes(cell.modelId) && cell.backend === "mlx",
   );
   const verified = allZImageMlx.filter((cell) => cell.state === "Verified");
-  assert.deepEqual(verified, [], "the d480 Z-Image records must remain historical at pin bf06");
-  assert.ok(
-    allZImageMlx.every((cell) => cell.evidence.currentEnvironmentVerification.length === 0),
-    "no historical Z-Image capture may be promoted across an exact inference-pin change",
+  // SC-19753's five q4 rungs were captured at the closure live at the time. The epic's inference
+  // pin has since advanced past it, so they are an ACCEPTED FLOOR and no longer promote — a pin
+  // bump staling calibration records is the fail-closed design, not a re-capture work order. Kept
+  // as an exact empty SET rather than a count so a record that silently survives the drift as
+  // current still fails here.
+  const expectedVerified = [];
+  assert.deepEqual(
+    verified.map((cell) => cell.id).sort(),
+    expectedVerified,
+    "no Z-Image rung may verify while its capture closure is superseded",
+  );
+  assert.deepEqual(
+    allZImageMlx
+      .filter((cell) => cell.evidence.currentEnvironmentVerification.length > 0)
+      .map((cell) => cell.id)
+      .sort(),
+    expectedVerified,
+    "a superseded capture must not survive the closure change as current evidence",
   );
   assert.ok(
     allZImageMlx
@@ -2766,7 +2798,7 @@ async function currentManifestCalibrationFixture({
   return JSON.stringify(parsed);
 }
 
-/// Retained Qwen q8 records using the shared rung-4 fingerprint, re-stamped current.
+/// Retained Qwen production-deferred records using the shared fingerprint, re-stamped current.
 ///
 /// Selected by their calibration fingerprint, which is what separates them from the 22 older Qwen
 /// records in the bundle: the rung-4 ingest and SC-18237's production-deferred pair carry the bare
@@ -2774,12 +2806,14 @@ async function currentManifestCalibrationFixture({
 /// `-deferred` load-shape variants. Q4/BF16 are deliberately not re-stamped: their physical source
 /// sessions bind the superseded closure and cannot truthfully be made current by a synthetic fixture.
 const QWEN_RUNG4_FINGERPRINT = "qwen-image-mlx-shared-ladder-2026-08-01-v1";
+const QWEN_PRODUCTION_DEFERRED_REVISION = "014134e3035ad7e4eca5c2ed7bded2375dc3c071";
 const qwenRung4OnCurrentPin = () =>
   currentEvidenceFixture({
     select: (record) =>
       record.target.provider === "qwen_image" &&
-      record.target.tier === "q8" &&
-      record.calibrationFingerprint === QWEN_RUNG4_FINGERPRINT,
+      record.calibrationFingerprint === QWEN_RUNG4_FINGERPRINT &&
+      (record.target.tier === "q8" ||
+        record.repositories.inference.revision === QWEN_PRODUCTION_DEFERRED_REVISION),
   });
 
 test("current evidence promotes a cell to Verified, and historical evidence does not (sc-16060)", async () => {
@@ -2823,8 +2857,8 @@ test("current evidence promotes a cell to Verified, and historical evidence does
   });
   assert.equal(
     verifiedQwen(promotedQwen),
-    2,
-    "only the explicitly re-stamped q8 rung-4 records may verify after the shared contract changes",
+    9,
+    "every re-stamped Qwen binding must verify once evidence and manifest share the live closure",
   );
   assert.equal(
     verifiedQwen(shipped),
@@ -2832,21 +2866,56 @@ test("current evidence promotes a cell to Verified, and historical evidence does
     "SC-18311 moves the Qwen provider closure, so every shipped capture is historical until recaptured",
   );
 
-  const evidenceOnlyZ = await buildMatrix({
+  const verifiedZ = (matrix) =>
+    matrix.cells.filter(
+      (cell) => cell.modelId === "z_image_turbo" && cell.backend === "mlx" &&
+        cell.state === "Verified",
+    ).length;
+  // The shipped Z-Image ladder is an accepted floor now: its capture closure was superseded by the
+  // pin advance, so nothing promotes from the checked-in artifact.
+  assert.equal(
+    verifiedZ(shipped),
+    0,
+    "a Z-Image ladder whose capture closure was superseded must not ship as Verified",
+  );
+  // ...which would leave the mismatched-binding control below comparing 0 against 0. Re-establish a
+  // real positive first: with BOTH evidence and manifest binding re-stamped onto the live closure,
+  // all five rungs promote. That is the baseline the mismatch must then destroy.
+  const promotedZ = await buildMatrix({
     publish: false,
     sourceOverrides: {
       calibrationEvidence: await currentEvidenceFixture({
         select: (record) => record.target.provider === "z_image_turbo",
       }),
+      manifest: await currentManifestCalibrationFixture({
+        select: (binding) => binding.provider === "z_image_turbo",
+      }),
     },
   });
   assert.equal(
-    evidenceOnlyZ.cells.filter(
-      (cell) => cell.modelId === "z_image_turbo" && cell.backend === "mlx" &&
-        cell.state === "Verified",
-    ).length,
+    verifiedZ(promotedZ),
+    5,
+    "on a shared live closure every Z-Image rung must still promote — the rule is intact, only the shipped capture is stale",
+  );
+
+  const manifestWithMismatchedZBinding = JSON.parse(stripJsoncComments(await readFile(
+    new URL("../config/manifests/builtin.models.jsonc", import.meta.url),
+    "utf8",
+  )));
+  for (const binding of manifestWithMismatchedZBinding.models
+    .find((model) => model.id === "z_image_turbo").mlx.calibrations) {
+    binding.inferenceClosureDigest = "0".repeat(64);
+  }
+  const mismatchedBindingZ = await buildMatrix({
+    publish: false,
+    sourceOverrides: {
+      manifest: JSON.stringify(manifestWithMismatchedZBinding),
+    },
+  });
+  assert.equal(
+    verifiedZ(mismatchedBindingZ),
     0,
-    "current evidence cannot promote through a historical exact manifest binding",
+    "current evidence cannot promote through a manifest binding with a different closure identity",
   );
 
   // sc-17774: moving the PIN must no longer demote anything — that was the whole defect. Moving
@@ -2883,7 +2952,7 @@ test("current evidence promotes a cell to Verified, and historical evidence does
   });
   assert.equal(
     verifiedQwen(pinOnlyQwen),
-    2,
+    9,
     "a pin move that leaves Qwen's compile closure alone must NOT demote its retained measurements",
   );
 
@@ -2901,7 +2970,7 @@ test("current evidence promotes a cell to Verified, and historical evidence does
   });
   assert.equal(
     verifiedQwen(otherProviderMoved),
-    2,
+    9,
     "another model's code path moving must never demote retained Qwen evidence",
   );
 
@@ -3124,9 +3193,9 @@ test("every conformance and characterization state carries a definition (sc-1606
 test("publication keeps every planned, measured, bound and cited coordinate — and nothing else", async () => {
   const resolved = await buildMatrix({ publish: false });
   const publishedDocument = await buildMatrix();
-  const plan = JSON.parse(
+  const plan = activeCalibrationPlan(JSON.parse(
     await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url), "utf8"),
-  );
+  ));
 
   const planned = plannedCellIds(plan, resolved.cells);
   assert.ok(planned.size > 100, "the shipped plan must target a substantial set of coordinates");
@@ -3171,14 +3240,15 @@ test("publication keeps every planned, measured, bound and cited coordinate — 
     assert.ok(resolved.cells.some(arm), `the "${name}" arm admits no coordinate at all`);
   }
 
-  // The seventh arm, `currentEnvironmentVerification`, currently admits nothing: SC-18311 changes
-  // the shared gen-core contract and moves the Qwen and FLUX.2 provider closures, so their prior
-  // captures are historical until they are re-run. Two facts keep this assertion useful:
+  // The seventh arm, `currentEnvironmentVerification`, now admits exactly the five freshly captured
+  // Z-Image rungs. SC-18311 still moves the Qwen and FLUX.2 provider closures, so their prior
+  // captures remain historical until they are re-run. Two facts keep this assertion useful:
   //
-  //   1. It is exact: no historical Qwen or FLUX.2 row may survive the closure change as current.
+  //   1. It is exact: only the new Z-Image capture may be current; no historical Qwen or FLUX.2 row
+  //      may survive the closure change as current.
   //   2. It is SUBSUMED. A current run is an eligible run, and `memoryCharacterization` counts every
   //      eligible run's geometry, so a cell carrying current evidence is `point` or `fitted` and the
-  //      measured arm already admits it. The arm being empty therefore cannot elide anything.
+  //      measured arm already admits it. The arm therefore cannot uniquely admit or elide anything.
   //
   // Asserted as an exact set so another recapture flips this test rather than silently passing, and
   // the field's presence is asserted separately so a rename cannot make the arm quietly vanish.
@@ -3188,7 +3258,7 @@ test("publication keeps every planned, measured, bound and cited coordinate — 
       .map((cell) => cell.id)
       .sort(),
     [],
-    "the SC-18311 closure change must demote every prior Qwen and FLUX.2 capture to historical",
+    "provider closure drift must demote every formerly current capture without re-stamping it",
   );
   assert.ok(
     resolved.cells.every((cell) => Array.isArray(cell.evidence.currentEnvironmentVerification)),
@@ -3474,8 +3544,17 @@ test("a calibration-plan entry that addresses no coordinate fails generation (sc
   // that capability `edit_image`, so they matched ZERO coordinates. Nothing caught it —
   // `expectedEngagedRungs` just returned null, and `memory-calibration.schema.json` types `mode` as a
   // free string — and a capture run against them would have produced records binding to nothing.
-  const plan = JSON.parse(
+  const rawPlan = JSON.parse(
     await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url), "utf8"),
+  );
+  const retiredStyleRows = rawPlan.providers.filter(
+    (entry) => entry.target.mode === "style_variations",
+  );
+  assert.ok(retiredStyleRows.length > 0, "historical style captures remain provenance");
+  const plan = activeCalibrationPlan(rawPlan);
+  assert.ok(
+    plan.providers.every((entry) => entry.target.mode !== "style_variations"),
+    "retired product modes are excluded from the active calibration plan",
   );
 
   // The shipped plan is clean, which is the property worth pinning: every entry addresses something.

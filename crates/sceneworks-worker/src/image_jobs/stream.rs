@@ -18,6 +18,13 @@ enum GenEvent {
         index: usize,
         frame: gen_core::PreviewFrame,
     },
+    /// Typed, provider-authored account of the prompt that actually reached image `index`'s
+    /// renderer. Only an active request-local sink can produce this event.
+    PromptEnhancement {
+        index: usize,
+        expected_prompt: String,
+        report: gen_core::PromptEnhancementReport,
+    },
     Image {
         index: usize,
         seed: i64,
@@ -56,6 +63,40 @@ fn preview_sink_for(
     gen_core::PreviewSink::new(move |frame| {
         let _ = tx.try_send(GenEvent::Preview { index, frame });
     })
+}
+
+#[derive(Clone)]
+struct PromptEnhancementEventSink {
+    tx: tokio::sync::mpsc::Sender<GenEvent>,
+    index: usize,
+}
+
+impl PromptEnhancementEventSink {
+    fn for_prompt(&self, prompt: &str) -> gen_core::PromptEnhancementSink {
+        let tx = self.tx.clone();
+        let index = self.index;
+        let expected_prompt = prompt.to_owned();
+        gen_core::PromptEnhancementSink::new(move |report| {
+            // One small load-bearing provenance event per image. Unlike decorative previews this
+            // must not be dropped under channel pressure: a missing report fails the enabled
+            // request closed.
+            let _ = tx.blocking_send(GenEvent::PromptEnhancement {
+                index,
+                expected_prompt: expected_prompt.clone(),
+                report,
+            });
+        })
+    }
+}
+
+fn prompt_enhancement_event_sink_for(
+    tx: &tokio::sync::mpsc::Sender<GenEvent>,
+    index: usize,
+) -> PromptEnhancementEventSink {
+    PromptEnhancementEventSink {
+        tx: tx.clone(),
+        index,
+    }
 }
 
 fn send_gen_progress(tx: &tokio::sync::mpsc::Sender<GenEvent>, index: usize, progress: Progress) {
@@ -140,6 +181,48 @@ where
     Ok(())
 }
 
+/// Prompt-reporting sibling of [`drive_gen_items`]. Kept separate so the additive inference
+/// contract changes only the FLUX.2-dev-capable generic lanes; every other producer remains source-
+/// and behavior-identical.
+#[cfg_attr(
+    not(all(not(target_os = "macos"), feature = "backend-candle")),
+    allow(dead_code)
+)]
+fn drive_gen_items_reported<I, Item, F>(
+    tx: tokio::sync::mpsc::Sender<GenEvent>,
+    items: I,
+    mut generate: F,
+) -> WorkerResult<()>
+where
+    I: IntoIterator<Item = Item>,
+    F: FnMut(
+        usize,
+        Item,
+        gen_core::PreviewSink,
+        PromptEnhancementEventSink,
+        &mut dyn FnMut(Progress),
+    ) -> WorkerResult<Option<GeneratedImage>>,
+{
+    for (index, item) in items.into_iter().enumerate() {
+        let _cache_release = RequestCacheRelease;
+        let mut on_progress = |progress| send_gen_progress(&tx, index, progress);
+        let Some(image) = generate(
+            index,
+            item,
+            preview_sink_for(&tx, index),
+            prompt_enhancement_event_sink_for(&tx, index),
+            &mut on_progress,
+        )?
+        else {
+            break;
+        };
+        if !send_generated_image(&tx, index, image) {
+            break;
+        }
+    }
+    Ok(())
+}
+
 /// Like [`drive_gen_items`] but the per-item closure additionally returns an optional pre-built
 /// `faceLikeness` sidecar block (sc-4409), carried through to `consume_gen_events` for per-image
 /// persistence. Used by all four angle-set lanes — InstantID, FLUX.2 edit, Qwen-Edit, and
@@ -175,6 +258,45 @@ where
         let _cache_release = RequestCacheRelease;
         let mut on_progress = |progress| send_gen_progress(&tx, index, progress);
         let Some(image) = generate(index, item, preview_sink_for(&tx, index), &mut on_progress)?
+        else {
+            break;
+        };
+        if !send_scored_generated_image(&tx, index, image) {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// [`drive_gen_items_scored`] plus the request-local prompt-report sink used by the shared MLX lane.
+/// Face likeness and prompt provenance remain independent per-image facts. The Candle FLUX.2-dev
+/// edit route does not admit the character-image mode, so it has no scored/reporting combination.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn drive_gen_items_scored_reported<I, Item, F>(
+    tx: tokio::sync::mpsc::Sender<GenEvent>,
+    items: I,
+    mut generate: F,
+) -> WorkerResult<()>
+where
+    I: IntoIterator<Item = Item>,
+    F: FnMut(
+        usize,
+        Item,
+        gen_core::PreviewSink,
+        PromptEnhancementEventSink,
+        &mut dyn FnMut(Progress),
+    ) -> WorkerResult<Option<ScoredGeneratedImage>>,
+{
+    for (index, item) in items.into_iter().enumerate() {
+        let _cache_release = RequestCacheRelease;
+        let mut on_progress = |progress| send_gen_progress(&tx, index, progress);
+        let Some(image) = generate(
+            index,
+            item,
+            preview_sink_for(&tx, index),
+            prompt_enhancement_event_sink_for(&tx, index),
+            &mut on_progress,
+        )?
         else {
             break;
         };

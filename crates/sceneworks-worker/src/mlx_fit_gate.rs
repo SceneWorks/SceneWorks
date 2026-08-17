@@ -42,7 +42,7 @@ use gen_core::{
     MemoryGeometry, MemoryMode, MemoryNumericTier, MemoryOptimizationAuthority,
     MemoryParityContract, MemoryParityResult, MemoryProviderContract, MemoryRunContext,
     MemorySelection, MemoryStrategy, OffloadPolicy, PerComponentBytes, Precision, Quant,
-    TransformerComponent, WeightsSource, MEMORY_DECODE_QUALITY_IMPLEMENTATION_FINGERPRINT,
+    TransformerComponent, WeightsSource,
 };
 use sceneworks_core::memory_calibration::{
     Backend as CalibrationBackend, BundleLoad, CalibrationBinding, EvidenceBundle, EvidenceQuery,
@@ -245,7 +245,6 @@ pub(crate) enum DecodeQualityBindingDecision {
     Legacy,
     Bound {
         artifact: MemoryDecodeArtifactIdentity,
-        implementation_fingerprint: String,
         row_count: usize,
     },
     Refused {
@@ -387,30 +386,11 @@ pub(crate) fn bind_decode_quality_policies_from_manifest(
             },
         });
     }
-    if let Some(foreign) = policies.iter().find(|policy| {
-        policy.implementation_fingerprint != MEMORY_DECODE_QUALITY_IMPLEMENTATION_FINGERPRINT
-    }) {
-        return Ok(DecodeQualityPolicyBinding {
-            policies: Vec::new(),
-            authoritative: true,
-            runtime_identity: None,
-            decision: DecodeQualityBindingDecision::Refused {
-                reason: format!(
-                    "decode-quality implementation fingerprint {} does not match running implementation {}",
-                    foreign.implementation_fingerprint,
-                    MEMORY_DECODE_QUALITY_IMPLEMENTATION_FINGERPRINT,
-                ),
-            },
-        });
-    }
-    let implementation_fingerprint = MEMORY_DECODE_QUALITY_IMPLEMENTATION_FINGERPRINT.to_owned();
     let runtime_identity = MemoryDecodeQualityRuntimeIdentity {
         artifact: artifact.clone(),
-        implementation_fingerprint: implementation_fingerprint.clone(),
     };
     let decision = DecodeQualityBindingDecision::Bound {
         artifact,
-        implementation_fingerprint,
         row_count: policies.len(),
     };
     Ok(DecodeQualityPolicyBinding {
@@ -1185,10 +1165,10 @@ struct VerifiedGeometryAlternative {
 /// closure-current binding, but a DIFFERENT geometry — the cell the request itself could not be
 /// admitted on.
 ///
-/// Closure-current is a deliberate restriction, not an oversight: `MLX_ESTIMATE_MARGIN` (0.10)
-/// was derived to cover extrapolation error on top of same-closure re-capture variance
-/// (`crates/sceneworks-worker/src/ladder_margin_policy.rs`). A stale-closure record already
-/// carries its own 0.05 drift allowance on the MEASURED path; stacking that drift under an
+/// Closure-current is a deliberate restriction, not an oversight: `MLX_ESTIMATE_MARGIN` was
+/// derived to cover extrapolation error on top of same-closure re-capture variance
+/// (`crates/sceneworks-worker/src/ladder_margin_policy.rs`). A stale-closure record already carries
+/// its own corpus-derived drift allowance on the MEASURED path; stacking that drift under an
 /// extrapolation would spend the estimate margin twice, and no derivation covers the sum — so a
 /// stale record may keep serving its own cell behind the stale margin (sc-18095) but may not seed
 /// an extrapolated estimate.
@@ -3713,11 +3693,12 @@ pub(crate) fn evaluate_request(
 /// would SIGKILL. `supports_sequential_offload` is precisely the provider's own machine-readable
 /// attestation that it wired that lifecycle (the gen-core discovery signal, sc-11126). Reading it
 /// per-engine makes the gate self-maintaining: every family the mlx-gen Phase-1 fan-out wires
-/// (sc-10840 — sd3/sana/flux/flux2/chroma/ideogram/kolors/anima/boogu/bernini alongside the earlier
+/// (sc-10840 — sd3/sana/flux/flux2/chroma/ideogram/kolors/anima/boogu alongside the earlier
 /// sdxl/z-image/qwen/lens/krea families) is covered the moment its descriptor advertises the bit, with
-/// no lockstep edit here. An engine that does not separate a text encoder (e.g. sensenova's fused MoT,
-/// `footprint` te=0) leaves the bit `false` and is correctly never offered `Sequential` — a no-op that
-/// would OOM.
+/// no lockstep edit here. Providers that stage unconditionally (for example Bernini) deliberately
+/// leave the selectable-control bit `false`; an engine that cannot benefit from staging (for example
+/// SenseNova's fused MoT, `footprint` te=0) does the same. Neither is offered a no-op `Sequential`
+/// selection.
 ///
 /// This is a pre-load, weights-free registry lookup (`(descriptor)()` allocates no tensors), the same
 /// query shape the worker already uses for family/guidance/quant capability advertisement and the
@@ -5224,6 +5205,9 @@ pub fn full_finetune_memory_error(
 mod tests {
     use super::*;
 
+    const DECODE_QUALITY_TEST_STAMP: &str =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
     fn quality_policy_json(route: &str) -> Value {
         serde_json::json!({
             "qualityAbi": gen_core::MEMORY_DECODE_QUALITY_ABI,
@@ -5238,7 +5222,7 @@ mod tests {
                 "variant": "packed-q4",
                 "fingerprint": format!("SceneWorks/fixture@{}:packed-q4", "c".repeat(40)),
             },
-            "implementationFingerprint": gen_core::MEMORY_DECODE_QUALITY_IMPLEMENTATION_FINGERPRINT,
+            "implementationFingerprint": DECODE_QUALITY_TEST_STAMP,
             "mode": "text_to_image",
             "overlay": null,
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1, "referenceCount": 0 },
@@ -5363,21 +5347,25 @@ mod tests {
             ));
         }
 
-        let mut stale_source_value = manifest_value;
-        stale_source_value["mlx"]["memoryStrategyContract"]["implementations"][0]
+        let mut forensic_source_value = manifest_value;
+        forensic_source_value["mlx"]["memoryStrategyContract"]["implementations"][0]
             ["parameterRanges"]["decodeGeometryPolicies"][0]["implementationFingerprint"] =
             Value::String("f".repeat(64));
-        let stale_source = bind_decode_quality_policies_from_manifest(
-            stale_source_value.as_object().unwrap(),
+        let forensic_source = bind_decode_quality_policies_from_manifest(
+            forensic_source_value.as_object().unwrap(),
             "realvisxl",
             Some(&provenance),
         )
         .unwrap();
-        assert!(stale_source.authoritative);
+        assert!(forensic_source.authoritative);
+        assert_eq!(forensic_source.policies.len(), 1);
+        assert_eq!(
+            forensic_source.policies[0].implementation_fingerprint,
+            "f".repeat(64)
+        );
         assert!(matches!(
-            stale_source.decision,
-            DecodeQualityBindingDecision::Refused { ref reason }
-                if reason.contains("does not match running implementation")
+            forensic_source.decision,
+            DecodeQualityBindingDecision::Bound { row_count: 1, .. }
         ));
     }
 
@@ -5595,15 +5583,15 @@ mod tests {
         .expect("builtin.models.jsonc parses");
         let models = manifest["models"].as_array().expect("manifest models");
         let expected = [
-            ("chroma1_base", "chroma", 4_usize, 1_usize),
-            ("chroma1_flash", "chroma", 4, 2),
-            ("chroma1_hd", "chroma", 4, 0),
-            ("illustrious_xl_v1", "sdxl", 10, 0),
-            ("illustrious_xl_v2", "sdxl", 10, 0),
-            ("kolors", "kolors", 7, 0),
-            ("realvisxl", "sdxl", 10, 0),
-            ("realvisxl_lightning", "sdxl", 10, 6),
-            ("sdxl", "sdxl", 10, 0),
+            ("chroma1_base", "chroma", 4_usize, 4_usize),
+            ("chroma1_flash", "chroma", 4, 4),
+            ("chroma1_hd", "chroma", 4, 4),
+            ("illustrious_xl_v1", "sdxl", 10, 10),
+            ("illustrious_xl_v2", "sdxl", 10, 10),
+            ("kolors", "kolors", 7, 7),
+            ("realvisxl", "sdxl", 10, 10),
+            ("realvisxl_lightning", "sdxl", 10, 10),
+            ("sdxl", "sdxl", 10, 10),
         ];
         let expected_ids = expected
             .iter()
@@ -5611,6 +5599,7 @@ mod tests {
             .collect::<std::collections::BTreeSet<_>>();
         let mut all_rows = 0_usize;
         let mut all_admitted = 0_usize;
+        let mut quality_stamps = std::collections::BTreeSet::new();
 
         for (model_id, family, row_count, admitted_count) in expected {
             let model = models
@@ -5649,9 +5638,16 @@ mod tests {
                     && row.geometry.batch == 1
                     && row.geometry.frames == 1
                     && row.geometry.reference_count == 0
-                    && row.implementation_fingerprint
-                        == gen_core::MEMORY_DECODE_QUALITY_IMPLEMENTATION_FINGERPRINT
+                    && row.implementation_fingerprint.len() == 64
+                    && row
+                        .implementation_fingerprint
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
             }));
+            quality_stamps.extend(
+                rows.iter()
+                    .map(|row| row.implementation_fingerprint.clone()),
+            );
             let admitted = rows
                 .iter()
                 .filter(|row| matches!(row.disposition, MemoryDecodeQualityDisposition::Admitted))
@@ -5739,21 +5735,19 @@ mod tests {
                     "{model_id}: admitted row must create its exact physical decode candidate"
                 );
             }
-            let refused = rows
-                .iter()
-                .find(|row| {
-                    matches!(
-                        row.disposition,
-                        MemoryDecodeQualityDisposition::Refused { .. }
-                    )
-                })
-                .expect("every route retains refused evidence");
+            let unmeasured_geometry = MemoryGeometry {
+                width: 64,
+                height: 64,
+                batch: 1,
+                frames: 1,
+                reference_count: 0,
+            };
             let result = synthesize_estimate_ladder(
                 contract,
                 &plan,
                 "text_to_image",
                 None,
-                refused.geometry,
+                unmeasured_geometry,
                 false,
                 None,
                 &[],
@@ -5762,7 +5756,7 @@ mod tests {
                 result.estimates.iter().all(|candidate| {
                     candidate.selection.strategy != MemoryStrategy::BoundedDecode
                 }),
-                "{model_id}: refused row must not create a physical decode candidate"
+                "{model_id}: an unmeasured coordinate must not create a physical decode candidate"
             );
             let matched = contract
                 .decode_geometry_policies_for_request(MemoryDecodePolicyQuery {
@@ -5770,22 +5764,19 @@ mod tests {
                     load_shape: contract.load_shape,
                     mode_key: "text_to_image",
                     overlay: None,
-                    geometry: refused.geometry,
+                    geometry: unmeasured_geometry,
                     use_pid: false,
                 })
                 .expect("exact policy query");
-            assert!(
-                matched.iter().any(|row| {
-                    matches!(
-                        row.disposition,
-                        MemoryDecodeQualityDisposition::Refused { .. }
-                    ) && row.production_evidence_sha256 == refused.production_evidence_sha256
-                }),
-                "{model_id}: refusal must retain its typed sealed evidence identity"
-            );
+            assert!(matched.is_empty(), "{model_id}: unmeasured policy query");
         }
 
-        assert_eq!((all_rows, all_admitted), (69, 9));
+        assert_eq!((all_rows, all_admitted), (69, 69));
+        assert_eq!(
+            quality_stamps.len(),
+            10,
+            "the sealed corpus retains each collection-time source closure"
+        );
         for model in models {
             let id = model["id"].as_str().expect("model id");
             if !expected_ids.contains(id) {
@@ -6458,14 +6449,25 @@ mod tests {
         );
     }
 
-    /// Stale admission (sc-18096) on a REAL shipped lane. Z-Image's ladder was measured at
-    /// `d4802320`, and `mlx:z_image_turbo`'s closure has moved since, so this is the one shipped
-    /// opt-in whose calibration is genuinely stale. Under sc-18095/18096 that ladder stays
-    /// SELECTABLE — its candidates reach the selector carrying their measured digest and are
-    /// graded behind the widened stale margin — while a binding that LIES about its digest still
-    /// resolves to nothing.
+    /// Admission on a REAL shipped lane. SC-19753 captured all five Z-Image rungs at the inference
+    /// closure that was live when it ran; the epic's pin has since advanced past it, so this ladder
+    /// is now an ACCEPTED FLOOR rather than current verification. A pin bump staling calibration
+    /// records is the fail-closed design working, not a re-capture work order.
+    ///
+    /// Renamed from `..._admits_current_mlx_ladder_rungs` because "current" is the one thing it no
+    /// longer proves. What it still proves exactly, and what keeps it from going vacuous:
+    ///   * the manifest binding and the packaged evidence agree with each other on the digest;
+    ///   * at the closure it WAS measured under, the ladder reaches calibrated admission on all
+    ///     five rungs;
+    ///   * a binding that lies about its digest resolves to nothing even at that same closure —
+    ///     the negative control now differs from the positive case by exactly one variable.
+    ///
+    /// Deliberately NOT asserted: that routing at the live closure degrades. `packaged_admission_route`
+    /// resolves evidence through the manifest binding rather than the caller's closure argument, so
+    /// it still reports `Evidence` there; asserting otherwise would encode a mechanism that does not
+    /// exist. Currency itself is covered by the matrix currency suite, not here.
     #[test]
-    fn shipped_z_image_manifest_admits_historical_mlx_ladder_rungs_as_stale() {
+    fn shipped_z_image_manifest_admits_the_accepted_mlx_ladder_floor() {
         let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
         let manifest: Value =
             serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
@@ -6492,14 +6494,17 @@ mod tests {
             .find(|record| {
                 matches!(record.backend, CalibrationBackend::Mlx)
                     && record.target.provider == "z_image_turbo"
+                    && record.calibration_fingerprint
+                        == "z-image-mlx-independent-materialization-v4"
             })
             .and_then(|record| record.repositories.inference.closure_digest)
-            .expect("the packaged bundle carries the historical Z-Image ladder with its digest");
+            .expect("the packaged bundle carries the current Z-Image ladder with its digest");
         let live = live_mlx_closure_digest("z_image_turbo");
         assert_ne!(
             captured, live,
-            "this test is about a lane whose closure HAS moved; if z_image_turbo were recaptured \
-             current, the assertions below would be checking the opposite of their own name"
+            "this ladder is a known accepted floor. If a re-capture has made it current again, \
+             restore the equality here and refresh the currency expectations that pair with it \
+             rather than leaving a stale `assert_ne!` asserting the opposite of the truth"
         );
         assert!(bindings.iter().all(|binding| {
             binding.query.abi == sceneworks_core::memory_calibration::MEMORY_CALIBRATION_ABI
@@ -6514,14 +6519,13 @@ mod tests {
                         batch: 1,
                         frames: 1,
                     }
-                // Capture provenance, pinned as a literal because it is a fact about the shipped
-                // opt-in that no pin bump may silently rewrite. It is NOT the currency term.
-                && binding.query.inference_revision == "d48023204cd3a4f3f8eb060f79803dccaddcb482"
-                // The currency term (sc-17774), graded against three independent artifacts: the
-                // manifest binding must agree with the evidence bundle about what it measured, and
-                // must disagree with the live closure config — which is why the route degrades.
+                && binding.query.fingerprint == "z-image-mlx-independent-materialization-v4"
+                // Capture provenance remains an exact fact about the shipped opt-in.
+                && binding.query.inference_revision == "dfd76b5aef62b2082ed4b18a8eebd2e3e2e07cfb"
+                // The manifest binding and the packaged evidence must still agree exactly with each
+                // other. They no longer agree with the LIVE closure, which is the accepted-floor
+                // state asserted above, not a drift between these two.
                 && binding.query.inference_closure_digest == captured
-                && binding.query.inference_closure_digest != live
         }));
         assert!(bindings.iter().all(|binding| {
             binding.query.load_shape
@@ -6553,62 +6557,53 @@ mod tests {
             Some(z_image),
             Some(resolved),
         );
+        // Routed at the closure the ladder was MEASURED under. That is the coordinate at which
+        // these records are evidence; at any other closure they are history, which is asserted
+        // separately below.
         let route = packaged_admission_route(
             &plan,
             &fixture_inputs(768, 768),
             "text_to_image",
             fixture_budget(128.0),
-            &live_mlx_closure_digest("z_image_turbo"),
+            &captured,
         )
-        .expect("historical Z-Image evidence must route without an error");
+        .expect("the accepted Z-Image floor must route without an error");
 
-        // sc-18096: the historical ladder is no longer pre-demoted to legacy. It reaches
-        // calibrated admission with every candidate carrying the digest it was MEASURED under, so
-        // the selector grades the whole ladder behind the widened stale-measured margin instead of
-        // refusing the render outright.
         assert_eq!(
             route.path,
             AdmissionPath::Evidence,
-            "the stale historical ladder must reach the selector; got fallback {:?}",
+            "at its captured closure the ladder must reach the selector; got fallback {:?}",
             route.fallback_reason
         );
         assert_eq!(
             route.evidence.len(),
             5,
-            "every historical rung must resolve to its promoted record"
+            "every rung must resolve to its promoted record at the captured closure"
         );
         assert!(
             route
                 .evidence
                 .iter()
                 .all(|candidate| candidate.closure_digest == captured),
-            "each candidate must carry the captured digest so the selector can widen it"
+            "each candidate must carry the captured digest"
         );
 
-        // A manifest still cannot LAUNDER a stale ladder current by claiming the live digest.
-        //
-        // With the admission pre-filter's closure conjunct retired (sc-18096), what stops the
-        // laundering is `EvidenceBundle::evidence_for` finding the RECORD still stamped with the
-        // digest it was really measured under: a binding claiming the live digest no longer
-        // matches its own record, so it resolves to NO candidates at all — a lie about identity
-        // is worse off than the honest stale declaration above, which is exactly the incentive
-        // the two comparisons must preserve. One asks "which measurement is this binding telling
-        // the truth about?"; the currency question is now the selector's widened-margin grading.
-        let mut laundered = z_image.clone();
-        for calibration in laundered
+        // A manifest still cannot substitute a different closure identity for the measured one.
+        let mut mismatched = z_image.clone();
+        for calibration in mismatched
             .get_mut("mlx")
             .and_then(|mlx| mlx.get_mut("calibrations"))
             .and_then(Value::as_array_mut)
             .expect("calibrations array")
         {
-            calibration["inferenceClosureDigest"] = Value::from(live.clone());
+            calibration["inferenceClosureDigest"] = Value::from("0".repeat(64));
         }
-        let laundered_route = packaged_admission_route(
+        let mismatched_route = packaged_admission_route(
             &MlxRequestPlan::for_spec_and_manifest(
                 "z_image_turbo",
                 "z_image_turbo",
                 &spec,
-                Some(&laundered),
+                Some(&mismatched),
                 Some(ResolvedArtifactProvenance {
                     identity: crate::model_jobs::ResolvedArtifactIdentity {
                         repository: resolved_binding.artifact_repository.clone(),
@@ -6622,16 +6617,17 @@ mod tests {
             &fixture_inputs(768, 768),
             "text_to_image",
             fixture_budget(128.0),
-            &live,
+            // Deliberately the CAPTURED closure — the same coordinate the positive case above
+            // routes at — so the lying manifest digest is the only variable between them.
+            &captured,
         )
-        .expect("a laundered opt-in degrades, it does not error");
+        .expect("a mismatched opt-in degrades, it does not error");
         assert_eq!(
-            laundered_route.path,
+            mismatched_route.path,
             AdmissionPath::Legacy,
-            "a binding claiming the live digest must not reach calibrated admission on records \
-             measured under another closure"
+            "a binding claiming a different digest must not reach calibrated admission"
         );
-        assert!(laundered_route.evidence.is_empty());
+        assert!(mismatched_route.evidence.is_empty());
     }
 
     #[test]
@@ -7825,12 +7821,12 @@ mod tests {
         let plan = packaged_krea_plan();
         // Realistic component facts so the floor arithmetic is meaningful: conditioning 8 GiB,
         // transformer 60 GiB, decoder 4 GiB. Floors at 1024² (headroom = 2 GiB fixture anchor):
-        //   staged (rung 1)       max(8, 64) + 2 = 66 GiB  -> widened 72.6 GiB
-        //   bounded decode floor  (8 + 64)  + 2 = 74 GiB  -> widened 81.4 GiB (never used: the
+        //   staged (rung 1)       max(8, 64) + 2 = 66 GiB  -> widened 99.27 GiB
+        //   bounded decode floor  (8 + 64)  + 2 = 74 GiB  -> widened 111.30 GiB (never used: the
         //                                                   measured 896² basis supplies a fitted
         //                                                   curve instead)
         // Fitted bounded-decode estimate from the 896² record: envelope 38.563 GiB scaled by
-        // 1024²/896² = 50.37 GiB, widened by the 0.10 MLX estimate margin to 55.41 GiB.
+        // 1024²/896² = 50.37 GiB, widened by the measured MLX estimate margin to 75.76 GiB.
         let mut generator = packaged_krea_generator();
         {
             let facts = &mut generator
@@ -7879,11 +7875,11 @@ mod tests {
             REQUEST_EVIDENCE_REVISION
         );
 
-        // At 60 GiB the staged floor (72.6 widened) no longer fits, and the FITTED bounded-decode
-        // estimate extrapolated from the measured 896² cell (55.41 GiB widened) is selected — with
+        // At 76 GiB the staged floor (99.27 widened) no longer fits, and the FITTED bounded-decode
+        // estimate extrapolated from the measured 896² cell (75.76 GiB widened) is selected — with
         // the measured cell's own sweep parameters, which a floor synthesis (built from the
-        // smallest declared ranges and a 81.4 GiB widened peak) could not produce at this budget.
-        let fitted = evaluate(&generator, 60.0)
+        // smallest declared ranges and a 111.30 GiB widened peak) could not produce at this budget.
+        let fitted = evaluate(&generator, 76.0)
             .expect("the fitted-curve estimate must admit where the floors cannot");
         assert_eq!(
             fitted.context.selection.strategy,
@@ -7946,11 +7942,11 @@ mod tests {
         // mutated fingerprint is deliberately WELL-FORMED (`-v1` satisfies the contract's version
         // token conformance rule), so the refusal below is the work of the basis identity gate in
         // `synthesize_estimate_ladder`, not an accidental contract-conformance `Invalid`. And it
-        // runs at 60 GiB, a budget where NO lower alternative is named (both packaged cells need
+        // runs at 76 GiB, a budget where NO lower alternative is named (both packaged cells need
         // their ~47 GiB captured foreign reserve), so `carries_verified_claim` is FALSE and the
         // fingerprint demotion at the admission seam never fires — the synthesis-side gate is the
         // only thing standing between the drifted provider and the fitted candidate. The
-        // unmutated generator ADMITS at 60 (the fitted arm above), so the refusal is exactly the
+        // unmutated generator ADMITS at 76 (the fitted arm above), so the refusal is exactly the
         // mutation's doing.
         let mut mismatched_generator = packaged_krea_generator();
         {
@@ -7974,7 +7970,7 @@ mod tests {
             "the mutated fingerprint must be conformance-CLEAN so this arm exercises the basis \
              identity gate, not format validation"
         );
-        let message = evaluate(&mismatched_generator, 60.0)
+        let message = evaluate(&mismatched_generator, 76.0)
             .expect_err("a fingerprint-drifted provider loses the measured basis and refuses")
             .to_string();
         assert!(
@@ -8012,7 +8008,7 @@ mod tests {
                 .expect("bounded decode capability")
                 .support = gen_core::MemoryStrategySupport::Missing;
         }
-        let message = evaluate(&unimplemented_generator, 60.0)
+        let message = evaluate(&unimplemented_generator, 76.0)
             .expect_err("an unimplemented rung is never estimate-admissible")
             .to_string();
         assert!(
@@ -8022,7 +8018,7 @@ mod tests {
 
         // At the LIVE closure the verdict forks on the digest pair, derived rather than
         // hardcoded: a fitted-curve estimate may extrapolate only from CLOSURE-CURRENT records
-        // (see `MeasuredRungBasis` — the 0.10 estimate margin was derived over same-closure
+        // (see `MeasuredRungBasis` — the estimate margin was derived over same-closure
         // re-capture variance and cannot also absorb closure drift). While the pose-control pair
         // is current the 60 GiB request admits the fitted rung; once the closure moves, the
         // records may keep serving their own measured cells behind the stale margin (sc-18095)
@@ -8093,12 +8089,12 @@ mod tests {
     /// and the selection translates to the right engine knobs.
     ///
     /// Floor arithmetic (fixture facts: base 3 GiB all transformer, headroom 2 fixed + 4 area):
-    ///   resident        9 GiB modeled -> widened  9.9
-    ///   staged floor    3 + 6 = 9     -> widened  9.9
-    ///   decode floor    3 + 6 = 9     -> widened  9.9   (bounds transients, not weights)
-    ///   attention floor 3 + 6 = 9     -> widened  9.9
-    ///   rung 4 floor    0 + 6 = 6     -> widened  6.6   (windowed transformer leaves residency)
-    /// An 8 GiB budget therefore admits exactly one rung: BoundedTransformerResidency.
+    ///   resident        9 GiB modeled -> widened 13.54
+    ///   staged floor    3 + 6 = 9     -> widened 13.54
+    ///   decode floor    3 + 6 = 9     -> widened 13.54  (bounds transients, not weights)
+    ///   attention floor 3 + 6 = 9     -> widened 13.54
+    ///   rung 4 floor    0 + 6 = 6     -> widened  9.02  (windowed transformer leaves residency)
+    /// A 9.1 GiB budget therefore admits exactly one rung: BoundedTransformerResidency.
     #[test]
     fn unmeasured_provider_under_a_small_budget_selects_a_deep_estimate_rung() {
         let generator = full_ladder_generator();
@@ -8111,7 +8107,7 @@ mod tests {
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
-            fixture_budget(8.0),
+            fixture_budget(9.1),
             gib_to_bytes(9.0),
             0,
             &[],
@@ -8120,7 +8116,7 @@ mod tests {
         assert_eq!(
             evaluation.context.selection.strategy,
             MemoryStrategy::BoundedTransformerResidency,
-            "only rung 4's floor fits an 8 GiB budget: {:?}",
+            "only rung 4's floor fits a 9.1 GiB budget: {:?}",
             evaluation.context.selection
         );
         assert_eq!(
@@ -8164,7 +8160,7 @@ mod tests {
             REQUEST_EVIDENCE_REVISION
         );
 
-        // Mutation arm: at 6 GiB even the rung-4 widened floor (6.6 GiB) overflows, and the
+        // Mutation arm: at 9 GiB even the rung-4 widened floor (~9.02 GiB) overflows, and the
         // refusal is the honest Reject quoting the widened requirement — proving the estimate
         // margin is applied on this path (a zeroed margin would admit 6.0 <= 6.0).
         let error = evaluate_request_with_budget(
@@ -8173,7 +8169,7 @@ mod tests {
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
-            fixture_budget(6.0),
+            fixture_budget(9.0),
             gib_to_bytes(9.0),
             0,
             &[],
@@ -8181,7 +8177,7 @@ mod tests {
         .expect_err("below every widened estimate the request must refuse")
         .to_string();
         assert!(
-            error.contains("needs 6.60 GiB"),
+            error.contains("needs 9.02 GiB"),
             "the refusal must quote the WIDENED rung-4 floor: {error}"
         );
     }
@@ -8875,8 +8871,7 @@ mod tests {
                     variant: "q4".to_owned(),
                     fingerprint: format!("SceneWorks/{route}-mlx@{}:q4", "d".repeat(40)),
                 },
-                implementation_fingerprint: MEMORY_DECODE_QUALITY_IMPLEMENTATION_FINGERPRINT
-                    .to_owned(),
+                implementation_fingerprint: DECODE_QUALITY_TEST_STAMP.to_owned(),
                 mode: MemoryMode::TextToImage,
                 overlay: None,
                 geometry,
@@ -8915,7 +8910,7 @@ mod tests {
                 &fixture_inputs(1024, 1024),
                 MemoryCacheState::Cold,
                 OffloadPolicy::Resident,
-                fixture_budget(8.0),
+                fixture_budget(9.1),
                 gib_to_bytes(9.0),
                 0,
                 &[],
@@ -8977,7 +8972,7 @@ mod tests {
             // Preserve the shipped contract, composition, parameters and load shape while making
             // the pure selector arithmetic legible: a 6 GiB base consists of a 1 GiB conditioner
             // and 5 GiB DiT. With 6 GiB of request headroom, only the windowed composition fits an
-            // 8 GiB constrained host after the canonical 10% estimate margin.
+            // 11 GiB constrained host after the current corpus-derived estimate margin.
             contract.asset_facts.base_bytes = gib_to_bytes(6.0);
             contract.asset_facts.conditioning_bytes = gib_to_bytes(1.0);
             contract.asset_facts.transformer_bytes = gib_to_bytes(5.0);
@@ -9048,7 +9043,7 @@ mod tests {
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Sequential,
-            fixture_budget(8.0),
+            fixture_budget(11.0),
             gib_to_bytes(12.0),
             0,
             &[],
@@ -9195,7 +9190,7 @@ mod tests {
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Sequential,
-            fixture_budget(8.0),
+            fixture_budget(11.0),
             gib_to_bytes(12.0),
             0,
             &[],
@@ -9372,7 +9367,7 @@ mod tests {
                 variant: "packed-q4".to_owned(),
                 fingerprint: format!("SceneWorks/fixture@{}:packed-q4", "c".repeat(40)),
             },
-            implementation_fingerprint: MEMORY_DECODE_QUALITY_IMPLEMENTATION_FINGERPRINT.to_owned(),
+            implementation_fingerprint: DECODE_QUALITY_TEST_STAMP.to_owned(),
             mode: MemoryMode::TextToImage,
             overlay: None,
             geometry: admitted_geometry,
@@ -12260,10 +12255,22 @@ mod tests {
         require_exact_source_bound_inventory(&source_inventory, &classified_inventory).expect(
             "the executable audit must classify the exact source-bound candidate inventory",
         );
-        assert_eq!(
-            cells.len(),
-            32,
-            "the source-derived Resident-only inventory changed; update the recorded audit result"
+        // Resident-only means "this cell has no ladder to fall back to", so this population SHRINKS
+        // monotonically as ladders are declared and made reachable: the pin advance brought the
+        // Bernini, Lens/Lens-Turbo, SANA and SD3.5 rung-4 ladders (sc-18609, sc-18605, sc-18607,
+        // sc-18606), and the SC-18460 contract chain declares more still. A RISE is the alarming
+        // direction and the only thing this recorded result exists to catch. Asserting the exact
+        // count instead froze the corpus: every re-capture and every newly declared ladder made a
+        // green branch red for the right reason and got "fixed" by editing the integer. So bound it
+        // — a ceiling that legitimately falls, plus the vacuity floor that keeps the budget walk
+        // below from passing on an empty inventory.
+        const RESIDENT_ONLY_CEILING: usize = 18;
+        assert!(
+            !cells.is_empty() && cells.len() <= RESIDENT_ONLY_CEILING,
+            "the source-derived Resident-only inventory is {} cells; it must stay non-empty and \
+             within the recorded ceiling of {RESIDENT_ONLY_CEILING}. A rise means a cell lost a \
+             reachable ladder — fix the declaration, do not raise the ceiling.",
+            cells.len()
         );
         for route in [
             "flux2_klein_9b",
@@ -12429,9 +12436,16 @@ mod tests {
                 .iter()
                 .map(|(model, provider, tier, host, ..)| (*model, *provider, *tier, *host))
                 .collect::<Vec<_>>(),
+            // The Lens and SD3.5 rows are gone with the inference pin advance, and for the same
+            // reason the Resident-only inventory above shrank 32 -> 18: sc-18605 and sc-18606 gave
+            // those providers reachable rung-4 ladders, so they are no longer Resident-only and
+            // have no estimate band left to flip. The four that remain have no ladder yet, which is
+            // what keeps this list a live audit rather than a formality.
             vec![
-                ("sd3_5_large", "sd3_5_large", "q8", 48),
-                ("sd3_5_large_turbo", "sd3_5_large_turbo", "q8", 48,),
+                ("flux2_dev", "flux2_dev", "bf16", 128),
+                ("flux2_dev", "flux2_dev_control", "q4", 64),
+                ("ideogram_4", "ideogram_4", "q8", 48),
+                ("ideogram_4_turbo", "ideogram_4_turbo", "q8", 48),
             ],
             "the source-bound resident-only audit changed; update the recorded result, \
              not only this expectation: {flips:?}"
@@ -12510,7 +12524,7 @@ mod tests {
     /// Completeness mutation for the loophole found after the production-router rewrite. A
     /// zero-cell route is still part of the candidate inventory: replacing FLUX.1 Schnell with an
     /// already-declared Chroma entry must fail before deduplication, and simply deleting Schnell
-    /// must fail exact source-inventory equality even though the 35 Resident-only cells and two
+    /// must fail exact source-inventory equality even though the 32 Resident-only cells and 12
     /// flips are unchanged.
     #[cfg(target_os = "macos")]
     #[test]
@@ -12821,7 +12835,7 @@ mod tests {
         // not merely a selector unit test.
         //
         // Fixture arithmetic: the record's envelope peak is exactly 5 GiB with a 3 GiB captured
-        // foreign reserve, so the widened requirement is 5 * 1.05 = 5.25 GiB against
+        // foreign reserve, so the widened requirement is ~5 * 1.252 = 6.26 GiB against
         // `total - reserve` of effective budget.
         let bundle = fixture_bundle();
         let generator = fixture_generator();
@@ -12862,8 +12876,8 @@ mod tests {
         // offered as a named "current verified alternative".
         assert!(stale.lower_alternative.is_none());
 
-        // End to end at 9 GiB: effective budget is 9 - 3 (captured foreign reserve) = 6 GiB, the
-        // widened 5.25 GiB fits, and the request keeps the exact verified rung INCLUDING its
+        // End to end at 9.5 GiB: effective budget is 9.5 - 3 (captured foreign reserve) = 6.5 GiB,
+        // the widened 6.26 GiB fits, and the request keeps the exact verified rung INCLUDING its
         // request-scoped process ceiling.
         let admitted = evaluate_request_with_budget_using_bundle(
             &generator,
@@ -12871,7 +12885,7 @@ mod tests {
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
-            fixture_budget(9.0),
+            fixture_budget(9.5),
             gib_to_bytes(4.0),
             0,
             &[],
@@ -12889,40 +12903,40 @@ mod tests {
             "a stale exact cell still derives the request-scoped ceiling"
         );
 
-        // The margin is APPLIED, not just plumbed (production-path mutation check): at 8.1 GiB the
-        // effective budget is 5.1 GiB — the RAW 5 GiB peak fits, the widened 5.25 GiB does not. A
+        // The margin is APPLIED, not just plumbed (production-path mutation check): at 9.1 GiB the
+        // effective budget is 6.1 GiB — the RAW 5 GiB peak fits, the widened 6.26 GiB does not. A
         // gate that stopped widening stale admission would admit here and flip this arm. The
-        // refusal quotes the graded host requirement: widened 5.25 GiB + the 3 GiB captured
-        // foreign reserve = 8.25 GiB.
+        // refusal quotes the graded host requirement: widened 6.26 GiB + the 3 GiB captured
+        // foreign reserve = 9.26 GiB.
         let error = evaluate_request_with_budget_using_bundle(
             &generator,
             &plan,
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
-            fixture_budget(8.1),
+            fixture_budget(9.1),
             gib_to_bytes(4.0),
             0,
             &[],
             Some(&bundle),
             Some(&moved),
         )
-        .expect_err("the raw peak fits 5.1 GiB but the WIDENED stale peak must not")
+        .expect_err("the raw peak fits 6.1 GiB but the WIDENED stale peak must not")
         .to_string();
         assert!(
-            error.contains("needs at least 8.25 GiB"),
+            error.contains("needs at least 9.26 GiB"),
             "the refusal must quote the widened stale host requirement: {error}"
         );
 
         // The control: the SAME request with the closure unmoved is graded at the raw peak, so the
-        // 8.1 GiB budget that refused above admits — proving the refusal was the stale widening.
+        // 9.1 GiB budget that refused above admits — proving the refusal was the stale widening.
         let current = evaluate_request_with_budget_using_bundle(
             &generator,
             &plan,
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
-            fixture_budget(8.1),
+            fixture_budget(9.1),
             gib_to_bytes(4.0),
             0,
             &[],
@@ -12937,9 +12951,9 @@ mod tests {
 
         // A stale record serves its OWN cell (the arms above) but may not SEED an extrapolation:
         // at 768² — off the measured 1024² geometry — the moved-closure request gets no fitted
-        // basis and refuses on floors alone (staged/decode/attention floors widen to 9.9 GiB
+        // basis and refuses on floors alone (staged/decode/attention floors widen to 13.54 GiB
         // against 8 GiB), while the unmoved closure admits the fitted bounded-decode estimate
-        // (clamped scale 1.0, envelope 5 GiB widened to 5.5) at the same budget. A gate that let
+        // (clamped scale 1.0, envelope 5 GiB widened to 7.52) at the same budget. A gate that let
         // stale records seed extrapolations would admit BOTH and flip the first arm.
         let off_geometry = fixture_inputs(768, 768);
         let error = evaluate_request_with_budget_using_bundle(
@@ -13838,7 +13852,7 @@ mod tests {
             MemoryCacheState::Warm,
             OffloadPolicy::Resident,
             MemoryBudget {
-                total_bytes: gib_to_bytes(10.0),
+                total_bytes: gib_to_bytes(11.0),
                 committed_bytes: gib_to_bytes(6.0),
                 reclaimable_bytes: 0,
                 reserved_headroom_bytes: 0,
@@ -14305,11 +14319,11 @@ mod tests {
         // sc-18096 repin. The mismatched record's 5 GiB raw peak fits the 10 GiB budget easily, so
         // ANY error here proves the record was excluded rather than authorizing the fit — the
         // fail-closed property this test owns. What changed: the bounded-decode rung now also
-        // carries a synthesized floor estimate (weights 6 GiB + headroom 6 GiB, widened to 13.2),
+        // carries a synthesized floor estimate (weights 6 GiB + headroom 6 GiB, widened to 18.05),
         // so the refusal is the honest "no rung fits with margins" `Reject` quoting the floor's
         // widened requirement instead of an `Unverified`/`FingerprintMismatch` refusal.
         assert!(
-            error.contains("needs 13.20 GiB"),
+            error.contains("needs 18.05 GiB"),
             "the mismatched record must not authorize the fit; the refusal must quote the \
              estimate floor instead: {error}"
         );
@@ -14955,8 +14969,10 @@ mod tests {
     /// epic 10834). This exercises the LIVE registry, so it must see the force-linked `mlx_gen_*`
     /// providers — anchored (`use mlx_gen_* as _;` in `image_jobs`) only on macOS, the sole platform the
     /// MLX gate runs on. Off-Mac the image registry is empty, so this is macOS-gated exactly like the
-    /// `engines.rs` descriptor sweeps. At the pinned mlx-gen `45428fa` every image engine advertises the
-    /// bit, so every wired id resolves true through the shared registry query.
+    /// `engines.rs` descriptor sweeps. The assertions below mirror the capability bits of the
+    /// currently pinned providers, so the shared registry query stays the only source of truth:
+    /// selectable engines resolve true through that query, while a registered provider that stages
+    /// unconditionally remains false for this specific request-selectable control.
     #[cfg(target_os = "macos")]
     #[test]
     fn engine_supports_sequential_is_derived_from_the_registered_capability() {
@@ -15014,13 +15030,24 @@ mod tests {
             "boogu_image",
             "boogu_image_turbo",
             "boogu_image_edit",
-            "bernini",
         ] {
             assert!(
                 engine_supports_sequential(id),
-                "{id}: sc-10840 fan-out engine must be sequential-capable at mlx-gen 45428fa"
+                "{id}: sc-10840 fan-out engine must advertise selectable sequential residency at the \
+                 pinned inference revision"
             );
         }
+        // Bernini's provider is registered and physically stages every request, but it has no
+        // Resident-warm mode and does not consume `OffloadPolicy`. Its descriptor must therefore
+        // expose unconditional staging without falsely advertising the selectable Sequential control.
+        let bernini = crate::inference_runtime::media()
+            .generators()
+            .find(|registration| (registration.descriptor)().id == "bernini")
+            .expect("Bernini provider must be registered in the MLX runtime");
+        let bernini_capabilities = (bernini.descriptor)().capabilities;
+        assert!(!bernini_capabilities.supports_sequential_offload);
+        assert!(bernini_capabilities.unconditionally_engages_staged_residency);
+        assert!(!engine_supports_sequential("bernini"));
         // A REGISTERED engine that does NOT advertise the bit stays false: sensenova's encoder is fused
         // into a unified MoT (`footprint` te=0) — no separable text encoder to drop, so residency buys
         // nothing and Sequential would be a no-op that OOMs. This proves the query reads the descriptor

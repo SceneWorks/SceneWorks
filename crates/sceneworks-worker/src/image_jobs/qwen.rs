@@ -573,10 +573,12 @@ async fn ensure_distill_lora_cached(
     Ok(path)
 }
 
-/// Reference asset ids for a Qwen edit: the character-flow `referenceAssetId`, else the
-/// Image-Edit `sourceAssetId` (edit_image mode). Mirrors the Python
-/// `ref = referenceAssetId or (sourceAssetId if edit_image)` and the FLUX.2 edit path.
+/// Ordered reference asset ids for a Qwen edit: plural `referenceAssetIds`, the singular
+/// character-flow `referenceAssetId`, or the Image-Edit `sourceAssetId` (edit_image mode).
 fn qwen_edit_reference_ids(request: &ImageRequest) -> Vec<String> {
+    if !request.reference_asset_ids.is_empty() {
+        return request.reference_asset_ids.iter().take(5).cloned().collect();
+    }
     if let Some(id) = request
         .reference_asset_id
         .as_deref()
@@ -616,6 +618,7 @@ fn resolve_qwen_edit_guidance(request: &ImageRequest, model: &ResolvedModel) -> 
     let raw = request
         .advanced
         .get("trueCfgScale")
+        .or_else(|| request.advanced.get("imageGuidanceScale"))
         .and_then(|value| {
             value
                 .as_f64()

@@ -1802,6 +1802,41 @@ pub(crate) fn wan_weight_bytes(engine_id: &str, model_dir: &Path) -> u64 {
     })
 }
 
+/// Exact resident-weight floor for the dedicated sequential Wan2.2 VACE-Fun provider. The shared
+/// UMT5+VAE preparation phase is co-resident, then each complete expert is loaded one at a time. The
+/// peak is therefore `max(shared, high + adapters, low + adapters)`, never the sum of both experts.
+/// Missing any required component fails closed because this route has no calibrated CUDA peak yet.
+pub(crate) fn wan_vace_fun_sequential_weight_bytes(
+    model_dir: &Path,
+    adapter_stage_bytes: u64,
+) -> Result<u64, WorkerError> {
+    let component = |name: &str| crate::mlx_fit_gate::sum_safetensors_bytes(&model_dir.join(name));
+    let high = component("transformer");
+    let low = component("transformer_2");
+    let text_encoder = component("text_encoder");
+    let vae = component("vae");
+    if [high, low, text_encoder, vae].contains(&0) {
+        return Err(WorkerError::InvalidPayload(
+            "Wan2.2 VACE-Fun admission cannot verify transformer, transformer_2, text_encoder, and vae weights; repair the model install before retrying."
+                .to_owned(),
+        ));
+    }
+    let shared = text_encoder.checked_add(vae).ok_or_else(|| {
+        WorkerError::InvalidPayload("Wan2.2 VACE-Fun shared footprint overflowed u64.".to_owned())
+    })?;
+    let high = high.checked_add(adapter_stage_bytes).ok_or_else(|| {
+        WorkerError::InvalidPayload(
+            "Wan2.2 VACE-Fun high-expert footprint overflowed u64.".to_owned(),
+        )
+    })?;
+    let low = low.checked_add(adapter_stage_bytes).ok_or_else(|| {
+        WorkerError::InvalidPayload(
+            "Wan2.2 VACE-Fun low-expert footprint overflowed u64.".to_owned(),
+        )
+    })?;
+    Ok(shared.max(high).max(low))
+}
+
 /// The pure Wan candle video admission decision: `Some(error)` when the model's RESIDENT WEIGHTS alone
 /// cannot fit the VRAM budget, `None` to admit. The non-Mochi twin of [`mochi_fit_error`], and pure for
 /// the same reason — the caller resolves the budget, so the whole decision is unit-testable with no CUDA
@@ -1906,6 +1941,85 @@ pub(crate) fn wan_video_fit_error_with_adapter_bytes(
     let budget = budget?;
     (budget.free_gb + f64::EPSILON < needed_gb)
         .then(|| video_peak_too_big_error(model_label, tier_key, needed_gb, budget.free_gb, gpu_id))
+}
+
+/// Fail-closed admission for the shared SCAIL-2 Candle bf16 package. Unlike the generic Wan gate,
+/// SCAIL has no lower-memory Candle tier and no sequential/offload lifecycle, so falling back to
+/// on-disk bytes or admitting an absent row would turn an incomplete catalog into a real OOM. The
+/// exact production render owns `candle.vramGbByTier.bf16`; [`HEADROOM_GB`] remains the common CUDA
+/// reserve added by every measured-peak gate.
+#[cfg(test)]
+pub(crate) fn scail2_video_fit_error(
+    manifest_entry: &JsonObject,
+    gpu_id: &str,
+    budget: Option<VramBudget>,
+) -> Option<WorkerError> {
+    scail2_video_fit_error_with_adapter_bytes(manifest_entry, 0, gpu_id, budget)
+}
+
+pub(crate) fn scail2_video_fit_error_with_adapter_bytes(
+    manifest_entry: &JsonObject,
+    adapter_bytes: u64,
+    gpu_id: &str,
+    budget: Option<VramBudget>,
+) -> Option<WorkerError> {
+    const MEASURED_PIXELS: u64 = 832 * 480;
+    let candle = manifest_entry.get("candle");
+    let measured = candle
+        .and_then(|value| value.get("measured"))
+        .and_then(Value::as_bool);
+    let peak_gb = candle
+        .and_then(|value| value.get("vramGbByTier"))
+        .and_then(|tiers| tiers.get("bf16"))
+        .and_then(json_f64)
+        .filter(|value| value.is_finite() && *value > 0.0);
+    let min_memory_gb = candle
+        .and_then(|value| value.get("minMemoryGb"))
+        .and_then(Value::as_u64);
+    let measured_pixels = candle
+        .and_then(|value| value.get("vramMeasuredPixels"))
+        .and_then(Value::as_u64);
+    let (true, Some(peak_gb), Some(min_memory_gb), Some(MEASURED_PIXELS)) = (
+        measured == Some(true),
+        peak_gb,
+        min_memory_gb,
+        measured_pixels,
+    ) else {
+        return Some(WorkerError::InvalidPayload(
+            "SCAIL-2 Candle admission is unavailable because the installed catalog has no complete \
+             measured bf16 CUDA row (positive peak, 832x480 geometry, and minMemoryGb floor). \
+             Refusing to load the 47.2 GB shared package; update SceneWorks before retrying."
+                .to_owned(),
+        ));
+    };
+    let base_needed_gb = peak_gb + HEADROOM_GB;
+    if (min_memory_gb as f64) + f64::EPSILON < base_needed_gb.ceil() {
+        return Some(WorkerError::InvalidPayload(format!(
+            "SCAIL-2 Candle admission is unavailable because catalog minMemoryGb={min_memory_gb} \
+             is below the measured bf16 CUDA peak plus reserve (~{} GB). Refusing to load the \
+             47.2 GB shared package; update SceneWorks before retrying.",
+            base_needed_gb.ceil() as u64,
+        )));
+    }
+    let needed_gb = base_needed_gb + adapter_bytes as f64 / BYTES_PER_GIB;
+    let Some(budget) = budget else {
+        return Some(WorkerError::InvalidPayload(
+            "SCAIL-2 Candle admission could not read free GPU VRAM from nvidia-smi. Refusing to \
+             load the 47.2 GB shared package without proving that the measured bf16 render peak \
+             fits; verify the NVIDIA driver/runtime and retry."
+                .to_owned(),
+        ));
+    };
+    (budget.free_gb + f64::EPSILON < needed_gb).then(|| {
+        WorkerError::InvalidPayload(format!(
+            "SCAIL-2 shared bf16 needs ~{needed} GB of free GPU VRAM (the measured 832x480, \
+             81-frame render peak plus CUDA reserve), but GPU {gpu_id} has ~{available} GB \
+             available. Its Candle provider has no lower-memory tier or sequential offload; use a \
+             GPU with more free VRAM, or use the MLX q4/q8 tiers on macOS.",
+            needed = needed_gb.ceil() as i64,
+            available = budget.free_gb.round() as i64,
+        ))
+    })
 }
 
 /// Build the MEASURED-peak candle video rejection (sc-12402). The measured sibling of
@@ -4558,6 +4672,35 @@ mod tests {
         assert_eq!(wan_weight_bytes("wan2_2_ti2v_5b", root), 1_000 + 400 + 30);
     }
 
+    #[test]
+    fn vace_fun_floor_uses_shared_or_one_expert_and_fails_closed_when_incomplete() {
+        let root_guard = tempfile::Builder::new()
+            .prefix("sc18478_vace_fun_components_")
+            .tempdir()
+            .expect("temp dir");
+        let root = root_guard.path();
+        for (relative, len) in [
+            ("transformer/model.safetensors", 1_000_u64),
+            ("transformer_2/model.safetensors", 2_000),
+            ("text_encoder/model.safetensors", 400),
+            ("vae/model.safetensors", 30),
+        ] {
+            let path = root.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::File::create(path).unwrap().set_len(len).unwrap();
+        }
+        assert_eq!(
+            wan_vace_fun_sequential_weight_bytes(root, 100).expect("complete layout"),
+            2_100,
+            "sequential VACE-Fun holds shared components or one expert plus its adapter stack, never both experts"
+        );
+        std::fs::remove_file(root.join("transformer_2/model.safetensors")).unwrap();
+        assert!(
+            wan_vace_fun_sequential_weight_bytes(root, 100).is_err(),
+            "an incomplete dual-expert layout must fail before load"
+        );
+    }
+
     /// The EXEMPTIONS and the tier-ROOT fallback both read `0` ⇒ no signal ⇒ admit.
     ///
     /// This is the sc-12179 guard. `ltx`/`svd` are exempt because their on-disk bytes are not their
@@ -4612,6 +4755,126 @@ mod tests {
     // -----------------------------------------------------------------------------------------
     // The MEASURED per-tier peak supersedes the floor (sc-12402).
     // -----------------------------------------------------------------------------------------
+
+    #[test]
+    fn scail2_requires_a_measured_bf16_row_and_splits_low_from_high_cards() {
+        let entry = obj(json!({
+            "candle": {
+                "minMemoryGb": 105,
+                "vramGbByTier": { "bf16": 102.115 },
+                "vramMeasuredPixels": 399360,
+                "measured": true
+            }
+        }));
+        let low = apply_vram_cap(None, Some(104.0));
+        let message = scail2_video_fit_error(&entry, "0", low)
+            .expect("102.115 GB measured + 2 GB reserve cannot fit 104 GB")
+            .to_string();
+        assert!(message.contains("SCAIL-2 shared bf16"), "{message}");
+        assert!(
+            message.contains("105") && message.contains("104"),
+            "{message}"
+        );
+        assert!(
+            message.contains("no lower-memory tier or sequential offload"),
+            "{message}"
+        );
+        assert!(message.contains("MLX q4/q8"), "{message}");
+
+        let high = apply_vram_cap(None, Some(105.0));
+        assert!(
+            scail2_video_fit_error(&entry, "0", high).is_none(),
+            "a card above measured peak + reserve must be admitted"
+        );
+        let adapter_message = scail2_video_fit_error_with_adapter_bytes(
+            &entry,
+            BYTES_PER_GIB as u64,
+            "0",
+            apply_vram_cap(None, Some(105.0)),
+        )
+        .expect("a 1 GiB adapter source must move the same card over the cold-load boundary")
+        .to_string();
+        assert!(adapter_message.contains("106"), "{adapter_message}");
+        let no_probe = scail2_video_fit_error(&entry, "0", None)
+            .expect("an unknown live budget cannot safely admit the dense F32 stack")
+            .to_string();
+        assert!(
+            no_probe.contains("could not read free GPU VRAM"),
+            "{no_probe}"
+        );
+        assert!(no_probe.contains("nvidia-smi"), "{no_probe}");
+        assert!(no_probe.contains("Refusing to load"), "{no_probe}");
+    }
+
+    #[test]
+    fn scail2_admission_fails_closed_on_missing_or_unmeasured_catalog_truth() {
+        for entry in [
+            obj(json!({})),
+            obj(json!({ "candle": { "measured": true } })),
+            obj(json!({
+                "candle": {
+                    "minMemoryGb": 105,
+                    "measured": false,
+                    "vramGbByTier": { "bf16": 102.115 },
+                    "vramMeasuredPixels": 399360
+                }
+            })),
+            obj(json!({
+                "candle": {
+                    "minMemoryGb": 105,
+                    "measured": true,
+                    "vramGbByTier": { "bf16": 0 },
+                    "vramMeasuredPixels": 399360
+                }
+            })),
+            obj(json!({
+                "candle": {
+                    "measured": true,
+                    "vramGbByTier": { "bf16": 102.115 },
+                    "vramMeasuredPixels": 399360
+                }
+            })),
+            obj(json!({
+                "candle": {
+                    "minMemoryGb": 105,
+                    "measured": true,
+                    "vramGbByTier": { "bf16": 102.115 }
+                }
+            })),
+            obj(json!({
+                "candle": {
+                    "minMemoryGb": 105,
+                    "measured": true,
+                    "vramGbByTier": { "bf16": 102.115 },
+                    "vramMeasuredPixels": 399361
+                }
+            })),
+        ] {
+            let message = scail2_video_fit_error(&entry, "0", None)
+                .expect("catalog omission must refuse even when no GPU budget is observable")
+                .to_string();
+            assert!(
+                message.contains("no complete measured bf16 CUDA row"),
+                "{message}"
+            );
+            assert!(message.contains("Refusing to load"), "{message}");
+        }
+
+        let under_floor = obj(json!({
+            "candle": {
+                "minMemoryGb": 104,
+                "measured": true,
+                "vramGbByTier": { "bf16": 102.115 },
+                "vramMeasuredPixels": 399360
+            }
+        }));
+        let message = scail2_video_fit_error(&under_floor, "0", None)
+            .expect("a floor below measured peak + reserve must refuse before probing the GPU")
+            .to_string();
+        assert!(message.contains("minMemoryGb=104"), "{message}");
+        assert!(message.contains("~105 GB"), "{message}");
+        assert!(message.contains("Refusing to load"), "{message}");
+    }
 
     /// The 5B's FORMER RESIDENT candle block (q4 46.1 / q8 48.7 / bf16 54.0), as sc-12402/sc-12631 shipped
     /// it. sc-13175 RE-DROPPED the live `wan_2_2` onto sequential offload, so the shipped block is now the

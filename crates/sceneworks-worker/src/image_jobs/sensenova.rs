@@ -29,7 +29,8 @@ fn resolve_sensenova_img_cfg(request: &ImageRequest) -> f32 {
     };
     request
         .advanced
-        .get("imageGuidanceScale")
+        .get("trueCfgScale")
+        .or_else(|| request.advanced.get("imageGuidanceScale"))
         .and_then(|value| {
             value
                 .as_f64()
@@ -251,10 +252,9 @@ async fn generate_sensenova_edit_stream(
     let likeness_source_ref = reference_ids.first().cloned();
 
     // No user adapters by design (sc-6038): SenseNova-U1 is an 8B MoT autoregressive model with no
-    // diffusion-LoRA merge path, and its manifest declares `loraCompatibility.families:
-    // ["sensenova-u1"]` (its own family — no LoRA declares it), so the picker offers none. The empty
-    // adapter list is intentional, not a dropped wiring (contrast `instantid.rs`, which DOES apply
-    // user SDXL LoRAs).
+    // diffusion-LoRA merge path. Its manifests therefore omit `loraCompatibility`, and the web
+    // picker explicitly fails closed for this engine family. The empty adapter list is intentional,
+    // not dropped wiring (contrast `instantid.rs`, which DOES apply user SDXL LoRAs).
     let spec = load_spec(weights_dir, quant, Vec::new(), None);
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
