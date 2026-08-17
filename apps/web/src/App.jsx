@@ -69,11 +69,13 @@ import { buildWorkersById } from "./workers.js";
 import { createEditorScratchRegistry } from "./editorScratch.js";
 import { appConfirm, ConfirmHost } from "./appConfirm.jsx";
 import { ModelLibraryDialog } from "./components/ModelLibraryDialog.jsx";
+import { ModelLibraryRestartDialog } from "./components/ModelLibraryRestartDialog.jsx";
 import {
   createModelLibraryGate,
   fetchModelLibraryStatus,
   relocateModelLibrary,
   setModelLibraryHandler,
+  validateModelLibrary,
 } from "./modelLibrary.js";
 import { isDesktop as isDesktopShell, tauriInvoke } from "./runtime.js";
 // Simple UI (design handoff "Simple UI for creative studios") — an ALTERNATIVE shell that
@@ -718,13 +720,20 @@ export function App() {
     () =>
       createModelLibraryGate({
         probe: () => fetchModelLibraryStatus(token),
-        relocate: (path) => relocateModelLibrary(token, path),
-        // Durable persistence of a relocated library is desktop state: the API validated and
-        // re-bound the identity, and hands back the exact HF_HOME the shell must store. Same
-        // field, file and normalization as the first-run storage step.
-        persist: async (adopted) => {
-          if (!isDesktopShell || !adopted?.hfHome) return;
-          await tauriInvoke("set_model_library", { path: adopted.hfHome });
+        validate: (path) => validateModelLibrary(token, path),
+        adopt: (path) => relocateModelLibrary(token, path),
+        // Durable persistence of a relocated library is desktop state: the API hands back the exact
+        // HF_HOME the shell must store, in the same field, file and normalization as the first-run
+        // storage step. Returns an undo so the gate can restore the previous location if the
+        // server's re-bind then fails — the two copies must never disagree.
+        persist: async (target) => {
+          if (!isDesktopShell || !target?.hfHome) return null;
+          const before = await tauriInvoke("get_storage_setup").catch(() => null);
+          const previous = before?.hfHome ?? before?.hfHomeDefault ?? null;
+          await tauriInvoke("set_model_library", { path: target.hfHome });
+          return previous
+            ? () => tauriInvoke("set_model_library", { path: previous })
+            : null;
         },
       }),
     [token],
@@ -734,15 +743,30 @@ export function App() {
     modelLibraryGate.getState,
   );
   useEffect(() => setModelLibraryHandler(modelLibraryGate.block), [modelLibraryGate]);
+  // The relocated library, held until the user answers the restart disclosure. The relocation is
+  // already durable at this point — this only decides WHEN the app picks it up.
+  const [modelLibraryRelocation, setModelLibraryRelocation] = useState(null);
+  // True while the NATIVE folder picker is up. The prompt's auto re-probe pauses on it: a drive
+  // that comes back while the user is choosing a folder must not resume the submission behind a
+  // modal OS dialog the user cannot see past.
+  const [modelLibraryPickerOpen, setModelLibraryPickerOpen] = useState(false);
   const chooseModelLibraryLocation = useCallback(async () => {
     if (!isDesktopShell) return;
-    const picked = await tauriInvoke("choose_folder").catch(() => null);
+    setModelLibraryPickerOpen(true);
+    let picked = null;
+    try {
+      picked = await tauriInvoke("choose_folder").catch(() => null);
+    } finally {
+      setModelLibraryPickerOpen(false);
+    }
     if (!picked) return;
     const adopted = await modelLibraryGate.relocate(picked);
     if (adopted?.hfHome) {
+      setModelLibraryRelocation(adopted);
+      // The notice outlives the dialog, so "Later" still leaves the reason visible.
       pushNotice(
         "general",
-        `Model library set to ${adopted.hfHome} — restart SceneWorks to apply it.`,
+        `Model library set to ${adopted.hfHome} — restart SceneWorks to apply it. The generation you started was not queued; submit it again after the restart.`,
       );
     }
   }, [modelLibraryGate, pushNotice]);
@@ -1407,6 +1431,16 @@ export function App() {
       { active: 0 },
     );
   }, [jobs, queueSummary]);
+  // Jobs actually executing on a worker. The restart disclosure (sc-19709) withholds "Restart now"
+  // while any of these are in flight: the teardown is graceful, but interrupting a render still
+  // throws away the work, so the user defers rather than discovers. Prefers the server's own count
+  // when the queue summary is loaded, since `jobs` is a recent window rather than the whole queue.
+  const runningJobCount = useMemo(
+    () =>
+      queueSummary?.counts?.running ??
+      jobs.filter((job) => job.status === "running").length,
+    [jobs, queueSummary],
+  );
   const filteredJobs = useMemo(() => {
     if (projectFilter === "all") {
       return jobs;
@@ -3139,6 +3173,36 @@ export function App() {
     />
   );
 
+  // The unavailable-model-library prompt and its post-relocation restart disclosure (sc-19709).
+  // Built once and rendered in BOTH shells for the same reason `workflowDropPanel` is: the handler
+  // that opens them is registered at App level and therefore fires in both, so a Simple-UI user
+  // whose library is disconnected would otherwise have their submission swallowed by a dialog that
+  // was never mounted — a silently dead Generate button. Both portal to <body>, so neither
+  // disturbs the shell it renders in.
+  const modelLibraryOverlays = (
+    <>
+      <ModelLibraryDialog
+        autoProbePaused={modelLibraryPickerOpen}
+        canRelocate={isDesktopShell}
+        onCancel={modelLibraryGate.cancel}
+        onRelocate={chooseModelLibraryLocation}
+        onRetry={modelLibraryGate.retry}
+        state={modelLibraryState}
+      />
+      <ModelLibraryRestartDialog
+        canRestart={isDesktopShell}
+        onLater={() => setModelLibraryRelocation(null)}
+        onRestart={() => {
+          void tauriInvoke("restart_app").catch((error) =>
+            pushNotice("general", `SceneWorks could not restart: ${String(error)}`),
+          );
+        }}
+        relocation={modelLibraryRelocation}
+        runningJobCount={runningJobCount}
+      />
+    </>
+  );
+
   const jobAction = useCallback(
     async (job, action, options = {}) => {
       try {
@@ -3607,6 +3671,7 @@ export function App() {
               too — otherwise a Simple-UI user's drop would be inspected and then answered by
               nothing. It portals to <body>, so it does not disturb this shell's layout. */}
           {workflowDropPanel}
+          {modelLibraryOverlays}
         </AppLiveContext.Provider>
       </AppStaticContext.Provider>
     );
@@ -3919,16 +3984,10 @@ export function App() {
           silently no-ops in the Tauri WebView). Renders nothing until a confirm is asked. */}
       <ConfirmHost />
 
-      {/* The unavailable-model-library prompt (sc-19709). Mounted once at the app root so a
-          blocked submission from any studio — and a selection that is already blocked — raise the
-          same single dialog. Renders nothing while the gate is idle, which is every normal run. */}
-      <ModelLibraryDialog
-        canRelocate={isDesktopShell}
-        onCancel={modelLibraryGate.cancel}
-        onRelocate={chooseModelLibraryLocation}
-        onRetry={modelLibraryGate.retry}
-        state={modelLibraryState}
-      />
+      {/* The unavailable-model-library prompt and its post-relocation restart disclosure
+          (sc-19709), built above and rendered in BOTH shells. Renders nothing while the gate is
+          idle, which is every normal run. */}
+      {modelLibraryOverlays}
 
       {/* "Workflow found" (sc-15951) — opened by a drop no in-app dropzone claimed, and only
           after the file turned out to carry a recipe. Renders nothing otherwise, which is the

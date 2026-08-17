@@ -194,26 +194,40 @@ describe("model library gate", () => {
     expect(action).not.toHaveBeenCalled();
   });
 
-  it("relocates through the seam, persists the returned home, and queues nothing afterwards", async () => {
+  it("validates, then persists, then adopts — and queues nothing afterwards", async () => {
     const action = vi.fn(async () => "job-1");
-    const adopted = {
+    const target = {
       libraryRoot: "/Volumes/Models 1/hf/hub",
       hfHome: "/Volumes/Models 1/hf",
-      status: { available: true },
+      adopted: false,
     };
-    const relocate = vi.fn(async () => adopted);
-    const persist = vi.fn(async () => ({}));
+    const order = [];
+    const validate = vi.fn(async () => {
+      order.push("validate");
+      return target;
+    });
+    const persist = vi.fn(async () => {
+      order.push("persist");
+      return null;
+    });
+    const adopt = vi.fn(async () => {
+      order.push("adopt");
+    });
     const gate = createModelLibraryGate({
       probe: async () => ({ available: false }),
-      relocate,
+      validate,
       persist,
+      adopt,
     });
     gate.block(unavailableError().context, action);
 
-    await expect(gate.relocate("/Volumes/Models 1/hf")).resolves.toBe(adopted);
-    expect(relocate).toHaveBeenCalledWith("/Volumes/Models 1/hf");
-    expect(persist).toHaveBeenCalledWith(adopted);
-    expect(gate.getState()).toMatchObject({ status: "idle", relocated: adopted });
+    await expect(gate.relocate("/Volumes/Models 1/hf")).resolves.toBe(target);
+    // Validation runs BEFORE either durable write, so an ordinary refusal never leaves the two
+    // copies of the location disagreeing.
+    expect(order).toEqual(["validate", "persist", "adopt"]);
+    expect(validate).toHaveBeenCalledWith("/Volumes/Models 1/hf");
+    expect(persist).toHaveBeenCalledWith(target);
+    expect(gate.getState()).toMatchObject({ status: "idle", relocated: target });
     // Relocation takes effect on the next launch, so resuming now would only be refused again:
     // the action is dropped, exactly like cancel, rather than left queued.
     expect(action).not.toHaveBeenCalled();
@@ -226,22 +240,85 @@ describe("model library gate", () => {
     const rejection = new Error(
       "That folder does not contain a SceneWorks model library.",
     );
-    const relocate = vi.fn().mockRejectedValueOnce(rejection);
+    const validate = vi.fn().mockRejectedValueOnce(rejection);
     const persist = vi.fn();
+    const adopt = vi.fn();
     const gate = createModelLibraryGate({
       probe: async () => ({ available: true }),
-      relocate,
+      validate,
       persist,
+      adopt,
     });
     gate.block(unavailableError().context, action);
 
     await expect(gate.relocate("/Users/me/Pictures")).resolves.toBeNull();
+    // Nothing was written anywhere, which is the entire point of validating first.
     expect(persist).not.toHaveBeenCalled();
+    expect(adopt).not.toHaveBeenCalled();
     expect(gate.getState()).toMatchObject({ status: "blocked" });
     expect(gate.getState().error).toBe(rejection.message);
     // The original action survived the rejected attempt.
     await gate.retry();
     expect(action).toHaveBeenCalledTimes(1);
+  });
+
+  // The two durable writes live in different places (the shell's settings file, the server's
+  // binding ledger). If the second fails, the first must be undone — and whatever the user is told
+  // has to match the state they are actually in.
+  it("undoes the persisted location when the server's re-bind fails, and says so", async () => {
+    const action = vi.fn(async () => "job-1");
+    const target = { libraryRoot: "/new/hub", hfHome: "/new" };
+    const undo = vi.fn(async () => {});
+    const persist = vi.fn(async () => undo);
+    const adopt = vi.fn().mockRejectedValueOnce(new Error("the library went away"));
+    const gate = createModelLibraryGate({
+      probe: async () => ({ available: true }),
+      validate: async () => target,
+      persist,
+      adopt,
+    });
+    gate.block(unavailableError().context, action);
+
+    await expect(gate.relocate("/new")).resolves.toBeNull();
+    expect(undo).toHaveBeenCalledTimes(1);
+    expect(gate.getState().error).toContain("previous location is still in use");
+    expect(gate.getState()).toMatchObject({ status: "blocked" });
+    // The blocked submission is still resumable — nothing was lost by the failed attempt.
+    await gate.retry();
+    expect(action).toHaveBeenCalledTimes(1);
+  });
+
+  it("says the previous location could NOT be restored when the undo also fails", async () => {
+    const undo = vi.fn().mockRejectedValueOnce(new Error("settings file is read-only"));
+    const gate = createModelLibraryGate({
+      probe: async () => ({ available: true }),
+      validate: async () => ({ libraryRoot: "/new/hub", hfHome: "/new" }),
+      persist: async () => undo,
+      adopt: async () => {
+        throw new Error("re-bind failed");
+      },
+    });
+    gate.block(unavailableError().context, vi.fn());
+
+    await expect(gate.relocate("/new")).resolves.toBeNull();
+    expect(gate.getState().error).toContain("could not restore the previous location");
+    expect(gate.getState().error).toContain("Settings");
+  });
+
+  it("clears a stale error when a later retry answers with a hint", async () => {
+    const gate = createModelLibraryGate({
+      probe: vi
+        .fn()
+        .mockRejectedValueOnce(new Error("Request failed with 500"))
+        .mockResolvedValueOnce({ available: false }),
+    });
+    gate.block(unavailableError().context, vi.fn());
+
+    await gate.retry();
+    expect(gate.getState().error).toBeTruthy();
+    await gate.retry();
+    expect(gate.getState().error).toBe("");
+    expect(gate.getState().hint).toBeTruthy();
   });
 
   // The throwing submission paths (training) must not print a second surface beside the dialog,

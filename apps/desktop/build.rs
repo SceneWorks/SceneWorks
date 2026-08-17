@@ -13,6 +13,7 @@ fn main() {
             "choose_data_dir",
             // Relocating an unavailable model library (sc-19709).
             "set_model_library",
+            "restart_app",
             "reveal_in_os",
             "resolve_asset_path",
             "save_asset_as",

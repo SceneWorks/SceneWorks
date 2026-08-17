@@ -13,22 +13,30 @@
 //!
 //! Relocation re-binds the durable identity ledger; it never rewrites download receipts, never
 //! clears the validated-closure ledger, and never downloads. The persisted `HF_HOME` that survives
-//! a relaunch is desktop state, so the response returns the exact `huggingFaceHome` the shell must
-//! store — the API resolves the pair, the shell owns persistence, and neither guesses.
+//! a relaunch is desktop state, so the response returns the exact `hfHome` the shell must store —
+//! the API resolves the pair, the shell owns persistence, and neither guesses.
+//!
+//! Relocation is a LOCAL operation (loopback peers only). It names an absolute host path, rewrites
+//! durable local state, and its typed refusals would otherwise answer "does this path exist?" for
+//! any token-holding LAN client — who could also re-point a shared server's library.
 
 use crate::error::ApiError;
 use crate::AppState;
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
 use axum::http::StatusCode;
 use axum::Json;
 use sceneworks_core::model_artifacts::external_library::{
     probe_model_source_library, resolve_relocation_target, ExternalLibraryBindingStore,
-    LibraryRelocationError, LibraryRelocationRejection, ModelSourceLibraryStatus, RelocationTarget,
+    ExternalLibraryError, LibraryRelocationError, LibraryRelocationRejection,
+    ModelSourceLibraryStatus, RelocationTarget,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::json;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 pub(crate) const RELOCATION_REJECTED_CODE: &str = "model_library_relocation_rejected";
+pub(crate) const RELOCATION_NOT_PERMITTED_CODE: &str = "model_library_relocation_not_permitted";
 
 fn configured_library(state: &AppState) -> PathBuf {
     sceneworks_core::hf_home::model_source_library(&state.settings.data_dir)
@@ -55,6 +63,14 @@ pub(crate) struct RelocateModelLibraryRequest {
     /// The folder the operator picked. Either a Hugging Face cache home (the folder containing
     /// `hub`) or the `hub` directory itself; the seam resolves which.
     pub path: String,
+    /// Validate the candidate and resolve the target WITHOUT writing anything.
+    ///
+    /// This exists so the client can order its two durable writes safely: the shell must persist
+    /// the new `HF_HOME` and the server must re-bind the identity ledger, and whichever runs second
+    /// can fail. A dry run moves every ordinary refusal (wrong folder, missing models) ahead of
+    /// BOTH writes, leaving only an exceptional race in the window where the two could disagree.
+    #[serde(default)]
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -62,38 +78,100 @@ pub(crate) struct RelocateModelLibraryRequest {
 pub(crate) struct RelocateModelLibraryResponse {
     #[serde(flatten)]
     pub target: RelocationTarget,
-    pub status: ModelSourceLibraryStatus,
+    /// Whether the durable binding was actually re-pointed at `libraryRoot`. False for a dry run.
+    ///
+    /// Deliberately NOT a probe of the adopted root: that would report `available: true` while
+    /// `GET /api/v1/model-library` — which probes the CONFIGURED library, the one this process is
+    /// still using — reports false, because the new root only takes effect on the next launch.
+    pub adopted: bool,
 }
 
 /// `POST /api/v1/model-library/relocate` — adopt a new library root without redownloading.
+///
+/// Local-only (see [`require_local_peer`]): it takes an absolute host path, and its typed refusals
+/// would otherwise be a filesystem-existence oracle for any token-holding LAN client — which could
+/// also re-point a shared server's library out from under everyone else.
 pub(crate) async fn relocate_model_library(
     State(state): State<AppState>,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
     Json(request): Json<RelocateModelLibraryRequest>,
 ) -> Result<Json<RelocateModelLibraryResponse>, ApiError> {
+    require_local_peer(connect_info.map(|ConnectInfo(addr)| addr))?;
     let picked = request.path.trim().to_owned();
     if picked.is_empty() {
         return Err(ApiError::bad_request("A library folder is required."));
     }
+    let dry_run = request.dry_run;
     let data_dir = state.settings.data_dir.clone();
     tokio::task::spawn_blocking(move || {
         let target = resolve_relocation_target(std::path::Path::new(&picked))
             .map_err(rejection_to_api_error)?;
         let store = ExternalLibraryBindingStore::new(&data_dir).map_err(|error| {
-            ApiError::internal(format!("model library ledger unavailable: {error}"))
+            relocation_failed("model library binding ledger is unavailable", &error)
         })?;
+        if dry_run {
+            store
+                .validate_relocation(&target.library_root)
+                .map_err(relocation_error_to_api_error)?;
+            return Ok(Json(RelocateModelLibraryResponse {
+                target,
+                adopted: false,
+            }));
+        }
         store
             .relocate_binding(&target.library_root)
-            .map_err(|error| match error {
-                LibraryRelocationError::Rejected(rejection) => rejection_to_api_error(rejection),
-                LibraryRelocationError::Failed(failure) => {
-                    ApiError::internal(format!("model library relocation failed: {failure}"))
-                }
-            })?;
-        let status = probe_model_source_library(&data_dir, &target.library_root);
-        Ok(Json(RelocateModelLibraryResponse { target, status }))
+            .map_err(relocation_error_to_api_error)?;
+        Ok(Json(RelocateModelLibraryResponse {
+            target,
+            adopted: true,
+        }))
     })
     .await
-    .map_err(|error| ApiError::internal(format!("model library relocation failed: {error}")))?
+    .map_err(|error| {
+        relocation_failed(
+            "model library relocation could not be completed",
+            &ExternalLibraryError(error.to_string()),
+        )
+    })?
+}
+
+/// Relocation names a host path and rewrites durable local state, so it is a local operation only.
+/// A missing peer fails closed: "we could not tell who is calling" is not permission.
+fn require_local_peer(peer: Option<SocketAddr>) -> Result<(), ApiError> {
+    if peer.is_some_and(|addr| addr.ip().is_loopback()) {
+        return Ok(());
+    }
+    Err(ApiError::typed(
+        StatusCode::FORBIDDEN,
+        "The model library can only be relocated from SceneWorks running on this machine. \
+         Reconnect the library on the host, or change its location there.",
+        RELOCATION_NOT_PERMITTED_CODE,
+        json!({ "reason": "not_a_local_client" }),
+    ))
+}
+
+fn relocation_error_to_api_error(error: LibraryRelocationError) -> ApiError {
+    match error {
+        LibraryRelocationError::Rejected(rejection) => rejection_to_api_error(rejection),
+        LibraryRelocationError::Failed(failure) => {
+            relocation_failed("model library relocation could not be completed", &failure)
+        }
+    }
+}
+
+/// An internal failure the operator cannot act on. The underlying error is LOGGED, never returned:
+/// a raw `io::Error` ("Permission denied (os error 13)") rendered into a dialog is exactly the raw
+/// filesystem text this whole seam exists to keep away from users.
+fn relocation_failed(summary: &'static str, error: &ExternalLibraryError) -> ApiError {
+    tracing::error!(
+        event = "model_library_relocation_failed",
+        detail = %error,
+        "{summary}"
+    );
+    ApiError::internal(
+        "SceneWorks could not update the model library location. The previous library is \
+         unchanged; check that the folder is readable and try again.",
+    )
 }
 
 /// Typed rejection → typed 409. The `detail` sentence is a human summary; the `reason` inside
@@ -115,6 +193,11 @@ fn rejection_to_api_error(rejection: LibraryRelocationRejection) -> ApiError {
              that contains them, or reconnect the original drive.",
             repositories.join(", ")
         ),
+        LibraryRelocationRejection::NoInstalledModels => {
+            "SceneWorks has no record of any installed models, so there is nothing to relocate. \
+             Reconnect the original library, or download the models you need."
+                .to_owned()
+        }
         LibraryRelocationRejection::HubDirectoryExpected => {
             "SceneWorks reads models from a `hub` folder inside the Hugging Face cache. Choose the \
              folder that contains `hub` (or the `hub` folder itself)."
@@ -161,6 +244,34 @@ mod tests {
             .join(REVISION);
         std::fs::create_dir_all(&snapshot).unwrap();
         std::fs::write(snapshot.join("model.safetensors"), b"weights").unwrap();
+    }
+
+    /// The one place a raw `io::Error` could still have reached a user: an internal failure whose
+    /// underlying cause is a filesystem error. It is logged, never returned — the dialog renders
+    /// `detail` verbatim, so "Permission denied (os error 13)" crossing this boundary would defeat
+    /// the entire typed seam.
+    #[test]
+    fn an_internal_failure_never_returns_raw_filesystem_text() {
+        let raw = ExternalLibraryError(
+            std::io::Error::from(std::io::ErrorKind::PermissionDenied).to_string(),
+        );
+        assert!(
+            raw.0.contains("denied"),
+            "the fixture must actually carry raw io text: {raw}"
+        );
+        let error = relocation_failed("model library relocation could not be completed", &raw);
+        assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
+        let detail = error.detail.to_lowercase();
+        for leak in ["os error", "permission denied", "no such file", "errno"] {
+            assert!(
+                !detail.contains(leak),
+                "raw filesystem text leaked: {detail}"
+            );
+        }
+        assert!(
+            detail.contains("previous library is unchanged"),
+            "a failure must still say what state the operator is in: {detail}"
+        );
     }
 
     /// An unrelated folder is rejected with the typed `not_a_model_library` reason and a 409 —

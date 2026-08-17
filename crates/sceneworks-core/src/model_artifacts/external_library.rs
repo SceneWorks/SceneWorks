@@ -18,6 +18,9 @@ pub const EXTERNAL_LIBRARY_CONTRACT_VERSION: u32 = 1;
 pub const EXTERNAL_LIBRARY_UNAVAILABLE_CODE: &str = "external_model_library_unavailable";
 const LEDGER_FILE: &str = ".sceneworks-external-library-state.json";
 const LEDGER_LOCK: &str = ".sceneworks-external-library-state.lock";
+/// The durable download receipt written per managed model directory. Read here (never written) so
+/// relocation judges the same install evidence `resolve_model_availability` does.
+const DOWNLOAD_RECEIPT_FILE: &str = ".sceneworks-download-complete.json";
 const VALIDATED_CLOSURES_FILE: &str = ".sceneworks-external-library-closures.json";
 const SESSION_DIR: &str = ".sceneworks-external-source-sessions";
 
@@ -371,15 +374,40 @@ impl ExternalLibraryBindingStore {
         ))
     }
 
+    /// Every closure this installation has DURABLE INSTALL EVIDENCE for — the exact union
+    /// `resolve_model_availability` consults when it decides whether a disconnected library is
+    /// "installed but unavailable": the validated-closure ledger AND the download receipts.
+    ///
+    /// Reading only the ledger is a fail-open: a receipt-backed install that predates the ledger
+    /// (or was never validated on a bound library) contributes nothing, so an unrelated folder with
+    /// a single `models--*` directory would validate vacuously and the binding would be overwritten
+    /// onto the wrong volume. Both sources, always.
+    fn installed_evidence_closures(
+        &self,
+    ) -> Result<Vec<Vec<ExternalArtifactRequirement>>, ExternalLibraryError> {
+        let mut closures = self.read_validated_closures_unlocked()?;
+        for requirement in receipt_installed_requirements(&self.models_dir) {
+            let closure = vec![requirement];
+            if !closures.contains(&closure) {
+                closures.push(closure);
+            }
+        }
+        Ok(closures)
+    }
+
     /// Deliberate, user-driven relocation of the model source library (sc-19709).
     ///
     /// [`Self::bind_or_probe_validated`] never replaces a binding — that is what makes a different
     /// physical volume at the same path fail closed. Relocation is the one explicit escape hatch:
     /// the operator names a new library root, and the binding is replaced ONLY after that root
-    /// physically carries every closure this install previously validated. Download receipts and
-    /// the validated-closure ledger are never touched, so relocation never redownloads anything and
+    /// physically carries every closure this install has evidence for. Download receipts and the
+    /// validated-closure ledger are never touched, so relocation never redownloads anything and
     /// never loses installed state — it only re-points the durable identity at where the library
     /// now lives.
+    ///
+    /// It fails CLOSED in both directions: a library missing any recorded install is refused, and
+    /// an installation with no evidence at all is refused outright rather than binding whatever
+    /// Hugging-Face-shaped directory it was handed.
     pub fn relocate_binding(
         &self,
         library_root: &Path,
@@ -387,15 +415,50 @@ impl ExternalLibraryBindingStore {
         let _lock = self
             .lock_exclusive()
             .map_err(LibraryRelocationError::Failed)?;
+        let (canonical, identity) = self.check_relocation_unlocked(library_root)?;
+        let binding = ExternalLibraryBinding {
+            schema_version: EXTERNAL_LIBRARY_CONTRACT_VERSION,
+            configured_path: absolute_lexical(library_root)
+                .map_err(LibraryRelocationError::Failed)?,
+            canonical_path: canonical,
+            physical_identity: identity,
+            bound_at: now_seconds().map_err(LibraryRelocationError::Failed)?,
+        };
+        self.write_unlocked(&binding)
+            .map_err(LibraryRelocationError::Failed)?;
+        Ok(binding)
+    }
+
+    /// Every check [`Self::relocate_binding`] makes, with nothing written.
+    ///
+    /// The client persists its own copy of the library location (the desktop shell's `HF_HOME`) and
+    /// the server re-binds the identity ledger. Whichever of those two durable writes runs second
+    /// can fail, and there is no compensating action for the FIRST one when the library it pointed
+    /// at is the disconnected drive. Validating first moves every ordinary refusal ahead of both
+    /// writes, so the only surviving failure window is an exceptional race — not a wrong folder.
+    pub fn validate_relocation(&self, library_root: &Path) -> Result<(), LibraryRelocationError> {
+        let _lock = self.lock_shared().map_err(LibraryRelocationError::Failed)?;
+        self.check_relocation_unlocked(library_root).map(|_| ())
+    }
+
+    fn check_relocation_unlocked(
+        &self,
+        library_root: &Path,
+    ) -> Result<(PathBuf, ExternalLibraryPhysicalIdentity), LibraryRelocationError> {
         let canonical_before = canonical_library_directory(library_root)?;
+        let closures = self
+            .installed_evidence_closures()
+            .map_err(LibraryRelocationError::Failed)?;
+        if closures.is_empty() {
+            return Err(LibraryRelocationError::Rejected(
+                LibraryRelocationRejection::NoInstalledModels,
+            ));
+        }
         if !has_repository_layout(&canonical_before) {
             return Err(LibraryRelocationError::Rejected(
                 LibraryRelocationRejection::NotAModelLibrary,
             ));
         }
-        let closures = self
-            .read_validated_closures_unlocked()
-            .map_err(LibraryRelocationError::Failed)?;
         let mut missing = Vec::new();
         for closure in &closures {
             if validate_requirements_at_root(&canonical_before, closure).is_err() {
@@ -428,22 +491,17 @@ impl ExternalLibraryBindingStore {
                 detail: error.0,
             })
         })?;
-        if canonical_before != canonical_after || identity_before != identity_after {
+        if !relocation_identity_held(
+            &canonical_before,
+            &canonical_after,
+            &identity_before,
+            &identity_after,
+        ) {
             return Err(LibraryRelocationError::Failed(ExternalLibraryError(
                 "external model library changed while it was being validated".to_owned(),
             )));
         }
-        let binding = ExternalLibraryBinding {
-            schema_version: EXTERNAL_LIBRARY_CONTRACT_VERSION,
-            configured_path: absolute_lexical(library_root)
-                .map_err(LibraryRelocationError::Failed)?,
-            canonical_path: canonical_before,
-            physical_identity: identity_before,
-            bound_at: now_seconds().map_err(LibraryRelocationError::Failed)?,
-        };
-        self.write_unlocked(&binding)
-            .map_err(LibraryRelocationError::Failed)?;
-        Ok(binding)
+        Ok((canonical_before, identity_before))
     }
 
     pub fn probe_resolution(
@@ -797,6 +855,10 @@ pub enum LibraryRelocationRejection {
     /// The layout is right, but models this install recorded as present are not in that library.
     /// Accepting it would silently orphan installed weights, so it fails closed.
     MissingInstalledModels { repositories: Vec<String> },
+    /// This installation has no durable install evidence at all — no receipts, no validated
+    /// closures — so there is nothing to relocate and nothing to check a candidate against.
+    /// Binding an arbitrary Hugging-Face-shaped directory here would be a guess, not a relocation.
+    NoInstalledModels,
     /// The library validates, but the app cannot express it as a Hugging Face cache home: the
     /// configured root is always `<HF_HOME>/hub`, so the operator must choose the folder that
     /// CONTAINS `hub` (or the `hub` folder itself).
@@ -873,6 +935,98 @@ pub fn resolve_relocation_target(
         }),
         _ => Err(LibraryRelocationRejection::HubDirectoryExpected),
     }
+}
+
+/// The relocation TOCTOU rule, pure so it can be asserted directly: the exact canonical path AND
+/// the exact physical identity must both survive the closure walk. A remount that swaps the volume
+/// under the same path is precisely what the identity half catches.
+fn relocation_identity_held(
+    canonical_before: &Path,
+    canonical_after: &Path,
+    identity_before: &ExternalLibraryPhysicalIdentity,
+    identity_after: &ExternalLibraryPhysicalIdentity,
+) -> bool {
+    canonical_before == canonical_after && identity_before == identity_after
+}
+
+/// Every install recorded by a durable download receipt, one self-contained requirement per receipt
+/// entry.
+///
+/// Deliberately manifest-free: relocation must judge what this machine actually INSTALLED, not what
+/// the current catalog happens to declare, and a receipt is self-describing (repo, immutable
+/// revision, variant, exact resolved files). Receipts are read, never written. A receipt whose
+/// shape cannot be understood is skipped rather than trusted — it contributes no evidence, and the
+/// caller still refuses when nothing at all is understood.
+fn receipt_installed_requirements(models_dir: &Path) -> Vec<ExternalArtifactRequirement> {
+    let Ok(entries) = std::fs::read_dir(models_dir) else {
+        return Vec::new();
+    };
+    let mut requirements: Vec<ExternalArtifactRequirement> = Vec::new();
+    for entry in entries.filter_map(Result::ok) {
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(entry.path().join(DOWNLOAD_RECEIPT_FILE)) else {
+            continue;
+        };
+        let Ok(document) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            continue;
+        };
+        let receipts = document
+            .get("receipts")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_else(|| vec![document]);
+        for receipt in receipts {
+            let Some(repository) = receipt.get("repo").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let files = receipt
+                .get("resolvedFiles")
+                .and_then(serde_json::Value::as_array)
+                .map(|files| {
+                    files
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(PathBuf::from)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if files.is_empty() {
+                continue;
+            }
+            let requirement = ExternalArtifactRequirement {
+                repository: repository.to_owned(),
+                revision: receipt
+                    .get("snapshotRevision")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned),
+                // Matches `receipt_requirements_for_model`: a variant-less legacy receipt is the
+                // `default` variant.
+                variant: receipt
+                    .get("variant")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or("default")
+                    .to_owned(),
+                files,
+                is_primary: true,
+            };
+            if !requirements.contains(&requirement) {
+                requirements.push(requirement);
+            }
+        }
+    }
+    requirements.sort_by(|left, right| {
+        (&left.repository, &left.revision, &left.variant, &left.files).cmp(&(
+            &right.repository,
+            &right.revision,
+            &right.variant,
+            &right.files,
+        ))
+    });
+    requirements
 }
 
 /// Does `root` look like a Hugging Face hub cache at all? One `models--<repo>` directory is enough:

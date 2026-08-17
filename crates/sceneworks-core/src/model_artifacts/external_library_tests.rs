@@ -590,3 +590,249 @@ fn source_file_symlink_must_remain_inside_the_same_repository() {
     )
     .is_err());
 }
+
+// ---------------------------------------------------------------------------------------------
+// Relocation (sc-19709). `bind_or_probe_validated` never replaces a binding, which is what makes a
+// different volume at the same path fail closed; `relocate_binding` is the one deliberate escape
+// hatch, and every test below exists to keep it from becoming a way to bind the WRONG volume.
+// ---------------------------------------------------------------------------------------------
+
+/// A durable download receipt for `repo` — install evidence that exists WITHOUT any binding or
+/// validated-closure record, which is the state every relocation check has to survive.
+fn write_download_receipt(data_dir: &Path, repo: &str, file: &str) {
+    let managed = data_dir
+        .join("models")
+        .join(crate::model_artifacts::artifact_selection::safe_download_dir(repo));
+    std::fs::create_dir_all(&managed).unwrap();
+    std::fs::write(
+        managed.join(".sceneworks-download-complete.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "receipts": [{
+                "repo": repo,
+                "variant": "default",
+                "resolvedFiles": [file],
+                "snapshotRevision": REVISION,
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+/// Nothing installed means nothing to relocate. Binding whatever Hugging-Face-shaped directory the
+/// operator happened to pick would be a guess, and it would silently become the identity every
+/// later install is judged against.
+#[test]
+fn relocation_refuses_outright_when_there_is_no_install_evidence() {
+    let temp = TempDir::new().unwrap();
+    let data = temp.path().join("data");
+    let candidate = temp.path().join("someones-cache").join("hub");
+    std::fs::create_dir_all(&candidate).unwrap();
+    seed_snapshot(&candidate, "someone/unrelated", "model.safetensors");
+
+    let store = ExternalLibraryBindingStore::new(&data).unwrap();
+    assert_eq!(
+        store.relocate_binding(&candidate).unwrap_err(),
+        LibraryRelocationError::Rejected(LibraryRelocationRejection::NoInstalledModels)
+    );
+    assert!(store.load().unwrap().is_none());
+}
+
+/// THE fail-open this exists to prevent. Evidence can be RECEIPTS ONLY — an install that predates
+/// the validated-closure ledger, or one never validated on a bound library. Judging the candidate
+/// against the ledger alone would find nothing to check, so any directory with a single `models--*`
+/// child would validate vacuously and capture the binding.
+#[test]
+fn relocation_checks_receipt_evidence_even_with_an_empty_ledger() {
+    let temp = TempDir::new().unwrap();
+    let data = temp.path().join("data");
+    write_download_receipt(&data, "owner/model", "model.safetensors");
+    let store = ExternalLibraryBindingStore::new(&data).unwrap();
+    assert!(
+        store.validated_closures().unwrap().is_empty(),
+        "this test is only meaningful while the ledger is empty"
+    );
+
+    let decoy = temp.path().join("decoy").join("hub");
+    std::fs::create_dir_all(&decoy).unwrap();
+    seed_snapshot(&decoy, "someone/unrelated", "model.safetensors");
+    assert_eq!(
+        store.relocate_binding(&decoy).unwrap_err(),
+        LibraryRelocationError::Rejected(LibraryRelocationRejection::MissingInstalledModels {
+            repositories: vec!["owner/model".to_owned()],
+        })
+    );
+    assert!(store.load().unwrap().is_none(), "a refusal writes nothing");
+
+    // The library that actually holds the receipted install is adopted.
+    let moved = temp.path().join("moved").join("hub");
+    std::fs::create_dir_all(&moved).unwrap();
+    seed_snapshot(&moved, "owner/model", "model.safetensors");
+    let binding = store.relocate_binding(&moved).unwrap();
+    assert_eq!(
+        binding.canonical_path,
+        std::fs::canonicalize(&moved).unwrap()
+    );
+}
+
+/// A legacy receipt with no recorded variant is the `default` variant, exactly as
+/// `receipt_requirements_for_model` reads it — otherwise a pre-variant install would contribute no
+/// evidence and reopen the same fail-open.
+#[test]
+fn a_variant_less_legacy_receipt_still_counts_as_evidence() {
+    let temp = TempDir::new().unwrap();
+    let data = temp.path().join("data");
+    let managed = data
+        .join("models")
+        .join(crate::model_artifacts::artifact_selection::safe_download_dir("owner/legacy"));
+    std::fs::create_dir_all(&managed).unwrap();
+    std::fs::write(
+        managed.join(".sceneworks-download-complete.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "receipts": [{
+                "repo": "owner/legacy",
+                "resolvedFiles": ["legacy.safetensors"],
+                "snapshotRevision": REVISION,
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let decoy = temp.path().join("decoy").join("hub");
+    std::fs::create_dir_all(&decoy).unwrap();
+    seed_snapshot(&decoy, "someone/unrelated", "model.safetensors");
+    let store = ExternalLibraryBindingStore::new(&data).unwrap();
+    assert_eq!(
+        store.relocate_binding(&decoy).unwrap_err(),
+        LibraryRelocationError::Rejected(LibraryRelocationRejection::MissingInstalledModels {
+            repositories: vec!["owner/legacy".to_owned()],
+        })
+    );
+}
+
+/// A library that holds SOME of what is installed is still the wrong library: accepting it would
+/// silently orphan the rest. Every missing repository is named, so the guidance is actionable.
+#[test]
+fn relocation_refuses_a_partial_library_and_names_what_is_missing() {
+    let temp = TempDir::new().unwrap();
+    let data = temp.path().join("data");
+    let original = temp.path().join("original").join("hub");
+    std::fs::create_dir_all(&original).unwrap();
+    seed_snapshot(&original, "owner/one", "model.safetensors");
+    seed_snapshot(&original, "owner/two", "model.safetensors");
+    let store = ExternalLibraryBindingStore::new(&data).unwrap();
+    // Both closures validated on the bound library, so both are in the ledger.
+    store
+        .bind_or_probe_validated(&original, &[requirement("owner/one", "model.safetensors")])
+        .unwrap();
+    store
+        .bind_or_probe_validated(&original, &[requirement("owner/two", "model.safetensors")])
+        .unwrap();
+    // A receipt for a third install with no ledger record at all.
+    write_download_receipt(&data, "owner/three", "model.safetensors");
+
+    let partial = temp.path().join("partial").join("hub");
+    std::fs::create_dir_all(&partial).unwrap();
+    seed_snapshot(&partial, "owner/one", "model.safetensors");
+    match store.relocate_binding(&partial).unwrap_err() {
+        LibraryRelocationError::Rejected(LibraryRelocationRejection::MissingInstalledModels {
+            repositories,
+        }) => assert_eq!(repositories, ["owner/three", "owner/two"]),
+        other => panic!("expected a missing-models refusal, got {other:?}"),
+    }
+}
+
+/// The dry run answers identically and writes nothing — neither a binding nor a ledger byte — which
+/// is what lets the client validate before it persists its own copy of the location.
+#[test]
+fn validate_relocation_answers_like_the_real_call_and_writes_nothing() {
+    let temp = TempDir::new().unwrap();
+    let data = temp.path().join("data");
+    let original = temp.path().join("original").join("hub");
+    std::fs::create_dir_all(&original).unwrap();
+    seed_snapshot(&original, "owner/model", "model.safetensors");
+    let store = ExternalLibraryBindingStore::new(&data).unwrap();
+    store
+        .bind_or_probe_validated(
+            &original,
+            &[requirement("owner/model", "model.safetensors")],
+        )
+        .unwrap();
+    let binding_before = store.load().unwrap();
+    let closures_before = store.validated_closures().unwrap();
+
+    let moved = temp.path().join("moved").join("hub");
+    std::fs::create_dir_all(moved.parent().unwrap()).unwrap();
+    std::fs::rename(&original, &moved).unwrap();
+    store.validate_relocation(&moved).unwrap();
+    assert_eq!(store.load().unwrap(), binding_before);
+    assert_eq!(store.validated_closures().unwrap(), closures_before);
+
+    let unrelated = temp.path().join("holiday-photos");
+    std::fs::create_dir_all(&unrelated).unwrap();
+    assert_eq!(
+        store.validate_relocation(&unrelated).unwrap_err(),
+        LibraryRelocationError::Rejected(LibraryRelocationRejection::NotAModelLibrary)
+    );
+    assert_eq!(store.load().unwrap(), binding_before);
+}
+
+/// The TOCTOU re-check: the closure walk touches many files and can race an unmount/remount, so the
+/// exact canonical path AND physical identity must still hold after validation. Asserted on the
+/// pure comparison, because the race itself cannot be scheduled deterministically in a test.
+#[test]
+fn relocation_requires_the_identity_to_hold_across_the_closure_walk() {
+    let path = PathBuf::from("/Volumes/Models/hf/hub");
+    let other = PathBuf::from("/Volumes/Models 1/hf/hub");
+    let identity = ExternalLibraryPhysicalIdentity {
+        volume_id: "volume-a".to_owned(),
+        directory_id: 7,
+    };
+    let remounted = ExternalLibraryPhysicalIdentity {
+        volume_id: "volume-b".to_owned(),
+        directory_id: 7,
+    };
+    assert!(relocation_identity_held(&path, &path, &identity, &identity));
+    assert!(!relocation_identity_held(
+        &path, &other, &identity, &identity
+    ));
+    assert!(!relocation_identity_held(
+        &path, &path, &identity, &remounted
+    ));
+}
+
+/// Relocation replaces the ONE durable binding, so a resolution stamped against the old library —
+/// the copy a worker is still carrying with an in-flight job — must stop validating rather than be
+/// silently accepted against the new volume. It fails closed as an identity mismatch.
+#[test]
+fn a_resolution_stamped_before_relocation_no_longer_matches_the_binding() {
+    let temp = TempDir::new().unwrap();
+    let data = temp.path().join("data");
+    let original = temp.path().join("original").join("hub");
+    std::fs::create_dir_all(&original).unwrap();
+    seed_snapshot(&original, "owner/model", "model.safetensors");
+    let requirements = vec![requirement("owner/model", "model.safetensors")];
+    let store = ExternalLibraryBindingStore::new(&data).unwrap();
+    let (old_binding, _) = store
+        .bind_or_probe_validated(&original, &requirements)
+        .unwrap();
+    let stamped =
+        ModelResolution::external_ready(original.clone(), old_binding, requirements.clone())
+            .unwrap();
+
+    let moved = temp.path().join("moved").join("hub");
+    std::fs::create_dir_all(moved.parent().unwrap()).unwrap();
+    std::fs::rename(&original, &moved).unwrap();
+    store.relocate_binding(&moved).unwrap();
+
+    assert_eq!(
+        store.probe_resolution(&stamped).unwrap().status,
+        ExternalLibraryProbeStatus::IdentityMismatch,
+    );
+    // Install evidence is untouched by relocation: nothing is redownloaded and nothing is lost.
+    assert_eq!(
+        store.validated_closures().unwrap(),
+        vec![canonical_requirement_closure(&requirements)]
+    );
+}

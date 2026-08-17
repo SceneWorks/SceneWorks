@@ -57,6 +57,7 @@ describe("App unavailable model library prompt (sc-19709)", () => {
   let imageJobPosts;
   let libraryAvailable;
   let probeCalls;
+  let simpleUi;
 
   beforeEach(() => {
     global.IS_REACT_ACT_ENVIRONMENT = true;
@@ -68,6 +69,7 @@ describe("App unavailable model library prompt (sc-19709)", () => {
     imageJobPosts = [];
     probeCalls = 0;
     libraryAvailable = false;
+    simpleUi = false;
     global.fetch = vi.fn((url, options = {}) => {
       const path = new URL(url).pathname;
       const method = options.method ?? "GET";
@@ -85,7 +87,11 @@ describe("App unavailable model library prompt (sc-19709)", () => {
         // The workflow-embed disclosure gates the very first generation; mark it answered so the
         // submission actually reaches the API and this test stays about the model library.
         return Promise.resolve(
-          response({ embedWorkflowInImages: true, workflowEmbedNoticeSeen: true }),
+          response({
+            embedWorkflowInImages: true,
+            workflowEmbedNoticeSeen: true,
+            simpleUi,
+          }),
         );
       }
       if (path.endsWith("/models")) return Promise.resolve(response([MODEL]));
@@ -197,6 +203,37 @@ describe("App unavailable model library prompt (sc-19709)", () => {
     libraryAvailable = true;
     await settle();
     expect(imageJobPosts).toHaveLength(1);
+  });
+
+  // The Simple shell is an ALTERNATIVE root that returns before the Advanced shell's overlays.
+  // The handler that opens this prompt is registered at App level and therefore fires in BOTH, so
+  // a prompt mounted only in the Advanced branch would leave a Simple-UI user with a Generate
+  // button that swallows its own failure and then never works again — strictly worse than the
+  // error banner it replaced.
+  it("raises the same prompt in the Simple shell", async () => {
+    simpleUi = true;
+    root = createRoot(container);
+    await act(async () => root.render(<App />));
+    await settle();
+    expect(document.body.querySelector(".su-root")).toBeTruthy();
+
+    const prompt = document.body.querySelector(".su-textarea");
+    expect(prompt).toBeTruthy();
+    await changeField(prompt, "a lighthouse at dusk");
+    const generate = [...document.body.querySelectorAll("button.su-generate")][0];
+    expect(generate).toBeTruthy();
+    await act(async () => generate.click());
+    await settle();
+
+    expect(imageJobPosts).toHaveLength(1);
+    expect(dialog()).toBeTruthy();
+    expect(dialog().textContent).toContain("Z-Image Turbo");
+
+    libraryAvailable = true;
+    await act(async () => button("Connect drive and retry").click());
+    await settle();
+    expect(imageJobPosts).toHaveLength(2);
+    expect(dialog()).toBeNull();
   });
 
   it("offers server guidance instead of a folder picker outside the desktop shell", async () => {

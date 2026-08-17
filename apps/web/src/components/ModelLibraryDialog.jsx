@@ -19,6 +19,7 @@ export function ModelLibraryDialog({
   onCancel,
   canRelocate,
   autoProbeMs = 5000,
+  autoProbePaused = false,
 }) {
   const blocked = state?.status === "blocked";
   const busy = state?.status === "retrying" || state?.status === "relocating";
@@ -27,11 +28,15 @@ export function ModelLibraryDialog({
   // While the prompt is open, keep re-probing: plugging the drive back in should resolve the
   // prompt without demanding a click. Every tick funnels through the same guarded retry the button
   // uses, so a tick that lands during an in-flight attempt is a no-op rather than a second submit.
+  //
+  // Paused while the NATIVE folder picker is up: that dialog is modal and opaque to this window, so
+  // a drive returning mid-selection would otherwise resume the submission behind something the user
+  // cannot see past — a job appearing out of an interaction they had not finished.
   useEffect(() => {
-    if (!blocked || !autoProbeMs || !onRetry) return undefined;
+    if (!blocked || autoProbePaused || !autoProbeMs || !onRetry) return undefined;
     const id = setInterval(() => onRetry({ auto: true }), autoProbeMs);
     return () => clearInterval(id);
-  }, [blocked, autoProbeMs, onRetry]);
+  }, [blocked, autoProbePaused, autoProbeMs, onRetry]);
 
   if (!open) return null;
 

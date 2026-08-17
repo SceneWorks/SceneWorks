@@ -1312,6 +1312,18 @@ pub fn restart_worker(app: AppHandle) {
     crate::setup::restart_gpu_worker(&app);
 }
 
+/// Relaunch the whole app so a spawn-environment setting takes effect (sc-19709).
+///
+/// The relocated model library reaches the API and GPU worker as `HF_HOME` at spawn, so it cannot
+/// apply to the running sidecars. This is the "Restart now" the disclosure offers: the SAME
+/// graceful teardown as quitting — SIGTERM then grace, never an immediate force-kill of a worker
+/// that may be mid-render — followed by a relaunch. Idempotent: a second call while a teardown is
+/// already running is a no-op, so a double click cannot start two.
+#[tauri::command]
+pub fn restart_app(app: AppHandle) {
+    crate::setup::begin_restart(&app);
+}
+
 #[tauri::command]
 pub fn get_gpu_info() -> GpuInfo {
     #[cfg(target_os = "macos")]
