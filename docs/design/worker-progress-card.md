@@ -236,6 +236,13 @@ Keep `.progress-track` and `.worker-meter` as low-level primitives (used inside 
 - 480–768px: Hardware row wraps so meters drop below the device/vendor/arch pills
 - < 480px: Title and Job ID stack vertically; action buttons become a full-width row
 
+## Queue priority
+
+- Pending cards on the Queue screen have a selection checkbox and a **Move to top** bulk action.
+- Priority is durable worker scheduling state, not only a visual sort; it survives API restarts.
+- `prompt_refine` jobs receive priority automatically when they are enqueued.
+- Only `queued` / `pending_caption` jobs can be promoted. Worker-owned work is never interrupted.
+
 ## Out of scope
 
 - Mobile-specific gestures

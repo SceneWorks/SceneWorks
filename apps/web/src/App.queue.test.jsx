@@ -776,6 +776,83 @@ describe("SceneWorks app shell", () => {
     expect(cancelButton.disabled).toBe(true);
   });
 
+  it("selects waiting jobs to move to the top and shows the durable queue order", async () => {
+    const prioritizeJobs = vi.fn(() => Promise.resolve(true));
+    const job = (id, overrides = {}) => ({
+      id,
+      type: "image_generate",
+      status: "queued",
+      stage: "queued",
+      progress: 0,
+      projectId: "project-1",
+      projectName: "Project 1",
+      requestedGpu: "auto",
+      payload: { prompt: id },
+      attempts: 1,
+      createdAt: "2026-05-19T09:00:00Z",
+      ...overrides,
+    });
+    const running = job("job-running", {
+      status: "running",
+      stage: "generating",
+      progress: 0.4,
+      createdAt: "2026-05-19T09:03:00Z",
+    });
+    const ordinary = job("job-ordinary", { createdAt: "2026-05-19T09:01:00Z" });
+    const automatic = job("job-refine", {
+      type: "prompt_refine",
+      payload: { prompt: "automatic refinement" },
+      queueRank: 7,
+      createdAt: "2026-05-19T09:02:00Z",
+    });
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Project 1" },
+            createPlaceholderJob: (event) => event.preventDefault(),
+            filteredJobs: [ordinary, running, automatic],
+            gpuOptions: ["auto", "0"],
+            jobAction: () => {},
+            prioritizeJobs,
+            projectFilter: "all",
+            projects: [{ id: "project-1", name: "Project 1" }],
+            requestedGpu: "auto",
+            setProjectFilter: () => {},
+            setRequestedGpu: () => {},
+            visibleWorkers: [],
+          },
+          <QueueScreen />,
+        ),
+      );
+    });
+
+    const titles = [...container.querySelectorAll(".worker-progress-card__title")].map((node) => node.textContent);
+    expect(titles[0]).toContain("job-running");
+    expect(titles[1]).toContain("automatic refinement");
+    expect(titles[2]).toContain("job-ordinary");
+    expect(container.querySelectorAll(".queue-priority-badge")).toHaveLength(1);
+    expect(container.querySelectorAll('.queue-job-selection input[type="checkbox"]')).toHaveLength(2);
+
+    const moveButton = [...container.querySelectorAll("button")].find((button) => button.textContent.startsWith("Move to top"));
+    expect(moveButton.disabled).toBe(true);
+    const ordinaryCheckbox = container.querySelector('input[aria-label*="job-ordinary"]');
+    await act(async () => {
+      ordinaryCheckbox.click();
+    });
+    expect(moveButton.textContent).toBe("Move to top (1)");
+    expect(moveButton.disabled).toBe(false);
+
+    await act(async () => {
+      moveButton.click();
+    });
+    expect(prioritizeJobs).toHaveBeenCalledWith(["job-ordinary"]);
+    expect(moveButton.textContent).toBe("Move to top");
+    expect(moveButton.disabled).toBe(true);
+  });
+
   it("dismisses an individual completed queue item via the per-card × (issue #1556)", async () => {
     const clearJob = vi.fn(() => Promise.resolve());
     const completedJob = {

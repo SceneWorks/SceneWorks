@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { terminalStatuses } from "../constants.js";
 import { GPU_REQUIRED_JOB_TYPES, NON_GPU_JOB_TYPES, pendingStatuses } from "../jobTypes.js";
@@ -8,6 +8,30 @@ import { WorkPanel } from "../components/WorkPanel.jsx";
 
 function formatJobType(type) {
   return String(type ?? "job").replaceAll("_", " ");
+}
+
+function queueRank(job) {
+  const rank = Number(job?.queueRank);
+  return Number.isSafeInteger(rank) && rank > 0 ? rank : 0;
+}
+
+// Match the order workers observe: already-running work first, then pending work by durable
+// priority/FIFO, then recent history. A worker can still skip an incompatible job, but it cannot
+// let GPU affinity cross a priority tier.
+function queueDisplayOrder(left, right) {
+  const group = (job) => {
+    if (pendingStatuses.has(job.status)) return 1;
+    if (terminalStatuses.has(job.status)) return 2;
+    return 0;
+  };
+  const groupDelta = group(left) - group(right);
+  if (groupDelta !== 0) return groupDelta;
+  if (pendingStatuses.has(left.status)) {
+    const rankDelta = queueRank(right) - queueRank(left);
+    if (rankDelta !== 0) return rankDelta;
+    return String(left.createdAt ?? "").localeCompare(String(right.createdAt ?? ""));
+  }
+  return String(right.createdAt ?? "").localeCompare(String(left.createdAt ?? ""));
 }
 
 function workerSupports(worker, type) {
@@ -239,6 +263,8 @@ function WorkerCard({ worker }) {
 
 export function QueueScreen() {
   const [jobPrompt, setJobPrompt] = useState("Placeholder generation");
+  const [selectedJobIds, setSelectedJobIds] = useState(() => new Set());
+  const [prioritizing, setPrioritizing] = useState(false);
   const {
     activeProject,
     assets = [],
@@ -250,6 +276,7 @@ export function QueueScreen() {
     gpuOptions,
     jobAction,
     jobs = filteredJobs,
+    prioritizeJobs,
     projectFilter,
     projects,
     requestedGpu,
@@ -277,6 +304,47 @@ export function QueueScreen() {
     () => filteredJobs.filter((job) => pendingStatuses.has(job.status)).length,
     [filteredJobs],
   );
+  const orderedJobs = useMemo(
+    () => [...filteredJobs].sort(queueDisplayOrder),
+    [filteredJobs],
+  );
+  const selectableJobIds = useMemo(
+    () => new Set(orderedJobs.filter((job) => pendingStatuses.has(job.status)).map((job) => job.id)),
+    [orderedJobs],
+  );
+
+  // A selected job can be claimed or removed by an SSE update while the operator is deciding.
+  // Prune it locally as soon as it stops being pending; the server repeats the same guard under
+  // the claim transaction for the final race.
+  useEffect(() => {
+    setSelectedJobIds((current) => {
+      const next = new Set([...current].filter((jobId) => selectableJobIds.has(jobId)));
+      return next.size === current.size ? current : next;
+    });
+  }, [selectableJobIds]);
+
+  const toggleJobSelection = (jobId) => {
+    setSelectedJobIds((current) => {
+      const next = new Set(current);
+      if (next.has(jobId)) next.delete(jobId);
+      else next.add(jobId);
+      return next;
+    });
+  };
+  const moveSelectedToTop = async () => {
+    if (!prioritizeJobs || selectedJobIds.size === 0 || prioritizing) return;
+    const jobIds = orderedJobs
+      .filter((job) => pendingStatuses.has(job.status) && selectedJobIds.has(job.id))
+      .map((job) => job.id);
+    if (!jobIds.length) return;
+    setPrioritizing(true);
+    try {
+      const succeeded = await prioritizeJobs(jobIds);
+      if (succeeded) setSelectedJobIds(new Set());
+    } finally {
+      setPrioritizing(false);
+    }
+  };
   return (
     <section className="page-frame queue-surface">
       <WorkPanel
@@ -347,11 +415,23 @@ export function QueueScreen() {
         )}
       </div>
 
+      <div className="queue-priority-toolbar">
+        <span>Prompt refinement moves to the front automatically. Select waiting jobs to prioritize them.</span>
+        <button
+          className="queue-move-to-top"
+          disabled={selectedJobIds.size === 0 || prioritizing || !prioritizeJobs}
+          onClick={moveSelectedToTop}
+          type="button"
+        >
+          {prioritizing ? "Moving…" : `Move to top${selectedJobIds.size ? ` (${selectedJobIds.size})` : ""}`}
+        </button>
+      </div>
+
       <div className="job-list">
-        {filteredJobs.length === 0 ? (
+        {orderedJobs.length === 0 ? (
           <div className="empty-panel">No jobs in this view</div>
         ) : (
-          filteredJobs.map((job) => {
+          orderedJobs.map((job) => {
             const message = jobWaitingMessage(job, workers, jobs);
             const variant = thumbnailVariantForJob(job);
             const thumbnails = variant === "hidden" ? [] : resolveJobAssets(job, assets);
@@ -359,19 +439,37 @@ export function QueueScreen() {
             // so the shared WorkerProgressCard surface it without per-screen plumbing.
             const enrichedJob = message && message !== job.message ? { ...job, message } : job;
             return (
-              <WorkerProgressCard
+              <div
+                className={`queue-job-entry${selectedJobIds.has(job.id) ? " selected" : ""}`}
                 key={job.id}
-                job={enrichedJob}
-                thumbnailsVariant={variant}
-                thumbnailAssets={thumbnails}
-                onThumbnailClick={setPreviewAsset ? (asset) => setPreviewAsset(asset, thumbnails) : undefined}
-                onCancel={(j) => jobAction(j, "cancel")}
-                onClear={clearJob ? (j) => clearJob(j) : undefined}
-                onRetry={(j, payload) => jobAction(j, "retry", { body: payload ?? {} })}
-                onFreshRetry={(j, payload) => jobAction(j, "retry", { body: payload ?? {} })}
-                onDuplicate={(j) => jobAction(j, "duplicate")}
-                hideOpenQueue
-              />
+              >
+                {pendingStatuses.has(job.status) ? (
+                  <div className="queue-job-selection">
+                    <label>
+                      <input
+                        aria-label={`Select ${formatJobType(job.type)} job ${job.id} to move to the top`}
+                        checked={selectedJobIds.has(job.id)}
+                        onChange={() => toggleJobSelection(job.id)}
+                        type="checkbox"
+                      />
+                      <span>Select</span>
+                    </label>
+                    {queueRank(job) > 0 ? <span className="queue-priority-badge">Priority</span> : null}
+                  </div>
+                ) : null}
+                <WorkerProgressCard
+                  job={enrichedJob}
+                  thumbnailsVariant={variant}
+                  thumbnailAssets={thumbnails}
+                  onThumbnailClick={setPreviewAsset ? (asset) => setPreviewAsset(asset, thumbnails) : undefined}
+                  onCancel={(j) => jobAction(j, "cancel")}
+                  onClear={clearJob ? (j) => clearJob(j) : undefined}
+                  onRetry={(j, payload) => jobAction(j, "retry", { body: payload ?? {} })}
+                  onFreshRetry={(j, payload) => jobAction(j, "retry", { body: payload ?? {} })}
+                  onDuplicate={(j) => jobAction(j, "duplicate")}
+                  hideOpenQueue
+                />
+              </div>
             );
           })
         )}
