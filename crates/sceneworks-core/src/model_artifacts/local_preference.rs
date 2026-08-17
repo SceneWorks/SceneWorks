@@ -227,12 +227,19 @@ pub fn prefer_local_artifacts(
     })
 }
 
-/// The leased local snapshot for this exact immutable pair, if one is active.
+/// The leased local snapshot for this exact immutable pair, if one is active AND still on disk.
+/// The lease is what keeps a published bundle from being evicted mid-load, so the presence check
+/// is belt-and-braces: an answer this function gives must be loadable, never a path the caller
+/// discovers is gone.
 pub fn local_snapshot(repository: &str, revision: &str) -> Option<PathBuf> {
     lock_active()
         .entries
         .iter()
-        .find(|entry| entry.repository == repository && entry.revision == revision)
+        .find(|entry| {
+            entry.repository == repository
+                && entry.revision == revision
+                && entry.snapshot_root.is_dir()
+        })
         .map(|entry| entry.snapshot_root.clone())
 }
 
@@ -245,7 +252,7 @@ pub fn unique_local_snapshot(repository: &str) -> Option<(String, PathBuf)> {
     let mut matches = active
         .entries
         .iter()
-        .filter(|entry| entry.repository == repository);
+        .filter(|entry| entry.repository == repository && entry.snapshot_root.is_dir());
     let first = matches.next()?;
     if matches.next().is_some() {
         return None;

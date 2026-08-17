@@ -266,6 +266,35 @@ fn a_disconnected_library_falls_back_to_the_unique_leased_revision() {
     assert!(configured.discover_snapshot("owner/model", None).is_err());
 }
 
+/// A scope can only ever answer with a snapshot that is really there: if the bundle directory is
+/// gone the load falls back to the source tier instead of being handed a path that does not exist.
+#[test]
+fn a_vanished_bundle_directory_is_never_answered_with() {
+    let _serialized = overlay_guard();
+    let temp = tempfile::tempdir().unwrap();
+    let library_root = temp.path().join("external-hf");
+    let source = seed_source(
+        &library_root,
+        "owner/model",
+        PRIMARY_REV,
+        "q4/model.safetensors",
+    );
+    let artifact = bundle(&temp.path().join("bundle"));
+    let configured = ArtifactSourceLibrary::new_preferring_local(&library_root).unwrap();
+    let _scope = prefer_local_artifacts(std::slice::from_ref(&artifact)).unwrap();
+
+    std::fs::remove_dir_all(artifact.location.root()).unwrap();
+    assert!(local_snapshot("owner/model", PRIMARY_REV).is_none());
+    assert!(unique_local_snapshot("owner/model").is_none());
+    assert_eq!(
+        configured
+            .discover_snapshot("owner/model", Some(PRIMARY_REV))
+            .unwrap()
+            .1,
+        source
+    );
+}
+
 /// Two bundles claiming one immutable snapshot is ambiguous, and ambiguity must never be resolved
 /// by picking one: the installation fails and the caller keeps the load on the source tier.
 #[test]
