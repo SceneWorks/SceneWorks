@@ -24,7 +24,7 @@ from pathlib import Path
 
 HARD_STOP_EXIT = 97
 PROVIDER_PHASE_PROTOCOL = "sceneworks-provider-phase-v1"
-PROVIDER_PHASES = (
+CAMPAIGN_ENTRY_PROVIDER_PHASES = (
     "common_load",
     "primary_conditioning",
     "primary_denoise",
@@ -36,6 +36,17 @@ PROVIDER_PHASES = (
     "lifecycle_error_recovery",
     "cleanup",
 )
+BOUNDED_CARRIER_PROVIDER_PHASES = (
+    "common_load",
+    "primary_conditioning",
+    "primary_denoise",
+    "primary_decode",
+    "cleanup",
+)
+PROVIDER_PHASE_PROFILES = {
+    "campaign-entry": CAMPAIGN_ENTRY_PROVIDER_PHASES,
+    "bounded-carrier": BOUNDED_CARRIER_PROVIDER_PHASES,
+}
 
 
 @dataclass(frozen=True)
@@ -599,6 +610,11 @@ def guard(args: argparse.Namespace) -> int:
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
         raise
+    provider_phases = (
+        PROVIDER_PHASE_PROFILES[args.provider_phase_profile]
+        if args.provider_phase_profile is not None
+        else ()
+    )
     runtime_deadline = None
     attestation_nonce = None
     attestation_buffer = bytearray()
@@ -630,12 +646,12 @@ def guard(args: argparse.Namespace) -> int:
                 except ValueError:
                     return "child_returned_non_integer_provider_phase_sequence"
                 expected_sequence = provider_phase_sequence + 1
-                if sequence != expected_sequence or sequence > len(PROVIDER_PHASES):
+                if sequence != expected_sequence or sequence > len(provider_phases):
                     return (
                         "child_returned_reordered_provider_phase:"
                         f"expected_{expected_sequence}:observed_{sequence}"
                     )
-                expected_name = PROVIDER_PHASES[sequence - 1]
+                expected_name = provider_phases[sequence - 1]
                 if fields[3] != expected_name:
                     return (
                         "child_returned_invalid_provider_phase_name:"
@@ -663,7 +679,7 @@ def guard(args: argparse.Namespace) -> int:
             if fields == ["DONE", str(attestation_nonce)]:
                 if child_reported_done:
                     return "child_returned_duplicate_completion_attestation"
-                if args.require_provider_phases and provider_phase_sequence != len(PROVIDER_PHASES):
+                if args.require_provider_phases and provider_phase_sequence != len(provider_phases):
                     return (
                         "child_completed_before_provider_phase_sequence:"
                         f"observed_{provider_phase_sequence}"
@@ -773,7 +789,8 @@ def guard(args: argparse.Namespace) -> int:
             if args.require_provider_phases:
                 attestation.update({
                     "providerPhaseProtocol": PROVIDER_PHASE_PROTOCOL,
-                    "providerPhases": list(PROVIDER_PHASES),
+                    "providerPhaseProfile": args.provider_phase_profile,
+                    "providerPhases": list(provider_phases),
                 })
             if args.min_swap_free_bytes is not None:
                 attestation["minSwapFreeBytes"] = args.min_swap_free_bytes
@@ -1107,6 +1124,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--allow-synthetic-telemetry", action="store_true")
     parser.add_argument("--require-child-attestation", action="store_true")
     parser.add_argument("--require-provider-phases", action="store_true")
+    parser.add_argument("--provider-phase-profile", choices=tuple(PROVIDER_PHASE_PROFILES))
     parser.add_argument("--synthetic-spawn-delay", type=float, default=0.0, help=argparse.SUPPRESS)
     parser.add_argument("--synthetic-launch-ready-file", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("command", nargs=argparse.REMAINDER)
@@ -1148,6 +1166,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("child attestation requires production Darwin telemetry and launch controls")
     if args.require_provider_phases and not args.require_child_attestation:
         parser.error("provider phases require child attestation")
+    if args.require_provider_phases != (args.provider_phase_profile is not None):
+        parser.error("provider phases require exactly one named phase profile")
     return args
 
 

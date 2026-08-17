@@ -2041,7 +2041,7 @@ test("the LTX real-weight safety canary cannot relax or masquerade as campaign e
     /LTX_(?:CANARY|PRODUCT_CANARY)_FIXTURE|diagnostic_(?:product_envelope_)?canary_complete/,
   );
   const campaignEntry = adapter.slice(
-    adapter.indexOf("fn prevalidate_ltx_campaign_entry("),
+    adapter.indexOf("fn run_ltx_campaign_entry("),
     adapter.indexOf("fn run_ltx(request:"),
   );
   for (const required of [
@@ -2070,6 +2070,32 @@ test("the LTX real-weight safety canary cannot relax or masquerade as campaign e
       < campaignEntry.indexOf("consume_ltx_canary_watchdog_attestation(request)?"),
     "the exact campaign row must be validated before the watchdog releases model allocation",
   );
+  const boundedCarrier = adapter.slice(
+    adapter.indexOf("fn run_ltx_bounded_carrier_proof("),
+    adapter.indexOf("fn run_ltx_campaign_entry("),
+  );
+  for (const required of [
+    "prevalidate_ltx_bounded_carrier_proof(request)?",
+    "start_lease_for(&LTX_BOUNDED_CARRIER_PHASE_NAMES)?",
+    'watchdog_lease.mark("common_load")?',
+    'watchdog_lease.mark("primary_conditioning")?',
+    'watchdog_lease.mark("primary_denoise")',
+    'watchdog_lease.mark("primary_decode")',
+    'watchdog_lease.mark("cleanup")?',
+    "validate_ltx_bounded_carrier_generation_request(&generation_request)?",
+    "scoped_generate(",
+    "spatial_decode_tile_count != 24",
+    "validate_ltx_canary_cleanup(",
+    '"diagnosticOnly": true',
+    '"promotable": false',
+    '"ingestible": false',
+    '"seed": LTX_SEED',
+  ]) assert.ok(boundedCarrier.includes(required), `bounded carrier must retain ${required}`);
+  assert.doesNotMatch(boundedCarrier, /verify_ltx_lifecycle|LtxRunAdmission::CampaignEntry/,
+    "SC-20254 must execute one provider request scope, not the multi-render campaign lifecycle");
+  assert.equal((boundedCarrier.match(/scoped_generate\(/g) ?? []).length, 1,
+    "SC-20254 must contain exactly one full-A/V render call");
+  assert.match(adapter, /LTX_BOUNDED_CARRIER_ACTION => run_ltx_bounded_carrier_proof\(&request\)/);
 
   const canary = adapter.slice(
     adapter.indexOf("fn validate_ltx_canary_plan_for("),

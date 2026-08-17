@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  chmod, mkdir, mkdtemp, readFile, readdir, stat, symlink, writeFile,
+  chmod, link, lstat, mkdir, mkdtemp, readFile, readdir, stat, symlink, writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -11,6 +11,14 @@ import { setTimeout as delay } from "node:timers/promises";
 
 import {
   CARGO_METADATA_TIMEOUT_MS,
+  BOUNDED_CARRIER_ACTION,
+  BOUNDED_CARRIER_FAILURE_RECEIPT_TYPE,
+  BOUNDED_CARRIER_FIXTURE,
+  BOUNDED_CARRIER_IDENTITY,
+  BOUNDED_CARRIER_LOGICAL_CASE_ID,
+  BOUNDED_CARRIER_PHASES,
+  BOUNDED_CARRIER_PROFILE,
+  BOUNDED_CARRIER_SUCCESS_RECEIPT_TYPE,
   CAMPAIGN_ENTRY_FIXTURE,
   CAMPAIGN_ENTRY_IDENTITY,
   CAMPAIGN_ENTRY_LOGICAL_CASE_ID,
@@ -26,6 +34,8 @@ import {
   PROVIDER_PHASES,
   PRODUCT_ENVELOPE_CANARY_PROFILE,
   acquireCampaignEntryOutcome,
+  acquireBoundedCarrierOutcome,
+  acquireCanonicalPublicationClaim,
   acquirePreparationLock,
   campaignEntryAdapterRequest,
   campaignEntryCanonicalFragment,
@@ -33,6 +43,13 @@ import {
   campaignEntryFailureReceipt,
   campaignEntryOutcomeReservationPath,
   campaignEntryPlan,
+  boundedCarrierFailurePath,
+  boundedCarrierFailureReceipt,
+  boundedCarrierOutcomeReservationPath,
+  boundedCarrierRequest,
+  boundedCarrierSuccessPath,
+  boundedCarrierSuccessReceipt,
+  canonicalPublicationClaimPath,
   canaryWatchdogEnvironment,
   canaryRequest,
   cargoSourceStatusIsClean,
@@ -53,7 +70,10 @@ import {
   preserveFailureReceiptSuppression,
   publishCampaignEntryCanonicalOutcome,
   publishCampaignEntryFailureReceipt,
+  publishBoundedCarrierFailureReceipt,
+  publishBoundedCarrierSuccessReceipt,
   releaseUnpublishedCampaignEntryOutcome,
+  releaseUnpublishedBoundedCarrierOutcome,
   preflightFreeFloor,
   repositoryToolchain,
   runtimeFreeFloor,
@@ -66,6 +86,9 @@ import {
   validateCampaignEntryFailureReceipt,
   validateCampaignEntryHarnessRequest,
   validateCampaignEntryWatchdogEvents,
+  validateBoundedCarrierReceipt,
+  validateBoundedCarrierResponse,
+  validateBoundedCarrierWatchdogEvents,
   validateCanaryResponse,
   validatePreparedCache,
   watchdogFailureSummary,
@@ -206,6 +229,85 @@ function campaignEntryRuntimeResponse(hostMemoryBytes = 128 * 1024 ** 3) {
   };
 }
 
+function boundedCarrierResponse(hostMemoryBytes = 128 * 1024 ** 3) {
+  const phase = (activeBytes) => ({
+    activeBytes, allocatorBytes: activeBytes + 10, reclaimableBytes: 10,
+  });
+  return {
+    schemaVersion: 1,
+    recordType: "sceneworks_bounded_carrier_proof_response_v1",
+    status: "diagnostic_bounded_carrier_complete",
+    story: "sc-20254",
+    logicalCaseId: BOUNDED_CARRIER_LOGICAL_CASE_ID,
+    fixture: BOUNDED_CARRIER_FIXTURE,
+    identity: BOUNDED_CARRIER_IDENTITY,
+    diagnosticOnly: true,
+    promotable: false,
+    ingestible: false,
+    inferenceRevision: "3".repeat(40),
+    calibrationFingerprint: "sc-19109-ltx-2-3-mlx-memory-ladder-v1",
+    artifact: {
+      repository: "SceneWorks/ltx-2.3-mlx",
+      resolvedRevision: "01df27d308466533aa09d251e3aebdcc627d07eb",
+      variant: "q4",
+      tierRoot: "/prepared/q4",
+      textEncoderRoot: "/prepared/gemma",
+      numericTierInventory: {
+        files: 11, bytes: 20_467_690_460,
+        sha256: "4e811932e87bb258f642ada790525e36ef2a55959c520e755f1807caf6fa225a",
+      },
+      textEncoderInventory: {
+        files: 17, bytes: 26_427_894_918,
+        sha256: "abde2d155aa8991747cc2999d40688d29a50261c080c0d51fac20357653928d7",
+      },
+    },
+    target: {
+      provider: "ltx_2_3", tier: "q4",
+      geometry: { width: 768, height: 512, frames: 121, fps: 30 },
+      seed: 18_946, videoMode: "default_av", audio: true,
+    },
+    strategy: {
+      rung: "bounded_decode",
+      engagedRungs: ["resident", "staged_residency", "bounded_decode"],
+      parameters: { decodeTileEdge: 192, decodeOverlap: 64 },
+      spatialDecodeTiles: 24,
+    },
+    watchdog: {
+      required: true,
+      protocol: "sceneworks-memory-watchdog-v1",
+      providerPhaseProtocol: "sceneworks-provider-phase-v1",
+      providerPhaseProfile: "bounded-carrier",
+      providerPhases: [...BOUNDED_CARRIER_PHASES],
+      maxFootprintBytes: MAX_FOOTPRINT_BYTES,
+      maxRuntimeSeconds: MAX_RUNTIME_SECONDS,
+      hostMemoryBytes,
+      minInitialMemoryFreeBytes: preflightFreeFloor(hostMemoryBytes),
+      minMemoryFreeBytes: runtimeFreeFloor(hostMemoryBytes),
+    },
+    mlxLimits: { memoryLimitBytes: MAX_FOOTPRINT_BYTES, wiredLimitBytes: MAX_FOOTPRINT_BYTES },
+    observedMemory: {
+      preProviderActiveBytes: 0,
+      preProviderCacheBytes: 0,
+      expectedPersistentActive: {
+        identity: "mlx-gen-ltx-transformer-ones-cache-av-bfloat16-v1",
+        videoDimension: 4_096, audioDimension: 2_048,
+        dtype: "bfloat16", bytesPerElement: 2, bytes: 12_288,
+      },
+      conditioning: phase(100), denoise: phase(200), decode: phase(150),
+      peakActiveBytes: 200,
+      postCleanupActiveBytes: 12_288,
+      postCleanupCacheBytes: 0,
+    },
+    output: {
+      frames: 121, fps: 30,
+      audio: { present: true, samples: 48_000, sampleRate: 48_000, channels: 2 },
+      frameTimelineSeconds: 4,
+      firstFrameNondegenerate: true,
+    },
+    capturedAt: "2026-08-17T12:00:00Z",
+  };
+}
+
 const PROCESS_IDENTITIES = [
   { pid: 1234, pgid: 1234, started: "Sun Aug 17 12:00:00 2026" },
   { pid: 1235, pgid: 1234, started: "Sun Aug 17 12:00:01 2026" },
@@ -233,7 +335,9 @@ function chainWatchdogEvents(events) {
   return events;
 }
 
-function campaignFailureEvents(hostMemoryBytes = 128 * 1024 ** 3, phaseCount = 1) {
+function campaignFailureEvents(
+  hostMemoryBytes = 128 * 1024 ** 3, phaseCount = 1, phases = PROVIDER_PHASES,
+) {
   const runtimeFloor = runtimeFreeFloor(hostMemoryBytes);
   let at = 1;
   const events = [
@@ -253,7 +357,7 @@ function campaignFailureEvents(hostMemoryBytes = 128 * 1024 ** 3, phaseCount = 1
   ];
   let providerPhase = null;
   for (let index = 0; index < phaseCount; index += 1) {
-    providerPhase = { sequence: index + 1, name: PROVIDER_PHASES[index] };
+    providerPhase = { sequence: index + 1, name: phases[index] };
     events.push({
       at: at++, event: "provider_phase", providerPhase, authenticated: true,
     });
@@ -275,13 +379,15 @@ function campaignFailureEvents(hostMemoryBytes = 128 * 1024 ** 3, phaseCount = 1
   return chainWatchdogEvents(events);
 }
 
-function campaignSuccessEvents(hostMemoryBytes = 128 * 1024 ** 3) {
-  const events = campaignFailureEvents(hostMemoryBytes, PROVIDER_PHASES.length);
+function campaignSuccessEvents(
+  hostMemoryBytes = 128 * 1024 ** 3, phases = PROVIDER_PHASES,
+) {
+  const events = campaignFailureEvents(hostMemoryBytes, phases.length, phases);
   const sample = events.at(-3);
   sample.physicalFootprintBytes = 3;
   events.splice(-2, 2, {
     at: events.at(-2).at, event: "child_completed",
-    providerPhase: { sequence: PROVIDER_PHASES.length, name: PROVIDER_PHASES.at(-1) },
+    providerPhase: { sequence: phases.length, name: phases.at(-1) },
   });
   return chainWatchdogEvents(events);
 }
@@ -631,7 +737,9 @@ test("SC-20216 publishes only after validation and never overwrites a failure re
   const root = await mkdtemp(path.join(tmpdir(), "sc20216-failure-publish-"));
   t.after(() => cleanupCanaryScratch(root));
   const canonical = path.join(root, "canonical.json");
+  const canonicalClaim = await acquireCanonicalPublicationClaim(canonical);
   const outcome = await acquireCampaignEntryOutcome(canonical);
+  outcome.canonicalClaim = canonicalClaim;
   const output = outcome.failureOutput;
   const hostMemoryBytes = 128 * 1024 ** 3;
   const { identity, key, preparationRoot, prepared } = campaignFailurePreparation(root);
@@ -662,18 +770,21 @@ test("SC-20216 publishes only after validation and never overwrites a failure re
     verify: async () => {}, build,
   }), /EEXIST/);
   await assert.rejects(() => acquireCampaignEntryOutcome(canonical), /EEXIST/);
+  await canonicalClaim.release();
 });
 
 test("SC-20216 jointly reserves canonical and failure outcomes across races and stale state", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "sc20216-outcome-race-"));
   t.after(() => cleanupCanaryScratch(root));
   const canonical = path.join(root, "canonical.json");
+  const canonicalClaim = await acquireCanonicalPublicationClaim(canonical);
   const raced = await Promise.allSettled([
     acquireCampaignEntryOutcome(canonical), acquireCampaignEntryOutcome(canonical),
   ]);
   assert.equal(raced.filter((result) => result.status === "fulfilled").length, 1);
   assert.equal(raced.filter((result) => result.status === "rejected").length, 1);
   const outcome = raced.find((result) => result.status === "fulfilled").value;
+  outcome.canonicalClaim = canonicalClaim;
   const hostMemoryBytes = 128 * 1024 ** 3;
   const { identity, key, preparationRoot, prepared } = campaignFailurePreparation(root);
   const publications = await Promise.allSettled([
@@ -696,6 +807,7 @@ test("SC-20216 jointly reserves canonical and failure outcomes across races and 
   ]);
   assert.notEqual(canonicalBytes === null, failureBytes === null,
     "exactly one jointly reserved outcome must publish");
+  await canonicalClaim.release();
 
   const retryDirectory = path.join(root, "retry");
   await mkdir(retryDirectory);
@@ -710,12 +822,397 @@ test("SC-20216 jointly reserves canonical and failure outcomes across races and 
   const partialDirectory = path.join(root, "partial");
   await mkdir(partialDirectory);
   const partialOutput = path.join(partialDirectory, "canonical.json");
+  const partialClaim = await acquireCanonicalPublicationClaim(partialOutput);
   const partial = await acquireCampaignEntryOutcome(partialOutput);
+  partial.canonicalClaim = partialClaim;
   await assert.rejects(() => publishCampaignEntryCanonicalOutcome(partial, { invalid: 1n }),
     /BigInt/);
   await releaseUnpublishedCampaignEntryOutcome(partial);
+  await partialClaim.release();
   await assert.rejects(() => acquireCampaignEntryOutcome(partialOutput), /EEXIST/,
     "a claimed but interrupted outcome must remain fail-closed");
+});
+
+test("SC-20254 freezes one distinct bounded full-A/V carrier and rejects identity drift", () => {
+  const hostMemoryBytes = 128 * 1024 ** 3;
+  const request = boundedCarrierRequest(hostMemoryBytes, TEXT_ENCODER_INVENTORY);
+  assert.equal(request.action, BOUNDED_CARRIER_ACTION);
+  assert.equal(request.planned.logicalCaseId, BOUNDED_CARRIER_LOGICAL_CASE_ID);
+  assert.equal(request.planned.fixture, BOUNDED_CARRIER_FIXTURE);
+  assert.equal(request.planned._boundedCarrier.identity, BOUNDED_CARRIER_IDENTITY);
+  assert.equal(request.planned._boundedCarrier.seed, 18_946);
+  assert.notEqual(request.planned.logicalCaseId, CAMPAIGN_ENTRY_LOGICAL_CASE_ID);
+  assert.notEqual(request.planned.fixture, CAMPAIGN_ENTRY_FIXTURE);
+  assert.deepEqual(request.planned.target.geometry, {
+    width: 768, height: 512, batch: 1, frames: 121,
+  });
+  assert.deepEqual(request.planned.strategy, {
+    rung: "bounded_decode",
+    engagedRungs: ["resident", "staged_residency", "bounded_decode"],
+    parameters: { decodeTileEdge: 192, decodeOverlap: 64 },
+  });
+
+  const response = boundedCarrierResponse(hostMemoryBytes);
+  validateBoundedCarrierResponse(response, {
+    inferenceRevision: "3".repeat(40), hostMemoryBytes,
+  });
+  assert.throws(() => validateBundle(response), /bundle|schema|records/);
+  for (const mutate of [
+    (value) => { value.logicalCaseId = CAMPAIGN_ENTRY_LOGICAL_CASE_ID; },
+    (value) => { value.fixture = CAMPAIGN_ENTRY_FIXTURE; },
+    (value) => { value.strategy.parameters.decodeTileEdge = 193; },
+    (value) => { value.target.seed += 1; },
+    (value) => { value.strategy.spatialDecodeTiles = 1; },
+    (value) => { value.output.audio.samples = 0; },
+    (value) => { value.output.firstFrameNondegenerate = false; },
+    (value) => { value.observedMemory.decode.activeBytes = 0; },
+    (value) => { value.observedMemory.postCleanupActiveBytes += 1; },
+    (value) => { value.watchdog.providerPhases.splice(1, 1); },
+    (value) => { value.watchdog.maxFootprintBytes += 1; },
+  ]) {
+    const changed = structuredClone(response);
+    mutate(changed);
+    assert.throws(
+      () => validateBoundedCarrierResponse(changed, {
+        inferenceRevision: "3".repeat(40), hostMemoryBytes,
+      }),
+      /SC-20254/,
+    );
+  }
+});
+
+test("SC-20254 success/failure receipts are chained, exclusive and canonically rejected", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "sc20254-outcome-"));
+  t.after(() => cleanupCanaryScratch(root));
+  const canonicalOutput = path.join(root, "canonical-campaign-bundle.json");
+  const hostMemoryBytes = 128 * 1024 ** 3;
+  const { identity, key, preparationRoot, prepared } = campaignFailurePreparation(
+    root, "1".repeat(40), "3".repeat(40),
+  );
+  const receiptOptions = {
+    sceneWorksRevision: "1".repeat(40), sceneWorksTree: "a".repeat(40),
+    inferenceRevision: "3".repeat(40), inferenceTree: "b".repeat(40),
+    identity, preparationKey: key, preparationRoot, prepared, hostMemoryBytes,
+  };
+  const successEvents = campaignSuccessEvents(hostMemoryBytes, BOUNDED_CARRIER_PHASES);
+  assert.equal(validateBoundedCarrierWatchdogEvents(successEvents, hostMemoryBytes), 3);
+  const failureEvents = campaignFailureEvents(hostMemoryBytes, 4, BOUNDED_CARRIER_PHASES);
+  const publication = (kind) => ({
+    canonicalOutput,
+    successOutput: boundedCarrierSuccessPath(canonicalOutput),
+    failureOutput: boundedCarrierFailurePath(canonicalOutput),
+    reservation: boundedCarrierOutcomeReservationPath(canonicalOutput),
+    choice: `${boundedCarrierOutcomeReservationPath(canonicalOutput)}.choice`,
+    canonicalPublicationClaim: canonicalPublicationClaimPath(canonicalOutput),
+    canonicalPublicationClaimHeldAtPublication: true,
+    outcomeChoice: kind,
+    canonicalBundleAbsentAtPublication: true,
+    outcomeReservationHeldAtPublication: true,
+  });
+  const success = boundedCarrierSuccessReceipt({
+    ...receiptOptions, events: successEvents, response: boundedCarrierResponse(hostMemoryBytes),
+    outcome: publication("success"),
+  });
+  const failure = boundedCarrierFailureReceipt({
+    ...receiptOptions, events: failureEvents, outcome: publication("failure"),
+  });
+  assert.equal(success.recordType, BOUNDED_CARRIER_SUCCESS_RECEIPT_TYPE);
+  assert.equal(failure.recordType, BOUNDED_CARRIER_FAILURE_RECEIPT_TYPE);
+  assert.notEqual(boundedCarrierFailurePath(canonicalOutput), campaignEntryFailurePath(canonicalOutput));
+  assert.throws(() => validateBundle(success), /bundle|schema|records/);
+  assert.throws(() => validateBundle(failure), /bundle|schema|records/);
+  validateBoundedCarrierReceipt(success);
+  validateBoundedCarrierReceipt(failure);
+
+  for (const mutate of [
+    (value) => { value.canonicalBundlePublished = true; },
+    (value) => { value.outcome.canonicalBundleAbsentAtPublication = false; },
+    (value) => { value.boundedCarrier.strategy.spatialDecodeTiles = 1; },
+    (value) => { value.watchdog.events[2].physicalFootprintBytes += 1; },
+    (value) => { value.artifacts.adapter.mode = 0o700; },
+  ]) {
+    const changed = structuredClone(success);
+    mutate(changed);
+    assert.throws(() => validateBoundedCarrierReceipt(changed), /SC-20254|SC-20216/);
+  }
+  const missingPhase = structuredClone(failure);
+  missingPhase.watchdog.events = missingPhase.watchdog.events.filter((event) =>
+    event.providerPhase?.name !== "primary_denoise");
+  chainWatchdogEvents(missingPhase.watchdog.events);
+  missingPhase.watchdog.eventChain = {
+    protocol: "sceneworks-watchdog-event-chain-v1",
+    count: missingPhase.watchdog.events.length,
+    head: missingPhase.watchdog.events.at(-1).eventHash,
+  };
+  assert.throws(() => validateBoundedCarrierReceipt(missingPhase), /SC-20216|SC-20254/);
+
+  const acquisitionPath = path.join(root, "acquisition-race.json");
+  const acquisitions = await Promise.allSettled([
+    acquireBoundedCarrierOutcome(acquisitionPath), acquireBoundedCarrierOutcome(acquisitionPath),
+  ]);
+  assert.equal(acquisitions.filter((result) => result.status === "fulfilled").length, 1);
+  assert.equal(acquisitions.filter((result) => result.status === "rejected").length, 1);
+  await releaseUnpublishedBoundedCarrierOutcome(
+    acquisitions.find((result) => result.status === "fulfilled").value,
+  );
+
+  const racedClaim = await acquireCanonicalPublicationClaim(canonicalOutput);
+  const racedOutcome = await acquireBoundedCarrierOutcome(canonicalOutput);
+  racedOutcome.canonicalClaim = racedClaim;
+  const publications = await Promise.allSettled([
+    publishBoundedCarrierSuccessReceipt(racedOutcome, {
+      verify: async () => {},
+      build: (outcome) => boundedCarrierSuccessReceipt({
+        ...receiptOptions, events: successEvents,
+        response: boundedCarrierResponse(hostMemoryBytes), outcome,
+      }),
+    }),
+    publishBoundedCarrierFailureReceipt(racedOutcome, {
+      verify: async () => {},
+      build: (outcome) => boundedCarrierFailureReceipt({
+        ...receiptOptions, events: failureEvents, outcome,
+      }),
+    }),
+  ]);
+  assert.equal(publications.filter((result) => result.status === "fulfilled").length, 1);
+  assert.equal(publications.filter((result) => result.status === "rejected").length, 1);
+  assert.equal(await readFile(canonicalOutput, "utf8").catch(() => null), null);
+  const [successBytes, failureBytes] = await Promise.all([
+    readFile(boundedCarrierSuccessPath(canonicalOutput), "utf8").catch(() => null),
+    readFile(boundedCarrierFailurePath(canonicalOutput), "utf8").catch(() => null),
+  ]);
+  assert.notEqual(successBytes === null, failureBytes === null);
+  await releaseUnpublishedBoundedCarrierOutcome(racedOutcome);
+  await racedClaim.release();
+
+  const legacyDirectory = path.join(root, "legacy-failure");
+  await mkdir(legacyDirectory);
+  const legacyOutput = path.join(legacyDirectory, "canonical.json");
+  await writeFile(campaignEntryFailurePath(legacyOutput), "legacy immutable SC-20216 failure\n");
+  await writeFile(campaignEntryOutcomeReservationPath(legacyOutput), "legacy owner\n");
+  await writeFile(`${campaignEntryOutcomeReservationPath(legacyOutput)}.choice`, "failure\n");
+  const legacyClaim = await acquireCanonicalPublicationClaim(legacyOutput);
+  const legacyBounded = await acquireBoundedCarrierOutcome(legacyOutput);
+  await releaseUnpublishedBoundedCarrierOutcome(legacyBounded);
+  await legacyClaim.release();
+
+  const staleOutput = path.join(root, "stale-canonical.json");
+  const staleClaimPath = canonicalPublicationClaimPath(staleOutput);
+  await mkdir(staleClaimPath, { mode: 0o700 });
+  await writeFile(path.join(staleClaimPath, "owner.json"), JSON.stringify({
+    schemaVersion: 1,
+    pid: process.pid,
+    processIdentity: { startIdentity: "reused pid", executable: "old-node" },
+    token: "stale",
+  }));
+  const reclamationPath = `${staleClaimPath}.reclaiming`;
+  await writeFile(reclamationPath, "", { mode: 0o600 });
+  const orphanedReclamationMetadata = await lstat(reclamationPath, { bigint: true });
+  await writeFile(reclamationPath, `${JSON.stringify({
+    schemaVersion: 1,
+    kind: "canonical-claim-reclamation-mutex",
+    pid: 999_999,
+    processIdentity: { startIdentity: "dead process", executable: "old-node" },
+    token: "orphaned-reclamation-owner",
+    filesystemIdentity: {
+      device: String(orphanedReclamationMetadata.dev),
+      inode: String(orphanedReclamationMetadata.ino),
+    },
+  })}\n`, { mode: 0o600 });
+  const currentIdentity = { startIdentity: "current process", executable: "node" };
+
+  const symlinkOutput = path.join(root, "symlink-canonical.json");
+  const symlinkClaimPath = canonicalPublicationClaimPath(symlinkOutput);
+  await mkdir(symlinkClaimPath, { mode: 0o700 });
+  await writeFile(path.join(symlinkClaimPath, "owner.json"), JSON.stringify({
+    schemaVersion: 1,
+    pid: process.pid,
+    processIdentity: { startIdentity: "reused pid", executable: "old-node" },
+    token: "stale",
+  }));
+  const foreignTarget = path.join(root, "foreign-reclamation-target");
+  await writeFile(foreignTarget, "must remain byte-identical\n", { mode: 0o640 });
+  const foreignBefore = await lstat(foreignTarget, { bigint: true });
+  await symlink(foreignTarget, `${symlinkClaimPath}.reclaiming`);
+  await assert.rejects(
+    acquireCanonicalPublicationClaim(
+      symlinkOutput, undefined, async () => currentIdentity,
+    ),
+    /reclamation lock helper exited before ownership/,
+  );
+  const foreignAfter = await lstat(foreignTarget, { bigint: true });
+  assert.equal(await readFile(foreignTarget, "utf8"), "must remain byte-identical\n");
+  assert.deepEqual({
+    device: foreignAfter.dev,
+    inode: foreignAfter.ino,
+    mode: foreignAfter.mode,
+    size: foreignAfter.size,
+    mtimeNs: foreignAfter.mtimeNs,
+    ctimeNs: foreignAfter.ctimeNs,
+  }, {
+    device: foreignBefore.dev,
+    inode: foreignBefore.ino,
+    mode: foreignBefore.mode,
+    size: foreignBefore.size,
+    mtimeNs: foreignBefore.mtimeNs,
+    ctimeNs: foreignBefore.ctimeNs,
+  });
+
+  const foreignInodeOutput = path.join(root, "foreign-inode-canonical.json");
+  const foreignInodeClaimPath = canonicalPublicationClaimPath(foreignInodeOutput);
+  await mkdir(foreignInodeClaimPath, { mode: 0o700 });
+  await writeFile(path.join(foreignInodeClaimPath, "owner.json"), JSON.stringify({
+    schemaVersion: 1,
+    pid: process.pid,
+    processIdentity: { startIdentity: "reused pid", executable: "old-node" },
+    token: "stale",
+  }));
+  const foreignInodePath = `${foreignInodeClaimPath}.reclaiming`;
+  await writeFile(foreignInodePath, "foreign inode must remain unchanged\n", { mode: 0o600 });
+  const foreignInodeBefore = await lstat(foreignInodePath, { bigint: true });
+  await assert.rejects(
+    acquireCanonicalPublicationClaim(
+      foreignInodeOutput, undefined, async () => currentIdentity,
+    ),
+    /preexisting canonical reclamation lock owner is invalid/,
+  );
+  const foreignInodeAfter = await lstat(foreignInodePath, { bigint: true });
+  assert.equal(await readFile(foreignInodePath, "utf8"), "foreign inode must remain unchanged\n");
+  assert.deepEqual({
+    mode: foreignInodeAfter.mode, size: foreignInodeAfter.size,
+    mtimeNs: foreignInodeAfter.mtimeNs, ctimeNs: foreignInodeAfter.ctimeNs,
+  }, {
+    mode: foreignInodeBefore.mode, size: foreignInodeBefore.size,
+    mtimeNs: foreignInodeBefore.mtimeNs, ctimeNs: foreignInodeBefore.ctimeNs,
+  });
+
+  const hardlinkOutput = path.join(root, "hardlink-canonical.json");
+  const hardlinkClaimPath = canonicalPublicationClaimPath(hardlinkOutput);
+  await mkdir(hardlinkClaimPath, { mode: 0o700 });
+  await writeFile(path.join(hardlinkClaimPath, "owner.json"), JSON.stringify({
+    schemaVersion: 1,
+    pid: process.pid,
+    processIdentity: { startIdentity: "reused pid", executable: "old-node" },
+    token: "stale",
+  }));
+  const linkedTarget = path.join(root, "hard-linked-reclamation-target");
+  await writeFile(linkedTarget, "hard link must remain unchanged\n", { mode: 0o640 });
+  await link(linkedTarget, `${hardlinkClaimPath}.reclaiming`);
+  const linkedBefore = await lstat(linkedTarget, { bigint: true });
+  await assert.rejects(
+    acquireCanonicalPublicationClaim(
+      hardlinkOutput, undefined, async () => currentIdentity,
+    ),
+    /reclamation lock helper exited before ownership/,
+  );
+  const linkedAfter = await lstat(linkedTarget, { bigint: true });
+  assert.equal(await readFile(linkedTarget, "utf8"), "hard link must remain unchanged\n");
+  assert.deepEqual({ mode: linkedAfter.mode, size: linkedAfter.size, ctimeNs: linkedAfter.ctimeNs }, {
+    mode: linkedBefore.mode, size: linkedBefore.size, ctimeNs: linkedBefore.ctimeNs,
+  });
+
+  let serializationArrivals = 0;
+  let releaseSerialization;
+  let reportBothArrived;
+  let reportStaleRevalidated;
+  let releaseStaleRevalidation;
+  const serializationGate = new Promise((resolve) => { releaseSerialization = resolve; });
+  const bothArrived = new Promise((resolve) => { reportBothArrived = resolve; });
+  const staleRevalidated = new Promise((resolve) => { reportStaleRevalidated = resolve; });
+  const staleGate = new Promise((resolve) => { releaseStaleRevalidation = resolve; });
+  const hooks = {
+    beforeSerialization: async () => {
+      serializationArrivals += 1;
+      if (serializationArrivals === 2) reportBothArrived();
+      await serializationGate;
+    },
+    afterStaleRevalidation: async () => {
+      const owner = JSON.parse(await readFile(reclamationPath, "utf8"));
+      const metadata = await lstat(reclamationPath, { bigint: true });
+      assert.equal(owner.pid, process.pid);
+      assert.deepEqual(owner.processIdentity, currentIdentity);
+      assert.notEqual(owner.token, "orphaned-reclamation-owner");
+      assert.deepEqual(owner.filesystemIdentity, {
+        device: String(metadata.dev), inode: String(metadata.ino),
+      });
+      reportStaleRevalidated();
+      await staleGate;
+    },
+  };
+  const reclaimers = [1, 2].map(() => acquireCanonicalPublicationClaim(
+    staleOutput, undefined, async () => currentIdentity, hooks,
+  ));
+  await bothArrived;
+  releaseSerialization();
+  await staleRevalidated;
+  releaseStaleRevalidation();
+  const reclaimed = await Promise.allSettled(reclaimers);
+  assert.equal(reclaimed.filter((result) => result.status === "fulfilled").length, 1);
+  assert.equal(reclaimed.filter((result) => result.status === "rejected").length, 1);
+  assert.match(reclaimed.find((result) => result.status === "rejected").reason.message,
+    /live contained LTX run/);
+  const recoveredClaim = reclaimed.find((result) => result.status === "fulfilled").value;
+  await recoveredClaim.assertOwner();
+  assert.deepEqual((await readdir(root)).filter((name) =>
+    name.includes("stale-canonical.json.ltx-canonical-publication-claim.stale-")), []);
+  const recoveredReclamationOwner = JSON.parse(await readFile(reclamationPath, "utf8"));
+  assert.equal(recoveredReclamationOwner.pid, process.pid);
+  assert.deepEqual(recoveredReclamationOwner.processIdentity, currentIdentity);
+  assert.notEqual(recoveredReclamationOwner.token, "orphaned-reclamation-owner");
+  await recoveredClaim.release();
+
+  const campaignRaceDirectory = path.join(root, "campaign-race");
+  await mkdir(campaignRaceDirectory);
+  const campaignRaceOutput = path.join(campaignRaceDirectory, "canonical.json");
+  const campaignClaim = await acquireCanonicalPublicationClaim(campaignRaceOutput);
+  const campaignOutcome = await acquireCampaignEntryOutcome(campaignRaceOutput);
+  campaignOutcome.canonicalClaim = campaignClaim;
+  const campaignRace = await Promise.allSettled([
+    publishCampaignEntryCanonicalOutcome(campaignOutcome, { exact: "canonical" }),
+    acquireCanonicalPublicationClaim(campaignRaceOutput),
+  ]);
+  assert.equal(campaignRace[0].status, "fulfilled");
+  assert.equal(campaignRace[1].status, "rejected");
+  assert.match(campaignRace[1].reason.message, /live contained LTX run/);
+  assert.equal(await readFile(boundedCarrierSuccessPath(campaignRaceOutput), "utf8")
+    .catch(() => null), null);
+  assert.equal(await readFile(boundedCarrierFailurePath(campaignRaceOutput), "utf8")
+    .catch(() => null), null);
+  await releaseUnpublishedCampaignEntryOutcome(campaignOutcome);
+  await campaignClaim.release();
+
+  for (const kind of ["success", "failure"]) {
+    const raceDirectory = path.join(root, `bounded-${kind}-race`);
+    await mkdir(raceDirectory);
+    const raceOutput = path.join(raceDirectory, "canonical.json");
+    const boundedClaim = await acquireCanonicalPublicationClaim(raceOutput);
+    const boundedOutcome = await acquireBoundedCarrierOutcome(raceOutput);
+    boundedOutcome.canonicalClaim = boundedClaim;
+    const publish = kind === "success"
+      ? publishBoundedCarrierSuccessReceipt(boundedOutcome, {
+        verify: async () => {},
+        build: (outcome) => boundedCarrierSuccessReceipt({
+          ...receiptOptions, events: successEvents,
+          response: boundedCarrierResponse(hostMemoryBytes), outcome,
+        }),
+      })
+      : publishBoundedCarrierFailureReceipt(boundedOutcome, {
+        verify: async () => {},
+        build: (outcome) => boundedCarrierFailureReceipt({
+          ...receiptOptions, events: failureEvents, outcome,
+        }),
+      });
+    const boundedRace = await Promise.allSettled([
+      publish,
+      acquireCanonicalPublicationClaim(raceOutput),
+    ]);
+    assert.equal(boundedRace[0].status, "fulfilled");
+    assert.equal(boundedRace[1].status, "rejected");
+    assert.match(boundedRace[1].reason.message, /live contained LTX run/);
+    assert.equal(await readFile(raceOutput, "utf8").catch(() => null), null);
+    await releaseUnpublishedBoundedCarrierOutcome(boundedOutcome);
+    await boundedClaim.release();
+  }
 });
 
 test("SC-20191 publishes one schema-valid canonical runtime record after stripping private evidence", async (t) => {
@@ -1259,6 +1756,7 @@ test("the production runner can only launch through the identity-checked watchdo
   assert.match(source, /response\?\.inferenceRevision !== expectedInferenceRevision/);
   assert.match(source, /--require-child-attestation/);
   assert.match(source, /--require-provider-phases/);
+  assert.match(source, /"--provider-phase-profile", "campaign-entry"/);
   assert.equal(CHILD_ATTESTATION_TIMEOUT_SECONDS, 30);
   assert.match(source, /--child-attestation-timeout", String\(CHILD_ATTESTATION_TIMEOUT_SECONDS\)/);
   assert.match(source, /event\.event === "child_attested"/);
@@ -1291,8 +1789,24 @@ test("the production runner can only launch through the identity-checked watchdo
   "the original watchdog failure must exist before receipt or postcondition validation");
   assert.match(failureHandling, /preserveFailureReceiptSuppression\(watchdogError, error\)/);
   assert.match(source, /acquireCampaignEntryOutcome\(output\)/);
+  const canonicalClaim = source.slice(
+    source.indexOf("export async function acquireCanonicalPublicationClaim("),
+    source.indexOf("export async function acquireBoundedCarrierOutcome("),
+  );
+  const reclamationMutex = canonicalClaim.indexOf(
+    "acquireCanonicalClaimReclamationMutex(\n      claimPath, signal, processIdentityProbe,",
+  );
+  const serializedOwnerRead = canonicalClaim.indexOf(
+    'path.join(claimPath, "owner.json")', reclamationMutex,
+  );
+  assert.ok(
+    reclamationMutex >= 0
+      && reclamationMutex < serializedOwnerRead
+      && serializedOwnerRead < canonicalClaim.indexOf("await reclamation.rename(claimPath, stale)"),
+    "stale claim identity must be re-read under serialized reclamation before its exact rename",
+  );
   assert.match(source, /canonicalBundleAbsentAtPublication: true/);
-  assert.equal(source.match(/await assertHostPreflight\(/g)?.length, 2,
+  assert.equal(source.match(/await assertHostPreflight\(/g)?.length, 3,
     "each contained execution profile has one immediate model-release check");
   assert.doesNotMatch(source, /300_000|5 \* 60 \* 1_000/);
   assert.match(
@@ -1305,11 +1819,27 @@ test("the production runner can only launch through the identity-checked watchdo
     /await assertHostPreflight\(hostMemoryBytes, signal\);\n\s*const status = await new Promise\(\(resolve, reject\) => \{\n\s*const child = spawn/,
     "the campaign entry host gate must also be the final operation before watchdog launch",
   );
+  const boundedController = source.slice(
+    source.indexOf("async function runBoundedCarrierController("),
+    source.indexOf("async function controller("),
+  );
+  assert.match(
+    boundedController,
+    /await assertHostPreflight\(hostMemoryBytes, signal\);\n\s*const status = await new Promise\(\(resolve, reject\) => \{\n\s*const child = spawn/,
+    "the bounded carrier host gate must be the final operation before its one watchdog launch",
+  );
+  assert.equal(BOUNDED_CARRIER_PROFILE, "bounded-carrier");
+  assert.match(boundedController, /--require-provider-phases/);
+  assert.match(boundedController, /"--provider-phase-profile", "bounded-carrier"/);
+  assert.match(boundedController, /acquireCanonicalPublicationClaim\(output, signal\)/);
+  assert.match(boundedController, /boundedCarrierSuccessReceipt/);
+  assert.match(boundedController, /boundedCarrierFailureReceipt/);
   assert.match(source, /sourceAfterRun: \{ sceneWorks: sceneWorksAfterRun, inference: inferenceAfterRun \}/);
   const campaignController = source.slice(
     source.indexOf("async function runCampaignEntryController("),
     source.indexOf("async function controller("),
   );
+  assert.match(campaignController, /acquireCanonicalPublicationClaim\(output, signal\)/);
   assert.doesNotMatch(campaignController, /onProviderCheckpoint/,
     "the one-row campaign entry must never publish a partial harness checkpoint");
   for (const operation of [
