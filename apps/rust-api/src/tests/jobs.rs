@@ -3200,6 +3200,90 @@ async fn retry_honours_character_inline_lora_provenance_without_letting_others_b
     assert_eq!(status, StatusCode::CREATED, "{replayed}");
     assert_eq!(replayed["payload"]["prompt"], "portrait, side light");
 
+    // The permit is PER-ADAPTER, not a blanket flag on the merged array: a genuine character job may
+    // replay its own links, but may not use that standing to introduce a foreign inline adapter.
+    let foreign = temp_dir.path().join("data/loras/foreign.safetensors");
+    write_test_safetensors(&foreign);
+    for (label, loras) in [
+        // Swap the persisted set for an entirely foreign inline adapter.
+        (
+            "LoRA not found: character_lora_foreign",
+            json!([{
+                "id": "character_lora_foreign",
+                "name": "Foreign",
+                "category": "character",
+                "sourcePath": foreign.display().to_string(),
+                "compatibility": { "families": ["z-image"] }
+            }]),
+        ),
+        // Keep the persisted link AND smuggle a foreign one alongside it: the permit must not
+        // launder its companion.
+        (
+            "LoRA not found: character_lora_foreign",
+            json!([
+                inline_lora.clone(),
+                {
+                    "id": "character_lora_foreign",
+                    "name": "Foreign",
+                    "category": "character",
+                    "sourcePath": foreign.display().to_string(),
+                    "compatibility": { "families": ["z-image"] }
+                }
+            ]),
+        ),
+        // Replay the persisted link's OWN id with a REDIRECTED path — the case an id-only match
+        // would wave through, carrying an arbitrary file into the enqueued payload.
+        (
+            &format!("LoRA not found: {inline_lora_id}"),
+            json!([{
+                "id": inline_lora_id,
+                "name": "Character Style",
+                "category": "character",
+                "sourcePath": foreign.display().to_string(),
+                "compatibility": { "families": ["z-image"] }
+            }]),
+        ),
+    ] {
+        for operation in ["retry", "duplicate"] {
+            let (status, error) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{character_job_id}/{operation}"),
+                json!({ "payloadChanges": { "loras": loras } }),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{operation} must not extend the character permit beyond the PERSISTED links: \
+                 {error}"
+            );
+            assert_eq!(error["detail"], label);
+        }
+    }
+
+    // A CATALOG adapter added alongside the persisted inline set is admitted — the narrowing must
+    // not turn a character job into one that can never gain an adapter — and both survive, in order.
+    let (status, widened) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{character_job_id}/duplicate"),
+        json!({
+            "payloadChanges": {
+                "loras": [inline_lora.clone(), { "id": "good_style" }]
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{widened}");
+    assert_eq!(widened["payload"]["loras"][0]["id"], inline_lora_id);
+    assert_eq!(widened["payload"]["loras"][1]["id"], "good_style");
+    assert!(
+        widened["payload"]["loras"][1].get("name").is_some(),
+        "the added catalog adapter must be hydrated from the catalog, not passed through inline: \
+         {widened}"
+    );
+
     // DIRECTION 2: an ORDINARY image job that wears both caller-settable markers must not borrow
     // that permission. Create is happy to make it — the LoRA gate no-ops on an empty set — which is
     // exactly why provenance cannot be read from the markers.
