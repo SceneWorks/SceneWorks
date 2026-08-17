@@ -371,6 +371,81 @@ impl ExternalLibraryBindingStore {
         ))
     }
 
+    /// Deliberate, user-driven relocation of the model source library (sc-19709).
+    ///
+    /// [`Self::bind_or_probe_validated`] never replaces a binding — that is what makes a different
+    /// physical volume at the same path fail closed. Relocation is the one explicit escape hatch:
+    /// the operator names a new library root, and the binding is replaced ONLY after that root
+    /// physically carries every closure this install previously validated. Download receipts and
+    /// the validated-closure ledger are never touched, so relocation never redownloads anything and
+    /// never loses installed state — it only re-points the durable identity at where the library
+    /// now lives.
+    pub fn relocate_binding(
+        &self,
+        library_root: &Path,
+    ) -> Result<ExternalLibraryBinding, LibraryRelocationError> {
+        let _lock = self
+            .lock_exclusive()
+            .map_err(LibraryRelocationError::Failed)?;
+        let canonical_before = canonical_library_directory(library_root)?;
+        if !has_repository_layout(&canonical_before) {
+            return Err(LibraryRelocationError::Rejected(
+                LibraryRelocationRejection::NotAModelLibrary,
+            ));
+        }
+        let closures = self
+            .read_validated_closures_unlocked()
+            .map_err(LibraryRelocationError::Failed)?;
+        let mut missing = Vec::new();
+        for closure in &closures {
+            if validate_requirements_at_root(&canonical_before, closure).is_err() {
+                missing.extend(
+                    closure
+                        .iter()
+                        .map(|requirement| requirement.repository.clone()),
+                );
+            }
+        }
+        if !missing.is_empty() {
+            missing.sort();
+            missing.dedup();
+            return Err(LibraryRelocationError::Rejected(
+                LibraryRelocationRejection::MissingInstalledModels {
+                    repositories: missing,
+                },
+            ));
+        }
+        let identity_before = physical_identity(&canonical_before).map_err(|error| {
+            LibraryRelocationError::Rejected(LibraryRelocationRejection::IdentityUnavailable {
+                detail: error.0,
+            })
+        })?;
+        // Same TOCTOU discipline as the initial bind: the closure walk touches many files and can
+        // race an unmount, so the exact identity must still hold after validation.
+        let canonical_after = canonical_library_directory(library_root)?;
+        let identity_after = physical_identity(&canonical_after).map_err(|error| {
+            LibraryRelocationError::Rejected(LibraryRelocationRejection::IdentityUnavailable {
+                detail: error.0,
+            })
+        })?;
+        if canonical_before != canonical_after || identity_before != identity_after {
+            return Err(LibraryRelocationError::Failed(ExternalLibraryError(
+                "external model library changed while it was being validated".to_owned(),
+            )));
+        }
+        let binding = ExternalLibraryBinding {
+            schema_version: EXTERNAL_LIBRARY_CONTRACT_VERSION,
+            configured_path: absolute_lexical(library_root)
+                .map_err(LibraryRelocationError::Failed)?,
+            canonical_path: canonical_before,
+            physical_identity: identity_before,
+            bound_at: now_seconds().map_err(LibraryRelocationError::Failed)?,
+        };
+        self.write_unlocked(&binding)
+            .map_err(LibraryRelocationError::Failed)?;
+        Ok(binding)
+    }
+
     pub fn probe_resolution(
         &self,
         resolution: &ModelResolution,
@@ -704,6 +779,213 @@ impl Drop for ExternalSourceSession {
     fn drop(&mut self) {
         if !self.complete {
             let _ = self.cleanup();
+        }
+    }
+}
+
+/// Typed, machine-readable reason a candidate model-library root was rejected for relocation
+/// (sc-19709). The desktop prompt renders its guidance from this discriminant — a client must never
+/// have to parse an error string, and a raw filesystem error must never reach the user.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum LibraryRelocationRejection {
+    /// The chosen path does not exist, is not a directory, or could not be opened.
+    NotADirectory,
+    /// The chosen directory carries no Hugging Face `models--<repo>` layout at all — the classic
+    /// "picked an unrelated folder" case.
+    NotAModelLibrary,
+    /// The layout is right, but models this install recorded as present are not in that library.
+    /// Accepting it would silently orphan installed weights, so it fails closed.
+    MissingInstalledModels { repositories: Vec<String> },
+    /// The library validates, but the app cannot express it as a Hugging Face cache home: the
+    /// configured root is always `<HF_HOME>/hub`, so the operator must choose the folder that
+    /// CONTAINS `hub` (or the `hub` folder itself).
+    HubDirectoryExpected,
+    /// The volume's durable physical identity could not be read, so no binding can be written.
+    IdentityUnavailable { detail: String },
+}
+
+/// Relocation failures split into "the operator can fix this by choosing differently"
+/// ([`LibraryRelocationError::Rejected`]) and "the app failed" ([`LibraryRelocationError::Failed`]).
+/// Only the former is ever rendered to a user.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LibraryRelocationError {
+    Rejected(LibraryRelocationRejection),
+    Failed(ExternalLibraryError),
+}
+
+impl std::fmt::Display for LibraryRelocationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rejected(rejection) => write!(formatter, "{rejection:?}"),
+            Self::Failed(error) => formatter.write_str(&error.0),
+        }
+    }
+}
+
+/// A validated relocation choice: the Hugging Face hub root SceneWorks binds, plus the `HF_HOME`
+/// value that resolves to it. The two are always related as `library_root == huggingface_home/hub`
+/// because that is exactly what [`crate::hf_home::huggingface_hub_cache_dir`] computes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RelocationTarget {
+    pub library_root: PathBuf,
+    pub huggingface_home: PathBuf,
+}
+
+/// Map a folder the operator picked to the pair of paths relocation needs.
+///
+/// Two shapes are accepted, in this order: the picked folder is a Hugging Face cache home (it has a
+/// `hub` child carrying the repository layout), or the picked folder IS the hub root (named `hub`).
+/// A directory that carries the layout but cannot be addressed as `<HF_HOME>/hub` is rejected with
+/// [`LibraryRelocationRejection::HubDirectoryExpected`] rather than silently binding a root the app
+/// could never resolve again after a restart.
+pub fn resolve_relocation_target(
+    picked: &Path,
+) -> Result<RelocationTarget, LibraryRelocationRejection> {
+    let picked = absolute_lexical(picked).map_err(|_| LibraryRelocationRejection::NotADirectory)?;
+    let canonical =
+        std::fs::canonicalize(&picked).map_err(|_| LibraryRelocationRejection::NotADirectory)?;
+    if !canonical.is_dir() {
+        return Err(LibraryRelocationRejection::NotADirectory);
+    }
+    let hub = picked.join("hub");
+    if std::fs::canonicalize(&hub)
+        .map(|path| has_repository_layout(&path))
+        .unwrap_or(false)
+    {
+        return Ok(RelocationTarget {
+            library_root: hub,
+            huggingface_home: picked,
+        });
+    }
+    if !has_repository_layout(&canonical) {
+        return Err(LibraryRelocationRejection::NotAModelLibrary);
+    }
+    let is_hub = picked
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case("hub"));
+    let parent = picked.parent().map(Path::to_path_buf);
+    match (is_hub, parent) {
+        (true, Some(home)) => Ok(RelocationTarget {
+            library_root: picked,
+            huggingface_home: home,
+        }),
+        _ => Err(LibraryRelocationRejection::HubDirectoryExpected),
+    }
+}
+
+/// Does `root` look like a Hugging Face hub cache at all? One `models--<repo>` directory is enough:
+/// this only separates "an unrelated folder" from "a model library", never "the RIGHT library" —
+/// that judgement belongs to the recorded closures.
+fn has_repository_layout(root: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return false;
+    };
+    entries.filter_map(Result::ok).any(|entry| {
+        entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with("models--"))
+            && entry.file_type().is_ok_and(|kind| kind.is_dir())
+    })
+}
+
+fn canonical_library_directory(root: &Path) -> Result<PathBuf, LibraryRelocationError> {
+    let canonical = std::fs::canonicalize(root)
+        .map_err(|_| LibraryRelocationError::Rejected(LibraryRelocationRejection::NotADirectory))?;
+    ensure_regular_directory(&canonical)
+        .map_err(|_| LibraryRelocationError::Rejected(LibraryRelocationRejection::NotADirectory))?;
+    Ok(canonical)
+}
+
+/// Live status of the configured model source library (sc-19709). The desktop prompt's
+/// "Connect drive and retry" re-probe reads exactly this — one cheap, write-free identity probe
+/// rather than a catalog rebuild.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ModelSourceLibraryStatus {
+    pub schema_version: u32,
+    pub configured_library_path: PathBuf,
+    pub expected_library: Option<ExternalLibraryBinding>,
+    pub probe_status: ExternalLibraryProbeStatus,
+    /// The single boolean a retry gates on: the expected library is verified present.
+    pub available: bool,
+}
+
+/// Probe the configured library once, write-free. With a durable binding this is an identity
+/// probe; without one, availability is simply whether the configured root is a readable directory
+/// (nothing is installed there yet, so there is no identity to prove).
+pub fn probe_model_source_library(
+    data_dir: &Path,
+    configured_library: &Path,
+) -> ModelSourceLibraryStatus {
+    let binding = ExternalLibraryBindingStore::new(data_dir)
+        .ok()
+        .and_then(|store| store.load().ok())
+        .flatten();
+    let (probe_status, available) = match &binding {
+        Some(binding) => {
+            let status = probe_binding(configured_library, binding).status;
+            let available = status == ExternalLibraryProbeStatus::Available;
+            (status, available)
+        }
+        None => {
+            let present = configured_library.is_dir();
+            (
+                if present {
+                    ExternalLibraryProbeStatus::Available
+                } else {
+                    ExternalLibraryProbeStatus::Unavailable
+                },
+                present,
+            )
+        }
+    };
+    ModelSourceLibraryStatus {
+        schema_version: EXTERNAL_LIBRARY_CONTRACT_VERSION,
+        configured_library_path: configured_library.to_path_buf(),
+        expected_library: binding,
+        probe_status,
+        available,
+    }
+}
+
+/// The typed payload the API attaches to an `external_model_library_unavailable` rejection
+/// (sc-19709). The desktop prompt names the model and the expected library location from THESE
+/// fields — never by parsing `detail`, and never by re-deriving availability client-side.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExternalLibraryUnavailableContext {
+    pub schema_version: u32,
+    pub availability: ModelAvailability,
+    pub model_id: String,
+    pub model_name: Option<String>,
+    pub configured_library_path: PathBuf,
+    pub expected_library_path: Option<PathBuf>,
+    pub expected_volume_id: Option<String>,
+}
+
+impl ExternalLibraryUnavailableContext {
+    pub fn from_resolution(
+        model_id: impl Into<String>,
+        model_name: Option<String>,
+        resolution: &ModelResolution,
+    ) -> Self {
+        Self {
+            schema_version: EXTERNAL_LIBRARY_CONTRACT_VERSION,
+            availability: resolution.availability.clone(),
+            model_id: model_id.into(),
+            model_name,
+            configured_library_path: resolution.configured_library_path.clone(),
+            expected_library_path: resolution
+                .expected_library
+                .as_ref()
+                .map(|binding| binding.canonical_path.clone()),
+            expected_volume_id: resolution
+                .expected_library
+                .as_ref()
+                .map(|binding| binding.physical_identity.volume_id.clone()),
         }
     }
 }

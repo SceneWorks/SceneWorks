@@ -1613,6 +1613,7 @@ pub(crate) async fn update_catalog_analyzer_config(
             ApiError {
                 status: StatusCode::CONFLICT,
                 detail: "Catalog analyzer configuration changed; refresh and retry".to_owned(),
+                context: None,
                 code: Some("catalog_analyzer_config_conflict"),
             }
         } else {

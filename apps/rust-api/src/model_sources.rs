@@ -23,7 +23,8 @@ use sceneworks_core::model_artifacts::artifact_selection::{
     requested_runtime_variant, selected_requirements_for_model,
 };
 use sceneworks_core::model_artifacts::external_library::{
-    resolve_model_availability, ModelAvailability, ModelResolution,
+    resolve_model_availability, ExternalLibraryUnavailableContext, ModelAvailability,
+    ModelResolution,
 };
 use sceneworks_core::model_artifacts::ResolvedModelArtifact;
 use serde_json::{json, Value};
@@ -489,11 +490,20 @@ async fn preflight_payload_model_sources(
                     .get("id")
                     .and_then(Value::as_str)
                     .unwrap_or("<unknown>");
-                return Err(ApiError::external_model_library_unavailable(format!(
-                    "Model '{model_id}' is installed on an external model library that is \
-                     currently unavailable. Reconnect the configured library and retry; the \
-                     installation itself is preserved."
-                )));
+                let model_name = entry.get("name").and_then(Value::as_str).map(str::to_owned);
+                let context = ExternalLibraryUnavailableContext::from_resolution(
+                    model_id,
+                    model_name,
+                    &resolution,
+                );
+                return Err(ApiError::external_model_library_unavailable(
+                    format!(
+                        "Model '{model_id}' is installed on an external model library that is \
+                         currently unavailable. Reconnect the configured library and retry; the \
+                         installation itself is preserved."
+                    ),
+                    &context,
+                ));
             }
         }
         Ok(())

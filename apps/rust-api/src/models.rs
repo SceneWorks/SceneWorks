@@ -481,6 +481,7 @@ pub(crate) async fn create_model_download_job(
         .ok_or_else(|| ApiError {
             status: StatusCode::NOT_FOUND,
             detail: "Model not found".to_owned(),
+            context: None,
             code: None,
         })?;
     // Tier selection (sc-8508): an explicit `variant` installs that quant tier's download entry; an
@@ -953,6 +954,7 @@ pub(crate) async fn create_model_convert_job(
         .ok_or_else(|| ApiError {
             status: StatusCode::NOT_FOUND,
             detail: "Model not found".to_owned(),
+            context: None,
             code: None,
         })?;
     let mlx = model
@@ -1075,6 +1077,7 @@ pub(crate) async fn delete_model(
         .ok_or_else(|| ApiError {
             status: StatusCode::NOT_FOUND,
             detail: "Model not found".to_owned(),
+            context: None,
             code: None,
         })?;
     let manifest_path = state
@@ -1183,6 +1186,7 @@ pub(crate) async fn delete_model_variant(
         .ok_or_else(|| ApiError {
             status: StatusCode::NOT_FOUND,
             detail: "Model not found".to_owned(),
+            context: None,
             code: None,
         })?;
     let data_dir = &state.settings.data_dir;
