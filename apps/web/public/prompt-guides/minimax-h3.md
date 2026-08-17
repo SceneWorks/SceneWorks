@@ -215,14 +215,17 @@ open text encoder has no trained representation for them — the embedding rows 
 indistinguishable from the model's unused padding. They almost certainly belong to the withheld
 H3-Context-IR front end, which is not in this loop.
 
-**Nothing strips or repairs the markers.** They are not removed, not rewritten and not warned about
-at submit time. Two features can still change what the text encoder sees, and both are things you
-switched on yourself:
+**At submit time nothing strips or repairs the markers.** Whatever is in the box goes to the text
+encoder as you typed it — not removed, not rewritten and not warned about. Two features can still
+change what the text encoder sees, and both are things you switched on yourself:
 
 - The **Refine** button hands your prompt *and this guide* to a language model and shows you the
   rewrite as a suggestion. The box does not change until you press **Apply** — *Keep original*
-  leaves it exactly as you typed it. But because the model has just read this page, a rewrite you
-  do apply may well drop the markers.
+  leaves it exactly as you typed it. **A rewrite you apply is guaranteed marker-free**: the H3
+  refiner is instructed never to write them, and the worker strips any that survive that instruction
+  before the suggestion is shown to you. So this is the one path that removes a marker, it removes
+  every one of them rather than most, and it only runs because you asked for a rewrite and then
+  accepted it.
 - A **Style Catalog** entry or a **preset stack** is folded into the outgoing prompt at submit time.
   There is no confirmation step: the Studio previews the composed string above the Generate button,
   and then sends it.

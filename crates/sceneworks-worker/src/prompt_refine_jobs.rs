@@ -1728,6 +1728,7 @@ mod tests {
 
         // BOTH partitions take the tailored prompt: `minimax_h3` (t2va + fl2va) and
         // `minimax_h3_ref` (Ref2VA) share one text encoder and one prompt format.
+        let asset = magic_section_from(MINIMAX_H3_REFINE_V1, "SYSTEM");
         for model_id in ["minimax_h3", "minimax_h3_ref"] {
             let system = build_rewrite_system_prompt(Some(&guide), Some("video"), Some(model_id));
             assert!(
@@ -1741,9 +1742,18 @@ mod tests {
                 "non_diegetic_music:",
             ] {
                 assert!(system.contains(field), "{model_id} instructs {field}");
+                // …and the ASSET is what instructs them. The guide names all three too, so a
+                // combined-prompt assertion alone would survive deleting them from the asset.
+                assert!(
+                    asset.contains(field),
+                    "the embedded asset itself must instruct {field}"
+                );
             }
+            // Asserted on a phrase the ASSET owns, not on `[Shot 1] At 00:00.000` — the guide
+            // appended below contains that literal in its own worked example, so pinning it would
+            // have gone green with the asset's shot instruction deleted.
             assert!(
-                system.contains("[Shot 1] At 00:00.000"),
+                system.contains("Continue this line with the framing, the angle"),
                 "{model_id} instructs the timed-shot labels, the one thing prose cannot express"
             );
             // The generic medium rules are REPLACED, not merged — the H3 asset owns the whole
@@ -1777,6 +1787,68 @@ mod tests {
         assert!(!refines_for_minimax_h3(Some("ltx_2_3")));
         assert!(!refines_for_minimax_h3(Some("")));
         assert!(!refines_for_minimax_h3(None));
+    }
+
+    /// sc-17162 review — the asset must carry no fill-in-the-blank SCAFFOLD.
+    ///
+    /// The post-filter strips the seven untrained markers and nothing else, so any other literal in
+    /// the asset that reads as a template is a string a small refiner checkpoint can echo straight
+    /// into the suggestion the user is offered. The first draft had exactly that: angle-bracketed
+    /// slots (`<framing, angle, …>`) and a timestamp with a letter standing in for a digit
+    /// (`00:0X.000`). Both would have shipped as literal placeholder text in a refined prompt.
+    ///
+    /// The rule this pins is "instructions, not blanks". Real OUTPUT tokens — the field names with
+    /// their colons, `[Shot 1] At 00:00.000` — are not scaffold: the model is supposed to write
+    /// those verbatim, and shot one always opens at zero.
+    #[test]
+    fn minimax_h3_asset_carries_no_fill_in_the_blank_scaffold() {
+        let asset = magic_section_from(MINIMAX_H3_REFINE_V1, "SYSTEM");
+        assert!(
+            !asset.is_empty(),
+            "the asset must parse to a non-empty SYSTEM block"
+        );
+
+        // No angle-bracketed slot. Scoped to `<` followed by a letter or space so the marker ban's
+        // own `<d>`/`<|…|>` citations in the rules below are not what this trips on — those are
+        // quoted BANS, and a test that could not tell them apart would forbid stating the ban.
+        for (index, byte) in asset.bytes().enumerate() {
+            if byte != b'<' {
+                continue;
+            }
+            let rest = &asset[index + 1..];
+            let cited_marker =
+                rest.starts_with('|') || rest.starts_with("d>") || rest.starts_with('/');
+            assert!(
+                cited_marker,
+                "angle-bracketed scaffold at byte {index}: {}",
+                &asset[index..asset.len().min(index + 60)]
+            );
+        }
+
+        // No timestamp with a non-digit standing in for a digit. Every `MM:SS.mmm`-shaped run in the
+        // asset must be all digits — `00:0X.000` is the exact form that was there.
+        for (index, _) in asset.match_indices(':') {
+            let after = &asset[index + 1..];
+            let digits_then_dot: String = after.chars().take(2).collect();
+            if !after.chars().nth(2).is_some_and(|c| c == '.') {
+                continue;
+            }
+            assert!(
+                digits_then_dot.chars().all(|c| c.is_ascii_digit()),
+                "timestamp with a placeholder digit near byte {index}: {}",
+                &asset[index.saturating_sub(12)..asset.len().min(index + 12)]
+            );
+        }
+
+        // And it says so, so a future edit is told the rule rather than only caught by it.
+        assert!(
+            asset.contains("never\nleave a blank, a placeholder or a bracketed stand-in"),
+            "the asset must forbid placeholders explicitly, not only avoid them"
+        );
+        assert!(
+            asset.contains("A timestamp is digits only"),
+            "the asset must forbid a stand-in digit explicitly"
+        );
     }
 
     /// sc-17162 (from sc-17143's finding) — a marker-baited reply survives NOTHING. The refiner is

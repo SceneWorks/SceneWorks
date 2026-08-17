@@ -218,11 +218,24 @@ describe("MiniMax-H3 prompt guide (sc-17162)", () => {
   //      **Apply** / **Keep original** (`RefinePromptControl.jsx:193-212`), so an unapplied
   //      suggestion changes nothing. And Refine is not "the one exception" — the style fold and the
   //      stack fold both alter the outgoing prompt with no review step at all.
+  //   v3 "**Nothing strips or repairs the markers.**" + "a rewrite you do apply may well drop the
+  //      markers" — true when written, FALSIFIED BY sc-17162's own refiner. The H3 rewrite path now
+  //      post-filters the seven markers out of the model's reply
+  //      (`prompt_refine_jobs.rs::strip_untrained_markers`, reached from `finalize_refined_output`
+  //      whenever the target model is an H3 partition), so an applied refinement can never contain
+  //      one. "May well drop" describes a likelihood; what ships is a GUARANTEE, and the unscoped
+  //      "nothing strips" sentence contradicted it outright.
   //
-  // So this pins the SHAPE of the correct claim rather than one sentence: the two absolutes are
+  // So this pins the SHAPE of the correct claim rather than one sentence: each false absolute is
   // asserted ABSENT, and each surviving path is asserted named. A future rewrite that reintroduces
-  // either absolute reds on the absolute's own assertion.
-  it("states the prompt-alteration story without the two absolutes that were false", () => {
+  // any of them reds on that absolute's own assertion.
+  //
+  // ⚠️ The v3 no-strip forbid is anchored on the BOLD MARKUP (`**Nothing strips`), because the true
+  // replacement contains "nothing strips or repairs the markers" as a SUBSTRING — it merely scopes
+  // it with "At submit time". A forbid regex on the bare phrase would match the correct copy and
+  // could never go green, which is the mirror of the survives-its-own-mutation defect this file has
+  // hit three times. The scoping is pinned positively below instead.
+  it("states the prompt-alteration story without the three absolutes that were false", () => {
     for (const overclaim of [
       { name: "the v1 unqualified pass-through", re: /passes your prompt through \*\*unchanged\*\*/ },
       { name: "the v2 'never alters your prompt' absolute", re: /never alters your prompt/i },
@@ -230,11 +243,25 @@ describe("MiniMax-H3 prompt guide (sc-17162)", () => {
       // Refine is a SUGGESTION until Apply. Copy that says it replaces the prompt outright is the
       // same class of error in the opposite direction.
       { name: "the claim that Refine replaces the prompt outright", re: /replaces what you wrote/i },
+      // v3, both halves — the unscoped no-strip absolute and the likelihood framing it implied.
+      { name: "the v3 unscoped 'nothing strips' absolute", re: /\*\*Nothing strips or repairs the markers/ },
+      { name: "the v3 'may well drop' likelihood framing", re: /may well drop the markers/i },
     ]) {
       expect(overclaim.re.test(guide), `guide must not carry ${overclaim.name}`).toBe(false);
     }
     for (const claim of [
+      // The no-strip claim survives, SCOPED to the path where it is still true.
+      {
+        name: "the no-strip claim scoped to the submit path",
+        re: /At submit time nothing strips or repairs the markers/,
+      },
       { name: "the markers are not stripped or repaired", re: /not removed, not rewritten and not warned about/ },
+      // …and the refine path's strip is stated as the GUARANTEE it is, with both halves named:
+      // the instruction in the embedded asset, and the worker-side post-filter that does not
+      // depend on the model complying with it.
+      { name: "the applied-refinement guarantee", re: /guaranteed marker-free/ },
+      { name: "the refiner instruction as the first half", re: /instructed never to write them/ },
+      { name: "the worker post-filter as the enforcing half", re: /strips any that survive/ },
       { name: "the Refine button as a prompt-altering path", re: /\*\*Refine\*\* button/ },
       { name: "that Refine needs Apply before it changes anything", re: /until you press \*\*Apply\*\*/ },
       { name: "the Style Catalog fold as a second path", re: /\*\*Style Catalog\*\* entry/ },

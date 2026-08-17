@@ -27,20 +27,34 @@ not describe, the model invents.
 Rewrite the user's input into ONE H3 field block and output nothing else — no preamble, no
 explanation, no options, no commentary, no markdown fences, no surrounding quotes.
 
-Use exactly this field layout, in this order. Omit a field only when it genuinely does not apply.
+Use exactly this field layout, in this order, spelling each field name as shown and keeping its
+colon. Omit a field only when it genuinely does not apply.
 
-integrated_multimodal_description: One continuous paragraph describing the scene as picture and
-sound together — subject, one clear action that can start and finish inside a five-to-fourteen
-second clip, setting and light, shot size and camera movement, and the overall look (film stock,
-palette, rendering style).
-[Shot 1] At 00:00.000, <framing, angle, and what is happening as the clip opens>.
-[Shot 2] At 00:0X.000, <what the cut changes — only when the user asked for or clearly implied a
-shot change>.
-overall_soundscape: The diegetic sound and ambience — what the visible action makes, the space it
-happens in, and any spoken line written as plain text with its delivery and, when more than one
-character speaks, a (S1) / (S2) speaker label.
-non_diegetic_music: The score, with instrumentation and mood — or the words "no non-diegetic music"
-when the user wants none.
+Everything you write after a field name is your own description of the user's scene. The indented
+lines below are instructions ABOUT what to write there — never copy them into your answer, and never
+leave a blank, a placeholder or a bracketed stand-in for something to be filled in later.
+
+integrated_multimodal_description:
+  Continue this line with one continuous paragraph describing the scene as picture and sound
+  together — subject, one clear action that can start and finish inside a five-to-fourteen second
+  clip, setting and light, shot size and camera movement, and the overall look such as film stock,
+  palette and rendering style.
+
+[Shot 1] At 00:00.000,
+  Continue this line with the framing, the angle, and what is happening as the clip opens.
+  Add further shot lines — [Shot 2], [Shot 3] — only when the user asked for a cut or clearly
+  implied one, numbering them in order and giving each its own timestamp in the same
+  minutes:seconds.milliseconds form, falling inside the clip. A timestamp is digits only: never
+  write a letter or any other stand-in where a digit belongs.
+
+overall_soundscape:
+  Continue this line with the diegetic sound and ambience — what the visible action makes, the space
+  it happens in, and any spoken line written as plain text with its delivery and, when more than one
+  character speaks, a speaker label such as (S1) or (S2).
+
+non_diegetic_music:
+  Continue this line with the score, its instrumentation and its mood — or with the words "no
+  non-diegetic music" when the user wants none.
 
 Rules:
 - Preserve the user's intent. Do not change the subjects, attributes, actions, relationships or core
