@@ -20,9 +20,12 @@
 //   node scripts/bump-inference.mjs --sha <sha40>   # pin a specific inference revision
 //   node scripts/bump-inference.mjs --self-test     # exercise the pin rewrite + the facts checks
 //
-// `--self-test` runs in `npm run check`. It used to be a manual npm script only, which made it a
-// place to add an assertion and never learn whether it fired; sc-17593 wired it in when it grew the
-// engine-capability-facts coverage checks, whose whole subject is a guard that was never exercised.
+// `--self-test` is a MANUAL script (`npm run bump:inference:self-test`) and is meant to stay one.
+// sc-17593 did wire it into `npm run check`, and sc-19758 (`8e70ce4a8`, "stop running the gate chain on
+// every commit") deliberately took it back out along with the rest of the gate chain: this script only
+// runs when a human bumps the pin, so paying for it on every commit bought nothing. Do not re-add it —
+// run it as part of the bump. The paragraph above used to claim it ran in `npm run check`; it has not
+// since that teardown.
 
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -291,18 +294,56 @@ function distinctResolutions(crate) {
 // point is that a stale audit surfaces HERE, at bump time, instead of in parity CI ten minutes later.
 // Fail-closed on purpose: the manifests and lockfile are already written by now, so the bump is
 // genuinely incomplete until the audit is refreshed and this passes.
-function verifyLicenseAudit() {
-  console.log("$ node scripts/check-license-coverage.mjs");
-  try {
-    execFileSync("node", ["scripts/check-license-coverage.mjs"], {
-      cwd: repoRoot,
-      stdio: "inherit",
-    });
-  } catch {
+function verifyLicenseAudit(io = {}) {
+  const {
+    report = () =>
+      execFileSync("node", ["scripts/check-license-coverage.mjs"], {
+        cwd: repoRoot,
+        stdio: "inherit",
+      }),
+    derive = deriveAuditFacts,
+    readAudit = () => JSON.parse(readFileSync(AUDIT_PATH, "utf8")),
+    log = console.log,
+  } = io;
+  log("$ node scripts/check-license-coverage.mjs");
+  report();
+  // The report cannot be the proof that the derivation worked. It is deliberately non-fatal
+  // (sc-19751), and treating its exit code as the signal is exactly how the restamp broke: the old
+  // body caught a rejection that stopped happening, so a stale audit sailed through here silently.
+  // Grade the written record against the checker's own derived facts instead.
+  //
+  // This grades the DERIVATION, not the licensing worklist — an open compliance item is still just a
+  // printed finding. Only a field the deriver failed to write refuses, and it names which, which is
+  // what the message below always claimed to do.
+  const derived = derive();
+  const audit = readAudit();
+  const drift = [
+    ["auditDigest", audit.auditDigest, derived.auditDigest],
+    [
+      "provenanceScan.matchedFiles",
+      audit.provenanceScan?.matchedFiles,
+      derived.provenanceMatchedFiles,
+    ],
+    [
+      "provenanceScan.populationSha256",
+      audit.provenanceScan?.populationSha256,
+      derived.provenancePopulationSha256,
+    ],
+    ["crateCoverage.cratePrefixes", audit.crateCoverage?.cratePrefixes, derived.cratePrefixes],
+    [
+      "crateCoverage.cratePopulationSha256",
+      audit.crateCoverage?.cratePopulationSha256,
+      derived.cratePopulationSha256,
+    ],
+  ].filter(([, written, computed]) => written !== computed);
+  if (drift.length > 0) {
     throw new Error(
       "the inference source/license audit is STILL stale after deriveLicenseAudit() ran. That is a " +
-        "bug in the derivation rather than work for you: it means the checker grades a field the " +
-        "deriver does not write. The check output above names which.",
+        "bug in the derivation rather than work for you: the checker grades a field the deriver does " +
+        "not write.\n" +
+        drift
+          .map(([field, written, computed]) => `  ${field}: wrote ${written}, checker computes ${computed}`)
+          .join("\n"),
     );
   }
 }
@@ -378,52 +419,87 @@ function deriveInferenceClosures(sha, repo) {
   });
 }
 
-/** Re-scan the ported/embedded source inventory and restamp the audit for the new revision. */
-function deriveLicenseAudit(sha, repo) {
-  const scan = (...args) =>
-    execFileSync("node", ["scripts/scan-inference-provenance.mjs", "--repo", repo, ...args], {
+const AUDIT_PATH = join(repoRoot, "config/inference-third-party-source.json");
+
+/**
+ * The facts check-license-coverage.mjs derives from the two inventories and the audit record itself.
+ *
+ * Read from its `--derive-json` mode rather than scraped out of its report. The report is non-fatal by
+ * design (sc-19751), so there is no thrown error to read a computed value out of — which is precisely
+ * how the restamp below silently stopped firing: the old code took the digest from
+ * `execFileSync`'s rejection, the rejection stopped happening, and the audit shipped describing the
+ * previous revision. A derived value belongs in structured output.
+ */
+function deriveAuditFacts() {
+  return JSON.parse(
+    execFileSync("node", ["scripts/check-license-coverage.mjs", "--derive-json"], {
       cwd: repoRoot,
       encoding: "utf8",
-    });
-  const populationSha = (output, label) => {
-    const match = /population sha256 ([0-9a-f]{64})/.exec(output);
-    if (!match) throw new Error(`could not read the ${label} population sha256 from the scanner`);
-    return match[1];
+    }),
+  );
+}
+
+/**
+ * The audit record a pin bump owes: the new revisions plus every population fact the checker grades.
+ *
+ * Pure, so `--self-test` drives it without a checkout. `matchedFiles` and `cratePrefixes` are the two
+ * fields nothing used to write — the checker grades both ("ported-source population count changed",
+ * "crate-prefix population count changed") and the deriver skipped both, so a bump that added or
+ * removed a ported file or a crate left the audit asserting the previous population.
+ */
+export function restampAuditRecord(audit, sha, derived) {
+  return {
+    ...audit,
+    inferenceRevision: sha,
+    provenanceScan: {
+      ...audit.provenanceScan,
+      revision: sha,
+      matchedFiles: derived.provenanceMatchedFiles,
+      populationSha256: derived.provenancePopulationSha256,
+    },
+    crateCoverage: {
+      ...audit.crateCoverage,
+      revision: sha,
+      cratePrefixes: derived.cratePrefixes,
+      cratePopulationSha256: derived.cratePopulationSha256,
+    },
   };
+}
 
-  console.log("$ node scripts/scan-inference-provenance.mjs --write (paths + crates)");
-  const paths = scan("--write", "config/inference-provenance-candidates.tsv");
-  const crates = scan("--write-crates", "config/inference-crate-prefixes.txt");
+/** Re-scan the ported/embedded source inventory and restamp the audit for the new revision. */
+function deriveLicenseAudit(sha, repo, io = {}) {
+  const {
+    scan = (...args) =>
+      execFileSync("node", ["scripts/scan-inference-provenance.mjs", "--repo", repo, ...args], {
+        cwd: repoRoot,
+        encoding: "utf8",
+      }),
+    derive = deriveAuditFacts,
+    readAudit = () => JSON.parse(readFileSync(AUDIT_PATH, "utf8")),
+    writeAudit = (record) => writeFileSync(AUDIT_PATH, `${JSON.stringify(record, null, 2)}\n`),
+    log = console.log,
+  } = io;
 
-  const auditPath = join(repoRoot, "config/inference-third-party-source.json");
-  const audit = JSON.parse(readFileSync(auditPath, "utf8"));
-  audit.inferenceRevision = sha;
-  audit.provenanceScan.revision = sha;
-  audit.provenanceScan.populationSha256 = populationSha(paths, "provenance");
-  audit.crateCoverage.revision = sha;
-  audit.crateCoverage.cratePopulationSha256 = populationSha(crates, "crate");
-  writeFileSync(auditPath, `${JSON.stringify(audit, null, 2)}\n`);
+  log("$ node scripts/scan-inference-provenance.mjs --write (paths + crates)");
+  scan("--write", "config/inference-provenance-candidates.tsv");
+  scan("--write-crates", "config/inference-crate-prefixes.txt");
 
-  // The digest is whatever the checker computes over the record just written. It used to be
-  // reported as "expected X, computed Y" and left for a human to paste back. A value a tool derives
-  // is a value that tool should write.
-  let output = "";
-  try {
-    execFileSync("node", ["scripts/check-license-coverage.mjs"], { cwd: repoRoot, encoding: "utf8" });
-  } catch (error) {
-    output = `${error.stdout ?? ""}${error.stderr ?? ""}`;
-  }
-  const computed = /digest mismatch: expected [0-9a-f]{64}, computed ([0-9a-f]{64})/.exec(output);
-  if (computed) {
-    audit.auditDigest = computed[1];
-    writeFileSync(auditPath, `${JSON.stringify(audit, null, 2)}\n`);
-    console.log(`bump-inference: restamped auditDigest -> ${computed[1].slice(0, 12)}…`);
-  }
+  // Pass 1 writes the population facts, which are pure functions of the two inventories just written.
+  const record = restampAuditRecord(readAudit(), sha, derive());
+  writeAudit(record);
+  // Pass 2 takes the digest, and must run AFTER pass 1 has landed: both population blocks are inside
+  // the canonical payload, so sealing first would seal the pre-scan population.
+  record.auditDigest = derive().auditDigest;
+  writeAudit(record);
+  log(
+    `bump-inference: restamped auditDigest -> ${record.auditDigest.slice(0, 12)}… ` +
+      `(${record.provenanceScan.matchedFiles} ported paths, ${record.crateCoverage.cratePrefixes} crates)`,
+  );
 
   // What a human still owes is READING it, which no script can do. The licensing-relevant signal is
   // an added/removed path or a changed ported-source marker; rows whose git_blob_sha1 moved with an
   // unrelated edit are not.
-  console.log(
+  log(
     "bump-inference: third-party source audit restamped. Review the diff of\n" +
       "  config/inference-provenance-candidates.tsv — added/removed paths and changed markers are\n" +
       "  the signal; rows differing only in git_blob_sha1 are not.",
@@ -1187,6 +1263,114 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
     pinnedRevision(
       `mlx = { git = "https://github.com/michaeltrefry/mlx-rs", rev = "${OTHER_PIN}" }\na = { git = "${INFERENCE_GIT}", rev = "${PREVIOUS_PIN}" }`,
     ) === PREVIOUS_PIN,
+  );
+
+  // The license-audit restamp (sc-18420). The bug this pins is subtle and cost the epic's pin advance
+  // a manual repair: the deriver read the recomputed digest out of `execFileSync`'s thrown error, and
+  // sc-19751 made check-license-coverage.mjs report-only, so the checker exits 0, nothing throws, and
+  // the restamp silently never fired — while `verifyLicenseAudit` graded the same exit code and also
+  // passed. Both fields the checker grades by COUNT were never written at all.
+  //
+  // The fake deriver mirrors the real one where it matters: its digest is a function of the record on
+  // disk, so a restamp taken before the population facts land is visibly the wrong digest.
+  const AUDIT_FIXTURE = {
+    inferenceRevision: PREVIOUS_PIN,
+    auditDigest: "0".repeat(64),
+    includeSites: [{ source: "a", included: "b", disposition: "artifact" }],
+    provenanceScan: {
+      scanner: "scripts/scan-inference-provenance.mjs",
+      revision: PREVIOUS_PIN,
+      matchedFiles: 600,
+      populationSha256: "1".repeat(64),
+    },
+    crateCoverage: {
+      scanner: "scripts/scan-inference-provenance.mjs",
+      revision: PREVIOUS_PIN,
+      cratePrefixes: 90,
+      cratePopulationSha256: "2".repeat(64),
+    },
+  };
+  let stored = structuredClone(AUDIT_FIXTURE);
+  const auditWrites = [];
+  const fakeDerive = () => ({
+    provenanceMatchedFiles: 626,
+    provenancePopulationSha256: "3".repeat(64),
+    cratePrefixes: 94,
+    cratePopulationSha256: "4".repeat(64),
+    auditDigest: `digest-of:${stored.provenanceScan.matchedFiles}:${stored.crateCoverage.cratePrefixes}`,
+  });
+  deriveLicenseAudit(SHA, "/self-test/inference", {
+    scan: () => "",
+    derive: fakeDerive,
+    readAudit: () => structuredClone(stored),
+    writeAudit: (record) => {
+      stored = structuredClone(record);
+      auditWrites.push(structuredClone(record));
+    },
+    log: () => {},
+  });
+  check(
+    "the audit digest is restamped even though the checker exits 0 and throws nothing",
+    stored.auditDigest === "digest-of:626:94",
+  );
+  check(
+    "the population COUNTS the checker grades are written, not only the population hashes",
+    stored.provenanceScan.matchedFiles === 626 && stored.crateCoverage.cratePrefixes === 94,
+  );
+  check(
+    "the digest is sealed after the population facts, never over the pre-scan record",
+    auditWrites.length === 2 && stored.auditDigest !== "digest-of:600:90",
+  );
+  check(
+    "every revision-keyed field moves to the new pin",
+    stored.inferenceRevision === SHA &&
+      stored.provenanceScan.revision === SHA &&
+      stored.crateCoverage.revision === SHA,
+  );
+  check(
+    "unrelated audit content is carried through untouched",
+    JSON.stringify(stored.includeSites) === JSON.stringify(AUDIT_FIXTURE.includeSites),
+  );
+
+  const verifyDrift = (mutate) => {
+    const audit = mutate(structuredClone(stored));
+    try {
+      verifyLicenseAudit({
+        report: () => {},
+        derive: fakeDerive,
+        readAudit: () => audit,
+        log: () => {},
+      });
+      return null;
+    } catch (error) {
+      return error.message;
+    }
+  };
+  check("a fully restamped audit passes verification", verifyDrift((audit) => audit) === null);
+  const skippedCount = verifyDrift((audit) => {
+    audit.provenanceScan.matchedFiles = 600;
+    return audit;
+  });
+  check(
+    "a graded field the deriver failed to write refuses, and the refusal NAMES it",
+    !!skippedCount &&
+      /provenanceScan\.matchedFiles: wrote 600, checker computes 626/.test(skippedCount),
+  );
+  const skippedCrates = verifyDrift((audit) => {
+    audit.crateCoverage.cratePrefixes = 90;
+    return audit;
+  });
+  check(
+    "the crate-prefix population count is graded on the same footing",
+    !!skippedCrates && /crateCoverage\.cratePrefixes: wrote 90, checker computes 94/.test(skippedCrates),
+  );
+  const staleDigest = verifyDrift((audit) => {
+    audit.auditDigest = "0".repeat(64);
+    return audit;
+  });
+  check(
+    "a stale digest is caught here rather than by an exit code the report no longer sets",
+    !!staleDigest && /auditDigest: wrote 0{64}/.test(staleDigest),
   );
 
   console.log(rc === 0 ? "self-test: PASS" : "self-test: FAIL");

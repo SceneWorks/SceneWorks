@@ -18,14 +18,30 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const OUTPUT_JSON = "docs/generated/memory-matrix.json";
 const OUTPUT_MD = "docs/generated/memory-matrix.md";
 const EXPECTED_IMAGE_COUNT = 53;
-// SC-18218 removed FLUX.2-dev from this census: the pinned MLX provider is eager/resident-only,
-// so counting its generic route as staged coverage would contradict the captured contract.
+// SC-18218 removed FLUX.2-dev from the MLX staged-residency census: the pinned MLX provider is
+// eager/resident-only, so counting its generic route as staged coverage would contradict the captured
+// contract. Bernini is the mirror case — inference sc-18609 made its DECLARED MLX rung-4 ladder
+// actually reachable on both variants, so it belongs in the census.
 //
-// Back to 38 with the sc-18304 pin advance to inference 81ed5aa1: sc-18609 made bernini_image's
-// DECLARED MLX rung-4 ladder actually reachable on both variants, so it re-enters the implemented
-// staged set it had dropped out of while the ladder was declared-but-unreachable. FLUX.2-dev is
-// still excluded — this is bernini rejoining, not the SC-18218 exclusion being reversed.
-const EXPECTED_MLX_STAGED_COUNT = 38;
+// Neither fact is a total. This census used to be pinned to an exact population, which meant hand-
+// renewing 37 -> 38 for a reachability change that had nothing to do with the contract being guarded,
+// and the number never said which entry moved. `assertMlxStagedCoverageIsStructurallyConsistent`
+// replaces it, and is DELIBERATELY WEAKER — the honest scope, so nobody reads more into it:
+//
+//   guarded — the two named lanes above by id; bespoke routes never claiming the generic ladder;
+//             per-route drift, where entries sharing a resolved route disagree with each other; and
+//             the census being neither empty nor the whole catalog.
+//   NOT guarded — uniform drift on a route nothing else shares. 35 of the 41 resolved routes are
+//             singletons (only sdxl, flux2_klein_9b, qwen_image_edit, sensenova_u1_8b,
+//             sensenova_u1_8b_fast and z_image_turbo group more than one entry), so a singleton lane
+//             silently dropping out of the census — or silently claiming staged coverage it has not
+//             implemented — passes every assertion here where the old count reddened. A whole shared
+//             family drifting uniformly passes too, for the same reason.
+//
+// That is the accepted shape-over-population tradeoff, not an oversight: the exact count caught those
+// cases and cost a hand-edit on every unrelated catalog or reachability change, and runtime catching is
+// the chosen tradeoff for what shape assertions cannot express. A staged claim a lane cannot honour
+// surfaces when the ladder is actually engaged.
 // Provider calibration ABI versions are deliberate invalidation switches. A provider-specific
 // execution/layout/quantization change that makes measurements unsafe must add or bump its key;
 // ecosystem-wide contract changes bump `default`. Exact source revisions remain provenance only.
@@ -360,6 +376,55 @@ export function assertTwinCoverage(models, modelStories = MODEL_STORIES, familyS
     throw new Error(`${dualGroups.size} dual families map onto only ${candleFamilyTwins.size} distinct Candle family twins`);
   }
   return { dualModels: dual.length, dualFamilies: dualGroups.size };
+}
+
+// The MLX staged-residency census, checked as structure instead of an exact population (see the note
+// on EXPECTED_IMAGE_COUNT above). Runs inside `validateMatrix`, so `cells` is still the full resolved
+// cross-product and `coverage` is not populated yet; the census-versus-published cross-check belongs to
+// tests/test_memory_matrix.py, which reads the artifact after the publication slim.
+export function assertMlxStagedCoverageIsStructurallyConsistent(matrix) {
+  const staged = new Set(
+    matrix.cells
+      .filter(
+        (cell) =>
+          cell.backend === "mlx" && cell.rung === "staged_residency" && isImplemented(cell.state),
+      )
+      .map((cell) => cell.modelId),
+  );
+  if (staged.has("flux2_dev")) {
+    throw new Error(
+      "flux2_dev claims MLX staged coverage, but SC-18218 measured the pinned provider as Resident-only",
+    );
+  }
+  if (!staged.has("bernini_image")) {
+    throw new Error(
+      "bernini_image lost its MLX staged coverage; inference sc-18609 made its declared rung-4 ladder reachable",
+    );
+  }
+  if (staged.size === 0 || staged.size >= matrix.models.length) {
+    throw new Error(
+      `MLX staged coverage is partial by construction, found ${staged.size}/${matrix.models.length}`,
+    );
+  }
+  // The verdict is a property of the RESOLVED ROUTE, so entries sharing a route must agree. An entry
+  // drifting away from its own siblings is exactly what a pinned total could not see.
+  const byRoute = new Map();
+  for (const model of matrix.models) {
+    const verdicts = byRoute.get(model.resolvedRoute) ?? new Set();
+    verdicts.add(staged.has(model.id));
+    byRoute.set(model.resolvedRoute, verdicts);
+  }
+  const split = [...byRoute.entries()].filter(([, verdicts]) => verdicts.size > 1).map(([route]) => route);
+  if (split.length) {
+    throw new Error(`MLX staged coverage disagrees within resolved route(s) ${split.sort().join(",")}`);
+  }
+  // A bespoke route carries its own pipeline and never advertises the generic staged ladder.
+  const bespoke = matrix.models
+    .filter((model) => model.routeKind === "bespoke" && staged.has(model.id))
+    .map((model) => model.id);
+  if (bespoke.length) {
+    throw new Error(`bespoke route(s) ${bespoke.sort().join(",")} claim generic MLX staged coverage`);
+  }
 }
 
 function sha256(body) {
@@ -1659,11 +1724,7 @@ function validateMatrix(
       `manifest image ids, EXPECTED_IMAGE_IDS, and generated ownership rows disagree (manifest-only=${manifestOnly.join(",")}; source-only=${sourceOnly.join(",")})`,
     );
   }
-  if (matrix.summary.mlxStagedStaticCoverage !== EXPECTED_MLX_STAGED_COUNT) {
-    throw new Error(
-      `expected MLX staged static coverage ${EXPECTED_MLX_STAGED_COUNT}/${EXPECTED_IMAGE_COUNT}, found ${matrix.summary.mlxStagedStaticCoverage}`,
-    );
-  }
+  assertMlxStagedCoverageIsStructurallyConsistent(matrix);
   for (const [key, expectedTiers] of backendTierOverrides) {
     const [modelId, backend] = key.split(":");
     const actualTiers = sortedUnique(
