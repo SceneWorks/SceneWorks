@@ -5247,8 +5247,21 @@ mod model_size_concurrency_tests {
         // `platforms: ["windows", "linux"]` set reading the raw upstream `MiniMaxAI/MiniMax-H3`
         // snapshot, which is the layout `candle-gen-minimax-h3::REQUIRED_COMPONENT_DIRS` loads. Its
         // ONE primary row (`transformer/*`) is a new `(repo, files)` context off-Mac, so
-        // windows/linux gain exactly one. `minimax_h3_ref` deliberately gained no off-Mac row
-        // (candle default-denies `ref2va`), which is why that is +1 and not +2.
+        // windows/linux gain exactly one. `minimax_h3_ref` deliberately gained no off-Mac row, which
+        // is why that is +1 and not +2.
+        //
+        // sc-20267 then widened `minimax_h3`'s q4/q8 tier rows to `["macos","windows","linux"]`. That
+        // SWAPS which key that +1 is off-Mac without changing the count: `model_download` prefers the
+        // `default: true` row, so the off-Mac context is now
+        // `(SceneWorks/minimax-h3-mlx, ["q4/transformer/*"])` rather than
+        // `(MiniMaxAI/MiniMax-H3, ["transformer/*"])`, and no other off-Mac entry contributes either
+        // key. Recorded because the arithmetic below is unchanged while the reason for one of its terms
+        // is not — a reader auditing this count off-Mac will find a repo the sc-19558 note says those
+        // platforms never fetch.
+        //
+        // (The reason `minimax_h3_ref` has no off-Mac row is NOT that candle "default-denies ref2va" —
+        // that premise was falsified by sc-17157, which is an ancestor of the pinned inference
+        // revision. See the trailing note in that entry's `downloads` for the current reason.)
         //
         // THE NUMBERS BELOW ARE THE SYNC MERGE'S, not any single side's. Starting from the shared
         // 87 / 84 / 84, four independent deltas all apply:

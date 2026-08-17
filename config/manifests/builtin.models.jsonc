@@ -13031,6 +13031,21 @@
         // now packed per tier (q4/q8 rows below), so the peak is no longer tier-independent.
         // ⚠️ The post-sc-19120 generate peak has NOT been re-measured — the numbers above are the
         // pre-change measurement, and sc-18662 (block streaming) is the remaining half of the gap.
+        //
+        // ⚠️ THE TIER ROWS ARE NO LONGER `macos`-ONLY (sc-20267, epic 17137 PR 3/3). The q4 and q8
+        // DiT primaries and their q4/q8 `text_encoder` co-requisites now carry
+        // `platforms: ["macos", "windows", "linux"]`, because `candle-gen-minimax-h3` gained
+        // `supported_quants: &[Quant::Q4, Quant::Q8]` AND a real pre-quantized tier loader (a tier
+        // resolver plus packed DiT / TE / vision loaders) in the paired inference change. The tier is
+        // therefore selectable on both lanes and reads the SAME packed artifacts — nothing is
+        // re-hosted and no byte counts move. The bf16 rows stay platform-split: see the note on the
+        // bf16 DiT row below and the off-Mac block further down for which route serves which lane.
+        //
+        // ⚠️ THIS IS OBTAINABILITY, NOT ROUTING. `VIDEO_MODEL_CAPS` still carries every candle column
+        // false for both partitions, `crates/sceneworks-worker/src/video_jobs/minimax_h3.rs` is still
+        // `#[cfg(target_os = "macos")]` end to end, and SceneWorks' own inference pin is unchanged by
+        // sc-20267 — so the app it builds does not yet contain the flip these rows anticipate.
+        // Declaration is not reachability (GH #2074).
         {
           "provider": "huggingface",
           "repo": "SceneWorks/minimax-h3-mlx",
@@ -13038,7 +13053,7 @@
           "variant": "q4",
           "default": true,
           "files": ["q4/transformer/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 18780109783,
           "footprint": { "diskSizeBytes": 18780109783, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
@@ -13048,7 +13063,7 @@
           "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
           "variant": "q8",
           "files": ["q8/transformer/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 35302064357,
           "footprint": { "diskSizeBytes": 35302064357, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
@@ -13058,6 +13073,16 @@
           "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
           "variant": "bf16",
           "files": ["bf16/transformer/*"],
+          // ⚠️ DELIBERATELY STILL `macos`-ONLY while the q4/q8 rows above are not (sc-20267). Two
+          // reasons, both about the OFF-MAC bf16 route that already exists further down:
+          //   1. off-Mac bf16 is served by the sc-19558 raw-upstream row (`MiniMaxAI/MiniMax-H3` @
+          //      939557dc, `transformer/*`), so widening this rehost row would put TWO bf16
+          //      `transformer` candidates in scope on Windows/Linux — and `model_download_for_variant`
+          //      returns the FIRST match, which is not a choice anything records; and
+          //   2. the off-Mac route is the BETTER one for candle. The macOS bf16 text-encoder row omits
+          //      shard 13 under a licence taken from the MLX engine's own `TE_SHARDS` / `VISION_SHARD`
+          //      read pattern; the off-Mac row ships all 14 because no shard-13-omission equivalent has
+          //      been established for `candle-gen-minimax-h3` (see that row's note below).
           "platforms": ["macos"],
           "estimatedSizeBytes": 66280569250,
           "footprint": { "diskSizeBytes": 66280569250, "residentMemoryBytes": null, "peakMemoryBytes": null }
@@ -13090,7 +13115,7 @@
           "componentId": "text_encoder",
           "subdir": "q4/text_encoder",
           "files": ["q4/text_encoder/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 18722713964
         },
         {
@@ -13102,7 +13127,7 @@
           "componentId": "text_encoder",
           "subdir": "q8/text_encoder",
           "files": ["q8/text_encoder/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 33723765614
         },
         {
@@ -13307,6 +13332,11 @@
         // set, from MiniMax's OWN public repo at the SAME pinned revision the macOS co-requisites
         // above already use. Nothing is re-hosted and nothing new has to be published.
         //
+        // Since sc-20267 they are the off-Mac **bf16** route rather than the only off-Mac route: the
+        // q4/q8 DiT and text-encoder rows above now serve Windows/Linux too, and a packed install
+        // substitutes those for the first two rows here while still taking the tier-agnostic
+        // remainder from this block.
+        //
         // WHY NOT THE OTHER TWO OPTIONS — recorded so they are not re-litigated:
         //   * A candle-packed REHOST was rejected twice over. It is an outward-facing publish (not
         //     something this repository can land), and it would have no consumer if it existed:
@@ -13320,6 +13350,32 @@
         //     real-weights validation run. It is also blocked on sc-19517: that repo publishes no
         //     `q4/transformer_ref` and its `bf16/transformer/` is incomplete.
         //
+        // ⚠️ sc-20267 CORRECTION — THE SECOND BULLET IS FALSIFIED IN FULL, AND THE FIRST BULLET'S
+        // "no consumer" CLAUSE WITH IT. The rejected reasoning is kept above verbatim because it is
+        // still the record of what was decided in sc-19558 and why; what follows is what falsified
+        // each part of it, so neither the stale premise nor the retracted blocker is reintroduced:
+        //   * "the candle provider declares `supported_quants: &[]` and has no tier loader, so a
+        //     packed tier is bytes nothing would select" — FALSE since the sc-20267 inference change:
+        //     `candle-gen-minimax-h3` now advertises `supported_quants: &[Quant::Q4, Quant::Q8]` and
+        //     ships a real pre-quantized tier loader (a tier resolver plus packed DiT, text-encoder
+        //     and vision loaders). A packed tier IS now selectable off-Mac, which is why the q4/q8
+        //     rows above are no longer `macos`-only. (The REHOST half of that bullet still stands on
+        //     its own: nothing new was published — both lanes read the SAME
+        //     `SceneWorks/minimax-h3-mlx` tiers at the same pinned revision.)
+        //   * "The tiers hold only `transformer/` and `transformer_ref/` — the text encoder and both
+        //     VAEs are NOT in `SceneWorks/minimax-h3-mlx` at all … so a tier loader would buy one
+        //     component of five" — FALSE since sc-19120, which added `q4/text_encoder` and
+        //     `q8/text_encoder` to that very repo. The tier now covers the TWO LARGEST components,
+        //     not one of five: DiT 66.28 GB + text encoder 66.71 GB out of the ~144.6 GB dense
+        //     off-Mac total. The REST of that claim stands — the two VAEs and the tokenizer are
+        //     tier-agnostic, no tier shrinks them, and they still come from upstream, which is
+        //     exactly what the rows below fetch.
+        //   * "blocked on sc-19517: that repo publishes no `q4/transformer_ref` and its
+        //     `bf16/transformer/` is incomplete" — sc-19517 is a RETRACTED PREMISE, not an open
+        //     blocker. `q4/transformer_ref` IS published with an exact hosted byte count
+        //     (18,780,109,783 B) and is declared as the per-tier sibling co-requisite in the sc-19573
+        //     block above. Do not reintroduce it as a dependency of anything.
+        //
         // ⚠️ WHAT THESE ROWS DO **NOT** DO. They make the weights OBTAINABLE off-Mac. They do not
         // by themselves make the lane serve a job, and `VIDEO_MODEL_CAPS` still carries every candle
         // column false for both partitions. TWO preconditions remain, and both are named here so
@@ -13332,10 +13388,39 @@
         // (crates/sceneworks-core/src/jobs_store/tests/mlx_routing_tests.rs) is the guard for the
         // weights half: flip a candle column with no row here and it goes red.
         //
-        // NO `variant` ON ANY OF THESE. The candle provider advertises `supported_quants: &[]`, so
-        // there is no tier axis off-Mac and a `variant` would advertise a choice nothing can honour.
+        // ⚠️ THESE ROWS ARE THE OFF-MAC **bf16** TIER — sc-20267 CORRECTION. They used to say "NO
+        // `variant` ON ANY OF THESE. The candle provider advertises `supported_quants: &[]`, so there
+        // is no tier axis off-Mac and a `variant` would advertise a choice nothing can honour." The
+        // tier axis off-Mac is now real (see the correction above), so the DiT primary and the
+        // `text_encoder` co-requisite below carry an explicit `"variant": "bf16"`. The two VAEs and the
+        // FL2VA config triple stay variant-LESS because they are a floor no tier shrinks — the same
+        // shape as their macOS twins.
+        //
+        // THE TWO SPELLINGS ARE NOT INTERCHANGEABLE, and that is why the labels had to be added rather
+        // than left off (apps/rust-api/src/models.rs):
+        //   * a variant-LESS PRIMARY is the UNTIERED/DEFAULT route, not "applies to every tier":
+        //     `model_download_for_variant` matches `variant` by exact (trimmed, lower-cased) equality,
+        //     so an unlabeled row can never satisfy a tier request, and `model_variant_downloads` keys
+        //     it as the `"default"` pseudo-tier. Once the q4/q8 primaries above became visible off-Mac,
+        //     `model_has_variant_matrix` turned TRUE there — and the Model Manager renders the tier
+        //     panel INSTEAD of the single Download button while `orderedMatrixVariants`
+        //     (apps/web/src/screens/ModelManagerScreen.jsx) drops the `"default"` pseudo-tier from that
+        //     panel. Leaving the primary unlabeled would have made the off-Mac bf16 route
+        //     UNINSTALLABLE through the UI, which is the exact obtainability sc-19558 landed to fix.
+        //     `scail2_14b`'s off-Mac primary is the precedent: it carries `variant: "bf16"` explicitly.
+        //   * a variant-LESS CO-REQUISITE is the opposite — `model_co_requisite_downloads_for_variant`
+        //     returns every unlabeled row for EVERY tier — so an unlabeled `text_encoder` row would
+        //     have added the 66.7 GB dense upstream encoder on top of the packed 18.7 GB q4 one for a
+        //     q4 off-Mac install, and `resolve_co_requisites_for_tier` (which refuses to guess once a
+        //     `componentId` maps to several rows) would have had no row to serve bf16 with at all.
+        // Per OS there is now exactly ONE row per (`componentId`, `variant`), which is the same
+        // pairing invariant the tier-agnostic rows record above.
+        //
         // Sizes are EXACT `os.stat` totals over the pinned snapshot with symlinks dereferenced,
-        // measured 2026-08-15; they sum to 144,633,607,972 B (134.7 GiB).
+        // measured 2026-08-15; they sum to 144,633,607,972 B (134.7 GiB) — the DENSE off-Mac floor,
+        // i.e. what a bf16 install costs. A q4 or q8 install off-Mac now pays the packed DiT + packed
+        // text encoder from `SceneWorks/minimax-h3-mlx` instead of the first two rows here, and still
+        // pays the tier-agnostic VAEs and FL2VA config below.
         //
         // ⚠️ THE METHOD MATTERS, because the first pass got one row wrong. A hub snapshot dir holds
         // repository content as SYMLINKS into `blobs/`; anything else in it is a local dropping.
@@ -13347,6 +13432,11 @@
           "provider": "huggingface",
           "repo": "MiniMaxAI/MiniMax-H3",
           "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          // `variant` added by sc-20267 — this row is the off-Mac bf16 tier, and it is the ONLY bf16
+          // `transformer` candidate off-Mac (the rehost's bf16 row is deliberately still `macos`-only).
+          // See the block preamble for why an unlabeled primary would have made this route
+          // uninstallable once q4/q8 became visible here.
+          "variant": "bf16",
           "files": ["transformer/*"],
           "platforms": ["windows", "linux"],
           "estimatedSizeBytes": 66280569250,
@@ -13356,13 +13446,19 @@
           "provider": "huggingface",
           "repo": "MiniMaxAI/MiniMax-H3",
           "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          // `variant` added by sc-20267, for the co-requisite half of the reason in the block
+          // preamble: an unlabeled co-requisite applies to EVERY tier, so leaving this row unscoped
+          // would have stacked the 66.7 GB dense encoder on top of the packed q4/q8 one now that those
+          // rows are visible off-Mac. bf16 is the tier this component IS.
+          "variant": "bf16",
           "coRequisite": true,
           "componentId": "text_encoder",
           "subdir": "text_encoder",
           // ⚠️ ALL FOURTEEN SHARDS, unlike the macOS bf16 row above, which omits shard 13. That
           // omission is licensed by the MLX engine's own `TE_SHARDS` / `VISION_SHARD` read pattern;
           // no equivalent has been established for `candle-gen-minimax-h3`, so this row fetches the
-          // whole component rather than inheriting a trim it cannot cite.
+          // whole component rather than inheriting a trim it cannot cite. It is also why the rehost's
+          // bf16 DiT row was NOT widened off-Mac: this route is the complete one for candle.
           "files": ["text_encoder/*"],
           "platforms": ["windows", "linux"],
           "estimatedSizeBytes": 66726510529
@@ -13413,14 +13509,21 @@
           "estimatedSizeBytes": 605461455
         }
       ],
-      // ⚠️ NOT PLATFORM-SCOPED, and off-Mac it names a repo with no surviving rows (sc-19558).
-      // `paths` has no `platforms` axis — it is one value per entry — while the off-Mac primary
-      // above is `MiniMaxAI/MiniMax-H3`. On Windows/Linux this therefore points at the MLX rehost,
-      // which those platforms never fetch. INERT TODAY: nothing off-Mac reads it, because the candle
-      // columns in `VIDEO_MODEL_CAPS` are all false and there is no H3 arm in the candle ladder, so
-      // no off-Mac code path resolves this value. Recorded rather than silently left, because the
-      // change that flips a candle column must either scope this key or teach the off-Mac lane to
-      // resolve the upstream snapshot the way `resolve_minimax_h3_load` resolves the macOS one.
+      // ⚠️ NOT PLATFORM-SCOPED, and off-Mac it is now TIER-DEPENDENT rather than simply wrong.
+      // `paths` has no `platforms` axis and no `variant` axis — it is one value per entry.
+      //
+      // sc-19558 recorded this as "off-Mac it names a repo with no surviving rows", which sc-20267
+      // falsified: the q4/q8 DiT and text-encoder rows now survive `retain_downloads_for_os` on
+      // Windows/Linux, so off-Mac a q4 or q8 install DOES populate `SceneWorks/minimax-h3-mlx` and
+      // this value names the right repo for those two tiers. It is still wrong for the off-Mac bf16
+      // tier, whose weights come from `MiniMaxAI/MiniMax-H3`.
+      //
+      // INERT EITHER WAY TODAY: nothing off-Mac reads it, because the candle columns in
+      // `VIDEO_MODEL_CAPS` are all false and there is no H3 arm in the candle ladder, so no off-Mac
+      // code path resolves this value. Recorded rather than silently left, because the change that
+      // flips a candle column must resolve the per-tier root the way `resolve_minimax_h3_load`
+      // resolves the macOS one — a single scalar here cannot express "the rehost at q4/q8, upstream
+      // at bf16", which is precisely the shape the off-Mac rows now have.
       "paths": {
         "model": "${HF_CACHE}/SceneWorks/minimax-h3-mlx"
       },
@@ -13582,13 +13685,21 @@
       //
       // ⚠️ THE DOWNLOADS ARE NO LONGER `macos`-ONLY — sc-19558 added the `platforms:
       // ["windows", "linux"]` raw-snapshot set above, which is the layout this provider's
-      // `REQUIRED_COMPONENT_DIRS` reads. THE ROUTING COLUMNS DID NOT MOVE WITH THEM. A `candle`
-      // block is metadata about a backend; the routing catalog is the authority on which lane serves
-      // a request (GH #2074 — declaration is not reachability), and `VIDEO_MODEL_CAPS` still carries
-      // every candle column false for both partitions because the two open items above — no measured
-      // ceiling, and no candle dispatch arm in `crates/sceneworks-worker/src/video_jobs/
-      // minimax_h3.rs`, which is `#[cfg(target_os = "macos")]` end to end — are unchanged. Obtaining
-      // weights is a precondition of routing, not routing.
+      // `REQUIRED_COMPONENT_DIRS` reads, and sc-20267 then widened the q4/q8 DiT and text-encoder
+      // rows to all three platforms once the provider gained `supported_quants: &[Quant::Q4,
+      // Quant::Q8]` and a packed tier loader. So off-Mac now has a THREE-TIER artifact set, not one.
+      // THE ROUTING COLUMNS DID NOT MOVE WITH EITHER CHANGE. A `candle` block is metadata about a
+      // backend; the routing catalog is the authority on which lane serves a request (GH #2074 —
+      // declaration is not reachability), and `VIDEO_MODEL_CAPS` still carries every candle column
+      // false for both partitions because the two open items above — no measured ceiling, and no
+      // candle dispatch arm in `crates/sceneworks-worker/src/video_jobs/minimax_h3.rs`, which is
+      // `#[cfg(target_os = "macos")]` end to end — are unchanged. Obtaining weights is a precondition
+      // of routing, not routing.
+      //
+      // ⚠️ AND NO `vramGbByTier` EVEN THOUGH THERE ARE NOW TIERS OFF-MAC. A tier axis in the download
+      // set is not a measured ceiling: the probe above still has never run, so the per-tier numbers
+      // this block would need do not exist. sc-20267 deliberately added none — a tier column filled in
+      // from the MLX measurements would be a guess about a different loader.
       "candle": {
         // Provable, and structural rather than requested: the provider pins
         // `OFFLOAD_POLICY = OffloadPolicy::Sequential` and ignores `spec.offload_policy` entirely,
@@ -13918,10 +14029,29 @@
         }
         // NO OFF-MAC ROWS HERE, and that is deliberate rather than an omission (sc-19558).
         // `minimax_h3` gained a `platforms: ["windows", "linux"]` raw-snapshot set because
-        // `candle-gen-minimax-h3` implements t2va + fl2va. This partition is Ref2VA, and the candle
-        // provider DEFAULT-DENIES `ref2va` at its conditioning allowlist until sc-17157 ports
-        // `transformer_ref`, so an off-Mac row here would advertise weights for a mode the only
-        // off-Mac engine refuses. Add the rows in the same change that lands the port, not before.
+        // `candle-gen-minimax-h3` implements t2va + fl2va.
+        //
+        // ⚠️ sc-20267 CORRECTION — THE ORIGINAL REASON IS STALE AND MUST NOT BE RESTATED. It read:
+        // "the candle provider DEFAULT-DENIES `ref2va` at its conditioning allowlist until sc-17157
+        // ports `transformer_ref`, so an off-Mac row here would advertise weights for a mode the only
+        // off-Mac engine refuses." sc-17157 LANDED (inference `32204c935`, "port Ref2VA multi-modal
+        // references to candle") and is an ancestor of the revision this repository pins, so the
+        // pinned candle engine advertises ALL THREE reference conditioning kinds — `Reference`,
+        // `ReferenceVideo` and `ReferenceAudio` — in its descriptor's allowlist. There is no engine
+        // refusal to cite.
+        //
+        // WHAT ACTUALLY KEEPS THE OFF-MAC ROWS ABSENT TODAY, both of which are about this repository
+        // rather than the engine:
+        //   1. every `transformer_ref` row is `macos`-ONLY — this entry's three primaries and the three
+        //      sibling co-requisites on `minimax_h3` alike — and they all live in
+        //      `SceneWorks/minimax-h3-mlx`, while the off-Mac bf16 route reads raw upstream. So
+        //      declaring an off-Mac Ref2VA set means first deciding which route serves `transformer_ref`
+        //      at which tier off-Mac. That platform split is sc-19573's concern; sc-20267 widened only
+        //      the base `transformer` tiers and deliberately left every `transformer_ref` row alone; and
+        //   2. there is still no candle dispatch arm — `crates/sceneworks-worker/src/video_jobs/
+        //      minimax_h3.rs` is `#[cfg(target_os = "macos")]` end to end — and this entry still has no
+        //      measured off-Mac VRAM ceiling of its own.
+        // Add the rows in the same change that resolves those two, not before.
       ],
       "paths": {
         "model": "${HF_CACHE}/SceneWorks/minimax-h3-mlx"
@@ -13980,21 +14110,33 @@
           "schedulers": ["default"]
         }
       },
-      // sc-17156 — NO `candle` block HERE, and unlike `minimax_h3` the reason is a REFUSAL IN CODE
-      // rather than a missing measurement.
+      // NO `candle` block HERE — and as of sc-20267 the reason is the SAME KIND as `minimax_h3`'s (a
+      // missing measurement plus a missing dispatch arm), not a different kind.
       //
-      // `minimax_h3` got a `candle` block because a candle generator for that partition exists and
-      // merely lacks a measured ceiling. This partition is different in kind: the candle provider
-      // serves the `transformer` checkpoint only, and `ref2va` is DEFAULT-DENIED at the descriptor's
-      // conditioning allowlist — `Reference`, `ReferenceVideo` and `ReferenceAudio` are deliberately
-      // absent, so `Capabilities::validate_request` turns a reference request into a typed
-      // `Unsupported` naming the kind. There is no candle code path that can render this entry, so a
-      // `candle` block would be advertising a lane that the provider actively rejects.
+      // ⚠️ sc-20267 CORRECTION — WHAT THIS COMMENT USED TO CLAIM IS FACTUALLY FALSE AGAINST THE PIN.
+      // sc-17156 wrote that the reason was "a REFUSAL IN CODE rather than a missing measurement":
+      // that the candle provider "serves the `transformer` checkpoint only", that `ref2va` is
+      // "DEFAULT-DENIED at the descriptor's conditioning allowlist — `Reference`, `ReferenceVideo` and
+      // `ReferenceAudio` are deliberately absent", and that `Capabilities::validate_request` therefore
+      // turns a reference request into a typed `Unsupported`. sc-17157 landed that port (inference
+      // `32204c935`, "port Ref2VA multi-modal references to candle": the `transformer_ref` partition,
+      // the omni-reference presentation and the audio VAE encoder) and it is an ANCESTOR of the
+      // revision this repository pins — so the pinned candle engine advertises all three reference
+      // conditioning kinds and there is no refusal to point at. The old text is quoted rather than
+      // deleted because it is cited elsewhere as the reason this entry has no candle surface; anyone
+      // who finds that citation should land here and stop.
       //
-      // sc-17157 ports the `transformer_ref` partition, the omni-reference presentation and the
-      // audio VAE encoder. That is the story that earns this entry a `candle` block — and it needs
-      // its own VRAM measurement when it lands, not a copy of `minimax_h3`'s, because the reference
-      // presentation adds an encode stage the base partition never runs.
+      // THE HONEST CURRENT REASON, and it is exactly two things:
+      //   1. NO MEASURED VRAM CEILING for this entry on the candle lane. It needs its own, not a copy
+      //      of `minimax_h3`'s, because the reference presentation adds an encode stage the base
+      //      partition never runs — and `minimax_h3`'s own candle block still carries `measured: false`
+      //      for a probe that has never been executed, so there is nothing to copy even if copying
+      //      were sound; and
+      //   2. NO CANDLE DISPATCH ARM — `crates/sceneworks-worker/src/video_jobs/minimax_h3.rs` is
+      //      `#[cfg(target_os = "macos")]` end to end for BOTH partitions.
+      // Neither is a statement about what the engine can do; both are about what this repository can
+      // yet prove and route. See also the trailing note in `downloads` above for why this entry
+      // declares no off-Mac rows.
       "ui": {
         "label": "MiniMax-H3 References",
         // §IV.2 attribution, same as `minimax_h3` — see that entry for the citation (sc-17227).
