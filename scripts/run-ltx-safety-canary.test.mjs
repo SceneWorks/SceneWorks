@@ -18,6 +18,7 @@ import {
   MIN_PREFLIGHT_FREE_BYTES,
   MIN_RUNTIME_FREE_BYTES,
   PREPARATION_SCHEMA_VERSION,
+  PRODUCT_ENVELOPE_CANARY_PROFILE,
   acquirePreparationLock,
   canaryWatchdogEnvironment,
   canaryRequest,
@@ -128,7 +129,7 @@ test("the runner freezes the exact tiny bounded-decode canary", () => {
     decodeTileEdge: 192, decodeOverlap: 64,
   });
   assert.deepEqual(request.planned._canary, {
-    videoMode: "no_audio", fps: 24, seed: 1234,
+    identity: "sc-19741-safety", videoMode: "no_audio", fps: 24, seed: 1234,
   });
   assert.equal(request.planned._watchdog.maxFootprintBytes, 53_347_146_863);
   assert.deepEqual(request.planned._artifact.numericTierInventory, {
@@ -137,6 +138,27 @@ test("the runner freezes the exact tiny bounded-decode canary", () => {
     sha256: "4e811932e87bb258f642ada790525e36ef2a55959c520e755f1807caf6fa225a",
   });
   assert.throws(() => canaryRequest(128 * 1024 ** 3));
+});
+
+test("the runner freezes the distinct full-A/V product-envelope canary", () => {
+  const request = canaryRequest(
+    128 * 1024 ** 3, TEXT_ENCODER_INVENTORY, PRODUCT_ENVELOPE_CANARY_PROFILE,
+  );
+  assert.equal(request.action, "product_envelope_canary");
+  assert.equal(request.planned.fixture,
+    "ltx-2-3-mlx-q4-768x512-f97-fps24-seed1234-product-envelope-canary");
+  assert.deepEqual(request.planned.target.geometry, {
+    width: 768, height: 512, batch: 1, frames: 97,
+  });
+  assert.deepEqual(request.planned._canary, {
+    identity: "sc-20169-product-envelope", videoMode: "default_av", fps: 24, seed: 1234,
+  });
+  assert.deepEqual(request.planned.strategy.parameters, {
+    decodeTileEdge: 192, decodeOverlap: 64,
+  });
+  assert.throws(() => canaryRequest(
+    128 * 1024 ** 3, TEXT_ENCODER_INVENTORY, "campaign",
+  ), /unsupported canary profile/);
 });
 
 test("private artifact clones preserve the canonical immutable snapshot roots", async () => {
@@ -163,6 +185,7 @@ test("private artifact clones preserve the canonical immutable snapshot roots", 
 test("the runner refuses promotable or identity-drifted adapter output", () => {
   const response = {
     status: "diagnostic_canary_complete",
+    canaryIdentity: "sc-19741-safety",
     inferenceRevision: "6f3a84ef4ad4f858c6fe199e14925a01a7943f97",
     diagnosticOnly: true,
     promotable: false,
@@ -172,6 +195,7 @@ test("the runner refuses promotable or identity-drifted adapter output", () => {
       provider: "ltx_2_3",
       tier: "q4",
       geometry: { width: 256, height: 256, frames: 9, fps: 24 },
+      videoMode: "no_audio",
       audio: false,
     },
     artifact: {
@@ -195,6 +219,7 @@ test("the runner refuses promotable or identity-drifted adapter output", () => {
       rung: "bounded_decode",
       engagedRungs: ["resident", "staged_residency", "bounded_decode"],
       parameters: { decodeTileEdge: 192, decodeOverlap: 64 },
+      spatialDecodeTiles: 4,
     },
     watchdog: {
       required: true,
@@ -212,6 +237,10 @@ test("the runner refuses promotable or identity-drifted adapter output", () => {
     observedMemory: {
       preProviderActiveBytes: 0,
       preProviderCacheBytes: 0,
+      conditioning: { activeBytes: 10, reclaimableBytes: 2, allocatorBytes: 12 },
+      denoise: { activeBytes: 20, reclaimableBytes: 3, allocatorBytes: 23 },
+      decode: { activeBytes: 30, reclaimableBytes: 4, allocatorBytes: 34 },
+      peakActiveBytes: 30,
       expectedPersistentActive: {
         identity: "mlx-gen-ltx-transformer-ones-cache-av-bfloat16-v1",
         videoDimension: 4_096,
@@ -223,7 +252,13 @@ test("the runner refuses promotable or identity-drifted adapter output", () => {
       postCleanupActiveBytes: (4_096 + 2_048) * 2,
       postCleanupCacheBytes: 0,
     },
-    output: { firstFrameNondegenerate: true },
+    output: {
+      frames: 9,
+      fps: 24,
+      audio: { present: false, samples: 0, sampleRate: 0, channels: 0 },
+      frameTimelineSeconds: 1 / 3,
+      firstFrameNondegenerate: true,
+    },
   };
   assert.deepEqual(
     validateCanaryResponse(
@@ -247,6 +282,8 @@ test("the runner refuses promotable or identity-drifted adapter output", () => {
     (value) => { value.watchdog.minMemoryFreeBytes -= 1; },
     (value) => { value.watchdog.minSwapFreeBytes = 1024 ** 3; },
     (value) => { value.mlxLimits.wiredLimitBytes = MAX_FOOTPRINT_BYTES + 1; },
+    (value) => { value.observedMemory.decode.allocatorBytes += 1; },
+    (value) => { value.observedMemory.peakActiveBytes -= 1; },
     (value) => { value.output.firstFrameNondegenerate = false; },
     (value) => { value.inferenceRevision = "0".repeat(40); },
     (value) => { value.artifact.resolvedRevision = "0".repeat(40); },
@@ -324,6 +361,118 @@ test("the runner refuses promotable or identity-drifted adapter output", () => {
       changed, response.inferenceRevision, TEXT_ENCODER_INVENTORY,
       response.watchdog.hostMemoryBytes,
     ), expected);
+  }
+});
+
+test("the runner requires exact non-ingestible full-A/V product-envelope evidence", () => {
+  const hostMemoryBytes = 128 * 1024 ** 3;
+  const response = {
+    status: "diagnostic_product_envelope_canary_complete",
+    canaryIdentity: "sc-20169-product-envelope",
+    inferenceRevision: "6f3a84ef4ad4f858c6fe199e14925a01a7943f97",
+    diagnosticOnly: true,
+    promotable: false,
+    ingestible: false,
+    calibrationFingerprint: "sc-19109-ltx-2-3-mlx-memory-ladder-v1",
+    target: {
+      provider: "ltx_2_3",
+      tier: "q4",
+      geometry: { width: 768, height: 512, frames: 97, fps: 24 },
+      videoMode: "default_av",
+      audio: true,
+    },
+    artifact: {
+      repository: "SceneWorks/ltx-2.3-mlx",
+      resolvedRevision: "01df27d308466533aa09d251e3aebdcc627d07eb",
+      numericTierInventory: {
+        files: 11,
+        bytes: 20_467_690_460,
+        sha256: "4e811932e87bb258f642ada790525e36ef2a55959c520e755f1807caf6fa225a",
+      },
+      textEncoderInventory: { ...TEXT_ENCODER_INVENTORY },
+    },
+    strategy: {
+      rung: "bounded_decode",
+      engagedRungs: ["resident", "staged_residency", "bounded_decode"],
+      parameters: { decodeTileEdge: 192, decodeOverlap: 64 },
+      spatialDecodeTiles: 24,
+    },
+    watchdog: {
+      required: true,
+      protocol: "sceneworks-memory-watchdog-v1",
+      maxFootprintBytes: MAX_FOOTPRINT_BYTES,
+      maxRuntimeSeconds: MAX_RUNTIME_SECONDS,
+      hostMemoryBytes,
+      minInitialMemoryFreeBytes: preflightFreeFloor(hostMemoryBytes),
+      minMemoryFreeBytes: runtimeFreeFloor(hostMemoryBytes),
+    },
+    mlxLimits: {
+      memoryLimitBytes: MAX_FOOTPRINT_BYTES,
+      wiredLimitBytes: MAX_FOOTPRINT_BYTES,
+    },
+    observedMemory: {
+      preProviderActiveBytes: 0,
+      preProviderCacheBytes: 0,
+      conditioning: { activeBytes: 10, reclaimableBytes: 2, allocatorBytes: 12 },
+      denoise: { activeBytes: 20, reclaimableBytes: 3, allocatorBytes: 23 },
+      decode: { activeBytes: 30, reclaimableBytes: 4, allocatorBytes: 34 },
+      peakActiveBytes: 30,
+      expectedPersistentActive: {
+        identity: "mlx-gen-ltx-transformer-ones-cache-av-bfloat16-v1",
+        videoDimension: 4_096,
+        audioDimension: 2_048,
+        dtype: "bfloat16",
+        bytesPerElement: 2,
+        bytes: 12_288,
+      },
+      postCleanupActiveBytes: 12_288,
+      postCleanupCacheBytes: 0,
+    },
+    output: {
+      frames: 97,
+      fps: 24,
+      audio: { present: true, samples: 192_000, sampleRate: 48_000, channels: 2 },
+      frameTimelineSeconds: 4,
+      firstFrameNondegenerate: true,
+    },
+  };
+  assert.deepEqual(validateCanaryResponse(
+    structuredClone(response), response.inferenceRevision, TEXT_ENCODER_INVENTORY,
+    hostMemoryBytes, PRODUCT_ENVELOPE_CANARY_PROFILE,
+  ), response);
+
+  const mutations = [
+    (value) => { value.status = "diagnostic_canary_complete"; },
+    (value) => { value.canaryIdentity = "sc-19741-safety"; },
+    (value) => { value.promotable = true; },
+    (value) => { value.ingestible = true; },
+    (value) => { value.target.geometry.width = 256; },
+    (value) => { value.target.geometry.height = 768; },
+    (value) => { value.target.geometry.frames = 89; },
+    (value) => { value.target.geometry.fps = 30; },
+    (value) => { value.target.videoMode = "no_audio"; },
+    (value) => { value.target.audio = false; },
+    (value) => { value.output.audio.present = false; },
+    (value) => { value.output.audio.samples = 0; },
+    (value) => { value.output.audio.sampleRate = 0; },
+    (value) => { value.output.audio.channels = 0; },
+    (value) => { value.output.frameTimelineSeconds = 97 / 24; },
+    (value) => { value.strategy.parameters.decodeTileEdge = 384; },
+    (value) => { value.strategy.spatialDecodeTiles = 1; },
+    (value) => { value.strategy.spatialDecodeTiles = 23; },
+    (value) => { value.watchdog.maxFootprintBytes -= 1; },
+    (value) => { value.mlxLimits.memoryLimitBytes -= 1; },
+    (value) => { value.observedMemory.peakActiveBytes -= 1; },
+    (value) => { value.observedMemory.postCleanupActiveBytes += 1; },
+    (value) => { value.artifact.numericTierInventory.sha256 = "0".repeat(64); },
+  ];
+  for (const mutate of mutations) {
+    const changed = structuredClone(response);
+    mutate(changed);
+    assert.throws(() => validateCanaryResponse(
+      changed, response.inferenceRevision, TEXT_ENCODER_INVENTORY,
+      hostMemoryBytes, PRODUCT_ENVELOPE_CANARY_PROFILE,
+    ));
   }
 });
 
