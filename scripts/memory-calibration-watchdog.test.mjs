@@ -352,6 +352,9 @@ test("authenticated provider phases are exact, monotonic and bound to terminal e
     "lifecycle_warm_repeat", "lifecycle_cancel", "lifecycle_cancel_recovery",
     "lifecycle_error", "lifecycle_error_recovery", "cleanup",
   ];
+  const telemetryTimeoutSeconds = 0.5;
+  // Bound startup, each serialized phase/ACK barrier, and completion independently.
+  const maxRuntimeSeconds = (phases.length + 2) * telemetryTimeoutSeconds;
   await writeFile(attester, String.raw`import json, os, socket
 sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 sock.connect(os.environ["SCENEWORKS_MEMORY_WATCHDOG_SOCKET"])
@@ -377,9 +380,20 @@ while True:
     if message == f"BYE {nonce}": break
     assert message == f"PING {nonce}"
 `);
-  await runWithMockedProductionTelemetry(files, ["python3", attester], {
-    requireProviderPhases: true,
-  });
+  try {
+    await runWithMockedProductionTelemetry(files, ["python3", attester], {
+      requireProviderPhases: true,
+      maxRuntimeSeconds,
+    });
+  } catch (error) {
+    const events = (await readFile(files.events, "utf8").catch(() => "")).trim()
+      .split("\n").filter(Boolean).map(JSON.parse);
+    const hardStops = events.filter((event) => event.event === "hard_stop")
+      .map((event) => event.reason);
+    assert.fail(
+      `provider-phase watchdog unexpectedly exited ${error.code}; hard_stop=${JSON.stringify(hardStops)}; events=${JSON.stringify(events)}`,
+    );
+  }
   const events = (await readFile(files.events, "utf8")).trim().split("\n").map(JSON.parse);
   const markers = events.filter((event) => event.event === "provider_phase");
   assert.deepEqual(markers.map((event) => event.providerPhase.name), phases);
@@ -398,6 +412,7 @@ while True:
     assert.equal(events[index].previousEventHash, events[index - 1].eventHash);
   }
   assert.ok(events.every((event) => /^[0-9a-f]{64}$/.test(event.eventHash)));
+  assert.equal(events.some((event) => event.event === "hard_stop"), false);
   validateWatchdogEventChain(events);
 });
 
