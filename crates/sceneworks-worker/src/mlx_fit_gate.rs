@@ -9345,17 +9345,25 @@ mod tests {
         /// A proposal in the exact state the cache seam produces for a granted switch: loaded
         /// resident/eager, request asking for staged/deferred, snapshot directory, contract implements
         /// staging.
-        fn granted_proposal(&self) -> crate::execution_planner::WarmPolicyProposal {
-            let loaded = crate::generator_cache::ExecutionPolicy {
+        fn loaded_policy(&self) -> crate::generator_cache::ExecutionPolicy {
+            crate::generator_cache::ExecutionPolicy {
                 offload_policy: OffloadPolicy::Resident,
                 load_shape: gen_core::LoadShape::EagerMaterialization,
                 load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
-            };
-            let requested = crate::generator_cache::ExecutionPolicy {
+            }
+        }
+
+        fn requested_policy(&self) -> crate::generator_cache::ExecutionPolicy {
+            crate::generator_cache::ExecutionPolicy {
                 offload_policy: OffloadPolicy::Sequential,
                 load_shape: gen_core::LoadShape::DeferredMaterialization,
                 load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
-            };
+            }
+        }
+
+        fn granted_proposal(&self) -> crate::execution_planner::WarmPolicyProposal {
+            let loaded = self.loaded_policy();
+            let requested = self.requested_policy();
             let decision = crate::execution_planner::decide_warm_policy(
                 loaded,
                 requested,
@@ -9591,6 +9599,55 @@ mod tests {
         assert_eq!(
             staged_items, 4,
             "the grant must apply to every item of the job, not only the reporting one"
+        );
+    }
+
+    /// The same one-event property, driven the way the POSE-control lane drives it.
+    ///
+    /// Review cycle 3 caught `generate_krea_imported_control_stream` still passing the bare `Copy`
+    /// proposal per pose inside `drive_gen_items_scored`, so a multi-pose warm job emitted N duplicate
+    /// warn events. Flooring was already correct there; only the reporting was wrong. This covers the
+    /// per-pose shape — an odd item count, and the refusing decision whose event is a warn rather than
+    /// an info, since duplicated warns were the actual complaint.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_multi_pose_job_emits_one_event_even_when_the_decision_is_a_refusal() {
+        let fixture = SdxlSelectorFixture::new();
+        let capture = EventCapture::install();
+        // A refusal, not a grant: an imported single-file source cannot re-open its components.
+        let refused = crate::execution_planner::WarmPolicyProposal::new(
+            "sdxl",
+            crate::execution_planner::decide_warm_policy(
+                fixture.loaded_policy(),
+                fixture.requested_policy(),
+                crate::execution_planner::SourceReopenability::SingleFileNotReopenable,
+                crate::execution_planner::StagingAttestation::Implemented,
+            ),
+            fixture.loaded_policy(),
+            fixture.requested_policy(),
+            crate::execution_planner::SourceReopenability::SingleFileNotReopenable,
+            crate::execution_planner::StagingAttestation::Implemented,
+        );
+        let mut warm_policy = crate::execution_planner::WarmPolicyOnce::new(refused);
+        for _ in 0..3 {
+            fixture
+                .evaluate(
+                    OffloadPolicy::Resident,
+                    warm_policy.take(),
+                    fixture_budget(20.0),
+                )
+                .expect("a refused switch must still serve every pose");
+        }
+        let text = capture.text();
+        assert_eq!(
+            text.matches("generator_cache_warm_policy_decision").count(),
+            1,
+            "three poses, one warm hit, one event: {text:?}"
+        );
+        assert!(
+            text.contains("decision=\"refused_switch\"")
+                && text.contains("reason=\"source_not_reopenable\""),
+            "the one event must carry the refusal: {text:?}"
         );
     }
 

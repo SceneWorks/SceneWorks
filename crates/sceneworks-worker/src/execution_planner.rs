@@ -1089,14 +1089,59 @@ mod tests {
 
     #[test]
     fn every_outcome_reports_a_distinct_stable_reason() {
-        let all = [
+        // EXHAUSTIVE over both reason enums. The `match` below has no wildcard, so adding a variant
+        // without listing it here is a compile error rather than a silently untested outcome — which is
+        // what let five variants added across review cycles go unenumerated.
+        fn served_as_is_variants() -> [ServedAsIsReason; 7] {
+            let all = [
+                ServedAsIsReason::DeclarationAuthorityOnly,
+                ServedAsIsReason::LoadedPolicyBoundsThePeak,
+                ServedAsIsReason::LoadedContractDoesNotImplementStaging,
+                ServedAsIsReason::NoStagedCandidateForThisRequest,
+                ServedAsIsReason::StagedCandidateDidNotFit,
+                ServedAsIsReason::SelectionAlreadyStaged,
+                ServedAsIsReason::RouteHasNoRequestScopedMemory,
+            ];
+            for reason in all {
+                // Exhaustiveness anchor: extend `all` (and the array length) when a variant is added.
+                match reason {
+                    ServedAsIsReason::DeclarationAuthorityOnly
+                    | ServedAsIsReason::LoadedPolicyBoundsThePeak
+                    | ServedAsIsReason::LoadedContractDoesNotImplementStaging
+                    | ServedAsIsReason::NoStagedCandidateForThisRequest
+                    | ServedAsIsReason::StagedCandidateDidNotFit
+                    | ServedAsIsReason::SelectionAlreadyStaged
+                    | ServedAsIsReason::RouteHasNoRequestScopedMemory => {}
+                }
+            }
+            all
+        }
+        fn refusal_variants() -> [RefusalReason; 2] {
+            let all = [
+                RefusalReason::SourceNotReopenable,
+                RefusalReason::NoExecutionSeamForLoadShapeAlone,
+            ];
+            for reason in all {
+                match reason {
+                    RefusalReason::SourceNotReopenable
+                    | RefusalReason::NoExecutionSeamForLoadShapeAlone => {}
+                }
+            }
+            all
+        }
+
+        let mut all = vec![
             WarmPolicyDecision::Unchanged,
-            WarmPolicyDecision::ServedAsIs(ServedAsIsReason::DeclarationAuthorityOnly),
-            WarmPolicyDecision::ServedAsIs(ServedAsIsReason::LoadedPolicyBoundsThePeak),
-            WarmPolicyDecision::ServedAsIs(ServedAsIsReason::LoadedContractDoesNotImplementStaging),
             WarmPolicyDecision::Rematerialized,
-            WarmPolicyDecision::RefusedSwitch(RefusalReason::SourceNotReopenable),
         ];
+        all.extend(served_as_is_variants().map(WarmPolicyDecision::ServedAsIs));
+        all.extend(refusal_variants().map(WarmPolicyDecision::RefusedSwitch));
+        assert_eq!(
+            all.len(),
+            11,
+            "every decision outcome must be enumerated here"
+        );
+
         let reasons: std::collections::BTreeSet<&str> =
             all.iter().map(|decision| decision.reason()).collect();
         assert_eq!(
@@ -1111,9 +1156,30 @@ mod tests {
             1,
             "exactly one outcome may execute the requested policy"
         );
-        for decision in all {
+        for decision in &all {
             assert!(!decision.label().is_empty() && !decision.reason().is_empty());
+            // The reason is a stable log token: snake_case, no whitespace, so a log filter written
+            // against it keeps working.
+            let reason = decision.reason();
+            assert!(
+                reason.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+                "{reason:?} is not a stable snake_case token"
+            );
         }
+        // Labels partition the outcomes into the three the docs describe.
+        let labels: std::collections::BTreeSet<&str> =
+            all.iter().map(|decision| decision.label()).collect();
+        assert_eq!(
+            labels,
+            [
+                "rematerialized",
+                "refused_switch",
+                "served_as_is",
+                "unchanged"
+            ]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
+        );
     }
 
     #[test]
