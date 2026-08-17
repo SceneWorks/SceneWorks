@@ -591,7 +591,13 @@ fn create_confined_output(root: &Path, relative: &Path) -> Result<File, Resolved
 
     let (parent, file_name) = windows_confined_parent(root, relative, true)?;
     let mut options = fs_at::OpenOptions::default();
+    // read(true) is required for the post-copy destination verification: fs_at requests the
+    // exact rights implied by its options (no generic mapping), and a write-only handle
+    // (FILE_GENERIC_WRITE | SYNCHRONIZE) lacks FILE_READ_ATTRIBUTES, so `File::metadata` on it
+    // fails with ERROR_ACCESS_DENIED. This was the single native publication failure: every
+    // staged copy died at `inspect staged file`, before any flush or rename ran.
     options
+        .read(true)
         .follow(false)
         .write(OpenOptionsWriteMode::Write)
         .create_new(true);
