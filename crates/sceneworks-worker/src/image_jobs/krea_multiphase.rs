@@ -438,6 +438,37 @@ fn krea_multiphase_generate_one(
     }
 }
 
+/// The `LoadSpec::quantize` this lane hands the engine, per backend.
+///
+/// A named function rather than an inline `cfg` split because the two arms silently diverged once
+/// already: the candle arm used to hardcode `None`, dropping the job's requested tier on the floor
+/// where the sibling `krea_edit.rs` candle arm forwards it. Tier is a whole-pipeline contract — q4
+/// means q4 for every segment — so the lane must not decide the tier behind the engine's back.
+///
+/// * **macOS/MLX** delegates to [`mlx_load_quant_for_resolved_artifact`], which maps the request to
+///   what the RESOLVED per-tier artifact actually needs (the MLX turnkeys ship pre-quantized, so a
+///   packed tier resolves to a `None` load quant on purpose).
+/// * **Candle** forwards the request unchanged, matching `krea_edit.rs`. At pin 931366f62,
+///   `candle-gen-krea`'s `actual_quant_tier` ignores `spec.quantize` entirely for a
+///   `WeightsSource::Dir` spec (the builtin per-tier turnkey — the tier IS the staged directory), so
+///   this is inert for the catalog path. It is load-bearing for an imported `WeightsSource::File`
+///   native checkpoint: there, `(companion = Some(tier), requested = None)` is a hard
+///   `Unsupported` — "no quant request, but its companion snapshot is packed" — so hardcoding `None`
+///   made a legitimate matching-tier multi-phase request unrunnable while telling the user to
+///   "request the matching tier" they had already requested. `spec.quantize` Q4/Q8 is documented
+///   ACCEPTED by that provider (inference sc-9607).
+fn multiphase_load_quant(engine_id: &str, quant: Option<Quant>) -> Option<Quant> {
+    #[cfg(target_os = "macos")]
+    {
+        mlx_load_quant_for_resolved_artifact(engine_id, quant)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = engine_id;
+        quant
+    }
+}
+
 /// Real multi-phase generation (epic 13879 S4, sc-13884): validate the job shape + phase list, resolve
 /// the RAW weights + tier + the job's LoRA stack (the SAME stack the phases reference by index), load
 /// the `krea_2_raw` ENGINE (the multi-phase driver keys on its descriptor id), and drive one output per
@@ -472,12 +503,6 @@ async fn generate_krea_multiphase_stream(
     let engine_id = raw_model.engine_id();
 
     let (quant, quant_bits) = resolve_quant(request, Some(&weights_dir));
-    // `quant` feeds the macOS resolved-artifact tier mapping below. The candle arm of that same cfg
-    // split hardcodes `load_quant = None` rather than passing `quant` through the way the sibling
-    // `krea_edit.rs` candle arm does, so the binding has no candle-lane reader. Kept as an explicit
-    // discard so the divergence stays visible instead of being hidden behind an `_quant` rename.
-    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let _ = quant;
     // The SAME adapter stack the phases reference by index: `resolve_adapters` emits one `AdapterSpec`
     // per `request.loras` entry, in order, so `LoadSpec::adapters[i]` is `request.loras[i]` and a
     // phase's lora `index` selects it directly.
@@ -518,10 +543,7 @@ async fn generate_krea_multiphase_stream(
 
     let (width, height) = (request.width, request.height);
     let adapter_count = adapters.len();
-    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let load_quant = None;
-    #[cfg(target_os = "macos")]
-    let load_quant = mlx_load_quant_for_resolved_artifact(engine_id, quant);
+    let load_quant = multiphase_load_quant(engine_id, quant);
     let mut spec = attach_selected_decoder(
         load_spec(weights_dir.clone(), load_quant, adapters, None)
             .with_resolved_route(request.model.clone()),

@@ -9721,6 +9721,40 @@ fn request_has_multiphase_detects_presence() {
     );
 }
 
+// The multi-phase lane must never decide the tier behind the engine's back — tier is a
+// whole-pipeline contract, so a q4 job is q4 for every segment. The candle arm of this lane used to
+// hardcode `LoadSpec::quantize = None` while the sibling `krea_edit.rs` candle arm forwarded the
+// request, which made an imported native checkpoint's matching-tier multi-phase request unrunnable
+// (`candle-gen-krea`'s `actual_quant_tier` hard-rejects `companion packed / no request`). These two
+// tests pin BOTH arms of `multiphase_load_quant` so the arms cannot silently diverge again; the
+// candle assertion first RUNS on the windows-candle lane, which is the only place that cfg compiles.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_multiphase_forwards_the_requested_tier_to_the_engine() {
+    for requested in [None, Some(Quant::Q4), Some(Quant::Q8)] {
+        assert_eq!(
+            multiphase_load_quant("krea_2_raw", requested),
+            requested,
+            "the candle multi-phase arm must hand the engine the tier the job asked for"
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn mlx_multiphase_defers_the_tier_to_the_resolved_artifact_mapping() {
+    // Not a tautology: it pins that this lane routes through the SHARED mapping rather than growing
+    // its own opinion. The MLX turnkeys ship pre-quantized, so the mapping deliberately collapses a
+    // packed request to a `None` load quant — the divergence this asserts against is a future edit
+    // that bypasses the mapping, which is exactly how the candle arm drifted.
+    for requested in [None, Some(Quant::Q4), Some(Quant::Q8)] {
+        assert_eq!(
+            multiphase_load_quant("krea_2_raw", requested),
+            mlx_load_quant_for_resolved_artifact("krea_2_raw", requested)
+        );
+    }
+}
+
 // A valid `advanced.phases` parses into the SceneWorks plan with concrete steps / guidance / lora
 // selectors, and `build_generation_phases` maps that plan to gen-core `phases` VERBATIM — each phase's
 // lora `index` becomes `PhaseAdapter.adapter` (the index into `LoadSpec::adapters`), `weight`/`steps`/
