@@ -261,17 +261,30 @@ pub fn unique_local_snapshot(repository: &str) -> Option<(String, PathBuf)> {
 pub fn redirect_source_library_path(source_library_root: &Path, path: &Path) -> Option<PathBuf> {
     let active = lock_active();
     for entry in &active.entries {
-        let safe = safe_repository_dir(&entry.repository).ok()?;
+        let Ok(safe) = safe_repository_dir(&entry.repository) else {
+            continue;
+        };
         let source_snapshot = source_library_root
             .join(format!("models--{safe}"))
             .join("snapshots")
             .join(&entry.revision);
-        let Ok(relative) = path.strip_prefix(&source_snapshot) else {
-            continue;
-        };
-        let redirected = entry.snapshot_root.join(relative);
-        if redirected.exists() {
-            return Some(redirected);
+        // Both the lexical and the canonical form of the source snapshot: callers hand over paths
+        // that have already been confined (canonicalized), while the configured library root is
+        // whatever the environment named — on macOS those differ for any `/var`-style symlink.
+        let mut prefixes = vec![source_snapshot.clone()];
+        if let Ok(canonical) = std::fs::canonicalize(&source_snapshot) {
+            if canonical != source_snapshot {
+                prefixes.push(canonical);
+            }
+        }
+        for prefix in prefixes {
+            let Ok(relative) = path.strip_prefix(&prefix) else {
+                continue;
+            };
+            let redirected = entry.snapshot_root.join(relative);
+            if redirected.exists() {
+                return Some(redirected);
+            }
         }
     }
     None

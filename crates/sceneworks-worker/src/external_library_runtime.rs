@@ -21,7 +21,7 @@
 //! volume — an engine defect while the source remains available is preserved verbatim, and a raw
 //! loader ENOENT is never what a disconnect surfaces as.
 
-use crate::{JsonObject, Settings, WorkerError, WorkerResult};
+use crate::{emit_event_value, JsonObject, Settings, WorkerError, WorkerResult};
 use sceneworks_core::contracts::JobType;
 use sceneworks_core::model_artifacts::artifact_selection::{
     requested_runtime_variant, selected_requirements_for_model,
@@ -29,11 +29,27 @@ use sceneworks_core::model_artifacts::artifact_selection::{
 use sceneworks_core::model_artifacts::external_library::{
     resolve_model_availability, ExternalSourceSession, ModelAvailability, ModelResolution,
 };
+use sceneworks_core::model_artifacts::local_preference::ActiveLocalArtifacts;
+use sceneworks_core::model_artifacts::resolved_cache::{ResolvedCacheLease, ResolvedCacheStore};
+use sceneworks_core::model_artifacts::{
+    ArtifactSourceLibrary, ModelArtifactResolver, ResolvedModelArtifact,
+};
+use serde_json::json;
+use tracing::Level;
 
 #[derive(Debug)]
 pub(crate) struct RuntimeSourceGuard {
     resolutions: Vec<ModelResolution>,
     sessions: Vec<ExternalSourceSession>,
+    /// The process-wide local-tier preference scopes, one per locally served artifact. Declared
+    /// BEFORE the leases so field drop order stops serving local paths first and only then
+    /// releases the leases protecting those bytes — the reverse of acquisition.
+    local_scopes: Vec<ActiveLocalArtifacts>,
+    /// Cross-process cache leases (one per locally served artifact) held for the whole job. Each
+    /// holds the entry's shared artifact lock, so an evictor taking that lock exclusively — even
+    /// non-blockingly, and even when it re-verifies under the lock — cannot remove bytes a load is
+    /// reading. Released on drop; `finish_success` crosses the promotion boundary first.
+    cache_leases: Vec<ResolvedCacheLease>,
 }
 
 impl RuntimeSourceGuard {
@@ -56,10 +72,7 @@ impl RuntimeSourceGuard {
         let model_free_dry_run = matches!(job_type, JobType::LoraTrain | JobType::ControlTraining)
             && payload.get("dryRun").and_then(serde_json::Value::as_bool) == Some(true);
         if explicit_download || model_free_dry_run {
-            return Ok(Self {
-                resolutions: Vec::new(),
-                sessions: Vec::new(),
-            });
+            return Ok(Self::none());
         }
 
         let model_entries = payload_model_entries(payload);
@@ -77,7 +90,14 @@ impl RuntimeSourceGuard {
         let configured_library = sceneworks_core::hf_home::model_source_library(&settings.data_dir)
             .root()
             .to_path_buf();
+        // Every VALID app-owned bundle, read once for this job. Empty when the resolved cache is
+        // disabled or uninitialized, and — by construction of the provider — never containing an
+        // entry that is torn, unverifiable, or in a shape the runtime cannot serve, so a partial
+        // local copy can only ever move the load back to the source tier.
+        let local_artifacts = local_resolved_artifacts(settings);
         let mut resolutions = Vec::new();
+        let mut cache_leases = Vec::new();
+        let mut local_scopes = Vec::new();
         for entry in &model_entries {
             let has_hf_downloads = entry
                 .get("downloads")
@@ -111,15 +131,36 @@ impl RuntimeSourceGuard {
                 requested_variant.as_deref(),
                 &settings.data_dir,
             );
-            let resolution = resolve_model_availability(
+            let mut resolution = resolve_model_availability(
                 &settings.data_dir,
                 &configured_library,
                 &selected.requirements,
                 selected.receipt_backed,
-                // Local-tier artifacts enter this seam in sc-19707; the resolver already accepts
-                // them, so wiring local preference will not touch this call site's shape.
-                &[],
+                &local_artifacts,
             );
+            // Local preference is only real once the artifact is LEASED and actually reachable
+            // through the shared snapshot resolvers. Anything that prevents either — a vanished or
+            // concurrently evicted entry, a bundle another scope already serves — falls the whole
+            // model back to the authoritative source tier by RE-RESOLVING without local
+            // candidates, so the fallback keeps every typed disconnect/incomplete guarantee
+            // instead of proceeding on a promise the runtime cannot keep.
+            if resolution.availability == ModelAvailability::LocalReady {
+                match admit_local_artifact(settings, resolution.local_artifact.as_ref()) {
+                    Some((lease, scope)) => {
+                        cache_leases.push(lease);
+                        local_scopes.push(scope);
+                    }
+                    None => {
+                        resolution = resolve_model_availability(
+                            &settings.data_dir,
+                            &configured_library,
+                            &selected.requirements,
+                            selected.receipt_backed,
+                            &[],
+                        );
+                    }
+                }
+            }
             if !resolutions.contains(&resolution) {
                 resolutions.push(resolution);
             }
@@ -131,6 +172,8 @@ impl RuntimeSourceGuard {
                 WorkerError::InvalidPayload(format!("invalid model source resolution: {error}"))
             })?;
             match resolution.availability {
+                // Already leased and served from the app-owned tier above; the configured source
+                // library is deliberately not consulted, opened, or probed for it.
                 ModelAvailability::LocalReady => {}
                 ModelAvailability::InstalledExternalUnavailable => {
                     return Err(unavailable(
@@ -174,10 +217,22 @@ impl RuntimeSourceGuard {
                 }
             }
         }
+        emit_source_tiers(&resolutions);
         Ok(Self {
             resolutions,
             sessions,
+            local_scopes,
+            cache_leases,
         })
+    }
+
+    fn none() -> Self {
+        Self {
+            resolutions: Vec::new(),
+            sessions: Vec::new(),
+            local_scopes: Vec::new(),
+            cache_leases: Vec::new(),
+        }
     }
 
     pub(crate) fn finish_success(mut self) -> WorkerResult<()> {
@@ -185,6 +240,13 @@ impl RuntimeSourceGuard {
             session
                 .mark_success()
                 .map_err(|error| WorkerError::Io(std::io::Error::other(error.to_string())))?;
+        }
+        // Stop serving local paths before the leases protecting them are released.
+        self.local_scopes.clear();
+        for lease in self.cache_leases.drain(..) {
+            // The promotion boundary for an artifact that just served a real load. Its own
+            // entry is already published, so this only records the successful use.
+            let _candidate = lease.mark_success();
         }
         Ok(())
     }
@@ -226,6 +288,119 @@ impl RuntimeSourceGuard {
     #[cfg(test)]
     pub(crate) fn resolutions(&self) -> &[ModelResolution] {
         &self.resolutions
+    }
+}
+
+/// Every VALID app-owned resolved artifact on this host, or nothing when the resolved cache is
+/// switched off. Read-only: enumeration never creates a cache session and never stamps usage, so
+/// judging availability cannot look like using a model.
+fn local_resolved_artifacts(settings: &Settings) -> Vec<ResolvedModelArtifact> {
+    if !settings.resolved_cache_policy().enabled {
+        return Vec::new();
+    }
+    ResolvedCacheStore::valid_local_artifacts(&settings.data_dir)
+}
+
+/// Take the runtime lease on one locally resolved artifact and start serving it, or `None` when it
+/// cannot be served after all (concurrently evicted, no longer complete, or a scope for the same
+/// snapshot is already active). Both halves are acquired together so a scope can never outlive the
+/// lease that protects the bytes behind it.
+fn admit_local_artifact(
+    settings: &Settings,
+    artifact: Option<&ResolvedModelArtifact>,
+) -> Option<(ResolvedCacheLease, ActiveLocalArtifacts)> {
+    let artifact = artifact?;
+    let cache_key = artifact.cache_key().ok()?;
+    let store = cache_store(settings)?;
+    let resolver = ModelArtifactResolver::new(
+        ArtifactSourceLibrary::new(sceneworks_core::hf_home::huggingface_hub_cache_dir(
+            &settings.data_dir,
+        ))
+        .ok()?,
+    );
+    // The store takes the entry's SHARED artifact lock before it re-reads and re-validates the
+    // published entry under it, then stamps usage. An evictor that reaches the entry first holds
+    // the exclusive lock, so this waits; an evictor that arrives afterwards finds the lock held
+    // and must leave the entry alone.
+    let lease = store
+        .acquire_complete(&cache_key, &resolver, &artifact.identity.repository)
+        .ok()
+        .flatten()?;
+    match sceneworks_core::model_artifacts::local_preference::prefer_local_artifacts(
+        std::slice::from_ref(lease.artifact()),
+    ) {
+        Ok(scope) => Some((lease, scope)),
+        Err(error) => {
+            emit_event_value(
+                Level::WARN,
+                json!({
+                    "event": "resolved_cache_local_tier_unsupported",
+                    "cacheKey": cache_key,
+                    "repository": artifact.identity.repository,
+                    "revision": artifact.identity.revision,
+                    "reason": error.to_string(),
+                }),
+            );
+            None
+        }
+    }
+}
+
+/// One long-lived cache session per data directory. Opening a session takes a durable session lock
+/// and writes session records, so a fresh session per job would churn the store; the worker claims
+/// one job at a time and keeps this handle for the process lifetime instead.
+fn cache_store(settings: &Settings) -> Option<ResolvedCacheStore> {
+    use std::collections::BTreeMap;
+    use std::sync::{Mutex, OnceLock};
+    static STORES: OnceLock<Mutex<BTreeMap<std::path::PathBuf, ResolvedCacheStore>>> =
+        OnceLock::new();
+    let stores = STORES.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let mut stores = stores
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(store) = stores.get(&settings.data_dir) {
+        return Some(store.clone());
+    }
+    let store = ResolvedCacheStore::open(&settings.data_dir).ok()?;
+    stores.insert(settings.data_dir.clone(), store.clone());
+    Some(store)
+}
+
+/// Report which tier will serve each admitted model. This is the runtime's answer to "where did
+/// this load's weights come from", emitted once per job before any loader runs.
+fn emit_source_tiers(resolutions: &[ModelResolution]) {
+    for resolution in resolutions {
+        let tier = match resolution.availability {
+            ModelAvailability::LocalReady => "resolved_local",
+            ModelAvailability::ExternalReady => "source_library",
+            _ => continue,
+        };
+        let (repository, revision) = match &resolution.local_artifact {
+            Some(artifact) => (
+                artifact.identity.repository.clone(),
+                artifact.identity.revision.clone(),
+            ),
+            None => resolution
+                .requirements
+                .iter()
+                .find(|requirement| requirement.is_primary)
+                .map(|requirement| {
+                    (
+                        requirement.repository.clone(),
+                        requirement.revision.clone().unwrap_or_default(),
+                    )
+                })
+                .unwrap_or_default(),
+        };
+        emit_event_value(
+            Level::INFO,
+            json!({
+                "event": "model_source_tier_selected",
+                "tier": tier,
+                "repository": repository,
+                "revision": revision,
+            }),
+        );
     }
 }
 

@@ -96,6 +96,25 @@ impl fmt::Debug for Settings {
 }
 
 impl Settings {
+    /// The effective resolved-model cache policy (sc-19707). The field itself is
+    /// `cfg(not(test))` — the dozens of test fixtures that build `Settings` literally predate it —
+    /// so under test the SAME environment `from_env` would have read is consulted directly. Both
+    /// forms therefore answer with `ResolvedCachePolicy::from_env_or_safe_default()` for any
+    /// process that took its settings from the environment.
+    #[cfg(not(test))]
+    pub(crate) fn resolved_cache_policy(
+        &self,
+    ) -> sceneworks_core::model_artifacts::resolved_cache::ResolvedCachePolicy {
+        self.resolved_cache.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn resolved_cache_policy(
+        &self,
+    ) -> sceneworks_core::model_artifacts::resolved_cache::ResolvedCachePolicy {
+        sceneworks_core::model_artifacts::resolved_cache::ResolvedCachePolicy::from_env_or_safe_default()
+    }
+
     pub fn from_env() -> Self {
         let defaults = sceneworks_core::app_paths::AppPaths::platform_default();
         let config_dir = env_path_or("SCENEWORKS_CONFIG_DIR", &defaults.config_dir);

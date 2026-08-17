@@ -196,11 +196,34 @@ pub(crate) fn normalize_app_managed_model_path(
             roots.push(canonical);
         }
     }
-    sceneworks_core::model_artifacts::confine_artifact_path(Path::new(raw_path), &roots).map_err(
-        |_| {
-            WorkerError::InvalidPayload(format!("{label} must be inside an app-managed directory."))
-        },
+    let confined = sceneworks_core::model_artifacts::confine_artifact_path(
+        Path::new(raw_path),
+        &roots,
     )
+    .map_err(|_| {
+        WorkerError::InvalidPayload(format!("{label} must be inside an app-managed directory."))
+    })?;
+    // sc-19707: a model directory the API already resolved to a concrete source-library path
+    // (training base models, captioners, analyzers) is served from the leased app-owned bundle
+    // when one covers that exact snapshot. Purely a read redirect inside the app data dir, applied
+    // only while a runtime lease is active and only when the bundle really holds the path — with
+    // no lease this is inert and the authoritative source path is returned unchanged.
+    Ok(prefer_leased_local_path(&source_library, confined))
+}
+
+/// Redirect one already-confined source-library path into the leased app-owned bundle that holds
+/// it (sc-19707). Inert without an active runtime lease, and inert for any path the bundle does not
+/// hold, so the authoritative source path is what survives in every other case. Shared by the model
+/// and adapter confinement seams so neither can drift into serving a different tier than the other.
+fn prefer_leased_local_path(
+    source_library: &sceneworks_core::model_artifacts::ArtifactSourceLibrary,
+    confined: PathBuf,
+) -> PathBuf {
+    sceneworks_core::model_artifacts::local_preference::redirect_source_library_path(
+        source_library.root(),
+        &confined,
+    )
+    .unwrap_or(confined)
 }
 
 /// Confine a LoRA adapter path taken from a job payload to an app-managed root
@@ -252,7 +275,13 @@ pub(crate) fn normalize_app_managed_lora_path(
                 "LoRA path must be inside an app-managed directory.".to_owned(),
             )
         })?;
-    Ok(loadable_confined_lora_path(&normalized, confined))
+    // The loadable (extension-bearing) form first: an HF-cached adapter confines to its
+    // extensionless `blobs/<sha>` target, and only the snapshot-shaped form can be matched against
+    // a leased bundle — which stores real files, so the redirected path keeps its extension.
+    Ok(prefer_leased_local_path(
+        &source_library,
+        loadable_confined_lora_path(&normalized, confined),
+    ))
 }
 
 /// Return a *loadable* form of a confined adapter path (sc-11649). mlx-rs's safetensors

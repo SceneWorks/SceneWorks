@@ -1286,6 +1286,7 @@ impl Drop for ResolvedCacheReservation {
     }
 }
 
+#[derive(Debug)]
 pub struct ResolvedCacheLease {
     runtime_lease: Option<ActiveArtifactLease>,
     #[allow(dead_code)]
