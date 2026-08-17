@@ -22,7 +22,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 HARD_STOP_EXIT = 97
-ATTESTED_INITIAL_MEMORY_FREE_PERCENT = 70
 
 
 @dataclass(frozen=True)
@@ -575,7 +574,8 @@ def guard(args: argparse.Namespace) -> int:
                     f"host_memory_free_below_{args.min_memory_free_bytes}:"
                     f"observed_{pressure.memory_free_bytes}"
                 )
-            if pressure.swap_free_bytes < args.min_swap_free_bytes:
+            if (args.min_swap_free_bytes is not None
+                    and pressure.swap_free_bytes < args.min_swap_free_bytes):
                 return (
                     f"host_swap_free_below_{args.min_swap_free_bytes}:"
                     f"observed_{pressure.swap_free_bytes}"
@@ -589,12 +589,6 @@ def guard(args: argparse.Namespace) -> int:
             return stopped
         if pressure is None or attested_initial_memory_free_bytes is None:
             return "child_attestation_initial_host_pressure_was_not_sampled"
-        if pressure.memory_free_percent < ATTESTED_INITIAL_MEMORY_FREE_PERCENT:
-            return (
-                f"initial_host_memory_free_percent_below_"
-                f"{ATTESTED_INITIAL_MEMORY_FREE_PERCENT}:observed_"
-                f"{pressure.memory_free_percent}"
-            )
         if pressure.memory_free_bytes < attested_initial_memory_free_bytes:
             return (
                 f"initial_host_memory_free_below_{attested_initial_memory_free_bytes}:"
@@ -655,10 +649,10 @@ def guard(args: argparse.Namespace) -> int:
                 "maxRuntimeSeconds": args.max_runtime_seconds,
                 "hostMemoryBytes": args.host_memory_bytes,
                 "minInitialMemoryFreeBytes": attested_initial_memory_free_bytes,
-                "minInitialMemoryFreePercent": ATTESTED_INITIAL_MEMORY_FREE_PERCENT,
                 "minMemoryFreeBytes": args.min_memory_free_bytes,
-                "minSwapFreeBytes": args.min_swap_free_bytes,
             }
+            if args.min_swap_free_bytes is not None:
+                attestation["minSwapFreeBytes"] = args.min_swap_free_bytes
             try:
                 child_attestation_deadline = (
                     time.monotonic() + args.child_attestation_timeout
@@ -958,13 +952,16 @@ def parse_args() -> argparse.Namespace:
             parser.error(f"--{name.replace('_', '-')} must be positive")
     if args.max_runtime_seconds is not None and args.max_runtime_seconds <= 0:
         parser.error("--max-runtime-seconds must be positive")
-    pressure_values = [args.host_memory_bytes, args.min_memory_free_bytes, args.min_swap_free_bytes]
+    pressure_values = [args.host_memory_bytes, args.min_memory_free_bytes]
     if any(value is not None for value in pressure_values) and not all(
             value is not None for value in pressure_values):
-        parser.error("host pressure guard requires memory size plus both free-byte floors")
-    if args.host_pressure_file and not all(value is not None for value in pressure_values[1:]):
-        parser.error("synthetic host pressure requires both free-byte floors")
-    for value in pressure_values:
+        parser.error("host pressure guard requires memory size plus a free-memory floor")
+    if args.min_swap_free_bytes is not None and not all(
+            value is not None for value in pressure_values):
+        parser.error("a swap floor requires the complete host-pressure guard")
+    if args.host_pressure_file and args.min_memory_free_bytes is None:
+        parser.error("synthetic host pressure requires a free-memory floor")
+    for value in [*pressure_values, args.min_swap_free_bytes]:
         if value is not None and value <= 0:
             parser.error("host pressure byte values must be positive")
     if args.synthetic_spawn_delay < 0:

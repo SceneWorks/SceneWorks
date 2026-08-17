@@ -2000,7 +2000,7 @@ test("the LTX real-weight safety canary cannot relax or masquerade as campaign e
     "LTX_CANARY_FRAMES",
     "LTX_CANARY_TILE_EDGE",
     "LTX_CANARY_OVERLAP",
-    'Some("default")',
+    'Some("no_audio")',
     '"status": "diagnostic_canary_complete"',
     '"promotable": false',
     '"ingestible": false',
@@ -2012,9 +2012,39 @@ test("the LTX real-weight safety canary cannot relax or masquerade as campaign e
   );
   assert.match(
     generationRequest,
-    /video_mode: None/,
-    "the canary must stay on the provider contract's default A/V route",
+    /video_mode: Some\("no_audio"\.to_owned\(\)\)/,
+    "the canary must skip the downstream audio decoder and vocoder",
   );
+  const admissionBridge = adapter.slice(
+    adapter.indexOf("fn ltx_canary_request_for_provider_admission("),
+    adapter.indexOf("fn ltx_load_spec("),
+  );
+  assert.match(admissionBridge, /request\.video_mode = None;/);
+  assert.match(admissionBridge, /request\.video_mode = Some\("no_audio"\.to_owned\(\)\);/);
+  assert.match(admissionBridge, /scoped_generate_observed_after_configuration\(/);
+  const genericScope = adapter.slice(
+    adapter.indexOf("fn scoped_generate_observed("),
+    adapter.indexOf("fn scoped_generate_observed_after_configuration("),
+  );
+  assert.match(genericScope, /None,/,
+    "ordinary production generation must not gain the canary-only post-configure override");
+  const configuredScope = adapter.slice(
+    adapter.indexOf("fn scoped_generate_observed_after_configuration("),
+    adapter.indexOf("/// Combine the generator and request-scope terminals"),
+  );
+  assert.ok(
+    configuredScope.indexOf(".configure_request(&mut request)")
+      < configuredScope.indexOf("after_configuration(&mut request)"),
+    "the canary restores no_audio only after ordinary provider configuration",
+  );
+  assert.ok(
+    configuredScope.indexOf("after_configuration(&mut request)")
+      < configuredScope.indexOf("generator.generate(&request"),
+    "the exact no_audio override must be restored before generation",
+  );
+  for (const lifecycle of ["enter_phase", "leave_phase", "scope.finish", "settle_scoped_generation"]) {
+    assert.ok(configuredScope.includes(lifecycle), `canary scope must retain ${lifecycle}`);
+  }
 
   const limitsLifecycle = adapter.slice(
     adapter.indexOf("impl LtxCanaryLimits"),

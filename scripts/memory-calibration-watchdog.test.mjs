@@ -169,7 +169,7 @@ sys.argv = [${JSON.stringify(WATCHDOG)},
     "--max-footprint-bytes", "100", "--max-runtime-seconds", "2",
     "--host-memory-bytes", ${JSON.stringify(String(requestedHostMemory))},
     "--min-memory-free-bytes", "100",
-    "--min-swap-free-bytes", "100", "--sample-interval", "0.02",
+    "--sample-interval", "0.02",
     "--telemetry-timeout", ${JSON.stringify(String(telemetryTimeout))},
     "--child-attestation-timeout", ${JSON.stringify(String(childAttestationTimeout))},
     "--term-grace", "0.1", "--event-file", ${JSON.stringify(files.events)},
@@ -307,6 +307,8 @@ def line():
     while not data.endswith(b"\n"): data += sock.recv(1)
     return data.decode().strip()
 payload = json.loads(line())
+assert "minSwapFreeBytes" not in payload
+assert "minInitialMemoryFreePercent" not in payload
 nonce = payload["nonce"]
 sock.sendall(f"ACK {nonce}\n".encode())
 release = line()
@@ -318,7 +320,9 @@ while True:
     if message == f"BYE {nonce}": break
     assert message == f"PING {nonce}"
 `);
-  await runWithMockedProductionTelemetry(files, ["python3", attester, launched]);
+  await runWithMockedProductionTelemetry(files, ["python3", attester, launched], {
+    swapFreeBytes: 0,
+  });
   assert.equal(await readFile(launched, "utf8"), "released\n");
   const events = (await readFile(files.events, "utf8")).trim().split("\n").map(JSON.parse);
   const attested = events.findIndex((event) => event.event === "child_attested");
@@ -328,6 +332,8 @@ while True:
   assert.ok(events.slice(0, attested).some((event) =>
     event.event === "sample" && event.phase === "child_attested_before_allocation"));
   assert.ok(events.some((event) => event.event === "child_completed"));
+  assert.ok(events.some((event) => event.event === "sample" && event.swapFreeBytes === 0),
+    "swap telemetry remains present without imposing an arbitrary free-capacity floor");
 });
 
 test("child attestation uses a short socket path when TMPDIR is a long external path", async (t) => {
@@ -418,7 +424,7 @@ time.sleep(60)
     await runWithMockedProductionTelemetry(files, ["python3", attester], {
       telemetryTimeout: 0.1,
       childAttestationTimeout: 1,
-      pressureSamples: [[90, 900, 900], [69, 900, 900]],
+      pressureSamples: [[90, 900, 900], [69, 150, 900]],
     });
   } catch (error) {
     status = error.code;
@@ -426,7 +432,7 @@ time.sleep(60)
   assert.equal(status, 97);
   const events = (await readFile(files.events, "utf8")).trim().split("\n").map(JSON.parse);
   assert.ok(events.some((event) =>
-    event.reason?.includes("initial_host_memory_free_percent_below_70")));
+    event.reason?.includes("initial_host_memory_free_below_210")));
   assert.equal(events.some((event) => event.event === "child_attested"), false);
 });
 
@@ -591,14 +597,14 @@ test("child attestation binds actual RAM and the two-boundary initial release fl
     await runWithMockedProductionTelemetry(pressured, [
       "python3", pressured.program, "hold", pressured.pids,
       pressured.telemetry, pressured.events,
-    ], { memoryFreePercent: 69, memoryFreeBytes: 900 });
+    ], { memoryFreePercent: 69, memoryFreeBytes: 209 });
   } catch (error) {
     status = error.code;
   }
   assert.equal(status, 97);
   const events = (await readFile(pressured.events, "utf8")).trim().split("\n").map(JSON.parse);
   assert.ok(events.some((event) =>
-    event.reason?.includes("initial_host_memory_free_percent_below_70")));
+    event.reason?.includes("initial_host_memory_free_below_210")));
   assert.equal(await readFile(pressured.pids, "utf8").catch(() => ""), "");
 });
 
@@ -632,7 +638,7 @@ open(sys.argv[1], "w").write("allocation-released\n")
   assert.equal(status, 97);
   assert.equal(await readFile(allocated, "utf8").catch(() => ""), "");
   const events = (await readFile(files.events, "utf8")).trim().split("\n").map(JSON.parse);
-  assert.ok(events.some((event) => event.reason?.includes("initial_host_memory_free_percent_below_70")));
+  assert.ok(events.some((event) => event.reason?.includes("initial_host_memory_free_below_210")));
 });
 
 test("Darwin host-pressure parsers fail closed on malformed or partial telemetry", async () => {

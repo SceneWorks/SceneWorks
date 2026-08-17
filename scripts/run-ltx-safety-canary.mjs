@@ -1,15 +1,15 @@
 #!/usr/bin/env node
 
 import { execFile, spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants, createReadStream } from "node:fs";
 import {
   chmod, copyFile, link, lstat, mkdtemp, mkdir, readFile, readdir, realpath, rm,
-  stat, unlink, writeFile,
+  rename, stat, unlink, writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { arch } from "node:os";
 import path from "node:path";
-import { promisify } from "node:util";
+import { isDeepStrictEqual, promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
 import { hashArtifactInventory } from "./hash-artifact-inventory.mjs";
@@ -20,8 +20,12 @@ export const MAX_FOOTPRINT_BYTES = 53_347_146_863;
 export const MAX_RUNTIME_SECONDS = 1_800;
 export const CHILD_ATTESTATION_TIMEOUT_SECONDS = 30;
 export const CARGO_METADATA_TIMEOUT_MS = 15 * 60 * 1000;
-export const MIN_MEMORY_FREE_PERCENT = 70;
-export const MIN_SWAP_FREE_BYTES = 1024 ** 3;
+export const PREPARATION_SCHEMA_VERSION = 2;
+export const PREPARATION_LOCK_POLL_MS = 50;
+export const PREPARATION_LOCK_ORPHAN_GRACE_MS = 30_000;
+// Free swap capacity is not a safety margin: the prelaunch free-memory floor is already more than
+// two hard footprint limits, and the watchdog continuously enforces a full-limit runtime margin.
+// Swap remains mandatory telemetry, but there is deliberately no arbitrary free-capacity floor.
 export const MIN_PREFLIGHT_FREE_BYTES = MAX_FOOTPRINT_BYTES * 2;
 export const MIN_RUNTIME_FREE_BYTES = MAX_FOOTPRINT_BYTES;
 const PROVIDER = "ltx_2_3";
@@ -74,6 +78,83 @@ export function privateArtifactRoots(scratch) {
   };
 }
 
+export function preparationIdentity(sceneWorksTree, inferenceTree, toolchainChannel) {
+  for (const [label, value] of [
+    ["SceneWorks tree", sceneWorksTree], ["inference tree", inferenceTree],
+  ]) {
+    if (!/^[0-9a-f]{40}$/.test(value)) fail(`${label} must be an exact git tree`);
+  }
+  if (!/^\d+\.\d+\.\d+$/.test(toolchainChannel)) fail("toolchain channel must be exact");
+  return {
+    schemaVersion: PREPARATION_SCHEMA_VERSION,
+    sceneWorksTree,
+    inferenceTree,
+    toolchainChannel,
+    platform: process.platform,
+    architecture: arch(),
+    artifact: {
+      repository: ARTIFACT_REPOSITORY,
+      revision: ARTIFACT_REVISION,
+      numericTier: {
+        files: 11, bytes: Q4_INVENTORY_BYTES, sha256: Q4_INVENTORY_SHA256,
+      },
+      textEncoder: {
+        files: TEXT_ENCODER_INVENTORY_FILES,
+        bytes: TEXT_ENCODER_INVENTORY_BYTES,
+        sha256: TEXT_ENCODER_INVENTORY_SHA256,
+      },
+    },
+  };
+}
+
+export function preparationCacheKey(identity) {
+  return createHash("sha256").update(JSON.stringify(identity)).digest("hex");
+}
+
+export function preparationCacheRoot(output, key) {
+  if (!/^[0-9a-f]{64}$/.test(key)) fail("preparation cache key must be an exact SHA-256");
+  return path.join(path.dirname(path.resolve(output)), "prepared", key);
+}
+
+export function preparationLockPath(preparationRoot) {
+  return path.join(path.dirname(preparationRoot), `.${path.basename(preparationRoot)}.lock`);
+}
+
+export async function sealedArtifactIdentity(root) {
+  const digest = createHash("sha256");
+  let files = 0;
+  let bytes = 0;
+  async function visit(directory, relativeDirectory) {
+    const directoryMetadata = await lstat(directory, { bigint: true });
+    if (!directoryMetadata.isDirectory() || directoryMetadata.isSymbolicLink()
+        || Number(directoryMetadata.mode & 0o777n) !== 0o500) {
+      fail(`sealed artifact directory changed: ${directory}`);
+    }
+    digest.update(`${relativeDirectory}/\0d\0${directoryMetadata.dev}\0${directoryMetadata.ino}`
+      + `\0${directoryMetadata.mtimeNs}\0${directoryMetadata.ctimeNs}\n`);
+    const entries = await readdir(directory, { withFileTypes: true });
+    entries.sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      const absolute = path.join(directory, entry.name);
+      const relative = path.posix.join(relativeDirectory, entry.name);
+      const metadata = await lstat(absolute, { bigint: true });
+      if (entry.isDirectory()) {
+        await visit(absolute, relative);
+      } else if (entry.isFile() && !metadata.isSymbolicLink()
+          && Number(metadata.mode & 0o777n) === 0o400) {
+        files += 1;
+        bytes += Number(metadata.size);
+        digest.update(`${relative}\0f\0${metadata.dev}\0${metadata.ino}\0${metadata.size}`
+          + `\0${metadata.mtimeNs}\0${metadata.ctimeNs}\n`);
+      } else {
+        fail(`sealed artifact entry changed: ${absolute}`);
+      }
+    }
+  }
+  await visit(root, ".");
+  return { files, bytes, sha256: digest.digest("hex") };
+}
+
 export function watchdogFailureSummary(status, eventBytes) {
   let hardStopReason = null;
   let validEvents = 0;
@@ -113,6 +194,82 @@ export function preservePrimaryFailure(primary, cleanup) {
   return error;
 }
 
+function killProcessGroup(child, signalName) {
+  if (child.pid === undefined) return;
+  try {
+    process.kill(-child.pid, signalName);
+  } catch (error) {
+    if (error.code !== "ESRCH") throw error;
+  }
+}
+
+export async function runOwnedCommand(executable, args, {
+  cwd = ROOT,
+  env = process.env,
+  signal,
+  timeout = 0,
+  maxBuffer = 10 * 1024 * 1024,
+} = {}) {
+  signal?.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    let stdout = "";
+    let stderr = "";
+    let terminationReason = null;
+    let killTimer = null;
+    let timeoutTimer = null;
+    const child = spawn(executable, args, {
+      cwd, env, detached: true, stdio: ["ignore", "pipe", "pipe"],
+    });
+    const terminate = (reason) => {
+      if (terminationReason !== null) return;
+      terminationReason = reason;
+      killProcessGroup(child, "SIGTERM");
+      killTimer = setTimeout(() => killProcessGroup(child, "SIGKILL"), 2_000);
+      killTimer.unref();
+    };
+    const onAbort = () => terminate(signal.reason ?? new Error("command aborted"));
+    if (signal) signal.addEventListener("abort", onAbort, { once: true });
+    if (timeout > 0) {
+      timeoutTimer = setTimeout(
+        () => terminate(new Error(`command timed out after ${timeout} ms: ${executable}`)), timeout,
+      );
+      timeoutTimer.unref();
+    }
+    const append = (stream, chunk) => {
+      const next = stream + chunk;
+      if (Buffer.byteLength(next) > maxBuffer) {
+        terminate(new Error(`command output exceeded ${maxBuffer} bytes: ${executable}`));
+      }
+      return next;
+    };
+    child.stdout.on("data", (chunk) => { stdout = append(stdout, chunk); });
+    child.stderr.on("data", (chunk) => { stderr = append(stderr, chunk); });
+    child.on("error", (error) => terminate(error));
+    child.on("close", (code, childSignal) => {
+      if (signal) signal.removeEventListener("abort", onAbort);
+      if (timeoutTimer !== null) clearTimeout(timeoutTimer);
+      if (killTimer !== null) clearTimeout(killTimer);
+      if (terminationReason !== null) {
+        killProcessGroup(child, "SIGKILL");
+        reject(terminationReason);
+        return;
+      }
+      if (code !== 0 || childSignal !== null) {
+        const error = new Error(
+          `command failed: ${executable} (code=${code}, signal=${childSignal})\n${stderr}`,
+        );
+        error.code = code;
+        error.signal = childSignal;
+        error.stdout = stdout;
+        error.stderr = stderr;
+        reject(error);
+        return;
+      }
+      resolve({ stdout, stderr });
+    });
+  });
+}
+
 async function git(cwd, args, signal) {
   return (await execFileAsync("git", ["-C", cwd, ...args], {
     encoding: "utf8", signal,
@@ -123,6 +280,30 @@ async function cleanHead(cwd, label, signal) {
   const head = await git(cwd, ["rev-parse", "HEAD"], signal);
   if ((await git(cwd, ["status", "--porcelain"], signal)) !== "") fail(`${label} repository is dirty`);
   return head;
+}
+
+async function observedSourceState(cwd, expectedRevision, expectedTree) {
+  try {
+    const [revision, tree, status] = await Promise.all([
+      git(cwd, ["rev-parse", "HEAD"]),
+      git(cwd, ["rev-parse", "HEAD^{tree}"]),
+      git(cwd, ["status", "--porcelain"]),
+    ]);
+    return {
+      observed: true,
+      clean: status === "",
+      revision,
+      tree,
+      matchesPrelaunch: status === "" && revision === expectedRevision && tree === expectedTree,
+    };
+  } catch (error) {
+    return {
+      observed: false,
+      matchesPrelaunch: false,
+      error: String(error?.message ?? error)
+        .replaceAll(/[\u0000-\u001f\u007f]/g, " ").slice(0, 512),
+    };
+  }
 }
 
 export function cargoSourceStatusIsClean(status) {
@@ -173,7 +354,7 @@ export function canaryRequest(memoryBytes, textEncoderInventory) {
       calibrationFingerprint: FINGERPRINT,
       fixture: FIXTURE,
       _watchdog: { maxFootprintBytes: MAX_FOOTPRINT_BYTES },
-      _canary: { videoMode: "default", fps: 24, seed: 1234 },
+      _canary: { videoMode: "no_audio", fps: 24, seed: 1234 },
       _artifact: {
         repository: ARTIFACT_REPOSITORY,
         revision: ARTIFACT_REVISION,
@@ -234,7 +415,7 @@ export function validateCanaryResponse(
       || response?.target?.geometry?.height !== 256
       || response?.target?.geometry?.frames !== 9
       || response?.target?.geometry?.fps !== 24
-      || response?.target?.audio !== true) {
+      || response?.target?.audio !== false) {
     fail("adapter response changed the exact canary identity");
   }
   if (response?.artifact?.repository !== ARTIFACT_REPOSITORY
@@ -265,10 +446,10 @@ export function validateCanaryResponse(
         && response?.watchdog?.hostMemoryBytes !== expectedHostMemoryBytes)
       || response?.watchdog?.minInitialMemoryFreeBytes
         !== preflightFreeFloor(response?.watchdog?.hostMemoryBytes)
-      || response?.watchdog?.minInitialMemoryFreePercent !== MIN_MEMORY_FREE_PERCENT
+      || Object.hasOwn(response?.watchdog ?? {}, "minInitialMemoryFreePercent")
       || response?.watchdog?.minMemoryFreeBytes
         !== runtimeFreeFloor(response?.watchdog?.hostMemoryBytes)
-      || response?.watchdog?.minSwapFreeBytes !== MIN_SWAP_FREE_BYTES
+      || Object.hasOwn(response?.watchdog ?? {}, "minSwapFreeBytes")
       || response?.mlxLimits?.memoryLimitBytes !== MAX_FOOTPRINT_BYTES
       || !Number.isInteger(response?.mlxLimits?.wiredLimitBytes)
       || response.mlxLimits.wiredLimitBytes <= 0
@@ -304,13 +485,10 @@ export function foreignHeavyProcesses(output) {
     const command = match[3];
     const executable = path.basename(command.trim().split(/\s+/, 1)[0]);
     const isPython = /^python(?:3(?:\.\d+)?)?$/.test(executable);
-    if ([
-      "cargo", "rustc", "clang", "clang++", "cc", "c++", "cmake", "ninja", "metal", "air-lld",
-      "sceneworks-worker", "memory-mlx-adapter", "Runner.Worker",
-    ].includes(executable)
+    if (["sceneworks-worker", "memory-mlx-adapter", "Runner.Worker"].includes(executable)
         || executable.includes("real_weights")
         || executable === "real_weight_tiling"
-        || (isPython && /(?:MiniMax|minimax)/.test(command))) {
+        || (isPython && /(?:MiniMax|minimax|real_weights)/.test(command))) {
       heavy.push(line.trim());
     }
   }
@@ -337,12 +515,6 @@ async function sampleHostPressure(memoryBytes, signal) {
   const memoryFreePercent = parseMemoryFreePercent(pressure.stdout);
   const swapFreeBytes = parseSwapFreeBytes(swap.stdout);
   const memoryFreeBytes = Math.floor(memoryBytes * memoryFreePercent / 100);
-  if (memoryFreePercent < MIN_MEMORY_FREE_PERCENT) {
-    fail(`host memory free ${memoryFreePercent}% is below ${MIN_MEMORY_FREE_PERCENT}%`);
-  }
-  if (swapFreeBytes < MIN_SWAP_FREE_BYTES) {
-    fail(`host swap free ${swapFreeBytes} is below ${MIN_SWAP_FREE_BYTES}`);
-  }
   const freeFloor = preflightFreeFloor(memoryBytes);
   if (memoryFreeBytes < freeFloor) {
     fail(`host memory free ${memoryFreeBytes} is below ${freeFloor}`);
@@ -377,30 +549,30 @@ export async function exactToolchain(scratch, signal) {
   resolutionEnv.PATH = [
     path.join(home, ".cargo/bin"), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin",
   ].join(":");
-  const rustup = (await execFileAsync("/usr/bin/which", ["rustup"], {
-    cwd: ROOT, encoding: "utf8", env: resolutionEnv, timeout: 2_000, signal,
+  const rustup = (await runOwnedCommand("/usr/bin/which", ["rustup"], {
+    cwd: ROOT, env: resolutionEnv, timeout: 2_000, signal,
   })).stdout.trim();
   if (!path.isAbsolute(rustup)) fail("the sanitized PATH did not resolve absolute rustup");
   const rustupReal = await realpath(rustup);
   if (!(await stat(rustupReal)).isFile()) fail("resolved rustup is not a regular file");
   const channel = await repositoryToolchain();
-  const cargo = (await execFileAsync(rustupReal, [
+  const cargo = (await runOwnedCommand(rustupReal, [
     "which", "--toolchain", channel, "cargo",
-  ], { cwd: ROOT, encoding: "utf8", env: resolutionEnv, timeout: 2_000, signal })).stdout.trim();
-  const rustc = (await execFileAsync(rustupReal, [
+  ], { cwd: ROOT, env: resolutionEnv, timeout: 2_000, signal })).stdout.trim();
+  const rustc = (await runOwnedCommand(rustupReal, [
     "which", "--toolchain", channel, "rustc",
-  ], { cwd: ROOT, encoding: "utf8", env: resolutionEnv, timeout: 2_000, signal })).stdout.trim();
+  ], { cwd: ROOT, env: resolutionEnv, timeout: 2_000, signal })).stdout.trim();
   if (!path.isAbsolute(cargo) || !path.isAbsolute(rustc)) {
     fail("rustup did not resolve absolute pinned toolchain executables");
   }
-  const version = (await execFileAsync(rustc, ["-Vv"], {
-    cwd: ROOT, encoding: "utf8", env: resolutionEnv, timeout: 2_000, signal,
+  const version = (await runOwnedCommand(rustc, ["-Vv"], {
+    cwd: ROOT, env: resolutionEnv, timeout: 2_000, signal,
   })).stdout;
   if (!new RegExp(`^release: ${channel.replaceAll(".", "\\.")}$`, "m").test(version)) {
     fail(`resolved rustc does not match pinned channel ${channel}`);
   }
   const privateTemp = path.join(scratch, "tmp");
-  await mkdir(privateTemp, { mode: 0o700 });
+  await mkdir(privateTemp, { recursive: true, mode: 0o700 });
   return {
     cargo,
     channel,
@@ -444,7 +616,7 @@ export async function cloneArtifactTree(source, destination, expectedDevice, sig
         (error) => { if (error.code !== "ENOENT") throw error; },
       );
       if (process.platform === "darwin") {
-        await execFileAsync("/bin/cp", ["-c", cloneSource, output], {
+        await runOwnedCommand("/bin/cp", ["-c", cloneSource, output], {
           timeout: 30_000, signal,
         });
       } else {
@@ -480,13 +652,392 @@ export async function cleanupCanaryScratch(scratch) {
   await rm(scratch, { recursive: true, force: true });
 }
 
+async function pathExists(entry) {
+  return lstat(entry).then(() => true, (error) => {
+    if (error.code === "ENOENT") return false;
+    throw error;
+  });
+}
+
+export async function prepareArtifactClone(
+  source, destination, expectedInventory, expectedDevice, signal,
+) {
+  await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
+  let reused = await pathExists(destination);
+  if (!reused) {
+    const staging = await mkdtemp(path.join(path.dirname(destination), ".artifact-stage-"));
+    const staged = path.join(staging, "tree");
+    try {
+      await cloneArtifactTree(source, staged, expectedDevice, signal);
+      assertInventory(
+        await hashArtifactInventory(staged, { signal }),
+        inventoryAtRoot(expectedInventory, staged),
+        "staged private artifact clone",
+      );
+      await rename(staged, destination);
+    } finally {
+      await cleanupCanaryScratch(staging);
+    }
+  }
+  const inventory = assertInventory(
+    await hashArtifactInventory(destination, { signal }),
+    inventoryAtRoot(expectedInventory, destination),
+    reused ? "reused private artifact clone" : "published private artifact clone",
+  );
+  const seal = await sealedArtifactIdentity(destination);
+  if (seal.files !== inventory.files || seal.bytes !== inventory.bytes) {
+    fail("sealed artifact metadata does not match its content inventory");
+  }
+  return { inventory, seal, reused };
+}
+
+function sameJson(left, right) {
+  return isDeepStrictEqual(left, right);
+}
+
+async function exactMetadata(entry, kind, mode) {
+  const metadata = await lstat(entry, { bigint: true });
+  const validKind = kind === "directory" ? metadata.isDirectory() : metadata.isFile();
+  if (!validKind || metadata.isSymbolicLink() || Number(metadata.mode & 0o777n) !== mode) {
+    fail(`prepared canary ${kind} mode changed: ${entry}`);
+  }
+  return metadata;
+}
+
+async function exactEntries(directory, expected) {
+  const actual = (await readdir(directory)).sort();
+  if (!sameJson(actual, [...expected].sort())) {
+    fail(`prepared canary structure changed: ${directory}`);
+  }
+}
+
+function adapterManifestIdentity(adapter) {
+  return {
+    sha256: adapter.sha256,
+    size: adapter.size,
+    seal: {
+      device: adapter.device,
+      inode: adapter.inode,
+      mtimeNs: adapter.mtimeNs,
+      ctimeNs: adapter.ctimeNs,
+      mode: adapter.mode,
+    },
+  };
+}
+
+async function validatePreparedStructure(preparationRoot) {
+  await exactMetadata(preparationRoot, "directory", 0o500);
+  await exactEntries(preparationRoot, ["adapter", "artifacts", "prepared.json", "prepared.sha256"]);
+  const roots = privateArtifactRoots(preparationRoot);
+  const revisionDirectory = path.dirname(roots.numericTier);
+  const snapshotsDirectory = path.dirname(revisionDirectory);
+  const modelDirectory = path.dirname(snapshotsDirectory);
+  const artifactsDirectory = path.join(preparationRoot, "artifacts");
+  const adapterDirectory = path.join(preparationRoot, "adapter");
+  for (const directory of [
+    artifactsDirectory, modelDirectory, snapshotsDirectory, revisionDirectory, adapterDirectory,
+  ]) {
+    await exactMetadata(directory, "directory", 0o500);
+  }
+  await exactEntries(artifactsDirectory, [path.basename(modelDirectory)]);
+  await exactEntries(modelDirectory, ["snapshots"]);
+  await exactEntries(snapshotsDirectory, [ARTIFACT_REVISION]);
+  await exactEntries(revisionDirectory, ["gemma", "q4"]);
+  await exactEntries(adapterDirectory, ["memory-mlx-adapter"]);
+  return roots;
+}
+
+export async function validatePreparedCache(preparationRoot, key, identity, signal) {
+  const rootMetadata = await lstat(preparationRoot, { bigint: true }).catch((error) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
+  if (rootMetadata === null) return null;
+  const manifestPath = path.join(preparationRoot, "prepared.json");
+  const completionPath = path.join(preparationRoot, "prepared.sha256");
+  if (!(await pathExists(manifestPath)) || !(await pathExists(completionPath))) return null;
+  const roots = await validatePreparedStructure(preparationRoot);
+  await exactMetadata(manifestPath, "file", 0o400);
+  await exactMetadata(completionPath, "file", 0o400);
+  const manifestBytes = await readFile(manifestPath, "utf8");
+  const completion = await readFile(completionPath, "utf8");
+  const manifestDigest = createHash("sha256").update(manifestBytes).digest("hex");
+  if (completion !== `${manifestDigest}\n`) fail("prepared canary completion seal changed");
+  const manifest = JSON.parse(manifestBytes);
+  if (manifest?.schemaVersion !== PREPARATION_SCHEMA_VERSION
+      || manifest?.key !== key
+      || path.basename(preparationRoot) !== key
+      || preparationCacheKey(identity) !== key
+      || !sameJson(manifest?.identity, identity)) {
+    fail("prepared canary cache identity does not match the exact source trees");
+  }
+  for (const [name, root] of Object.entries(roots)) {
+    if (!sameJson(manifest?.artifacts?.[name]?.content, identity?.artifact?.[name])) {
+      fail(`prepared canary ${name} manifest is not bound to the canonical artifact identity`);
+    }
+    const seal = await sealedArtifactIdentity(root);
+    if (!sameJson(seal, manifest?.artifacts?.[name]?.seal)) {
+      fail(`prepared canary ${name} seal changed`);
+    }
+    if (seal.files !== identity.artifact[name].files
+        || seal.bytes !== identity.artifact[name].bytes) {
+      fail(`prepared canary ${name} seal does not match the canonical artifact shape`);
+    }
+  }
+  const adapterPath = path.join(preparationRoot, "adapter", "memory-mlx-adapter");
+  const adapter = await adapterIdentity(adapterPath, signal);
+  if (!sameJson(adapterManifestIdentity(adapter), manifest?.adapter)) {
+    fail("prepared canary adapter changed");
+  }
+  return { manifest, roots, adapter, reused: true };
+}
+
+async function sealPreparationDirectories(directory) {
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    if (entry.isDirectory()) await sealPreparationDirectories(path.join(directory, entry.name));
+  }
+  if (((await lstat(directory)).mode & 0o777) !== 0o500) await chmod(directory, 0o500);
+}
+
+async function writePreparedManifest(stage, key, identity, preparedFrom, builtArtifacts, signal) {
+  if (!/^[0-9a-f]{40}$/.test(preparedFrom.sceneWorksRevision)
+      || !/^[0-9a-f]{40}$/.test(preparedFrom.inferenceRevision)) {
+    fail("prepared canary source revisions must be exact commits");
+  }
+  const roots = privateArtifactRoots(stage);
+  const artifacts = {};
+  for (const [name, root] of Object.entries(roots)) {
+    const content = assertInventory(
+      builtArtifacts?.[name], identity.artifact[name], `new prepared ${name}`,
+    );
+    const seal = await sealedArtifactIdentity(root);
+    artifacts[name] = {
+      content: { files: content.files, bytes: content.bytes, sha256: content.sha256 },
+      seal,
+    };
+  }
+  const adapter = await adapterIdentity(path.join(stage, "adapter", "memory-mlx-adapter"), signal);
+  const manifest = {
+    schemaVersion: PREPARATION_SCHEMA_VERSION,
+    key,
+    identity,
+    preparedFrom,
+    artifacts,
+    adapter: adapterManifestIdentity(adapter),
+  };
+  const bytes = `${JSON.stringify(manifest, null, 2)}\n`;
+  const manifestPath = path.join(stage, "prepared.json");
+  const completionPath = path.join(stage, "prepared.sha256");
+  await writeFile(manifestPath, bytes, { flag: "wx", mode: 0o400 });
+  await writeFile(
+    completionPath,
+    `${createHash("sha256").update(bytes).digest("hex")}\n`,
+    { flag: "wx", mode: 0o400 },
+  );
+  await chmod(manifestPath, 0o400);
+  await chmod(completionPath, 0o400);
+  await sealPreparationDirectories(stage);
+  return manifest;
+}
+
+function validProcessIdentity(identity) {
+  return identity !== null && typeof identity === "object"
+    && typeof identity.startIdentity === "string" && identity.startIdentity !== ""
+    && typeof identity.executable === "string" && identity.executable !== "";
+}
+
+export async function osProcessIdentity(pid, signal) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return null;
+  let stdout;
+  try {
+    ({ stdout } = await execFileAsync(
+      "/bin/ps", ["-p", String(pid), "-o", "pid=,lstart=,comm="],
+      { encoding: "utf8", timeout: 2_000, signal },
+    ));
+  } catch (error) {
+    if (error.code === 1) return null;
+    throw error;
+  }
+  const lines = stdout.trim() ? stdout.trim().split("\n") : [];
+  if (lines.length === 0) return null;
+  if (lines.length !== 1) fail(`ps returned multiple identities for process ${pid}`);
+  const fields = lines[0].trim().split(/\s+/);
+  if (fields.length < 7 || Number(fields[0]) !== pid) {
+    fail(`ps did not return a complete start identity for process ${pid}`);
+  }
+  const identity = {
+    // BSD and procps both spell lstart as five whitespace-separated fields. It is an opaque OS
+    // process-birth token here; owner.json's wall-clock startedAt is diagnostic only.
+    startIdentity: fields.slice(1, 6).join(" "),
+    executable: fields.slice(6).join(" "),
+  };
+  if (!validProcessIdentity(identity)) fail(`ps returned an invalid identity for process ${pid}`);
+  return identity;
+}
+
+async function abortableDelay(milliseconds, signal) {
+  signal?.throwIfAborted();
+  await new Promise((resolve, reject) => {
+    const finish = () => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    };
+    const timer = setTimeout(finish, milliseconds);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason ?? new Error("preparation lock wait aborted"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    timer.unref();
+  });
+}
+
+export async function acquirePreparationLock(
+  preparationRoot, signal, processIdentityProbe = osProcessIdentity,
+) {
+  const lock = preparationLockPath(preparationRoot);
+  const token = randomUUID();
+  while (true) {
+    signal?.throwIfAborted();
+    let acquired = false;
+    try {
+      await mkdir(lock, { mode: 0o700 });
+      acquired = true;
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+    }
+    if (acquired) {
+      try {
+        const processIdentity = await processIdentityProbe(process.pid, signal);
+        if (!validProcessIdentity(processIdentity)) {
+          fail("cannot bind prepared canary lock to this process start identity");
+        }
+        await writeFile(
+          path.join(lock, "owner.json"),
+          `${JSON.stringify({
+            schemaVersion: 2,
+            pid: process.pid,
+            processIdentity,
+            token,
+            startedAt: Date.now(),
+          })}\n`,
+          { flag: "wx", mode: 0o400 },
+        );
+      } catch (error) {
+        await cleanupCanaryScratch(lock);
+        throw error;
+      }
+      return async () => {
+        const owner = JSON.parse(await readFile(path.join(lock, "owner.json"), "utf8"));
+        const actualIdentity = await processIdentityProbe(process.pid);
+        if (owner.token !== token || owner.pid !== process.pid
+            || !sameJson(owner.processIdentity, actualIdentity)) {
+          fail("prepared canary lock ownership changed");
+        }
+        await cleanupCanaryScratch(lock);
+      };
+    }
+    const ownerPath = path.join(lock, "owner.json");
+    let owner = null;
+    try {
+      owner = JSON.parse(await readFile(ownerPath, "utf8"));
+    } catch {
+      // A process can be killed between creating its lock directory and completing owner.json.
+      // Recover only after the orphan grace below, never while a live owner can still publish.
+    }
+    const lockMetadata = await lstat(lock, { bigint: true }).catch((error) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    });
+    if (lockMetadata === null) continue;
+    const oldEnough = Date.now() - Number(lockMetadata.mtimeMs) >= PREPARATION_LOCK_ORPHAN_GRACE_MS;
+    const verifiableOwner = owner?.schemaVersion === 2
+      && Number.isSafeInteger(owner.pid) && owner.pid > 0
+      && validProcessIdentity(owner.processIdentity);
+    const observedIdentity = verifiableOwner
+      ? await processIdentityProbe(owner.pid, signal) : null;
+    const staleOwner = verifiableOwner
+      ? !sameJson(observedIdentity, owner.processIdentity) : oldEnough;
+    if (staleOwner) {
+      const stale = `${lock}.stale-${randomUUID()}`;
+      try {
+        await rename(lock, stale);
+        await cleanupCanaryScratch(stale);
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      }
+      continue;
+    }
+    await abortableDelay(PREPARATION_LOCK_POLL_MS, signal);
+  }
+}
+
+async function cleanupStalePreparationStages(preparationRoot) {
+  const parent = path.dirname(preparationRoot);
+  const prefix = `.${path.basename(preparationRoot)}.stage-`;
+  for (const entry of await readdir(parent)) {
+    if (entry.startsWith(prefix)) await cleanupCanaryScratch(path.join(parent, entry));
+  }
+}
+
+export async function prepareCanaryCache({
+  preparationRoot,
+  key,
+  identity,
+  preparedFrom,
+  build,
+  signal,
+  hooks = {},
+  processIdentityProbe = osProcessIdentity,
+}) {
+  const parent = path.dirname(preparationRoot);
+  await mkdir(parent, { recursive: true, mode: 0o700 });
+  await exactMetadata(parent, "directory", 0o700);
+  const alreadyPrepared = await validatePreparedCache(preparationRoot, key, identity, signal);
+  if (alreadyPrepared !== null) return alreadyPrepared;
+  const release = await acquirePreparationLock(preparationRoot, signal, processIdentityProbe);
+  let stage = null;
+  let operationError = null;
+  let cleanupError = null;
+  try {
+    const wonRace = await validatePreparedCache(preparationRoot, key, identity, signal);
+    if (wonRace !== null) return wonRace;
+    if (await pathExists(preparationRoot)) await cleanupCanaryScratch(preparationRoot);
+    await cleanupStalePreparationStages(preparationRoot);
+    stage = await mkdtemp(path.join(parent, `.${key}.stage-`));
+    await hooks.stageCreated?.(stage, signal);
+    const built = await build(stage, signal, hooks);
+    signal?.throwIfAborted();
+    await hooks.buildComplete?.(stage, signal);
+    await writePreparedManifest(stage, key, identity, preparedFrom, built?.artifacts, signal);
+    signal?.throwIfAborted();
+    await hooks.beforePublish?.(stage, signal);
+    signal?.throwIfAborted();
+    await rename(stage, preparationRoot);
+    stage = null;
+    const prepared = await validatePreparedCache(preparationRoot, key, identity, signal);
+    if (prepared === null) fail("atomic prepared canary publication is incomplete");
+    return { ...prepared, reused: false };
+  } catch (error) {
+    operationError = error;
+  } finally {
+    try {
+      if (stage !== null) await cleanupCanaryScratch(stage);
+      await release();
+    } catch (error) {
+      cleanupError = error;
+    }
+  }
+  throw preservePrimaryFailure(operationError, cleanupError);
+}
+
 export async function inferenceCargoSource(
   cargo, cargoEnv, inferenceRepo, inferenceRevision, signal,
 ) {
-  const metadata = JSON.parse((await execFileAsync(cargo, [
+  const metadata = JSON.parse((await runOwnedCommand(cargo, [
     "metadata", "--locked", "--format-version", "1",
   ], {
-    cwd: ROOT, encoding: "utf8", env: cargoEnv, timeout: CARGO_METADATA_TIMEOUT_MS,
+    cwd: ROOT, env: cargoEnv, timeout: CARGO_METADATA_TIMEOUT_MS,
     maxBuffer: 50 * 1024 * 1024, signal,
   })).stdout);
   const packages = metadata.packages.filter((pkg) =>
@@ -514,13 +1065,20 @@ export async function inferenceCargoSource(
 }
 
 async function adapterIdentity(adapterPath, signal) {
-  const metadata = await stat(adapterPath, { bigint: true });
+  const metadata = await lstat(adapterPath, { bigint: true });
+  if (!metadata.isFile() || metadata.isSymbolicLink()
+      || Number(metadata.mode & 0o777n) !== 0o500) {
+    fail("prepared canary adapter must be a read-only executable regular file");
+  }
   return {
     path: adapterPath,
     sha256: await sha256(adapterPath, signal),
     device: metadata.dev.toString(),
     inode: metadata.ino.toString(),
     size: Number(metadata.size),
+    mtimeNs: metadata.mtimeNs.toString(),
+    ctimeNs: metadata.ctimeNs.toString(),
+    mode: Number(metadata.mode & 0o777n),
   };
 }
 
@@ -532,21 +1090,21 @@ async function assertAdapterIdentity(expected, signal) {
 }
 
 async function buildExactAdapter(
-  sceneWorksRevision, inferenceRepo, inferenceRevision, scratch, signal,
+  sceneWorksRevision, inferenceRepo, inferenceRevision, buildRoot, preparationRoot, signal,
 ) {
-  const toolchain = await exactToolchain(scratch, signal);
+  await mkdir(buildRoot, { mode: 0o700 });
+  const toolchain = await exactToolchain(buildRoot, signal);
   const { cargo } = toolchain;
   const cargoEnv = toolchain.env;
   const target = cargoEnv.CARGO_TARGET_DIR;
   const cargoSource = await inferenceCargoSource(
     cargo, cargoEnv, inferenceRepo, inferenceRevision, signal,
   );
-  await execFileAsync(cargo, [
+  await runOwnedCommand(cargo, [
     "build", "--locked", "--release", "-p", "sceneworks-memory-adapter",
     "--bin", "memory-mlx-adapter", "--features", "mlx",
   ], {
     cwd: ROOT,
-    encoding: "utf8",
     env: cargoEnv,
     timeout: 30 * 60 * 1000,
     maxBuffer: 10 * 1024 * 1024,
@@ -563,9 +1121,9 @@ async function buildExactAdapter(
   }
   await inferenceCargoSource(cargo, cargoEnv, inferenceRepo, inferenceRevision, signal);
   const built = path.join(target, "release/memory-mlx-adapter");
-  const adapterDirectory = path.join(scratch, "executable");
-  await mkdir(adapterDirectory, { mode: 0o700 });
+  const adapterDirectory = path.join(preparationRoot, "adapter");
   const adapterPath = path.join(adapterDirectory, "memory-mlx-adapter");
+  await mkdir(adapterDirectory, { mode: 0o700 });
   await copyFile(built, adapterPath, fsConstants.COPYFILE_EXCL);
   await chmod(adapterPath, 0o500);
   await chmod(adapterDirectory, 0o500);
@@ -599,6 +1157,11 @@ async function controller(argv) {
   }
   const sceneWorksRevision = await cleanHead(ROOT, "SceneWorks");
   const inferenceRevision = await cleanHead(inferenceRepo, "inference");
+  const [sceneWorksTree, inferenceTree, toolchainChannel] = await Promise.all([
+    git(ROOT, ["rev-parse", "HEAD^{tree}"]),
+    git(inferenceRepo, ["rev-parse", "HEAD^{tree}"]),
+    repositoryToolchain(),
+  ]);
   const adapterSource = await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/lib.rs"), "utf8");
   const pin = adapterSource.match(/pub const INFERENCE_PIN: &str = "([0-9a-f]{40})";/)?.[1];
   if (!pin || inferenceRevision !== pin) fail(`inference checkout ${inferenceRevision} does not match adapter pin ${pin}`);
@@ -612,30 +1175,11 @@ async function controller(argv) {
   if (!Number.isSafeInteger(memoryBytes) || memoryBytes < MIN_PREFLIGHT_FREE_BYTES) {
     fail(`host memory ${memoryBytes} cannot preserve two canary stop boundaries`);
   }
-  const preBuildHost = await assertHostPreflight(memoryBytes);
-  const numericTierRoot = await realpath(path.resolve(
-    process.env.SCENEWORKS_LTX_ROOT ?? fail("SCENEWORKS_LTX_ROOT is required"),
-  ));
-  const textEncoderRoot = await realpath(path.resolve(
-    process.env.SCENEWORKS_LTX_TEXT_ENCODER_ROOT
-      ?? fail("SCENEWORKS_LTX_TEXT_ENCODER_ROOT is required"),
-  ));
-  const numericTierInventory = assertInventory(
-    await hashArtifactInventory(numericTierRoot),
-    { files: 11, bytes: Q4_INVENTORY_BYTES, sha256: Q4_INVENTORY_SHA256 },
-    "local q4",
-  );
-  const textEncoderInventory = assertInventory(
-    await hashArtifactInventory(textEncoderRoot),
-    {
-      files: TEXT_ENCODER_INVENTORY_FILES,
-      bytes: TEXT_ENCODER_INVENTORY_BYTES,
-      sha256: TEXT_ENCODER_INVENTORY_SHA256,
-    },
-    "local text-encoder",
-  );
-  const scratch = await mkdtemp(path.join(tmpdir(), "sc19741-ltx-canary-"));
+  const identity = preparationIdentity(sceneWorksTree, inferenceTree, toolchainChannel);
+  const preparationKey = preparationCacheKey(identity);
+  const preparationRoot = preparationCacheRoot(output, preparationKey);
   let activeWatchdog = null;
+  let runScratch = null;
   let interruptedSignal = null;
   const cancellation = new AbortController();
   const signalHandlers = Object.fromEntries(["SIGINT", "SIGTERM"].map((signalName) => [
@@ -655,62 +1199,110 @@ async function controller(argv) {
   let cleanupError = null;
   try {
     const { signal } = cancellation;
-    const scratchDevice = (await stat(scratch, { bigint: true })).dev;
+    const prepared = await prepareCanaryCache({
+      preparationRoot,
+      key: preparationKey,
+      identity,
+      preparedFrom: { sceneWorksRevision, inferenceRevision },
+      signal,
+      build: async (stage, buildSignal, hooks) => {
+        const numericTierRoot = await realpath(path.resolve(
+          process.env.SCENEWORKS_LTX_ROOT ?? fail("SCENEWORKS_LTX_ROOT is required to prepare q4"),
+        ));
+        const textEncoderRoot = await realpath(path.resolve(
+          process.env.SCENEWORKS_LTX_TEXT_ENCODER_ROOT
+            ?? fail("SCENEWORKS_LTX_TEXT_ENCODER_ROOT is required to prepare the text encoder"),
+        ));
+        const numericTierInventory = assertInventory(
+          await hashArtifactInventory(numericTierRoot, { signal: buildSignal }),
+          identity.artifact.numericTier,
+          "local q4",
+        );
+        const textEncoderInventory = assertInventory(
+          await hashArtifactInventory(textEncoderRoot, { signal: buildSignal }),
+          identity.artifact.textEncoder,
+          "local text-encoder",
+        );
+        const preparationDevice = (await stat(stage, { bigint: true })).dev;
+        const roots = privateArtifactRoots(stage);
+        await mkdir(path.dirname(roots.numericTier), { recursive: true, mode: 0o700 });
+        await cloneArtifactTree(numericTierRoot, roots.numericTier, preparationDevice, buildSignal);
+        const preparedNumericTier = assertInventory(
+          await hashArtifactInventory(roots.numericTier, { signal: buildSignal }),
+          inventoryAtRoot(numericTierInventory, roots.numericTier),
+          "new prepared numericTier",
+        );
+        await hooks.afterNumericClone?.(stage, buildSignal);
+        await cloneArtifactTree(
+          textEncoderRoot, roots.textEncoder, preparationDevice, buildSignal,
+        );
+        const preparedTextEncoder = assertInventory(
+          await hashArtifactInventory(roots.textEncoder, { signal: buildSignal }),
+          inventoryAtRoot(textEncoderInventory, roots.textEncoder),
+          "new prepared textEncoder",
+        );
+        await hooks.afterArtifactClone?.(stage, buildSignal);
+        const buildRoot = path.join(stage, `.build-${randomUUID()}`);
+        let buildError = null;
+        let buildCleanupError = null;
+        try {
+          await buildExactAdapter(
+            sceneWorksRevision,
+            inferenceRepo,
+            inferenceRevision,
+            buildRoot,
+            stage,
+            buildSignal,
+          );
+        } catch (error) {
+          buildError = error;
+        } finally {
+          try {
+            await cleanupCanaryScratch(buildRoot);
+          } catch (error) {
+            buildCleanupError = error;
+          }
+        }
+        const finalBuildError = preservePrimaryFailure(buildError, buildCleanupError);
+        if (finalBuildError !== null) throw finalBuildError;
+        return {
+          artifacts: {
+            numericTier: preparedNumericTier,
+            textEncoder: preparedTextEncoder,
+          },
+        };
+      },
+    });
+    const preparationReused = prepared.reused;
     const {
       numericTier: privateNumericTierRoot,
       textEncoder: privateTextEncoderRoot,
-    } = privateArtifactRoots(scratch);
-    await mkdir(path.dirname(privateNumericTierRoot), { recursive: true, mode: 0o700 });
-    await cloneArtifactTree(numericTierRoot, privateNumericTierRoot, scratchDevice, signal);
-    await cloneArtifactTree(textEncoderRoot, privateTextEncoderRoot, scratchDevice, signal);
-    assertInventory(
-      await hashArtifactInventory(privateNumericTierRoot, { signal }),
-      inventoryAtRoot(numericTierInventory, privateNumericTierRoot), "private q4 clone",
+    } = prepared.roots;
+    const adapter = prepared.adapter;
+    const textEncoderInventory = inventoryAtRoot(
+      identity.artifact.textEncoder, privateTextEncoderRoot,
     );
-    assertInventory(
-      await hashArtifactInventory(privateTextEncoderRoot, { signal }),
-      inventoryAtRoot(textEncoderInventory, privateTextEncoderRoot),
-      "private text-encoder clone",
-    );
-    const adapter = await buildExactAdapter(
-      sceneWorksRevision, inferenceRepo, inferenceRevision, scratch, signal,
-    );
-    const preLaunchHost = await assertHostPreflight(memoryBytes, signal);
-    assertInventory(
-      await hashArtifactInventory(numericTierRoot, { signal }), numericTierInventory,
-      "pre-launch q4",
-    );
-    assertInventory(
-      await hashArtifactInventory(textEncoderRoot, { signal }), textEncoderInventory,
-      "pre-launch text-encoder",
-    );
-    assertInventory(
-      await hashArtifactInventory(privateNumericTierRoot, { signal }),
-      inventoryAtRoot(numericTierInventory, privateNumericTierRoot),
-      "pre-launch private q4",
-    );
-    assertInventory(
-      await hashArtifactInventory(privateTextEncoderRoot, { signal }),
-      inventoryAtRoot(textEncoderInventory, privateTextEncoderRoot),
-      "pre-launch private text-encoder",
-    );
-    await assertAdapterIdentity(adapter, signal);
-    const requestPath = path.join(scratch, "request.json");
-    const responsePath = path.join(scratch, "response.json");
-    const eventsPath = path.join(scratch, "watchdog.jsonl");
+    const runRoot = path.join(path.dirname(output), "runs");
+    await mkdir(runRoot, { recursive: true, mode: 0o700 });
+    runScratch = await mkdtemp(path.join(runRoot, "sc19741-run-"));
+    const requestPath = path.join(runScratch, "request.json");
+    const responsePath = path.join(runScratch, "response.json");
+    const eventsPath = path.join(runScratch, "watchdog.jsonl");
     const request = canaryRequest(memoryBytes, textEncoderInventory);
     await writeFile(requestPath, `${JSON.stringify(request)}\n`, { flag: "wx" });
+    const launchPrepared = await validatePreparedCache(
+      preparationRoot, preparationKey, identity, signal,
+    );
+    if (launchPrepared === null) fail("prepared canary cache disappeared before launch");
+    await assertAdapterIdentity(launchPrepared.adapter, signal);
     const watchdog = path.join(ROOT, "scripts/memory-calibration-watchdog.py");
     const runtimeMemoryFreeFloor = runtimeFreeFloor(memoryBytes);
-    signal.throwIfAborted();
-    const status = await new Promise((resolve, reject) => {
-      const childProcess = spawn("/usr/bin/python3", [
+    const watchdogArgs = [
       watchdog,
       "--max-footprint-bytes", String(MAX_FOOTPRINT_BYTES),
       "--max-runtime-seconds", String(MAX_RUNTIME_SECONDS),
       "--host-memory-bytes", String(memoryBytes),
       "--min-memory-free-bytes", String(runtimeMemoryFreeFloor),
-      "--min-swap-free-bytes", String(MIN_SWAP_FREE_BYTES),
       "--sample-interval", "0.25",
       "--telemetry-timeout", "1",
       "--child-attestation-timeout", String(CHILD_ATTESTATION_TIMEOUT_SECONDS),
@@ -720,13 +1312,26 @@ async function controller(argv) {
       "--",
       "/bin/sh", "-c", 'set -C; exec "$1" <"$2" >"$3"',
       "sc19741-canary", adapter.path, requestPath, responsePath,
-      ], {
+    ];
+    const watchdogEnv = {
+      ...process.env,
+      SCENEWORKS_LTX_ROOT: privateNumericTierRoot,
+      SCENEWORKS_LTX_TEXT_ENCODER_ROOT: privateTextEncoderRoot,
+    };
+    if (await cleanHead(ROOT, "SceneWorks", signal) !== sceneWorksRevision
+        || await cleanHead(inferenceRepo, "inference", signal) !== inferenceRevision
+        || await git(ROOT, ["rev-parse", "HEAD^{tree}"], signal) !== sceneWorksTree
+        || await git(inferenceRepo, ["rev-parse", "HEAD^{tree}"], signal) !== inferenceTree) {
+      fail("verified source checkout changed during canary preparation");
+    }
+    signal.throwIfAborted();
+    // There is no sustained-quiet gate. Unrelated compilation may overlap preparation; this one
+    // fresh check exclusively protects the instant at which the watchdog releases model loading.
+    const preLaunchHost = await assertHostPreflight(memoryBytes, signal);
+    const status = await new Promise((resolve, reject) => {
+      const childProcess = spawn("/usr/bin/python3", watchdogArgs, {
         stdio: "inherit",
-        env: {
-          ...process.env,
-          SCENEWORKS_LTX_ROOT: privateNumericTierRoot,
-          SCENEWORKS_LTX_TEXT_ENCODER_ROOT: privateTextEncoderRoot,
-        },
+        env: watchdogEnv,
       });
       activeWatchdog = childProcess;
       if (interruptedSignal !== null) childProcess.kill(interruptedSignal);
@@ -740,27 +1345,13 @@ async function controller(argv) {
       fail(watchdogFailureSummary(status, eventBytes));
     }
     await assertAdapterIdentity(adapter, signal);
-    assertInventory(
-      await hashArtifactInventory(numericTierRoot, { signal }), numericTierInventory, "post-run q4",
-    );
-    assertInventory(
-      await hashArtifactInventory(textEncoderRoot, { signal }), textEncoderInventory,
-      "post-run text-encoder",
-    );
-    assertInventory(
-      await hashArtifactInventory(privateNumericTierRoot, { signal }),
-      inventoryAtRoot(numericTierInventory, privateNumericTierRoot),
-      "post-run private q4",
-    );
-    assertInventory(
-      await hashArtifactInventory(privateTextEncoderRoot, { signal }),
-      inventoryAtRoot(textEncoderInventory, privateTextEncoderRoot),
-      "post-run private text-encoder",
-    );
-    if (await cleanHead(ROOT, "SceneWorks", signal) !== sceneWorksRevision
-        || await cleanHead(inferenceRepo, "inference", signal) !== inferenceRevision) {
-      fail("verified source checkout changed during the canary");
+    if (await validatePreparedCache(preparationRoot, preparationKey, identity, signal) === null) {
+      fail("prepared canary cache disappeared after the run");
     }
+    const [sceneWorksAfterRun, inferenceAfterRun] = await Promise.all([
+      observedSourceState(ROOT, sceneWorksRevision, sceneWorksTree),
+      observedSourceState(inferenceRepo, inferenceRevision, inferenceTree),
+    ]);
     const response = validateCanaryResponse(
       JSON.parse(await readFile(responsePath, "utf8")),
       inferenceRevision,
@@ -779,7 +1370,7 @@ async function controller(argv) {
         !Number.isInteger(event.memoryFreeBytes)
         || event.memoryFreeBytes < runtimeMemoryFreeFloor
         || !Number.isInteger(event.swapFreeBytes)
-        || event.swapFreeBytes < MIN_SWAP_FREE_BYTES)
+        || event.swapFreeBytes < 0)
       || events.some((event) => event.event === "hard_stop" || event.event === "terminated")) {
       fail("watchdog event stream is incomplete or contains a hard stop");
     }
@@ -796,13 +1387,22 @@ async function controller(argv) {
     sceneWorksRevision,
     inferenceRevision,
     adapter,
-    hostPreflight: { preBuild: preBuildHost, preLaunch: preLaunchHost },
+    preparation: {
+      key: preparationKey,
+      root: preparationRoot,
+      identity,
+      preparedFrom: prepared.manifest.preparedFrom,
+      reused: preparationReused,
+      verification: "initial-content-hash-atomic-publish-read-only-metadata-seal",
+    },
+    hostPreflight: { preLaunch: preLaunchHost },
+    sourceAfterRun: { sceneWorks: sceneWorksAfterRun, inference: inferenceAfterRun },
     request,
     response,
     watchdog: {
       maxObservedFootprintBytes,
       minimumRuntimeFreeBytes: runtimeMemoryFreeFloor,
-      minimumSwapFreeBytes: MIN_SWAP_FREE_BYTES,
+      swapTelemetryRequired: true,
       ownedGroupResidueVerified: true,
       events,
     },
@@ -822,7 +1422,7 @@ async function controller(argv) {
     operationError = error;
   } finally {
     try {
-      await cleanupCanaryScratch(scratch);
+      if (runScratch !== null) await cleanupCanaryScratch(runScratch);
     } catch (error) {
       cleanupError = error;
     }

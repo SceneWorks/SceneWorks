@@ -133,8 +133,6 @@ const LTX_Q4_F305_CRASH_FOOTPRINT_BYTES: u64 = 96_970_084_480;
 /// host-pressure gates. It must never be reused to admit a campaign row.
 const LTX_CANARY_MAX_FOOTPRINT_BYTES: u64 = 53_347_146_863;
 const LTX_CANARY_MAX_RUNTIME_SECONDS: f64 = 1_800.0;
-const LTX_CANARY_MIN_SWAP_FREE_BYTES: u64 = 1024 * 1024 * 1024;
-const LTX_CANARY_MIN_INITIAL_MEMORY_FREE_PERCENT: u64 = 70;
 const LTX_CANARY_WATCHDOG_PROTOCOL: &str = "sceneworks-memory-watchdog-v1";
 const LTX_CANARY_WIDTH: u32 = 256;
 const LTX_CANARY_HEIGHT: u32 = 256;
@@ -1384,11 +1382,31 @@ enum ScopedGenerationFailureKind {
 
 fn scoped_generate_observed(
     generator: &dyn Generator,
+    request: GenerationRequest,
+    context: &MemoryRunContext,
+    error_phase: Option<MemoryPhase>,
+    observed_failure: &mut Option<ScopedGenerationFailureKind>,
+    on_progress: &mut dyn FnMut(Progress),
+) -> Result<GenerationOutput, String> {
+    scoped_generate_observed_after_configuration(
+        generator,
+        request,
+        context,
+        error_phase,
+        observed_failure,
+        on_progress,
+        None,
+    )
+}
+
+fn scoped_generate_observed_after_configuration(
+    generator: &dyn Generator,
     mut request: GenerationRequest,
     context: &MemoryRunContext,
     error_phase: Option<MemoryPhase>,
     observed_failure: &mut Option<ScopedGenerationFailureKind>,
     on_progress: &mut dyn FnMut(Progress),
+    after_configuration: Option<fn(&mut GenerationRequest) -> Result<(), String>>,
 ) -> Result<GenerationOutput, String> {
     if let MemorySafetyDecision::Reject { reason } = generator.memory_strategy_safety_check(context)
     {
@@ -1403,6 +1421,21 @@ fn scoped_generate_observed(
     scope
         .configure_request(&mut request)
         .map_err(|error| format!("configure calibrated request: {error}"))?;
+    if let Some(after_configuration) = after_configuration {
+        if let Err(error) = after_configuration(&mut request) {
+            *observed_failure = Some(ScopedGenerationFailureKind::Error);
+            let finish = scope.finish(MemoryRunOutcome::Error {
+                message: error.clone(),
+            });
+            return match finish {
+                Ok(()) => Err(error),
+                Err(finish) => {
+                    *observed_failure = Some(ScopedGenerationFailureKind::Finish);
+                    Err(format!("{error}; finish calibrated request: {finish}"))
+                }
+            };
+        }
+    }
     if let Some(phase) = error_phase {
         // The shared gen-core request floor rejects a fault phase that is not paired with an
         // explicit harness authorization, so the pair must be set together through gen-core's own
@@ -5459,9 +5492,9 @@ fn ltx_request(geometry: LtxGeometry, fps: u32, seed: u64) -> GenerationRequest 
 }
 
 /// The non-promotable safety canary. This is intentionally outside the product calibration
-/// envelope: it reuses the inference provider's historical 256x256x9 q4 residency baseline, then
-/// forces the smallest shipped spatial decode carrier so the permanent-pin per-tile release path
-/// executes without exposing a campaign geometry to real weights.
+/// envelope: it reuses the inference provider's historical 256x256x9 q4 residency baseline, skips
+/// only the downstream audio decoder/vocoder, then forces the smallest shipped spatial decode
+/// carrier so the permanent-pin per-tile release path executes without a campaign geometry.
 fn ltx_canary_generation_request() -> GenerationRequest {
     GenerationRequest {
         prompt: "a sunlit pine branch, static camera".to_owned(),
@@ -5471,9 +5504,7 @@ fn ltx_canary_generation_request() -> GenerationRequest {
         seed: Some(LTX_CANARY_SEED),
         frames: Some(LTX_CANARY_FRAMES),
         fps: Some(LTX_CANARY_FPS),
-        // The provider's calibrated contract has no video-mode variant axis. Keep the production
-        // default A/V path instead of asking the memory scope to configure an unsupported variant.
-        video_mode: None,
+        video_mode: Some("no_audio".to_owned()),
         memory: Some(GenerationMemory {
             tile_vae_decode: true,
             decode_tile_edge: Some(LTX_CANARY_TILE_EDGE),
@@ -5482,6 +5513,67 @@ fn ltx_canary_generation_request() -> GenerationRequest {
         }),
         ..Default::default()
     }
+}
+
+fn ltx_canary_request_for_provider_admission(
+    mut request: GenerationRequest,
+) -> Result<GenerationRequest, String> {
+    let memory = request
+        .memory
+        .as_ref()
+        .ok_or_else(|| "LTX safety canary omitted bounded-decode memory parameters".to_owned())?;
+    if request.width != LTX_CANARY_WIDTH
+        || request.height != LTX_CANARY_HEIGHT
+        || request.count != 1
+        || request.frames != Some(LTX_CANARY_FRAMES)
+        || request.fps != Some(LTX_CANARY_FPS)
+        || request.seed != Some(LTX_CANARY_SEED)
+        || request.video_mode.as_deref() != Some("no_audio")
+        || !memory.tile_vae_decode
+        || memory.decode_tile_edge != Some(LTX_CANARY_TILE_EDGE)
+        || memory.decode_overlap != Some(LTX_CANARY_OVERLAP)
+    {
+        return Err(
+            "LTX no-audio admission bridge is private to the exact safety canary tuple".to_owned(),
+        );
+    }
+    // The pinned provider's production request scope rejects every explicit video-mode override.
+    // Admit/configure the ordinary unconditional A/V denoise with its default, then restore the
+    // strictly smaller no-audio decode request immediately before generation.
+    request.video_mode = None;
+    Ok(request)
+}
+
+fn restore_ltx_canary_no_audio_after_configuration(
+    request: &mut GenerationRequest,
+) -> Result<(), String> {
+    if request.video_mode.is_some() {
+        return Err(
+            "LTX safety canary provider configuration introduced an unexpected video-mode override"
+                .to_owned(),
+        );
+    }
+    request.video_mode = Some("no_audio".to_owned());
+    Ok(())
+}
+
+fn scoped_generate_ltx_no_audio_canary(
+    generator: &dyn Generator,
+    request: GenerationRequest,
+    context: &MemoryRunContext,
+    on_progress: &mut dyn FnMut(Progress),
+) -> Result<GenerationOutput, String> {
+    let request = ltx_canary_request_for_provider_admission(request)?;
+    let mut observed_failure = None;
+    scoped_generate_observed_after_configuration(
+        generator,
+        request,
+        context,
+        None,
+        &mut observed_failure,
+        on_progress,
+        Some(restore_ltx_canary_no_audio_after_configuration),
+    )
 }
 
 /// Resolve and validate the `SCENEWORKS_LTX_*` environment family into a tier-exact load spec.
@@ -6432,12 +6524,12 @@ fn validate_ltx_canary_plan(request: &Value) -> Result<MemorySelection, String> 
         .get("_canary")
         .and_then(Value::as_object)
         .ok_or_else(|| "LTX safety canary requires planned._canary".to_owned())?;
-    if canary.get("videoMode").and_then(Value::as_str) != Some("default")
+    if canary.get("videoMode").and_then(Value::as_str) != Some("no_audio")
         || canary.get("fps").and_then(Value::as_u64) != Some(u64::from(LTX_CANARY_FPS))
         || canary.get("seed").and_then(Value::as_u64) != Some(LTX_CANARY_SEED)
     {
         return Err(format!(
-            "LTX safety canary requires the default A/V route, fps {LTX_CANARY_FPS}, seed {LTX_CANARY_SEED}"
+            "LTX safety canary requires the no-audio route, fps {LTX_CANARY_FPS}, seed {LTX_CANARY_SEED}"
         ));
     }
     let artifact = planned
@@ -6508,9 +6600,7 @@ struct LtxCanaryWatchdogAttestation {
     max_runtime_seconds: f64,
     host_memory_bytes: u64,
     min_initial_memory_free_bytes: u64,
-    min_initial_memory_free_percent: u64,
     min_memory_free_bytes: u64,
-    min_swap_free_bytes: u64,
     nonce: String,
     stream: Option<UnixStream>,
 }
@@ -6651,16 +6741,6 @@ fn consume_ltx_canary_watchdog_attestation_stream(
         .get("minInitialMemoryFreeBytes")
         .and_then(Value::as_u64)
         .ok_or_else(|| "LTX safety canary watchdog omitted minInitialMemoryFreeBytes".to_owned())?;
-    let min_initial_memory_free_percent = payload
-        .get("minInitialMemoryFreePercent")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| {
-            "LTX safety canary watchdog omitted minInitialMemoryFreePercent".to_owned()
-        })?;
-    let min_swap_free_bytes = payload
-        .get("minSwapFreeBytes")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| "LTX safety canary watchdog omitted minSwapFreeBytes".to_owned())?;
     let requested_host_memory = request
         .pointer("/hardware/memoryBytes")
         .and_then(Value::as_u64)
@@ -6671,9 +6751,9 @@ fn consume_ltx_canary_watchdog_attestation_stream(
         || host_memory_bytes != requested_host_memory
         || min_initial_memory_free_bytes
             != 2 * LTX_CANARY_MAX_FOOTPRINT_BYTES + telemetry_resolution
-        || min_initial_memory_free_percent != LTX_CANARY_MIN_INITIAL_MEMORY_FREE_PERCENT
+        || payload.get("minInitialMemoryFreePercent").is_some()
         || min_memory_free_bytes != LTX_CANARY_MAX_FOOTPRINT_BYTES + telemetry_resolution
-        || min_swap_free_bytes != LTX_CANARY_MIN_SWAP_FREE_BYTES
+        || payload.get("minSwapFreeBytes").is_some()
     {
         return Err(
             "LTX safety canary watchdog did not attest the exact reviewed bounds".to_owned(),
@@ -6690,9 +6770,7 @@ fn consume_ltx_canary_watchdog_attestation_stream(
         max_runtime_seconds,
         host_memory_bytes,
         min_initial_memory_free_bytes,
-        min_initial_memory_free_percent,
         min_memory_free_bytes,
-        min_swap_free_bytes,
         nonce: nonce.to_owned(),
         stream: Some(stream),
     })
@@ -6778,11 +6856,10 @@ fn run_ltx_canary(request: &Value) -> Result<Value, String> {
         active: 0,
         cache: 0,
     };
-    let (frames, fps, has_audio) = video_frames(scoped_generate(
+    let (frames, fps, has_audio) = video_frames(scoped_generate_ltx_no_audio_canary(
         generator.as_ref(),
         ltx_canary_generation_request(),
         &context,
-        None,
         &mut |progress| match progress {
             Progress::Step { current: 1, .. } => {
                 conditioning = PhaseMemory::capture();
@@ -6796,7 +6873,7 @@ fn run_ltx_canary(request: &Value) -> Result<Value, String> {
         },
     )?)?;
     let decode = PhaseMemory::capture();
-    if frames.len() != LTX_CANARY_FRAMES as usize || fps != LTX_CANARY_FPS || !has_audio {
+    if frames.len() != LTX_CANARY_FRAMES as usize || fps != LTX_CANARY_FPS || has_audio {
         return Err(format!(
             "LTX safety canary returned frames={}, fps={fps}, audio={has_audio}",
             frames.len()
@@ -6846,7 +6923,7 @@ fn run_ltx_canary(request: &Value) -> Result<Value, String> {
                 "frames": LTX_CANARY_FRAMES,
                 "fps": LTX_CANARY_FPS,
             },
-            "audio": true,
+            "audio": false,
         },
         "strategy": ltx_attested_strategy(request, &context.selection, &contract)?,
         "watchdog": {
@@ -6856,9 +6933,7 @@ fn run_ltx_canary(request: &Value) -> Result<Value, String> {
             "maxRuntimeSeconds": watchdog.max_runtime_seconds,
             "hostMemoryBytes": watchdog.host_memory_bytes,
             "minInitialMemoryFreeBytes": watchdog.min_initial_memory_free_bytes,
-            "minInitialMemoryFreePercent": watchdog.min_initial_memory_free_percent,
             "minMemoryFreeBytes": watchdog.min_memory_free_bytes,
-            "minSwapFreeBytes": watchdog.min_swap_free_bytes,
             "source": "conservative-stop-from-sc-18808-q8-costaged-safetensor-arithmetic-not-physical-bound",
         },
         "mlxLimits": {
@@ -8408,7 +8483,7 @@ mod ltx_tests {
                     "maxFootprintBytes": LTX_CANARY_MAX_FOOTPRINT_BYTES,
                 },
                 "_canary": {
-                    "videoMode": "default",
+                    "videoMode": "no_audio",
                     "fps": LTX_CANARY_FPS,
                     "seed": LTX_CANARY_SEED,
                 },
@@ -8449,11 +8524,26 @@ mod ltx_tests {
             (generated.width, generated.height, generated.frames),
             (LTX_CANARY_WIDTH, LTX_CANARY_HEIGHT, Some(LTX_CANARY_FRAMES))
         );
-        assert_eq!(generated.video_mode, None);
+        assert_eq!(generated.video_mode.as_deref(), Some("no_audio"));
         let memory = generated.memory.expect("bounded decode carrier");
         assert!(memory.tile_vae_decode);
         assert_eq!(memory.decode_tile_edge, Some(LTX_CANARY_TILE_EDGE));
         assert_eq!(memory.decode_overlap, Some(LTX_CANARY_OVERLAP));
+
+        let mut admitted =
+            ltx_canary_request_for_provider_admission(ltx_canary_generation_request())
+                .expect("the exact diagnostic tuple may use the private admission bridge");
+        assert_eq!(admitted.video_mode, None);
+        restore_ltx_canary_no_audio_after_configuration(&mut admitted)
+            .expect("no_audio is restored only after provider configuration");
+        assert_eq!(admitted.video_mode.as_deref(), Some("no_audio"));
+
+        let mut production_default = ltx_canary_generation_request();
+        production_default.video_mode = Some("default".to_owned());
+        assert!(ltx_canary_request_for_provider_admission(production_default).is_err());
+        let mut provider_override = ltx_canary_generation_request();
+        provider_override.video_mode = Some("default".to_owned());
+        assert!(restore_ltx_canary_no_audio_after_configuration(&mut provider_override).is_err());
     }
 
     #[test]
@@ -8470,9 +8560,7 @@ mod ltx_tests {
             "maxRuntimeSeconds": LTX_CANARY_MAX_RUNTIME_SECONDS,
             "hostMemoryBytes": host_memory,
             "minInitialMemoryFreeBytes": 2 * LTX_CANARY_MAX_FOOTPRINT_BYTES + host_memory.div_ceil(100),
-            "minInitialMemoryFreePercent": LTX_CANARY_MIN_INITIAL_MEMORY_FREE_PERCENT,
             "minMemoryFreeBytes": LTX_CANARY_MAX_FOOTPRINT_BYTES + host_memory.div_ceil(100),
-            "minSwapFreeBytes": LTX_CANARY_MIN_SWAP_FREE_BYTES,
         });
         let (mut watchdog, adapter) = UnixStream::pair().expect("watchdog socket pair");
         let expected_nonce = nonce.clone();
@@ -8506,11 +8594,6 @@ mod ltx_tests {
         watchdog_thread.join().expect("watchdog thread");
         assert_eq!(attested.max_footprint_bytes, LTX_CANARY_MAX_FOOTPRINT_BYTES);
         assert_eq!(attested.max_runtime_seconds, LTX_CANARY_MAX_RUNTIME_SECONDS);
-        assert_eq!(
-            attested.min_initial_memory_free_percent,
-            LTX_CANARY_MIN_INITIAL_MEMORY_FREE_PERCENT
-        );
-
         assert!(std::env::var_os("SCENEWORKS_MEMORY_WATCHDOG_SOCKET").is_none());
         let direct = consume_ltx_canary_watchdog_attestation(&request)
             .expect_err("direct stdin canary has no live watchdog channel");
@@ -8518,6 +8601,34 @@ mod ltx_tests {
         let direct_action = run_ltx_canary(&request)
             .expect_err("public canary action must refuse without the live watchdog");
         assert!(direct_action.contains("live external watchdog channel"));
+
+        let mut swap_gated = payload.clone();
+        swap_gated["minSwapFreeBytes"] = json!(1024_u64 * 1024 * 1024);
+        let (mut fake_watchdog, fake_adapter) =
+            UnixStream::pair().expect("swap-gated watchdog socket pair");
+        let fake_thread = std::thread::spawn(move || {
+            fake_watchdog
+                .write_all(format!("{swap_gated}\n").as_bytes())
+                .expect("send swap-gated attestation");
+        });
+        let error = consume_ltx_canary_watchdog_attestation_stream(&request, fake_adapter)
+            .expect_err("an arbitrary swap reserve must not enter the reviewed canary bounds");
+        fake_thread.join().expect("fake watchdog thread");
+        assert!(error.contains("exact reviewed bounds"));
+
+        let mut percent_gated = payload.clone();
+        percent_gated["minInitialMemoryFreePercent"] = json!(70);
+        let (mut fake_watchdog, fake_adapter) =
+            UnixStream::pair().expect("percent-gated watchdog socket pair");
+        let fake_thread = std::thread::spawn(move || {
+            fake_watchdog
+                .write_all(format!("{percent_gated}\n").as_bytes())
+                .expect("send percent-gated attestation");
+        });
+        let error = consume_ltx_canary_watchdog_attestation_stream(&request, fake_adapter)
+            .expect_err("a redundant percentage floor must not enter the reviewed canary bounds");
+        fake_thread.join().expect("fake watchdog thread");
+        assert!(error.contains("exact reviewed bounds"));
 
         let mut weakened = payload;
         weakened["minInitialMemoryFreeBytes"] =
@@ -8561,8 +8672,8 @@ mod ltx_tests {
             ("wrong overlap", |request| {
                 request["planned"]["strategy"]["parameters"]["decodeOverlap"] = json!(32)
             }),
-            ("audio-suppressed variant", |request| {
-                request["planned"]["_canary"]["videoMode"] = json!("no_audio")
+            ("audio-enabled variant", |request| {
+                request["planned"]["_canary"]["videoMode"] = json!("default")
             }),
             ("ceiling drift", |request| {
                 request["planned"]["_watchdog"]["maxFootprintBytes"] =
