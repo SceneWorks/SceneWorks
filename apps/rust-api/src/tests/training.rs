@@ -1,6 +1,95 @@
 //! rust-api training tests (split from tests.rs, sc-11217 F-030).
 use super::support::*;
 
+#[test]
+fn platform_effective_training_catalog_preserves_mlx_defaults_and_seeds_candle_limits() {
+    let mlx = crate::training::effective_training_targets_for_candle(false);
+    let candle = crate::training::effective_training_targets_for_candle(true);
+
+    for kernel in ["kolors_lora", "sd3_lora", "mage_flow_lora"] {
+        let mlx_target = mlx
+            .targets
+            .iter()
+            .find(|target| target.kernel == kernel)
+            .expect("MLX target");
+        let candle_target = candle
+            .targets
+            .iter()
+            .find(|target| target.id == mlx_target.id)
+            .expect("Candle projection of the same target");
+        assert_eq!(
+            mlx_target.defaults.advanced["gradientCheckpointing"],
+            json!(true),
+            "{kernel} keeps its pre-existing MLX checkpointing default"
+        );
+        assert!(
+            mlx_target.defaults.advanced["sampleEvery"]
+                .as_u64()
+                .is_some_and(|value| value > 0),
+            "{kernel} keeps its pre-existing MLX preview cadence"
+        );
+        assert_eq!(
+            candle_target.defaults.advanced["gradientCheckpointing"],
+            json!(false),
+            "{kernel} Candle metadata must not advertise unsupported checkpointing"
+        );
+        assert_eq!(candle_target.defaults.advanced["sampleEvery"], json!(0));
+        if kernel == "mage_flow_lora" {
+            assert!(mlx_target
+                .defaults
+                .advanced
+                .get("fullFinetuneConfig")
+                .is_none());
+            assert_eq!(
+                candle_target.defaults.advanced["fullFinetuneConfig"],
+                json!({
+                    "mixedPrecision": "f32",
+                    "gradientCheckpointing": false
+                })
+            );
+        }
+    }
+
+    let candle_wan5 = candle
+        .targets
+        .iter()
+        .find(|target| target.base_model == "wan_2_2")
+        .expect("Wan TI2V-5B target");
+    assert_eq!(candle_wan5.defaults.advanced["sampleEvery"], json!(0));
+    let candle_wan14 = candle
+        .targets
+        .iter()
+        .filter(|target| target.kernel == "wan_moe_lora")
+        .collect::<Vec<_>>();
+    assert_eq!(candle_wan14.len(), 2);
+    assert!(candle_wan14.iter().all(|target| {
+        target.defaults.advanced["gradientCheckpointing"] == json!(true)
+            && target.defaults.advanced["sampleEvery"] == json!(0)
+    }));
+
+    let mlx_presets = crate::training::effective_training_presets_for_candle(false);
+    let candle_presets = crate::training::effective_training_presets_for_candle(true);
+    let mlx_kolors = mlx_presets
+        .presets
+        .iter()
+        .find(|preset| preset.target_id == "kolors_lora")
+        .expect("Kolors preset");
+    let candle_kolors = candle_presets
+        .presets
+        .iter()
+        .find(|preset| preset.id == mlx_kolors.id)
+        .expect("Candle Kolors preset");
+    assert_eq!(
+        mlx_kolors.config.advanced["gradientCheckpointing"],
+        json!(true)
+    );
+    assert_eq!(
+        candle_kolors.config.advanced["gradientCheckpointing"],
+        json!(false)
+    );
+    assert_eq!(candle_kolors.config.advanced["sampleEvery"], json!(0));
+}
+
 #[tokio::test]
 async fn training_targets_route_returns_builtin_registry() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
@@ -1945,6 +2034,207 @@ async fn completed_training_job_registers_lora_with_provenance() {
         .iter()
         .any(|item| item["name"] == json!("Aurora Style")
             && item["provenance"]["trainingJobId"] == json!(job_id)));
+}
+
+fn seed_installed_wan_i2v_a14b_training_base(data_dir: &std::path::Path) {
+    #[cfg(target_os = "macos")]
+    {
+        let snapshot = materialize_snapshot(
+            data_dir,
+            "SceneWorks/wan2.2-i2v-a14b-mlx",
+            "test-wan-i2v-a14b-training",
+        );
+        seed_wan_mlx_tier(&snapshot.join("bf16"), true);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    seed_installed_training_base(data_dir, "wan_2_2_i2v_14b");
+}
+
+#[tokio::test]
+async fn wan_a14b_registration_requires_and_registers_both_expert_files() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    seed_installed_wan_i2v_a14b_training_base(&settings.data_dir);
+    let app = create_app(settings).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Wan Experts Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+    let (_, asset) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project_id}/assets"),
+        "Portrait.PNG",
+        "image/png",
+        b"png-bytes",
+    )
+    .await;
+    let (_, dataset) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets"),
+        json!({
+            "name": "Wan expert set",
+            "items": [{
+                "assetId": asset["id"],
+                "caption": { "text": "wanSubject portrait" }
+            }]
+        }),
+    )
+    .await;
+    let (_, registry) = request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
+    let target = registry["targets"]
+        .as_array()
+        .expect("targets")
+        .iter()
+        .find(|target| target["baseModel"] == "wan_2_2_i2v_14b")
+        .expect("Wan I2V A14B target")
+        .clone();
+
+    let (status, missing_job) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/jobs"),
+        json!({
+            "targetId": target["id"],
+            "datasetId": dataset["id"],
+            "config": target["defaults"],
+            "outputName": "Wan Missing",
+            "dryRun": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{missing_job}");
+    let missing_job_id = missing_job["id"].as_str().expect("missing job id");
+    claim_training_job(&app, missing_job_id).await;
+    let missing_output_dir = std::path::PathBuf::from(
+        missing_job["payload"]["plan"]["output"]["outputDir"]
+            .as_str()
+            .expect("missing output dir"),
+    );
+    std::fs::create_dir_all(&missing_output_dir).expect("missing output dir creates");
+    write_test_safetensors(&missing_output_dir.join("wan_missing.high_noise.safetensors"));
+    let (status, missing_completed) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{missing_job_id}/progress"),
+        json!({
+            "status": "completed",
+            "stage": "completed",
+            "progress": 1,
+            "message": "Only one Wan expert was written.",
+            "workerId": TEST_TRAINING_WORKER_ID,
+            "result": {
+                "outputPath": missing_output_dir.join("wan_missing.high_noise.safetensors").display().to_string()
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(missing_completed["result"]["loraRegistered"], false);
+    assert!(missing_completed["result"]["loraRegistrationError"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("No declared trained adapter")));
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/jobs"),
+        json!({
+            "targetId": target["id"],
+            "datasetId": dataset["id"],
+            "config": target["defaults"],
+            "outputName": "Wan Pair",
+            "dryRun": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(
+        job["payload"]["manifestEntry"]["files"],
+        json!([
+            "wan_pair.high_noise.safetensors",
+            "wan_pair.low_noise.safetensors"
+        ])
+    );
+
+    let job_id = job["id"].as_str().expect("job id");
+    claim_training_job(&app, job_id).await;
+    let output_dir = std::path::PathBuf::from(
+        job["payload"]["plan"]["output"]["outputDir"]
+            .as_str()
+            .expect("output dir"),
+    );
+    std::fs::create_dir_all(&output_dir).expect("output dir creates");
+    for name in [
+        "wan_pair.high_noise.safetensors",
+        "wan_pair.low_noise.safetensors",
+    ] {
+        write_test_safetensors(&output_dir.join(name));
+    }
+    let (status, completed) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        json!({
+            "status": "completed",
+            "stage": "completed",
+            "progress": 1,
+            "message": "Trained both Wan experts.",
+            "workerId": TEST_TRAINING_WORKER_ID,
+            "result": {
+                "outputPath": output_dir.join("wan_pair.high_noise.safetensors").display().to_string()
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(completed["result"]["loraRegistered"], true);
+
+    let (_, loras) = request(
+        app,
+        "GET",
+        &format!("/api/v1/loras?projectId={project_id}"),
+        Value::Null,
+    )
+    .await;
+    let registered = loras
+        .as_array()
+        .expect("loras")
+        .iter()
+        .find(|entry| entry["name"] == "Wan Pair")
+        .expect("registered Wan pair");
+    assert_eq!(
+        registered["files"],
+        json!([
+            "wan_pair.high_noise.safetensors",
+            "wan_pair.low_noise.safetensors"
+        ])
+    );
+}
+
+#[test]
+fn trusted_adapter_files_rejects_a_missing_wan_expert() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    write_test_safetensors(&dir.path().join("wan_pair.high_noise.safetensors"));
+    let declared = json!([
+        "wan_pair.high_noise.safetensors",
+        "wan_pair.low_noise.safetensors"
+    ]);
+    assert!(crate::training::trusted_adapter_files(Some(&declared), dir.path()).is_none());
+    write_test_safetensors(&dir.path().join("wan_pair.low_noise.safetensors"));
+    assert_eq!(
+        crate::training::trusted_adapter_files(Some(&declared), dir.path()),
+        Some(vec![
+            "wan_pair.high_noise.safetensors".to_owned(),
+            "wan_pair.low_noise.safetensors".to_owned()
+        ])
+    );
 }
 
 #[tokio::test]
@@ -4413,70 +4703,53 @@ async fn completed_full_finetune_registers_a_selectable_model_not_a_lora() {
     // no-op. Assert the WITHDRAWAL SHAPE the projection emits, and — below — that a submission
     // carrying a LoRA is actually refused. Absence of a key proves nothing; the 400 does.
     //
-    // macOS-only, and deliberately so. A Mage fine-tune is routable ONLY on the MLX lane
-    // (`mage-flow` is absent from `CANDLE_ROUTED_FAMILIES` — there is no candle Mage engine), so
-    // off-Mac the model renders nothing at all, LoRA or not: that is a whole-model routing gap, not
-    // an over-advertised adapter, and the projection correctly abstains rather than dressing it up
-    // in a LoRA-shaped message. Asserting the macOS shape unconditionally here is what turned the
-    // Linux parity lane red. The lane-parameterized coverage that exercises BOTH topologies on
-    // every platform — including the imported Krea 2 + candle case this file cannot reach — lives
-    // in `models::imported_lora_advertisement_tests`.
-    if cfg!(target_os = "macos") {
-        assert_eq!(
-            entry["loraCompatibility"]["families"],
-            json!([]),
-            "the withdrawal must be an EXPLICIT empty family list — removing the key alone falls \
-             back to `family` and silently re-advertises: {:?}",
-            entry.get("loraCompatibility")
-        );
-        assert_eq!(
-            entry["loraCompatibility"]["supported"],
-            json!(false),
-            "the web picker fails OPEN on an empty family list, so it needs this explicit signal"
-        );
+    // Generated Mage full fine-tunes render plain text-to-image on both native lanes after
+    // sc-18480. Neither provider accepts adapters, so every deployment projection must publish the
+    // same explicit withdrawal while leaving the full model selectable.
+    assert_eq!(
+        entry["loraCompatibility"]["families"],
+        json!([]),
+        "the withdrawal must be an EXPLICIT empty family list — removing the key alone falls back \
+         to `family` and silently re-advertises: {:?}",
+        entry.get("loraCompatibility")
+    );
+    assert_eq!(
+        entry["loraCompatibility"]["supported"],
+        json!(false),
+        "the web picker fails OPEN on an empty family list, so it needs this explicit signal"
+    );
 
-        // ...and the withdrawal is LOAD-BEARING, not decorative: a generation carrying a LoRA is
-        // refused at submit, terminally, instead of being accepted and queued forever.
-        //
-        // This is the assertion whose absence let the original no-op ship. The two failure modes
-        // are distinguishable by their message, and only one of them is this gate: "has no declared
-        // LoRA families" means the advertisement was withdrawn and the request died here; "LoRA not
-        // found" would mean the families check PASSED (the `family` fallback fired) and we only got
-        // as far as hydrating the adapter — which is exactly what the pre-fix code did.
-        let (status, refused) = request(
-            app.clone(),
-            "POST",
-            "/api/v1/image/jobs",
-            json!({
-                "projectId": project_id,
-                "model": model_id,
-                "prompt": "a fine-tune with an adapter it cannot load",
-                "loras": [{ "id": "any_adapter" }]
-            }),
-        )
-        .await;
-        assert_eq!(
-            status,
-            StatusCode::BAD_REQUEST,
-            "a fine-tune + LoRA submission must be refused, not queued: {refused}"
-        );
-        let detail = refused["detail"].as_str().unwrap_or_default().to_owned();
-        assert!(
-            detail.contains("no declared LoRA families"),
-            "the refusal must come from the withdrawn advertisement; \"LoRA not found\" would mean \
-             the `family` fallback re-advertised it and the hang is still live. Got: {detail}"
-        );
-    } else {
-        // Off-Mac the projection must ABSTAIN, not invent a withdrawal. Pinned rather than left
-        // unasserted so this branch still fails if the abstention rule is ever loosened into
-        // "withdraw whenever no lane claims it" — which would silently relabel every unroutable
-        // imported model's whole-model gap as a LoRA problem.
-        assert!(
-            entry.get("loraCompatibility").is_none(),
-            "no candle Mage engine exists, so there is no adapter promise to withdraw: {:?}",
-            entry.get("loraCompatibility")
-        );
-    }
+    // ...and the withdrawal is LOAD-BEARING, not decorative: a generation carrying a LoRA is
+    // refused at submit, terminally, instead of being accepted and queued forever.
+    //
+    // This is the assertion whose absence let the original no-op ship. The two failure modes
+    // are distinguishable by their message, and only one of them is this gate: "has no declared
+    // LoRA families" means the advertisement was withdrawn and the request died here; "LoRA not
+    // found" would mean the families check PASSED (the `family` fallback fired) and we only got
+    // as far as hydrating the adapter — which is exactly what the pre-fix code did.
+    let (status, refused) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "model": model_id,
+            "prompt": "a fine-tune with an adapter it cannot load",
+            "loras": [{ "id": "any_adapter" }]
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a fine-tune + LoRA submission must be refused, not queued: {refused}"
+    );
+    let detail = refused["detail"].as_str().unwrap_or_default().to_owned();
+    assert!(
+        detail.contains("no declared LoRA families"),
+        "the refusal must come from the withdrawn advertisement; \"LoRA not found\" would mean \
+         the `family` fallback re-advertised it and the hang is still live. Got: {detail}"
+    );
 
     // It is NOT a LoRA — registering it as one would offer it as an adapter the engine cannot load.
     let (status, loras) = request(

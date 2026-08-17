@@ -92,7 +92,8 @@ export const WAN_MOE_PAIRED_LORA_MODEL_IDS = new Set(["wan_2_2_t2v_14b", "wan_2_
 // Ideogram-style JSON caption (style + grounded composition) for Ideogram 4 text-to-image variations.
 // As with PROMPT_REFINE_MODEL_ID, the native worker resolves the model by its HF repo string (carried
 // in the job payload's `model` field); the web uses the catalog id only to look up install state and
-// offer a download (the eligibility gate is the sibling sc-8110). macOnly in the catalog.
+// offer a download (the eligibility gate is the sibling sc-8110). Native MLX and Candle workers
+// both serve the production image-caption request.
 export const VISION_CAPTION_MODEL_ID = "vision_caption_qwen3vl_8b";
 export const VISION_CAPTION_MODEL_REPO = "huihui-ai/Huihui-Qwen3-VL-8B-Instruct-abliterated";
 
@@ -134,7 +135,7 @@ const seededFallbackModels = [
     name: "Z-Image-Turbo",
     type: "image",
     // No `character_image`: the worker adapter has no IP-Adapter wiring (sc-2005).
-    capabilities: ["text_to_image", "style_variations"],
+    capabilities: ["text_to_image"],
     ui: {
       description: "Fast local text-to-image target.",
       promptGuide: { title: "Z-Image-Turbo Prompt Guide", path: "/prompt-guides/z-image-turbo.md" },
@@ -160,7 +161,7 @@ const seededFallbackModels = [
     id: "z_image",
     name: "Z-Image",
     type: "image",
-    capabilities: ["text_to_image", "style_variations"],
+    capabilities: ["text_to_image"],
     ui: {
       description: "Undistilled base Z-Image text-to-image (real CFG, ~50 steps).",
       promptGuide: { title: "Z-Image Prompt Guide", path: "/prompt-guides/z-image-turbo.md" },
@@ -180,7 +181,7 @@ const seededFallbackModels = [
     id: "qwen_image",
     name: "Qwen Image",
     type: "image",
-    capabilities: ["text_to_image", "style_variations"],
+    capabilities: ["text_to_image"],
     ui: {
       description: "Qwen text-to-image target.",
       promptGuide: { title: "Qwen Image Prompt Guide", path: "/prompt-guides/qwen-image.md" },
@@ -272,7 +273,7 @@ const seededFallbackModels = [
     id: "lens",
     name: "Lens",
     type: "image",
-    capabilities: ["text_to_image", "style_variations"],
+    capabilities: ["text_to_image"],
     ui: {
       description: "Microsoft Lens base text-to-image (20-step, CFG 5.0); higher quality than Turbo, also the LoRA training base.",
       promptGuide: { title: "Lens Prompt Guide", path: "/prompt-guides/lens.md" },
@@ -282,7 +283,7 @@ const seededFallbackModels = [
     id: "lens_turbo",
     name: "Lens-Turbo",
     type: "image",
-    capabilities: ["text_to_image", "style_variations"],
+    capabilities: ["text_to_image"],
     ui: {
       description: "Microsoft Lens distilled 4-step text-to-image; strong text rendering, large-VRAM GPU.",
       promptGuide: { title: "Lens-Turbo Prompt Guide", path: "/prompt-guides/lens-turbo.md" },
@@ -307,9 +308,9 @@ const seededFallbackModels = [
     ui: {
       description: "Unified multimodal model (NEO-unify, ~16B); native text-to-image and instruction editing with strong text rendering and infographics. In Character Studio, drives a wardrobe-preserving reference flow — outfit + accessories + tattoos + hair color carry through to new scenes, but face geometry may drift. Pick InstantID or PuLID-FLUX for face-locked identity. Heavy (~42GB bf16); CUDA or 96GB+ Apple Silicon.",
       promptGuide: { title: "SenseNova-U1 8B Prompt Guide", path: "/prompt-guides/sensenova-u1-8b.md" },
-      // Edit-style variation knob (imageGuidanceScale): higher = closer to the
-      // reference, lower = more prompt-driven variation. Drives advanced.imageGuidanceScale.
-      variationStrength: { label: "Reference strength", default: 1.5, min: 0.5, max: 4.0, step: 0.1 },
+      // Edit-style true-CFG knob: the registered engine rejects IP/reference blend strengths.
+      hideReferenceStrength: true,
+      variationStrength: { label: "Reference strength", default: 1.5, min: 1.0, max: 4.0, step: 0.1 },
     },
   },
   {
@@ -329,7 +330,8 @@ const seededFallbackModels = [
     ui: {
       description: "8-step distilled SenseNova-U1; ~5-6x faster text-to-image, editing, and Character Studio reference (~50s/image on MPS) at a small quality trade-off. Same wardrobe-preserving reference tradeoff as the base 8B (carries outfit + accessories across new scenes; face may drift). Shares the base 8B weights; a ~0.4GB distill LoRA downloads automatically. Distilled editing is experimental — use the base model for max-quality reference work.",
       promptGuide: { title: "SenseNova-U1 8B Fast Prompt Guide", path: "/prompt-guides/sensenova-u1-8b-fast.md" },
-      variationStrength: { label: "Reference strength", default: 1.5, min: 0.5, max: 4.0, step: 0.1 },
+      hideReferenceStrength: true,
+      variationStrength: { label: "Reference strength", default: 1.5, min: 1.0, max: 4.0, step: 0.1 },
       viewAngles: [
         { id: "three_quarter_left", label: "Three-quarter left" },
         { id: "three_quarter_right", label: "Three-quarter right" },
@@ -353,7 +355,7 @@ const seededFallbackModels = [
     image: { supportsGuidance: false, supportsNegativePrompt: false },
     name: "FLUX.1 [schnell]",
     type: "image",
-    capabilities: ["text_to_image", "style_variations"],
+    capabilities: ["text_to_image"],
     ui: {
       description: "FLUX.1 [schnell] — fast ~4-step distilled text-to-image, Apache-2.0 (commercial-safe). ~34GB bf16, large-VRAM GPU.",
       promptGuide: { title: "FLUX.1 [schnell] Prompt Guide", path: "/prompt-guides/flux-schnell.md" },
@@ -368,7 +370,7 @@ const seededFallbackModels = [
     name: "FLUX.1 [dev]",
     type: "image",
     // character_image: XLabs FLUX IP-Adapter (sc-2011 resemblance tier).
-    capabilities: ["text_to_image", "character_image", "style_variations"],
+    capabilities: ["text_to_image", "character_image"],
     ui: {
       description: "FLUX.1 [dev] — higher-quality ~28-step text-to-image under the FLUX.1 [dev] Non-Commercial License (non-commercial only); gated download needs an HF token + license acceptance. ~34GB bf16, large-VRAM GPU. With a character reference, runs XLabs IP-Adapter for scene-flexible resemblance (faithful identity belongs to PuLID-FLUX).",
       promptGuide: { title: "FLUX.1 [dev] Prompt Guide", path: "/prompt-guides/flux-dev.md" },
@@ -388,7 +390,7 @@ const seededFallbackModels = [
     id: "chroma1_hd",
     name: "Chroma1-HD",
     type: "image",
-    capabilities: ["text_to_image", "style_variations"],
+    capabilities: ["text_to_image"],
     ui: {
       description: "Chroma1-HD — high-resolution text-to-image, Apache-2.0 (commercial-safe). FLUX.1-schnell-derived 8.9B + T5-XXL; true CFG with negative prompts (~40 steps, guidance 3.0). Large-VRAM GPU.",
       promptGuide: { title: "Chroma1-HD Prompt Guide", path: "/prompt-guides/chroma1-hd.md" },
@@ -398,7 +400,7 @@ const seededFallbackModels = [
     id: "chroma1_base",
     name: "Chroma1-Base",
     type: "image",
-    capabilities: ["text_to_image", "style_variations"],
+    capabilities: ["text_to_image"],
     ui: {
       description: "Chroma1-Base — text-to-image foundation tuned for finetuning, Apache-2.0 (commercial-safe). FLUX.1-schnell-derived 8.9B + T5-XXL; true CFG with negative prompts (~40 steps, guidance 3.0). Large-VRAM GPU.",
       promptGuide: { title: "Chroma1-Base Prompt Guide", path: "/prompt-guides/chroma1-base.md" },
@@ -408,7 +410,7 @@ const seededFallbackModels = [
     id: "chroma1_flash",
     name: "Chroma1-Flash",
     type: "image",
-    capabilities: ["text_to_image", "style_variations"],
+    capabilities: ["text_to_image"],
     defaults: { resolution: "768x768", steps: 12, guidanceScale: 1.0, sampler: "heun", scheduler: "default" },
     limits: {
       resolutions: ["768x768", "1024x1024", "1280x720", "720x1280"],
@@ -424,7 +426,7 @@ const seededFallbackModels = [
     id: "kolors",
     name: "Kolors",
     type: "image",
-    capabilities: ["text_to_image", "edit_image", "character_image", "style_variations"],
+    capabilities: ["text_to_image", "edit_image", "character_image"],
     ui: {
       description: "Kwai-Kolors Kolors — photorealistic text-to-image with strong Chinese + English prompting and text rendering. Apache-2.0 (commercial-safe). ChatGLM3-6B + SDXL-style UNet; ~16.5GB, real CFG + negative prompt, ~25 steps at guidance 5.0.",
       promptGuide: { title: "Kolors Prompt Guide", path: "/prompt-guides/kolors.md" },
@@ -437,7 +439,7 @@ const seededFallbackModels = [
     id: "sdxl",
     name: "Stable Diffusion XL",
     type: "image",
-    capabilities: ["text_to_image", "edit_image", "character_image", "style_variations"],
+    capabilities: ["text_to_image", "edit_image", "character_image"],
     ui: {
       description: "Stability AI Stable Diffusion XL base 1.0 — open text-to-image foundation with the largest LoRA/finetune ecosystem. CreativeML OpenRAIL++-M (commercial use OK, ungated). SDXL UNet + dual CLIP; ~6.9GB fp16, real CFG + negative prompt, ~30 steps at guidance 7.0; native 1024x1024. With a character reference, runs IP-Adapter plus-face for scene-flexible resemblance (faithful likeness — see InstantID).",
       promptGuide: { title: "Stable Diffusion XL Prompt Guide", path: "/prompt-guides/sdxl.md" },
@@ -447,7 +449,7 @@ const seededFallbackModels = [
     id: "realvisxl",
     name: "RealVisXL (photoreal SDXL)",
     type: "image",
-    capabilities: ["text_to_image", "edit_image", "character_image", "style_variations"],
+    capabilities: ["text_to_image", "edit_image", "character_image"],
     ui: {
       description: "Photoreal SDXL finetune that targets the \"shiny/plastic\" look of base SDXL — the same RealVisXL_V5.0 checkpoint the InstantID built-in uses, exposed as a plain selectable. openrail++ (commercial use OK, ungated). Same SDXL UNet + dual CLIP, sdxl-family LoRA support, real CFG + negative prompt; ~30 steps at guidance 7.0, native 1024x1024. With a character reference, runs IP-Adapter plus-face for scene-flexible resemblance.",
       promptGuide: { title: "RealVisXL Prompt Guide", path: "/prompt-guides/realvisxl.md" },
@@ -457,7 +459,7 @@ const seededFallbackModels = [
     id: "illustrious_xl_v1",
     name: "Illustrious-XL v1.0 (anime)",
     type: "image",
-    capabilities: ["text_to_image", "edit_image", "character_image", "style_variations"],
+    capabilities: ["text_to_image", "edit_image", "character_image"],
     ui: {
       description: "Danbooru-tag anime SDXL finetune from OnomaAI, trained for high-resolution illustration. Same SDXL UNet + dual CLIP, sdxl-family LoRA support, real CFG + negative prompt. Prompts blend Danbooru tags with natural language. Handles wide frames up to 1536x1536. SDXL license (openrail++), commercial use OK, ungated.",
       // Danbooru-tag anime SDXL: same quality-prefix + booru-hint seam as Anima (sc-10760). Studio seeds
@@ -474,7 +476,7 @@ const seededFallbackModels = [
     id: "illustrious_xl_v2",
     name: "Illustrious-XL v2.0 (anime)",
     type: "image",
-    capabilities: ["text_to_image", "edit_image", "character_image", "style_variations"],
+    capabilities: ["text_to_image", "edit_image", "character_image"],
     ui: {
       description: "The v2.0-STABLE snapshot of Illustrious-XL — subtler and more stable than v1.0, but with a narrower safe frame width (it tends to duplicate the subject in wide compositions, so the widest aspect buckets are not offered — prefer square or tall). Same Danbooru-tag prompting and sdxl-family LoRA support. CreativeML OpenRAIL-M, commercial use OK, ungated.",
       // Danbooru-tag anime SDXL: same quality-prefix + booru-hint seam as Anima (sc-10760).
@@ -577,12 +579,12 @@ const seededFallbackModels = [
     id: "flux2_klein_9b",
     name: "FLUX.2 [klein] 9B",
     type: "image",
-    // FLUX.2 [klein] — Apple Silicon MLX-only image-edit backbone. The
+    // FLUX.2 [klein] — native MLX on Apple Silicon and Candle/CUDA off-Mac. The
     // adapter advertises text_to_image (txt2img) and character_image (reference
     // editing through Flux2KleinEdit + image_paths).
-    capabilities: ["text_to_image", "character_image", "style_variations"],
+    capabilities: ["text_to_image", "character_image"],
     ui: {
-      description: "Black Forest Labs FLUX.2 [klein] 9B — 4-step distilled text-to-image + reference editing, MLX-only (Apple Silicon). Distributed under the FLUX Non-Commercial License (gated). In Character Studio's angle set + pose library, the FLUX.2-aesthetic tier (sc-2003 spike: mean ArcFace 0.52 across 5 angles — third-best identity hold, BUT the only prompt-driven backbone that holds portrait framing at 90° profiles where Qwen and InstantID both reframe). Pose library runs the multi-image trick (skeleton + character) at compact ~22 GB memory.",
+      description: "Black Forest Labs FLUX.2 [klein] 9B — 4-step distilled text-to-image + reference editing, running natively through MLX on Apple Silicon and Candle/CUDA on Windows/Linux. Distributed under the FLUX Non-Commercial License (gated). In Character Studio's angle set + pose library, the FLUX.2-aesthetic tier (sc-2003 spike: mean ArcFace 0.52 across 5 angles — third-best identity hold, BUT the only prompt-driven backbone that holds portrait framing at 90° profiles where Qwen and InstantID both reframe). Pose library runs the multi-image trick (skeleton + character) at compact ~22 GB memory.",
       promptGuide: { title: "FLUX.2 [klein] 9B Prompt Guide", path: "/prompt-guides/flux2-klein.md" },
       variationStrength: { label: "Prompt strength", default: 4.0, min: 1.0, max: 10.0, step: 0.5 },
       // Identity strength → the engine's image-guidance CFG (sc-8278/sc-8273). klein edit carries
@@ -616,10 +618,9 @@ const seededFallbackModels = [
   },
   {
     // Stable Diffusion 3.5 Large Turbo (epic 7841 / S4 sc-7873) — the fast default
-    // of the SD3.5 family: ADD-distilled few-step (~4), CFG-free 8B MMDiT, native
-    // MLX (Apple Silicon). Catalog-driven gating (macOnly + gated) comes from the
-    // manifest/macSupport; this fallback entry only seeds the picker + per-variant
-    // defaults until the live catalog loads. Recommended (the fast SD3.5 default).
+    // of the SD3.5 family: ADD-distilled few-step (~4), CFG-free 8B MMDiT, served by native MLX
+    // on Apple Silicon and native Candle/CUDA off-Mac. This fallback entry only seeds the picker
+    // and per-variant defaults until the live catalog loads. Recommended as the fast default.
     id: "sd3_5_large_turbo",
     // Which generation AXES this engine has (sc-15299) — mirrored from the manifest `image`
     // sub-block so the pre-catalog seed hides the same dead controls the live catalog does.
@@ -627,7 +628,7 @@ const seededFallbackModels = [
     image: { supportsGuidance: false, supportsNegativePrompt: false },
     name: "Stable Diffusion 3.5 Large Turbo",
     type: "image",
-    capabilities: ["text_to_image", "style_variations"],
+    capabilities: ["text_to_image"],
     // Few-step CFG-free: 4 steps, guidance ~1.0 (the negative prompt is inert).
     defaults: { steps: 4, guidanceScale: 1.0, sampler: "euler", scheduler: "default" },
     limits: {
@@ -636,18 +637,18 @@ const seededFallbackModels = [
     },
     ui: {
       description:
-        "Stable Diffusion 3.5 Large Turbo — the few-step (~4), CFG-free distilled SD3.5 flagship: fast iteration at flagship quality on the native MLX engine (Apple Silicon). Best for quick text-to-image; native 1024×1024. Stability AI Community License (gated).",
+        "Stable Diffusion 3.5 Large Turbo — the few-step (~4), CFG-free distilled SD3.5 flagship for fast iteration at flagship quality. Native MLX on Apple Silicon and native Candle/CUDA on Windows and Linux; native 1024×1024. Stability AI Community License.",
       promptGuide: { title: "Stable Diffusion 3.5 Prompt Guide", path: "/prompt-guides/sd3-5.md" },
     },
   },
   {
     // Stable Diffusion 3.5 Large (epic 7841 / S4 sc-7873) — the high-fidelity
     // flagship: 8B MMDiT + triple text encoder + true CFG with negative prompts.
-    // ~28 steps at guidance 3.5. Native MLX (Apple Silicon), gated.
+    // ~28 steps at guidance 3.5. Native MLX on Apple Silicon and native Candle/CUDA off-Mac.
     id: "sd3_5_large",
     name: "Stable Diffusion 3.5 Large",
     type: "image",
-    capabilities: ["text_to_image", "style_variations"],
+    capabilities: ["text_to_image"],
     // High-fidelity true-CFG flagship: 28 steps, guidance 3.5 (+negative prompt).
     defaults: { steps: 28, guidanceScale: 3.5, sampler: "euler", scheduler: "default" },
     limits: {
@@ -656,19 +657,19 @@ const seededFallbackModels = [
     },
     ui: {
       description:
-        "Stability AI Stable Diffusion 3.5 Large — the 8B multimodal diffusion transformer (MMDiT) flagship for the highest fidelity, native MLX (Apple Silicon). Triple text encoder for strong prompt adherence and in-image text; true CFG with negative prompts. ~28 steps at guidance 3.5; native 1024×1024. Stability AI Community License (gated).",
+        "Stability AI Stable Diffusion 3.5 Large — the 8B multimodal diffusion transformer (MMDiT) flagship for the highest fidelity. Native MLX on Apple Silicon and native Candle/CUDA on Windows and Linux. Triple text encoder for strong prompt adherence and in-image text; true CFG with negative prompts. ~28 steps at guidance 3.5; native 1024×1024. Stability AI Community License.",
       promptGuide: { title: "Stable Diffusion 3.5 Prompt Guide", path: "/prompt-guides/sd3-5.md" },
     },
   },
   {
     // Stable Diffusion 3.5 Medium (epic 7841 / S4 sc-7873) — the smaller-RAM
     // mid-tier: 2.5B MMDiT-X (dual-attention) + the same triple TE + true CFG,
-    // renders up to 1440². ~40 steps at guidance 4.5. Native MLX (Apple Silicon),
-    // gated; the lightest SD3.5 footprint.
+    // renders up to 1440². ~40 steps at guidance 4.5. Native MLX on Apple Silicon and native
+    // Candle/CUDA off-Mac; the lightest SD3.5 footprint.
     id: "sd3_5_medium",
     name: "Stable Diffusion 3.5 Medium",
     type: "image",
-    capabilities: ["text_to_image", "style_variations"],
+    capabilities: ["text_to_image"],
     // Smaller-RAM mid-tier: a few more steps + slightly higher guidance than Large.
     defaults: { steps: 40, guidanceScale: 4.5, sampler: "euler", scheduler: "default" },
     limits: {
@@ -677,7 +678,7 @@ const seededFallbackModels = [
     },
     ui: {
       description:
-        "Stability AI Stable Diffusion 3.5 Medium — the 2.5B MMDiT-X (dual-attention) mid-tier with the lightest SD3.5 memory footprint, native MLX (Apple Silicon). Same triple text encoder and true CFG as Large; renders up to 1440×1440. ~40 steps at guidance 4.5. Stability AI Community License (gated).",
+        "Stability AI Stable Diffusion 3.5 Medium — the 2.5B MMDiT-X (dual-attention) mid-tier with the lightest SD3.5 memory footprint. Native MLX on Apple Silicon and native Candle/CUDA on Windows and Linux. Same triple text encoder and true CFG as Large; renders up to 1440×1440. ~40 steps at guidance 4.5. Stability AI Community License.",
       promptGuide: { title: "Stable Diffusion 3.5 Prompt Guide", path: "/prompt-guides/sd3-5.md" },
     },
   },
@@ -789,7 +790,7 @@ const seededFallbackModels = [
     id: "wan_2_2_i2v_14b",
     name: "Wan2.2 14B (I2V)",
     type: "video",
-    capabilities: ["image_to_video", "first_last_frame", "extend_clip", "video_bridge"],
+    capabilities: ["image_to_video", "extend_clip", "video_bridge"],
     defaults: { duration: 5, fps: 16, resolution: "1280x720", quality: "balanced" },
     limits: {
       durations: [3, 4, 5],

@@ -2,13 +2,13 @@
 
 ## Best For
 
-Ideogram 4 is a 9.3B-parameter flow-matching text-to-image model with best-in-class text rendering, deep language understanding, and **explicit layout control via bounding boxes and color palettes**. Apple Silicon only (native MLX backend).
+Ideogram 4 is a 9.3B-parameter flow-matching text-to-image model with best-in-class text rendering, deep language understanding, and **explicit layout control via bounding boxes and color palettes**. It runs through native MLX on Apple Silicon and native Candle/CUDA on Windows and Linux.
 
 It is uniquely good at: legible typography in images, precise placement of objects and text, and adherence to a described layout — because it is prompted with a **structured JSON caption**, not free text.
 
 > **License:** Ideogram Non-Commercial Model Agreement — gated Hugging Face download. Accept the license at the [model card](https://huggingface.co/ideogram-ai/ideogram-4-fp8) and add a Hugging Face token under Settings → Service credentials before downloading. Generations are for non-commercial use only.
 
-> **Hardware:** Pre-quantized **Q4** (default, ~15 GB download, ~28 GB peak at 1024²) or **Q8**. The 2048² / 6:1 ceiling needs ~96 GB. macOS only.
+> **Hardware:** Pre-quantized **Q4** (default, ~15 GB download, ~28 GB measured peak at 1024² on Apple Silicon) or **Q8**. The 2048² / 6:1 ceiling needs a high-memory accelerator.
 
 ## The key thing to know
 

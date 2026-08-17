@@ -128,9 +128,9 @@ fn fit_edit_references(
 // resolve on the candle lane too (video_jobs.rs + the candle edit handlers call `fit_engine_image`).
 
 // ---------------------------------------------------------------------------
-// FLUX.2-klein edit / reference (macOS, sc-3029): the `flux2_klein_9b_edit` and
-// `flux2_klein_9b_kv_edit` variants. FLUX.2-klein is MLX-only (no torch), so this
-// is where its edit/reference jobs run. One output per requested count, each
+// FLUX.2-klein edit / reference (macOS MLX, sc-3029): the `flux2_klein_9b_edit` and
+// `flux2_klein_9b_kv_edit` variants. This is the MLX implementation; the native Candle/CUDA sibling
+// runs off-Mac and there is no Python fallback. One output per requested count, each
 // conditioned on the shared reference image(s); the -kv variant auto-engages the
 // reference-K/V cache (~2.4× edit speedup).
 // ---------------------------------------------------------------------------
@@ -219,6 +219,24 @@ fn flux2_edit_image_guidance(request: &ImageRequest) -> Option<f32> {
         .unwrap_or(DEFAULT_EDIT_IMAGE_GUIDANCE)
         .clamp(1.0, 2.5);
     (scale > 1.0).then_some(scale)
+}
+
+/// Effective text guidance for FLUX.2 reference/edit paths. Character/Image Studio's variation
+/// slider emits `trueCfgScale`; `guidanceScale` remains the direct-request/legacy fallback.
+fn flux2_edit_text_guidance(request: &ImageRequest, model: &ResolvedModel) -> Option<f32> {
+    if !model.supports_guidance() {
+        return None;
+    }
+    request
+        .advanced
+        .get("trueCfgScale")
+        .and_then(|value| {
+            value
+                .as_f64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+        })
+        .map(|value| value as f32)
+        .or_else(|| resolve_guidance(request, model))
 }
 
 /// Resolve the numeric tier the FLUX.2 edit provider will actually load. Standard tier resolution
@@ -341,6 +359,7 @@ fn flux2_edit_generate_one(
     image_guidance: Option<f32>,
     conditioning: Vec<Conditioning>,
     enhance: &PromptEnhance,
+    prompt_enhancement: gen_core::PromptEnhancementSink,
     preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
@@ -367,7 +386,7 @@ fn flux2_edit_generate_one(
         cancel: cancel.clone(),
         ..Default::default()
     };
-    enhance.apply(&mut request);
+    enhance.apply(&mut request, prompt_enhancement);
     let memory_context = if use_provider_memory_safety {
         let contract = generator.memory_strategy_contract().ok_or_else(|| {
             WorkerError::Engine(
@@ -463,7 +482,7 @@ async fn generate_flux2_edit_stream(
         backend,
     );
     let steps = resolve_steps(request, &model);
-    let guidance = resolve_guidance(request, &model);
+    let guidance = flux2_edit_text_guidance(request, &model);
     // Identity strength (sc-8278): map the UI `referenceStrength` slider onto the engine's
     // image-guidance CFG so a strong prompt doesn't drop the reference identity (sc-8234).
     let image_guidance = flux2_edit_image_guidance(request);
@@ -556,7 +575,7 @@ async fn generate_flux2_edit_stream(
     let adapter_count = adapters.len();
     // sc-6135: FLUX.2-dev caption upsampling — image-conditioned on the reference for the edit path.
     // Gated to dev by the engine + the manifest `ui.promptEnhance` toggle; off for klein.
-    let enhance = PromptEnhance::from_advanced(&request.advanced);
+    let enhance = PromptEnhance::from_advanced(&request.advanced)?;
     let spec = attach_manifest_text_encoder(
         load_spec(weights_dir, quant, adapters, None),
         engine_id,
@@ -580,10 +599,10 @@ async fn generate_flux2_edit_stream(
                 }
                 _ => None,
             };
-            drive_gen_items_scored(
+            drive_gen_items_scored_reported(
                 tx,
                 seeds.into_iter().zip(prompts),
-                move |index, (seed, prompt), preview, on_progress| {
+                move |index, (seed, prompt), preview, prompt_enhancement, on_progress| {
                     // Pose tier: pair this pose's DWPose whole-body skeleton (body + hands
                     // 21x2 + face 68 when the pose carries them — sc-6702) with the reference
                     // as a `[skeleton, reference]` multi-image set; else the plain reference
@@ -629,6 +648,7 @@ async fn generate_flux2_edit_stream(
                         image_guidance,
                         conditioning,
                         &enhance,
+                        prompt_enhancement.for_prompt(&prompt),
                         preview,
                         &cancel,
                         on_progress,
@@ -678,9 +698,9 @@ async fn generate_flux2_edit_stream(
 // the `flux2_dev_control` registry generator — a VACE ControlNet on the dev base.
 // One image per library pose, each conditioned on a DWPose skeleton fed to the
 // `alibaba-pai/FLUX.2-dev-Fun-Controlnet-Union` branch (TRUE pose lock, not the
-// best-effort `[skeleton, reference]` tier above). FLUX.2 is MLX-only, so this is
-// the only strict-pose path for dev (no candle sibling). Mirrors the Z-Image MLX
-// control path (`generate_zimage_control_stream`).
+// best-effort `[skeleton, reference]` tier above). This is the MLX strict-pose implementation;
+// Candle/CUDA owns the corresponding off-Mac `Flux2Control` lane. Mirrors the Z-Image MLX control
+// path (`generate_zimage_control_stream`).
 // ---------------------------------------------------------------------------
 
 /// The engine registry id for the FLUX.2-dev Fun-Controlnet-Union variant (sc-2292).

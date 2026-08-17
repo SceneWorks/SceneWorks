@@ -7,10 +7,10 @@
   ],
   "generatedFrom": {
     "candle": {
-      "inferenceRevision": "dfd76b5aef62b2082ed4b18a8eebd2e3e2e07cfb"
+      "inferenceRevision": "931366f62a4e5800c54e0586b7fb34e3a4079e3b"
     },
     "mlx": {
-      "inferenceRevision": "dfd76b5aef62b2082ed4b18a8eebd2e3e2e07cfb"
+      "inferenceRevision": "931366f62a4e5800c54e0586b7fb34e3a4079e3b"
     }
   },
   "models": {
@@ -162,6 +162,10 @@
     "moss_ttsd_v05": {
       "candle": false
     },
+    "pulid_flux_dev": {
+      "mlx": true,
+      "candle": true
+    },
     "qwen_image": {
       "candle": true,
       "mlx": true
@@ -173,10 +177,12 @@
       "mlx": true
     },
     "qwen_image_edit_2511": {
-      "mlx": true
+      "mlx": true,
+      "candle": true
     },
     "qwen_image_edit_2511_lightning": {
-      "mlx": true
+      "mlx": true,
+      "candle": true
     },
     "realvisxl": {
       "candle": true,

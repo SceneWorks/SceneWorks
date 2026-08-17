@@ -1,27 +1,24 @@
-//! Native Rust LoRA/LoKr training jobs (epic 3039) — the training analog of
+//! Native Rust adapter/control/full-base training jobs (epic 3039) — the training analog of
 //! [`image_jobs`](crate::image_jobs)/[`video_jobs`](crate::video_jobs).
 //!
 //! Parses a `lora_train` job into the Rust-resolved [`TrainingPlan`], then either
 //! validates it (dry run) or maps it onto a [`gen_core::TrainingRequest`] and drives
 //! `crate::inference_runtime::load_trainer(id, &LoadSpec).train(req, on_progress)` — exactly as the
 //! image path maps `ImageRequest` → `GenerationRequest` and calls `Generator::generate`.
-//! The engine writes the adapter to the plan's `output.outputDir`; the API registers
-//! it from the staged `manifestEntry` + the files on disk (apps/rust-api jobs.rs
-//! `register_trained_lora`), so the streamed `result` here is informational/UI only.
+//! The engine writes the requested artifact to the plan's `output.outputDir`; the API registers an
+//! adapter, control overlay, or full model from the plan's `outputKind`, staged `manifestEntry`, and
+//! files on disk, so the streamed `result` here is informational/UI only.
 //!
 //! Routing (sc-3049, sc-7817): the API sends native-trainable families
 //! (`z_image_lora`/`sdxl_lora`/`kolors_lora`/`lens_lora`/`krea_lora`/`sd3_lora`/`wan_lora`/
-//! `wan_moe_lora`/`ltx_mlx_lora`)
+//! `wan_moe_lora`/`ltx_mlx_lora`/`anima_lora`/`mage_flow_lora`)
 //! here (`jobs_store::training_job_is_mlx_eligible` on Mac, `…_is_candle_eligible` off-Mac).
 //! `kolors_lora` joined the native trainers in sc-4732 (engine trainer sc-4568); `lens_lora` in
 //! sc-5180; `krea_lora` in sc-7577/7578; `sd3_lora` (Large + MMDiT-X Medium training bases) in
-//! sc-7884 (engine trainer sc-7883/7885), native-MLX/Apple-Silicon only. The dry-run validator is
-//! cross-platform. The real run executes in-process on the macOS
-//! MLX engine OR — the off-Mac cutover (sc-7817, epic 5164) — on the candle Windows/CUDA + Linux
-//! engine, for the candle trainers (`sdxl`/`z_image_turbo`/`lens`/the Krea 2 Raw 12B DiT
-//! `krea_2_raw` (sc-8614)/LTX-2.3 `ltx_2_3`/the Wan A14B **T2V** `wan2_2_t2v_14b`). Families without
-//! a native trainer for the active backend (Kolors, the dense Wan 5B, and Wan I2V A14B off-Mac) are
-//! refused and remain queued; there is no Python/torch training fallback.
+//! sc-7884 (engine trainer sc-7883/7885). The dry-run validator is cross-platform. Real runs execute
+//! in-process on MLX/macOS or Candle/Windows+Linux. At the sc-18479 inference pin the two registries
+//! cover every advertised target; routing still checks the exact base/network cross-product and
+//! unsupported combinations remain queued. There is no Python/torch training fallback.
 
 use super::*;
 use sceneworks_core::training::{TrainingPlan, TRAINING_PLAN_VERSION};
@@ -127,10 +124,334 @@ pub(crate) fn validate_training_plan(settings: &Settings, plan: &TrainingPlan) -
     Ok(())
 }
 
-/// Dry-run: validate the plan and report what a real run would produce, with no
-/// model load or training (so a GPU worker without the engine still validates).
-/// Cross-platform — the validator and summary touch only the plan + the dataset
-/// images on disk. Mirrors the Python `_run_lora_train_dry_run`.
+/// A fully mapped, weights-free training request. Both dry-run and real execution obtain this from
+/// [`preflight_training_run`], so path resolution and plan-to-engine config mapping cannot drift.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[derive(Debug)]
+struct PreparedTrainingRun {
+    engine_id: &'static str,
+    request: TrainingRequest,
+}
+
+/// Weights-free preflight shared by dry and real execution. It binds the serialized plan's exact
+/// kernel/base identity to an active trainer descriptor, constructs the same typed request the real
+/// path will submit, and validates its complete config/item surface without loading model weights.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn preflight_training_run(
+    settings: &Settings,
+    plan: &TrainingPlan,
+) -> WorkerResult<PreparedTrainingRun> {
+    validate_training_plan(settings, plan)?;
+    let engine_id = validate_training_target_config(plan)?;
+    let request = training_request_from_plan(settings, plan)?;
+    validate_weights_free_training_request(plan, engine_id, &request)?;
+    Ok(PreparedTrainingRun { engine_id, request })
+}
+
+/// The default neither-backend build never claims a native training job. Keep its plan validator
+/// available for compilation/tests without pretending an absent runtime registry can validate an
+/// engine request.
+#[cfg(not(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+)))]
+fn preflight_training_run(settings: &Settings, plan: &TrainingPlan) -> WorkerResult<()> {
+    validate_training_plan(settings, plan)?;
+    validate_training_target_config(plan).map(|_| ())
+}
+
+fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static str> {
+    let engine_id = engine_trainer_id_for(&plan.target.kernel, &plan.target.base_model)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "No native trainer for kernel '{}' (base model '{}').",
+                plan.target.kernel, plan.target.base_model
+            ))
+        })?;
+    let descriptor = crate::inference_runtime::trainer_descriptor(engine_id).ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "Native trainer '{engine_id}' is not registered in this worker runtime."
+        ))
+    })?;
+    let advanced = &plan.config.advanced;
+    let network_type = preflight_string(advanced, "networkType", "lora")?.to_ascii_lowercase();
+    let supported = match network_type.as_str() {
+        "lora" => descriptor.supports_lora,
+        "lokr" => descriptor.supports_lokr,
+        "control" => descriptor.supports_control,
+        "full" => descriptor.supports_full_finetune,
+        _ => false,
+    };
+    if !supported {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Native trainer '{engine_id}' does not support networkType '{network_type}'."
+        )));
+    }
+
+    if descriptor.backend != "candle" {
+        return Ok(engine_id);
+    }
+    let kernel = plan.target.kernel.as_str();
+    if !matches!(
+        kernel,
+        "anima_lora" | "kolors_lora" | "sd3_lora" | "mage_flow_lora" | "wan_lora" | "wan_moe_lora"
+    ) {
+        return Ok(engine_id);
+    }
+    let dtype = preflight_string(advanced, "mixedPrecision", "bf16")?.to_ascii_lowercase();
+    if !matches!(dtype.as_str(), "bf16" | "f32") {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Candle trainer '{engine_id}' supports mixedPrecision bf16 or f32, not '{dtype}'."
+        )));
+    }
+    let checkpointing = preflight_bool(advanced, "gradientCheckpointing", false)?;
+    let resume = preflight_bool(advanced, "resume", false)?;
+    let sample_every = preflight_u32(advanced, "sampleEvery", 0)?;
+    if resume {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Candle trainer '{engine_id}' does not support resume."
+        )));
+    }
+    if matches!(
+        kernel,
+        "anima_lora" | "kolors_lora" | "sd3_lora" | "mage_flow_lora"
+    ) && checkpointing
+    {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Candle trainer '{engine_id}' does not support gradient checkpointing."
+        )));
+    }
+    let preview_supported = kernel == "wan_moe_lora" && plan.target.base_model == "wan_2_2_t2v_14b";
+    if sample_every > 0 && !preview_supported {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Candle trainer '{engine_id}' does not support in-training previews."
+        )));
+    }
+    if kernel == "anima_lora" && dtype != "bf16" {
+        return Err(WorkerError::InvalidPayload(
+            "Candle Anima training requires mixedPrecision=bf16.".to_owned(),
+        ));
+    }
+    if kernel == "mage_flow_lora" && network_type == "full" && dtype != "f32" {
+        return Err(WorkerError::InvalidPayload(
+            "Candle Mage full base fine-tuning requires mixedPrecision=f32.".to_owned(),
+        ));
+    }
+    Ok(engine_id)
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn training_request_from_plan(
+    settings: &Settings,
+    plan: &TrainingPlan,
+) -> WorkerResult<TrainingRequest> {
+    let items = plan
+        .dataset
+        .items
+        .iter()
+        .map(|item| {
+            Ok(TrainingItem {
+                image_path: resolve_dataset_item_path(
+                    settings,
+                    &plan.dataset.root_path,
+                    &item.image_path,
+                    "Training dataset imagePath",
+                )?,
+                caption: item.caption.clone(),
+                control_image_path: item
+                    .control_image_path
+                    .as_ref()
+                    .map(|path| {
+                        resolve_dataset_item_path(
+                            settings,
+                            &plan.dataset.root_path,
+                            path,
+                            "Training dataset controlImagePath",
+                        )
+                    })
+                    .transpose()?,
+            })
+        })
+        .collect::<WorkerResult<Vec<_>>>()?;
+    Ok(TrainingRequest {
+        items,
+        config: finalize_training_config(map_training_config(&plan.config), plan),
+        output_dir: resolve_training_output_dir(
+            settings,
+            &plan.output.output_dir,
+            "Training outputDir",
+        )?,
+        file_name: plan.output.file_name.clone(),
+        trigger_words: plan.output.trigger_words.clone(),
+        cancel: CancelFlag::new(),
+    })
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn validate_weights_free_training_request(
+    plan: &TrainingPlan,
+    engine_id: &str,
+    request: &TrainingRequest,
+) -> WorkerResult<()> {
+    let descriptor = crate::inference_runtime::trainer_descriptor(engine_id).ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "Native trainer '{engine_id}' is not registered in this worker runtime."
+        ))
+    })?;
+    gen_core::train::validate_control_request(&descriptor, request).map_err(|error| {
+        WorkerError::InvalidPayload(format!("{engine_id} trainer rejected the plan: {error}"))
+    })?;
+    gen_core::train::validate_full_finetune_request(&descriptor, request).map_err(|error| {
+        WorkerError::InvalidPayload(format!("{engine_id} trainer rejected the plan: {error}"))
+    })?;
+
+    validate_new_family_request(plan, engine_id, request)?;
+    Ok(())
+}
+
+/// Validate the exact weights-free contract shared by the new native families. The common flow
+/// parser comes directly from the pinned `candle-gen` crate, including optimizer aliases and
+/// normalized timestep-bias/loss aliases. SD3 deliberately extends only the timestep-type set with
+/// `default`/`logit_normal`; all other flow families use the shared four-value set. This runs for
+/// both MLX and Candle before their backend-specific load path.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn validate_new_family_request(
+    plan: &TrainingPlan,
+    engine_id: &str,
+    request: &TrainingRequest,
+) -> WorkerResult<()> {
+    if !matches!(
+        plan.target.kernel.as_str(),
+        "anima_lora" | "kolors_lora" | "sd3_lora" | "mage_flow_lora" | "wan_lora" | "wan_moe_lora"
+    ) {
+        return Ok(());
+    }
+    for (key, default) in [
+        ("timestepType", "sigmoid"),
+        ("timestepBias", "balanced"),
+        ("lossType", "mse"),
+    ] {
+        // `map_training_config` intentionally defaults absent/blank legacy values. A present value
+        // of the wrong JSON type is not legacy absence and must not be silently collapsed.
+        preflight_string(&plan.config.advanced, key, default)?;
+    }
+    if request
+        .items
+        .iter()
+        .any(|item| item.control_image_path.is_some())
+    {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Native trainer '{engine_id}' does not consume per-item control/source images."
+        )));
+    }
+
+    if plan.target.kernel == "kolors_lora" {
+        let timestep = candle_gen::train::flow_match::normalize_cfg(&request.config.timestep_type);
+        let bias = candle_gen::train::flow_match::normalize_cfg(&request.config.timestep_bias);
+        let loss = candle_gen::train::flow_match::normalize_cfg(&request.config.loss_type);
+        if timestep != "sigmoid" || bias != "high_noise" || !matches!(loss.as_str(), "mse" | "l2") {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Native trainer '{engine_id}' uses its fixed sigmoid/high_noise DDPM schedule and \
+                 MSE objective; timestepType '{}', timestepBias '{}', lossType '{}' are not consumed.",
+                request.config.timestep_type,
+                request.config.timestep_bias,
+                request.config.loss_type
+            )));
+        }
+    }
+
+    let mut normalized = request.clone();
+    if normalized.config.full_finetune && normalized.config.rank == 0 {
+        // Mage full tuning has no adapter rank; its provider applies this same normalization before
+        // running the otherwise-identical flow config validator.
+        normalized.config.rank = 1;
+    }
+    if plan.target.kernel == "sd3_lora" {
+        let timestep =
+            candle_gen::train::flow_match::normalize_cfg(&normalized.config.timestep_type);
+        if !matches!(
+            timestep.as_str(),
+            "default" | "logit_normal" | "sigmoid" | "linear" | "uniform" | "weighted"
+        ) {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Native trainer '{engine_id}' does not recognize timestepType '{}'.",
+                request.config.timestep_type
+            )));
+        }
+        // The pinned shared validator owns optimizer/bias/loss and the common timestep set. Map
+        // SD3's two intentional extensions onto a common value only after validating the original.
+        normalized.config.timestep_type = "sigmoid".to_owned();
+    }
+    candle_gen::train::flow_match::validate_flow_match_request(
+        &normalized,
+        &format!("{engine_id} trainer"),
+    )
+    .map_err(|error| WorkerError::InvalidPayload(error.to_string()))
+}
+
+fn preflight_string(advanced: &JsonObject, key: &str, default: &str) -> WorkerResult<String> {
+    match advanced.get(key) {
+        None => Ok(default.to_owned()),
+        Some(Value::String(value)) if !value.trim().is_empty() => Ok(value.trim().to_owned()),
+        Some(Value::String(_)) => Ok(default.to_owned()),
+        Some(_) => Err(WorkerError::InvalidPayload(format!(
+            "Training config field '{key}' must be a string."
+        ))),
+    }
+}
+
+fn preflight_bool(advanced: &JsonObject, key: &str, default: bool) -> WorkerResult<bool> {
+    match advanced.get(key) {
+        None => Ok(default),
+        Some(Value::Bool(value)) => Ok(*value),
+        Some(Value::String(value)) if value.eq_ignore_ascii_case("true") => Ok(true),
+        Some(Value::String(value)) if value.eq_ignore_ascii_case("false") => Ok(false),
+        Some(_) => Err(WorkerError::InvalidPayload(format!(
+            "Training config field '{key}' must be a boolean."
+        ))),
+    }
+}
+
+fn preflight_u32(advanced: &JsonObject, key: &str, default: u32) -> WorkerResult<u32> {
+    match advanced.get(key) {
+        None => Ok(default),
+        Some(Value::Number(value)) => value
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| {
+                WorkerError::InvalidPayload(format!(
+                    "Training config field '{key}' must be a non-negative integer."
+                ))
+            }),
+        Some(Value::String(value)) => value.trim().parse::<u32>().map_err(|_| {
+            WorkerError::InvalidPayload(format!(
+                "Training config field '{key}' must be a non-negative integer."
+            ))
+        }),
+        Some(_) => Err(WorkerError::InvalidPayload(format!(
+            "Training config field '{key}' must be a non-negative integer."
+        ))),
+    }
+}
+
+/// Dry-run: validate the plan and active trainer descriptor, then report what a real run would
+/// produce, with no model load or training. Cross-platform: the shared preflight touches only the
+/// registry, plan, and dataset images. Mirrors the Python `_run_lora_train_dry_run`.
 async fn run_training_dry_run(
     api: &ApiClient,
     settings: &Settings,
@@ -152,7 +473,7 @@ async fn run_training_dry_run(
         ),
     )
     .await?;
-    validate_training_plan(settings, plan)?;
+    preflight_training_run(settings, plan)?;
     let item_count = plan.dataset.items.len();
     update_job(
         api,
@@ -265,23 +586,27 @@ pub(crate) fn training_progress(
 /// the generator id of the same base model). Backend-neutral: the registry resolves it to the mlx
 /// trainer on macOS or the candle trainer off-Mac. Wan splits by the base model variant: the dense
 /// TI2V-5B (`wan_lora`) vs the two A14B MoE variants (`wan_moe_lora` + the T2V/I2V base model).
-/// `None` for a family with no native trainer at all — those never route here, but the mapping fails
-/// loudly if one does. NB the candle registry only holds a subset of these ids (`sdxl`,
-/// `z_image_turbo`, `lens`, `krea_2_raw`, `ltx_2_3`, `wan2_2_t2v_14b`); the API's
-/// `training_job_is_candle_eligible` gate keeps the candle-untrained ids
-/// (Kolors/Wan-5B/Wan-I2V) off the candle worker, and `load_trainer`
-/// fails loudly as the backstop if one ever slips through.
+/// `None` for an unknown base/family combination: routing is the first gate, but execution repeats
+/// the identity check here so a forged or stale plan cannot load a sibling trainer. Both native
+/// registries serve the advertised product targets at the pinned inference revision; Candle also
+/// preserves the Krea ControlNet and Wan T2V LoKr lanes.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
+#[cfg(test)]
 fn engine_trainer_id(plan: &TrainingPlan) -> Option<&'static str> {
-    match plan.target.kernel.as_str() {
+    engine_trainer_id_for(&plan.target.kernel, &plan.target.base_model)
+}
+
+/// Pure production mapping used by both dispatch and matching-platform capability facts.
+pub(crate) fn engine_trainer_id_for(kernel: &str, base_model: &str) -> Option<&'static str> {
+    match kernel {
         "z_image_lora" => Some("z_image_turbo"),
         "sdxl_lora" => Some("sdxl"),
         // Kolors is an SDXL U-Net under a ChatGLM3-6B encoder; the engine registers its
         // LoRA/LoKr trainer under the same id as its generator (`"kolors"`), sc-4568.
-        "kolors_lora" => Some("kolors"),
+        "kolors_lora" => (base_model == "kolors").then_some("kolors"),
         // Lens trains the base (non-distilled) Lens DiT — the `SceneWorks/Lens` diffusers rehost
         // since sc-8797 (microsoft/Lens is dead); the engine registers its LoRA/LoKr trainer
         // under the base generator id `"lens"` (arch-identical to lens_turbo), sc-5148.
@@ -297,28 +622,26 @@ fn engine_trainer_id(plan: &TrainingPlan) -> Option<&'static str> {
         // MMDiT-X `sd3_5_medium` (T4 sc-7885). The trained adapter records `family: sd3` and applies
         // back at that base (Large also covers the family-arch-identical `sd3_5_large_turbo`) via the
         // `apply_sd3_adapters` seam — no base-model gating (family-match, like Krea Raw→Turbo).
-        "sd3_lora" => match plan.target.base_model.as_str() {
+        "sd3_lora" => match base_model {
             "sd3_5_large" => Some("sd3_5_large"),
             "sd3_5_medium" => Some("sd3_5_medium"),
             _ => None,
         },
         "ltx_mlx_lora" => Some("ltx_2_3"),
         // Dense Wan2.2-TI2V-5B.
-        "wan_lora" => Some("wan2_2_ti2v_5b"),
+        "wan_lora" => (base_model == "wan_2_2").then_some("wan2_2_ti2v_5b"),
         // A14B dual-expert MoE; the T2V/I2V base model picks the trainer.
-        "wan_moe_lora" => match plan.target.base_model.as_str() {
+        "wan_moe_lora" => match base_model {
             "wan_2_2_t2v_14b" => Some("wan2_2_t2v_14b"),
             "wan_2_2_i2v_14b" => Some("wan2_2_i2v_14b"),
             _ => None,
         },
-        // Anima (epic 10512, sc-10522): the `mlx-gen-anima` LoRA/LoKr trainer registers under the same
-        // id as the inference generator of the training base. All three variants share one architecture,
-        // so a LoRA trained on any applies back to every variant via `apply_anima_adapters`; the base
-        // model selects which variant's dense weights the trainer loads (default `anima_base`).
-        "anima_lora" => match plan.target.base_model.as_str() {
-            "anima_aesthetic" => Some("anima_aesthetic"),
-            "anima_turbo" => Some("anima_turbo"),
-            _ => Some("anima_base"),
+        // Anima adapters train on the undistilled Base checkpoint and apply across the family. The
+        // product target does not advertise Aesthetic/Turbo as training bases, and Candle registers
+        // only the Base trainer, so reject sibling and unknown identities here as a second gate.
+        "anima_lora" => match base_model {
+            "anima_base" => Some("anima_base"),
+            _ => None,
         },
         // Mage-Flow (epic 14034, sc-14055 LoRA/LoKr + sc-14056 full base fine-tune, mapped here in
         // sc-15277): `mlx-gen-mage` registers ONE trainer, under the inference-generator id of the
@@ -335,7 +658,7 @@ fn engine_trainer_id(plan: &TrainingPlan) -> Option<&'static str> {
         // inference, so the adapter would be fitted on a distribution the model never sees and would
         // train silently WRONG rather than fail. Anything that is not the Base checkpoint therefore
         // resolves to `None` and fails loudly. See `mage_flow_edit_base` in sc-15320.
-        "mage_flow_lora" => match plan.target.base_model.as_str() {
+        "mage_flow_lora" => match base_model {
             "mage_flow_base" => Some("mage_flow_base"),
             _ => None,
         },
@@ -495,16 +818,9 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
         // Previously dropped here, so the engine always ran at its `false` default. Absent
         // (legacy payloads) preserves that default.
         //
-        // ...EXCEPT on a full base fine-tune (sc-14056). No family has a full-tune activation
-        // checkpointing path yet (sc-14989), and the Mage engine trainer now HARD-ERRORS on
-        // `full_finetune + gradient_checkpointing` rather than silently ignoring the flag. The
-        // Mage-Flow training target's own defaults set `gradientCheckpointing: true`, so mapping it
-        // through verbatim would 400 every full run submitted from the app with the stock config —
-        // the capability would be unreachable by construction. Clear it for the full path instead.
-        // This is not "silently ignoring a user request": the Training Studio hides the checkbox
-        // whenever `networkType == "full"` and says why, so what the user sees is what runs.
-        gradient_checkpointing: !full_finetune
-            && advanced_bool(advanced, "gradientCheckpointing", false),
+        // Full fine-tunes do not silently clear this value. Platform-effective metadata seeds
+        // `false`, and the shared dry/real preflight rejects a forged `true` plan before load.
+        gradient_checkpointing: advanced_bool(advanced, "gradientCheckpointing", false),
         full_finetune,
         trigger_word: config.trigger_word.clone(),
         // sc-5637 — preview-sample cadence. The SceneWorks config + UI always supply these (presets
@@ -515,10 +831,9 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
         sample_every: advanced_u32(advanced, "sampleEvery", 0),
         sample_steps: advanced_u32(advanced, "sampleSteps", 20),
         sample_guidance_scale: advanced_f32(advanced, "sampleGuidanceScale", 1.0),
-        // Mid-schedule resume (gen-core sc-9560 / F-125): not yet surfaced on the SceneWorks
-        // training path — default `false` preserves the current from-scratch behavior. Wiring the
-        // resume toggle from the plan's `advanced` bag is a separate training-feature story.
-        resume: false,
+        // Preserve submitted resume intent. Each backend either implements it or the shared
+        // dry/real preflight rejects it before any model load.
+        resume: advanced_bool(advanced, "resume", false),
         // ControlNet control type (sc-10163) — set by a control-branch target's `advanced.controlType`
         // (e.g. "pose"); absent for LoRA/LoKr targets ⇒ None. Drives the control trainer's overlay
         // `kind` metadata and is required by its validate; ignored by LoRA trainers.
@@ -576,9 +891,8 @@ fn resolve_sample_prompts(pool: Vec<String>, count: u32) -> Vec<String> {
 /// backward materializes a gradient for the FROZEN base weight too, so a dense backward over a
 /// multi-billion-parameter DiT OOMs even alone on a 96 GB card (epic 5164: the candle Z-Image trainer
 /// got checkpointing in sc-5246, and the Wan A14B trainer needs it too). Scoped to exactly the
-/// candle-trainable big-DiT families: Z-Image, LTX-2.3, and the Wan A14B **T2V** MoE — the same set
-/// `jobs_store::training_job_is_candle_eligible` gates the MoE to (only `wan_2_2_t2v_14b` has a candle
-/// trainer; the I2V A14B / dense 5B are refused and remain queued). Krea 2 Raw is a 12B DiT
+/// candle-trainable big-DiT families: Z-Image, LTX-2.3, and both Wan A14B MoE variants. The dense
+/// Wan TI2V-5B trainer can honor the submitted value and is not forced. Krea 2 Raw is a 12B DiT
 /// (epic 7565 P4, sc-8614) —
 /// the same dense-backward OOM class, so it is forced too (the sc-7900 big-DiT backstop). SDXL's
 /// smaller U-Net fits a dense backward (the `candle_sdxl_real_weights` smoke trains it with
@@ -596,7 +910,10 @@ fn candle_requires_gradient_checkpointing(plan: &TrainingPlan) -> bool {
         // LTX-2.3 is a 22B DiT. Its candle trainer supports packed-q4 bases, but a dense backward
         // still materializes frozen-weight gradients unless checkpointing is forced.
         "ltx_mlx_lora" => true,
-        "wan_moe_lora" => plan.target.base_model == "wan_2_2_t2v_14b",
+        "wan_moe_lora" => matches!(
+            plan.target.base_model.as_str(),
+            "wan_2_2_t2v_14b" | "wan_2_2_i2v_14b"
+        ),
         _ => false,
     }
 }
@@ -607,7 +924,7 @@ fn candle_requires_gradient_checkpointing(plan: &TrainingPlan) -> bool {
 /// cross-platform "Gradient Checkpointing" UI box ON, but the user can turn it OFF — harmless on the
 /// macOS MLX path (bf16 alone fits) yet a guaranteed OOM on candle for these families — and a thin /
 /// legacy submit that omits the key leaves the worker's `map_training_config` default (`false`) in
-/// force. Forcing it here makes a real off-Mac Z-Image / Krea Raw / Wan A14B-T2V run impossible to configure
+/// force. Forcing it here makes a real off-Mac Z-Image / Krea Raw / Wan A14B run impossible to configure
 /// into a dense-backward OOM. On macOS this is the identity (the MLX path tolerates a dense bf16
 /// backward), so the mapped config passes through unchanged.
 #[cfg(target_os = "macos")]
@@ -787,14 +1104,7 @@ pub(crate) async fn run_training_execution(
     )
     .await?;
 
-    validate_training_plan(settings, plan)?;
-
-    let engine_id = engine_trainer_id(plan).ok_or_else(|| {
-        WorkerError::InvalidPayload(format!(
-            "No native trainer for kernel '{}' (base model '{}').",
-            plan.target.kernel, plan.target.base_model
-        ))
-    })?;
+    let PreparedTrainingRun { engine_id, request } = preflight_training_run(settings, plan)?;
 
     let weights_dir = resolve_app_managed_model_dir(
         settings,
@@ -814,40 +1124,7 @@ pub(crate) async fn run_training_execution(
     let train_components =
         resolve_trainer_components(engine_id, &plan.target.base_model, settings)?;
 
-    let output_dir =
-        resolve_training_output_dir(settings, &plan.output.output_dir, "Training outputDir")?;
-    tokio::fs::create_dir_all(&output_dir).await?;
-
-    let items: Vec<TrainingItem> = plan
-        .dataset
-        .items
-        .iter()
-        .map(|item| {
-            Ok(TrainingItem {
-                image_path: resolve_dataset_item_path(
-                    settings,
-                    &plan.dataset.root_path,
-                    &item.image_path,
-                    "Training dataset imagePath",
-                )?,
-                caption: item.caption.clone(),
-                // ControlNet training: resolve the per-item conditioning image the same way as the
-                // target (None for LoRA — the control trainer's validate rejects a missing one).
-                control_image_path: item
-                    .control_image_path
-                    .as_ref()
-                    .map(|p| {
-                        resolve_dataset_item_path(
-                            settings,
-                            &plan.dataset.root_path,
-                            p,
-                            "Training dataset controlImagePath",
-                        )
-                    })
-                    .transpose()?,
-            })
-        })
-        .collect::<WorkerResult<Vec<_>>>()?;
+    tokio::fs::create_dir_all(&request.output_dir).await?;
     // sc-14056: the interim `networkType == "full"` rejection that used to sit here is gone. It
     // existed because this worker pinned a sceneworks-gen-core without `TrainingConfig.full_finetune`
     // and `mage_flow_lora` was in no routed training set, so a full request would have been mapped
@@ -859,21 +1136,18 @@ pub(crate) async fn run_training_execution(
     //
     // Apply backend-specific safety overrides before the config reaches the engine: candle can't run
     // a dense backward over the big-DiT families without a CUDA OOM, so `finalize_training_config`
-    // forces gradient checkpointing on for them (Z-Image, Wan A14B-T2V) regardless of the plan value.
+    // forces gradient checkpointing on for them (Z-Image and both Wan A14B variants) regardless of
+    // the plan value.
     // On macOS this is the identity. See its doc comment for the why.
-    let config = finalize_training_config(map_training_config(&plan.config), plan);
-    let sample_config = config.clone();
-    let total_steps = config.steps;
-    let file_name = plan.output.file_name.clone();
-    let trigger_words = plan.output.trigger_words.clone();
+    let sample_config = request.config.clone();
+    let total_steps = request.config.steps;
 
     check_cancel(api, &job.id, "LoRA training canceled before it started.").await?;
 
-    let cancel = CancelFlag::new();
+    let cancel = request.cancel.clone();
     let (tx, rx) = tokio::sync::mpsc::channel::<TrainEvent>(64);
 
     let blocking = {
-        let cancel = cancel.clone();
         tokio::task::spawn_blocking(move || -> WorkerResult<()> {
             // Load precision tracks the requested `train_dtype` (advanced `mixedPrecision`, default
             // bf16). The MLX Lens trainer loads its DiT at this precision and enforces `train_dtype`
@@ -882,7 +1156,12 @@ pub(crate) async fn run_training_execution(
             // them — the default bf16 path is byte-identical to before. The candle trainers are lazy
             // (sc-7817): they build the frozen base inside `train()` at the request's `train_dtype`,
             // so `LoadSpec.precision` is likewise inert for them and this mapping stays harmless.
-            let load_precision = if config.train_dtype.trim().eq_ignore_ascii_case("f32") {
+            let load_precision = if request
+                .config
+                .train_dtype
+                .trim()
+                .eq_ignore_ascii_case("f32")
+            {
                 Precision::Fp32
             } else {
                 Precision::Bf16
@@ -901,14 +1180,6 @@ pub(crate) async fn run_training_execution(
                 crate::inference_runtime::load_trainer(engine_id, &spec).map_err(|error| {
                     WorkerError::Engine(format!("{engine_id} trainer load failed: {error}"))
                 })?;
-            let request = TrainingRequest {
-                items,
-                config,
-                output_dir,
-                file_name,
-                trigger_words,
-                cancel,
-            };
             trainer.validate(&request).map_err(|error| {
                 WorkerError::InvalidPayload(format!(
                     "{engine_id} trainer rejected the plan: {error}"
@@ -1364,6 +1635,15 @@ async fn consume_training_events(
                         samples.cfg.sample_guidance_scale,
                         backend,
                     );
+                    let artifact = match &plan.target.output_kind {
+                        sceneworks_core::training::TrainingOutputKind::BaseCheckpoint => {
+                            "Full base checkpoint"
+                        }
+                        sceneworks_core::training::TrainingOutputKind::ControlBranch => {
+                            "Control branch"
+                        }
+                        _ => "Trained adapter",
+                    };
                     update_job(
                         api,
                         &job.id,
@@ -1371,7 +1651,7 @@ async fn consume_training_events(
                             JobStatus::Completed,
                             ProgressStage::Completed,
                             1.0,
-                            &format!("Trained LoRA saved as {}.", plan.output.file_name),
+                            &format!("{artifact} saved as {}.", plan.output.file_name),
                             Some(result),
                             backend,
                         ),
@@ -1611,7 +1891,13 @@ fn training_result(
     let mut result = JsonObject::new();
     result.insert("mode".to_owned(), json!("train"));
     result.insert("kernel".to_owned(), json!(plan.target.kernel));
+    result.insert("outputKind".to_owned(), json!(plan.target.output_kind));
+    result.insert(
+        "networkType".to_owned(),
+        json!(advanced_str(&plan.config.advanced, "networkType", "lora")),
+    );
     result.insert("loraId".to_owned(), json!(plan.output.lora_id));
+    result.insert("outputId".to_owned(), json!(plan.output.lora_id));
     result.insert("outputDir".to_owned(), json!(plan.output.output_dir));
     result.insert("fileName".to_owned(), json!(plan.output.file_name));
     result.insert(
@@ -1905,7 +2191,7 @@ mod tests {
     }
 
     /// sc-7817 follow-up: the candle backend OOMs on a dense backward over the big-DiT training
-    /// families (Z-Image, LTX-2.3, Wan A14B-T2V), so `finalize_training_config` must force gradient
+    /// families (Z-Image, LTX-2.3, and both Wan A14B variants), so `finalize_training_config` must force gradient
     /// checkpointing on for them even when the resolved plan turns it off — a user un-checking the
     /// cross-platform "Gradient Checkpointing" UI box, or a thin submit that omits the key (the
     /// worker default is `false`). SDXL's smaller U-Net fits a dense backward, so its plan value is
@@ -1937,6 +2223,14 @@ mod tests {
         assert!(
             finalized_checkpointing("wan_moe_lora", "wan_2_2_t2v_14b"),
             "wan A14B T2V forces gradient checkpointing on candle"
+        );
+        assert!(
+            finalized_checkpointing("wan_moe_lora", "wan_2_2_i2v_14b"),
+            "wan A14B I2V forces gradient checkpointing on candle"
+        );
+        assert!(
+            !finalized_checkpointing("wan_lora", "wan_2_2"),
+            "Wan TI2V-5B honors the submitted checkpointing value"
         );
         assert!(
             finalized_checkpointing("ltx_mlx_lora", "ltx_2_3"),
@@ -2289,7 +2583,7 @@ mod tests {
         all(not(target_os = "macos"), feature = "backend-candle")
     ))]
     #[test]
-    fn engine_trainer_id_maps_mlx_native_families_and_rejects_the_rest() {
+    fn engine_trainer_id_maps_native_families_and_rejects_the_rest() {
         let cases: &[(&str, &str, Option<&str>)] = &[
             ("z_image_lora", "z_image_turbo", Some("z_image_turbo")),
             ("sdxl_lora", "sdxl", Some("sdxl")),
@@ -2305,6 +2599,7 @@ mod tests {
             // Kolors gained a native mlx-gen trainer (sc-4568) and now routes here (sc-4732);
             // the trainer registers under the generator id `"kolors"`.
             ("kolors_lora", "kolors", Some("kolors")),
+            ("kolors_lora", "not_kolors", None),
             // Lens gained a native mlx-gen trainer (sc-5148) and now routes here (sc-5180); the
             // trainer registers under the base generator id `"lens"`.
             ("lens_lora", "lens", Some("lens")),
@@ -2315,11 +2610,12 @@ mod tests {
             // registers under the inference-generator id of each base.
             ("sd3_lora", "sd3_5_large", Some("sd3_5_large")),
             ("sd3_lora", "sd3_5_medium", Some("sd3_5_medium")),
-            // Anima (sc-10522): the `anima_lora` kernel maps to the trainer registered under the
-            // inference-generator id of the training-base variant; `anima_base` is the default.
+            // Anima trains only the undistilled Base checkpoint. Its sibling generation variants
+            // accept the resulting family adapter but are not product training bases.
             ("anima_lora", "anima_base", Some("anima_base")),
-            ("anima_lora", "anima_aesthetic", Some("anima_aesthetic")),
-            ("anima_lora", "anima_turbo", Some("anima_turbo")),
+            ("anima_lora", "anima_aesthetic", None),
+            ("anima_lora", "anima_turbo", None),
+            ("anima_lora", "anima_unknown", None),
             // Mage-Flow (sc-15277): the single `mlx-gen-mage` trainer registers under the
             // inference-generator id of the training base. The same id serves lora/lokr/full.
             ("mage_flow_lora", "mage_flow_base", Some("mage_flow_base")),
@@ -2331,6 +2627,7 @@ mod tests {
             ("sd3_lora", "sd3_5_large_turbo", None),
             // Unknown A14B base model variant.
             ("wan_moe_lora", "wan_2_2_mystery", None),
+            ("wan_lora", "wan_2_2_mystery", None),
         ];
         let dir = tempfile::tempdir().expect("tempdir");
         let image = dir.path().join("datasets").join("ds-1").join("x.png");
@@ -2347,6 +2644,269 @@ mod tests {
                 *expected,
                 "kernel={kernel} base_model={base_model}"
             );
+        }
+    }
+
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn sc18479_claims_map_to_exact_candle_trainer_capabilities() {
+        use sceneworks_core::training::builtin_training_targets;
+
+        let cells = [
+            ("anima_base_lora", "lora", "anima_base"),
+            ("anima_base_lora", "lokr", "anima_base"),
+            ("kolors_lora", "lora", "kolors"),
+            ("kolors_lora", "lokr", "kolors"),
+            ("mage_flow_base_lora", "lora", "mage_flow_base"),
+            ("mage_flow_base_lora", "lokr", "mage_flow_base"),
+            ("mage_flow_base_lora", "full", "mage_flow_base"),
+            ("sd3_5_large_lora", "lora", "sd3_5_large"),
+            ("sd3_5_large_lora", "lokr", "sd3_5_large"),
+            ("sd3_5_medium_lora", "lora", "sd3_5_medium"),
+            ("sd3_5_medium_lora", "lokr", "sd3_5_medium"),
+            ("wan_lora", "lora", "wan2_2_ti2v_5b"),
+            ("wan_i2v_14b_lora", "lora", "wan2_2_i2v_14b"),
+        ];
+        assert_eq!(cells.len(), 13, "the reconciled matrix has exactly 13 gaps");
+
+        let targets = builtin_training_targets();
+        let registry = crate::inference_runtime::media();
+        for (target_id, network_type, expected_engine) in cells {
+            let target = targets
+                .targets
+                .iter()
+                .find(|target| target.id == target_id)
+                .unwrap_or_else(|| panic!("missing target {target_id}"));
+            assert!(
+                target.limits["networkTypes"]
+                    .as_array()
+                    .is_some_and(|values| values.iter().any(|value| value == network_type)),
+                "{target_id} does not advertise {network_type}"
+            );
+            assert_eq!(
+                engine_trainer_id_for(&target.kernel, &target.base_model),
+                Some(expected_engine),
+                "{target_id}/{network_type} mapping"
+            );
+            let descriptor = registry
+                .trainers()
+                .map(|registration| (registration.descriptor)())
+                .find(|descriptor| descriptor.id == expected_engine)
+                .unwrap_or_else(|| panic!("missing Candle trainer {expected_engine}"));
+            assert_eq!(descriptor.backend, "candle", "{target_id}/{network_type}");
+            let supported = match network_type {
+                "lora" => descriptor.supports_lora,
+                "lokr" => descriptor.supports_lokr,
+                "full" => descriptor.supports_full_finetune,
+                _ => false,
+            };
+            assert!(supported, "{target_id}/{network_type} is not implemented");
+        }
+    }
+
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn shared_dry_and_real_preflight_rejects_forged_new_candle_configs_before_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = test_settings(dir.path());
+        let dataset_root = dir.path().join("datasets").join("ds-1");
+        std::fs::create_dir_all(&dataset_root).expect("dataset root");
+        let image = dataset_root.join("x.png");
+        std::fs::write(&image, b"png").expect("image");
+        let image = image.display().to_string();
+
+        let cases = [
+            (
+                "anima_lora",
+                "anima_base",
+                "lora",
+                "mixedPrecision",
+                json!("f32"),
+            ),
+            (
+                "kolors_lora",
+                "kolors",
+                "lora",
+                "gradientCheckpointing",
+                json!(true),
+            ),
+            ("sd3_lora", "sd3_5_large", "lora", "sampleEvery", json!(1)),
+            (
+                "mage_flow_lora",
+                "mage_flow_base",
+                "lora",
+                "resume",
+                json!(true),
+            ),
+            ("wan_lora", "wan_2_2", "lora", "sampleEvery", json!(1)),
+            (
+                "wan_moe_lora",
+                "wan_2_2_i2v_14b",
+                "lora",
+                "sampleEvery",
+                json!(1),
+            ),
+        ];
+        for (kernel, base, network, field, value) in cases {
+            let mut serialized = plan_json(dir.path(), kernel, base, network, &[&image]);
+            serialized["config"]["advanced"][field] = value;
+            let error = preflight_training_run(&settings, &parse(serialized))
+                .expect_err("dry and real execution share this rejection before load");
+            assert!(
+                matches!(error, WorkerError::InvalidPayload(_)),
+                "{kernel}/{base}/{field}: {error:?}"
+            );
+        }
+
+        let forged = parse(plan_json(
+            dir.path(),
+            "kolors_lora",
+            "anima_base",
+            "lora",
+            &[&image],
+        ));
+        assert!(preflight_training_run(&settings, &forged)
+            .expect_err("a forged kernel/base pairing must fail")
+            .to_string()
+            .contains("No native trainer"));
+
+        let unsupported_network = parse(plan_json(
+            dir.path(),
+            "wan_lora",
+            "wan_2_2",
+            "lokr",
+            &[&image],
+        ));
+        assert!(preflight_training_run(&settings, &unsupported_network)
+            .expect_err("Wan TI2V-5B does not advertise LoKr")
+            .to_string()
+            .contains("does not support networkType"));
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn shared_dry_and_real_preflight_covers_native_recipe_enums_and_item_sources() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = test_settings(dir.path());
+        let dataset_root = dir.path().join("datasets").join("ds-1");
+        std::fs::create_dir_all(&dataset_root).expect("dataset root");
+        let image = dataset_root.join("x.png");
+        let control = dataset_root.join("control.png");
+        std::fs::write(&image, b"png").expect("image");
+        std::fs::write(&control, b"png").expect("control");
+        let image = image.display().to_string();
+
+        for (kernel, base, field, value) in [
+            (
+                "anima_lora",
+                "anima_base",
+                "timestepType",
+                json!("logit_normal"),
+            ),
+            (
+                "mage_flow_lora",
+                "mage_flow_base",
+                "timestepType",
+                json!("logit_normal"),
+            ),
+            ("kolors_lora", "kolors", "timestepType", json!("linear")),
+            ("wan_lora", "wan_2_2", "optimizer", json!("lion")),
+            ("sd3_lora", "sd3_5_large", "timestepBias", json!("middle")),
+            (
+                "wan_moe_lora",
+                "wan_2_2_i2v_14b",
+                "lossType",
+                json!("huber"),
+            ),
+        ] {
+            let mut serialized = plan_json(dir.path(), kernel, base, "lora", &[&image]);
+            if field == "optimizer" {
+                serialized["config"][field] = value;
+            } else {
+                serialized["config"]["advanced"][field] = value;
+            }
+            let error = preflight_training_run(&settings, &parse(serialized))
+                .expect_err("the shared dry/real recipe preflight must reject before load");
+            assert!(
+                matches!(error, WorkerError::InvalidPayload(_)),
+                "{kernel}/{field}: {error:?}"
+            );
+        }
+
+        // SD3 is the sole extension: logit-normal remains a valid, weights-free request.
+        let mut sd3 = plan_json(dir.path(), "sd3_lora", "sd3_5_large", "lora", &[&image]);
+        sd3["config"]["advanced"]["timestepType"] = json!("logit_normal");
+        assert!(preflight_training_run(&settings, &parse(sd3)).is_ok());
+
+        for (kernel, base) in [
+            ("anima_lora", "anima_base"),
+            ("kolors_lora", "kolors"),
+            ("sd3_lora", "sd3_5_medium"),
+            ("mage_flow_lora", "mage_flow_base"),
+            ("wan_lora", "wan_2_2"),
+            ("wan_moe_lora", "wan_2_2_i2v_14b"),
+        ] {
+            let mut serialized = plan_json(dir.path(), kernel, base, "lora", &[&image]);
+            serialized["dataset"]["items"][0]["controlImagePath"] = json!("control.png");
+            let error = preflight_training_run(&settings, &parse(serialized))
+                .expect_err("adapter item source/control images must fail before load");
+            assert!(
+                error.to_string().contains("control/source"),
+                "{kernel}: {error}"
+            );
+        }
+
+        // Mage full legitimately carries rank=0. Its provider normalizes only for flow validation;
+        // the prepared request must preserve the complete-base optimizer surface unchanged.
+        let mut mage_full = plan_json(
+            dir.path(),
+            "mage_flow_lora",
+            "mage_flow_base",
+            "full",
+            &[&image],
+        );
+        mage_full["target"]["outputKind"] = json!("base_checkpoint");
+        mage_full["config"]["rank"] = json!(0);
+        mage_full["config"]["advanced"]["mixedPrecision"] = json!("f32");
+        let prepared = preflight_training_run(&settings, &parse(mage_full))
+            .expect("rank-zero Mage full request validates");
+        assert_eq!(prepared.request.config.rank, 0);
+    }
+
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn candle_registry_preserves_krea_control_and_wan_t2v_lokr() {
+        use sceneworks_core::training::builtin_training_targets;
+
+        let targets = builtin_training_targets();
+        let registry = crate::inference_runtime::media();
+        for (target_id, network_type, expected_engine) in [
+            ("krea_2_control", "control", "krea_2_control"),
+            ("wan_t2v_14b_lora", "lokr", "wan2_2_t2v_14b"),
+        ] {
+            let target = targets
+                .targets
+                .iter()
+                .find(|target| target.id == target_id)
+                .unwrap_or_else(|| panic!("missing preserved target {target_id}"));
+            assert_eq!(
+                engine_trainer_id_for(&target.kernel, &target.base_model),
+                Some(expected_engine)
+            );
+            let descriptor = registry
+                .trainers()
+                .map(|registration| (registration.descriptor)())
+                .find(|descriptor| descriptor.id == expected_engine)
+                .unwrap_or_else(|| panic!("missing preserved trainer {expected_engine}"));
+            assert_eq!(descriptor.backend, "candle");
+            assert!(match network_type {
+                "control" => descriptor.supports_control,
+                "lokr" => descriptor.supports_lokr,
+                _ => false,
+            });
         }
     }
 
@@ -2568,23 +3128,22 @@ mod tests {
         );
     }
 
-    /// sc-14056 — the full-base-fine-tune signal must actually REACH the engine, and the target's own
-    /// `gradientCheckpointing: true` default must not 400 the run.
+    /// sc-14056 — the full-base-fine-tune signal and submitted checkpointing intent must both reach
+    /// the engine config unchanged. Unsupported combinations are rejected by the shared preflight.
     ///
     /// `map_training_config` builds the engine config field-by-field with no `..Default`, so a
     /// dropped field is silent. And `NetworkType::parse("full")` returns `Lora` — it maps every
     /// unknown string to Lora — so a `"full"` plan whose `full_finetune` is not threaded would train
     /// a LoRA adapter AND REPORT SUCCESS. That is the F-055 class this test exists to catch.
     ///
-    /// It discriminates in both directions: the LoRA plan must map to `full_finetune == false` with
-    /// the checkpointing flag honored, and the full plan — differing ONLY in `networkType` — must map
-    /// to `full_finetune == true` with checkpointing cleared.
+    /// It discriminates in both directions: the LoRA plan maps to `full_finetune == false`, while
+    /// the full plan differs only in `networkType` and maps to `full_finetune == true`.
     #[cfg(any(
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")
     ))]
     #[test]
-    fn map_training_config_threads_the_full_finetune_flag_and_clears_checkpointing() {
+    fn map_training_config_threads_full_finetune_and_checkpointing_without_override() {
         let dir = tempfile::tempdir().expect("tempdir");
         let image = dir.path().join("datasets").join("ds-1").join("x.png");
         let mapped = |network_type: &str| {
@@ -2595,10 +3154,6 @@ mod tests {
                 network_type,
                 &[&image.display().to_string()],
             );
-            // The Mage training target ships this ON by default (sceneworks-core training.rs), which
-            // is exactly why the full path has to clear it: the engine HARD-ERRORS on
-            // `full_finetune + gradient_checkpointing` (no full-tune checkpointing yet, sc-14989),
-            // so passing the stock default through would 400 every full run submitted from the app.
             value["config"]["advanced"]["gradientCheckpointing"] = json!(true);
             map_training_config(&parse(value).config)
         };
@@ -2620,9 +3175,8 @@ mod tests {
              it to Lora, so without this the run silently trains an adapter and reports success"
         );
         assert!(
-            !full.gradient_checkpointing,
-            "a full run must clear gradientCheckpointing or the engine rejects the target's own \
-             defaults"
+            full.gradient_checkpointing,
+            "mapping must preserve explicit intent; preflight owns unsupported-combination errors"
         );
         // The adapter parameterization stays Lora — `full` is not a NetworkType variant (gen-core
         // deliberately kept that enum closed), so the two signals are independent by design.
@@ -2661,6 +3215,37 @@ mod tests {
         all(not(target_os = "macos"), feature = "backend-candle")
     ))]
     #[test]
+    fn training_result_preserves_full_checkpoint_identity_and_network_type() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let mut value = plan_json(
+            dir.path(),
+            "mage_flow_lora",
+            "mage_flow_base",
+            "full",
+            &[&image.display().to_string()],
+        );
+        value["target"]["outputKind"] = json!("base_checkpoint");
+        value["output"]["loraId"] = json!("finetune_mage");
+        let plan = parse(value);
+        let output = TrainingOutput {
+            adapter_path: dir.path().join("models/finetunes/finetune_mage"),
+            steps: 1,
+            final_loss: 0.25,
+        };
+        let result = training_result(&plan, &output, &[], &[], &[], 0, 0.0, "candle");
+
+        assert_eq!(result["outputKind"], json!("base_checkpoint"));
+        assert_eq!(result["networkType"], json!("full"));
+        assert_eq!(result["outputId"], json!("finetune_mage"));
+        assert_eq!(result["backend"], json!("candle"));
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
     fn map_training_config_defaults_when_advanced_is_empty() {
         let dir = tempfile::tempdir().expect("tempdir");
         let image = dir.path().join("datasets").join("ds-1").join("x.png");
@@ -2685,6 +3270,28 @@ mod tests {
         // them trains exactly as before (no previews) rather than erroring.
         assert_eq!(cfg.sample_every, 0);
         assert!(cfg.sample_prompts.is_empty());
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn map_training_config_preserves_explicit_resume_intent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let mut value = plan_json(
+            dir.path(),
+            "wan_lora",
+            "wan_2_2",
+            "lora",
+            &[&image.display().to_string()],
+        );
+        value["config"]["advanced"]["resume"] = json!(true);
+        assert!(
+            map_training_config(&parse(value).config).resume,
+            "the worker must not hardcode resume=false; provider preflight decides support"
+        );
     }
 
     /// sc-5637 — the preview-sample config must reach the engine. The mapping builds the engine config
@@ -3532,8 +4139,8 @@ mod tests {
             batch_size: 1,
             gradient_accumulation: 1,
             gradient_checkpointing,
-            // sc-14056: candle-lane LoRA harness — there is no candle full-fine-tune trainer, and
-            // gen-core's `validate_full_finetune_request` floor would reject one.
+            // This shared CUDA adapter harness exercises SDXL-family adapters only. Mage full-base
+            // coverage has its own production-registry smoke and checkpoint contract.
             full_finetune: false,
             train_dtype: "bf16".to_owned(),
             resolution,

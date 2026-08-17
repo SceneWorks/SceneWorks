@@ -350,8 +350,8 @@ fn mlx_gpu_capability_set_matches_expected_full_set() {
         // sc-6539: Dataset Doctor one-tap upscale — reuses the Real-ESRGAN engine, advertised
         // wherever image_upscale is.
         WorkerCapability::DatasetUpscale,
-        // sc-6105: smart-select segmentation (native-MLX SAM3 box-prompt) — Mac-only, advertised
-        // only here so an `image_segment` job routes to the MLX worker by construction.
+        // sc-6105: smart-select segmentation uses native-MLX SAM3 box prompts here; the Candle GPU
+        // descriptor advertises the sibling route off-Mac.
         WorkerCapability::ImageSegment,
         WorkerCapability::VideoUpscale,
         WorkerCapability::PersonDetect,
@@ -874,8 +874,9 @@ fn default_tier_key_mirrors_the_production_resolver() {
 /// a manifest edit that drops the flux2 `vramGbByTier` / `sequentialPeakGb` makes `predicted_*` return
 /// `None` → the whole gate goes INERT for flux2 (the exact "candle block missing" failure the story
 /// targets). Exercises the same `SCENEWORKS_CUDA_VRAM_CAP_GB` small-card emulation the worker honors via
-/// `apply_vram_cap`. Gated to the candle lane where `vram_gate` compiles (sc-10920 measured q4/q8;
-/// bf16 + klein are carried, and are asserted to reject on real cards, which is the intended outcome).
+/// `apply_vram_cap`. Gated to the candle lane where `vram_gate` compiles. SC-18474 replaces the old
+/// FLUX.2-dev estimates with bounded caption-aware q4/q8 route high-waters; BF16 remains absent until
+/// it has fresh evidence. Klein retains its separate historical gate.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn flux2_candle_blocks_drive_the_fit_gate_and_reject() {
@@ -892,44 +893,62 @@ fn flux2_candle_blocks_drive_the_fit_gate_and_reject() {
         "flux2_dev candle block present (absent ⇒ fit-gate inert for flux2)"
     );
 
-    // Measured q4 (sc-10920): resident 44.0 / sequential 35.6, each + the gate's 2 GB headroom.
+    // SC-18474 bounded q4 high-water: 42.7 GB for edit, plus the gate's 2 GB headroom. The
+    // caption-aware captures do not prove a lower sequential peak, so both rows remain 44.7 GB.
     let q4_res = predicted_peak_gb(dev_entry, "q4").expect("q4 resident predicted");
     let q4_seq = predicted_sequential_peak_gb(dev_entry, "q4").expect("q4 sequential predicted");
-    assert!((q4_res - 46.0).abs() < 1e-6, "q4 resident 44.0 + 2 headroom, got {q4_res}");
-    assert!((q4_seq - 37.6).abs() < 1e-6, "q4 sequential 35.6 + 2 headroom, got {q4_seq}");
-    assert!(q4_seq < q4_res, "sequential is the lower peak");
+    assert!((q4_res - 44.7).abs() < 1e-6, "q4 resident 42.7 + 2 headroom, got {q4_res}");
+    assert!((q4_seq - 44.7).abs() < 1e-6, "q4 sequential 42.7 + 2 headroom, got {q4_seq}");
+    assert_eq!(q4_seq, q4_res, "no smaller caption-aware sequential peak is claimed");
 
-    // A 96 GB card fits q4 resident outright — no offload.
-    let card96 = apply_vram_cap(None, Some(96.0));
-    assert_eq!(fit_decision(Some(q4_res), card96), FitDecision::Fits);
+    // The conservative supported tier is 48 GB and fits q4 resident outright.
+    assert_eq!(dev_entry["candle"]["minMemoryGb"], 48);
+    let card48 = apply_vram_cap(None, Some(48.0));
+    assert_eq!(fit_decision(Some(q4_res), card48), FitDecision::Fits);
 
-    // Emulate a 40 GB card: resident 46 won't fit, but sequential 37.6 does → OFFLOAD, run sequentially.
+    // A 40 GB card cannot fit either row. Offload is attempted, then fails closed on the same
+    // caption-aware high-water rather than falling through to an obsolete v2 ladder rung.
     let card40 = apply_vram_cap(None, Some(40.0));
     let at40 = resolve_offload(fit_decision(Some(q4_res), card40), /* sequential_capable */ true);
     assert!(matches!(at40, FitDecision::Offload { .. }), "40 GB → offload, got {at40:?}");
-    assert_eq!(sequential_overflow_gb(Some(q4_seq), card40), None, "sequential fits 40 GB → run");
+    assert_eq!(
+        sequential_overflow_gb(Some(q4_seq), card40),
+        Some(q4_seq),
+        "sequential high-water still exceeds 40 GB"
+    );
 
-    // Emulate a 30 GB card: even the sequential 37.6 peak won't fit → REJECT-before-OOM (sc-10856 gate).
+    // A 30 GB card is also rejected before load.
     let card30 = apply_vram_cap(None, Some(30.0));
     let at30 = resolve_offload(fit_decision(Some(q4_res), card30), true);
     assert!(matches!(at30, FitDecision::Offload { .. }), "30 GB → offload attempt, got {at30:?}");
     assert_eq!(
         sequential_overflow_gb(Some(q4_seq), card30),
         Some(q4_seq),
-        "sequential 37.6 > 30 GB → reject carrying the number"
+        "sequential 44.7 > 30 GB → reject carrying the number"
     );
 
-    // Measured q8 is present too (resident 70.7 / sequential 64.9 + headroom).
-    assert!((predicted_peak_gb(dev_entry, "q8").unwrap() - 72.7).abs() < 1e-6);
-    assert!((predicted_sequential_peak_gb(dev_entry, "q8").unwrap() - 66.9).abs() < 1e-6);
+    // Q8 uses the larger 70.8 GB route high-water plus headroom and therefore starts at the next
+    // supported 80 GB tier; again, no smaller sequential peak is claimed.
+    assert!((predicted_peak_gb(dev_entry, "q8").unwrap() - 72.8).abs() < 1e-6);
+    assert!((predicted_sequential_peak_gb(dev_entry, "q8").unwrap() - 72.8).abs() < 1e-6);
 
-    // The carried bf16 tier (128 / 97) rejects on a 96 GB card even sequentially — the intended outcome
-    // (113 GB dense weights can't run off-Mac), reject-before-OOM instead of a silent load-time OOM.
-    let bf16_seq = predicted_sequential_peak_gb(dev_entry, "bf16").expect("bf16 sequential carried");
     assert_eq!(
-        sequential_overflow_gb(Some(bf16_seq), card96),
-        Some(bf16_seq),
-        "bf16 sequential 99 > 96 GB → reject"
+        predicted_peak_gb(dev_entry, "bf16"),
+        Some(48.0),
+        "the legacy static fallback exists, so route admission must reject the missing tier row"
+    );
+    assert_eq!(predicted_sequential_peak_gb(dev_entry, "bf16"), None);
+    assert!(
+        crate::image_jobs::validate_candle_tier_memory_evidence("flux2_dev", dev_entry, "q4")
+            .is_ok()
+    );
+    assert!(
+        crate::image_jobs::validate_candle_tier_memory_evidence("flux2_dev", dev_entry, "q8")
+            .is_ok()
+    );
+    assert!(
+        crate::image_jobs::validate_candle_tier_memory_evidence("flux2_dev", dev_entry, "bf16")
+            .is_err()
     );
 
     // klein carries a candle block so ITS fit-gate is live: on a 16 GB epic-target card klein rejects
@@ -1931,11 +1950,11 @@ fn sd3_5_manifest_entries_gate_correctly() {
 }
 
 /// sc-8489 (SANA Phase B2): the SANA builtin-manifest entry gates correctly at the catalog layer —
-/// family `sana`, `capabilities == ["text_to_image"]` only (edit/reference rejected), the UN-gated
+/// family `sana`, text-to-image plus non-edit image-to-image, the UN-gated
 /// `SceneWorks/Sana_1600M_1024px_mlx` MLX re-host (NOT gated — the mirror carries the NVIDIA
 /// non-commercial NOTICE), dense bf16 (NO `mlx.quantize` — the load path rejects a quant), the
-/// `mlx.minMemoryGb` memory-eligibility lever, the sana LoRA family, and the NVIDIA non-commercial
-/// notice surfaced in the UI description. Parses the embedded builtin manifest (the exact bytes
+/// `mlx.minMemoryGb` memory-eligibility lever, no unsupported LoRA advertisement, and the NVIDIA
+/// non-commercial notice surfaced in the UI description. Parses the embedded builtin manifest (the exact bytes
 /// shipped) so manifest drift on any of these levers fails CI without a real download. The
 /// descriptor-derived guidance/negative/backend surface is covered by
 /// `model_table_rows_resolve_and_flags_match_descriptor`.
@@ -1948,13 +1967,17 @@ fn sana_manifest_entry_gates_correctly() {
         Some("sana"),
         "sana family"
     );
-    // Capability gate: text_to_image ONLY — edit/reference are rejected (base SANA is plain t2i).
+    // sc-18475: both native backends accept the advertised non-edit singular-reference img2img shape.
     let caps: Vec<&str> = entry
         .get("capabilities")
         .and_then(Value::as_array)
         .map(|a| a.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
-    assert_eq!(caps, vec!["text_to_image"], "sana capabilities");
+    assert_eq!(
+        caps,
+        vec!["text_to_image", "image_to_image"],
+        "sana capabilities"
+    );
     // UN-gated SceneWorks/* MLX re-host (the mirror carries the NVIDIA non-commercial NOTICE; OK to
     // ship un-gated with notice, the Krea/Boogu precedent) — so NO `gated: true`.
     assert_ne!(
@@ -2001,18 +2024,12 @@ fn sana_manifest_entry_gates_correctly() {
         mlx.get("minMemoryGb").and_then(Value::as_u64).is_some(),
         "sana mlx.minMemoryGb present"
     );
-    // sana LoRA family declared (reserved; no SANA LoRA wired yet) — an empty list would match every
-    // LoRA (sc-1927).
-    let lora_families: Vec<&str> = entry
-        .get("loraCompatibility")
-        .and_then(|c| c.get("families"))
-        .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
-    assert_eq!(
-        lora_families,
-        vec!["sana"],
-        "sana loraCompatibility.families"
+    // SANA adapters are not wired. Do not advertise a reserved LoRA family: the request router
+    // rejects LoRA carriers fail-closed, so surfacing an adapter picker here would promise an
+    // operation the worker intentionally refuses.
+    assert!(
+        entry.get("loraCompatibility").is_none(),
+        "sana must not advertise loraCompatibility"
     );
     // NVIDIA non-commercial notice surfaced in the UI description (the gated-with-notice carrier).
     let desc = entry
@@ -2026,10 +2043,10 @@ fn sana_manifest_entry_gates_correctly() {
     );
 }
 
-/// sc-8490: the SANA-Sprint builtin entry gates exactly like base SANA — `sana` family, text_to_image
-/// only (CFG-free few-step distillation, no edit/reference surface), un-gated `SceneWorks/*` MLX
-/// re-host carrying the NVIDIA non-commercial notice, the q4/q8/bf16 quant matrix (default q4), and the
-/// SANA LoRA family reserved. The few-step default (2 steps) is asserted so a manifest drift to the base 20-step
+/// sc-8490/sc-18475: the SANA-Sprint builtin entry gates exactly like base SANA — `sana` family,
+/// text-to-image plus non-edit image-to-image, un-gated `SceneWorks/*` MLX
+/// re-host carrying the NVIDIA non-commercial notice, the q4/q8/bf16 quant matrix (default q4), and no
+/// unsupported LoRA advertisement. The few-step default (2 steps) is asserted so a manifest drift to the base 20-step
 /// loop fails CI. Descriptor-derived guidance/negative/backend flags are covered by
 /// `model_table_rows_resolve_and_flags_match_descriptor`.
 #[test]
@@ -2041,13 +2058,17 @@ fn sana_sprint_manifest_entry_gates_correctly() {
         Some("sana"),
         "sana-sprint family"
     );
-    // Capability gate: text_to_image ONLY — edit/reference are rejected (Sprint is plain few-step t2i).
+    // sc-18475: Sprint exposes the same non-edit singular-reference img2img shape as base SANA.
     let caps: Vec<&str> = entry
         .get("capabilities")
         .and_then(Value::as_array)
         .map(|a| a.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
-    assert_eq!(caps, vec!["text_to_image"], "sana-sprint capabilities");
+    assert_eq!(
+        caps,
+        vec!["text_to_image", "image_to_image"],
+        "sana-sprint capabilities"
+    );
     // UN-gated SceneWorks/* MLX re-host (the mirror carries the NVIDIA non-commercial NOTICE) — no `gated`.
     assert_ne!(
         entry.get("gated").and_then(Value::as_bool),
@@ -2099,17 +2120,10 @@ fn sana_sprint_manifest_entry_gates_correctly() {
         mlx.get("minMemoryGb").and_then(Value::as_u64).is_some(),
         "sana-sprint mlx.minMemoryGb present"
     );
-    // sana LoRA family declared (reserved; no SANA LoRA wired yet).
-    let lora_families: Vec<&str> = entry
-        .get("loraCompatibility")
-        .and_then(|c| c.get("families"))
-        .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(Value::as_str).collect())
-        .unwrap_or_default();
-    assert_eq!(
-        lora_families,
-        vec!["sana"],
-        "sana-sprint loraCompatibility.families"
+    // Sprint shares the same fail-closed adapter contract as base SANA.
+    assert!(
+        entry.get("loraCompatibility").is_none(),
+        "sana-sprint must not advertise loraCompatibility"
     );
     // NVIDIA non-commercial notice surfaced in the UI description (the gated-with-notice carrier).
     let desc = entry
@@ -2125,8 +2139,9 @@ fn sana_sprint_manifest_entry_gates_correctly() {
 
 /// sc-9946 (epic 8506): the Kolors builtin entry ships the standard q4/q8/bf16 quant matrix from the
 /// un-gated `SceneWorks/kolors-mlx` re-host (was upstream `Kwai-Kolors/Kolors-diffusers` dense +
-/// install-time quant). Unlike SANA, Kolors keeps its full capability surface. Asserts the flip to the
-/// SceneWorks repo, the per-tier variants (q4 default + q8 + bf16) each an installable artifact with a
+/// install-time quant). Unlike SANA, Kolors keeps its live edit and character surfaces; the retired
+/// `style_variations` UI mode is intentionally absent. Asserts the flip to the SceneWorks repo, the
+/// per-tier variants (q4 default + q8 + bf16) each an installable artifact with a
 /// `footprint`, `mlx.quantize: 4` (packed q4 default) + `minMemoryGb`, and the reserved kolors LoRA
 /// family — so a manifest drift fails CI without a real download. Descriptor guidance/steps are covered
 /// by `model_table_rows_resolve_and_flags_match_descriptor`.
@@ -2139,7 +2154,8 @@ fn kolors_manifest_entry_gates_correctly() {
         Some("kolors"),
         "kolors family"
     );
-    // Kolors keeps its full surface (unlike base SANA's t2i-only): edit/character/style variations.
+    // Kolors keeps its live edit/character surface; SANA's narrower reference surface is non-edit
+    // singular-reference img2img. The retired style mode must not reappear in the catalog.
     let caps: Vec<&str> = entry
         .get("capabilities")
         .and_then(Value::as_array)
@@ -2147,13 +2163,8 @@ fn kolors_manifest_entry_gates_correctly() {
         .unwrap_or_default();
     assert_eq!(
         caps,
-        vec![
-            "text_to_image",
-            "edit_image",
-            "character_image",
-            "style_variations"
-        ],
-        "kolors keeps its full capability surface"
+        vec!["text_to_image", "edit_image", "character_image"],
+        "kolors keeps its full live capability surface without the retired style mode"
     );
     // Un-gated SceneWorks/* MLX re-host (the tier LICENSE travels with the weights) — NO `gated: true`.
     assert_ne!(
@@ -2762,6 +2773,20 @@ fn an_unusable_gpu_withholds_every_candle_capability() {
         healthy.capabilities.contains(&WorkerCapability::ImageGenerate),
         "the healthy baseline must include image_generate, else this test proves nothing"
     );
+    for capability in [
+        WorkerCapability::VideoExtend,
+        WorkerCapability::VideoBridge,
+        WorkerCapability::PersonReplace,
+        WorkerCapability::ImageDetail,
+        WorkerCapability::ImageSegment,
+        WorkerCapability::DatasetAnalysis,
+    ] {
+        assert!(
+            healthy.capabilities.contains(&capability),
+            "a healthy candle worker must advertise every native dispatch capability; \
+             missing {capability:?}"
+        );
+    }
 
     // The withheld worker keeps the descriptor's own base set PLUS the `candle` lane marker, and
     // nothing else. The marker is not a job capability — it says "this host serves the candle

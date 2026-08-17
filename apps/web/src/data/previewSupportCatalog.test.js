@@ -4,7 +4,9 @@ import {
   assertBackendCoverage,
   catalogToWebPreviewSupport,
   derivePreviewSupport,
+  parseBespokePreviewRoutes,
   parseEngineModelTable,
+  parsePulidPreviewRoutes,
   parseSceneworksAudioBackends,
   parseSceneworksBackends,
   PREVIEW_SUPPORT_GENERATOR,
@@ -14,6 +16,9 @@ import previewSupport from "./previewSupport.json";
 // live outside the web root — see the server.fs.allow entries in vite.config.js (mirrors the
 // style.txt / builtin.styles.jsonc pair).
 import enginesSource from "../../../../crates/sceneworks-worker/src/engines.rs?raw";
+import qwenEditCandleSource from "../../../../crates/sceneworks-worker/src/image_jobs/qwen_edit_candle.rs?raw";
+import pulidMlxSource from "../../../../crates/sceneworks-worker/src/image_jobs/pulid.rs?raw";
+import pulidCandleSource from "../../../../crates/sceneworks-worker/src/image_jobs/pulid_candle.rs?raw";
 import previewSupportManifestRaw from "../../../../config/manifests/builtin.preview-support.jsonc?raw";
 // The inference pin itself. `verifyEngineCapabilityFacts` in scripts/bump-inference.mjs compares the
 // facts files against it, but that script runs only when someone bumps THROUGH it — CI never invokes
@@ -54,7 +59,16 @@ const audioFactsEntries = Object.entries(audioFactsModules)
 const audioFactsFiles = audioFactsEntries.map((entry) => entry.facts);
 
 const rows = parseEngineModelTable(enginesSource);
-const derived = derivePreviewSupport(rows, factsFiles, audioFactsFiles);
+const qwenPreviewRoutes = parseBespokePreviewRoutes(qwenEditCandleSource);
+const pulidPreviewRoutes = parsePulidPreviewRoutes(pulidMlxSource, pulidCandleSource);
+const bespokePreviewRoutes = [
+  ...qwenPreviewRoutes,
+  ...pulidPreviewRoutes,
+];
+const derived = derivePreviewSupport(rows, factsFiles, audioFactsFiles, bespokePreviewRoutes);
+const bespokePreviewKeys = new Set(
+  bespokePreviewRoutes.map((route) => `${route.modelId}\u0000${route.backend}`),
+);
 
 /** Every audio engine id, which for audio IS the SceneWorks model id it answers for. */
 const audioEngineIds = new Set(
@@ -134,6 +148,73 @@ describe("preview-support catalog: the artifacts are derived, not authored", () 
   });
 });
 
+describe("preview-support catalog: bespoke Candle Qwen-Edit preview", () => {
+  it("derives the two live catalog routes from the worker's exact sink-bearing declaration", () => {
+    expect(qwenPreviewRoutes).toEqual([
+      { modelId: "qwen_image_edit_2511", backend: "candle", supportsPreview: true },
+      {
+        modelId: "qwen_image_edit_2511_lightning",
+        backend: "candle",
+        supportsPreview: true,
+      },
+    ]);
+    for (const route of qwenPreviewRoutes) {
+      expect(previewSupport.models[route.modelId]?.[route.backend]).toBe(true);
+    }
+  });
+
+  it("drops the claim loudly if the request stops carrying drive_gen_items' preview sink", () => {
+    const withoutSink = qwenEditCandleSource.replace(
+      /\n\s*preview,\n\s*\};/,
+      "\n                        ..Default::default()\n                    };",
+    );
+    expect(withoutSink).not.toBe(qwenEditCandleSource);
+    expect(() => parseBespokePreviewRoutes(withoutSink)).toThrow(/live preview sink/);
+  });
+
+  it("refuses a declared route that has no MODEL_TABLE authority", () => {
+    expect(() =>
+      derivePreviewSupport(rows, factsFiles, audioFactsFiles, [
+        { modelId: "not_a_shipped_model", backend: "candle", supportsPreview: true },
+      ]),
+    ).toThrow(/unknown MODEL_TABLE id/);
+  });
+});
+
+describe("preview-support catalog: direct-dispatch PuLID preview", () => {
+  it("derives both native preview sinks from their exact worker requests", () => {
+    expect(pulidPreviewRoutes).toEqual([
+      {
+        modelId: "pulid_flux_dev",
+        backend: "mlx",
+        supportsPreview: true,
+        directDispatch: true,
+      },
+      {
+        modelId: "pulid_flux_dev",
+        backend: "candle",
+        supportsPreview: true,
+        directDispatch: true,
+      },
+    ]);
+    expect(previewSupport.models.pulid_flux_dev).toEqual({ candle: true, mlx: true });
+  });
+
+  it("fails closed if either direct request drops its live sink", () => {
+    const withoutMlxSink = pulidMlxSource.replace(/\n\s*preview,\n/, "\n");
+    expect(() => parsePulidPreviewRoutes(withoutMlxSink, pulidCandleSource)).toThrow(
+      /MLX GenerationRequest has no live preview sink/,
+    );
+    const withoutCandleSink = pulidCandleSource.replace(
+      /\n\s*preview:\s*preview\.clone\(\),\n/,
+      "\n",
+    );
+    expect(() => parsePulidPreviewRoutes(pulidMlxSource, withoutCandleSink)).toThrow(
+      /Candle PulidFluxRequest has no live preview sink/,
+    );
+  });
+});
+
 // The stage-1 facts file is a checked-in SOURCE, so it gets the same scrutiny style.txt gets: an
 // empty or truncated one derives as "no route supports live preview", which is a confident wrong
 // answer rather than a missing one. The Rust dumper refuses to write one; this refuses to read one.
@@ -156,21 +237,26 @@ describe("preview-support catalog: the stage-1 facts files are non-vacuous", () 
     },
   );
 
-  // The assertion `bump-inference.mjs` makes at bump time, made again where CI can actually see it.
-  // Without this, a pin edited outside the sanctioned script leaves every facts file — and therefore
-  // the entire served catalog — describing the PREVIOUS revision's descriptors, silently.
-  it.each(factsEntries.map((entry) => [entry.name, entry.facts]))(
-    "%s was dumped at the revision the worker currently pins",
-    (name, facts) => {
-      expect(facts.generatedFrom.inferenceRevision, `${name} vs crates/sceneworks-worker/Cargo.toml`)
-        .toBe(inferencePin);
-    },
-  );
-
-  it("the manifest stamps each backend's dump revision, and it is the current pin", () => {
+  // A capability dump is NOT invalidated by a pin bump.
+  //
+  // These two suites used to require every facts file, and every backend in the manifest, to carry
+  // the revision the worker currently pins. That made an ordinary pin bump invalidate the declared
+  // capabilities of both backends at once — and since a dump can only be produced on a lane that
+  // LINKS that backend, refreshing them meant a round trip to a second machine before CI could go
+  // green. Pins change constantly; declared capabilities almost never do. A dump goes stale when a
+  // provider gains or loses a capability, which is a property of the dump's CONTENT, not of the
+  // revision label attached to it.
+  //
+  // So the revision is recorded and no longer enforced. What still holds is the shape: each dump
+  // names a backend matching its filename, is not truncated, and carries a well-formed 40-hex
+  // revision (asserted above), and the manifest still stamps one per backend so the served catalog
+  // says which checkout produced it. Fourth instance of the same defect class — see sc-19728
+  // (decode-quality fingerprints), sc-19751 (license/provenance audits), sc-19758 (closure digests).
+  it("the manifest stamps a well-formed dump revision for each backend", () => {
     const manifest = JSON.parse(previewSupportManifestRaw);
+    expect(manifest.backends.length).toBeGreaterThan(0);
     for (const backend of manifest.backends) {
-      expect(manifest.generatedFrom[backend].inferenceRevision, backend).toBe(inferencePin);
+      expect(manifest.generatedFrom[backend].inferenceRevision, backend).toMatch(/^[0-9a-f]{40}$/);
     }
   });
 
@@ -452,14 +538,26 @@ describe("preview-support catalog: the audio registry is dumped too", () => {
     }
   });
 
-  it("refuses a media and audio dump of one backend at different revisions", () => {
-    // `candle` is dumped twice — once per registry — and the two must describe one checkout, or
-    // `generatedFrom` claims a state that never existed.
-    expect(() =>
-      derivePreviewSupport(rows, factsFiles, [
-        syntheticAudioFacts({ inferenceRevision: "0".repeat(40) }),
-      ]),
-    ).toThrow(/two different inference revisions/);
+  it("records both revisions when a backend's media and audio dumps disagree", () => {
+    // This used to THROW. `candle` is dumped once per registry, and the two were required to
+    // describe one checkout on the reasoning that anything else claims a state that never existed.
+    //
+    // But the two halves come off different machines: the media candle dump needs a lane that links
+    // the candle media engines (off-Mac), while the audio registry is candle-native everywhere and
+    // is rewritten by the macOS dump. Requiring agreement meant a Mac-side pin bump produced a tree
+    // this function rejected outright, and the derived catalog could not regenerate until a second
+    // machine had run. That is the ordinary mid-bump state of a two-lane repo, not a fiction.
+    //
+    // Inverted rather than deleted, so it is the observable proof of the removal: restoring the
+    // refusal turns this red.
+    const audioRevision = "0".repeat(40);
+    const derivedSplit = derivePreviewSupport(rows, factsFiles, [
+      syntheticAudioFacts({ inferenceRevision: audioRevision }),
+    ]);
+    expect(derivedSplit.generatedFrom.candle.audioInferenceRevision).toBe(audioRevision);
+    // The media half keeps the plain key, so consumers reading `.inferenceRevision` are unaffected.
+    expect(derivedSplit.generatedFrom.candle.inferenceRevision).toMatch(/^[0-9a-f]{40}$/);
+    expect(derivedSplit.generatedFrom.candle.inferenceRevision).not.toBe(audioRevision);
   });
 
   it("still derives when no audio dump is supplied, so the argument stays optional", () => {
@@ -502,8 +600,10 @@ describe("preview-support catalog: the MODEL_TABLE join", () => {
       for (const [modelId, byBackend] of Object.entries(previewSupport.models)) {
         if (!(facts.backend in byBackend)) continue;
         // Two namespaces answer under one backend key: MODEL_TABLE ids through the media facts, and
-        // audio engine ids through the identity join. An entry backed by NEITHER would be invented.
+        // audio engine ids through the identity join. Bespoke direct-dispatch routes are backed by
+        // the parsed worker sink above. An entry backed by NONE of those would be invented.
         if (audioIds.has(modelId)) continue;
+        if (bespokePreviewKeys.has(`${modelId}\u0000${facts.backend}`)) continue;
         const engineId = rows.find((row) => row.sceneworksId === modelId)?.engineId;
         expect(factsIds.has(engineId), `${modelId} → ${engineId} @ ${facts.backend}`).toBe(true);
       }
@@ -572,7 +672,7 @@ describe("preview-support catalog: the MODEL_TABLE join", () => {
 // nobody regenerated — which is the whole point of landing sc-16965 before those stories.
 describe("preview-support catalog: the shipped answers match the dumped facts", () => {
   it.each(factsEntries.map((entry) => [entry.facts.backend, entry.facts]))(
-    "advertises live preview on %s for exactly the routes whose descriptors say so",
+    "advertises live preview on %s for exactly the descriptor or bespoke-worker routes that say so",
     (backend, facts) => {
       const advertisingEngines = new Set(
         facts.engines.filter((engine) => engine.supportsPreview).map((engine) => engine.id),
@@ -589,6 +689,11 @@ describe("preview-support catalog: the shipped answers match the dumped facts", 
             .flatMap((audio) =>
               audio.engines.filter((engine) => engine.supportsPreview).map((engine) => engine.id),
             ),
+        )
+        .concat(
+          bespokePreviewRoutes
+            .filter((route) => route.backend === backend && route.supportsPreview)
+            .map((route) => route.modelId),
         )
         .sort();
       const actual = Object.entries(previewSupport.models)

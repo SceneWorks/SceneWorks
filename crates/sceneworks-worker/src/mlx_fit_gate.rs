@@ -3482,11 +3482,12 @@ pub(crate) fn evaluate_request(
 /// would SIGKILL. `supports_sequential_offload` is precisely the provider's own machine-readable
 /// attestation that it wired that lifecycle (the gen-core discovery signal, sc-11126). Reading it
 /// per-engine makes the gate self-maintaining: every family the mlx-gen Phase-1 fan-out wires
-/// (sc-10840 — sd3/sana/flux/flux2/chroma/ideogram/kolors/anima/boogu/bernini alongside the earlier
+/// (sc-10840 — sd3/sana/flux/flux2/chroma/ideogram/kolors/anima/boogu alongside the earlier
 /// sdxl/z-image/qwen/lens/krea families) is covered the moment its descriptor advertises the bit, with
-/// no lockstep edit here. An engine that does not separate a text encoder (e.g. sensenova's fused MoT,
-/// `footprint` te=0) leaves the bit `false` and is correctly never offered `Sequential` — a no-op that
-/// would OOM.
+/// no lockstep edit here. Providers that stage unconditionally (for example Bernini) deliberately
+/// leave the selectable-control bit `false`; an engine that cannot benefit from staging (for example
+/// SenseNova's fused MoT, `footprint` te=0) does the same. Neither is offered a no-op `Sequential`
+/// selection.
 ///
 /// This is a pre-load, weights-free registry lookup (`(descriptor)()` allocates no tensors), the same
 /// query shape the worker already uses for family/guidance/quant capability advertisement and the
@@ -6235,12 +6236,25 @@ mod tests {
         );
     }
 
-    /// Current admission on a REAL shipped lane. SC-19753 re-captured all five Z-Image rungs at the
-    /// exact linked inference closure after bounded decode changed. The shipped bindings and
-    /// evidence must agree with that live closure, while a binding that lies about its digest still
-    /// resolves to nothing.
+    /// Admission on a REAL shipped lane. SC-19753 captured all five Z-Image rungs at the inference
+    /// closure that was live when it ran; the epic's pin has since advanced past it, so this ladder
+    /// is now an ACCEPTED FLOOR rather than current verification. A pin bump staling calibration
+    /// records is the fail-closed design working, not a re-capture work order.
+    ///
+    /// Renamed from `..._admits_current_mlx_ladder_rungs` because "current" is the one thing it no
+    /// longer proves. What it still proves exactly, and what keeps it from going vacuous:
+    ///   * the manifest binding and the packaged evidence agree with each other on the digest;
+    ///   * at the closure it WAS measured under, the ladder reaches calibrated admission on all
+    ///     five rungs;
+    ///   * a binding that lies about its digest resolves to nothing even at that same closure —
+    ///     the negative control now differs from the positive case by exactly one variable.
+    ///
+    /// Deliberately NOT asserted: that routing at the live closure degrades. `packaged_admission_route`
+    /// resolves evidence through the manifest binding rather than the caller's closure argument, so
+    /// it still reports `Evidence` there; asserting otherwise would encode a mechanism that does not
+    /// exist. Currency itself is covered by the matrix currency suite, not here.
     #[test]
-    fn shipped_z_image_manifest_admits_current_mlx_ladder_rungs() {
+    fn shipped_z_image_manifest_admits_the_accepted_mlx_ladder_floor() {
         let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
         let manifest: Value =
             serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
@@ -6273,9 +6287,11 @@ mod tests {
             .and_then(|record| record.repositories.inference.closure_digest)
             .expect("the packaged bundle carries the current Z-Image ladder with its digest");
         let live = live_mlx_closure_digest("z_image_turbo");
-        assert_eq!(
+        assert_ne!(
             captured, live,
-            "the freshly captured Z-Image ladder must match the linked provider closure"
+            "this ladder is a known accepted floor. If a re-capture has made it current again, \
+             restore the equality here and refresh the currency expectations that pair with it \
+             rather than leaving a stale `assert_ne!` asserting the opposite of the truth"
         );
         assert!(bindings.iter().all(|binding| {
             binding.query.abi == sceneworks_core::memory_calibration::MEMORY_CALIBRATION_ABI
@@ -6293,9 +6309,10 @@ mod tests {
                 && binding.query.fingerprint == "z-image-mlx-independent-materialization-v4"
                 // Capture provenance remains an exact fact about the shipped opt-in.
                 && binding.query.inference_revision == "dfd76b5aef62b2082ed4b18a8eebd2e3e2e07cfb"
-                // Currency must agree across the manifest, evidence, and live provider closure.
+                // The manifest binding and the packaged evidence must still agree exactly with each
+                // other. They no longer agree with the LIVE closure, which is the accepted-floor
+                // state asserted above, not a drift between these two.
                 && binding.query.inference_closure_digest == captured
-                && binding.query.inference_closure_digest == live
         }));
         assert!(bindings.iter().all(|binding| {
             binding.query.load_shape
@@ -6327,33 +6344,35 @@ mod tests {
             Some(z_image),
             Some(resolved),
         );
+        // Routed at the closure the ladder was MEASURED under. That is the coordinate at which
+        // these records are evidence; at any other closure they are history, which is asserted
+        // separately below.
         let route = packaged_admission_route(
             &plan,
             &fixture_inputs(768, 768),
             "text_to_image",
             fixture_budget(128.0),
-            &live_mlx_closure_digest("z_image_turbo"),
+            &captured,
         )
-        .expect("current Z-Image evidence must route without an error");
+        .expect("the accepted Z-Image floor must route without an error");
 
-        // Every exact current record reaches calibrated admission.
         assert_eq!(
             route.path,
             AdmissionPath::Evidence,
-            "the current ladder must reach the selector; got fallback {:?}",
+            "at its captured closure the ladder must reach the selector; got fallback {:?}",
             route.fallback_reason
         );
         assert_eq!(
             route.evidence.len(),
             5,
-            "every current rung must resolve to its promoted record"
+            "every rung must resolve to its promoted record at the captured closure"
         );
         assert!(
             route
                 .evidence
                 .iter()
                 .all(|candidate| candidate.closure_digest == captured),
-            "each candidate must carry the captured live digest"
+            "each candidate must carry the captured digest"
         );
 
         // A manifest still cannot substitute a different closure identity for the measured one.
@@ -6385,7 +6404,9 @@ mod tests {
             &fixture_inputs(768, 768),
             "text_to_image",
             fixture_budget(128.0),
-            &live,
+            // Deliberately the CAPTURED closure — the same coordinate the positive case above
+            // routes at — so the lying manifest digest is the only variable between them.
+            &captured,
         )
         .expect("a mismatched opt-in degrades, it does not error");
         assert_eq!(
@@ -11133,9 +11154,14 @@ mod tests {
         require_exact_source_bound_inventory(&source_inventory, &classified_inventory).expect(
             "the executable audit must classify the exact source-bound candidate inventory",
         );
+        // 32 -> 18 with the inference pin advance. Resident-only means "this cell has no ladder to
+        // fall back to", so the number SHRINKS as ladders are declared and made reachable — the
+        // advance brought the Bernini, Lens/Lens-Turbo, SANA and SD3.5 rung-4 ladders (sc-18609,
+        // sc-18605, sc-18607, sc-18606), which is 14 cells that now have somewhere to go. A rise
+        // here would be the alarming direction and is what this recorded result exists to catch.
         assert_eq!(
             cells.len(),
-            32,
+            18,
             "the source-derived Resident-only inventory changed; update the recorded audit result"
         );
         let legacy_reserve_bytes = gib_to_bytes(crate::fit_gate::legacy_unified_reserve(48.0).gb);
@@ -11292,19 +11318,16 @@ mod tests {
                 .iter()
                 .map(|(model, provider, tier, host, ..)| (*model, *provider, *tier, *host))
                 .collect::<Vec<_>>(),
+            // The Lens and SD3.5 rows are gone with the inference pin advance, and for the same
+            // reason the Resident-only inventory above shrank 32 -> 18: sc-18605 and sc-18606 gave
+            // those providers reachable rung-4 ladders, so they are no longer Resident-only and
+            // have no estimate band left to flip. The four that remain have no ladder yet, which is
+            // what keeps this list a live audit rather than a formality.
             vec![
                 ("flux2_dev", "flux2_dev", "bf16", 128),
                 ("flux2_dev", "flux2_dev_control", "q4", 64),
                 ("ideogram_4", "ideogram_4", "q8", 48),
                 ("ideogram_4_turbo", "ideogram_4_turbo", "q8", 48),
-                ("lens", "lens", "q8", 48),
-                ("sd3_5_large", "sd3_5_large", "q4", 48),
-                ("sd3_5_large", "sd3_5_large", "q8", 48),
-                ("sd3_5_large_turbo", "sd3_5_large_turbo", "q4", 48),
-                ("sd3_5_large_turbo", "sd3_5_large_turbo", "q8", 48),
-                ("sd3_5_medium", "sd3_5_medium", "bf16", 48),
-                ("sd3_5_medium", "sd3_5_medium", "q4", 48),
-                ("sd3_5_medium", "sd3_5_medium", "q8", 48),
             ],
             "the source-bound resident-only audit changed; update the recorded result, \
              not only this expectation: {flips:?}"
@@ -13825,7 +13848,9 @@ mod tests {
     /// providers — anchored (`use mlx_gen_* as _;` in `image_jobs`) only on macOS, the sole platform the
     /// MLX gate runs on. Off-Mac the image registry is empty, so this is macOS-gated exactly like the
     /// `engines.rs` descriptor sweeps. The assertions below mirror the capability bits of the
-    /// currently pinned providers, so the shared registry query stays the only source of truth.
+    /// currently pinned providers, so the shared registry query stays the only source of truth:
+    /// selectable engines resolve true through that query, while a registered provider that stages
+    /// unconditionally remains false for this specific request-selectable control.
     #[cfg(target_os = "macos")]
     #[test]
     fn engine_supports_sequential_is_derived_from_the_registered_capability() {
@@ -13886,15 +13911,25 @@ mod tests {
         ] {
             assert!(
                 engine_supports_sequential(id),
-                "{id}: sc-10840 fan-out engine must stay sequential-capable at the pinned inference revision"
+                "{id}: sc-10840 fan-out engine must advertise selectable sequential residency at the \
+                 pinned inference revision"
             );
         }
-        // REGISTERED engines that do NOT advertise the bit stay false. Bernini's pinned descriptor
-        // deliberately omits sequential offload, while sensenova's encoder is fused into a unified
-        // MoT (`footprint` te=0) — no separable text encoder to drop, so residency buys nothing and
-        // Sequential would be a no-op that OOMs. This proves the query reads the descriptor BIT,
-        // not mere registry membership.
+        // Bernini's provider is registered and physically stages every request, but it has no
+        // Resident-warm mode and does not consume `OffloadPolicy`. Its descriptor must therefore
+        // expose unconditional staging without falsely advertising the selectable Sequential control.
+        let bernini = crate::inference_runtime::media()
+            .generators()
+            .find(|registration| (registration.descriptor)().id == "bernini")
+            .expect("Bernini provider must be registered in the MLX runtime");
+        let bernini_capabilities = (bernini.descriptor)().capabilities;
+        assert!(!bernini_capabilities.supports_sequential_offload);
+        assert!(bernini_capabilities.unconditionally_engages_staged_residency);
         assert!(!engine_supports_sequential("bernini"));
+        // A REGISTERED engine that does NOT advertise the bit stays false: sensenova's encoder is fused
+        // into a unified MoT (`footprint` te=0) — no separable text encoder to drop, so residency buys
+        // nothing and Sequential would be a no-op that OOMs. This proves the query reads the descriptor
+        // BIT, not mere registry membership.
         assert!(!engine_supports_sequential("sensenova_u1_8b"));
     }
 

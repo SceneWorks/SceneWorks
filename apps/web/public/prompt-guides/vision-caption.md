@@ -6,7 +6,7 @@ The default model is an abliterated **Qwen3-VL-8B-Instruct**.
 
 ## Installation
 
-The Vision Captioner runs in-process on the native MLX worker (Apple Silicon only for now). It is **not** auto-downloaded — install it once from the **Models** screen. It is about 18 GB and downloads into the shared Hugging Face cache, so other tools reuse the snapshot. A 64 GB-class Mac is recommended.
+The Vision Captioner runs in-process through native MLX on Apple Silicon and native Candle/CUDA on Windows and Linux. It is **not** auto-downloaded — install it once from the **Models** screen. It is about 18 GB and downloads into the shared Hugging Face cache, so other tools reuse the snapshot. A large-memory accelerator is recommended.
 
 ## How It Works
 

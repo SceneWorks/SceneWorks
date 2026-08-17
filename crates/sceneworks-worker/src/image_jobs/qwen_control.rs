@@ -1,6 +1,6 @@
 use super::advanced;
 use super::{
-    attach_manifest_text_encoder, pose_entries, resolve_advanced_or_manifest_f32,
+    attach_manifest_text_encoder, pose_entries, resolve_adapters, resolve_advanced_or_manifest_f32,
     resolve_advanced_or_manifest_u32, run_candle_strict_control, trusted_control_weight_revision,
     ApiClient, CancelFlag, CandleStrictControl, Image, ImagePlan, ImageRequest, JobSnapshot,
     JsonObject, Path, PathBuf, Progress, QwenFunControl, QwenFunControlPaths,
@@ -338,6 +338,7 @@ pub(super) struct QwenStrictControl {
     steps: u32,
     guidance: f32,
     control_scale: f32,
+    adapters: Vec<gen_core::AdapterSpec>,
 }
 
 #[cfg(test)]
@@ -354,6 +355,7 @@ pub(super) fn qwen_strict_control_test_fixture(path: PathBuf) -> QwenStrictContr
         steps: 30,
         guidance: 4.0,
         control_scale: 1.0,
+        adapters: Vec::new(),
     }
 }
 
@@ -415,19 +417,24 @@ impl CandleStrictControl for QwenStrictControl {
     /// The Qwen-Image-2512 base tier dir + the packed 2512-Fun-Controlnet-Union overlay file, exactly
     /// the two paths [`Self::load`] hands `QwenFunControlPaths` (sc-16069).
     fn conditioning_admission(&self) -> ConditioningAdmission {
+        // The control overlay plus the user LoRA stack — both are co-resident with whichever base
+        // shape is picked below, so they are priced into either floor.
+        let mut overlays = vec![self.controlnet.as_path()];
+        overlays.extend(self.adapters.iter().map(|adapter| adapter.path.as_path()));
         if let Some(text_encoder) = self.load_spec.text_encoder.as_ref() {
             let transformer = self.qwen_base.join("transformer");
             let vae = self.qwen_base.join("vae");
             if transformer.is_dir() && vae.is_dir() {
+                let mut staged = vec![
+                    crate::conditioning_fit::weights_source_path(text_encoder),
+                    vae.as_path(),
+                ];
+                staged.extend(overlays.iter().copied());
                 return ConditioningAdmission::Floor(ConditioningFootprint::from_paths(
                     "Qwen-Image",
                     "strict-pose ControlNet branch",
                     &transformer,
-                    &[
-                        crate::conditioning_fit::weights_source_path(text_encoder),
-                        vae.as_path(),
-                        self.controlnet.as_path(),
-                    ],
+                    &staged,
                 ));
             }
         }
@@ -435,7 +442,7 @@ impl CandleStrictControl for QwenStrictControl {
             "Qwen-Image",
             "strict-pose ControlNet branch",
             &self.qwen_base,
-            &[&self.controlnet],
+            &overlays,
         ))
     }
 
@@ -444,7 +451,7 @@ impl CandleStrictControl for QwenStrictControl {
             qwen_base: self.qwen_base.clone(),
             text_encoder: None,
             controlnet: self.controlnet.clone(),
-            adapters: Vec::new(),
+            adapters: self.adapters.clone(),
         };
         QwenFunControl::load_with_spec(&paths, &self.load_spec).map_err(|error| {
             WorkerError::Engine(format!("Qwen 2512-Fun strict-control load failed: {error}"))
@@ -512,13 +519,16 @@ pub(super) async fn generate_candle_qwen_control_stream(
     let pose_count = pose_entries(request).len();
     let raw_settings =
         qwen_control_raw_settings(request, &repo, steps, guidance, control_scale, pose_count);
-    let selected_spec = attach_manifest_text_encoder(
-        gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(qwen_base.clone()))
-            .with_control(gen_core::WeightsSource::File(controlnet.clone())),
-        QWEN_CONTROL_ENGINE_ID,
-        request,
-        settings,
-    )?;
+    // The adapter stack rides the LoadSpec, not `QwenFunControlPaths`: `load_with_spec` rebuilds the
+    // paths from the admitted spec, so a stack left only on the paths struct is silently dropped.
+    let adapters = resolve_adapters(request, settings)?;
+    let mut base_spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(qwen_base.clone()))
+        .with_control(gen_core::WeightsSource::File(controlnet.clone()));
+    if !adapters.is_empty() {
+        base_spec = base_spec.with_adapters(adapters.clone());
+    }
+    let selected_spec =
+        attach_manifest_text_encoder(base_spec, QWEN_CONTROL_ENGINE_ID, request, settings)?;
 
     let provider = QwenStrictControl {
         qwen_base,
@@ -531,6 +541,7 @@ pub(super) async fn generate_candle_qwen_control_stream(
         steps,
         guidance,
         control_scale,
+        adapters,
     };
 
     run_candle_strict_control(

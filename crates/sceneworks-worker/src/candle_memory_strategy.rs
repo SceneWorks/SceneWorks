@@ -872,6 +872,23 @@ fn evaluate_shared_image_inner(
     } else {
         Vec::new()
     };
+    // A closure digest answers whether the compiled provider code changed; the provider-owned
+    // calibration identity answers whether the measured memory semantics changed. Both have to
+    // match. FLUX.2-dev's caption-upsample lifecycle intentionally rotated v2 -> v3 while retaining
+    // the old historical records, so accepting closure-stale evidence merely because the selector
+    // can widen it would feed an obsolete prompt-conditioning peak into the live v3 contract.
+    let mut current_verified = Vec::with_capacity(verified.len());
+    let mut current_closure_digests = Vec::with_capacity(closure_digests.len());
+    if let Some(current_calibration) = calibration {
+        for (candidate, closure_digest) in verified.into_iter().zip(closure_digests) {
+            if candidate.calibration_fingerprint == current_calibration.fingerprint {
+                current_verified.push(candidate);
+                current_closure_digests.push(closure_digest);
+            }
+        }
+    }
+    verified = current_verified;
+    closure_digests = current_closure_digests;
     // Calibration records describe the certified overlay fixture. User-provided adapters can be
     // larger, so every optimized candidate must reserve the bytes for the actual request before
     // the common selector performs its fit check. The resident estimate already includes these
@@ -1434,7 +1451,7 @@ mod tests {
     }
 
     #[test]
-    fn flux2_dev_base_bindings_are_current_selectable_and_overlay_free() {
+    fn flux2_dev_v2_bindings_stay_historical_but_cannot_enter_the_v3_selector() {
         let source = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
             .iter()
             .find(|(name, _)| *name == "builtin.models.jsonc")
@@ -1562,25 +1579,14 @@ mod tests {
         .expect("uncertified FLUX.2-dev control query")
         .is_empty());
 
-        // sc-17774: everything below is closure-aware — the packaged evidence is RETAINED whatever
-        // the pin is (which is why `verified_candidates` still returns all five rungs), and
-        // ADMISSION is the step that carries the currency term.
-        //
-        // `flux2_dev`'s packaged bindings were captured at `5ffd7612`, and its compile closure HAS
-        // moved since (sc-17760 reached the identical verdict by an independent method: a
-        // linked-artifact digest on the RTX box, ARTIFACTS DIFFER). So every packaged candidate
-        // reaching the selector here is STALE-closure evidence. Pre-sc-18095 that staled the whole
-        // ladder into refusal (`evaluation.is_none()` was asserted here). sc-18095 turns currency
-        // into a signal: fully-verified measured cells keep serving, graded at the candle
-        // stale-measured margin (`ladder_margin_policy::CANDLE_STALE_MEASURED_MARGIN`, 2%).
-        //
-        // At 40 GiB free (38 GiB effective after the selector's 2 GiB reserve), the resident live
-        // estimate (44.0 GB) and the staged candidate's widened peak (44.3 GB x 1.02 ≈ 42.1 GiB)
-        // do not fit; bounded decode's widened peak (34.7 GB x 1.02 ≈ 33.0 GiB) does. Admission
-        // must advance to bounded decode via the stale-admission path instead of refusing.
+        // The five exact historical bindings remain queryable for auditability. Admission is a
+        // separate step: their v2 calibration identity no longer describes the live v3
+        // caption-upsample lifecycle, so none of these ladder rungs may reach the selector.
         let mut spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("flux2-dev-q4-fixture")))
             .with_quant(Quant::Q4);
         spec.load_shape = gen_core::LoadShape::DeferredMaterialization;
+        let live_predicted_peak = crate::vram_gate::predicted_peak_gb(manifest, "q4")
+            .expect("measured FLUX.2-dev q4 high-water");
         let evaluate = |free_gb: f64| {
             evaluate_shared_image(
                 "flux2_dev",
@@ -1599,34 +1605,31 @@ mod tests {
                     free_gb,
                     total_gb: 96.0,
                 }),
-                Some(44.0),
+                Some(live_predicted_peak),
                 0,
                 MemoryCacheState::Cold,
             )
             .expect("FLUX.2-dev safe-device-peak evaluation")
         };
-        let evaluation = evaluate(40.0).expect(
-            "flux2_dev's stale-closure packaged evidence must stay eligible at the widened candle \
-             margin (sc-18095), not refuse the ladder",
-        );
-        assert_eq!(
-            evaluation.context.selection.strategy,
-            MemoryStrategy::BoundedDecode
-        );
-        assert_eq!(evaluation.context.predicted_peak_bytes, 34_700_000_000);
+        for budget_gb in [16.0, 24.0] {
+            assert!(
+                evaluate(budget_gb).is_none(),
+                "the obsolete v2 ladder must not reopen live v3 FLUX.2-dev on a {budget_gb} GB budget"
+            );
+        }
 
-        // The stale margin still discriminates on this lane: at 34.5 GiB free (32.5 GiB effective)
-        // bounded decode's RAW peak (34.7 GB ≈ 32.3 GiB) would fit, but its widened peak (≈ 33.0
-        // GiB) does not — the selector must advance to bounded attention. A zeroed stale margin
-        // would select bounded decode here.
-        let widened = evaluate(34.5).expect(
-            "bounded attention's widened peak fits the 32.5 GiB effective budget (sc-18095)",
+        assert!(
+            candidates.iter().all(|candidate| candidate
+                .calibration_fingerprint
+                .ends_with("device-format-blocks-v2")),
+            "the retained packaged rows must remain truthfully labeled as v2 history"
         );
+        let live = evaluate(96.0).expect("live v3 FLUX.2-dev resident route");
+        assert_eq!(live.context.selection.strategy, MemoryStrategy::Resident);
         assert_eq!(
-            widened.context.selection.strategy,
-            MemoryStrategy::BoundedAttention
+            live.context.calibration_fingerprint,
+            "flux2-dev-cuda-caption-upsample-staged-host-full-edge-decode-bounded-attention-device-format-blocks-v3"
         );
-        assert_eq!(widened.context.predicted_peak_bytes, 25_200_000_000);
     }
 
     /// sc-18097 headline (epic 18093 R1b): an UNMEASURED provider cell — no packaged calibration

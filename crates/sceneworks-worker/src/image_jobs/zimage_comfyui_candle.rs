@@ -258,7 +258,8 @@ pub(super) async fn generate_candle_zimage_comfyui_stream(
     let adapter_count = paths.adapters.specs.len();
     let spec =
         prepare_zimage_comfyui_load_spec_for_request(paths, request, settings, descriptor.id)?;
-    // The tokenizer snapshot is structural; all weight files are priced from finalized tokens.
+    // The tokenizer snapshot is structural; all weight files — the adapter pins included — are priced
+    // from the finalized tokens on the spec, so the LoRA stack still counts toward the cold floor.
     let cold_admission =
         prepare_cached_candle_base_floor(&request.model, "ComfyUI Z-Image", settings, &spec, &[])?;
 

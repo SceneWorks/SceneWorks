@@ -978,14 +978,12 @@
     },
     {
       "id": "aura-sr-v2",
-      "models": [
-        "aura_sr_v2"
-      ],
+      "models": [],
       "name": "AuraSR v2",
       "publisher": "fal.ai",
       "license": "Apache-2.0",
       "homepage": "https://huggingface.co/fal/AuraSR-v2",
-      "usage": "GAN image upscaler (utility model). Downloaded on first use from the upstream fal repository; NOT re-hosted by SceneWorks.",
+      "usage": "Retired GAN image upscaler. The license text remains bundled for existing installations, but current SceneWorks releases neither offer nor download AuraSR.",
       "documents": [
         {
           "label": "Apache License 2.0",

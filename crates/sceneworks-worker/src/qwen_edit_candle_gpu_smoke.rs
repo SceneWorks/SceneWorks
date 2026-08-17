@@ -146,6 +146,11 @@ fn qwen_edit_worker_lane_gpu_smoke() {
         height: h,
         pixels: vec![128u8; (w * h * 3) as usize],
     };
+    let alternate_reference = Image {
+        width: w,
+        height: h,
+        pixels: (0..(w * h * 3)).map(|i| (i % 251) as u8).collect(),
+    };
 
     let cancel = CancelFlag::new();
     // sc-16962 preview acceptance: the bespoke edit lane is invoked BY NAME, so the registry cannot
@@ -176,17 +181,39 @@ fn qwen_edit_worker_lane_gpu_smoke() {
     let started = std::time::Instant::now();
     let mut steps_seen = 0u32;
     let out = model_engine
-        .generate(&req, std::slice::from_ref(&reference), &mut |p| {
-            if let Progress::Step { current, .. } = p {
-                steps_seen = steps_seen.max(current);
-            }
-        })
+        .generate(
+            &req,
+            &[reference.clone(), alternate_reference.clone()],
+            &mut |p| {
+                if let Progress::Step { current, .. } = p {
+                    steps_seen = steps_seen.max(current);
+                }
+            },
+        )
         .unwrap_or_else(|e| panic!("{model} generate: {e}"));
+    let plural_frames = {
+        let mut frames = frames.lock().expect("preview frames");
+        let captured = frames.clone();
+        frames.clear();
+        captured
+    };
+    let alternate_out = model_engine
+        .generate(
+            &req,
+            std::slice::from_ref(&alternate_reference),
+            &mut |_| {},
+        )
+        .unwrap_or_else(|e| panic!("{model} alternate-reference generate: {e}"));
+    let alternate_frames = frames.lock().expect("preview frames").clone();
     let elapsed = started.elapsed();
 
     assert_eq!((out.width, out.height), (w, h), "output dims");
     assert_eq!(out.pixels.len(), (w * h * 3) as usize, "RGB8 pixel count");
     assert!(steps_seen >= 1, "expected denoise step progress");
+    assert!(
+        mean_abs_frame_delta(&out, &alternate_out) > 0.25,
+        "ordered plural reference pixels must affect the Qwen edit output"
+    );
 
     // Degenerate-decode floor: a coherent edit clears the general per-pixel std-dev bar by a wide
     // margin; a NaN / all-black / flat collapse pulls it toward 0.
@@ -199,6 +226,10 @@ fn qwen_edit_worker_lane_gpu_smoke() {
 
     let png = out_dir.join(format!("{model}_q4_{w}x{h}_s{seed}.png"));
     save_png(&out, &png);
+    save_png(
+        &alternate_out,
+        &out_dir.join(format!("{model}_single_reference_b.png")),
+    );
     println!(
         "[worker-smoke] {model}: q4 edit OK in {:.1}s (std {std:.2}) -> {}",
         elapsed.as_secs_f32(),
@@ -206,14 +237,21 @@ fn qwen_edit_worker_lane_gpu_smoke() {
     );
 
     // ---- sc-16962: the live preview sink actually produced frames ----
-    let frames = frames.lock().expect("preview frames").clone();
     assert_preview_strip(
-        &frames,
+        &plural_frames,
         steps as u32,
         w,
         h,
         &out_dir,
-        &format!("{model}_q4"),
+        &format!("{model}_q4_plural"),
+    );
+    assert_preview_strip(
+        &alternate_frames,
+        steps as u32,
+        w,
+        h,
+        &out_dir,
+        &format!("{model}_q4_alternate"),
     );
 }
 

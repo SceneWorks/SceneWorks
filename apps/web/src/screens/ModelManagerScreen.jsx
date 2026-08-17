@@ -135,7 +135,6 @@ const CAPABILITY_LABELS = {
   image_to_image: "Image to Image",
   edit_image: "Image Edit",
   character_image: "Character",
-  style_variations: "Style Variations",
   vqa: "Visual Q&A",
   interleave: "Interleaved",
   image_to_video: "Image to Video",
@@ -149,6 +148,7 @@ const CAPABILITY_LABELS = {
   video_bridge: "Video Bridge",
   replace_person: "Replace Person",
 };
+const RETIRED_MODEL_CAPABILITIES = new Set(["style_variations"]);
 
 function capabilityLabel(capability) {
   return CAPABILITY_LABELS[capability] ?? String(capability).replaceAll("_", " ");
@@ -1170,7 +1170,9 @@ export function ModelManagerScreen() {
     const failedDownload = localDownloadJob && terminalStatuses.has(localDownloadJob.status);
     const downloadSize = downloadSizeText(model);
     const unassociated = !model.family;
-    const capabilities = Array.isArray(model.capabilities) ? model.capabilities : [];
+    const capabilities = Array.isArray(model.capabilities)
+      ? model.capabilities.filter((capability) => !RETIRED_MODEL_CAPABILITIES.has(capability))
+      : [];
     // Audio-type cards describe themselves via the `audio` sub-block (voice count,
     // languages, edit modes, multi-speaker) instead of the generic capabilities[].
     const audioChips = audioCapabilityChips(model);

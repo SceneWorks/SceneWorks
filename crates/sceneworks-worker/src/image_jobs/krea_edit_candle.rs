@@ -67,7 +67,7 @@ fn krea_edit_candle_has_lora(request: &ImageRequest) -> bool {
 
 /// Reference asset ids for a Krea edit, in fixed order (image 1 (required) + image 2 (optional)), capped at
 /// [`KREA_EDIT_CANDLE_MAX_REFERENCES`]. The multi-image picker sends the plural `referenceAssetIds`; with
-/// no plural list it falls back to the single Image-Edit `sourceAssetId`. Mirrors
+/// no plural list it falls back to singular `referenceAssetId`, then Image-Edit `sourceAssetId`. Mirrors
 /// `flux2_edit_candle_reference_ids` (capped to the Krea 1..=2 contract).
 fn krea_edit_candle_reference_ids(request: &ImageRequest) -> Vec<String> {
     if !request.reference_asset_ids.is_empty() {
@@ -77,6 +77,14 @@ fn krea_edit_candle_reference_ids(request: &ImageRequest) -> Vec<String> {
             .take(KREA_EDIT_CANDLE_MAX_REFERENCES)
             .cloned()
             .collect();
+    }
+    if let Some(id) = request
+        .reference_asset_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        return vec![id.to_owned()];
     }
     if let Some(id) = request
         .source_asset_id
@@ -134,7 +142,8 @@ fn krea_edit_candle_guidance(request: &ImageRequest) -> f32 {
 }
 
 /// Load the Krea edit reference set: the 1..=2 references (plural `referenceAssetIds`, else the single
-/// `sourceAssetId`), each pre-fit to the render W×H (crop / pad / outpaint→pad; `stretch` keeps the legacy
+/// singular `referenceAssetId`, else `sourceAssetId`), each pre-fit to the render W×H (crop / pad /
+/// outpaint→pad; `stretch` keeps the legacy
 /// resize). `render_edit` VAE-encodes each at the target resolution, so pre-fitting keeps an off-aspect
 /// source from stretching. Errors if no source. Shares the geometry with the other edit lanes
 /// ([`fit_engine_image`]).
@@ -148,7 +157,7 @@ fn load_krea_edit_candle_references(
     let ids = krea_edit_candle_reference_ids(request);
     if ids.is_empty() {
         return Err(WorkerError::InvalidPayload(
-            "Krea 2 edit requires a source image (sourceAssetId).".to_owned(),
+            "Krea 2 edit requires one reference image.".to_owned(),
         ));
     }
     let mut references = Vec::with_capacity(ids.len());
@@ -412,4 +421,31 @@ pub(super) async fn generate_candle_krea_edit_stream(
         asset_writes,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn singular_reference_and_plural_order_are_preserved() {
+        let singular = json!({
+            "projectId": "p", "model": "krea_2_raw", "mode": "edit_image",
+            "referenceAssetId": "singular"
+        });
+        let singular =
+            ImageRequest::from_payload(singular.as_object().expect("image request object"));
+        assert_eq!(krea_edit_candle_reference_ids(&singular), vec!["singular"]);
+
+        let plural = json!({
+            "projectId": "p", "model": "krea_2_raw", "mode": "edit_image",
+            "referenceAssetIds": ["scene", "person"]
+        });
+        let plural = ImageRequest::from_payload(plural.as_object().expect("image request object"));
+        assert_eq!(
+            krea_edit_candle_reference_ids(&plural),
+            vec!["scene".to_owned(), "person".to_owned()]
+        );
+    }
 }
