@@ -246,7 +246,42 @@
         // sc-16025 changes the q4/q8 numeric profile (Q8 LM layers + transformer head). Preserve the
         // historical figures for comparison, but do not authorize them as current evidence until
         // the CUDA real-weight lane remeasures the converged provider.
-        "measured": false
+        "measured": false,
+        // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
+        // Engine-derived rung x tier coverage for mage_flow_edit_base.
+        // Re-run scripts/generate-manifest-memory-declarations.mjs to update;
+        // hand edits inside this region are overwritten.
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "mage_flow_edit_base",
+          "implementations": [
+            {
+              "rung": "staged_residency",
+              "tiers": ["bf16", "q8", "q4"],
+              "modes": ["edit_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/mage_flow_edit_base"
+            },
+            {
+              "rung": "bounded_attention",
+              "tiers": ["bf16", "q8", "q4"],
+              "modes": ["edit_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/mage_flow_edit_base"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "tiers": ["bf16"],
+              "modes": ["edit_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/mage_flow_edit_base"
+            }
+          ]
+        }
+        // END generated-from-engine-capabilities
       },
       "ui": {
         "label": "Mage-Flow Edit-Base",
@@ -490,7 +525,42 @@
         "minMemoryGb": 17,
         "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
         "vramMeasuredPixels": 1048576,
-        "measured": false
+        "measured": false,
+        // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
+        // Engine-derived rung x tier coverage for mage_flow_edit.
+        // Re-run scripts/generate-manifest-memory-declarations.mjs to update;
+        // hand edits inside this region are overwritten.
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "mage_flow_edit",
+          "implementations": [
+            {
+              "rung": "staged_residency",
+              "tiers": ["bf16", "q8", "q4"],
+              "modes": ["edit_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/mage_flow_edit"
+            },
+            {
+              "rung": "bounded_attention",
+              "tiers": ["bf16", "q8", "q4"],
+              "modes": ["edit_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/mage_flow_edit"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "tiers": ["bf16"],
+              "modes": ["edit_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/mage_flow_edit"
+            }
+          ]
+        }
+        // END generated-from-engine-capabilities
       },
       "ui": {
         "label": "Mage-Flow Edit",
@@ -742,7 +812,42 @@
         "minMemoryGb": 17,
         "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
         "vramMeasuredPixels": 1048576,
-        "measured": false
+        "measured": false,
+        // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
+        // Engine-derived rung x tier coverage for mage_flow_edit_turbo.
+        // Re-run scripts/generate-manifest-memory-declarations.mjs to update;
+        // hand edits inside this region are overwritten.
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "mage_flow_edit_turbo",
+          "implementations": [
+            {
+              "rung": "staged_residency",
+              "tiers": ["bf16", "q8", "q4"],
+              "modes": ["edit_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/mage_flow_edit_turbo"
+            },
+            {
+              "rung": "bounded_attention",
+              "tiers": ["bf16", "q8", "q4"],
+              "modes": ["edit_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/mage_flow_edit_turbo"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "tiers": ["bf16"],
+              "modes": ["edit_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/mage_flow_edit_turbo"
+            }
+          ]
+        }
+        // END generated-from-engine-capabilities
       },
       "ui": {
         "label": "Mage-Flow Edit-Turbo",
@@ -969,7 +1074,42 @@
         "minMemoryGb": 17,
         "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
         "vramMeasuredPixels": 1048576,
-        "measured": false
+        "measured": false,
+        // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
+        // Engine-derived rung x tier coverage for mage_flow_base.
+        // Re-run scripts/generate-manifest-memory-declarations.mjs to update;
+        // hand edits inside this region are overwritten.
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "mage_flow_base",
+          "implementations": [
+            {
+              "rung": "staged_residency",
+              "tiers": ["bf16", "q8", "q4"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/mage_flow_base"
+            },
+            {
+              "rung": "bounded_attention",
+              "tiers": ["bf16", "q8", "q4"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/mage_flow_base"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "tiers": ["bf16"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/mage_flow_base"
+            }
+          ]
+        }
+        // END generated-from-engine-capabilities
       },
       "ui": {
         "label": "Mage-Flow Base",
@@ -1190,7 +1330,42 @@
         "minMemoryGb": 17,
         "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
         "vramMeasuredPixels": 1048576,
-        "measured": false
+        "measured": false,
+        // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
+        // Engine-derived rung x tier coverage for mage_flow.
+        // Re-run scripts/generate-manifest-memory-declarations.mjs to update;
+        // hand edits inside this region are overwritten.
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "mage_flow",
+          "implementations": [
+            {
+              "rung": "staged_residency",
+              "tiers": ["bf16", "q8", "q4"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/mage_flow"
+            },
+            {
+              "rung": "bounded_attention",
+              "tiers": ["bf16", "q8", "q4"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/mage_flow"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "tiers": ["bf16"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/mage_flow"
+            }
+          ]
+        }
+        // END generated-from-engine-capabilities
       },
       "ui": {
         "label": "Mage-Flow RL",
@@ -1419,7 +1594,42 @@
         "minMemoryGb": 17,
         "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
         "vramMeasuredPixels": 1048576,
-        "measured": false
+        "measured": false,
+        // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
+        // Engine-derived rung x tier coverage for mage_flow_turbo.
+        // Re-run scripts/generate-manifest-memory-declarations.mjs to update;
+        // hand edits inside this region are overwritten.
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "mage_flow_turbo",
+          "implementations": [
+            {
+              "rung": "staged_residency",
+              "tiers": ["bf16", "q8", "q4"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/mage_flow_turbo"
+            },
+            {
+              "rung": "bounded_attention",
+              "tiers": ["bf16", "q8", "q4"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/mage_flow_turbo"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "tiers": ["bf16"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/mage_flow_turbo"
+            }
+          ]
+        }
+        // END generated-from-engine-capabilities
       },
       "ui": {
         "label": "Mage-Flow Turbo",
@@ -1707,7 +1917,20 @@
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
               "parameterRanges": { "decodeTileEdges": [2048, 768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [256, 64], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit", "TextEncoder", "Both"] },
               "source": "inference:crates/media/mlx-gen/mlx-gen-z-image/src/memory_strategy.rs"
+            },
+            // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
+            // Engine-derived rung x tier coverage for z_image_turbo.
+            // Re-run scripts/generate-manifest-memory-declarations.mjs to update;
+            // hand edits inside this region are overwritten.
+            {
+              "rung": "staged_residency",
+              "tiers": ["bf16", "q8", "q4"],
+              "modes": ["text_to_image"],
+              "overlays": ["none", "lora"],
+              "loadProfiles": ["plain", "lora", "pid"],
+              "source": "config/engine-capabilities/capabilities.mlx.json#memoryContracts/z_image_turbo"
             }
+            // END generated-from-engine-capabilities
           ]
         },
         "limits": {
@@ -1805,7 +2028,29 @@
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
               "parameterRanges": { "decodeTileEdges": [512], "decodeOverlaps": [128], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit"] },
               "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+            },
+            // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
+            // Engine-derived rung x tier coverage for z_image_turbo, z_image_turbo_control.
+            // Re-run scripts/generate-manifest-memory-declarations.mjs to update;
+            // hand edits inside this region are overwritten.
+            {
+              "rung": "staged_residency",
+              "tiers": ["bf16", "q8", "q4"],
+              "modes": ["text_to_image"],
+              "overlays": ["none", "lora"],
+              "loadProfiles": ["plain", "lora"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/z_image_turbo"
+            },
+            {
+              "rung": "staged_residency",
+              "runtimeProvider": "z_image_turbo_control",
+              "tiers": ["bf16", "q8", "q4"],
+              "modes": ["text_to_image"],
+              "overlays": ["control"],
+              "loadProfiles": ["single_control"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/z_image_turbo_control"
             }
+            // END generated-from-engine-capabilities
           ]
         },
         "minMemoryGb": 40,
@@ -2015,7 +2260,20 @@
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
               "parameterRanges": { "decodeTileEdges": [2048, 768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [256, 64], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit", "TextEncoder", "Both"] },
               "source": "inference:crates/media/mlx-gen/mlx-gen-z-image/src/memory_strategy.rs"
+            },
+            // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
+            // Engine-derived rung x tier coverage for z_image.
+            // Re-run scripts/generate-manifest-memory-declarations.mjs to update;
+            // hand edits inside this region are overwritten.
+            {
+              "rung": "staged_residency",
+              "tiers": ["bf16", "q8", "q4"],
+              "modes": ["text_to_image"],
+              "overlays": ["none", "lora"],
+              "loadProfiles": ["plain", "lora"],
+              "source": "config/engine-capabilities/capabilities.mlx.json#memoryContracts/z_image"
             }
+            // END generated-from-engine-capabilities
           ]
         },
         "limits": {
@@ -2117,7 +2375,29 @@
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
               "parameterRanges": { "decodeTileEdges": [512], "decodeOverlaps": [128], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit"] },
               "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+            },
+            // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
+            // Engine-derived rung x tier coverage for z_image, z_image_control.
+            // Re-run scripts/generate-manifest-memory-declarations.mjs to update;
+            // hand edits inside this region are overwritten.
+            {
+              "rung": "staged_residency",
+              "tiers": ["bf16", "q8", "q4"],
+              "modes": ["text_to_image"],
+              "overlays": ["none", "lora"],
+              "loadProfiles": ["plain", "lora"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/z_image"
+            },
+            {
+              "rung": "staged_residency",
+              "runtimeProvider": "z_image_control",
+              "tiers": ["bf16", "q8", "q4"],
+              "modes": ["text_to_image"],
+              "overlays": ["control"],
+              "loadProfiles": ["single_control"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/z_image_control"
             }
+            // END generated-from-engine-capabilities
           ]
         },
         "minMemoryGb": 30,
@@ -2594,7 +2874,20 @@
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
               "parameterRanges": { "decodeTileEdges": [768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [64], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit"] },
               "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs"
+            },
+            // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
+            // Engine-derived rung x tier coverage for qwen_image.
+            // Re-run scripts/generate-manifest-memory-declarations.mjs to update;
+            // hand edits inside this region are overwritten.
+            {
+              "rung": "staged_residency",
+              "tiers": ["bf16", "q8", "q4"],
+              "modes": ["text_to_image"],
+              "overlays": ["none", "lora"],
+              "loadProfiles": ["plain", "lora"],
+              "source": "config/engine-capabilities/capabilities.mlx.json#memoryContracts/qwen_image"
             }
+            // END generated-from-engine-capabilities
           ]
         },
         "limits": {
@@ -2636,7 +2929,50 @@
         "vramGbByTier": { "q4": 53.7, "q8": 65.3, "bf16": 82.5 },
         "vramMeasuredPixels": 1048576,
         "sequentialPeakGb": { "q4": 30.3, "q8": 38.7, "bf16": 71.7 },
-        "measured": true
+        "measured": true,
+        // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
+        // Engine-derived rung x tier coverage for qwen_image.
+        // Re-run scripts/generate-manifest-memory-declarations.mjs to update;
+        // hand edits inside this region are overwritten.
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "qwen_image",
+          "implementations": [
+            {
+              "rung": "staged_residency",
+              "tiers": ["bf16", "q8", "q4"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/qwen_image"
+            },
+            {
+              "rung": "bounded_decode",
+              "tiers": ["bf16", "q8", "q4"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/qwen_image"
+            },
+            {
+              "rung": "bounded_attention",
+              "tiers": ["bf16", "q8", "q4"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/qwen_image"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "tiers": ["bf16", "q8", "q4"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/qwen_image"
+            }
+          ]
+        }
+        // END generated-from-engine-capabilities
       },
       "ui": {
         "label": "Qwen Image",
@@ -2806,7 +3142,20 @@
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
               "parameterRanges": { "decodeTileEdges": [768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [64], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit"] },
               "source": "inference:crates/media/mlx-gen/mlx-gen-qwen-image/src/memory_strategy.rs"
+            },
+            // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
+            // Engine-derived rung x tier coverage for qwen_image_edit.
+            // Re-run scripts/generate-manifest-memory-declarations.mjs to update;
+            // hand edits inside this region are overwritten.
+            {
+              "rung": "staged_residency",
+              "tiers": ["bf16", "q8", "q4"],
+              "modes": ["edit_image", "character_image"],
+              "overlays": ["none", "lora"],
+              "loadProfiles": ["plain", "lora"],
+              "source": "config/engine-capabilities/capabilities.mlx.json#memoryContracts/qwen_image_edit"
             }
+            // END generated-from-engine-capabilities
           ]
         }
       },
@@ -2856,7 +3205,50 @@
         "vramGbByTier": { "q4": 56.7, "q8": 69.0, "bf16": 81.7 },
         "vramMeasuredPixels": 1048576,
         "sequentialPeakGb": { "q4": 36.9, "q8": 39.3, "bf16": 52.2 },
-        "measured": true
+        "measured": true,
+        // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
+        // Engine-derived rung x tier coverage for qwen_image_edit.
+        // Re-run scripts/generate-manifest-memory-declarations.mjs to update;
+        // hand edits inside this region are overwritten.
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "qwen_image_edit",
+          "implementations": [
+            {
+              "rung": "staged_residency",
+              "tiers": ["bf16", "q8", "q4"],
+              "modes": ["edit_image", "character_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/qwen_image_edit"
+            },
+            {
+              "rung": "bounded_decode",
+              "tiers": ["bf16", "q8", "q4"],
+              "modes": ["edit_image", "character_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/qwen_image_edit"
+            },
+            {
+              "rung": "bounded_attention",
+              "tiers": ["bf16", "q8", "q4"],
+              "modes": ["edit_image", "character_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/qwen_image_edit"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "tiers": ["bf16", "q8", "q4"],
+              "modes": ["edit_image", "character_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/qwen_image_edit"
+            }
+          ]
+        }
+        // END generated-from-engine-capabilities
       },
       "ui": {
         "label": "Qwen Image Edit (2511)",
@@ -3230,7 +3622,50 @@
         // this id into `uses_standard_tier_layout` so the worker resolves the q4/q8/bf16 subdir
         // directly from the turnkey snapshot.
         "quantize": 4,
-        "standardTierLayout": true
+        "standardTierLayout": true,
+        // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
+        // Engine-derived rung x tier coverage for lens.
+        // Re-run scripts/generate-manifest-memory-declarations.mjs to update;
+        // hand edits inside this region are overwritten.
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "lens",
+          "implementations": [
+            {
+              "rung": "staged_residency",
+              "tiers": ["q4"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.mlx.json#memoryContracts/lens"
+            },
+            {
+              "rung": "bounded_decode",
+              "tiers": ["q4"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.mlx.json#memoryContracts/lens"
+            },
+            {
+              "rung": "bounded_attention",
+              "tiers": ["q4"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.mlx.json#memoryContracts/lens"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "tiers": ["q4"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.mlx.json#memoryContracts/lens"
+            }
+          ]
+        }
+        // END generated-from-engine-capabilities
       },
       "candle": {
         "memoryStrategyContract": {
@@ -3269,7 +3704,20 @@
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 16777216, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
               "parameterRanges": { "decodeTileEdges": [768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [128], "attentionChunkSizes": [16777216], "transformerWindowSizes": [1, 2, 4, 8, 12, 24], "transformerWindowComponents": ["Dit"] },
               "source": "inference:crates/media/candle-gen/candle-gen-lens/src/lib.rs"
+            },
+            // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
+            // Engine-derived rung x tier coverage for lens.
+            // Re-run scripts/generate-manifest-memory-declarations.mjs to update;
+            // hand edits inside this region are overwritten.
+            {
+              "rung": "staged_residency",
+              "tiers": ["q8", "q4"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/lens"
             }
+            // END generated-from-engine-capabilities
           ]
         }
       },
@@ -3393,7 +3841,50 @@
         // this id into `uses_standard_tier_layout` so the worker resolves the q4/q8/bf16 subdir
         // directly from the turnkey snapshot.
         "quantize": 4,
-        "standardTierLayout": true
+        "standardTierLayout": true,
+        // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
+        // Engine-derived rung x tier coverage for lens_turbo.
+        // Re-run scripts/generate-manifest-memory-declarations.mjs to update;
+        // hand edits inside this region are overwritten.
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "lens_turbo",
+          "implementations": [
+            {
+              "rung": "staged_residency",
+              "tiers": ["bf16"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.mlx.json#memoryContracts/lens_turbo"
+            },
+            {
+              "rung": "bounded_decode",
+              "tiers": ["bf16"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.mlx.json#memoryContracts/lens_turbo"
+            },
+            {
+              "rung": "bounded_attention",
+              "tiers": ["bf16"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.mlx.json#memoryContracts/lens_turbo"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "tiers": ["bf16"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.mlx.json#memoryContracts/lens_turbo"
+            }
+          ]
+        }
+        // END generated-from-engine-capabilities
       },
       // candle/CUDA VRAM gate (sc-9094, epic 9083) — MEASURED on an RTX PRO 6000 (Blackwell sm_120) at
       // 1024²/8-step via the candle-gen nvidia-smi peak monitor: q4 packed overall-peak 37.3 GB (the
@@ -3444,7 +3935,20 @@
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 16777216, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
               "parameterRanges": { "decodeTileEdges": [768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [128], "attentionChunkSizes": [16777216], "transformerWindowSizes": [1, 2, 4, 8, 12, 24], "transformerWindowComponents": ["Dit"] },
               "source": "inference:crates/media/candle-gen/candle-gen-lens/src/lib.rs"
+            },
+            // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
+            // Engine-derived rung x tier coverage for lens_turbo.
+            // Re-run scripts/generate-manifest-memory-declarations.mjs to update;
+            // hand edits inside this region are overwritten.
+            {
+              "rung": "staged_residency",
+              "tiers": ["q8", "q4"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/lens_turbo"
             }
+            // END generated-from-engine-capabilities
           ]
         }
       },
@@ -4562,7 +5066,50 @@
         "vramGbByTier": { "q4": 21.3, "q8": 31.8 },
         "vramMeasuredPixels": 1048576,
         "sequentialPeakGb": { "q4": 18.4, "q8": 26.4 },
-        "measured": false
+        "measured": false,
+        // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
+        // Engine-derived rung x tier coverage for flux1_schnell.
+        // Re-run scripts/generate-manifest-memory-declarations.mjs to update;
+        // hand edits inside this region are overwritten.
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "flux1_schnell",
+          "implementations": [
+            {
+              "rung": "staged_residency",
+              "tiers": ["q8", "q4"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/flux1_schnell"
+            },
+            {
+              "rung": "bounded_decode",
+              "tiers": ["q8", "q4"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/flux1_schnell"
+            },
+            {
+              "rung": "bounded_attention",
+              "tiers": ["q8", "q4"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/flux1_schnell"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "tiers": ["q8", "q4"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/flux1_schnell"
+            }
+          ]
+        }
+        // END generated-from-engine-capabilities
       },
       "ui": {
         "label": "FLUX.1 [schnell]",
@@ -4775,7 +5322,50 @@
         "vramGbByTier": { "q4": 21.3, "q8": 31.8 },
         "vramMeasuredPixels": 1048576,
         "sequentialPeakGb": { "q4": 18.4, "q8": 26.4 },
-        "measured": true
+        "measured": true,
+        // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
+        // Engine-derived rung x tier coverage for flux1_dev.
+        // Re-run scripts/generate-manifest-memory-declarations.mjs to update;
+        // hand edits inside this region are overwritten.
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "flux1_dev",
+          "implementations": [
+            {
+              "rung": "staged_residency",
+              "tiers": ["q8", "q4"],
+              "modes": ["text_to_image", "character_image"],
+              "overlays": ["none", "control", "identity"],
+              "loadProfiles": ["plain", "single_control", "ip_adapter"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/flux1_dev"
+            },
+            {
+              "rung": "bounded_decode",
+              "tiers": ["q8", "q4"],
+              "modes": ["text_to_image", "character_image"],
+              "overlays": ["none", "control", "identity"],
+              "loadProfiles": ["plain", "single_control", "ip_adapter"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/flux1_dev"
+            },
+            {
+              "rung": "bounded_attention",
+              "tiers": ["q8", "q4"],
+              "modes": ["text_to_image", "character_image"],
+              "overlays": ["none", "control", "identity"],
+              "loadProfiles": ["plain", "single_control", "ip_adapter"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/flux1_dev"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "tiers": ["q8", "q4"],
+              "modes": ["text_to_image", "character_image"],
+              "overlays": ["none", "control", "identity"],
+              "loadProfiles": ["plain", "single_control", "ip_adapter"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/flux1_dev"
+            }
+          ]
+        }
+        // END generated-from-engine-capabilities
       },
       // sc-8669: re-hosted ungated on SceneWorks (FLUX.1 [dev] Non-Commercial License redistributed
       // with LICENSE + NOTICE, the flux2_dev re-host precedent) — no HF token / license-accept gate.
@@ -7719,7 +8309,50 @@
         "vramGbByTier": { "q4": 46.2, "q8": 50.6, "bf16": 75.5 },
         "vramMeasuredPixels": 1048576,
         "sequentialPeakGb": { "q4": 24.2, "q8": 28.7, "bf16": 53.3 },
-        "measured": true
+        "measured": true,
+        // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
+        // Engine-derived rung x tier coverage for flux2_klein_9b.
+        // Re-run scripts/generate-manifest-memory-declarations.mjs to update;
+        // hand edits inside this region are overwritten.
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "flux2_klein_9b",
+          "implementations": [
+            {
+              "rung": "staged_residency",
+              "tiers": ["bf16", "q8", "q4"],
+              "modes": ["text_to_image", "edit_image", "image_to_image", "character_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/flux2_klein_9b"
+            },
+            {
+              "rung": "bounded_decode",
+              "tiers": ["bf16", "q8", "q4"],
+              "modes": ["text_to_image", "edit_image", "image_to_image", "character_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/flux2_klein_9b"
+            },
+            {
+              "rung": "bounded_attention",
+              "tiers": ["bf16", "q8", "q4"],
+              "modes": ["text_to_image", "edit_image", "image_to_image", "character_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/flux2_klein_9b"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "tiers": ["bf16", "q8", "q4"],
+              "modes": ["text_to_image", "edit_image", "image_to_image", "character_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/flux2_klein_9b"
+            }
+          ]
+        }
+        // END generated-from-engine-capabilities
       },
       // SceneWorks public/ungated re-host (LICENSE.md travels with the weights). FLUX
       // Non-Commercial License — generations are non-commercial use only, matching SceneWorks's
@@ -8622,7 +9255,50 @@
         "vramGbByTier": { "q4": 42.7, "q8": 70.8 },
         "vramMeasuredPixels": 65536,
         "sequentialPeakGb": { "q4": 42.7, "q8": 70.8 },
-        "measured": false
+        "measured": false,
+        // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
+        // Engine-derived rung x tier coverage for flux2_dev.
+        // Re-run scripts/generate-manifest-memory-declarations.mjs to update;
+        // hand edits inside this region are overwritten.
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "flux2_dev",
+          "implementations": [
+            {
+              "rung": "staged_residency",
+              "tiers": ["q8", "q4"],
+              "modes": ["text_to_image", "edit_image", "character_image"],
+              "overlays": ["none", "control"],
+              "loadProfiles": ["plain", "single_control"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/flux2_dev"
+            },
+            {
+              "rung": "bounded_decode",
+              "tiers": ["q8", "q4"],
+              "modes": ["text_to_image", "edit_image", "character_image"],
+              "overlays": ["none", "control"],
+              "loadProfiles": ["plain", "single_control"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/flux2_dev"
+            },
+            {
+              "rung": "bounded_attention",
+              "tiers": ["q8", "q4"],
+              "modes": ["text_to_image", "edit_image", "character_image"],
+              "overlays": ["none", "control"],
+              "loadProfiles": ["plain", "single_control"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/flux2_dev"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "tiers": ["q8", "q4"],
+              "modes": ["text_to_image", "edit_image", "character_image"],
+              "overlays": ["none", "control"],
+              "loadProfiles": ["plain", "single_control"],
+              "source": "config/engine-capabilities/capabilities.candle.json#memoryContracts/flux2_dev"
+            }
+          ]
+        }
+        // END generated-from-engine-capabilities
       },
       "gated": false,
       "licenseUrl": "https://huggingface.co/SceneWorks/flux2-dev-mlx/blob/main/LICENSE.md",
@@ -9104,7 +9780,20 @@
               "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
               "parameterRanges": { "transformerWindowSizes": [1, 2, 5, 10], "transformerWindowComponents": ["Dit", "TextEncoder", "Both"] },
               "source": "inference:crates/media/mlx-gen/mlx-gen-chroma/src/memory_strategy.rs"
+            },
+            // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
+            // Engine-derived rung x tier coverage for chroma1_hd.
+            // Re-run scripts/generate-manifest-memory-declarations.mjs to update;
+            // hand edits inside this region are overwritten.
+            {
+              "rung": "staged_residency",
+              "tiers": ["bf16", "q8", "q4"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.mlx.json#memoryContracts/chroma1_hd"
             }
+            // END generated-from-engine-capabilities
           ]
         }
       },
@@ -9598,7 +10287,20 @@
               "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
               "parameterRanges": { "transformerWindowSizes": [1, 2, 5, 10], "transformerWindowComponents": ["Dit", "TextEncoder", "Both"] },
               "source": "inference:crates/media/mlx-gen/mlx-gen-chroma/src/memory_strategy.rs"
+            },
+            // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
+            // Engine-derived rung x tier coverage for chroma1_base.
+            // Re-run scripts/generate-manifest-memory-declarations.mjs to update;
+            // hand edits inside this region are overwritten.
+            {
+              "rung": "staged_residency",
+              "tiers": ["bf16", "q8", "q4"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.mlx.json#memoryContracts/chroma1_base"
             }
+            // END generated-from-engine-capabilities
           ]
         }
       },
@@ -10038,7 +10740,20 @@
               "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
               "parameterRanges": { "transformerWindowSizes": [1, 2, 5, 10], "transformerWindowComponents": ["Dit", "TextEncoder", "Both"] },
               "source": "inference:crates/media/mlx-gen/mlx-gen-chroma/src/memory_strategy.rs"
+            },
+            // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
+            // Engine-derived rung x tier coverage for chroma1_flash.
+            // Re-run scripts/generate-manifest-memory-declarations.mjs to update;
+            // hand edits inside this region are overwritten.
+            {
+              "rung": "staged_residency",
+              "tiers": ["bf16", "q8", "q4"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.mlx.json#memoryContracts/chroma1_flash"
             }
+            // END generated-from-engine-capabilities
           ]
         }
       },
@@ -10780,7 +11495,28 @@
               "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
               "parameterRanges": { "transformerWindowSizes": [1, 2, 5, 10], "transformerWindowComponents": ["Dit", "TextEncoder", "Both"] },
               "source": "inference:crates/media/mlx-gen/mlx-gen-kolors/src/memory_strategy.rs"
+            },
+            // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
+            // Engine-derived rung x tier coverage for kolors.
+            // Re-run scripts/generate-manifest-memory-declarations.mjs to update;
+            // hand edits inside this region are overwritten.
+            {
+              "rung": "staged_residency",
+              "tiers": ["bf16"],
+              "modes": ["text_to_image", "edit_image", "character_image"],
+              "overlays": ["none", "identity"],
+              "loadProfiles": ["plain", "ip_adapter"],
+              "source": "config/engine-capabilities/capabilities.mlx.json#memoryContracts/kolors"
+            },
+            {
+              "rung": "staged_residency",
+              "tiers": ["q8", "q4"],
+              "modes": ["text_to_image", "edit_image", "character_image"],
+              "overlays": ["none", "lora", "identity"],
+              "loadProfiles": ["plain", "lora", "ip_adapter"],
+              "source": "config/engine-capabilities/capabilities.mlx.json#memoryContracts/kolors"
             }
+            // END generated-from-engine-capabilities
           ]
         }
       },
@@ -11732,7 +12468,20 @@
               "parameters": { "decodeTileEdge": 640, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
               "parameterRanges": { "decodeTileEdges": [768, 640, 512, 384, 320, 256, 192], "decodeOverlaps": [64], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit"] },
               "source": "inference:crates/media/mlx-gen/mlx-gen-anima/src/memory_strategy.rs"
+            },
+            // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
+            // Engine-derived rung x tier coverage for anima_base.
+            // Re-run scripts/generate-manifest-memory-declarations.mjs to update;
+            // hand edits inside this region are overwritten.
+            {
+              "rung": "staged_residency",
+              "tiers": ["q4"],
+              "modes": ["text_to_image"],
+              "overlays": ["none", "lora"],
+              "loadProfiles": ["plain", "lora"],
+              "source": "config/engine-capabilities/capabilities.mlx.json#memoryContracts/anima_base"
             }
+            // END generated-from-engine-capabilities
           ]
         }
       },
@@ -11925,7 +12674,20 @@
               "parameters": { "decodeTileEdge": 640, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
               "parameterRanges": { "decodeTileEdges": [768, 640, 512, 384, 320, 256, 192], "decodeOverlaps": [64], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit"] },
               "source": "inference:crates/media/mlx-gen/mlx-gen-anima/src/memory_strategy.rs"
+            },
+            // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
+            // Engine-derived rung x tier coverage for anima_aesthetic.
+            // Re-run scripts/generate-manifest-memory-declarations.mjs to update;
+            // hand edits inside this region are overwritten.
+            {
+              "rung": "staged_residency",
+              "tiers": ["q4"],
+              "modes": ["text_to_image"],
+              "overlays": ["none", "lora"],
+              "loadProfiles": ["plain", "lora"],
+              "source": "config/engine-capabilities/capabilities.mlx.json#memoryContracts/anima_aesthetic"
             }
+            // END generated-from-engine-capabilities
           ]
         }
       },
@@ -12121,7 +12883,20 @@
               "parameters": { "decodeTileEdge": 640, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
               "parameterRanges": { "decodeTileEdges": [768, 640, 512, 384, 320, 256, 192], "decodeOverlaps": [64], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit"] },
               "source": "inference:crates/media/mlx-gen/mlx-gen-anima/src/memory_strategy.rs"
+            },
+            // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
+            // Engine-derived rung x tier coverage for anima_turbo.
+            // Re-run scripts/generate-manifest-memory-declarations.mjs to update;
+            // hand edits inside this region are overwritten.
+            {
+              "rung": "staged_residency",
+              "tiers": ["q4"],
+              "modes": ["text_to_image"],
+              "overlays": ["none", "lora"],
+              "loadProfiles": ["plain", "lora"],
+              "source": "config/engine-capabilities/capabilities.mlx.json#memoryContracts/anima_turbo"
             }
+            // END generated-from-engine-capabilities
           ]
         }
       },
@@ -13165,7 +13940,20 @@
               "parameters": { "transformerWindowSize": 10, "transformerWindowComponent": "Dit" },
               "parameterRanges": { "transformerWindowSizes": [1, 2, 5, 10], "transformerWindowComponents": ["Dit"] },
               "source": "inference:crates/media/mlx-gen/mlx-gen-sdxl/src/memory_strategy.rs"
+            },
+            // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
+            // Engine-derived rung x tier coverage for sdxl.
+            // Re-run scripts/generate-manifest-memory-declarations.mjs to update;
+            // hand edits inside this region are overwritten.
+            {
+              "rung": "staged_residency",
+              "tiers": ["bf16", "q8", "q4"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "loadProfiles": ["plain"],
+              "source": "config/engine-capabilities/capabilities.mlx.json#memoryContracts/sdxl"
             }
+            // END generated-from-engine-capabilities
           ]
         }
       },

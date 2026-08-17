@@ -150,6 +150,36 @@
         }
       }
     },
+    "memoryDeclarationWithhold": {
+      "type": "object",
+      "required": ["rungs", "story", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "rungs": {
+          "oneOf": [
+            { "const": "all" },
+            {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "enum": [
+                  "resident",
+                  "staged_residency",
+                  "bounded_decode",
+                  "bounded_attention",
+                  "bounded_transformer_residency"
+                ]
+              }
+            }
+          ],
+          "description": "The rungs this block declares LESS of than the engine dumps. \"all\" withholds the whole backend block."
+        },
+        "story": { "type": "string", "minLength": 1 },
+        "reason": { "type": "string", "minLength": 1 }
+      },
+      "description": "A DELIBERATE withhold: the manifest declaring less than config/engine-capabilities/capabilities.<backend>.json dumps, on purpose, because a measurement says the wider claim is wrong (the SC-15525 sdxl quality withholding is the shape this exists for). scripts/generate-manifest-memory-declarations.mjs honors it and reports it; it never overrides one. `story` and `reason` are required because a withhold with no cited verdict is indistinguishable from an untriaged gap, which is exactly what the projection exists to eliminate."
+    },
     "samplerKey": {
       "type": "string",
       "enum": [
@@ -1054,6 +1084,17 @@
                 "type": "boolean",
                 "description": "Static provider capability: the registered MLX generator can defer and release model components during request execution. Exact per-rung availability remains declared by memoryStrategyContract and runtime evidence."
               },
+              "memoryDeclarationWithhold": {
+                "$ref": "#/$defs/memoryDeclarationWithhold",
+                "x-sceneworks-contract": "descriptive",
+                "x-sceneworks-readers": [
+                  {
+                    "path": "scripts/lib/manifest-memory-declarations.mjs",
+                    "anchor": "withheldRungs"
+                  }
+                ],
+                "description": "Optional deliberate withhold for the MLX memory declaration: rungs this entry declares LESS of than the engine dump, with the measured verdict that decided it. Read only by the declaration projector, which skips those rungs and reports them; it constrains no request."
+              },
               "memoryStrategyContract": {
                 "type": "object",
                 "required": ["abi", "provider", "implementations"],
@@ -1071,8 +1112,35 @@
                     "uniqueItems": true,
                     "items": {
                       "type": "object",
-                      "required": ["rung", "fingerprint", "tiers", "modes", "overlays", "engagedRungs", "parameters", "parameterRanges", "source"],
+                      "required": ["rung", "tiers", "modes", "overlays", "source"],
                       "additionalProperties": false,
+                      "allOf": [
+                        {
+                          "description": "Two row shapes, told apart by `source` (sc-20246). A MEASURED row is hand-authored from provider code and must name its fingerprint, engaged ladder composition and parameter shape. An ENGINE-PROJECTED row is written by scripts/generate-manifest-memory-declarations.mjs from the committed capability dumps, which publish rung x tier coverage and the route witnesses and nothing else — it must therefore NOT carry those four fields, because there is no engine fact behind them and a generator filling them in would be inventing measurement. It must name loadProfiles, which the witnesses do publish.",
+                          "if": {
+                            "required": ["source"],
+                            "properties": { "source": { "pattern": "^config/engine-capabilities/" } }
+                          },
+                          "then": {
+                            "required": ["loadProfiles"],
+                            "not": {
+                              "anyOf": [
+                                { "required": ["fingerprint"] },
+                                { "required": ["engagedRungs"] },
+                                { "required": ["parameters"] },
+                                { "required": ["parameterRanges"] },
+                                { "required": ["requestContexts"] },
+                                { "required": ["providerOverlay"] },
+                                { "required": ["requiredOffloadPolicy"] },
+                                { "required": ["sourceKinds"] }
+                              ]
+                            }
+                          },
+                          "else": {
+                            "required": ["fingerprint", "engagedRungs", "parameters", "parameterRanges"]
+                          }
+                        }
+                      ],
                       "properties": {
                         "rung": { "enum": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"] },
                         "runtimeProvider": {
@@ -1238,6 +1306,17 @@
                   }
                 ],
                 "description": "Optional exact per-cell Candle/CUDA calibration bindings. The worker submits only exact authoritative packaged records to the shared selector; absence or any identity mismatch leaves optimized execution unavailable."
+              },
+              "memoryDeclarationWithhold": {
+                "$ref": "#/$defs/memoryDeclarationWithhold",
+                "x-sceneworks-contract": "descriptive",
+                "x-sceneworks-readers": [
+                  {
+                    "path": "scripts/lib/manifest-memory-declarations.mjs",
+                    "anchor": "withheldRungs"
+                  }
+                ],
+                "description": "Optional deliberate withhold for the Candle/CUDA memory declaration: rungs this entry declares LESS of than the engine dump, with the measured verdict that decided it. Read only by the declaration projector, which skips those rungs and reports them; it constrains no request."
               },
               "memoryStrategyContract": {
                 "$ref": "#/properties/models/items/properties/mlx/properties/memoryStrategyContract",
