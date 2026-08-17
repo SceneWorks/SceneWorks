@@ -1745,7 +1745,7 @@ fn windows_confined_directory(
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
         .open(managed_parent)?;
     let mut options = fs_at::OpenOptions::default();
-    options.follow(false);
+    options.read(true).follow(false);
     let directory = options.open_dir_at(&parent, &name)?;
     reject_link_or_reparse(path, "managed cache directory")?;
     let current = options.open_dir_at(&parent, &name)?;

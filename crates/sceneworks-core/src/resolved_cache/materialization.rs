@@ -640,7 +640,7 @@ fn windows_confined_parent(
     let (_, mut directory, _) = windows_confined_directory(root, managed_parent)?;
     for component in components {
         let mut options = fs_at::OpenOptions::default();
-        options.follow(false);
+        options.read(true).follow(false);
         directory = match options.open_dir_at(&directory, component.as_os_str()) {
             Ok(directory) => directory,
             Err(error) if create && error.kind() == std::io::ErrorKind::NotFound => options
