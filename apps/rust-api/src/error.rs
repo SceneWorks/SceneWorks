@@ -71,6 +71,27 @@ impl ApiError {
         }
     }
 
+    /// The typed "Installed — external library unavailable" submission-preflight rejection
+    /// (sc-19708). 503 because the installation is intact and the request is well-formed: the
+    /// operator reconnects the library and retries.
+    pub(crate) fn external_model_library_unavailable(detail: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            detail: detail.into(),
+            code: Some(
+                sceneworks_core::model_artifacts::external_library::EXTERNAL_LIBRARY_UNAVAILABLE_CODE,
+            ),
+        }
+    }
+
+    pub(crate) fn model_artifact_conflict(detail: impl Into<String>, code: &'static str) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            detail: detail.into(),
+            code: Some(code),
+        }
+    }
+
     pub(crate) fn internal(detail: impl Into<String>) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,

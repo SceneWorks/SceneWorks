@@ -262,7 +262,9 @@ pub struct ResolvedCacheStore {
 struct StoreInner {
     root: PathBuf,
     session_id: String,
-    _session_lock: File,
+    /// `None` only for the read-only inspection handle created by
+    /// [`ResolvedCacheStore::enumerate_existing`]; every runtime session holds its lock.
+    _session_lock: Option<File>,
 }
 
 impl std::fmt::Debug for ResolvedCacheStore {
@@ -303,9 +305,40 @@ impl ResolvedCacheStore {
             inner: Arc::new(StoreInner {
                 root,
                 session_id,
-                _session_lock: session_lock,
+                _session_lock: Some(session_lock),
             }),
         })
+    }
+
+    /// Inspect an already-initialized cache without creating a runtime session or refreshing
+    /// usage. Missing cache roots are an empty cache; unmanaged or invalid roots still fail
+    /// closed. This is the catalog/preflight read path (sc-19708): discovery must never stamp
+    /// usage or take a session slot.
+    pub fn enumerate_existing(
+        data_dir: &Path,
+    ) -> Result<Vec<ResolvedCacheEntrySummary>, ResolvedCacheError> {
+        let root = data_dir.join("models").join("resolved");
+        if !root.exists() {
+            return Ok(Vec::new());
+        }
+        ensure_regular_directory(&root)?;
+        let marker = std::fs::read(root.join(STORE_MARKER)).map_err(|_| {
+            ResolvedCacheError::new("resolved cache root is missing its reserved marker")
+        })?;
+        if marker != STORE_MARKER_BODY {
+            return Err(ResolvedCacheError::new(
+                "resolved cache root has an invalid reserved marker",
+            ));
+        }
+        let root = std::fs::canonicalize(root)?;
+        Self {
+            inner: Arc::new(StoreInner {
+                root,
+                session_id: "read-only-inspection".to_owned(),
+                _session_lock: None,
+            }),
+        }
+        .enumerate()
     }
 
     pub fn root(&self) -> &Path {

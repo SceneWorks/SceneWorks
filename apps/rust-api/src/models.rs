@@ -2004,7 +2004,13 @@ pub(crate) fn max_model_upload_bytes() -> usize {
 /// byte-accurate download size — so an unreachable huggingface.co can't stall
 /// those paths (sc-4169).
 pub(crate) async fn model_catalog(state: &AppState) -> Result<Vec<Value>, ApiError> {
-    Ok(model_catalog_snapshot(state).await?.as_ref().clone())
+    let mut models = model_catalog_snapshot(state).await?.as_ref().clone();
+    crate::model_sources::refresh_live_external_availability(
+        &state.settings.data_dir,
+        &mut models,
+    )
+    .await?;
+    Ok(models)
 }
 
 /// Catalog with live Hugging Face download-size estimates (negative-cached on
@@ -2019,6 +2025,11 @@ pub(crate) async fn model_catalog_sized(state: &AppState) -> Result<Vec<Value>, 
     let (size_estimates, snapshot) = tokio::join!(size_estimates, snapshot);
     let size_estimates = size_estimates?;
     let mut models = snapshot?.as_ref().clone();
+    crate::model_sources::refresh_live_external_availability(
+        &state.settings.data_dir,
+        &mut models,
+    )
+    .await?;
     for model in &mut models {
         let context = model_download_context(model)?;
         let live_estimate = context.as_ref().and_then(|context| {
@@ -4454,13 +4465,62 @@ fn apply_model_catalog_entry(
     download_context: Option<DownloadContext>,
     data_dir: &FsPath,
     user_model_ids: &std::collections::HashSet<String>,
+    local_artifacts: &[sceneworks_core::model_artifacts::ResolvedModelArtifact],
 ) -> Result<Value, ApiError> {
     #[cfg(test)]
     test_delay_catalog_probe(&model);
     let state = install_state_for(download_context, &model, data_dir);
+    // sc-19708: the typed availability judgement for this entry's default selected closure on
+    // this host, through the ONE shared resolver. Catalog nuances layered on top of it:
+    // an install living in an app-owned path is local-ready regardless of the library, and an
+    // installed-but-incomplete cache stays `incomplete` rather than `missing`.
+    let availability_resolution = crate::model_sources::availability_for_entry(
+        data_dir,
+        &model,
+        None,
+        local_artifacts,
+    );
+    use sceneworks_core::model_artifacts::external_library::ModelAvailability;
+    let managed_models = data_dir.join("models");
+    let installed_in_app_owned_path = state.installed
+        && state
+            .installed_path
+            .as_deref()
+            .map(FsPath::new)
+            .is_some_and(|path| path.starts_with(&managed_models));
+    let (availability, availability_resolution) = if installed_in_app_owned_path
+        && !matches!(
+            availability_resolution.availability,
+            ModelAvailability::LocalReady
+        ) {
+        (ModelAvailability::LocalReady, None)
+    } else if availability_resolution.availability == ModelAvailability::Missing
+        && state.cache_incomplete
+    {
+        (ModelAvailability::Incomplete, Some(availability_resolution))
+    } else {
+        (
+            availability_resolution.availability.clone(),
+            Some(availability_resolution),
+        )
+    };
     let object = model
         .as_object_mut()
         .ok_or_else(|| ApiError::internal("Model manifest entry must be an object"))?;
+    object.insert(
+        "modelAvailability".to_owned(),
+        serde_json::to_value(&availability)
+            .map_err(|error| ApiError::internal(format!("serialize model availability: {error}")))?,
+    );
+    object.insert(
+        "modelResolution".to_owned(),
+        availability_resolution
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|error| ApiError::internal(format!("serialize model resolution: {error}")))?
+            .unwrap_or(Value::Null),
+    );
     let model_id = object.get("id").and_then(Value::as_str).unwrap_or_default();
     let user_managed = user_model_ids.contains(model_id);
     object.insert(
@@ -4786,6 +4846,9 @@ async fn build_model_catalog_snapshot(state: &AppState) -> Result<Vec<Value>, Ap
 
     let data_dir = Arc::new(state.settings.data_dir.clone());
     let user_model_ids = Arc::new(user_model_ids);
+    // App-owned resolved-local artifacts, enumerated ONCE per snapshot build (read-only: no
+    // session, no usage refresh) so every entry's availability can detect local-ready coverage.
+    let local_artifacts = Arc::new(crate::model_sources::local_resolved_artifacts(state));
     let work_items = models
         .into_iter()
         .zip(download_contexts.clone())
@@ -4793,6 +4856,7 @@ async fn build_model_catalog_snapshot(state: &AppState) -> Result<Vec<Value>, Ap
     let work_groups = group_model_catalog_work_items(work_items);
     let data_dir_for_sweep = data_dir.clone();
     let user_model_ids_for_sweep = user_model_ids.clone();
+    let local_artifacts_for_sweep = local_artifacts.clone();
 
     // sc-14530: each model's install-state resolution is independent but may spend seconds
     // waiting on network-volume metadata. Dispatch bounded blocking tasks per primary-repo group
@@ -4807,6 +4871,7 @@ async fn build_model_catalog_snapshot(state: &AppState) -> Result<Vec<Value>, Ap
                     download_context,
                     &data_dir_for_sweep,
                     &user_model_ids_for_sweep,
+                    &local_artifacts_for_sweep,
                 )
             })
             .collect::<Result<Vec<_>, _>>()

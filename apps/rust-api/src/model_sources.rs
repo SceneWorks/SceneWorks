@@ -1,0 +1,457 @@
+//! The API's single model-source seam (sc-19708).
+//!
+//! Every job-creation path calls [`ensure_runtime_model_sources`] with its final payload. The
+//! seam — never the route — attaches the generic model carriers a job needs (catalog manifest
+//! entries, declarative data) and runs submission preflight through the one shared availability
+//! resolver in `sceneworks_core::model_artifacts`. Route handlers contribute only data: the
+//! payload fields their request contract already carries (`model`, `baseModel`, `embedder`,
+//! `modelNameOrPath`, analyzer flags). Which payload fields reference models, and which job types
+//! always load a fixed utility model, are declared in the two tables below — tables at the seam,
+//! never logic in a route, and never a per-model branch.
+//!
+//! Preflight rejects a submission with the typed 503 `external_model_library_unavailable` only
+//! when a model's durable install identity proves it lives on a currently unavailable external
+//! library. Genuinely missing or incomplete installs keep their established download/on-demand
+//! behavior. The worker's own pre-loader guard re-judges the same closure for the claiming
+//! worker's platform at job start, so this preflight is user experience, not the enforcement
+//! boundary.
+
+use crate::error::ApiError;
+use crate::AppState;
+use sceneworks_core::contracts::{JobType, JsonObject};
+use sceneworks_core::model_artifacts::artifact_selection::{
+    requested_runtime_variant, selected_requirements_for_model,
+};
+use sceneworks_core::model_artifacts::external_library::{
+    resolve_model_availability, ModelAvailability, ModelResolution,
+};
+use sceneworks_core::model_artifacts::ResolvedModelArtifact;
+use serde_json::{json, Value};
+use std::path::Path;
+
+/// How a payload field references a model. `CatalogId` values resolve through the catalog
+/// manifest by id; `Repository` values (utility routes that historically named a provider repo)
+/// resolve to the catalog entry whose supported download declares that repository.
+#[derive(Clone, Copy)]
+enum PayloadModelRef {
+    CatalogId(&'static str),
+    Repository(&'static str),
+}
+
+/// DATA TABLE: which payload fields of each job type reference a model. The default row covers
+/// every generation route (their typed handlers already attach `modelManifestEntry`; the ids here
+/// only fill gaps and are deduplicated against present carriers).
+fn payload_reference_spec(job_type: &JobType) -> &'static [PayloadModelRef] {
+    use PayloadModelRef::{CatalogId, Repository};
+    match job_type {
+        JobType::PromptRefine => &[Repository("model")],
+        JobType::TrainingCaption => &[Repository("modelNameOrPath")],
+        JobType::DatasetAnalysis => &[CatalogId("embedder")],
+        JobType::LoraTrain | JobType::ControlTraining => &[CatalogId("baseModel")],
+        _ => &[CatalogId("model"), CatalogId("modelId")],
+    }
+}
+
+/// DATA TABLE: job types that always load a fixed utility model, keyed on the job type and the
+/// request's own data (engine/flags) — never on a model name. Referenced ids are ordinary catalog
+/// manifest entries; adding a model or utility changes manifest data, not this seam.
+fn fixed_runtime_model_ids(job_type: &JobType, payload: &JsonObject) -> Vec<&'static str> {
+    let payload_flag = |key: &str| {
+        payload
+            .get(key)
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    };
+    match job_type {
+        JobType::ImageVqa | JobType::ImageInterleave => vec!["sensenova_u1_8b"],
+        JobType::PersonDetect => vec!["person_detector"],
+        JobType::PersonTrack => vec!["person_detector", "sam3_person_segment"],
+        JobType::PoseDetect => vec!["dwpose_pose_detector"],
+        JobType::ImageSegment => vec!["sam3_person_segment"],
+        JobType::ImageDetail
+            if payload
+                .get("model")
+                .and_then(Value::as_str)
+                .map_or(true, |model| model.trim().is_empty()) =>
+        {
+            vec!["realvisxl"]
+        }
+        JobType::VideoUpscale => vec!["seedvr2_upscaler"],
+        JobType::ImageUpscale => {
+            let seedvr2 = payload
+                .get("engine")
+                .and_then(Value::as_str)
+                .is_some_and(|engine| engine.eq_ignore_ascii_case("seedvr2"));
+            vec![if seedvr2 {
+                "seedvr2_upscaler"
+            } else {
+                "real_esrgan"
+            }]
+        }
+        JobType::DatasetUpscale => vec!["real_esrgan"],
+        JobType::PromptRefine
+            if payload
+                .get("model")
+                .and_then(Value::as_str)
+                .map_or(true, |model| model.trim().is_empty()) =>
+        {
+            vec!["prompt_refine_anubis_8b"]
+        }
+        JobType::DatasetFaceAnalysis | JobType::FaceLikenessCompare | JobType::KpsExtract => {
+            vec!["instantid_face_stack"]
+        }
+        JobType::CatalogAnalysis => {
+            let mut ids = Vec::new();
+            if payload_flag("structuredAnalysisEnabled") {
+                ids.extend([
+                    "person_detector",
+                    "dwpose_pose_detector",
+                    "instantid_face_stack",
+                ]);
+            }
+            if payload_flag("visionAnalysisEnabled") {
+                ids.push("vision_caption_qwen3vl_8b");
+            }
+            if payload_flag("semanticEmbeddingsEnabled") {
+                ids.push("clip_vit_l14");
+            }
+            ids
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn payload_has_model_entry(payload: &JsonObject, model_id: &str) -> bool {
+    payload_model_entries(payload)
+        .into_iter()
+        .any(|entry| entry.get("id").and_then(Value::as_str) == Some(model_id))
+}
+
+fn payload_model_entries(payload: &JsonObject) -> Vec<&Value> {
+    ["modelManifestEntry", "baseModelManifestEntry"]
+        .into_iter()
+        .filter_map(|key| payload.get(key))
+        .chain(
+            payload
+                .get("modelManifestEntries")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten(),
+        )
+        .filter(|entry| !entry.is_null())
+        .collect()
+}
+
+fn push_model_entry(payload: &mut JsonObject, entry: Value) -> Result<(), ApiError> {
+    payload
+        .entry("modelManifestEntries".to_owned())
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or_else(|| ApiError::bad_request("modelManifestEntries must be an array"))?
+        .push(entry);
+    Ok(())
+}
+
+/// Complete carrier attachment + submission preflight for the final job payload shape. See the
+/// module docs for the contract. Explicit downloads carry a distinct typed operation because
+/// their desired destination is intentionally missing and must not masquerade as a ready runtime
+/// source.
+pub(crate) async fn ensure_runtime_model_sources(
+    state: &AppState,
+    job_type: &JobType,
+    payload: &mut JsonObject,
+) -> Result<(), ApiError> {
+    if matches!(job_type, JobType::ModelImport) {
+        // Imports consume the request-owned staged upload, never a Hugging Face source library.
+        return Ok(());
+    }
+    if matches!(job_type, JobType::ModelDownload | JobType::LoraDownload) {
+        payload.insert(
+            "modelArtifactOperation".to_owned(),
+            json!({ "schemaVersion": 1, "kind": "explicit_download" }),
+        );
+        return Ok(());
+    }
+    if matches!(job_type, JobType::LoraTrain | JobType::ControlTraining)
+        && payload.get("dryRun").and_then(Value::as_bool) == Some(true)
+    {
+        // Dry-run planning performs no model I/O and stays available while a library is
+        // disconnected. The worker guard applies the identical exemption.
+        return Ok(());
+    }
+    if matches!(job_type, JobType::ModelConvert) {
+        let repository = payload
+            .get("sourceRepo")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| ApiError::bad_request("model_convert requires sourceRepo"))?
+            .to_owned();
+        let entry = resolve_model_manifest_entry_by_repo(state, &repository).await?;
+        // The conversion's source repository, not its output model id, is the immutable runtime
+        // input. Replace any client carrier so a mismatched id cannot bless different bytes.
+        payload.remove("modelManifestEntry");
+        payload.insert("modelManifestEntries".to_owned(), json!([entry]));
+        return preflight_payload_model_sources(state, payload).await;
+    }
+
+    let mut ids = fixed_runtime_model_ids(job_type, payload)
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let mut repositories = Vec::new();
+    let has_primary_carrier = payload.contains_key("modelManifestEntry");
+    for reference in payload_reference_spec(job_type) {
+        let (key, is_repository) = match reference {
+            PayloadModelRef::CatalogId(key) => (*key, false),
+            PayloadModelRef::Repository(key) => (*key, true),
+        };
+        let Some(value) = payload
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        if is_repository {
+            repositories.push(value.to_owned());
+        } else if !has_primary_carrier {
+            ids.push(value.to_owned());
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    for model_id in ids {
+        if payload_has_model_entry(payload, &model_id) {
+            continue;
+        }
+        let entry = crate::models::resolve_model_manifest_entry(state, &model_id).await?;
+        if entry.as_object().map_or(true, JsonObject::is_empty) {
+            return Err(ApiError::model_artifact_conflict(
+                format!("Runtime model '{model_id}' is not registered in the model catalog."),
+                "model_artifact_incomplete",
+            ));
+        }
+        push_model_entry(payload, entry)?;
+    }
+    for repository in repositories {
+        let entry = resolve_model_manifest_entry_by_repo(state, &repository).await?;
+        let entry_id = entry
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        if payload_has_model_entry(payload, &entry_id) {
+            continue;
+        }
+        push_model_entry(payload, entry)?;
+    }
+
+    preflight_payload_model_sources(state, payload).await
+}
+
+/// Resolve the exact catalog model whose supported download names `repository`.
+///
+/// Utility jobs historically carried provider repository strings rather than catalog ids. They
+/// now enter the same typed availability seam without trusting the caller to supply a parallel
+/// identity. An unregistered repository fails closed instead of bypassing durable source binding.
+pub(crate) async fn resolve_model_manifest_entry_by_repo(
+    state: &AppState,
+    repository: &str,
+) -> Result<Value, ApiError> {
+    let declares_repository = |entry: &Value| {
+        entry
+            .get("downloads")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|download| {
+                sceneworks_core::model_artifacts::artifact_selection::is_supported_model_download(
+                    download,
+                )
+            })
+            .any(|download| download.get("repo").and_then(Value::as_str) == Some(repository))
+    };
+    let model_id = crate::models::model_catalog(state)
+        .await?
+        .into_iter()
+        .find(|entry| declares_repository(entry))
+        .and_then(|entry| {
+            entry
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .ok_or_else(|| {
+            ApiError::model_artifact_conflict(
+                format!(
+                    "Model source repository '{repository}' is not registered in the model catalog."
+                ),
+                "model_artifact_incomplete",
+            )
+        })?;
+    let entry = crate::models::resolve_model_manifest_entry(state, &model_id).await?;
+    if entry.as_object().map_or(true, JsonObject::is_empty) {
+        return Err(ApiError::model_artifact_conflict(
+            format!("Runtime model '{model_id}' is not registered in the model catalog."),
+            "model_artifact_incomplete",
+        ));
+    }
+    Ok(entry)
+}
+
+/// App-owned resolved-local artifacts for LocalReady detection. Empty when the resolved cache is
+/// disabled or uninitialized; read-only (never creates a session or refreshes usage).
+pub(crate) fn local_resolved_artifacts(state: &AppState) -> Vec<ResolvedModelArtifact> {
+    if !state.settings.resolved_cache.enabled {
+        return Vec::new();
+    }
+    sceneworks_core::model_artifacts::resolved_cache::ResolvedCacheStore::enumerate_existing(
+        &state.settings.data_dir,
+    )
+    .map(|entries| {
+        entries
+            .into_iter()
+            .filter_map(|entry| entry.metadata.map(|metadata| metadata.artifact))
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// The one availability judgement for a manifest entry on this host: exact selected closure
+/// (host platform, requested variant) through the shared resolver. Sync + blocking FS.
+pub(crate) fn availability_for_entry(
+    data_dir: &Path,
+    entry: &Value,
+    requested_variant: Option<&str>,
+    local_artifacts: &[ResolvedModelArtifact],
+) -> ModelResolution {
+    let configured_library = sceneworks_core::hf_home::model_source_library(data_dir)
+        .root()
+        .to_path_buf();
+    let requirements = selected_requirements_for_model(
+        entry,
+        std::env::consts::OS,
+        requested_variant,
+        data_dir,
+    );
+    resolve_model_availability(data_dir, &configured_library, &requirements, local_artifacts)
+}
+
+/// Re-judge the externally sourced rows of a (possibly cached) catalog snapshot against the LIVE
+/// library state. The snapshot is rebuilt only when its inputs change, but a drive can disconnect
+/// or reconnect between rebuilds — the catalog must show the transition immediately, from the
+/// stamped requirement closure, without mutating receipts or the snapshot cache itself.
+pub(crate) async fn refresh_live_external_availability(
+    data_dir: &Path,
+    models: &mut Vec<Value>,
+) -> Result<(), ApiError> {
+    let needs_refresh = models.iter().any(|model| {
+        model
+            .get("modelResolution")
+            .is_some_and(|value| !value.is_null())
+    });
+    if !needs_refresh {
+        return Ok(());
+    }
+    let data_dir = data_dir.to_path_buf();
+    let input = std::mem::take(models);
+    *models = tokio::task::spawn_blocking(move || {
+        let mut models = input;
+        for model in &mut models {
+            let Some(resolution_value) = model
+                .get("modelResolution")
+                .filter(|value| !value.is_null())
+            else {
+                continue;
+            };
+            let Ok(resolution) =
+                serde_json::from_value::<ModelResolution>(resolution_value.clone())
+            else {
+                continue;
+            };
+            if !matches!(
+                resolution.availability,
+                ModelAvailability::ExternalReady
+                    | ModelAvailability::InstalledExternalUnavailable
+                    | ModelAvailability::Incomplete
+            ) || resolution.requirements.is_empty()
+            {
+                continue;
+            }
+            let live = resolve_model_availability(
+                &data_dir,
+                &resolution.configured_library_path,
+                &resolution.requirements,
+                &[],
+            );
+            if let Some(object) = model.as_object_mut() {
+                object.insert(
+                    "modelAvailability".to_owned(),
+                    serde_json::to_value(&live.availability).map_err(|error| {
+                        ApiError::internal(format!("serialize live model availability: {error}"))
+                    })?,
+                );
+                object.insert(
+                    "modelResolution".to_owned(),
+                    serde_json::to_value(&live).map_err(|error| {
+                        ApiError::internal(format!("serialize live model resolution: {error}"))
+                    })?,
+                );
+            }
+        }
+        Ok::<_, ApiError>(models)
+    })
+    .await
+    .map_err(|error| ApiError::internal(format!("external availability probe failed: {error}")))??;
+    Ok(())
+}
+
+/// Submission preflight over every carried model entry: reject with the typed 503 only when a
+/// model's durable install identity proves it lives on an unavailable external library.
+async fn preflight_payload_model_sources(
+    state: &AppState,
+    payload: &JsonObject,
+) -> Result<(), ApiError> {
+    let requested_variant = requested_runtime_variant(payload);
+    let entries = payload_model_entries(payload)
+        .into_iter()
+        .filter(|entry| {
+            entry
+                .get("downloads")
+                .and_then(Value::as_array)
+                .is_some_and(|downloads| !downloads.is_empty())
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let data_dir = state.settings.data_dir.clone();
+    let local_artifacts = local_resolved_artifacts(state);
+    tokio::task::spawn_blocking(move || {
+        for entry in &entries {
+            let resolution = availability_for_entry(
+                &data_dir,
+                entry,
+                requested_variant.as_deref(),
+                &local_artifacts,
+            );
+            if resolution.availability == ModelAvailability::InstalledExternalUnavailable {
+                let model_id = entry
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("<unknown>");
+                return Err(ApiError::external_model_library_unavailable(format!(
+                    "Model '{model_id}' is installed on an external model library that is \
+                     currently unavailable. Reconnect the configured library and retry; the \
+                     installation itself is preserved."
+                )));
+            }
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|error| ApiError::internal(format!("model source preflight failed: {error}")))?
+}
