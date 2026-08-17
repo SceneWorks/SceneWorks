@@ -100,6 +100,10 @@ mod credentials_ipc;
 // production seams are cfg'd out, so allow dead_code there (mirrors the generator_cache precedent).
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod cache_thread;
+// The single pre-loader model-source guard (sc-19708): every dispatched job's generic model
+// carriers are reduced to this platform's exact requirement closure and judged through the one
+// shared availability resolver before any handler constructs a loader.
+mod external_library_runtime;
 mod inference_runtime;
 // Backend-neutral generator load/run cache (epic 3720, sc-3724). Typed entirely against
 // `gen_core::*` (no tensor types leak), so it links on ALL targets — the production load seam
@@ -1633,7 +1637,15 @@ async fn run_utility_job(
     // timings are posted separately by the handlers and coalesce-merge server-side.
     let metrics_probe = job_metrics::JobMetricsProbe::start(&settings.gpu_id);
     let result = with_shutdown_flag(shutdown.clone(), async {
-        match job.job_type {
+        // sc-19708: the ONE pre-loader guard. Typed model-source admission happens here for every
+        // job type, before any handler runs; handlers never carry availability or cache policy.
+        let source_guard = external_library_runtime::RuntimeSourceGuard::begin(
+            &job.job_type,
+            &job.payload,
+            settings,
+        )
+        .map_err(|error| ("Model source unavailable.", error))?;
+        let dispatch_result = match job.job_type {
             JobType::Placeholder => run_placeholder_job(api, settings, &job, &shutdown)
                 .await
                 .map_err(|error| ("Placeholder job failed.", error)),
@@ -1870,6 +1882,15 @@ async fn run_utility_job(
                 .await;
                 result.map_err(|error| ("Utility job failed.", error))
             }
+        };
+        // Success releases the operation-owned source sessions; failure re-probes the exact bound
+        // sources so a mid-load disconnect surfaces as the typed unavailable condition instead of
+        // a raw loader error (sc-19708). An error with the source still present stays verbatim.
+        match dispatch_result {
+            Ok(()) => source_guard
+                .finish_success()
+                .map_err(|error| ("Model source session cleanup failed.", error)),
+            Err((message, error)) => Err((message, source_guard.classify_failure(settings, error))),
         }
     })
     .await;
