@@ -90,13 +90,37 @@ pub struct RetentionReport {
 
 /// Pre-removal report for one entry: exact reclaimable bytes, what currently blocks removal, and
 /// whether removal would make the model unavailable until its external source returns.
+/// Pin state as far as the preview could establish it. `Unknown` is deliberately not collapsed
+/// into "not pinned": a caller that cannot distinguish them would show a pinned entry as freely
+/// removable whenever a metadata read fails.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ManualRemovalPins {
+    Known {
+        artifact_pinned: bool,
+        owners: Vec<String>,
+    },
+    Unknown,
+}
+
+impl ManualRemovalPins {
+    /// True only when the entry is provably unpinned.
+    pub fn is_provably_unpinned(&self) -> bool {
+        matches!(
+            self,
+            Self::Known {
+                artifact_pinned: false,
+                owners,
+            } if owners.is_empty()
+        )
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ManualRemovalPreview {
     pub cache_key: String,
     pub state: ResolvedCacheEntryState,
     pub reclaimable_bytes: u64,
-    pub artifact_pinned: bool,
-    pub pin_owners: Vec<String>,
+    pub pins: ManualRemovalPins,
     /// `Some` when the authoritative source is currently unreachable or incomplete, so removing
     /// this entry leaves the model unavailable until the source returns.
     pub source_unavailable_warning: Option<String>,
@@ -134,7 +158,10 @@ pub struct ReconciliationReport {
     pub deferred: Vec<RetainedRecord>,
     /// Entries whose metadata is unreadable, so lifecycle matching was impossible. They are
     /// surfaced here (and in `enumerate`) instead of being silently skipped.
-    pub unmatched_unreadable: usize,
+    /// Digest-derived keys of entries whose metadata could not be read, so lifecycle matching was
+    /// impossible. Named rather than merely counted so a caller can log, surface and act on the
+    /// specific stranded entries instead of just knowing that some exist.
+    pub unmatched_unreadable: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -224,6 +251,15 @@ impl ResolvedCacheStore {
     /// Enforces the inactivity TTL and size limit with deterministic LRU ordering under the
     /// caller-supplied clock. Never blocks on artifact locks and never removes an entry that any
     /// protection covers; the report explains every retained entry.
+    ///
+    /// Clock sensitivity is deliberate and bounded. `now` is caller-supplied wall-clock seconds, so
+    /// a large *forward* jump (a corrected clock, a restored VM snapshot, a bad NTP step) makes
+    /// every entry look inactive at once and can expire the whole eligible set in a single pass.
+    /// That is bounded by the protections rather than by the clock: pinned, leased, in-flight and
+    /// recovery entries are still retained, and each eviction still has to prove the authoritative
+    /// source is a complete second copy, so a spurious sweep costs re-materialization time, never
+    /// data. A *backward* jump fails safe on its own — `saturating_sub` yields zero elapsed time,
+    /// so nothing expires.
     pub fn enforce_retention(
         &self,
         policy: &ResolvedCachePolicy,
@@ -300,11 +336,20 @@ impl ResolvedCacheStore {
         if std::fs::symlink_metadata(&entry).is_err() {
             return Err(ResolvedCacheError::new("no such resolved-cache entry"));
         }
-        let reclaimable_bytes = measure_entry_bytes(&entry)?;
+        // A preview must stay renderable even for an entry that cannot be walked (for example one
+        // holding a link, which the confined deleter would also refuse). Measurement failure
+        // degrades to an unknown size and becomes a refusal reason rather than an error.
+        let (reclaimable_bytes, unmeasurable) = match measure_entry_bytes(&entry) {
+            Ok(bytes) => (bytes, None),
+            Err(error) => (
+                0,
+                Some(format!("entry cannot be measured for removal: {error}")),
+            ),
+        };
         let active = self.artifact_lock_is_contended(&digest)?;
-        let (state, artifact_pinned, pin_owners, source_warning, blocked) = match self
-            .read_metadata_unlocked(&digest)
-        {
+        let active_block =
+            || active.then(|| "an active lease or reservation holds this entry".to_owned());
+        let (state, pins, source_warning, blocked) = match self.read_metadata_unlocked(&digest) {
             Ok(JournalRead::Valid { metadata, .. }) => {
                 let live_materializing = metadata.state == ResolvedCacheEntryState::Materializing
                     && self.materializing_session_is_live(&metadata)?;
@@ -314,7 +359,7 @@ impl ResolvedCacheStore {
                     None
                 };
                 let blocked = if active {
-                    Some("an active lease or reservation holds this entry".to_owned())
+                    active_block()
                 } else if live_materializing {
                     Some("a live session is materializing this entry".to_owned())
                 } else if metadata.effective_pin {
@@ -324,35 +369,63 @@ impl ResolvedCacheStore {
                 };
                 (
                     metadata.state.clone(),
-                    metadata.artifact_pinned,
-                    metadata.model_pin_owners.iter().cloned().collect(),
+                    ManualRemovalPins::Known {
+                        artifact_pinned: metadata.artifact_pinned,
+                        owners: metadata.model_pin_owners.iter().cloned().collect(),
+                    },
                     warning,
                     blocked,
                 )
             }
+            // A tombstoned entry is already gone as far as pins are concerned: the removal was
+            // authorized before the tombstone was written.
             Ok(JournalRead::Evicted { .. }) => (
                 ResolvedCacheEntryState::Evicting,
-                false,
-                Vec::new(),
+                ManualRemovalPins::Known {
+                    artifact_pinned: false,
+                    owners: Vec::new(),
+                },
                 None,
-                active.then(|| "an active lease or reservation holds this entry".to_owned()),
+                active_block(),
             ),
-            Ok(JournalRead::Missing) | Err(_) => (
+            // No journal, or both slots proven corrupt: no recoverable state can hold a pin.
+            Ok(JournalRead::Missing) => (
                 ResolvedCacheEntryState::Corrupt,
-                false,
-                Vec::new(),
+                ManualRemovalPins::Known {
+                    artifact_pinned: false,
+                    owners: Vec::new(),
+                },
                 None,
-                active.then(|| "an active lease or reservation holds this entry".to_owned()),
+                active_block(),
+            ),
+            Err(error) if error.is_unrecoverable_metadata() => (
+                ResolvedCacheEntryState::Corrupt,
+                ManualRemovalPins::Known {
+                    artifact_pinned: false,
+                    owners: Vec::new(),
+                },
+                None,
+                active_block(),
+            ),
+            // The state could not be read, so the pins are genuinely unknown. Reporting "not
+            // pinned" here would present a pinned entry to the UI as freely removable, so the
+            // preview reports unknown and blocks, matching what `remove_entry` will do.
+            Err(error) => (
+                ResolvedCacheEntryState::Corrupt,
+                ManualRemovalPins::Unknown,
+                None,
+                Some(format!(
+                    "cannot remove a resolved-cache entry whose state cannot be read: {error}"
+                )),
             ),
         };
         Ok(ManualRemovalPreview {
             cache_key: cache_key.to_owned(),
             state,
             reclaimable_bytes,
-            artifact_pinned,
-            pin_owners,
+            pins,
             source_unavailable_warning: source_warning,
-            blocked,
+            blocked: blocked.or(unmeasurable),
         })
     }
 
@@ -408,9 +481,19 @@ impl ResolvedCacheStore {
                     warning = self.probe_source_reachable(&metadata).err();
                 }
             }
-            // Corrupt journal slots or an invalid tombstone: manual removal is exactly how a user
-            // clears unrecoverable residue after recovery has given up on it.
-            Ok(JournalRead::Missing) | Err(_) => {}
+            // No journal at all, or both slots proven corrupt: there is no recoverable state left
+            // that could carry a pin or a live materialization, and manual removal is exactly how a
+            // user clears that residue after recovery has given up on it.
+            Ok(JournalRead::Missing) => {}
+            Err(error) if error.is_unrecoverable_metadata() => {}
+            // Every other read failure — transient IO, descriptor pressure, or the fail-closed
+            // refusal of a linked/non-regular tombstone — leaves the pin and materialization state
+            // unknown. Removing here could delete a pinned entry, so it refuses instead.
+            Err(error) => {
+                return Err(ResolvedCacheError::new(format!(
+                    "cannot remove a resolved-cache entry whose state cannot be read: {error}"
+                )));
+            }
         }
         let reclaimed_bytes = measure_entry_bytes(&entry)?;
         self.write_eviction_marker(
@@ -433,11 +516,17 @@ impl ResolvedCacheStore {
     }
 
     /// Reconciles a source-library lifecycle event (full uninstall, single-tier deletion,
-    /// revision replacement) with the resolved cache: every entry whose primary provenance
-    /// matches the selector is removed — including pinned entries, because the model itself was
-    /// explicitly removed — while active leases and live materializations are deferred and
+    /// revision replacement) with the resolved cache: every entry whose primary provenance matches
+    /// the selector is removed, while active leases and live materializations are deferred and
     /// reported for a later pass. Entries that only share components with the selected model are
-    /// untouched and stay valid.
+    /// untouched and stay valid, because their bundles are self-contained.
+    ///
+    /// **Pinned entries are removed here.** This is the one deliberate carve-out from the
+    /// otherwise absolute never-remove-pinned invariant, and it is not an oversight: a pin means
+    /// "keep this local copy of this model", but reconciliation only runs because the model itself
+    /// was explicitly uninstalled. Honoring the pin would keep bytes for a model the user removed
+    /// and that nothing can load — stranded state, not a kept promise. Automatic retention
+    /// (TTL/LRU/size) never does this; only an explicit lifecycle event does.
     pub fn reconcile_removed_source(
         &self,
         selector: &SourceLifecycleSelector,
@@ -457,7 +546,7 @@ impl ResolvedCacheStore {
                     // Pending evictions already have their own audited convergence.
                     Ok(JournalRead::Evicted { .. }) | Ok(JournalRead::Missing) => continue,
                     Err(_) => {
-                        report.unmatched_unreadable += 1;
+                        report.unmatched_unreadable.push(format!("sha256:{digest}"));
                         continue;
                     }
                 }
@@ -465,13 +554,14 @@ impl ResolvedCacheStore {
             if !selector_matches(selector, &metadata) {
                 continue;
             }
+            let entry = self.inner.root.join("entries").join(&digest);
             let artifact_lock = open_lock_file(&self.artifact_lock_path(&digest))?;
             match FileExt::try_lock_exclusive(&artifact_lock) {
                 Ok(()) => {}
                 Err(error) if is_lock_contended(&error) => {
                     report.deferred.push(RetainedRecord {
                         cache_key: metadata.cache_key.clone(),
-                        bytes: metadata.verified_bytes,
+                        bytes: entry_bytes(&entry, &metadata),
                         hold: RetentionHold::ActiveUse,
                         detail: None,
                     });
@@ -493,13 +583,12 @@ impl ResolvedCacheStore {
             {
                 report.deferred.push(RetainedRecord {
                     cache_key: metadata.cache_key.clone(),
-                    bytes: metadata.verified_bytes,
+                    bytes: entry_bytes(&entry, &metadata),
                     hold: RetentionHold::MaterializationInProgress,
                     detail: None,
                 });
                 continue;
             }
-            let entry = self.inner.root.join("entries").join(&digest);
             let bytes = measure_entry_bytes(&entry)?;
             self.write_eviction_marker(
                 &digest,
@@ -553,6 +642,7 @@ impl ResolvedCacheStore {
         report: &mut RetentionReport,
         candidates: &mut Vec<EvictionCandidate>,
     ) -> Result<(), ResolvedCacheError> {
+        let entry = self.inner.root.join("entries").join(digest);
         let _metadata_lock = self.lock_metadata(digest)?;
         match self.read_metadata_unlocked(digest) {
             Ok(JournalRead::Valid { metadata, .. }) => match metadata.state {
@@ -560,7 +650,7 @@ impl ResolvedCacheStore {
                     if let Err(error) = validate_complete_metadata(self, &metadata) {
                         report.retained.push(RetainedRecord {
                             cache_key: metadata.cache_key.clone(),
-                            bytes: metadata.verified_bytes,
+                            bytes: entry_bytes(&entry, &metadata),
                             hold: RetentionHold::RecoveryCandidate,
                             detail: Some(error.to_string()),
                         });
@@ -569,7 +659,7 @@ impl ResolvedCacheStore {
                     if metadata.effective_pin {
                         report.retained.push(RetainedRecord {
                             cache_key: metadata.cache_key.clone(),
-                            bytes: metadata.verified_bytes,
+                            bytes: entry_bytes(&entry, &metadata),
                             hold: RetentionHold::Pinned,
                             detail: None,
                         });
@@ -578,7 +668,7 @@ impl ResolvedCacheStore {
                     if self.artifact_lock_is_contended(digest)? {
                         report.retained.push(RetainedRecord {
                             cache_key: metadata.cache_key.clone(),
-                            bytes: metadata.verified_bytes,
+                            bytes: entry_bytes(&entry, &metadata),
                             hold: RetentionHold::ActiveUse,
                             detail: None,
                         });
@@ -586,7 +676,7 @@ impl ResolvedCacheStore {
                     }
                     candidates.push(EvictionCandidate {
                         cache_key: metadata.cache_key.clone(),
-                        bytes: metadata.verified_bytes,
+                        bytes: entry_bytes(&entry, &metadata),
                         activity: entry_activity(&metadata),
                         created_at: metadata.created_at,
                     });
@@ -599,7 +689,7 @@ impl ResolvedCacheStore {
                     };
                     report.retained.push(RetainedRecord {
                         cache_key: metadata.cache_key.clone(),
-                        bytes: metadata.verified_bytes,
+                        bytes: entry_bytes(&entry, &metadata),
                         hold,
                         detail: None,
                     });
@@ -607,7 +697,7 @@ impl ResolvedCacheStore {
                 _ => {
                     report.retained.push(RetainedRecord {
                         cache_key: metadata.cache_key.clone(),
-                        bytes: metadata.verified_bytes,
+                        bytes: entry_bytes(&entry, &metadata),
                         hold: RetentionHold::RecoveryCandidate,
                         detail: None,
                     });
@@ -669,6 +759,14 @@ impl ResolvedCacheStore {
     /// Re-acquires the locks and re-verifies every protection before removing one candidate. Any
     /// doubt — pin, lease, state change, usage since the scan, local validation failure, or an
     /// unverifiable source — retains the entry.
+    ///
+    /// The sole-copy proof re-hashes every source file, which is minutes of work on a multi-GB
+    /// bundle, so it deliberately runs with **no artifact lock held**: `acquire_complete` takes the
+    /// artifact lock *blocking*, and hashing underneath the exclusive lock would stall any model
+    /// load of that artifact for the whole hash. Phase one establishes the proof unlocked; phase
+    /// two takes the exclusive lock and re-verifies only cheap facts — journal generation, state,
+    /// pin, activity, path/size validation and a stat-only source recheck — before the tombstone is
+    /// written. Anything that changed in between retains the entry rather than trusting phase one.
     fn evict_candidate(
         &self,
         candidate: &EvictionCandidate,
@@ -676,20 +774,48 @@ impl ResolvedCacheStore {
         now: u64,
     ) -> Result<EvictAttempt, ResolvedCacheError> {
         let digest = cache_key_digest(&candidate.cache_key)?;
+        let retained = |hold: RetentionHold, detail: Option<String>| {
+            Ok(EvictAttempt::Retained(RetainedRecord {
+                cache_key: candidate.cache_key.clone(),
+                bytes: candidate.bytes,
+                hold,
+                detail,
+            }))
+        };
+
+        // Phase one: no artifact lock. Read the entry, cheaply reject anything already protected,
+        // then pay for the sole-copy proof while concurrent loads can still acquire the artifact.
+        // Tombstones, missing journals and unreadable entries carry no usable proof; phase two
+        // resolves each of them under the exclusive lock, where they can be acted on safely.
+        let scanned = {
+            let _metadata_lock = self.lock_metadata(&digest)?;
+            match self.read_metadata_unlocked(&digest) {
+                Ok(JournalRead::Valid { metadata, .. }) => Some(*metadata),
+                _ => None,
+            }
+        };
+        let source_proof = match &scanned {
+            Some(scanned)
+                if scanned.state == ResolvedCacheEntryState::Complete
+                    && !scanned.effective_pin
+                    && entry_activity(scanned) == candidate.activity =>
+            {
+                Some(self.verify_source_complete(scanned))
+            }
+            _ => None,
+        };
+
+        // Phase two: exclusive artifact lock, then re-verify everything cheaply.
         let artifact_lock = open_lock_file(&self.artifact_lock_path(&digest))?;
         match FileExt::try_lock_exclusive(&artifact_lock) {
             Ok(()) => {}
             Err(error) if is_lock_contended(&error) => {
-                return Ok(EvictAttempt::Retained(RetainedRecord {
-                    cache_key: candidate.cache_key.clone(),
-                    bytes: candidate.bytes,
-                    hold: RetentionHold::ActiveUse,
-                    detail: None,
-                }));
+                return retained(RetentionHold::ActiveUse, None);
             }
             Err(error) => return Err(error.into()),
         }
         let _metadata_lock = self.lock_metadata(&digest)?;
+        let entry = self.inner.root.join("entries").join(&digest);
         let metadata = match self.read_metadata_unlocked(&digest) {
             Ok(JournalRead::Valid { metadata, .. }) => *metadata,
             Ok(JournalRead::Evicted { .. }) => {
@@ -700,57 +826,63 @@ impl ResolvedCacheStore {
                     cause: marker.cause,
                 }));
             }
-            Ok(JournalRead::Missing) => return Ok(EvictAttempt::AlreadyGone),
+            Ok(JournalRead::Missing) => {
+                // Only an entry directory that is genuinely gone may be subtracted from the size
+                // accounting; a present-but-journal-less entry still occupies its bytes.
+                return if std::fs::symlink_metadata(&entry).is_err() {
+                    Ok(EvictAttempt::AlreadyGone)
+                } else {
+                    retained(
+                        RetentionHold::RecoveryCandidate,
+                        Some("entry has no readable journal".to_owned()),
+                    )
+                };
+            }
             Err(error) => {
-                return Ok(EvictAttempt::Retained(RetainedRecord {
-                    cache_key: candidate.cache_key.clone(),
-                    bytes: candidate.bytes,
-                    hold: RetentionHold::RecoveryCandidate,
-                    detail: Some(error.to_string()),
-                }));
+                return retained(RetentionHold::RecoveryCandidate, Some(error.to_string()));
             }
         };
         if metadata.state != ResolvedCacheEntryState::Complete {
-            return Ok(EvictAttempt::Retained(RetainedRecord {
-                cache_key: candidate.cache_key.clone(),
-                bytes: candidate.bytes,
-                hold: RetentionHold::RecoveryCandidate,
-                detail: None,
-            }));
+            return retained(RetentionHold::RecoveryCandidate, None);
         }
         if metadata.effective_pin {
-            return Ok(EvictAttempt::Retained(RetainedRecord {
-                cache_key: candidate.cache_key.clone(),
-                bytes: candidate.bytes,
-                hold: RetentionHold::Pinned,
-                detail: None,
-            }));
+            return retained(RetentionHold::Pinned, None);
         }
         if entry_activity(&metadata) != candidate.activity {
             // The entry was used between the scan and this attempt: its LRU position is stale, so
             // this round retains it.
-            return Ok(EvictAttempt::Retained(RetainedRecord {
-                cache_key: candidate.cache_key.clone(),
-                bytes: candidate.bytes,
-                hold: RetentionHold::Fresh,
-                detail: Some("entry was used after it was scanned".to_owned()),
-            }));
+            return retained(
+                RetentionHold::Fresh,
+                Some("entry was used after it was scanned".to_owned()),
+            );
         }
-        if let Err(error) = validate_complete_metadata(self, &metadata) {
-            return Ok(EvictAttempt::Retained(RetainedRecord {
-                cache_key: candidate.cache_key.clone(),
-                bytes: candidate.bytes,
-                hold: RetentionHold::RecoveryCandidate,
-                detail: Some(error.to_string()),
-            }));
+        // The unlocked proof is only usable if the entry is byte-for-byte the one it was taken
+        // against; any journal write in between invalidates it.
+        let snapshot = match source_proof {
+            Some(Ok(snapshot))
+                if scanned
+                    .as_ref()
+                    .is_some_and(|scanned| scanned.updated_at == metadata.updated_at) =>
+            {
+                snapshot
+            }
+            Some(Err(detail)) => return retained(RetentionHold::SourceUnverified, Some(detail)),
+            _ => {
+                return retained(
+                    RetentionHold::Fresh,
+                    Some("entry changed while its source was being verified".to_owned()),
+                );
+            }
+        };
+        if let Err(error) = validate_complete_metadata_inner(
+            self,
+            &metadata,
+            ContentVerification::PathsAndSizesOnly,
+        ) {
+            return retained(RetentionHold::RecoveryCandidate, Some(error.to_string()));
         }
-        if let Err(detail) = self.verify_source_complete(&metadata) {
-            return Ok(EvictAttempt::Retained(RetainedRecord {
-                cache_key: candidate.cache_key.clone(),
-                bytes: candidate.bytes,
-                hold: RetentionHold::SourceUnverified,
-                detail: Some(detail),
-            }));
+        if let Err(detail) = revalidate_source_snapshot(&snapshot) {
+            return retained(RetentionHold::SourceUnverified, Some(detail));
         }
         self.write_eviction_marker(
             &digest,
@@ -758,7 +890,11 @@ impl ResolvedCacheStore {
                 schema_version: RESOLVED_CACHE_STORE_VERSION,
                 cache_key: metadata.cache_key.clone(),
                 cause,
-                reclaimable_bytes: metadata.verified_bytes,
+                // Actual on-disk bytes, deduplicated across hard links within the entry, rather
+                // than the logical closure sum: materialization hard-links files repeated inside
+                // one bundle, so the logical sum over-reports what removal reclaims and would
+                // over-drive size enforcement.
+                reclaimable_bytes: measure_entry_bytes(&entry).unwrap_or(metadata.verified_bytes),
                 requested_at: now,
                 session_id: self.inner.session_id.clone(),
             },
@@ -816,19 +952,43 @@ impl ResolvedCacheStore {
     /// the recorded configured library and re-runs the full closure resolution, which checks
     /// reachability, confinement, sizes, and the enriched sha256 hashes of every member file. Any
     /// failure means the resolved bundle may be the sole complete copy.
-    fn verify_source_complete(&self, metadata: &ResolvedCacheMetadata) -> Result<(), String> {
+    ///
+    /// This is the expensive half of eviction and runs with no artifact lock held. It returns the
+    /// exact identity of what it verified so the decision can be re-confirmed cheaply under the
+    /// lock; see [`revalidate_source_snapshot`].
+    fn verify_source_complete(
+        &self,
+        metadata: &ResolvedCacheMetadata,
+    ) -> Result<SourceSnapshot, String> {
         let library = self.source_library_for(metadata)?;
         let snapshot = library
             .repository_root(&metadata.artifact.identity.repository)
             .map_err(|error| error.to_string())?
             .join("snapshots")
             .join(&metadata.artifact.identity.revision);
-        metadata
+        let locations = metadata
             .artifact
             .closure
             .source_file_locations(&metadata.artifact.identity, &snapshot)
-            .map(|_| ())
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        #[cfg(test)]
+        run_source_hash_observer();
+        let mut files = Vec::with_capacity(locations.len());
+        for location in locations {
+            let file_metadata =
+                std::fs::symlink_metadata(&location.source_path).map_err(|error| {
+                    format!(
+                        "verified source file {} became unavailable: {error}",
+                        location.source_path.display()
+                    )
+                })?;
+            files.push(VerifiedSourceFile {
+                len: file_metadata.len(),
+                modified: file_metadata.modified().ok(),
+                path: location.source_path,
+            });
+        }
+        Ok(SourceSnapshot { files })
     }
 
     /// Advisory source probe for manual-removal warnings: reachability plus per-file existence
@@ -872,6 +1032,77 @@ impl ResolvedCacheStore {
         })?;
         ArtifactSourceLibrary::new(canonical).map_err(|error| error.to_string())
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    static SOURCE_HASH_OBSERVER: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs once, from inside the unlocked source-verification work, so a test can observe which locks
+/// are held at that moment.
+#[cfg(test)]
+fn set_source_hash_observer(observer: impl FnOnce() + 'static) {
+    SOURCE_HASH_OBSERVER.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(observer));
+    });
+}
+
+#[cfg(test)]
+fn run_source_hash_observer() {
+    SOURCE_HASH_OBSERVER.with(|slot| {
+        if let Some(observer) = slot.borrow_mut().take() {
+            observer();
+        }
+    });
+}
+
+/// Actual on-disk bytes of one entry, falling back to the logical closure sum when the entry
+/// cannot be walked. Materialization hard-links files repeated inside a bundle, so the logical sum
+/// over-reports what a removal would reclaim; measuring keeps reporting and size enforcement honest.
+fn entry_bytes(entry: &Path, metadata: &ResolvedCacheMetadata) -> u64 {
+    measure_entry_bytes(entry).unwrap_or(metadata.verified_bytes)
+}
+
+/// Exactly which source bytes the unlocked sole-copy proof covered.
+#[derive(Clone, Debug)]
+struct SourceSnapshot {
+    files: Vec<VerifiedSourceFile>,
+}
+
+#[derive(Clone, Debug)]
+struct VerifiedSourceFile {
+    path: PathBuf,
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+/// Cheap re-confirmation of an already-hashed source, run under the exclusive lock: every verified
+/// file must still be a regular file of the same length and modification time. This is stat-only by
+/// design — re-hashing here is exactly what would stall a concurrent model load.
+fn revalidate_source_snapshot(snapshot: &SourceSnapshot) -> Result<(), String> {
+    for file in &snapshot.files {
+        let current = std::fs::symlink_metadata(&file.path).map_err(|error| {
+            format!(
+                "verified source file {} became unavailable: {error}",
+                file.path.display()
+            )
+        })?;
+        if current.file_type().is_symlink() || !current.is_file() {
+            return Err(format!(
+                "verified source file {} is no longer a regular file",
+                file.path.display()
+            ));
+        }
+        if current.len() != file.len || current.modified().ok() != file.modified {
+            return Err(format!(
+                "verified source file {} changed while the eviction was being authorized",
+                file.path.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn entry_activity(metadata: &ResolvedCacheMetadata) -> u64 {

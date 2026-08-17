@@ -46,6 +46,10 @@ const STORE_MARKER: &str = ".sceneworks-resolved-cache-v1";
 const STORE_MARKER_BODY: &[u8] = b"sceneworks-resolved-cache\nschema=1\n";
 const EVICTED_MARKER_FILE: &str = "evicted.marker.json";
 const AUDIT_DIR: &str = "audit";
+/// The one journal-read failure that means "this entry holds no recoverable state", as opposed to
+/// a transient or environmental read failure. Manual removal is allowed to clear it; every other
+/// read error must refuse, because it cannot rule out a pin or an in-flight materialization.
+const BOTH_METADATA_SLOTS_CORRUPT: &str = "both cache metadata slots are corrupt";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -171,6 +175,12 @@ pub struct ResolvedCacheError(String);
 impl ResolvedCacheError {
     fn new(message: impl Into<String>) -> Self {
         Self(message.into())
+    }
+
+    /// True only for the journal read failure that proves the entry retains no recoverable
+    /// state — never for a transient, environmental, or fail-closed refusal.
+    pub fn is_unrecoverable_metadata(&self) -> bool {
+        self.0 == BOTH_METADATA_SLOTS_CORRUPT
     }
 }
 
@@ -940,24 +950,50 @@ impl ResolvedCacheStore {
     /// interruption: rerunning after a crash converges because the tombstone survives until the
     /// directory removal completes.
     ///
-    /// Ordering is deliberate. The tombstone is the durable record of *intent* and the audit
-    /// record is the durable record of *completion*, so the audit write follows the removal it
-    /// describes: writing it first (as an earlier revision did) reports a removal that a failed
-    /// deletion never performed — a Windows sharing violation produced exactly that false
-    /// "completed" record.
+    /// The audit trail is two-state so a removal failure and an audit-write failure stay
+    /// distinguishable. A `Started` record is written *before* the last unlink, so the intent
+    /// survives outside the entry even though the tombstone dies with it; the record is then
+    /// rewritten `Completed` once the bytes are actually gone. A `Started` record left behind by a
+    /// crash or a sharing violation is therefore an honest "attempted, unconfirmed" — never the
+    /// false "completed" an earlier revision recorded — and the deterministic per-entry record
+    /// path means a retry overwrites its own record instead of accumulating duplicates.
+    ///
+    /// Audit-write failures after a successful removal do not fail the eviction: the bytes really
+    /// are gone, so reporting failure would corrupt size accounting and re-drive eviction. Those
+    /// are warned instead.
     fn finish_pending_eviction(&self, digest: &str) -> Result<EvictionMarker, ResolvedCacheError> {
         let marker = self.read_eviction_marker(digest)?.ok_or_else(|| {
             ResolvedCacheError::new("cache entry has no eviction tombstone to finish")
         })?;
+        if let Err(error) =
+            self.write_eviction_audit_record(digest, &marker, EvictionAuditStatus::Started)
+        {
+            tracing::warn!(
+                cache_key = %marker.cache_key,
+                error = %error,
+                "could not record resolved-cache eviction intent before removal"
+            );
+        }
         let entries = self.inner.root.join("entries");
         remove_managed_tree(&entries.join(digest), &entries)?;
-        self.write_eviction_audit_record(&marker)?;
+        if let Err(error) =
+            self.write_eviction_audit_record(digest, &marker, EvictionAuditStatus::Completed)
+        {
+            tracing::warn!(
+                cache_key = %marker.cache_key,
+                error = %error,
+                "resolved-cache entry was removed but its completed audit record could not be \
+                 written; the started record remains"
+            );
+        }
         Ok(marker)
     }
 
     fn write_eviction_audit_record(
         &self,
+        digest: &str,
         marker: &EvictionMarker,
+        status: EvictionAuditStatus,
     ) -> Result<(), ResolvedCacheError> {
         let audit = self.inner.root.join(AUDIT_DIR);
         match std::fs::create_dir(&audit) {
@@ -969,10 +1005,11 @@ impl ResolvedCacheStore {
         let record = EvictionAuditRecord {
             schema_version: RESOLVED_CACHE_STORE_VERSION,
             marker: marker.clone(),
-            completed_at: now_seconds()?,
-            completed_by_session: self.inner.session_id.clone(),
+            status,
+            recorded_at: now_seconds()?,
+            recorded_by_session: self.inner.session_id.clone(),
         };
-        let name = format!("{}-{}.json", marker.requested_at, random_id()?);
+        let name = format!("{digest}-{}.json", marker.requested_at);
         atomic_write_json(&audit.join(name), &record)
     }
 
@@ -1007,9 +1044,7 @@ impl ResolvedCacheStore {
             });
         }
         if had_file {
-            Err(ResolvedCacheError::new(
-                "both cache metadata slots are corrupt",
-            ))
+            Err(ResolvedCacheError::new(BOTH_METADATA_SLOTS_CORRUPT))
         } else {
             Ok(JournalRead::Missing)
         }
@@ -1541,15 +1576,25 @@ fn eviction_marker_checksum(marker: &EvictionMarker) -> Result<String, ResolvedC
     Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
 }
 
-/// Post-removal audit record persisted outside the removed entry so the eviction remains
-/// auditable after the entry directory is gone.
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct EvictionAuditRecord {
-    schema_version: u32,
-    marker: EvictionMarker,
-    completed_at: u64,
-    completed_by_session: String,
+/// Audit record persisted outside the removed entry so the eviction remains auditable after the
+/// entry directory (and the tombstone inside it) is gone.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EvictionAuditRecord {
+    pub schema_version: u32,
+    pub marker: EvictionMarker,
+    pub status: EvictionAuditStatus,
+    pub recorded_at: u64,
+    pub recorded_by_session: String,
+}
+
+/// `Started` means the removal was authorized and attempted; `Completed` means the bytes are
+/// confirmed gone. A record left at `Started` is an attempted-but-unconfirmed removal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvictionAuditStatus {
+    Started,
+    Completed,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1788,6 +1833,27 @@ fn validate_complete_metadata(
     store: &ResolvedCacheStore,
     metadata: &ResolvedCacheMetadata,
 ) -> Result<(), ResolvedCacheError> {
+    validate_complete_metadata_inner(store, metadata, ContentVerification::RehashEveryFile)
+}
+
+/// How thoroughly a complete entry's own bundle bytes are re-verified.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ContentVerification {
+    /// Re-reads and re-hashes every bundle file. Required before handing an artifact to a runtime
+    /// load, and the cost is proportional to the bundle size.
+    RehashEveryFile,
+    /// Validates identity, shape, confinement, file presence and sizes, but does not re-hash file
+    /// contents. Used by retention, which is deciding whether to *delete* the bundle rather than
+    /// load it: the link/escape confinement checks are what keep a removal inside the managed
+    /// root, while re-hashing gigabytes would hold locks that block model loads.
+    PathsAndSizesOnly,
+}
+
+fn validate_complete_metadata_inner(
+    store: &ResolvedCacheStore,
+    metadata: &ResolvedCacheMetadata,
+    verification: ContentVerification,
+) -> Result<(), ResolvedCacheError> {
     let digest = cache_key_digest(&metadata.cache_key)?;
     validate_metadata_shape(metadata, &digest)?;
     if metadata.state != ResolvedCacheEntryState::Complete
@@ -1805,10 +1871,20 @@ fn validate_complete_metadata(
         ));
     }
     validate_completion_confinement(store, &metadata.cache_key, &metadata.artifact)?;
-    metadata
-        .artifact
-        .validate()
-        .map_err(|error| ResolvedCacheError::new(error.to_string()))?;
+    // Stripping the recorded hashes makes `validate` check identity, confinement, file presence
+    // and sizes while skipping the content re-read; every other invariant is unchanged, and the
+    // cache key deliberately excludes post-copy verification enrichment, so it is unaffected.
+    match verification {
+        ContentVerification::RehashEveryFile => metadata
+            .artifact
+            .validate()
+            .map_err(|error| ResolvedCacheError::new(error.to_string()))?,
+        ContentVerification::PathsAndSizesOnly => {
+            artifact_without_content_hashes(&metadata.artifact)
+                .validate()
+                .map_err(|error| ResolvedCacheError::new(error.to_string()))?
+        }
+    }
     if metadata
         .artifact
         .cache_key()
@@ -1821,6 +1897,16 @@ fn validate_complete_metadata(
         ));
     }
     Ok(())
+}
+
+fn artifact_without_content_hashes(artifact: &ResolvedModelArtifact) -> ResolvedModelArtifact {
+    let mut artifact = artifact.clone();
+    for member in &mut artifact.closure.members {
+        for file in &mut member.files {
+            file.sha256 = None;
+        }
+    }
+    artifact
 }
 
 fn validate_completion_confinement(

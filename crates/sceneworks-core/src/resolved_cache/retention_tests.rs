@@ -5,6 +5,8 @@ use crate::model_artifacts::{
     ModelArtifactResolver, ResolvedBundleClosure, ResolvedBundleMember,
     MODEL_ARTIFACT_CONTRACT_VERSION,
 };
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tempfile::TempDir;
 
 const REV_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -204,17 +206,41 @@ fn entry_dir(store: &ResolvedCacheStore, cache_key: &str) -> PathBuf {
     store.entry_path(cache_key).unwrap()
 }
 
-fn audit_records(store: &ResolvedCacheStore) -> Vec<PathBuf> {
+fn audit_records(store: &ResolvedCacheStore) -> Vec<EvictionAuditRecord> {
     let audit = store.root().join(AUDIT_DIR);
     if !audit.exists() {
         return Vec::new();
     }
-    let mut records = std::fs::read_dir(audit)
+    let mut paths = std::fs::read_dir(audit)
         .unwrap()
         .map(|item| item.unwrap().path())
         .collect::<Vec<_>>();
-    records.sort();
-    records
+    paths.sort();
+    paths
+        .into_iter()
+        .map(|path| {
+            serde_json::from_slice::<EvictionAuditRecord>(&std::fs::read(&path).unwrap())
+                .unwrap_or_else(|error| {
+                    panic!("audit record {} is unreadable: {error}", path.display())
+                })
+        })
+        .collect()
+}
+
+/// Records for removals whose bytes are confirmed gone. A `Started` record is only an attempt.
+fn completed_audit_records(store: &ResolvedCacheStore) -> Vec<EvictionAuditRecord> {
+    audit_records(store)
+        .into_iter()
+        .filter(|record| record.status == EvictionAuditStatus::Completed)
+        .collect()
+}
+
+/// Actual on-disk bytes of one entry, as retention itself accounts for them.
+fn measured_bytes(store: &ResolvedCacheStore, cache_key: &str) -> u64 {
+    store
+        .manual_removal_preview(cache_key)
+        .unwrap()
+        .reclaimable_bytes
 }
 
 fn retained_hold(report: &RetentionReport, cache_key: &str) -> RetentionHold {
@@ -242,13 +268,18 @@ fn lru_size_eviction_and_ttl_are_deterministic_under_a_fake_clock() {
     stamp_activity(&store, &candidate_b.cache_key, Some(2_000), 500);
     stamp_activity(&store, &candidate_c.cache_key, Some(3_000), 500);
 
-    // Size pressure: 30 bytes of complete entries against a 25-byte limit evicts exactly the
-    // least recently used entry.
+    // Size pressure: a limit one entry short of the measured total evicts exactly the least
+    // recently used entry. Sizes are measured rather than hardcoded because accounting is the
+    // entry's real on-disk footprint (bundle plus journal and receipt), not the closure sum.
+    let bytes_a = measured_bytes(&store, &candidate_a.cache_key);
+    let bytes_b = measured_bytes(&store, &candidate_b.cache_key);
+    let bytes_c = measured_bytes(&store, &candidate_c.cache_key);
+    let total = bytes_a + bytes_b + bytes_c;
     let report = store
-        .enforce_retention(&policy(25, 1_000_000), 10_000)
+        .enforce_retention(&policy(total - bytes_a, 1_000_000), 10_000)
         .unwrap();
-    assert_eq!(report.complete_bytes_before, 30);
-    assert_eq!(report.complete_bytes_after, 20);
+    assert_eq!(report.complete_bytes_before, total);
+    assert_eq!(report.complete_bytes_after, bytes_b + bytes_c);
     assert!(report.limit_satisfied);
     assert!(report.failed.is_empty());
     assert_eq!(
@@ -263,7 +294,7 @@ fn lru_size_eviction_and_ttl_are_deterministic_under_a_fake_clock() {
             .collect::<Vec<_>>(),
         vec![(
             candidate_a.cache_key.as_str(),
-            10,
+            bytes_a,
             EvictionCause::SizePressure
         )]
     );
@@ -284,7 +315,7 @@ fn lru_size_eviction_and_ttl_are_deterministic_under_a_fake_clock() {
         .lookup_complete(&candidate_c.cache_key)
         .unwrap()
         .is_some());
-    assert_eq!(audit_records(&store).len(), 1);
+    assert_eq!(completed_audit_records(&store).len(), 1);
 
     // TTL: with the fake clock at 2_000 + ttl, entry b (activity 2_000) is expired and entry c
     // (activity 3_000) is not — deterministically.
@@ -307,7 +338,7 @@ fn lru_size_eviction_and_ttl_are_deterministic_under_a_fake_clock() {
         .lookup_complete(&candidate_c.cache_key)
         .unwrap()
         .is_some());
-    assert_eq!(audit_records(&store).len(), 2);
+    assert_eq!(completed_audit_records(&store).len(), 2);
 }
 
 #[test]
@@ -321,8 +352,12 @@ fn equal_activity_lru_ties_break_deterministically_by_cache_key() {
     materialize_complete(&store, &library, &candidate_b);
     stamp_activity(&store, &candidate_a.cache_key, Some(1_000), 500);
     stamp_activity(&store, &candidate_b.cache_key, Some(1_000), 500);
+    // A limit that leaves room for exactly one of the two equally-aged entries.
+    let bytes_a = measured_bytes(&store, &candidate_a.cache_key);
+    let bytes_b = measured_bytes(&store, &candidate_b.cache_key);
+    let limit = std::cmp::max(bytes_a, bytes_b);
     let report = store
-        .enforce_retention(&policy(10, 1_000_000), 10_000)
+        .enforce_retention(&policy(limit, 1_000_000), 10_000)
         .unwrap();
     let expected = std::cmp::min(&candidate_a.cache_key, &candidate_b.cache_key);
     assert_eq!(report.evicted.len(), 1);
@@ -528,11 +563,13 @@ fn size_enforcement_explains_why_protected_entries_prevent_reaching_the_limit() 
     store
         .set_artifact_pin(&candidate_b.cache_key, true)
         .unwrap();
+    let total = measured_bytes(&store, &candidate_a.cache_key)
+        + measured_bytes(&store, &candidate_b.cache_key);
     let report = store.enforce_retention(&policy(1, 1), FAR_FUTURE).unwrap();
     assert!(report.evicted.is_empty());
     assert!(!report.limit_satisfied);
-    assert_eq!(report.complete_bytes_before, 20);
-    assert_eq!(report.complete_bytes_after, 20);
+    assert_eq!(report.complete_bytes_before, total);
+    assert_eq!(report.complete_bytes_after, total);
     assert_eq!(report.retained.len(), 2);
     assert!(report
         .retained
@@ -570,7 +607,13 @@ fn manual_remove_reports_reclaimable_bytes_and_respects_pins_and_leases() {
         .manual_removal_preview(&candidate_a.cache_key)
         .unwrap();
     assert!(preview.blocked.as_deref().unwrap().contains("pinned"));
-    assert!(preview.artifact_pinned);
+    assert_eq!(
+        preview.pins,
+        ManualRemovalPins::Known {
+            artifact_pinned: true,
+            owners: Vec::new(),
+        }
+    );
     assert!(preview.source_unavailable_warning.is_none());
     assert!(preview.reclaimable_bytes >= 10);
     let error = store
@@ -615,7 +658,7 @@ fn manual_remove_reports_reclaimable_bytes_and_respects_pins_and_leases() {
     assert_eq!(outcome.reclaimed_bytes, preview.reclaimable_bytes);
     assert!(outcome.source_unavailable_warning.is_some());
     assert!(!entry_dir(&store, &candidate_a.cache_key).exists());
-    assert_eq!(audit_records(&store).len(), 1);
+    assert_eq!(completed_audit_records(&store).len(), 1);
 
     // The sibling entry, sibling model directories, and the remaining source are untouched.
     assert!(store
@@ -729,7 +772,7 @@ fn reconciliation_covers_tier_deletion_revision_replacement_and_full_uninstall()
         std::fs::read(sibling.join("sentinel.bin")).unwrap(),
         b"imported-asset"
     );
-    assert_eq!(audit_records(&store).len(), 3);
+    assert_eq!(completed_audit_records(&store).len(), 3);
 }
 
 #[test]
@@ -760,7 +803,11 @@ fn reconciliation_defers_active_leases_and_surfaces_unreadable_entries() {
     assert!(report.removed.is_empty());
     assert_eq!(report.deferred.len(), 1);
     assert_eq!(report.deferred[0].hold, RetentionHold::ActiveUse);
-    assert_eq!(report.unmatched_unreadable, 1);
+    assert_eq!(
+        report.unmatched_unreadable,
+        vec![candidate_z.cache_key.clone()],
+        "an unreadable entry must be named, not merely counted"
+    );
     assert!(store
         .lookup_complete(&candidate_y.cache_key)
         .unwrap()
@@ -815,7 +862,7 @@ fn interrupted_eviction_converges_on_recovery_lookup_and_reservation() {
     // Recovery finishes the interrupted removal and records the audit trail.
     store.recover().unwrap();
     assert!(!entry_dir(&store, &candidate.cache_key).exists());
-    assert_eq!(audit_records(&store).len(), 1);
+    assert_eq!(completed_audit_records(&store).len(), 1);
 
     // A new reservation for the same key can also converge a pending tombstone on its own.
     materialize_complete(&store, &library, &candidate);
@@ -839,7 +886,7 @@ fn interrupted_eviction_converges_on_recovery_lookup_and_reservation() {
         ReservationOutcome::Acquired(reservation) => drop(reservation),
         other => panic!("reservation over a tombstone must converge and acquire, got {other:?}"),
     }
-    assert_eq!(audit_records(&store).len(), 2);
+    assert_eq!(completed_audit_records(&store).len(), 2);
     let republished = materialize_complete(&store, &library, &candidate);
     assert_eq!(republished.state, ResolvedCacheEntryState::Complete);
 }
@@ -910,6 +957,108 @@ fn eviction_tombstone_probe_refuses_a_link_without_reading_through_it() {
         .is_file());
 }
 
+/// Manual removal may clear residue that provably holds no recoverable state, but an entry whose
+/// state merely *cannot be read* might still be pinned or materializing, so it must refuse. The
+/// two cases are deliberately distinguished rather than collapsed into one permissive arm.
+#[test]
+fn manual_removal_refuses_an_unreadable_entry_but_clears_proven_corrupt_residue() {
+    let scratch = TempDir::new().unwrap();
+    let library = scratch.path().join("library");
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let pinned = flat_candidate(&library, "SceneWorks/m-a", REV_A, "q8", b"0123456789");
+    let residue = flat_candidate(&library, "SceneWorks/m-b", REV_A, "q8", b"0123456789");
+    materialize_complete(&store, &library, &pinned);
+    materialize_complete(&store, &library, &residue);
+    store.set_artifact_pin(&pinned.cache_key, true).unwrap();
+
+    // A pinned entry whose journal read fails for a reason that does NOT prove the state is
+    // unrecoverable must not be removable: the pin is still real. The undecodable tombstone is a
+    // plain regular file, so the entry stays perfectly measurable — the refusal therefore has to
+    // come from the unknown pin state itself, not from an incidental measurement failure.
+    let pinned_entry = entry_dir(&store, &pinned.cache_key);
+    std::fs::write(pinned_entry.join(EVICTED_MARKER_FILE), b"garbage-tombstone").unwrap();
+    let preview = store.manual_removal_preview(&pinned.cache_key).unwrap();
+    assert!(
+        preview.reclaimable_bytes > 0,
+        "the entry must still be measurable, so the refusal is about the unknown pin state"
+    );
+    assert_eq!(
+        preview.pins,
+        ManualRemovalPins::Unknown,
+        "unreadable state must never be reported as 'no pins'"
+    );
+    assert!(!preview.pins.is_provably_unpinned());
+    assert!(preview.blocked.unwrap().contains("cannot be read"));
+    assert!(store.remove_entry(&pinned.cache_key, 1_000).is_err());
+    assert!(pinned_entry
+        .join("bundle")
+        .join("model.safetensors")
+        .is_file());
+
+    // Both journal slots proven corrupt: no recoverable state can hold a pin, so manual removal is
+    // exactly how a user clears it.
+    let residue_entry = entry_dir(&store, &residue.cache_key);
+    for slot in 0..=1 {
+        std::fs::write(
+            residue_entry.join(format!("metadata.{slot}.json")),
+            b"corrupt",
+        )
+        .unwrap();
+    }
+    let preview = store.manual_removal_preview(&residue.cache_key).unwrap();
+    assert!(preview.pins.is_provably_unpinned());
+    assert!(preview.blocked.is_none());
+    let outcome = store.remove_entry(&residue.cache_key, 2_000).unwrap();
+    assert_eq!(outcome.reclaimed_bytes, preview.reclaimable_bytes);
+    assert!(!residue_entry.exists());
+}
+
+/// The sole-copy proof re-hashes every source file, so it must not run while the exclusive
+/// artifact lock is held: `acquire_complete` takes that lock blocking, and a model load would
+/// otherwise stall for the whole hash. This pins the ordering by observing, from inside the
+/// hashing work itself, that the artifact lock is still free.
+#[test]
+fn the_source_rehash_runs_before_the_exclusive_artifact_lock_is_taken() {
+    let scratch = TempDir::new().unwrap();
+    let library = scratch.path().join("library");
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let candidate = flat_candidate(&library, "SceneWorks/m-a", REV_A, "q8", b"0123456789");
+    materialize_complete(&store, &library, &candidate);
+    stamp_activity(&store, &candidate.cache_key, Some(1_000), 500);
+    let digest = cache_key_digest(&candidate.cache_key).unwrap();
+    let lock_path = store
+        .root()
+        .join("locks")
+        .join(format!("{digest}.artifact.lock"));
+
+    // Observe the lock exactly while the source file is being read for hashing.
+    let observed = Arc::new(AtomicBool::new(false));
+    let seen = Arc::new(AtomicBool::new(false));
+    let probe = {
+        let observed = Arc::clone(&observed);
+        let seen = Arc::clone(&seen);
+        let lock_path = lock_path.clone();
+        move || {
+            seen.store(true, Ordering::SeqCst);
+            let handle = open_lock_file(&lock_path).unwrap();
+            observed.store(
+                FileExt::try_lock_exclusive(&handle).is_ok(),
+                Ordering::SeqCst,
+            );
+        }
+    };
+    set_source_hash_observer(probe);
+
+    let report = store.enforce_retention(&policy(1, 1), FAR_FUTURE).unwrap();
+    assert_eq!(report.evicted.len(), 1, "the entry must still be evicted");
+    assert!(seen.load(Ordering::SeqCst), "the observer must have run");
+    assert!(
+        observed.load(Ordering::SeqCst),
+        "the artifact lock must still be free while the source is being hashed, or a concurrent \
+         model load would block for the whole hash"
+    );
+}
+
 /// A reservation whose interruption cannot be recorded must leave the entry conservatively
 /// `Materializing` (never silently "clean"), so a later pass still treats it as this session's
 /// live work rather than as an eviction candidate.
@@ -978,7 +1127,7 @@ fn eviction_removal_never_follows_a_swapped_symlink_outside_the_root() {
     assert!(external.is_dir());
     // The removal failed, so nothing may claim it completed: the audit trail records completed
     // removals only, and the tombstone remains as the durable record of intent.
-    assert!(audit_records(&store).is_empty());
+    assert!(completed_audit_records(&store).is_empty());
     std::fs::remove_file(&entry).unwrap();
 }
 
@@ -1052,7 +1201,7 @@ fn windows_shared_reader_without_a_lease_does_not_protect_an_expired_entry() {
     assert!(report.failed.is_empty());
     assert_eq!(report.evicted.len(), 1);
     assert!(!entry_dir(&store, &candidate.cache_key).exists());
-    assert_eq!(audit_records(&store).len(), 1);
+    assert_eq!(completed_audit_records(&store).len(), 1);
 
     // The orphaned handle keeps serving the bytes it already opened; nothing is corrupted.
     let mut contents = Vec::new();
@@ -1096,7 +1245,7 @@ fn windows_sharing_violation_keeps_the_eviction_pending_until_it_converges() {
     let report = store.enforce_retention(&policy(1, 1), FAR_FUTURE).unwrap();
     assert!(report.evicted.is_empty());
     assert_eq!(report.failed.len(), 1);
-    assert!(audit_records(&store).is_empty());
+    assert!(completed_audit_records(&store).is_empty());
     assert_eq!(
         store.enumerate().unwrap()[0].state,
         ResolvedCacheEntryState::Evicting
@@ -1109,5 +1258,5 @@ fn windows_sharing_violation_keeps_the_eviction_pending_until_it_converges() {
     drop(delete_blocking);
     store.recover().unwrap();
     assert!(!entry_dir(&store, &candidate.cache_key).exists());
-    assert_eq!(audit_records(&store).len(), 1);
+    assert_eq!(completed_audit_records(&store).len(), 1);
 }
