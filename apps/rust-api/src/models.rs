@@ -4678,8 +4678,14 @@ mod model_size_concurrency_tests {
         // sc-18481 retired AuraSR from the installable catalog because every production backend
         // rejects its dead `engine:aura-sr` route. Its unscoped download row had contributed one
         // context on every OS, so removing it reduces macOS 87 → 86 and windows/linux 85 → 84.
+        //
+        // sc-19708 declared `instantid_face_stack`: the SCRFD + ArcFace pair the face-analysis
+        // and identity lanes stage from `SceneWorks/instantid-mlx`, now a catalog entry so those
+        // routes carry a typed model-source identity. One download row, no `platforms` scoping
+        // (the pair loads on macOS and the off-Mac candle lane alike), so every OS gains exactly
+        // one: macOS 86 → 87, windows/linux 84 → 85.
         for (os, expected_distinct_contexts) in
-            [("macos", 86_usize), ("windows", 84), ("linux", 84)]
+            [("macos", 87_usize), ("windows", 85), ("linux", 85)]
         {
             let mut keys = std::collections::HashSet::new();
             for mut model in manifest["models"]
@@ -4962,7 +4968,38 @@ pub(crate) async fn resolve_model_manifest_entry(
             .cloned()
     };
     let mut entry = merge_model_manifest_entry(find(&builtin), find(&user));
+    if entry.as_object().map_or(true, JsonObject::is_empty) {
+        // The model-source seam (sc-19708) resolves fixed utility models (upscalers, detectors,
+        // the face stack) for job admission even when the configured manifest directory is
+        // missing or trimmed — the compiled-in builtin manifest is the complete fallback so a
+        // stripped config dir cannot silently strip typed model-source coverage.
+        if let Some(embedded) = embedded_builtin_catalog_entry(|candidate| {
+            candidate.get("id").and_then(Value::as_str) == Some(model_id)
+        })? {
+            entry = embedded;
+        }
+    }
     inject_converted_model_path(&mut entry, &state.settings.data_dir);
+    Ok(entry)
+}
+
+/// The compiled-in builtin model manifest, used as the last-resort catalog authority when the
+/// on-disk manifest directory does not carry an entry. Kept complete and cross-platform: the
+/// caller derives per-platform closures from it, so filtering here would let a macOS API omit
+/// Candle-only co-requisites from a Windows/Linux worker carrier.
+pub(crate) fn embedded_builtin_catalog_entry(
+    predicate: impl Fn(&Value) -> bool,
+) -> Result<Option<Value>, ApiError> {
+    let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
+    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+        .map_err(|error| ApiError::internal(format!("embedded model manifest invalid: {error}")))?;
+    let entry = manifest
+        .get("models")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|entry| predicate(entry))
+        .cloned();
     Ok(entry)
 }
 

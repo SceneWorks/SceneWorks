@@ -187,9 +187,19 @@ pub(crate) async fn ensure_runtime_model_sources(
             .filter(|value| !value.is_empty())
             .ok_or_else(|| ApiError::bad_request("model_convert requires sourceRepo"))?
             .to_owned();
-        let entry = resolve_model_manifest_entry_by_repo(state, &repository).await?;
         // The conversion's source repository, not its output model id, is the immutable runtime
-        // input. Replace any client carrier so a mismatched id cannot bless different bytes.
+        // input. A cataloged repo carries its full manifest entry; an uncataloged one (user
+        // conversions of arbitrary repos are supported) carries a minimal declarative entry built
+        // from the request's own data — its install evidence is then whatever receipts the repo
+        // actually has, so a disconnect is still typed while a never-downloaded repo stays on the
+        // established convert/download path.
+        let entry = match resolve_model_manifest_entry_by_repo(state, &repository).await {
+            Ok(entry) => entry,
+            Err(_) => json!({
+                "id": format!("model_convert:{repository}"),
+                "downloads": [{ "provider": "huggingface", "repo": repository }],
+            }),
+        };
         payload.remove("modelManifestEntry");
         payload.insert("modelManifestEntries".to_owned(), json!([entry]));
         return preflight_payload_model_sources(state, payload).await;
@@ -273,7 +283,7 @@ pub(crate) async fn resolve_model_manifest_entry_by_repo(
             })
             .any(|download| download.get("repo").and_then(Value::as_str) == Some(repository))
     };
-    let model_id = crate::models::model_catalog(state)
+    let mut resolved = crate::models::model_catalog(state)
         .await?
         .into_iter()
         .find(|entry| declares_repository(entry))
@@ -282,15 +292,24 @@ pub(crate) async fn resolve_model_manifest_entry_by_repo(
                 .get("id")
                 .and_then(Value::as_str)
                 .map(str::to_owned)
-        })
-        .ok_or_else(|| {
-            ApiError::model_artifact_conflict(
-                format!(
-                    "Model source repository '{repository}' is not registered in the model catalog."
-                ),
-                "model_artifact_incomplete",
-            )
-        })?;
+        });
+    if resolved.is_none() {
+        resolved = crate::models::embedded_builtin_catalog_entry(&declares_repository)?
+            .and_then(|entry| {
+                entry
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            });
+    }
+    let model_id = resolved.ok_or_else(|| {
+        ApiError::model_artifact_conflict(
+            format!(
+                "Model source repository '{repository}' is not registered in the model catalog."
+            ),
+            "model_artifact_incomplete",
+        )
+    })?;
     let entry = crate::models::resolve_model_manifest_entry(state, &model_id).await?;
     if entry.as_object().map_or(true, JsonObject::is_empty) {
         return Err(ApiError::model_artifact_conflict(
@@ -330,13 +349,19 @@ pub(crate) fn availability_for_entry(
     let configured_library = sceneworks_core::hf_home::model_source_library(data_dir)
         .root()
         .to_path_buf();
-    let requirements = selected_requirements_for_model(
+    let selected = selected_requirements_for_model(
         entry,
         std::env::consts::OS,
         requested_variant,
         data_dir,
     );
-    resolve_model_availability(data_dir, &configured_library, &requirements, local_artifacts)
+    resolve_model_availability(
+        data_dir,
+        &configured_library,
+        &selected.requirements,
+        selected.receipt_backed,
+        local_artifacts,
+    )
 }
 
 /// Re-judge the externally sourced rows of a (possibly cached) catalog snapshot against the LIVE
@@ -371,19 +396,23 @@ pub(crate) async fn refresh_live_external_availability(
             else {
                 continue;
             };
+            // Only the two states whose durable evidence is a live question refresh here: an
+            // external-ready row can disconnect and an unavailable row can reconnect between
+            // snapshot rebuilds. Both imply a durable binding/receipt existed at stamping time.
             if !matches!(
                 resolution.availability,
-                ModelAvailability::ExternalReady
-                    | ModelAvailability::InstalledExternalUnavailable
-                    | ModelAvailability::Incomplete
+                ModelAvailability::ExternalReady | ModelAvailability::InstalledExternalUnavailable
             ) || resolution.requirements.is_empty()
             {
                 continue;
             }
+            // A stamped external/incomplete resolution existed only because install evidence
+            // existed when it was stamped, so the live re-judgement keeps that strength.
             let live = resolve_model_availability(
                 &data_dir,
                 &resolution.configured_library_path,
                 &resolution.requirements,
+                true,
                 &[],
             );
             if let Some(object) = model.as_object_mut() {

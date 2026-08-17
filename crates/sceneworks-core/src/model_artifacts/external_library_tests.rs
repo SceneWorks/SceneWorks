@@ -398,7 +398,7 @@ fn resolver_walks_ready_unavailable_reconnected_and_incomplete_states() {
     let snapshot = seed_snapshot(&library, "owner/model", "model.safetensors");
     let requirements = vec![requirement("owner/model", "model.safetensors")];
 
-    let ready = resolve_model_availability(&data, &library, &requirements, &[]);
+    let ready = resolve_model_availability(&data, &library, &requirements, true, &[]);
     assert_eq!(ready.availability, ModelAvailability::ExternalReady);
     ready.validate().unwrap();
     let binding = ready.expected_library.clone().unwrap();
@@ -407,7 +407,7 @@ fn resolver_walks_ready_unavailable_reconnected_and_incomplete_states() {
     // typed unavailable condition, and nothing rewrote the binding ledger.
     let detached = temp.path().join("detached");
     std::fs::rename(&library, &detached).unwrap();
-    let unavailable = resolve_model_availability(&data, &library, &requirements, &[]);
+    let unavailable = resolve_model_availability(&data, &library, &requirements, true, &[]);
     assert_eq!(
         unavailable.availability,
         ModelAvailability::InstalledExternalUnavailable
@@ -418,16 +418,39 @@ fn resolver_walks_ready_unavailable_reconnected_and_incomplete_states() {
 
     // Reconnect the SAME volume/path: availability returns to ready under the original binding.
     std::fs::rename(&detached, &library).unwrap();
-    let reconnected = resolve_model_availability(&data, &library, &requirements, &[]);
+    let reconnected = resolve_model_availability(&data, &library, &requirements, true, &[]);
     assert_eq!(reconnected.availability, ModelAvailability::ExternalReady);
     assert_eq!(reconnected.expected_library.as_ref(), Some(&binding));
 
     // Remove one required component while the library stays connected: this is a stale/incomplete
     // install, NOT a library disconnect — the two conditions must never blur.
     std::fs::remove_file(snapshot.join("model.safetensors")).unwrap();
-    let incomplete = resolve_model_availability(&data, &library, &requirements, &[]);
+    let incomplete = resolve_model_availability(&data, &library, &requirements, true, &[]);
     assert_eq!(incomplete.availability, ModelAvailability::Incomplete);
     assert!(incomplete.expected_library.is_none());
+}
+
+/// Install evidence gates the typed disconnect state when no binding exists yet. A declared-only
+/// closure (manifest identity, no receipts) with no library present was never installed: Missing,
+/// so the established download path is preserved. A receipt-backed closure in the same situation
+/// is the pre-binding upgrade path — the receipts prove the install, so it is the typed
+/// unavailable condition, never a silent re-download.
+#[test]
+fn without_a_binding_only_receipt_evidence_can_prove_installed_but_unavailable() {
+    let temp = TempDir::new().unwrap();
+    let data = temp.path().join("data");
+    let library = temp.path().join("never-mounted");
+    let requirements = vec![requirement("owner/model", "model.safetensors")];
+
+    let declared_only = resolve_model_availability(&data, &library, &requirements, false, &[]);
+    assert_eq!(declared_only.availability, ModelAvailability::Missing);
+    assert!(declared_only.expected_library.is_none());
+
+    let receipt_backed = resolve_model_availability(&data, &library, &requirements, true, &[]);
+    assert_eq!(
+        receipt_backed.availability,
+        ModelAvailability::InstalledExternalUnavailable
+    );
 }
 
 /// An empty requirement closure means no durable install identity: the resolver reports Missing
@@ -438,7 +461,7 @@ fn resolver_reports_missing_for_an_empty_closure_without_binding() {
     let data = temp.path().join("data");
     let library = temp.path().join("external-hf");
     std::fs::create_dir_all(&library).unwrap();
-    let missing = resolve_model_availability(&data, &library, &[], &[]);
+    let missing = resolve_model_availability(&data, &library, &[], false, &[]);
     assert_eq!(missing.availability, ModelAvailability::Missing);
     assert!(missing.expected_library.is_none());
     missing.validate().unwrap();
@@ -486,7 +509,7 @@ fn resolver_prefers_covering_local_artifact_and_rejects_variant_mismatch() {
     let artifact = covering_local_artifact(&temp.path().join("resolved"));
 
     // Library never existed / is unavailable: local artifact still resolves LocalReady.
-    let local = resolve_model_availability(&data, &library, &requirements, &[artifact.clone()]);
+    let local = resolve_model_availability(&data, &library, &requirements, true, &[artifact.clone()]);
     assert_eq!(local.availability, ModelAvailability::LocalReady);
     local.validate().unwrap();
 
@@ -494,7 +517,7 @@ fn resolver_prefers_covering_local_artifact_and_rejects_variant_mismatch() {
     // completeness is judged against the exact selected variant closure.
     let mut q8 = requirements.clone();
     q8[0].variant = "q8".to_owned();
-    let not_covered = resolve_model_availability(&data, &library, &q8, &[artifact]);
+    let not_covered = resolve_model_availability(&data, &library, &q8, true, &[artifact]);
     assert_ne!(not_covered.availability, ModelAvailability::LocalReady);
 }
 

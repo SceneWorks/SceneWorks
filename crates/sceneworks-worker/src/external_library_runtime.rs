@@ -106,7 +106,7 @@ impl RuntimeSourceGuard {
             }
             // This worker's OWN platform and the request's selected tier define the closure —
             // never the API host's platform, never a sibling variant's receipts.
-            let requirements = selected_requirements_for_model(
+            let selected = selected_requirements_for_model(
                 entry,
                 std::env::consts::OS,
                 requested_variant.as_deref(),
@@ -115,7 +115,8 @@ impl RuntimeSourceGuard {
             let resolution = resolve_model_availability(
                 &settings.data_dir,
                 &configured_library,
-                &requirements,
+                &selected.requirements,
+                selected.receipt_backed,
                 // Local-tier artifacts enter this seam in sc-19707; the resolver already accepts
                 // them, so wiring local preference will not touch this call site's shape.
                 &[],
@@ -149,10 +150,13 @@ impl RuntimeSourceGuard {
                             // The session probe re-proves path + physical identity and re-walks
                             // the closure. Distinguish "components vanished while the library
                             // stayed provably present" from a disconnect mid-admission.
+                            // The requirements came from an external-ready resolution, so the
+                            // install evidence is already proven durable.
                             let recheck = resolve_model_availability(
                                 &settings.data_dir,
                                 &configured_library,
                                 &resolution.requirements,
+                                true,
                                 &[],
                             );
                             if recheck.availability
@@ -204,6 +208,7 @@ impl RuntimeSourceGuard {
                     &settings.data_dir,
                     &configured_library,
                     &resolution.requirements,
+                    true,
                     &[],
                 )
                 .availability

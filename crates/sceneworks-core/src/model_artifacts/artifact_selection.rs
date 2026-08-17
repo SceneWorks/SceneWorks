@@ -446,6 +446,17 @@ pub fn declared_exact_requirements_for_model(model: &Value) -> Vec<ExternalArtif
     requirements
 }
 
+/// One selected requirement closure plus the strength of its install evidence. Only
+/// receipt-backed closures prove a completed installation; a declared-exact closure carries a
+/// checkable identity but proves nothing about install state, so it must never produce the
+/// typed "installed — external library unavailable" condition on its own.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SelectedRequirements {
+    pub requirements: Vec<ExternalArtifactRequirement>,
+    /// True when at least one requirement came from a durable download receipt.
+    pub receipt_backed: bool,
+}
+
 /// The exact selected requirement closure for one (already tier/platform-selected) manifest
 /// closure: receipt-backed requirements first, declared-exact fallbacks for rows without a
 /// receipt, canonically ordered with the primary first. Returns an empty closure when the model
@@ -454,8 +465,9 @@ pub fn declared_exact_requirements_for_model(model: &Value) -> Vec<ExternalArtif
 pub fn selected_requirements_for_closure(
     selected: &Value,
     data_dir: &Path,
-) -> Vec<ExternalArtifactRequirement> {
+) -> SelectedRequirements {
     let mut requirements = receipt_requirements_for_model(selected, data_dir);
+    let receipt_backed = !requirements.is_empty();
     for declared in declared_exact_requirements_for_model(selected) {
         if !requirements.iter().any(|requirement| {
             requirement.repository == declared.repository
@@ -471,7 +483,10 @@ pub fn selected_requirements_for_closure(
         .count()
         != 1
     {
-        return Vec::new();
+        return SelectedRequirements {
+            requirements: Vec::new(),
+            receipt_backed: false,
+        };
     }
     requirements.sort_by(|left, right| {
         (
@@ -487,7 +502,10 @@ pub fn selected_requirements_for_closure(
                 &right.files,
             ))
     });
-    requirements
+    SelectedRequirements {
+        requirements,
+        receipt_backed,
+    }
 }
 
 /// One-call composition: select the exact closure for (`platform`, `requested_variant`), then
@@ -497,7 +515,7 @@ pub fn selected_requirements_for_model(
     platform: &str,
     requested_variant: Option<&str>,
     data_dir: &Path,
-) -> Vec<ExternalArtifactRequirement> {
+) -> SelectedRequirements {
     let selected = selected_model_artifact_closure(model, platform, requested_variant);
     selected_requirements_for_closure(&selected, data_dir)
 }
@@ -549,6 +567,8 @@ mod tests {
         // sibling q8 receipt must not appear (a model-wide union would mark q4 incomplete when
         // q8 was removed, or vice versa).
         let q4 = selected_requirements_for_model(&model, std::env::consts::OS, Some("q4"), temp.path());
+        assert!(q4.receipt_backed);
+        let q4 = q4.requirements;
         assert_eq!(q4.len(), 1);
         assert!(q4[0].is_primary);
         assert_eq!(q4[0].variant, "q4");
@@ -565,7 +585,8 @@ mod tests {
             ]),
         );
         let q4_after = selected_requirements_for_model(&model, std::env::consts::OS, Some("q4"), temp.path());
-        assert_eq!(q4, q4_after);
+        assert_eq!(q4, q4_after.requirements);
+        assert!(q4_after.receipt_backed);
     }
 
     #[test]
@@ -647,10 +668,10 @@ mod tests {
                  "files":["encoder.safetensors"]}
             ]
         });
-        assert!(
-            selected_requirements_for_model(&model, std::env::consts::OS, None, temp.path())
-                .is_empty()
-        );
+        let selected =
+            selected_requirements_for_model(&model, std::env::consts::OS, None, temp.path());
+        assert!(selected.requirements.is_empty());
+        assert!(!selected.receipt_backed);
     }
 
     #[test]

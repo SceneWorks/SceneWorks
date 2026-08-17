@@ -1151,17 +1151,24 @@ pub fn local_artifact_for_requirements(
 ///
 /// The decision ladder is uniform for every model:
 /// 1. an app-owned resolved-local artifact that covers the exact closure → `LocalReady`;
-/// 2. an empty closure (no durable install identity) → `Missing` — the caller's established
+/// 2. an empty closure (no checkable install identity) → `Missing` — the caller's established
 ///    download/on-demand behavior is preserved, never a typed disconnect;
 /// 3. the bound (or bindable) physical library validates every requirement → `ExternalReady`;
 /// 4. the library is physically present but the closure does not validate → `Incomplete`;
 /// 5. the durable binding cannot be proven present (disconnected, or a different physical volume
 ///    now occupies the configured path) → `InstalledExternalUnavailable`. The install receipts and
 ///    binding ledger are never mutated on this path, so reconnecting restores `ExternalReady`.
+///
+/// `receipt_backed` is the strength of the closure's install evidence. Without a durable binding,
+/// only a receipt-backed closure may produce `InstalledExternalUnavailable` (the pre-binding
+/// upgrade path: receipts prove the install even though the library was never bound). A
+/// declared-exact closure with no receipts, no binding, and no library is a model that was never
+/// installed: `Missing`, never a typed disconnect.
 pub fn resolve_model_availability(
     data_dir: &Path,
     configured_library: &Path,
     requirements: &[ExternalArtifactRequirement],
+    receipt_backed: bool,
     local_artifacts: &[ResolvedModelArtifact],
 ) -> ModelResolution {
     if let Some(artifact) = local_artifact_for_requirements(local_artifacts, requirements) {
@@ -1179,7 +1186,24 @@ pub fn resolve_model_availability(
             local_artifact: None,
         };
     }
+    let not_installed = || {
+        ModelResolution::not_ready(
+            ModelAvailability::Missing,
+            configured_library.to_path_buf(),
+            requirements.to_vec(),
+        )
+        .unwrap_or_else(|_| {
+            ModelResolution::unavailable(
+                configured_library.to_path_buf(),
+                None,
+                requirements.to_vec(),
+            )
+        })
+    };
     let Ok(store) = ExternalLibraryBindingStore::new(data_dir) else {
+        if !receipt_backed {
+            return not_installed();
+        }
         return ModelResolution::unavailable(
             configured_library.to_path_buf(),
             None,
@@ -1228,9 +1252,13 @@ pub fn resolve_model_availability(
                         requirements.to_vec(),
                     )
                 })
+            } else if existing_binding.is_none() && !receipt_backed {
+                // No binding, no receipts, no library: nothing was ever installed here. The
+                // declared manifest identity alone must not manufacture a typed disconnect.
+                not_installed()
             } else {
-                // Receipt identity is durable even while the configured source cannot be opened.
-                // Keep it installed-but-unavailable; never rewrite receipts or start a download.
+                // Receipt/binding identity is durable even while the configured source cannot be
+                // opened. Keep it installed-but-unavailable; never rewrite receipts or download.
                 ModelResolution::unavailable(
                     configured_library.to_path_buf(),
                     existing_binding,
