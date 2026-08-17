@@ -161,12 +161,33 @@ pub(crate) fn memory_mode_from_mode_key(key: &str) -> MemoryMode {
 
 /// Execute one provider request through the adopted safety/lifecycle seam. A created scope receives
 /// exactly one explicit terminal outcome; its Drop remains only a panic/unwind backstop.
+///
+/// This is also where the typed execution domains are planned onto the request (sc-18317): every
+/// image and video generation on either backend passes through here, including the no-context early
+/// return, so one call site covers the MLX fit gate, the candle memory strategy, and every bespoke
+/// control/edit lane that assembles its own `GenerationRequest`.
 pub fn generate_with_scope(
     generator: &dyn gen_core::Generator,
     request: &mut gen_core::GenerationRequest,
     context: Option<&gen_core::MemoryRunContext>,
     on_progress: &mut dyn FnMut(gen_core::Progress),
 ) -> gen_core::Result<gen_core::GenerationOutput> {
+    let execution_domains =
+        crate::execution_planner::plan_request_execution_domains(generator, request);
+    if !execution_domains.is_empty() {
+        tracing::info!(
+            event = "execution_domains_selected",
+            engine = generator.descriptor().id,
+            graphEvalCadenceBlocks = execution_domains
+                .graph_eval_cadence
+                .map(gen_core::GraphEvalCadence::blocks),
+            ffnChunkRows = execution_domains.ffn_chunk.map(gen_core::FfnChunk::rows),
+            cfgBatching = execution_domains
+                .cfg_batching
+                .map(gen_core::CfgBatching::label),
+            "selected typed execution domains from the provider's declaration"
+        );
+    }
     let Some(context) = context else {
         return generator.generate(request, on_progress);
     };

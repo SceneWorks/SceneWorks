@@ -1,7 +1,7 @@
 {
   "backend": "mlx",
   "generatedFrom": {
-    "inferenceRevision": "931366f62a4e5800c54e0586b7fb34e3a4079e3b",
+    "inferenceRevision": "717f43b5283d3449d9d19b7539045a82be1ef7bd",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "engines": [
@@ -5290,7 +5290,7 @@
     {
       "id": "krea_2_turbo_control",
       "composed": false,
-      "selectorDigest": "sha256:94fcb2364ce9dd4483a42c2b86944d9667172d5b9c31dca611f02a3af4254471",
+      "selectorDigest": "sha256:212c9a64152cfc0c25edb8aedb1a0838f04dd622d2e903ac20011f3394a3e8a3",
       "surfaces": [
         {
           "selector": {
@@ -5390,11 +5390,14 @@
           "implementedRungs": [
             "bounded_attention",
             "bounded_decode",
+            "bounded_transformer_residency",
             "resident",
             "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
-          "deferredMaterializationRungs": []
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
         },
         {
           "selector": {
@@ -5448,11 +5451,14 @@
           "implementedRungs": [
             "bounded_attention",
             "bounded_decode",
+            "bounded_transformer_residency",
             "resident",
             "staged_residency"
           ],
           "structurallyNotApplicableRungs": [],
-          "deferredMaterializationRungs": []
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
         },
         {
           "selector": {

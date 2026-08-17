@@ -393,7 +393,7 @@ async fn generate_flux1_dev_control_stream(
         move |generator,
               initial_cache_state,
               loaded_policy,
-              _requested_policy,
+              warm_policy,
               external_committed_bytes,
               tx,
               cancel| {
@@ -410,6 +410,10 @@ async fn generate_flux1_dev_control_stream(
             };
             let likeness_source_ref = likeness_source.as_ref().map(|(_, id)| id.clone());
             let mut cache_state = initial_cache_state;
+            // sc-18317: ONE warm hit is ONE decision, but this lane evaluates the request once per
+            // item. Hand the real proposal to the first evaluation and an inert one to the rest, so a
+            // multi-image job settles exactly one decision and emits exactly one event.
+            let mut warm_policy = crate::execution_planner::WarmPolicyOnce::new(warm_policy);
             drive_gen_items_scored(tx, poses, move |_index, pose, preview, on_progress| {
                 let control = preprocess_control_entry(
                     &control_kind,
@@ -430,6 +434,7 @@ async fn generate_flux1_dev_control_stream(
                     &memory_inputs,
                     cache_state,
                     loaded_policy.offload_policy,
+                    warm_policy.take(),
                     external_committed_bytes,
                 )?;
                 cache_state = gen_core::MemoryCacheState::Warm;

@@ -150,14 +150,99 @@ shared code) when it drops its resident generator after the idle timeout: `engin
 level. It correlates with the worker releasing cached GPU allocations (Metal/MLX or
 CUDA) before the next generation cold-loads weights again.
 
-### Generator cache policy mismatch — `generator_cache_policy_mismatch`
+### Warm execution-policy decision — `generator_cache_warm_policy_decision` (Rust worker, sc-18317)
 
-Emitted at warn level on a warm cache hit when a request asks for an execution policy
-different from the resident generator's cold-load policy. Fields: `engine`,
-`loadedOffloadPolicy`, `loadedLoadShape`, `requestedOffloadPolicy`, and
-`requestedLoadShape`. Until the request planner can switch a resident generator's staged
-components, the worker logs the mismatch and safely serves the cached generator under its
-loaded policy; the event does not indicate a reload or an execution failure.
+Emitted once per request evaluation on a warm cache hit whose request asks for an
+execution policy different from the one the resident generator was loaded under.
+**Silent when the policies match**, so it never becomes per-request noise. It replaces
+`generator_cache_policy_mismatch`, which only reported that a difference existed and
+always served the cold-load policy.
+
+The event is emitted by whoever SETTLES the decision, not by the cache seam that made
+it, and that distinction is the whole point: the seam can tell a switch is safe and
+performable, but per-request staging is chosen by the memory ladder's candidate set, so
+only the request-scoped planner knows whether honoring the switch changed anything.
+`rematerialized` therefore means the selection actually moved.
+
+| field | meaning |
+| --- | --- |
+| `decision` | `rematerialized` \| `served_as_is` \| `refused_switch` |
+| `reason` | see below |
+| `source` | `reopenable` \| `single_file_not_reopenable` — the base weights source |
+| `staging` | `staging_implemented` \| `staging_not_implemented` — what the LOADED instance's own memory contract declares |
+| `engine` | the gen-core engine id |
+| `loadedOffloadPolicy`, `loadedLoadShape`, `loadedLoadShapeDeclarationResult` | the resident generator's cold-load policy |
+| `requestedOffloadPolicy`, `requestedLoadShape`, `requestedLoadShapeDeclarationResult` | what this request asked for |
+
+- `rematerialized` / `components_rematerialized_in_place` (info) — **the switch was
+  granted AND it changed the plan.** The request asked for a strictly tighter shape at
+  peak, which is inside the envelope admission already proved; the source re-opens; the
+  loaded instance declares staging; and flooring the ladder to staged candidates produced
+  a selection the baseline would not have made. gen-core's request-scoped residency driver
+  evicts and rebuilds the affected components inside the already-loaded generator, so
+  **no new generator is constructed and the cache entry is not evicted** — never a reload,
+  never a cache miss.
+- `served_as_is` — the resident generator ran under its loaded policy. The `reason` says
+  why, and each one names its own cause rather than blaming the source generically:
+  - `loaded_policy_bounds_the_peak` — the request asked to run *less* staged / *more*
+    resident than the load chose. Admission was proved against the loaded shape. Expected
+    and benign.
+  - `loaded_contract_does_not_implement_staging` — the LOADED instance's memory contract
+    does not declare staged residency, so `OffloadPolicy::Sequential` is advisory-only for
+    it. Read per-instance, not from the engine's static descriptor bit.
+  - `selection_already_staged` — the switch was granted but the ladder had already chosen a
+    staged selection, so the floor was a no-op.
+  - `no_staged_candidate_for_this_request` — no candidate in this request's ladder engages
+    staged residency.
+  - `staged_candidate_did_not_fit` — a staged candidate existed but did not fit this
+    request's budget. Not a refusal: the same fit check every selection passes.
+  - `declaration_authority_only` — only `LoadShapeDeclarationResult` differs, which records
+    who decided the shape rather than what runs.
+  - `route_has_no_request_scoped_memory` — this route assembles its provider request
+    without a `GenerationMemory` block, so it has no seam a switch could act through.
+    Also covers a route whose memory plan is absent for this particular request.
+- `refused_switch` / `no_execution_seam_for_load_shape_alone` (**warn**) — the request
+  tightened only `LoadShape`, leaving `OffloadPolicy` unchanged. `OffloadPolicy` reaches the
+  provider through the memory ladder's staged-residency selection, which a grant floors;
+  `LoadShape` has no request-scoped selector at all. Granting such a switch would report a
+  re-materialization whose deferred half executed nowhere, so it is refused until that axis
+  has an execution seam. Benign — the request runs under the loaded shape.
+- `refused_switch` / `source_not_reopenable` (**warn**) — the outcome most worth acting on.
+  The resident weights are a single-file / imported base source, so the provider's residency
+  driver could answer a staging request with
+  `unsupported: resident-only component source cannot stage or rematerialize components`.
+  The worker refuses *before* asking and serves under the loaded policy, so the job still
+  completes — but that route will never receive the staged/streamed memory ladder while it
+  loads from an import. Recurring warns for a model expected to stage mean it is being
+  loaded from a single file rather than a snapshot directory.
+
+  A prepared re-openable pin does **not** lift this, deliberately: a pin proves the file
+  re-reads, not that the provider retained a loader to re-read it with, and at the current
+  inference pin the one provider that takes a single-file base under `Resident` obtains such
+  a pin and then discards it. The `staging` field will read `staging_implemented` for that
+  instance — its contract cannot see the difference — which is exactly why the refusal keys
+  on the source.
+
+Memory admission always uses the **loaded** policy regardless of the decision: it names the
+shape the resident weights are actually in, which is what the budget was proved against. A
+granted switch only ever lowers the predicted peak, so it stays inside that envelope.
+
+**One warm hit emits one event, whatever the image count.** A multi-image job evaluates one
+request per image, and a granted switch floors *every* one of them — the decision is a fact
+about the resident generator, not about an image. Only the first evaluation reports it, so a
+four-image job that switched staging logs one `rematerialized`, not four. A job cancelled
+before its first evaluation logs nothing at all: no request ran, so there is no decision to
+report.
+
+### Typed execution domains — `execution_domains_selected` (Rust worker, sc-18317)
+
+Emitted at info level, once per generation, only when the planner actually selected a typed
+execution domain for the request — so it is absent for every provider that declares none.
+Fields: `engine`, and whichever of `graphEvalCadenceBlocks`, `ffnChunkRows`, `cfgBatching`
+were chosen. Selections come exclusively from the provider's own
+`Capabilities::execution` declaration, so a value here is always one the provider accepts;
+an unset domain means the provider's historical default. Absence of this event is the normal
+state, not a fault.
 
 ### API errors — `api_error` (API)
 

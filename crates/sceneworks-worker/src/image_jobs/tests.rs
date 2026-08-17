@@ -1265,6 +1265,7 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
                 &memory_inputs,
                 gen_core::MemoryCacheState::Cold,
                 gen_core::OffloadPolicy::Resident,
+                crate::execution_planner::WarmPolicyProposal::inert("krea_2_turbo"),
                 17,
                 work,
                 req.width,
@@ -1277,9 +1278,24 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
                 case.hires_fix,
                 tx,
                 CancelFlag::new(),
-                |_generator, _plan, inputs, cache_state, offload_policy, external_bytes| {
+                |_generator,
+                 _plan,
+                 inputs,
+                 cache_state,
+                 offload_policy,
+                 warm_policy: crate::execution_planner::WarmPolicyProposal,
+                 external_bytes| {
                     evaluated_states.push(cache_state);
                     assert_eq!(offload_policy, gen_core::OffloadPolicy::Resident);
+                    // The imported lane threads the proposal exactly like production; an inert one has
+                    // nothing to decide and settles silently.
+                    assert_eq!(
+                        warm_policy.decision(),
+                        crate::execution_planner::WarmPolicyDecision::Unchanged
+                    );
+                    warm_policy.settle_with_selection(
+                        crate::execution_planner::GrantOutcome::AlreadyStaged,
+                    );
                     assert_eq!(external_bytes, 17);
                     let mut context = hires_memory_context(selection);
                     context.mode = if inputs.mode == "edit_image" {
@@ -18296,6 +18312,7 @@ fn krea_imported_control_mlx_gpu_smoke() {
             &memory_inputs,
             cache_state,
             gen_core::OffloadPolicy::Resident,
+            crate::execution_planner::WarmPolicyProposal::inert("krea_2_turbo_control"),
             0,
         )
         .unwrap_or_else(|error| panic!("[{label}] fit gate refused the pose request: {error}"));

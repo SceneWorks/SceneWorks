@@ -614,6 +614,10 @@ async fn generate_krea_control_stream(
                     &memory_inputs,
                     cache_state,
                     gen_core::OffloadPolicy::Resident,
+                    // This lane loads through `start_cached_gen_stream`, which never varies the
+                    // execution policy, so there is no warm switch to decide. The seam itself
+                    // declines the proposal it was handed; this one is inert by construction.
+                    crate::execution_planner::WarmPolicyProposal::inert(KREA_CONTROL_ENGINE_ID),
                     0,
                 )?;
                 cache_state = gen_core::MemoryCacheState::Warm;
