@@ -24,9 +24,9 @@ use sceneworks_core::contracts::{
     CancelPendingJobsRequest, CancelPendingJobsResponse, ClaimRequest, ClaimResponse,
     ClearJobsRequest, ClearJobsResponse, ContractNumber, DuplicateJobRequest, GenerationMetrics,
     GenerationMetricsRow, ImageUpscaleRequest, JobCreateRequest, JobSnapshot, JobStatus, JobType,
-    JsonObject, ProgressRequest, QueueSummary, RetryJobRequest, WorkerCapability,
-    WorkerHeartbeatRequest, WorkerRegisterRequest, WorkerSnapshot, WorkerStatus,
-    WorkerTerminationRequest,
+    JsonObject, PrioritizeJobsRequest, PrioritizeJobsResponse, ProgressRequest, QueueSummary,
+    RetryJobRequest, WorkerCapability, WorkerHeartbeatRequest, WorkerRegisterRequest,
+    WorkerSnapshot, WorkerStatus, WorkerTerminationRequest,
 };
 use sceneworks_core::hf_home::{huggingface_hub_cache_dir, huggingface_repo_cache_path};
 use sceneworks_core::image_request::{
@@ -158,7 +158,7 @@ mod jobs;
 use jobs::{
     cancel_job, cancel_pending_jobs, claim_job, clear_job, clear_jobs, create_job, duplicate_job,
     get_job, get_job_metrics, invalidate_model_catalog_for_terminal_jobs, list_jobs, list_metrics,
-    retry_job, update_job_progress, upsert_job_metrics,
+    prioritize_jobs, retry_job, update_job_progress, upsert_job_metrics,
 };
 mod workers;
 use workers::{
@@ -1806,6 +1806,9 @@ fn create_app_with_state_mode(
         // Cancel every pending (queued / pending_caption) item at once (sc-13448).
         // Static segment like `/clear`, so it takes priority over `/jobs/:job_id`.
         .route("/api/v1/jobs/cancel-pending", post(cancel_pending_jobs))
+        // Move selected not-yet-started jobs to the front. This is a static segment and must be
+        // registered before the per-job routes below.
+        .route("/api/v1/jobs/prioritize", post(prioritize_jobs))
         .route("/api/v1/jobs/events", get(job_events))
         .route("/api/v1/jobs/events/ticket", post(create_event_ticket))
         // Media ticket (sc-8810): auth-protected mint endpoint; the ticket is honored

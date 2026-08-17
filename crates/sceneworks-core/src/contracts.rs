@@ -1289,6 +1289,29 @@ pub struct CancelPendingJobsResponse {
     pub extra: ExtraFields,
 }
 
+/// Body for `POST /api/v1/jobs/prioritize` — move selected jobs that have not started to the
+/// front of the durable worker queue. The API caps the collection size; unknown, active, and
+/// terminal ids are harmlessly ignored so a selection racing a worker claim cannot preempt it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrioritizeJobsRequest {
+    pub job_ids: Vec<String>,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
+}
+
+/// Response for `POST /api/v1/jobs/prioritize`: the snapshots whose queue ranks changed, in their
+/// preserved relative scheduling order. Returning the snapshots lets the acting client reorder
+/// immediately while the same updates fan out over SSE to every other Queue screen.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrioritizeJobsResponse {
+    pub prioritized: usize,
+    pub jobs: Vec<JobSnapshot>,
+    #[serde(flatten)]
+    pub extra: ExtraFields,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SidecarPatterns {
