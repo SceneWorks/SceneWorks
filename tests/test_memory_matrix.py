@@ -87,10 +87,22 @@ def test_matrix_accounts_for_all_models_and_pinned_mlx_staged_coverage():
     #
     # Stated as structure, not as a population. The count moved 37 -> 38 when inference sc-18609 made
     # bernini_image's DECLARED MLX rung-4 ladder actually reachable, and renewing the constant would
-    # only have re-frozen the corpus at the next catalog change. The defect this has to keep catching
-    # is a lane claiming staged coverage it has not implemented — so assert the two per-model contracts
-    # by name, closure under the resolved route, and a strictly partial census. Those hold at any
-    # catalog size and name the entry that drifted.
+    # only have re-frozen the corpus at the next catalog change.
+    #
+    # The replacement is DELIBERATELY WEAKER than the count, and the honest scope is worth stating so
+    # nobody reads more into it. Guarded: the two lanes below by name, bespoke routes never claiming the
+    # generic ladder, per-route drift where entries sharing a resolved route disagree with each other,
+    # and the census being neither empty nor the whole catalog. NOT guarded: uniform drift on a route
+    # nothing else shares — 35 of the 41 resolved routes are singletons, so a singleton lane silently
+    # dropping out of the census, or silently claiming staged coverage it has not implemented, passes
+    # everything here where the old count reddened. A whole shared family drifting uniformly passes for
+    # the same reason.
+    #
+    # That is the accepted shape-over-population tradeoff rather than an oversight. The count did catch
+    # those cases, and charged a hand-edit for every unrelated catalog or reachability change to do it;
+    # runtime catching is the chosen tradeoff for the residue. The generator carries the same note beside
+    # `assertMlxStagedCoverageIsStructurallyConsistent`, which is where the mirror of these assertions
+    # runs against the pre-publication document.
     assert "flux2_dev" not in mlx_staged, (
         "SC-18218: the pinned MLX FLUX.2 provider is Resident-only and owes no staged-route claim"
     )

@@ -26,9 +26,22 @@ const EXPECTED_IMAGE_COUNT = 53;
 // Neither fact is a total. This census used to be pinned to an exact population, which meant hand-
 // renewing 37 -> 38 for a reachability change that had nothing to do with the contract being guarded,
 // and the number never said which entry moved. `assertMlxStagedCoverageIsStructurallyConsistent`
-// replaces it: the same defect (a lane claiming staged coverage it has not implemented) is caught by
-// the two named per-model contracts, closure of the verdict under the resolved route, and a strictly
-// partial census — all of which hold at any catalog size and name the entry that drifted.
+// replaces it, and is DELIBERATELY WEAKER — the honest scope, so nobody reads more into it:
+//
+//   guarded — the two named lanes above by id; bespoke routes never claiming the generic ladder;
+//             per-route drift, where entries sharing a resolved route disagree with each other; and
+//             the census being neither empty nor the whole catalog.
+//   NOT guarded — uniform drift on a route nothing else shares. 35 of the 41 resolved routes are
+//             singletons (only sdxl, flux2_klein_9b, qwen_image_edit, sensenova_u1_8b,
+//             sensenova_u1_8b_fast and z_image_turbo group more than one entry), so a singleton lane
+//             silently dropping out of the census — or silently claiming staged coverage it has not
+//             implemented — passes every assertion here where the old count reddened. A whole shared
+//             family drifting uniformly passes too, for the same reason.
+//
+// That is the accepted shape-over-population tradeoff, not an oversight: the exact count caught those
+// cases and cost a hand-edit on every unrelated catalog or reachability change, and runtime catching is
+// the chosen tradeoff for what shape assertions cannot express. A staged claim a lane cannot honour
+// surfaces when the ladder is actually engaged.
 // Provider calibration ABI versions are deliberate invalidation switches. A provider-specific
 // execution/layout/quantization change that makes measurements unsafe must add or bump its key;
 // ecosystem-wide contract changes bump `default`. Exact source revisions remain provenance only.
