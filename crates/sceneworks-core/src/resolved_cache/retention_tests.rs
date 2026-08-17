@@ -976,6 +976,9 @@ fn eviction_removal_never_follows_a_swapped_symlink_outside_the_root() {
     assert_eq!(report.failed.len(), 1);
     assert_eq!(std::fs::read(&sentinel).unwrap(), b"untouched");
     assert!(external.is_dir());
+    // The removal failed, so nothing may claim it completed: the audit trail records completed
+    // removals only, and the tombstone remains as the durable record of intent.
+    assert!(audit_records(&store).is_empty());
     std::fs::remove_file(&entry).unwrap();
 }
 
