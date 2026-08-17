@@ -307,20 +307,18 @@ pub(crate) async fn resolve_model_manifest_entry_by_repo(
 
 /// App-owned resolved-local artifacts for LocalReady detection. Empty when the resolved cache is
 /// disabled or uninitialized; read-only (never creates a session or refreshes usage).
+///
+/// This is the SAME provider the worker's pre-loader guard uses (sc-19707), so catalog/preflight
+/// and the actual load can never disagree about which entries are valid: an entry that is still
+/// materializing, torn, unverifiable, or in a shape the runtime cannot serve is not a local
+/// candidate on either side of the boundary.
 pub(crate) fn local_resolved_artifacts(state: &AppState) -> Vec<ResolvedModelArtifact> {
     if !state.settings.resolved_cache.enabled {
         return Vec::new();
     }
-    sceneworks_core::model_artifacts::resolved_cache::ResolvedCacheStore::enumerate_existing(
+    sceneworks_core::model_artifacts::resolved_cache::ResolvedCacheStore::valid_local_artifacts(
         &state.settings.data_dir,
     )
-    .map(|entries| {
-        entries
-            .into_iter()
-            .filter_map(|entry| entry.metadata.map(|metadata| metadata.artifact))
-            .collect()
-    })
-    .unwrap_or_default()
 }
 
 /// The one availability judgement for a manifest entry on this host: exact selected closure

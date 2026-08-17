@@ -617,6 +617,407 @@ mod tests {
         (settings(data), library, payload)
     }
 
+    /// Pin the configured source library AND switch the resolved cache on for the body. Under
+    /// test `Settings::resolved_cache_policy` reads the same environment `Settings::from_env`
+    /// would have read, so this is exactly the production "user enabled the cache" state.
+    fn with_local_cache<T>(library: &Path, body: impl FnOnce() -> T) -> T {
+        crate::test_env::temp_env_vars(
+            &[
+                ("HF_HUB_CACHE", library.to_str().expect("utf-8 temp path")),
+                (
+                    sceneworks_core::model_artifacts::resolved_cache::RESOLVED_CACHE_ENABLED_ENV,
+                    "1",
+                ),
+            ],
+            body,
+        )
+    }
+
+    /// Publish a real bundle through the PRODUCTION materializer: the source snapshot is copied,
+    /// verified and atomically published exactly as a promotion would do it, so these tests read
+    /// back the same on-disk shape the runtime will meet.
+    fn publish_bundle(
+        data_dir: &Path,
+        library: &Path,
+        repository: &str,
+        revision: &str,
+        variant: &str,
+        files: &[&str],
+    ) -> sceneworks_core::model_artifacts::ResolvedModelArtifact {
+        use sceneworks_core::model_artifacts::local_preference::hub_cache_member_destination;
+        use sceneworks_core::model_artifacts::resolved_cache::{
+            MaterializationCancellation, MaterializationOutcome, ResolvedCacheMaterializer,
+        };
+        use sceneworks_core::model_artifacts::{
+            ArtifactAvailability, ArtifactFile, ArtifactIdentity, ArtifactMemberRole,
+            ResolvedBundleClosure, ResolvedBundleMember,
+        };
+
+        let identity = ArtifactIdentity::pinned(repository, revision, variant).unwrap();
+        let closure = ResolvedBundleClosure::new(vec![ResolvedBundleMember {
+            role: ArtifactMemberRole::Primary,
+            component_id: None,
+            source: identity.clone(),
+            tier: Some(variant.to_owned()),
+            source_subpath: PathBuf::new(),
+            destination: hub_cache_member_destination(repository, revision, Path::new("")).unwrap(),
+            files: files
+                .iter()
+                .map(|file| ArtifactFile::new(*file).unwrap())
+                .collect(),
+        }])
+        .unwrap();
+        let resolver = ModelArtifactResolver::new(ArtifactSourceLibrary::new(library).unwrap());
+        let source = resolver
+            .resolve_source(identity, closure, ArtifactAvailability::Available)
+            .unwrap();
+        let candidate = sceneworks_core::model_artifacts::PromotionCandidate {
+            cache_key: source.cache_key().unwrap(),
+            artifact: source,
+        };
+        let store = ResolvedCacheStore::open(data_dir).unwrap();
+        let outcome = ResolvedCacheMaterializer::new(store)
+            .materialize(
+                &candidate,
+                library,
+                repository,
+                &MaterializationCancellation::default(),
+            )
+            .unwrap();
+        match outcome {
+            MaterializationOutcome::Published(metadata) => metadata.artifact,
+            other => panic!("bundle was not published: {other:?}"),
+        }
+    }
+
+    /// The walking skeleton: an installed model with a published bundle admits from the app-owned
+    /// tier, the SHARED snapshot resolver every image/video/audio/utility loader uses returns the
+    /// bundle path, an evictor cannot take the entry while the job holds it, and finishing the job
+    /// restores the source tier.
+    #[test]
+    fn a_published_bundle_serves_the_load_and_is_lease_protected() {
+        let temp = TempDir::new().unwrap();
+        let (settings, library, payload) = installed_model(&temp);
+        with_local_cache(&library, || {
+            let artifact = publish_bundle(
+                &settings.data_dir,
+                &library,
+                "owner/model",
+                REV_A,
+                "default",
+                &["model.safetensors"],
+            );
+            let cache_key = artifact.cache_key().unwrap();
+            let bundle_root = artifact.location.root().to_path_buf();
+
+            // Before the guard runs, the shared resolver reads the configured source library.
+            let source_snapshot =
+                crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, "owner/model")
+                    .expect("source snapshot");
+            assert!(source_snapshot.starts_with(&library));
+
+            let guard =
+                RuntimeSourceGuard::begin(&JobType::ImageGenerate, &payload, &settings).unwrap();
+            assert_eq!(
+                guard.resolutions()[0].availability,
+                ModelAvailability::LocalReady
+            );
+
+            // The one shared snapshot resolver — every model-consuming runtime funnels through it
+            // — now answers with the app-owned bundle.
+            let loaded =
+                crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, "owner/model")
+                    .expect("leased local snapshot");
+            assert_eq!(loaded, bundle_root.join(format!(
+                "models--owner--model/snapshots/{REV_A}"
+            )));
+            assert!(loaded.join("model.safetensors").is_file());
+            // And so does the pinned-component resolver used by the utility/co-requisite lanes.
+            assert_eq!(
+                crate::model_jobs::huggingface_pinned_snapshot_dir(
+                    &settings.data_dir,
+                    "owner/model",
+                    REV_A
+                ),
+                Some(loaded.clone())
+            );
+
+            // An evictor takes the entry's artifact lock exclusively; the live lease denies it.
+            let evictor = ResolvedCacheStore::open(&settings.data_dir).unwrap();
+            let candidate = sceneworks_core::model_artifacts::PromotionCandidate {
+                cache_key: cache_key.clone(),
+                artifact: ModelArtifactResolver::new(
+                    ArtifactSourceLibrary::new(&library).unwrap(),
+                )
+                .resolve_source(
+                    artifact.identity.clone(),
+                    artifact.closure.clone(),
+                    sceneworks_core::model_artifacts::ArtifactAvailability::Available,
+                )
+                .unwrap(),
+            };
+            assert!(matches!(
+                evictor.reserve(&candidate, &library, "owner/model").unwrap(),
+                sceneworks_core::model_artifacts::resolved_cache::ReservationOutcome::Contended
+            ));
+
+            guard.finish_success().unwrap();
+            // Usage was recorded for a real load, and the entry survives untouched.
+            let metadata = evictor.lookup_complete(&cache_key).unwrap().unwrap();
+            assert!(metadata.last_used_at.is_some());
+            // With the job finished the source tier serves again.
+            assert_eq!(
+                crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, "owner/model"),
+                Some(source_snapshot)
+            );
+        });
+    }
+
+    /// The epic's headline outcome: with the configured library disconnected, a complete local
+    /// bundle still admits and still resolves — without the runtime ever reaching a downloader or
+    /// recreating the configured library root.
+    #[test]
+    fn a_disconnected_library_still_serves_a_complete_bundle_without_downloading() {
+        let temp = TempDir::new().unwrap();
+        let (settings, library, payload) = installed_model(&temp);
+        with_local_cache(&library, || {
+            publish_bundle(
+                &settings.data_dir,
+                &library,
+                "owner/model",
+                REV_A,
+                "default",
+                &["model.safetensors"],
+            );
+            std::fs::rename(&library, temp.path().join("detached")).unwrap();
+
+            let guard =
+                RuntimeSourceGuard::begin(&JobType::ImageGenerate, &payload, &settings).unwrap();
+            assert_eq!(
+                guard.resolutions()[0].availability,
+                ModelAvailability::LocalReady
+            );
+            let loaded =
+                crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, "owner/model")
+                    .expect("leased local snapshot while disconnected");
+            assert!(loaded.join("model.safetensors").is_file());
+            let resolved_root =
+                std::fs::canonicalize(settings.data_dir.join("models").join("resolved")).unwrap();
+            assert!(loaded.starts_with(&resolved_root), "{}", loaded.display());
+            // Nothing recreated the configured library or a parallel download destination: the
+            // preference path never reaches the downloader.
+            assert!(!library.exists());
+            guard.finish_success().unwrap();
+        });
+    }
+
+    /// Each invalid-entry case runs against a bundle that WOULD have served the load, with exactly
+    /// one property broken, and asserts the control first — so a case can only pass because the
+    /// broken property is what moved the load back to the authoritative source tier.
+    fn invalid_local_entry_falls_back(break_it: impl FnOnce(&Path, &Path)) {
+        let temp = TempDir::new().unwrap();
+        let (settings, library, payload) = installed_model(&temp);
+        with_local_cache(&library, || {
+            let artifact = publish_bundle(
+                &settings.data_dir,
+                &library,
+                "owner/model",
+                REV_A,
+                "default",
+                &["model.safetensors"],
+            );
+            let bundle = artifact.location.root().to_path_buf();
+            let source_snapshot =
+                crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, "owner/model")
+                    .expect("source snapshot");
+
+            let guard =
+                RuntimeSourceGuard::begin(&JobType::ImageGenerate, &payload, &settings).unwrap();
+            assert_eq!(
+                guard.resolutions()[0].availability,
+                ModelAvailability::LocalReady,
+                "control: the intact bundle must serve this load"
+            );
+            drop(guard);
+
+            break_it(&settings.data_dir, &bundle);
+
+            let guard =
+                RuntimeSourceGuard::begin(&JobType::ImageGenerate, &payload, &settings).unwrap();
+            assert_eq!(
+                guard.resolutions()[0].availability,
+                ModelAvailability::ExternalReady,
+                "an invalid local entry must fall back to the authoritative source"
+            );
+            assert_eq!(
+                crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, "owner/model"),
+                Some(source_snapshot),
+                "and the load must read the source library, not the invalid bundle"
+            );
+        });
+    }
+
+    fn published_file(bundle: &Path) -> PathBuf {
+        bundle.join(format!(
+            "models--owner--model/snapshots/{REV_A}/model.safetensors"
+        ))
+    }
+
+    #[test]
+    fn a_torn_local_entry_never_wins() {
+        invalid_local_entry_falls_back(|_, bundle| {
+            std::fs::write(published_file(bundle), b"").unwrap();
+        });
+    }
+
+    #[test]
+    fn a_partial_local_entry_never_wins() {
+        invalid_local_entry_falls_back(|_, bundle| {
+            std::fs::remove_file(published_file(bundle)).unwrap();
+        });
+    }
+
+    #[test]
+    fn an_unverifiable_local_entry_never_wins() {
+        invalid_local_entry_falls_back(|data_dir, _| {
+            let entries = data_dir.join("models/resolved/entries");
+            for entry in std::fs::read_dir(&entries).unwrap().flatten() {
+                for slot in 0..=1 {
+                    let path = entry.path().join(format!("metadata.{slot}.json"));
+                    if path.exists() {
+                        std::fs::write(&path, b"{\"not\":\"a journal\"}").unwrap();
+                    }
+                }
+            }
+        });
+    }
+
+    /// A bundle of a DIFFERENT revision or a DIFFERENT tier than the one this request selected is
+    /// not this request's artifact: the selected closure keeps its source tier and the local entry
+    /// is left alone.
+    #[test]
+    fn a_wrong_revision_or_wrong_tier_bundle_is_not_used() {
+        let temp = TempDir::new().unwrap();
+        let data = temp.path().join("data");
+        let library = temp.path().join("external-hf");
+        seed_snapshot(&library, "owner/matrix", REV_A, "q4/model.safetensors");
+        seed_snapshot(&library, "owner/matrix", REV_A, "q8/model.safetensors");
+        write_receipts(
+            &data,
+            "owner/matrix",
+            json!([
+                { "repo": "owner/matrix", "modelId": "m", "variant": "q4",
+                  "resolvedFiles": ["q4/model.safetensors"], "snapshotRevision": REV_A },
+                { "repo": "owner/matrix", "modelId": "m", "variant": "q8",
+                  "resolvedFiles": ["q8/model.safetensors"], "snapshotRevision": REV_A }
+            ]),
+        );
+        let settings = settings(data);
+        let entry = json!({
+            "id": "m",
+            "downloads": [
+                { "provider": "huggingface", "repo": "owner/matrix", "variant": "q4",
+                  "default": true, "files": ["q4/*"] },
+                { "provider": "huggingface", "repo": "owner/matrix", "variant": "q8",
+                  "files": ["q8/*"] }
+            ]
+        });
+        let payload = |variant: &str| {
+            json!({ "modelManifestEntry": entry, "variant": variant })
+                .as_object()
+                .unwrap()
+                .clone()
+        };
+        with_local_cache(&library, || {
+            // Only the q4 tier is published locally.
+            publish_bundle(
+                &settings.data_dir,
+                &library,
+                "owner/matrix",
+                REV_A,
+                "q4",
+                &["q4/model.safetensors"],
+            );
+            let guard =
+                RuntimeSourceGuard::begin(&JobType::ImageGenerate, &payload("q4"), &settings)
+                    .unwrap();
+            assert_eq!(
+                guard.resolutions()[0].availability,
+                ModelAvailability::LocalReady
+            );
+            drop(guard);
+            // The q8 selection must NOT be served by the q4 bundle even though both share one
+            // repository and one immutable revision.
+            let guard =
+                RuntimeSourceGuard::begin(&JobType::ImageGenerate, &payload("q8"), &settings)
+                    .unwrap();
+            assert_eq!(
+                guard.resolutions()[0].availability,
+                ModelAvailability::ExternalReady
+            );
+            drop(guard);
+
+            // A bundle of another revision of the same model is likewise not this model.
+            seed_snapshot(&library, "owner/other", REV_B, "model.safetensors");
+            publish_bundle(
+                &settings.data_dir,
+                &library,
+                "owner/other",
+                REV_B,
+                "default",
+                &["model.safetensors"],
+            );
+            let other = json!({
+                "modelManifestEntry": {
+                    "id": "other",
+                    "downloads": [{ "provider": "huggingface", "repo": "owner/other",
+                                    "revision": REV_A, "files": ["model.safetensors"] }]
+                }
+            })
+            .as_object()
+            .unwrap()
+            .clone();
+            let guard =
+                RuntimeSourceGuard::begin(&JobType::ImageGenerate, &other, &settings).unwrap();
+            assert_ne!(
+                guard.resolutions()[0].availability,
+                ModelAvailability::LocalReady,
+                "a bundle of a different revision must never satisfy a pinned request"
+            );
+        });
+    }
+
+    /// The resolved cache is opt-in: with it switched off no entry is read, no session is opened,
+    /// and every runtime keeps reading the configured source library byte for byte.
+    #[test]
+    fn a_disabled_cache_never_prefers_a_local_bundle() {
+        let temp = TempDir::new().unwrap();
+        let (settings, library, payload) = installed_model(&temp);
+        with_local_cache(&library, || {
+            publish_bundle(
+                &settings.data_dir,
+                &library,
+                "owner/model",
+                REV_A,
+                "default",
+                &["model.safetensors"],
+            );
+        });
+        with_library(&library, || {
+            let guard =
+                RuntimeSourceGuard::begin(&JobType::ImageGenerate, &payload, &settings).unwrap();
+            assert_eq!(
+                guard.resolutions()[0].availability,
+                ModelAvailability::ExternalReady
+            );
+            assert!(
+                crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, "owner/model")
+                    .expect("source snapshot")
+                    .starts_with(&library)
+            );
+        });
+    }
+
     #[test]
     fn installed_model_admits_as_external_ready_with_a_source_session() {
         let temp = TempDir::new().unwrap();
