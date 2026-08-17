@@ -9,6 +9,33 @@ use super::*;
 /// exists for: the gate would validate the request against MLX's capability lists while the job
 /// executes on Candle, so an MLX-only choice is admitted and then fails on the worker, and a
 /// Candle-valid choice is 400'd (sc-18420). One derivation, one place.
+///
+/// ## Scope: enqueue gates only — NOT the catalog advertisement lanes
+///
+/// `models.rs`'s `apply_imported_lora_advertisement`, `apply_imported_provider_surface` and the
+/// `mlx_catalog_status` probe keep their own bare `cfg!(target_os = "macos")` deliberately. They
+/// answer a DIFFERENT question: *which engines does this BUILD link* (macOS links MLX and no candle
+/// engine; Windows/Linux/Docker link candle and no MLX), and the MLX tier probe additionally reads
+/// convert-output directories that only exist on macOS. This function answers *which single backend
+/// does this INSTANCE route a job to*, which `candle_required` can move at runtime.
+///
+/// Three reasons not to unify them:
+/// 1. Those sites need a LANE PAIR, consulted ASYMMETRICALLY — a withdrawal crosses lanes, a
+///    positive advertisement never does. Collapsing that into this one-hot routing answer would
+///    break the invariant `apply_imported_lora_advertisement` documents.
+/// 2. A macOS build links no candle engine, so deriving the advertisement from `candle_required`
+///    would publish verdicts for an engine this binary cannot run.
+/// 3. Routing the `mlx_catalog_status` probe through here would HIDE `mlxTiers` and its per-tier
+///    state from the Studio on macOS under `candle_required`, for tier directories that are
+///    genuinely on disk — a regression, not a unification.
+///
+/// The residual skew is real but unshipped: on macOS the desktop wrapper sets
+/// `SCENEWORKS_CANDLE_REQUIRED` only under `cfg(not(target_os = "macos"))` and
+/// [`Settings::candle_required`] is documented "Absent on macOS", so reaching it takes a manual
+/// operator override. Under that override the catalog still advertises MLX-derived imported verdicts
+/// while these gates refuse against candle. Closing it properly means making the advertisement lane
+/// pair a runtime DEPLOYMENT fact (including remote candle workers registered with this API), not
+/// re-pointing it at this function.
 pub(crate) fn enqueue_backend(state: &AppState) -> &'static str {
     if !cfg!(target_os = "macos") || state.settings.candle_required {
         "candle"

@@ -456,20 +456,28 @@ async fn validate_and_canonicalize_merged_generation_payload(
                 .to_owned();
             resolve_selected_image_text_encoder(state, &merged, &model_id, &mut manifest_entry)
                 .await?;
-            // The two remaining `create_image_job` capability gates, run on the SAME merged object
-            // the queue transaction will persist (sc-18420). `payload_changes` is a SHALLOW merge,
-            // so `advanced` arrives replaced wholesale: without these, a retry/duplicate could
-            // enqueue a decoder+`usePid` pair, an uninstalled or wrong-backend decoder, or an
-            // imported request shape the create path 400s — the exact combinations this boundary's
-            // own doc comment claims it re-validates. Order mirrors `create_image_job`: the decoder
-            // gate reads the rebuilt entry directly, then the entry is stamped so the imported gate
-            // sees the server-owned row rather than anything the caller sent.
+            // The `create_image_job` capability gates this boundary did not run, applied to the
+            // SAME merged object the queue transaction will persist (sc-18420). `payload_changes`
+            // is a SHALLOW merge, so both `advanced` and the top-level `loras` array arrive
+            // REPLACED WHOLESALE: without these, a retry/duplicate could enqueue a decoder+`usePid`
+            // pair, an uninstalled or wrong-backend decoder, a family-incompatible or uninstalled
+            // LoRA set, or an imported request shape — every one of which the create path 400s, and
+            // all of them exactly the combinations this boundary's own doc comment claims it
+            // re-validates.
+            //
+            // Order mirrors `create_image_job`: the decoder gate reads the rebuilt entry directly,
+            // the entry is then stamped, the LoRA gate runs (it also NORMALIZES `loras` in place,
+            // and the canonical object returned from here is what gets persisted), and the imported
+            // gate runs last so it sees the server-owned row and the normalized adapter list rather
+            // than anything the caller sent.
             crate::generation::validate_selected_decoder_for_manifest(
                 crate::generation::enqueue_backend(state),
                 &merged,
                 &manifest_entry,
             )?;
             merged.insert("modelManifestEntry".to_owned(), manifest_entry);
+            validate_job_lora_compatibility(state, project_id.as_deref(), &mut merged, false)
+                .await?;
             crate::generation::validate_imported_submission(state, &model_id, &merged)?;
         }
     } else if matches!(
@@ -479,15 +487,16 @@ async fn validate_and_canonicalize_merged_generation_payload(
             | JobType::VideoBridge
             | JobType::PersonReplace
     ) {
-        // The video half of the same bypass. `canonicalize_image_model_payload` is image-only, so
-        // there is no rebuilt entry to gate against here; resolve the catalog row for the merged
-        // model exactly as `create_video_job` does and gate on that. Read-only on purpose — this
-        // closes the decoder bypass without taking on video's separate entry-canonicalization
-        // question.
+        // The video half of the same bypass — `create_video_job` runs both of these too.
+        // `canonicalize_image_model_payload` is image-only, so there is no rebuilt entry to gate
+        // against here; resolve the catalog row for the merged model exactly as `create_video_job`
+        // does and gate on that. Read-only on purpose — this closes the bypass without taking on
+        // video's separate entry-canonicalization question.
         //
-        // Keyed off an actually-present `advanced.decoder`, which is precisely when the gate stops
-        // being a no-op, so the overwhelmingly common decoder-less replay costs no extra catalog
-        // resolution.
+        // The decoder gate is keyed off an actually-present `advanced.decoder`, which is precisely
+        // when it stops being a no-op, so the overwhelmingly common decoder-less replay costs no
+        // extra catalog resolution. The LoRA gate needs no such guard: it returns before touching a
+        // catalog when `loras` is absent or empty.
         let selects_decoder = merged
             .get("advanced")
             .and_then(Value::as_object)
@@ -504,6 +513,7 @@ async fn validate_and_canonicalize_merged_generation_payload(
                 &entry,
             )?;
         }
+        validate_job_lora_compatibility(state, project_id.as_deref(), &mut merged, false).await?;
     }
     Ok(merged)
 }

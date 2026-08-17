@@ -2690,8 +2690,13 @@ async fn candle_required_moves_the_decoder_gate_onto_the_candle_option_list() {
     let detail = error["detail"].as_str().unwrap_or_default();
     assert!(
         detail.contains("is not compatible with qwen_image"),
-        "candle_required must reject an MLX-only decoder as incompatible, not merely uninstalled: \
-         {error}"
+        "candle_required must reject an MLX-only decoder as incompatible, not merely uninstalled. \
+         NOTE: this exact branch is coupled to the SHIPPED decoder facts declaring ZERO candle \
+         options for qwen_image — if `capabilities.candle.json` ever gains a decoderOption for this \
+         row, the correct refusal becomes 'is not installed' (or the selection becomes valid) and \
+         this assertion must be re-stated against the new facts, NOT deleted. The backend-selection \
+         claim itself lives in the platform-free unit test \
+         `the_gate_consults_only_the_executing_backends_option_list`: {error}"
     );
 
     // Native lane: the same request against the same row, with candle_required off. On macOS the
@@ -2874,6 +2879,322 @@ async fn retry_and_duplicate_gate_a_merged_video_decoder_selection() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{replayed}");
+}
+
+/// One image model and one video model, each declaring its own LoRA family, plus the four adapters
+/// the retry/duplicate LoRA-gate tests need: a wrong-family one, a right-family-but-absent-on-disk
+/// one, and a compatible installed one per lane. Mirrors the fixture
+/// `generation_job_routes_reject_incompatible_loras` uses on the create path, so both boundaries are
+/// asserted against the SAME catalog and therefore the same refusal strings.
+fn write_lora_gate_catalog(temp_dir: &tempfile::TempDir) {
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"{
+          "schemaVersion": 1,
+          "models": [
+            {
+              "id": "gate_image",
+              "name": "Gate Image",
+              "family": "z-image",
+              "type": "image",
+              "adapter": "z_image_diffusers",
+              "capabilities": ["text_to_image", "edit_image", "character_image"],
+              "downloads": [], "paths": {}, "defaults": {}, "limits": {},
+              "loraCompatibility": { "families": ["z-image"] },
+              "ui": {}
+            },
+            {
+              "id": "gate_video",
+              "name": "Gate Video",
+              "family": "ltx-video",
+              "type": "video",
+              "adapter": "ltx_video",
+              "capabilities": ["text_to_video", "image_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
+              "downloads": [], "paths": {}, "defaults": {}, "limits": {},
+              "loraCompatibility": { "families": ["ltx-video"] },
+              "ui": {}
+            }
+          ]
+        }"#,
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+    std::fs::write(
+        config_dir.join("builtin.loras.jsonc"),
+        r#"{ "schemaVersion": 1, "loras": [] }"#,
+    )
+    .expect("builtin loras writes");
+    std::fs::write(
+        config_dir.join("user.loras.jsonc"),
+        r#"{
+          "schemaVersion": 1,
+          "loras": [
+            {
+              "id": "qwen_style", "name": "Qwen Style", "family": "qwen-image",
+              "triggerWords": [], "compatibility": { "families": ["qwen-image"] },
+              "source": { "provider": "local", "path": "loras/qwen.safetensors" }
+            },
+            {
+              "id": "deleted_style", "name": "Deleted Style", "family": "z-image",
+              "triggerWords": [], "compatibility": { "families": ["z-image"] },
+              "source": { "provider": "local", "path": "loras/deleted.safetensors" }
+            },
+            {
+              "id": "good_style", "name": "Good Style", "family": "z-image",
+              "triggerWords": [], "compatibility": { "families": ["z-image"] },
+              "source": { "provider": "local", "path": "loras/good.safetensors" }
+            },
+            {
+              "id": "motion_style", "name": "Motion Style", "family": "ltx-video",
+              "triggerWords": [], "compatibility": { "families": ["ltx-video"] },
+              "source": { "provider": "local", "path": "loras/motion.safetensors" }
+            }
+          ]
+        }"#,
+    )
+    .expect("user loras writes");
+    for file in ["builtin.recipe-presets.jsonc", "user.recipe-presets.jsonc"] {
+        std::fs::write(
+            config_dir.join(file),
+            r#"{ "schemaVersion": 1, "presets": [] }"#,
+        )
+        .expect("preset manifest writes");
+    }
+    let lora_dir = temp_dir.path().join("data/loras");
+    std::fs::create_dir_all(&lora_dir).expect("lora dir creates");
+    // `deleted.safetensors` is deliberately NOT written: a catalog-backed adapter whose file is gone
+    // resolves to a non-installed state, which is the create path's "is not installed" refusal.
+    for name in ["qwen.safetensors", "good.safetensors", "motion.safetensors"] {
+        write_test_safetensors(&lora_dir.join(name));
+    }
+}
+
+/// sc-18420: `validate_job_lora_compatibility_with` runs at BOTH create boundaries
+/// (`create_image_job`, `create_video_job`) and at neither retry/duplicate one. `loras` is a
+/// TOP-LEVEL key, so the shallow `payload_changes` merge replaces the whole array — a retry could
+/// swap a validated adapter set for a wrong-family, uninstalled, or entirely unknown one and enqueue
+/// it, deferring the failure to a worker that cannot load the file.
+///
+/// Every refusal string here is the create path's own, asserted verbatim against the same catalog.
+#[tokio::test]
+async fn retry_and_duplicate_gate_a_merged_lora_set_the_create_path_refuses() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_lora_gate_catalog(&temp_dir);
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    // The LoRA catalog is project-scoped, so the gate needs a real project to resolve against.
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "LoRA Gate" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+
+    // Baseline: created with a COMPATIBLE adapter, so the refusals below are about the merged set
+    // and not about the route rejecting adapters at all.
+    let (status, original) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_image",
+            "prompt": "mist over hills",
+            "model": "gate_image",
+            "count": 1,
+            "loras": [{ "id": "good_style" }],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{original}");
+    let job_id = original["id"].as_str().expect("job id").to_owned();
+
+    let (_, before) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    let before = before.as_array().expect("jobs array").len();
+
+    for (expected, loras) in [
+        (
+            "LoRA qwen_style is not compatible with model gate_image",
+            json!([{ "id": "qwen_style" }]),
+        ),
+        (
+            "LoRA is not installed: deleted_style",
+            json!([{ "id": "deleted_style" }]),
+        ),
+        (
+            "LoRA not found: no_such_lora",
+            json!([{ "id": "no_such_lora" }]),
+        ),
+        // A mixed set must be refused for its bad member, not silently pruned to the good one.
+        (
+            "LoRA qwen_style is not compatible with model gate_image",
+            json!([{ "id": "good_style" }, { "id": "qwen_style" }]),
+        ),
+    ] {
+        // The create path's own verdict on the identical set, so the two boundaries are compared
+        // rather than the retry refusal being asserted in isolation.
+        let (create_status, create_error) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            json!({
+                "projectId": project_id,
+                "mode": "text_to_image",
+                "prompt": "mist over hills",
+                "model": "gate_image",
+                "count": 1,
+                "loras": loras,
+            }),
+        )
+        .await;
+        assert_eq!(create_status, StatusCode::BAD_REQUEST, "{create_error}");
+        assert_eq!(create_error["detail"], expected);
+
+        for operation in ["retry", "duplicate"] {
+            let (status, error) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{job_id}/{operation}"),
+                json!({ "payloadChanges": { "loras": loras } }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {error}");
+            assert_eq!(
+                error["detail"], expected,
+                "{operation} must reproduce the create path's LoRA refusal verbatim"
+            );
+        }
+    }
+
+    let (_, after) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(
+        after.as_array().expect("jobs array").len(),
+        before,
+        "a refused retry/duplicate must not persist a job"
+    );
+
+    // The gate must still admit — and NORMALIZE — a set the create path accepts, so the canonical
+    // object this boundary returns carries the hydrated catalog spec rather than the bare id.
+    let (status, replayed) = request(
+        app,
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/duplicate"),
+        json!({ "payloadChanges": { "loras": [{ "id": "good_style" }] } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{replayed}");
+    assert_eq!(replayed["payload"]["loras"][0]["id"], "good_style");
+    assert!(
+        replayed["payload"]["loras"][0].get("name").is_some(),
+        "the admitted set must be the normalized catalog spec, not the caller's bare id: {replayed}"
+    );
+}
+
+/// The video half of the same LoRA bypass — `create_video_job` runs the identical gate.
+#[tokio::test]
+async fn retry_and_duplicate_gate_a_merged_video_lora_set_the_create_path_refuses() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_lora_gate_catalog(&temp_dir);
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    // The LoRA catalog is project-scoped, so the gate needs a real project to resolve against.
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "LoRA Gate" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+
+    let (status, original) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a drone shot",
+            "model": "gate_video",
+            "loras": [{ "id": "motion_style" }],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{original}");
+    let job_id = original["id"].as_str().expect("job id").to_owned();
+
+    let (_, before) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    let before = before.as_array().expect("jobs array").len();
+
+    for (expected, loras) in [
+        (
+            "LoRA qwen_style is not compatible with model gate_video",
+            json!([{ "id": "qwen_style" }]),
+        ),
+        // A z-image adapter is installed and well-formed, just wrong for THIS lane's model.
+        (
+            "LoRA good_style is not compatible with model gate_video",
+            json!([{ "id": "good_style" }]),
+        ),
+        (
+            "LoRA not found: no_such_lora",
+            json!([{ "id": "no_such_lora" }]),
+        ),
+    ] {
+        let (create_status, create_error) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/video/jobs",
+            json!({
+                "projectId": project_id,
+                "mode": "text_to_video",
+                "prompt": "a drone shot",
+                "model": "gate_video",
+                "loras": loras,
+            }),
+        )
+        .await;
+        assert_eq!(create_status, StatusCode::BAD_REQUEST, "{create_error}");
+        assert_eq!(create_error["detail"], expected);
+
+        for operation in ["retry", "duplicate"] {
+            let (status, error) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{job_id}/{operation}"),
+                json!({ "payloadChanges": { "loras": loras } }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {error}");
+            assert_eq!(
+                error["detail"], expected,
+                "{operation} must reproduce the video create path's LoRA refusal verbatim"
+            );
+        }
+    }
+
+    let (_, after) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(
+        after.as_array().expect("jobs array").len(),
+        before,
+        "a refused retry/duplicate must not persist a job"
+    );
+
+    let (status, replayed) = request(
+        app,
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/duplicate"),
+        json!({ "payloadChanges": { "loras": [{ "id": "motion_style" }] } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{replayed}");
+    assert_eq!(replayed["payload"]["loras"][0]["id"], "motion_style");
 }
 
 /// sc-18420: the same retry/duplicate bypass for the imported-submission gate. The create path
