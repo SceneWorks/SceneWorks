@@ -2656,6 +2656,32 @@ mod download_receipt_tests {
         }
     }
 
+    /// A platformCleanupOnly tombstone has its `variants` projection stripped by
+    /// `apply_model_catalog_entry`, yet the snapshot pipeline still runs size enrichment on it.
+    /// The refresh must no-op for tombstones while staying a hard error for real entries —
+    /// this exact mismatch 500'd the whole catalog for machines holding legacy Eros weights.
+    /// (Platform-neutral twin of the seeded-cache Eros tests below, which cannot run on Windows:
+    /// their setup writes the literal `gemma/*` manifest pattern as a filename.)
+    #[test]
+    fn size_refresh_tolerates_a_cleanup_tombstone_without_variants() {
+        let mut tombstone = json!({
+            "id": "ltx_2_3_eros",
+            "platformCleanupOnly": true,
+        });
+        refresh_variant_download_sizes(&mut tombstone)
+            .expect("tombstone size refresh must be a no-op");
+        assert!(
+            tombstone.get("variants").is_none(),
+            "tombstone refresh must not invent a variants projection"
+        );
+
+        let mut real_entry = json!({ "id": "ltx_2_3" });
+        assert!(
+            refresh_variant_download_sizes(&mut real_entry).is_err(),
+            "a non-tombstone entry without a variants array is still a contract violation"
+        );
+    }
+
     /// SC-18902: Eros is a real MLX product route, but its exact-head Candle/CUDA capture was
     /// unusable. Pin the complete catalog projection so a future edit cannot restore the 46.8 GB
     /// Windows/Linux offer merely by changing one of the three required download rows.
@@ -2856,6 +2882,18 @@ mod download_receipt_tests {
                 "cleanup projection leaked {field}"
             );
         }
+
+        // The snapshot pipeline runs size enrichment on every retained row AFTER the tombstone
+        // strip. It must tolerate the stripped projection — a hard error here 500s the entire
+        // catalog for any machine still holding legacy Eros weights in its HF cache.
+        let mut enriched = projected.clone();
+        let context = model_download_context(&enriched).unwrap();
+        apply_model_catalog_size_fields(&mut enriched, context.as_ref(), None)
+            .expect("size enrichment tolerates a cleanup tombstone");
+        assert!(
+            enriched.get("variants").is_none(),
+            "size enrichment must not resurrect the variants projection on a tombstone"
+        );
 
         let primary_repo = "TenStrip/LTX2.3-10Eros";
         let adapter_repo = "TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments";
@@ -4479,6 +4517,12 @@ fn apply_variant_fields(object: &mut JsonObject, data_dir: &FsPath) {
 }
 
 fn refresh_variant_download_sizes(model: &mut Value) -> Result<(), ApiError> {
+    // A platformCleanupOnly tombstone strips the whole variants projection in
+    // `apply_model_catalog_entry` — the missing array is its contract, not corruption, and there
+    // is nothing to refresh. Keep the strict array guard below for every real catalog entry.
+    if model.get("platformCleanupOnly").and_then(Value::as_bool) == Some(true) {
+        return Ok(());
+    }
     // `apply_variant_fields` runs in the blocking install-state sweep while live HF estimation runs
     // concurrently. Refresh only the already-built response fields after both complete: rebuilding
     // variants here would repeat filesystem probes serially and undo the intended overlap.
