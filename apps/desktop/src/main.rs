@@ -96,6 +96,7 @@ fn main() {
             settings::get_gpu_info,
             // GPU memory cap (epic 7819).
             settings::set_gpu_memory_limit,
+            settings::set_resolved_cache_policy,
             // Live MLX memory telemetry for the Settings readout (epic 7819, sc-7825).
             settings::get_gpu_telemetry,
             // LAN remote access (epic 4484, stories 4/5).

@@ -60,6 +60,8 @@ pub struct Settings {
     pub host: String,
     pub port: u16,
     pub data_dir: PathBuf,
+    /// Finite, disabled-by-default app-owned resolved-model cache policy shared with workers.
+    pub resolved_cache: sceneworks_core::model_artifacts::resolved_cache::ResolvedCachePolicy,
     pub config_dir: PathBuf,
     /// Directory holding the `credentials.json` store (sc-16540). Resolved by
     /// [`sceneworks_core::credentials::credentials_dir`] and deliberately independent
@@ -173,6 +175,8 @@ impl Settings {
             host: host.clone(),
             port,
             data_dir,
+            resolved_cache:
+                sceneworks_core::model_artifacts::resolved_cache::ResolvedCachePolicy::from_env_or_safe_default(),
             config_dir,
             credentials_dir,
             access_token: std::env::var("SCENEWORKS_ACCESS_TOKEN")

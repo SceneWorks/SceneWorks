@@ -28,6 +28,7 @@
     "allow-restart-worker",
     "allow-get-gpu-info",
     "allow-set-gpu-memory-limit",
+    "allow-set-resolved-cache-policy",
     "allow-get-gpu-telemetry",
     "allow-get-remote-access",
     "allow-set-remote-access",

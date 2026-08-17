@@ -150,6 +150,7 @@ pub(crate) fn test_settings(temp_dir: &tempfile::TempDir) -> Settings {
         host: "127.0.0.1".to_owned(),
         port: 0,
         data_dir: temp_dir.path().join("data"),
+        resolved_cache: Default::default(),
         config_dir: temp_dir.path().join("config"),
         // Pinned to the tempdir on purpose. Resolving this the way production does
         // (`credentials::credentials_dir`) would hand tests the developer's REAL OS
