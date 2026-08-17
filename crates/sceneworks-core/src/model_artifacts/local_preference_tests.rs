@@ -295,28 +295,65 @@ fn a_vanished_bundle_directory_is_never_answered_with() {
     );
 }
 
-/// Two bundles claiming one immutable snapshot is ambiguous, and ambiguity must never be resolved
-/// by picking one: the installation fails and the caller keeps the load on the source tier.
+/// Two models sharing one component snapshot is normal — the shared encoder is materialized into
+/// both bundles. The second installation adopts the bundle already serving that snapshot instead
+/// of failing, so a job carrying both models keeps BOTH on the local tier.
 #[test]
-fn conflicting_bundles_refuse_to_install_a_scope() {
+fn a_second_bundle_adopts_the_snapshot_already_being_served() {
     let _serialized = overlay_guard();
     let temp = tempfile::tempdir().unwrap();
     let first = bundle(&temp.path().join("bundle-a"));
     let second = bundle(&temp.path().join("bundle-b"));
-    let error = prefer_local_artifacts(&[first.clone(), second]).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("two resolved-local bundles claim"),
-        "{error}"
+
+    // One call carrying both, and two separate scopes, both succeed and serve the first bundle.
+    let together = prefer_local_artifacts(&[first.clone(), second.clone()]).unwrap();
+    assert_eq!(
+        local_snapshot("owner/encoder", COMPONENT_REV).unwrap(),
+        first
+            .location
+            .root()
+            .join(format!("models--owner--encoder/snapshots/{COMPONENT_REV}"))
     );
-    // The failed installation left nothing behind.
-    assert!(local_snapshot("owner/model", PRIMARY_REV).is_none());
+    drop(together);
 
     let scope = prefer_local_artifacts(std::slice::from_ref(&first)).unwrap();
-    assert!(prefer_local_artifacts(std::slice::from_ref(&first)).is_err());
+    let adopted = prefer_local_artifacts(std::slice::from_ref(&second)).unwrap();
+    assert!(adopted.is_empty(), "the second scope installed nothing new");
+    drop(adopted);
     drop(scope);
-    assert!(prefer_local_artifacts(std::slice::from_ref(&first)).is_ok());
+    assert!(local_snapshot("owner/model", PRIMARY_REV).is_none());
+}
+
+/// A bundle whose file set for the shared snapshot is NARROWER than what the next artifact needs
+/// must not be adopted: that is how a load would be handed an incomplete snapshot. The second
+/// artifact fails to install and its caller keeps it on the source tier.
+#[test]
+fn a_narrower_serving_bundle_is_never_adopted() {
+    let _serialized = overlay_guard();
+    let temp = tempfile::tempdir().unwrap();
+    let narrow_root = temp.path().join("bundle-narrow");
+    let mut narrow = bundle(&narrow_root);
+    let wide = bundle(&temp.path().join("bundle-wide"));
+
+    // The narrow bundle holds only ONE of the encoder's two files.
+    let mut members = narrow.closure.members.clone();
+    let encoder = members
+        .iter_mut()
+        .find(|member| member.source.repository == "owner/encoder")
+        .unwrap();
+    encoder
+        .files
+        .push(ArtifactFile::new("encoder.extra.safetensors").unwrap());
+    narrow.closure = ResolvedBundleClosure::new(members).unwrap();
+
+    let scope = prefer_local_artifacts(std::slice::from_ref(&wide)).unwrap();
+    let error = prefer_local_artifacts(std::slice::from_ref(&narrow)).unwrap_err();
+    assert!(
+        error.to_string().contains("does not hold every file"),
+        "{error}"
+    );
+    drop(scope);
+    assert!(local_snapshot("owner/encoder", COMPONENT_REV).is_none());
 }
 
 /// A model directory that was resolved to a concrete source path before the load (training base

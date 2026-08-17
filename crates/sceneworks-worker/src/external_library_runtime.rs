@@ -770,6 +770,66 @@ mod tests {
         });
     }
 
+    /// A job that carries several models (a primary plus utility/co-requisite carriers) leases and
+    /// serves EVERY one of them from the local tier — admission is per artifact, so one model can
+    /// never silently drag another back onto the source tier.
+    #[test]
+    fn every_model_a_job_carries_is_served_from_its_own_leased_bundle() {
+        let temp = TempDir::new().unwrap();
+        let data = temp.path().join("data");
+        let library = temp.path().join("external-hf");
+        for repo in ["owner/primary", "owner/utility"] {
+            seed_snapshot(&library, repo, REV_A, "model.safetensors");
+            write_receipts(
+                &data,
+                repo,
+                json!([{ "repo": repo, "modelId": repo,
+                         "resolvedFiles": ["model.safetensors"], "snapshotRevision": REV_A }]),
+            );
+        }
+        let settings = settings(data);
+        let entry = |repo: &str| {
+            json!({
+                "id": repo,
+                "downloads": [{ "provider": "huggingface", "repo": repo, "revision": REV_A,
+                                "files": ["model.safetensors"] }]
+            })
+        };
+        let payload = json!({
+            "modelManifestEntry": entry("owner/primary"),
+            "modelManifestEntries": [entry("owner/utility")]
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        with_local_cache(&library, || {
+            for repo in ["owner/primary", "owner/utility"] {
+                publish_bundle(
+                    &settings.data_dir,
+                    &library,
+                    repo,
+                    REV_A,
+                    "default",
+                    &["model.safetensors"],
+                );
+            }
+            let guard =
+                RuntimeSourceGuard::begin(&JobType::ImageGenerate, &payload, &settings).unwrap();
+            assert_eq!(guard.resolutions().len(), 2);
+            assert!(guard
+                .resolutions()
+                .iter()
+                .all(|resolution| resolution.availability == ModelAvailability::LocalReady));
+            for repo in ["owner/primary", "owner/utility"] {
+                let loaded = crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, repo)
+                    .expect("leased local snapshot");
+                assert!(loaded.join("model.safetensors").is_file());
+                assert!(!loaded.starts_with(&library));
+            }
+            guard.finish_success().unwrap();
+        });
+    }
+
     /// The runtimes whose model directory is a concrete path resolved BEFORE the load — training
     /// base models, captioners, analyzers (the `ManagedModelPath` entrypoint) — and the
     /// receipt-provenance lane both read the leased bundle too, so no model-consuming surface is
