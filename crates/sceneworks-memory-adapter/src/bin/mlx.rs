@@ -10893,7 +10893,16 @@ mod ltx_tests {
             |value: &mut Value| {
                 value["providerPhaseProfile"] = json!(LTX_BOUNDED_CARRIER_PHASE_PROFILE)
             },
+            |value: &mut Value| value["providerPhaseProfile"] = json!("foreign-profile"),
             |value: &mut Value| value["providerPhases"] = json!(LTX_PROVIDER_PHASE_NAMES),
+            |value: &mut Value| {
+                value["providerPhases"] = json!([
+                    "common_load",
+                    "primary_conditioning",
+                    "primary_denoise",
+                    "primary_decode"
+                ])
+            },
             |value: &mut Value| {
                 value["providerPhases"] = json!([
                     "primary_conditioning",

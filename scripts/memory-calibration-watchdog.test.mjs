@@ -463,6 +463,120 @@ while True:
   );
 });
 
+test("bounded campaign entry profile advertises and acknowledges exactly five phases", async () => {
+  const files = await fixture();
+  const attester = `${files.program}.bounded-campaign-phases.py`;
+  const phases = [
+    "common_load", "primary_conditioning", "primary_denoise", "primary_decode", "cleanup",
+  ];
+  await writeFile(attester, String.raw`import json, os, socket
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.connect(os.environ["SCENEWORKS_MEMORY_WATCHDOG_SOCKET"])
+def line():
+    data = b""
+    while not data.endswith(b"\n"): data += sock.recv(1)
+    return data.decode().strip()
+payload = json.loads(line()); nonce = payload["nonce"]
+assert payload["providerPhaseProtocol"] == "sceneworks-provider-phase-v1"
+assert payload["providerPhaseProfile"] == "bounded-campaign-entry"
+assert payload["providerPhases"] == ${JSON.stringify(phases)}
+sock.sendall(f"ACK {nonce}\n".encode()); assert line() == f"GO {nonce}"
+for sequence, name in enumerate(payload["providerPhases"], 1):
+    sock.sendall(f"PHASE {nonce} {sequence} {name}\n".encode())
+    while True:
+        acknowledgement = line()
+        if acknowledgement == f"PING {nonce}": continue
+        assert acknowledgement == f"PHASE_ACK {nonce} {sequence} {name}"
+        break
+sock.sendall(f"DONE {nonce}\n".encode())
+while True:
+    message = line()
+    if message == f"BYE {nonce}": break
+    assert message == f"PING {nonce}"
+`);
+  await runWithMockedProductionTelemetry(files, ["python3", attester], {
+    requireProviderPhases: true,
+    providerPhaseProfile: "bounded-campaign-entry",
+  });
+  const events = (await readFile(files.events, "utf8")).trim().split("\n").map(JSON.parse);
+  assert.deepEqual(
+    events.filter((event) => event.event === "provider_phase")
+      .map((event) => event.providerPhase.name),
+    phases,
+  );
+  assert.deepEqual(
+    events.find((event) => event.event === "child_completed").providerPhase,
+    { sequence: 5, name: "cleanup" },
+  );
+  assert.equal(events.some((event) => event.event === "hard_stop"), false);
+  validateWatchdogEventChain(events);
+});
+
+test("bounded campaign entry phase omissions and reordering hard-stop before completion", async () => {
+  const phases = [
+    "common_load", "primary_conditioning", "primary_denoise", "primary_decode", "cleanup",
+  ];
+  for (const [mode, expectedReason] of [
+    ["missing", /child_completed_before_provider_phase_sequence:observed_4/],
+    ["reordered", /child_returned_reordered_provider_phase:expected_1:observed_2/],
+  ]) {
+    const files = await fixture();
+    const attester = `${files.program}.bad-bounded-campaign-phase.py`;
+    await writeFile(attester, String.raw`import json, os, socket, sys, time
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.connect(os.environ["SCENEWORKS_MEMORY_WATCHDOG_SOCKET"])
+def line():
+    data = b""
+    while not data.endswith(b"\n"): data += sock.recv(1)
+    return data.decode().strip()
+payload = json.loads(line()); nonce = payload["nonce"]
+sock.sendall(f"ACK {nonce}\n".encode()); assert line() == f"GO {nonce}"
+if sys.argv[1] == "missing":
+    for sequence, name in enumerate(payload["providerPhases"][:-1], 1):
+        sock.sendall(f"PHASE {nonce} {sequence} {name}\n".encode())
+        while True:
+            acknowledgement = line()
+            if acknowledgement == f"PING {nonce}": continue
+            assert acknowledgement == f"PHASE_ACK {nonce} {sequence} {name}"
+            break
+    sock.sendall(f"DONE {nonce}\n".encode())
+else:
+    sock.sendall(f"PHASE {nonce} 2 ${phases[1]}\n".encode())
+time.sleep(60)
+`);
+    let status = 0;
+    try {
+      await runWithMockedProductionTelemetry(files, ["python3", attester, mode], {
+        requireProviderPhases: true,
+        providerPhaseProfile: "bounded-campaign-entry",
+      });
+    } catch (error) {
+      status = error.code;
+    }
+    assert.equal(status, 97);
+    const events = (await readFile(files.events, "utf8")).trim().split("\n").map(JSON.parse);
+    assert.match(events.find((event) => event.event === "hard_stop").reason, expectedReason);
+    assert.equal(events.at(-1).event, "terminated");
+  }
+});
+
+test("an unknown provider phase profile is rejected before the guarded command starts", async () => {
+  const files = await fixture();
+  let status = 0;
+  try {
+    await runWithMockedProductionTelemetry(
+      files,
+      ["python3", files.program, "complete", files.pids, files.telemetry, files.events],
+      { requireProviderPhases: true, providerPhaseProfile: "foreign-campaign-profile" },
+    );
+  } catch (error) {
+    status = error.code;
+  }
+  assert.equal(status, 2);
+  assert.equal(await readFile(files.pids, "utf8").catch(() => ""), "");
+  assert.equal(await readFile(files.events, "utf8").catch(() => ""), "");
+});
+
 test("reordered or foreign provider phases hard-stop the owned group", async () => {
   for (const [statement, expectedReason] of [
     ['sock.sendall(f"PHASE {nonce} 2 primary_conditioning\\n".encode())', /reordered_provider_phase/],

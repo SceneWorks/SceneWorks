@@ -2106,6 +2106,7 @@ test("the LTX real-weight safety canary cannot relax or masquerade as campaign e
   );
   for (const required of [
     "prevalidate_ltx_bounded_campaign_entry(request)?",
+    "consume_ltx_canary_watchdog_attestation(request)?",
     "start_lease_for(&LTX_BOUNDED_CARRIER_PHASE_NAMES)?",
     "LtxRunAdmission::BoundedCampaignEntry",
     "validate_ltx_bounded_campaign_fragment(&fragment)?",
@@ -2116,6 +2117,21 @@ test("the LTX real-weight safety canary cannot relax or masquerade as campaign e
   ]) assert.ok(boundedCampaign.includes(required), `bounded campaign must retain ${required}`);
   assert.match(adapter,
     /LTX_BOUNDED_CAMPAIGN_ACTION => run_ltx_bounded_campaign_entry\(&request\)/);
+  const attestationIndex = boundedCampaign.indexOf(
+    "consume_ltx_canary_watchdog_attestation(request)?",
+  );
+  const limitsIndex = boundedCampaign.indexOf("LtxCanaryLimits::install()?");
+  const modelResolutionIndex = boundedCampaign.indexOf("run_ltx_with_admission(");
+  assert.ok(attestationIndex >= 0 && limitsIndex >= 0 && modelResolutionIndex >= 0,
+    "SC-20318 safety ordering anchors must all remain present");
+  assert.ok(
+    attestationIndex < limitsIndex,
+    "SC-20318 must reject a mismatched watchdog phase profile before allocator/model work",
+  );
+  assert.ok(
+    attestationIndex < modelResolutionIndex,
+    "SC-20318 must reject a mismatched watchdog phase profile before model resolution",
+  );
 
   const canary = adapter.slice(
     adapter.indexOf("fn validate_ltx_canary_plan_for("),
@@ -2237,6 +2253,83 @@ test("the LTX real-weight safety canary cannot relax or masquerade as campaign e
   assert.match(limitsLifecycle, /set_wired_limit\(self\.previous_wired\);/);
   assert.match(limitsLifecycle, /set_memory_limit\(self\.previous_memory\);/);
   assert.match(limitsLifecycle, /impl Drop for LtxCanaryLimits[\s\S]*self\.restore\(\);/);
+});
+
+test("the SC-20318 provider phase profile is exact across runner, watchdog and adapter", async () => {
+  const [runner, watchdog, adapter] = await Promise.all([
+    source("scripts/run-ltx-safety-canary.mjs"),
+    source("scripts/memory-calibration-watchdog.py"),
+    source("crates/sceneworks-memory-adapter/src/bin/mlx.rs"),
+  ]);
+  const campaignPhases = [
+    "common_load", "primary_conditioning", "primary_denoise", "primary_decode",
+    "lifecycle_warm_repeat", "lifecycle_cancel", "lifecycle_cancel_recovery",
+    "lifecycle_error", "lifecycle_error_recovery", "cleanup",
+  ];
+  const boundedPhases = [
+    "common_load", "primary_conditioning", "primary_denoise", "primary_decode", "cleanup",
+  ];
+  const quotedValues = (sourceText, expression, label) => {
+    const match = sourceText.match(expression);
+    assert.ok(match, `${label} must remain a literal exact contract`);
+    return [...match[1].matchAll(/"([^"]+)"/g)].map((entry) => entry[1]);
+  };
+
+  assert.deepEqual(quotedValues(
+    watchdog,
+    /^CAMPAIGN_ENTRY_PROVIDER_PHASES = \(([\s\S]*?)^\)$/m,
+    "Python campaign-entry phases",
+  ), campaignPhases);
+  assert.deepEqual(quotedValues(
+    watchdog,
+    /^BOUNDED_CARRIER_PROVIDER_PHASES = \(([\s\S]*?)^\)$/m,
+    "Python bounded-carrier phases",
+  ), boundedPhases);
+  assert.deepEqual(quotedValues(
+    watchdog,
+    /^BOUNDED_CAMPAIGN_ENTRY_PROVIDER_PHASES = \(([\s\S]*?)^\)$/m,
+    "Python bounded-campaign-entry phases",
+  ), boundedPhases);
+  const pythonProfiles = watchdog.slice(
+    watchdog.indexOf("PROVIDER_PHASE_PROFILES = {"),
+    watchdog.indexOf("\n}\n", watchdog.indexOf("PROVIDER_PHASE_PROFILES = {")) + 2,
+  );
+  assert.match(pythonProfiles,
+    /"campaign-entry": CAMPAIGN_ENTRY_PROVIDER_PHASES/);
+  assert.match(pythonProfiles,
+    /"bounded-carrier": BOUNDED_CARRIER_PROVIDER_PHASES/);
+  assert.match(pythonProfiles,
+    /"bounded-campaign-entry": BOUNDED_CAMPAIGN_ENTRY_PROVIDER_PHASES/);
+
+  assert.deepEqual(quotedValues(
+    runner,
+    /export const PROVIDER_PHASES = Object\.freeze\(\[([\s\S]*?)\]\);/,
+    "runner campaign-entry phases",
+  ), campaignPhases);
+  assert.deepEqual(quotedValues(
+    runner,
+    /export const BOUNDED_CARRIER_PHASES = Object\.freeze\(\[([\s\S]*?)\]\);/,
+    "runner bounded phases",
+  ), boundedPhases);
+  assert.match(runner,
+    /export const BOUNDED_CAMPAIGN_ENTRY_PROFILE = "bounded-campaign-entry";/);
+  assert.match(runner,
+    /phaseProfile: "bounded-campaign-entry",\n\s*childName: "sc-20318-bounded-campaign-entry"/);
+
+  assert.deepEqual(quotedValues(
+    adapter,
+    /const LTX_PROVIDER_PHASE_NAMES: \[&str; 10\] = \[([\s\S]*?)\];/,
+    "Rust campaign-entry phases",
+  ), campaignPhases);
+  assert.deepEqual(quotedValues(
+    adapter,
+    /const LTX_BOUNDED_CARRIER_PHASE_NAMES: \[&str; 5\] = \[([\s\S]*?)\];/,
+    "Rust bounded phases",
+  ), boundedPhases);
+  assert.match(adapter,
+    /const LTX_BOUNDED_CAMPAIGN_PHASE_PROFILE: &str = "bounded-campaign-entry";/);
+  assert.match(adapter,
+    /Some\(LTX_BOUNDED_CAMPAIGN_ACTION\) => Some\(\(\n\s*LTX_BOUNDED_CAMPAIGN_PHASE_PROFILE,\n\s*&LTX_BOUNDED_CARRIER_PHASE_NAMES,/);
 });
 
 test("the MLX FLUX.2-dev calibration arm is bound to the direct reference-free T2I contract", async () => {

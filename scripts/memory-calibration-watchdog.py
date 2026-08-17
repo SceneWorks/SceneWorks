@@ -43,9 +43,17 @@ BOUNDED_CARRIER_PROVIDER_PHASES = (
     "primary_decode",
     "cleanup",
 )
+BOUNDED_CAMPAIGN_ENTRY_PROVIDER_PHASES = (
+    "common_load",
+    "primary_conditioning",
+    "primary_denoise",
+    "primary_decode",
+    "cleanup",
+)
 PROVIDER_PHASE_PROFILES = {
     "campaign-entry": CAMPAIGN_ENTRY_PROVIDER_PHASES,
     "bounded-carrier": BOUNDED_CARRIER_PROVIDER_PHASES,
+    "bounded-campaign-entry": BOUNDED_CAMPAIGN_ENTRY_PROVIDER_PHASES,
 }
 
 
