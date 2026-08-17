@@ -40,6 +40,15 @@ const EXPECTED_IMAGE_COUNT = 53;
 //             silently dropping out of the census — or silently claiming staged coverage it has not
 //             implemented — passes every assertion here where the old count reddened. A whole shared
 //             family drifting uniformly passes too, for the same reason.
+//   ALSO NOT guarded, as of 2026-08-17 — the per-route comparison SKIPS entries whose MLX tier axis is
+//             a single synthetic `default`, i.e. entries advertising no tier ladder at all (no
+//             `vramGbByTier`, no tier-tagged download variant, and a `quantize` naming no packed tier).
+//             `flux2_klein_9b_true_v2` is the only such entry today, and it shares route
+//             `flux2_klein_9b` with two tiered siblings. Its verdict is structurally fixed at "not
+//             staged" — the tiers its contract declares do not exist for it — so including it reported
+//             a disagreement no declaration could resolve. A future single-dense-tier entry therefore
+//             joins that blind spot silently. Accepted for the same reason as the rest of this note:
+//             the alternative was declaring a packed tier the artifact does not ship.
 //
 // That is the accepted shape-over-population tradeoff, not an oversight: the exact count caught those
 // cases and cost a hand-edit on every unrelated catalog or reachability change, and runtime catching is
@@ -411,8 +420,34 @@ export function assertMlxStagedCoverageIsStructurallyConsistent(matrix) {
   }
   // The verdict is a property of the RESOLVED ROUTE, so entries sharing a route must agree. An entry
   // drifting away from its own siblings is exactly what a pinned total could not see.
+  //
+  // EXEMPT: an entry whose MLX tier axis is a single synthetic `default`. That is not drift, it is an
+  // entry with no advertised tier ladder AT ALL — `mlxTiers` falls through to `["default"]` when the
+  // catalog declares no `vramGbByTier`, no tier-tagged download variant, and a `quantize` that names no
+  // packed tier (`<= 0`, i.e. dense; see `resolve_quant`). Such an entry can never reach an Implemented
+  // staged cell, because the tiers its contract declares do not exist for it, so comparing its verdict
+  // against tiered siblings on the same route reports a disagreement that no declaration change can
+  // resolve.
+  //
+  // The instance is `flux2_klein_9b_true_v2`: a convert-at-install entry whose transformer is a FIXED
+  // DENSE BF16 artifact, sharing route `flux2_klein_9b` with the tiered base and KV entries. Coordinator
+  // decision 2026-08-17, building on Michael's report-only ruling the same day: `quantize: 0` stays
+  // because it is the only truthful encoding of that artifact — declaring a packed tier it does not ship
+  // would hand-declare a q8 that does not exist and mislead tier selection, which is the drift class
+  // this epic exists to kill. So the invariant yields on the axis instead of the manifest lying.
+  //
+  // Scoped as narrowly as that reasoning allows: the exemption removes these entries from the CROSS-
+  // ENTRY comparison only. Every other assertion in this function still applies to them, and the
+  // comparison keeps full force among tiered entries sharing a route — see
+  // `a drifting tiered route-mate still reds after the single-dense-tier exemption` in
+  // `generate-memory-matrix.test.mjs`, which exists so the exemption cannot be widened into a hole.
+  const hasSingleDenseTierAxis = (model) => {
+    const tiers = model.axes?.mlx?.tiers ?? [];
+    return tiers.length === 1 && tiers[0] === "default";
+  };
   const byRoute = new Map();
   for (const model of matrix.models) {
+    if (hasSingleDenseTierAxis(model)) continue;
     const verdicts = byRoute.get(model.resolvedRoute) ?? new Set();
     verdicts.add(staged.has(model.id));
     byRoute.set(model.resolvedRoute, verdicts);
@@ -421,9 +456,41 @@ export function assertMlxStagedCoverageIsStructurallyConsistent(matrix) {
   if (split.length) {
     throw new Error(`MLX staged coverage disagrees within resolved route(s) ${split.sort().join(",")}`);
   }
-  // A bespoke route carries its own pipeline and never advertises the generic staged ladder.
+  // A bespoke route carries its own pipeline and never advertises the GENERIC staged ladder.
+  //
+  // "Generic" is load-bearing and, as of 2026-08-17, actually enforced as written. This used to reject a
+  // bespoke route for ANY implemented staged cell, which conflated two different claims: the generic
+  // base ladder (the `none` overlay, plus the `lora` overlay that rides it) and a route-local closed
+  // overlay the entry declares for itself.
+  //
+  // `routeKind: "bespoke"` means only "no row in `engines.rs`'s MODEL_TABLE" — a SceneWorks worker
+  // DISPATCH fact, and backend-agnostic. It does not mean the engine registry publishes no contract.
+  // PuLID is exactly that split: bespoke in worker dispatch, and on candle genuinely unregistered (the
+  // candle dump carries its typed `bespokeMemoryRouteWaivers` entry), yet the MLX registry publishes a
+  // real `pulid_flux` memory contract with route witnesses at pin 931366f62. SC-18460 wired its MLX
+  // declaration route on that basis, and its census cells bear it out: `character_image` +
+  // `identity` is Implemented on every tier while `none` and `lora` stay Missing on every tier — the
+  // "deliberately closed identity-only contract" this file already describes in
+  // `staticCandleOverlayIsAvailable`.
+  //
+  // So the check now asks the question it always claimed to: does a bespoke route claim staged coverage
+  // on a GENERIC coordinate? Its own closed overlay is the one declaration it IS entitled to make.
+  // Teeth preserved — if PuLID's `none` or `lora` staged cell ever turns Implemented this still reds;
+  // `a bespoke route claiming the generic staged ladder still reds` pins that.
+  const GENERIC_STAGED_OVERLAYS = new Set(["none", "lora"]);
   const bespoke = matrix.models
-    .filter((model) => model.routeKind === "bespoke" && staged.has(model.id))
+    .filter(
+      (model) =>
+        model.routeKind === "bespoke" &&
+        matrix.cells.some(
+          (cell) =>
+            cell.backend === "mlx" &&
+            cell.rung === "staged_residency" &&
+            cell.modelId === model.id &&
+            GENERIC_STAGED_OVERLAYS.has(cell.overlay) &&
+            isImplemented(cell.state),
+        ),
+    )
     .map((model) => model.id);
   if (bespoke.length) {
     throw new Error(`bespoke route(s) ${bespoke.sort().join(",")} claim generic MLX staged coverage`);

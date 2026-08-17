@@ -10,6 +10,7 @@ import {
   activeCalibrationPlan,
   assertCellOwnershipIsBackendScoped,
   assertCalibrationPlanTargetsResolvedCoordinates,
+  assertMlxStagedCoverageIsStructurallyConsistent,
   assertCellInventoryMatchesCatalog,
   assertPublishedDocumentIsClosed,
   hoistManifestScopes,
@@ -3672,6 +3673,104 @@ test("manifest-derived evidence is published once per scope, and the join is clo
     assert.throws(
       () => hoistManifestScopes(drifted),
       /manifest-derived evidence differs between coordinates of scope/,
+    );
+  }
+});
+
+// The two scopings applied to `assertMlxStagedCoverageIsStructurallyConsistent` on 2026-08-17 (see the
+// honest-scope note at the top of generate-memory-matrix.mjs) each narrow it, so each needs a control
+// proving the narrowing did not become a hole. Driven against the exported assertion over a synthetic
+// census rather than the real catalog: the boundary being tested is the assertion's own logic, and a
+// fixture states the boundary in one screen instead of depending on whatever the catalog happens to
+// declare this week.
+function stagedCensusFixture() {
+  const model = (id, { route = id, routeKind = "registry", tiers = ["q4"] } = {}) => ({
+    id,
+    resolvedRoute: route,
+    routeKind,
+    axes: { mlx: { tiers } },
+  });
+  const cell = (modelId, { overlay = "none", state = "Implemented/unverified" } = {}) => ({
+    backend: "mlx",
+    rung: "staged_residency",
+    modelId,
+    tier: "q4",
+    mode: "text_to_image",
+    overlay,
+    state,
+  });
+  // Minimum shape the other assertions in the function demand: bernini in the census, flux2_dev out of
+  // it, and the census neither empty nor the whole catalog.
+  return {
+    models: [model("bernini_image"), model("filler_a"), model("filler_b")],
+    cells: [cell("bernini_image")],
+    model,
+    cell,
+  };
+}
+
+test("the staged-coverage census fixture is green before any perturbation", () => {
+  const { models, cells } = stagedCensusFixture();
+  assertMlxStagedCoverageIsStructurallyConsistent({ models, cells });
+});
+
+test("a drifting tiered route-mate still reds after the single-dense-tier exemption", () => {
+  const { models, cells, model, cell } = stagedCensusFixture();
+  // Two TIERED entries sharing one route, disagreeing: the exemption must not reach this.
+  const drifted = {
+    models: [...models, model("tiered_staged", { route: "shared" }), model("tiered_bare", { route: "shared" })],
+    cells: [...cells, cell("tiered_staged")],
+  };
+  assert.throws(
+    () => assertMlxStagedCoverageIsStructurallyConsistent(drifted),
+    /MLX staged coverage disagrees within resolved route\(s\) shared/,
+    "per-route drift between tiered entries must still red",
+  );
+
+  // Same disagreement, except the entry that lacks staged coverage advertises NO tier ladder — the
+  // `flux2_klein_9b_true_v2` shape. Structurally fixed, not drift, so it is exempt.
+  const exempt = {
+    models: [
+      ...models,
+      model("tiered_staged", { route: "shared" }),
+      model("single_dense", { route: "shared", tiers: ["default"] }),
+    ],
+    cells: [...cells, cell("tiered_staged")],
+  };
+  assertMlxStagedCoverageIsStructurallyConsistent(exempt);
+
+  // And the exemption is keyed on the axis, not on the id: a single-dense entry is only exempt from the
+  // CROSS-ENTRY comparison. Add a third TIERED route-mate that disagrees and the route reds again.
+  const exemptPlusDrift = {
+    models: [...exempt.models, model("tiered_bare", { route: "shared" })],
+    cells: exempt.cells,
+  };
+  assert.throws(
+    () => assertMlxStagedCoverageIsStructurallyConsistent(exemptPlusDrift),
+    /disagrees within resolved route\(s\) shared/,
+    "an exempt entry on the route must not suppress drift between its tiered siblings",
+  );
+});
+
+test("a bespoke route claiming the generic staged ladder still reds", () => {
+  const { models, cells, model, cell } = stagedCensusFixture();
+  // PuLID's actual shape: bespoke dispatch, staged coverage ONLY on its own closed overlay. Allowed.
+  const closedOverlayOnly = {
+    models: [...models, model("bespoke_identity", { routeKind: "bespoke" })],
+    cells: [...cells, cell("bespoke_identity", { overlay: "identity" })],
+  };
+  assertMlxStagedCoverageIsStructurallyConsistent(closedOverlayOnly);
+
+  // The generic coordinates are the ones a bespoke route may never claim.
+  for (const overlay of ["none", "lora"]) {
+    const generic = {
+      models: [...models, model("bespoke_identity", { routeKind: "bespoke" })],
+      cells: [...cells, cell("bespoke_identity", { overlay })],
+    };
+    assert.throws(
+      () => assertMlxStagedCoverageIsStructurallyConsistent(generic),
+      /bespoke route\(s\) bespoke_identity claim generic MLX staged coverage/,
+      `a bespoke route claiming the ${overlay} overlay must red`,
     );
   }
 });
