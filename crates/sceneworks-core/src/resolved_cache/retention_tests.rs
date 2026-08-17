@@ -875,6 +875,79 @@ fn invalid_tombstone_fails_safe_and_recovery_resurrects_the_receipt_backed_entry
     );
 }
 
+/// The tombstone probe runs on every metadata read, so it is confinement-checked like every other
+/// managed path in this module: a linked tombstone is refused rather than followed, and refusing it
+/// fails the read closed instead of silently treating the entry as evictable.
+#[cfg(unix)]
+#[test]
+fn eviction_tombstone_probe_refuses_a_link_without_reading_through_it() {
+    use std::os::unix::fs::symlink;
+
+    let scratch = TempDir::new().unwrap();
+    let library = scratch.path().join("library");
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let candidate = flat_candidate(&library, "SceneWorks/m-a", REV_A, "q8", b"0123456789");
+    materialize_complete(&store, &library, &candidate);
+    let external = scratch.path().join("external-tombstone.json");
+    std::fs::write(&external, b"external-must-not-be-read").unwrap();
+    symlink(
+        &external,
+        entry_dir(&store, &candidate.cache_key).join(EVICTED_MARKER_FILE),
+    )
+    .unwrap();
+
+    let error = store
+        .lookup_complete(&candidate.cache_key)
+        .expect_err("a linked eviction tombstone must fail the read closed");
+    assert!(error.to_string().contains("link"));
+    assert_eq!(
+        std::fs::read(&external).unwrap(),
+        b"external-must-not-be-read"
+    );
+    assert!(entry_dir(&store, &candidate.cache_key)
+        .join("bundle")
+        .join("model.safetensors")
+        .is_file());
+}
+
+/// A reservation whose interruption cannot be recorded must leave the entry conservatively
+/// `Materializing` (never silently "clean"), so a later pass still treats it as this session's
+/// live work rather than as an eviction candidate.
+#[test]
+fn a_reservation_that_cannot_record_its_interruption_leaves_materializing_state() {
+    let scratch = TempDir::new().unwrap();
+    let library = scratch.path().join("library");
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let candidate = flat_candidate(&library, "SceneWorks/m-a", REV_A, "q8", b"0123456789");
+    let reservation = match store
+        .reserve(&candidate, &library, "image:model-a")
+        .unwrap()
+    {
+        ReservationOutcome::Acquired(reservation) => reservation,
+        other => panic!("fixture reservation must acquire, got {other:?}"),
+    };
+    let digest = cache_key_digest(&candidate.cache_key).unwrap();
+    std::fs::write(
+        entry_dir(&store, &candidate.cache_key).join(EVICTED_MARKER_FILE),
+        b"garbage-tombstone",
+    )
+    .unwrap();
+    drop(reservation);
+
+    let _lock = store.lock_metadata(&digest).unwrap();
+    assert!(store.read_metadata_locked(&digest).is_err());
+    let entry = store.inner.root.join("entries").join(&digest);
+    let envelope = [entry.join("metadata.0.json"), entry.join("metadata.1.json")]
+        .into_iter()
+        .filter_map(|path| read_journal(&path).ok())
+        .max_by_key(|envelope| envelope.generation)
+        .expect("the journal still holds the reservation state");
+    assert_eq!(
+        envelope.metadata.state,
+        ResolvedCacheEntryState::Materializing
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn eviction_removal_never_follows_a_swapped_symlink_outside_the_root() {
@@ -949,9 +1022,17 @@ fn retention_checkpoints_gate_on_policy_and_idleness() {
     assert!(!entry_dir(&store, &candidate.cache_key).exists());
 }
 
+/// An incidental open handle is NOT an eviction protection, and must not be mistaken for one.
+/// Windows deletes through an ordinary shared reader (POSIX-semantics delete), so a reader that
+/// holds no lease cannot keep a policy-expired entry alive; the artifact lease is the protection,
+/// and `active_lease_survives_automatic_cleanup_and_eviction_resumes_after_release` proves that
+/// one on this platform too. This test pins the real behavior so a future reader-blocks-delete
+/// assumption cannot creep back in.
 #[cfg(windows)]
 #[test]
-fn windows_eviction_with_an_open_bundle_handle_fails_closed_and_converges() {
+fn windows_shared_reader_without_a_lease_does_not_protect_an_expired_entry() {
+    use std::io::Read;
+
     let scratch = TempDir::new().unwrap();
     let library = scratch.path().join("library");
     let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
@@ -963,18 +1044,59 @@ fn windows_eviction_with_an_open_bundle_handle_fails_closed_and_converges() {
         .unwrap()
         .join("model.safetensors");
 
-    // A rogue open handle (no lease) makes the confined deleter fail with a sharing violation.
-    // The durable tombstone keeps the failure recoverable instead of stranding a half-removed
-    // entry.
-    let open_handle = File::open(&bundle_file).unwrap();
+    let mut reader = File::open(&bundle_file).unwrap();
+    let report = store.enforce_retention(&policy(1, 1), FAR_FUTURE).unwrap();
+    assert!(report.failed.is_empty());
+    assert_eq!(report.evicted.len(), 1);
+    assert!(!entry_dir(&store, &candidate.cache_key).exists());
+    assert_eq!(audit_records(&store).len(), 1);
+
+    // The orphaned handle keeps serving the bytes it already opened; nothing is corrupted.
+    let mut contents = Vec::new();
+    reader.read_to_end(&mut contents).unwrap();
+    assert_eq!(contents, b"0123456789");
+}
+
+/// A genuine Windows sharing violation (an exclusive, share-mode-0 handle) must fail closed and
+/// stay convergent: the durable tombstone survives the failed deletion, the entry reads as
+/// `Evicting` rather than as a usable bundle, no audit record claims a removal that did not
+/// happen, and the next checkpoint after the handle closes finishes the removal exactly once.
+#[cfg(windows)]
+#[test]
+fn windows_sharing_violation_keeps_the_eviction_pending_until_it_converges() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let scratch = TempDir::new().unwrap();
+    let library = scratch.path().join("library");
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let candidate = flat_candidate(&library, "SceneWorks/m-a", REV_A, "q8", b"0123456789");
+    materialize_complete(&store, &library, &candidate);
+    stamp_activity(&store, &candidate.cache_key, Some(1_000), 500);
+    let bundle_file = store
+        .bundle_path(&candidate.cache_key)
+        .unwrap()
+        .join("model.safetensors");
+
+    let exclusive = OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(&bundle_file)
+        .unwrap();
     let report = store.enforce_retention(&policy(1, 1), FAR_FUTURE).unwrap();
     assert!(report.evicted.is_empty());
     assert_eq!(report.failed.len(), 1);
-    let summaries = store.enumerate().unwrap();
-    assert_eq!(summaries[0].state, ResolvedCacheEntryState::Evicting);
+    assert!(audit_records(&store).is_empty());
+    assert_eq!(
+        store.enumerate().unwrap()[0].state,
+        ResolvedCacheEntryState::Evicting
+    );
+    assert!(store
+        .lookup_complete(&candidate.cache_key)
+        .unwrap()
+        .is_none());
 
-    drop(open_handle);
+    drop(exclusive);
     store.recover().unwrap();
     assert!(!entry_dir(&store, &candidate.cache_key).exists());
-    assert_eq!(audit_records(&store).len(), 2);
+    assert_eq!(audit_records(&store).len(), 1);
 }

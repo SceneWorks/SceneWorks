@@ -877,11 +877,35 @@ impl ResolvedCacheStore {
     /// Reads the eviction tombstone if one exists. An unreadable or checksum-invalid tombstone is
     /// an error, never a sanction to delete: readers surface it and recovery either resurrects the
     /// entry from a valid complete receipt or parks it as corrupt.
+    ///
+    /// This probe runs on *every* metadata read, so the overwhelmingly common "no tombstone" case
+    /// must stay cheap and must not consume a file descriptor: it is decided by a single
+    /// `symlink_metadata`, and only a tombstone that is actually present is opened and read. An
+    /// earlier revision read the path unconditionally, adding an open/read/close to every metadata
+    /// read; under descriptor pressure that turned into an unreadable-metadata error inside
+    /// `ResolvedCacheReservation::drop`, which left the entry `Materializing` and reddened the
+    /// pre-existing stale-staging cleanup test on the hosted macOS lane. The tombstone is also
+    /// confinement-checked here like every other managed path in this module.
     fn read_eviction_marker(
         &self,
         digest: &str,
     ) -> Result<Option<EvictionMarker>, ResolvedCacheError> {
         let path = self.eviction_marker_path(digest);
+        match std::fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink()
+                    || metadata_is_reparse_point(&metadata)
+                    || !metadata.is_file()
+                {
+                    return Err(ResolvedCacheError::new(format!(
+                        "eviction tombstone {} is a link or not a regular file",
+                        path.display()
+                    )));
+                }
+            }
+        }
         let body = match std::fs::read(&path) {
             Ok(body) => body,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -910,18 +934,24 @@ impl ResolvedCacheStore {
         atomic_write_json(&self.eviction_marker_path(digest), &envelope)
     }
 
-    /// Finishes a tombstoned removal: records the audit trail outside the entry, then removes the
-    /// whole entry directory (bundle, journal slots, receipt, tombstone) with the confined
-    /// deleter. Caller holds the exclusive artifact lock and the metadata lock. Idempotent under
+    /// Finishes a tombstoned removal: removes the whole entry directory (bundle, journal slots,
+    /// receipt, tombstone) with the confined deleter, then records the audit trail outside the
+    /// entry. Caller holds the exclusive artifact lock and the metadata lock. Idempotent under
     /// interruption: rerunning after a crash converges because the tombstone survives until the
     /// directory removal completes.
+    ///
+    /// Ordering is deliberate. The tombstone is the durable record of *intent* and the audit
+    /// record is the durable record of *completion*, so the audit write follows the removal it
+    /// describes: writing it first (as an earlier revision did) reports a removal that a failed
+    /// deletion never performed — a Windows sharing violation produced exactly that false
+    /// "completed" record.
     fn finish_pending_eviction(&self, digest: &str) -> Result<EvictionMarker, ResolvedCacheError> {
         let marker = self.read_eviction_marker(digest)?.ok_or_else(|| {
             ResolvedCacheError::new("cache entry has no eviction tombstone to finish")
         })?;
-        self.write_eviction_audit_record(&marker)?;
         let entries = self.inner.root.join("entries");
         remove_managed_tree(&entries.join(digest), &entries)?;
+        self.write_eviction_audit_record(&marker)?;
         Ok(marker)
     }
 
@@ -1313,21 +1343,39 @@ impl Drop for ResolvedCacheReservation {
         if self.finished {
             return;
         }
-        if let Ok(_metadata_lock) = self.store.lock_metadata(&self.digest) {
-            if let Ok(mut metadata) = self.store.read_metadata_locked(&self.digest) {
-                if self.verify_ownership(&metadata).is_ok() {
-                    metadata.state = ResolvedCacheEntryState::Interrupted;
-                    metadata.reservation_id = None;
-                    metadata.reservation_owner = None;
-                    metadata.session_id = None;
-                    metadata.recovery_status = RecoveryStatus::InterruptedReservation;
-                    metadata.updated_at = now_seconds().unwrap_or(metadata.updated_at);
-                    let _ = self.store.write_metadata_unlocked(&self.digest, &metadata);
-                }
-            }
+        // A reservation that cannot record its own interruption leaves a `Materializing` entry
+        // owned by this still-live session, which every liveness check must keep treating as live.
+        // Recovery cannot converge that until the process exits and its session lock frees, so the
+        // condition is warned rather than silently swallowed.
+        if let Err(error) = self.mark_interrupted_on_drop() {
+            tracing::warn!(
+                cache_key = %self.cache_key,
+                reservation_id = %self.reservation_id,
+                error = %error,
+                "resolved-cache reservation could not record its interruption; the entry stays \
+                 materializing until this session ends"
+            );
         }
         let _ = std::fs::remove_file(&self.record_path);
         self.artifact_lock.take();
+    }
+}
+
+impl ResolvedCacheReservation {
+    fn mark_interrupted_on_drop(&self) -> Result<(), ResolvedCacheError> {
+        let _metadata_lock = self.store.lock_metadata(&self.digest)?;
+        let mut metadata = self.store.read_metadata_locked(&self.digest)?;
+        if self.verify_ownership(&metadata).is_err() {
+            // Another owner legitimately took the entry over; nothing of ours to interrupt.
+            return Ok(());
+        }
+        metadata.state = ResolvedCacheEntryState::Interrupted;
+        metadata.reservation_id = None;
+        metadata.reservation_owner = None;
+        metadata.session_id = None;
+        metadata.recovery_status = RecoveryStatus::InterruptedReservation;
+        metadata.updated_at = now_seconds().unwrap_or(metadata.updated_at);
+        self.store.write_metadata_unlocked(&self.digest, &metadata)
     }
 }
 
