@@ -25,8 +25,12 @@
 // generated rows are appended rather than merged, are all documented on
 // `scripts/lib/manifest-memory-declarations.mjs`.
 //
-// NOT A GATE. Nothing verifies this output; `npm run report:memory-contract-reconciliation` reports
-// what still disagrees and always exits 0 (Michael, 2026-08-17). Do not wire this into CI.
+// NOT A GATE, and there is no check mode. Nothing verifies this output and nothing may:
+// `npm run report:memory-contract-reconciliation` is BOTH the disagreement worklist AND the freshness
+// signal — it prints whether the committed manifest is still the projection of the committed dumps,
+// names this script as the refresh, and always exits 0 (Michael, 2026-08-17). A blocking fixed-point
+// invariant was deliberately NOT added; a stale projection is a thing a human reads about in the
+// report, never a red build. Do not wire this into CI, and do not add `--check`.
 //
 // Usage:
 //   node scripts/generate-manifest-memory-declarations.mjs
@@ -111,7 +115,9 @@ if (result.withholds.length) {
     const rungs = entry.rungs === "all" ? "all rungs" : entry.rungs.join(", ");
     console.log(
       `    ${entry.backend}:${entry.provider} on ${entry.modelId} — ${rungs} ` +
-        `(${entry.declaration.story ?? "no story"}: ${entry.declaration.reason ?? "no reason"})`,
+        // Both fields are required by `withheldRungs` and by the authoring schema, so there is no
+        // "no story" fallback to print: an uncited withhold never reaches here.
+        `(${entry.declaration.story}: ${entry.declaration.reason})`,
     );
   }
 } else {

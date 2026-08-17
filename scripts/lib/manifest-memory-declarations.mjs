@@ -64,8 +64,15 @@
 //
 // ## Not a gate
 //
-// This is a developer tool, run like the repo's other `generate-*` scripts. Nothing checks its
-// output; the reconciliation stays report-only (Michael, 2026-08-17). Do not wire it into CI.
+// This is a developer tool, run like the repo's other `generate-*` scripts. Nothing checks its output
+// and nothing may: the reconciliation stays report-only (Michael, 2026-08-17).
+//
+// `scripts/report-memory-contract-reconciliation.mjs` is the FRESHNESS SIGNAL — it evaluates whether
+// the committed manifest is still the projection of the committed dumps, prints it, names the
+// regenerate command, and always exits 0. That evaluation deliberately does NOT live in
+// `scripts/manifest-memory-declarations.test.mjs`: a blocking fixed-point assertion there would be a
+// new gate in `npm run check`, which is exactly what the 2026-08-17 decision rules out. The tests in
+// that file cover generator LOGIC on fixtures; none of them asserts the committed artifact is fresh.
 
 import { stripJsoncComments } from "./jsonc.mjs";
 
@@ -374,10 +381,23 @@ export function overlayOwners(model, backend) {
  * constrains instead of living in a table over here that nobody editing the manifest would see.
  * Shape: `{ "rungs": ["bounded_decode"], "story": "SC-15525", "reason": "..." }`, or `"rungs": "all"`
  * to withhold the whole backend. The generator honors it and REPORTS it; it never overrides one.
+ *
+ * The same shape is declared in `packages/schemas/model-manifest.schema.json`
+ * (`$defs/memoryDeclarationWithhold`, referenced from both backend blocks), so a withhold authored in
+ * the manifest passes the authoring-schema audit. `story` and `reason` are required in both places: a
+ * withhold with no cited verdict is indistinguishable from the untriaged gap this projection exists to
+ * eliminate, so it fails loudly here rather than silently suppressing engine truth.
  */
 export function withheldRungs(model, backend) {
   const declaration = model?.[backend]?.memoryDeclarationWithhold;
   if (!declaration) return null;
+  for (const field of ["story", "reason"]) {
+    if (typeof declaration[field] !== "string" || !declaration[field].trim()) {
+      throw new Error(
+        `${model.id}:${backend} memoryDeclarationWithhold must cite a non-empty ${field}`,
+      );
+    }
+  }
   const rungs = declaration.rungs;
   if (rungs === "all") return { rungs: "all", declaration };
   if (!Array.isArray(rungs) || rungs.length === 0) {
@@ -778,15 +798,78 @@ export function modelSpans(body) {
   }
 }
 
-/** The index just past a value, skipped forward over a trailing same-line `//` comment. */
-function endOfLineValue(body, index) {
-  let cursor = index;
-  while (cursor < body.length && (body[cursor] === " " || body[cursor] === "\t")) cursor += 1;
-  if (body[cursor] === "/" && body[cursor + 1] === "/") {
-    while (cursor < body.length && body[cursor] !== "\n") cursor += 1;
-    return cursor;
+/** Where a comment starts on one line, or -1. String-aware, so a `https://` inside a value is not a
+ *  comment. Single-line only, which is safe because a JSON string can never contain a raw newline. */
+function lineCommentStart(line) {
+  let inString = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    if (inString) {
+      if (char === "\\") index += 1;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+    if (char === "/" && line[index + 1] === "/") return index;
+    if (char === "/" && line[index + 1] === "*") {
+      const close = line.indexOf("*/", index + 2);
+      if (close < 0) return index;
+      index = close + 1;
+    }
   }
-  return index;
+  return -1;
+}
+
+/**
+ * Split trailing whitespace-and-comment trivia off a jsonc fragment: `[code, trivia]`.
+ *
+ * A separator comma must land after the last real CONTENT, never after a comment — appending it to a
+ * `// note` line makes the comma part of the comment, and the manifest stops parsing. Both shapes
+ * occur in this file: an entry with a trailing same-line note (`"measured": true // ...`) and an
+ * `implementations` array whose last line before `]` is a standalone comment. `clearProjection` uses
+ * the same split in reverse to take that comma back out.
+ */
+export function splitTrailingTrivia(text) {
+  let boundary = text.length;
+  for (;;) {
+    let cursor = boundary;
+    while (cursor > 0 && /\s/.test(text[cursor - 1])) cursor -= 1;
+    const lineStart = text.lastIndexOf("\n", cursor - 1) + 1;
+    const commentAt = lineCommentStart(text.slice(lineStart, cursor));
+    if (commentAt < 0) {
+      boundary = cursor;
+      break;
+    }
+    boundary = lineStart + commentAt;
+    if (text.slice(lineStart, boundary).trim() !== "") {
+      // Content, then a note on the SAME line: the comma hugs the content.
+      while (boundary > lineStart && /[ \t]/.test(text[boundary - 1])) boundary -= 1;
+      break;
+    }
+    // A whole comment line — keep walking back past it.
+  }
+  return [text.slice(0, boundary), text.slice(boundary)];
+}
+
+/** `code, trivia` — the fragment with a separator comma placed after its last real content. */
+function withSeparatorComma(text) {
+  const [code, trivia] = splitTrailingTrivia(text);
+  return `${code},${trivia}`;
+}
+
+/** The inverse: drop the one separator comma `withSeparatorComma` added. */
+function withoutSeparatorComma(text) {
+  const [code, trivia] = splitTrailingTrivia(text);
+  return `${code.replace(/,$/, "")}${trivia}`;
+}
+
+/** Index of the newline ending the line `index` sits on (or the end of the body). */
+function endOfLine(body, index) {
+  const newline = body.indexOf("\n", index);
+  return newline < 0 ? body.length : newline;
 }
 
 const indentOf = (body, index) => {
@@ -830,7 +913,7 @@ export function stripGeneratedRegion(text) {
   const end = text.indexOf(GENERATED_END, begin);
   if (end < 0) throw new Error("generated region has no END marker");
   const after = end + GENERATED_END.length;
-  const head = text.slice(0, begin).replace(/,\s*$/, "");
+  const head = withoutSeparatorComma(text.slice(0, begin));
   const tail = text.slice(after).replace(/^\s*,/, "");
   return `${head}${tail}`;
 }
@@ -866,12 +949,14 @@ export function applyProjection(body, plans) {
         `${arrayIndent}  `,
         plan.providers.map((item) => item.provider),
       );
-      const head = inner.replace(/\s*$/, "");
-      const separator = head.trim() ? ",\n" : "\n";
+      // The comma goes after the last real ROW, which is not necessarily the last line: an
+      // `implementations` array may end with a standalone comment line before its `]`.
+      const head = inner.replace(/[ \t]*$/, "").replace(/\n$/, "");
+      const joined = head.trim() ? withSeparatorComma(head) : head;
       edits.push({
         start: open,
         end: implementations.valueEnd,
-        text: `[${head}${separator}${region}\n${arrayIndent}]`,
+        text: `[${joined}\n${region}\n${arrayIndent}]`,
       });
       continue;
     }
@@ -883,19 +968,25 @@ export function applyProjection(body, plans) {
     // two regions would leave `clearProjection` pairing the outer BEGIN with the inner END.
     const region = plan.rows.map((row) => renderRow(row, `${indent}    `)).join(",\n");
     const inserted =
-      `,\n${indent}${GENERATED_BEGIN}\n` +
+      `\n${indent}${GENERATED_BEGIN}\n` +
       renderBanner(indent, plan.providers.map((item) => item.provider)) +
       `${indent}"memoryStrategyContract": {\n` +
       `${indent}  "abi": 1,\n` +
       `${indent}  "provider": ${JSON.stringify(plan.contractProvider)},\n` +
       `${indent}  "implementations": [\n${region}\n${indent}  ]\n` +
       // No comma after the closing brace: the generated contract becomes the block's LAST entry, and
-      // the comma that joins it to the previous one is already emitted above.
+      // the comma that joins it to the previous one is emitted by `withSeparatorComma` below.
       `${indent}}\n` +
       `${indent}${GENERATED_END}`;
-    // Past any trailing same-line comment on the entry we append after, so the inserted comma cannot
-    // land inside somebody's `// note` and change what that note says.
-    edits.push({ start: endOfLineValue(body, last.valueEnd), end: endOfLineValue(body, last.valueEnd), text: inserted });
+    // Rewrite from the end of the anchor entry's VALUE to the end of its line, so the separator comma
+    // lands on the value and any trailing `// note` is reproduced after it. Appending `,` past the
+    // note would make the comma part of the comment and the manifest would stop parsing.
+    const lineEnd = endOfLine(body, last.valueEnd);
+    edits.push({
+      start: last.valueEnd,
+      end: lineEnd,
+      text: withSeparatorComma(body.slice(last.valueEnd, lineEnd)) + inserted,
+    });
   }
   edits.sort((left, right) => right.start - left.start);
   let out = body;
@@ -917,9 +1008,11 @@ export function clearProjection(body) {
     if (end < 0) throw new Error("generated region has no END marker");
     const lineStart = out.lastIndexOf("\n", begin) + 1;
     let after = end + GENERATED_END.length;
-    // A generated whole-contract insert owns the comma that introduced it; a generated region inside
-    // an `implementations` array is introduced by a comma on the preceding hand-authored row.
-    const head = out.slice(0, lineStart).replace(/,(\s*)$/, "$1");
+    // Both region shapes are introduced by ONE separator comma placed after the preceding real
+    // content — which is not necessarily the preceding line, since that content may be followed by a
+    // trailing note or a standalone comment line. `withoutSeparatorComma` takes back exactly the
+    // comma `withSeparatorComma` put in, which is what makes `--clear` byte-exact.
+    const head = withoutSeparatorComma(out.slice(0, lineStart));
     while (after < out.length && out[after] === "\n") after += 1;
     out = `${head}${out.slice(after)}`;
   }

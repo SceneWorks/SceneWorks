@@ -24,16 +24,65 @@
 //   node scripts/report-memory-contract-reconciliation.mjs
 //   node scripts/report-memory-contract-reconciliation.mjs --json
 //   node scripts/report-memory-contract-reconciliation.mjs --leg engine_manifest
+//
+// It also carries the FRESHNESS signal for the manifest's engine-projected memory declarations
+// (sc-20246): whether `config/manifests/builtin.models.jsonc` is still the projection of the committed
+// capability dumps. That lives here, not in a test, because a blocking fixed-point invariant would be
+// a new gate. See `manifestFixedPoint` below.
 
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { projectManifestBody } from "./lib/manifest-memory-declarations.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const argv = process.argv.slice(2);
 const asJson = argv.includes("--json");
 const legAt = argv.indexOf("--leg");
 const legFilter = legAt >= 0 ? argv[legAt + 1] : null;
+
+/**
+ * Is the committed manifest still the projection of the committed dumps? (sc-20246)
+ *
+ * THIS IS THE FRESHNESS SIGNAL, and it is deliberately here rather than in a test. A blocking
+ * "the committed projection is a fixed point" invariant would be a new gate — ruled out by Michael's
+ * 2026-08-17 decision, and it would contradict the projector's own not-a-gate contract. So the report
+ * says whether the manifest is stale and what to run; a human decides. Never throws: a broken input
+ * degrades to "could not evaluate", because an unavailable freshness signal is not a build failure.
+ */
+function manifestFixedPoint() {
+  const read = (relative) => readFileSync(path.join(ROOT, relative), "utf8");
+  try {
+    const body = read("config/manifests/builtin.models.jsonc");
+    const projected = projectManifestBody({
+      body,
+      engineFacts: ["mlx", "candle"].map((backend) =>
+        JSON.parse(read(`config/engine-capabilities/capabilities.${backend}.json`)),
+      ),
+      enginesSource: read("crates/sceneworks-worker/src/engines.rs"),
+      strictControlSource: read("crates/sceneworks-worker/src/image_jobs/strict_control.rs"),
+      imageRoutingSource: read("crates/sceneworks-worker/src/image_jobs/base.rs"),
+      routeRegistrySource: read("crates/sceneworks-worker/src/memory_route_registry.rs"),
+    });
+    return { current: projected.body === body };
+  } catch (error) {
+    return { error: (error?.message ?? String(error)).split("\n")[0] };
+  }
+}
+
+function fixedPointLine() {
+  const state = manifestFixedPoint();
+  if (state.error) {
+    return `  Manifest projection freshness: could not evaluate — ${state.error}`;
+  }
+  return state.current
+    ? "  Manifest projection: the memory declarations ARE the projection of the committed engine dumps."
+    : "  Manifest projection: STALE — the memory declarations are not the projection of the committed\n" +
+      "  engine dumps. Run `npm run generate:manifest-memory-declarations` to refresh, then regenerate\n" +
+      "  the derived artifacts. Findings below may reflect the old projection.";
+}
 
 // The reconciliation needs the same assembled inputs the matrix generator builds (cells, calibration
 // plan, survey), so the report asks the generator for them rather than reassembling — one code path,
@@ -54,6 +103,7 @@ try {
   // Even the report refuses to fail. If the inputs cannot be assembled at all, say so and exit 0 —
   // this script is a worklist, and an unavailable worklist is not a build failure.
   console.log("Memory-contract reconciliation report");
+  console.log(fixedPointLine());
   console.log("  Could not assemble the reconciliation inputs on this branch:");
   console.log(`  ${(error?.stderr || error?.message || String(error)).toString().trim().split("\n").slice(-4).join("\n  ")}`);
   console.log("\nDone. Exit 0 always.");
@@ -65,7 +115,9 @@ const findings = (result.findings ?? []).filter(
 );
 
 if (asJson) {
-  console.log(JSON.stringify({ ...result, findings }, null, 2));
+  console.log(
+    JSON.stringify({ ...result, manifestProjection: manifestFixedPoint(), findings }, null, 2),
+  );
   process.exit(0);
 }
 
@@ -85,6 +137,7 @@ const coordinate = (entry) =>
 
 console.log("Memory-contract reconciliation report");
 console.log("Nothing here fails a build. This is a worklist, not a gate (Michael, 2026-08-17).");
+console.log(`\n${fixedPointLine()}`);
 if (result.unavailable) {
   console.log(`\n  Reconciliation did not run: ${result.unavailable}`);
   console.log("\nDone. Exit 0 always.");

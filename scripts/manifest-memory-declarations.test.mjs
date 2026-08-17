@@ -18,6 +18,7 @@ import {
   projectManifestBody,
   projectProviderRows,
   routeWitnessInventory,
+  splitTrailingTrivia,
   rustStringSlice,
   withheldRungs,
   witnessCoordinatesForTier,
@@ -155,6 +156,39 @@ const FIXTURE_MANIFEST = `{
   ]
 }
 `;
+
+// Same entry, but the LAST key of the `mlx` block carries a trailing same-line note. The
+// whole-contract insert appends after that key, so its separator comma must land on the value and not
+// past the note — a comma appended after `// ...` becomes comment text and the manifest stops parsing.
+const FIXTURE_MANIFEST_TRAILING_NOTE = FIXTURE_MANIFEST.replace(
+  '"vramGbByTier": { "q4": 4.2 }',
+  '"vramGbByTier": { "q4": 4.2 } // measured on an M3 Max, do not round',
+);
+
+// A hand-authored `implementations` array whose last line before `]` is a STANDALONE comment. The
+// in-array separator comma has the same hazard there.
+const FIXTURE_MANIFEST_TRAILING_COMMENT_LINE = FIXTURE_MANIFEST.replace(
+  '        "vramGbByTier": { "q4": 4.2 }',
+  `        "vramGbByTier": { "q4": 4.2 },
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "widget",
+          "implementations": [
+            {
+              "rung": "bounded_decode",
+              "fingerprint": "widget-hand-authored-v1",
+              "tiers": ["q4"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "engagedRungs": ["resident", "bounded_decode"],
+              "parameters": { "decodeTileEdge": 512 },
+              "parameterRanges": { "decodeTileEdges": [512] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-widget/src/memory_strategy.rs"
+            }
+            // A parting thought about the row above, which must not swallow the next comma.
+          ]
+        }`,
+);
 
 const fixtureInput = (overrides = {}) => ({
   body: FIXTURE_MANIFEST,
@@ -391,10 +425,17 @@ test("a whole-backend withhold suppresses every rung on that block", () => {
 
 test("a malformed withhold fails loudly instead of silently projecting everything", () => {
   const host = parse(FIXTURE_MANIFEST).models[0];
-  host.mlx.memoryDeclarationWithhold = { rungs: ["not_a_rung"] };
+  const cited = { story: "SC-0000", reason: "measured" };
+  host.mlx.memoryDeclarationWithhold = { ...cited, rungs: ["not_a_rung"] };
   assert.throws(() => withheldRungs(host, "mlx"), /unknown rung/);
-  host.mlx.memoryDeclarationWithhold = { rungs: [] };
+  host.mlx.memoryDeclarationWithhold = { ...cited, rungs: [] };
   assert.throws(() => withheldRungs(host, "mlx"), /non-empty array/);
+  // An UNCITED withhold is the dangerous one: it is indistinguishable from the untriaged gap the
+  // projection exists to close, so both fields are required here and in the authoring schema.
+  host.mlx.memoryDeclarationWithhold = { rungs: "all", reason: "measured" };
+  assert.throws(() => withheldRungs(host, "mlx"), /non-empty story/);
+  host.mlx.memoryDeclarationWithhold = { rungs: "all", story: "SC-0000", reason: "   " };
+  assert.throws(() => withheldRungs(host, "mlx"), /non-empty reason/);
 });
 
 test("tiers whose witnessed coordinates differ land in separate rows, never a union", () => {
@@ -484,6 +525,56 @@ test("hand-authored non-memory content survives a projection cycle unchanged", (
   assert.match(projected, /A hand-written comment that must survive/);
 });
 
+test("a trailing same-line note at the insert anchor keeps the manifest parseable", () => {
+  const projected = projectManifestBody(
+    fixtureInput({ body: FIXTURE_MANIFEST_TRAILING_NOTE }),
+  ).body;
+  // The comma is on the value, the note is reproduced verbatim after it.
+  assert.match(projected, /"vramGbByTier": \{ "q4": 4\.2 \}, \/\/ measured on an M3 Max, do not round/);
+  assert.ok(widgetContract(projected).implementations.length > 0);
+  assert.equal(clearProjection(projected), FIXTURE_MANIFEST_TRAILING_NOTE);
+  assert.equal(
+    projectManifestBody(fixtureInput({ body: projected })).body,
+    projected,
+    "still idempotent with a note at the anchor",
+  );
+});
+
+test("a standalone trailing comment line in implementations keeps the manifest parseable", () => {
+  const projected = projectManifestBody(
+    fixtureInput({ body: FIXTURE_MANIFEST_TRAILING_COMMENT_LINE }),
+  ).body;
+  const rows = widgetContract(projected).implementations;
+  assert.ok(rows.some((row) => row.fingerprint === "widget-hand-authored-v1"), "hand row survives");
+  assert.ok(
+    rows.some((row) => row.source?.startsWith("config/engine-capabilities/")),
+    "projected rows were appended",
+  );
+  // The comma went after the row, NOT after the parting thought.
+  assert.match(projected, /\},\n\s*\/\/ A parting thought about the row above/);
+  assert.equal(clearProjection(projected), FIXTURE_MANIFEST_TRAILING_COMMENT_LINE);
+  assert.equal(
+    projectManifestBody(fixtureInput({ body: projected })).body,
+    projected,
+    "still idempotent with a standalone comment line before the closing bracket",
+  );
+});
+
+test("the trivia splitter never places a comma inside a comment or a string", () => {
+  assert.deepEqual(splitTrailingTrivia('"a": 1'), ['"a": 1', ""]);
+  assert.deepEqual(splitTrailingTrivia('"a": 1 // note'), ['"a": 1', " // note"]);
+  assert.deepEqual(splitTrailingTrivia('"a": 1\n  // note\n'), ['"a": 1', "\n  // note\n"]);
+  // A `//` inside a string is not a comment, so the whole line is content.
+  assert.deepEqual(
+    splitTrailingTrivia('"url": "https://example.com/x"'),
+    ['"url": "https://example.com/x"', ""],
+  );
+  assert.deepEqual(
+    splitTrailingTrivia('"url": "https://example.com/x" // and a real note'),
+    ['"url": "https://example.com/x"', " // and a real note"],
+  );
+});
+
 test("generated regions are delimited and never nested", () => {
   const projected = projectManifestBody(fixtureInput()).body;
   const begins = projected.split(GENERATED_BEGIN).length - 1;
@@ -506,37 +597,18 @@ test("generated regions are delimited and never nested", () => {
 
 // --- the committed manifest ----------------------------------------------------------------------
 
-test("the committed manifest is a fixed point of the committed dumps", () => {
-  const body = read("config/manifests/builtin.models.jsonc");
-  const result = projectManifestBody({
-    body,
-    engineFacts: ["mlx", "candle"].map((backend) =>
-      JSON.parse(read(`config/engine-capabilities/capabilities.${backend}.json`)),
-    ),
-    enginesSource: read("crates/sceneworks-worker/src/engines.rs"),
-    strictControlSource: read("crates/sceneworks-worker/src/image_jobs/strict_control.rs"),
-    imageRoutingSource: read("crates/sceneworks-worker/src/image_jobs/base.rs"),
-    routeRegistrySource: read("crates/sceneworks-worker/src/memory_route_registry.rs"),
-  });
-  assert.equal(
-    result.body,
-    body,
-    "run `npm run generate:manifest-memory-declarations` — the committed projection is stale",
-  );
-  const manifest = parse(result.body);
-  // Shape, not population: every generated row must be a usable declaration.
-  for (const model of manifest.models) {
-    for (const backend of ["mlx", "candle"]) {
-      for (const row of model[backend]?.memoryStrategyContract?.implementations ?? []) {
-        if (!row.source?.startsWith("config/engine-capabilities/")) continue;
-        assert.ok(row.tiers?.length, `${model.id}:${backend}:${row.rung} declares tiers`);
-        assert.ok(row.modes?.length, `${model.id}:${backend}:${row.rung} declares modes`);
-        assert.ok(row.overlays?.length, `${model.id}:${backend}:${row.rung} declares overlays`);
-        assert.ok(row.loadProfiles?.length, `${model.id}:${backend}:${row.rung} declares profiles`);
-      }
-    }
-  }
-});
+// The committed manifest's FRESHNESS is deliberately not asserted here.
+//
+// A "the committed projection is a fixed point of the committed dumps" test would be a blocking
+// freshness invariant in `npm run check` — a new gate, which is exactly what Michael's 2026-08-17
+// decision rules out, and it would contradict this generator's own "NOT A GATE" contract. The
+// freshness signal lives in `npm run report:memory-contract-reconciliation`, which prints whether the
+// manifest is a fixed point of the committed dumps and always exits 0.
+//
+// Nothing is lost in coverage: the row-shape invariant that test also carried (every projected row
+// declares non-empty tiers/modes/overlays/loadProfiles) is asserted on the fixture projection by
+// "projected rows carry only engine-derived axes and never guess measured shape" above, where it
+// tests the generator instead of the committed artifact.
 
 test("every model object in the committed manifest is locatable by the text walker", () => {
   const body = read("config/manifests/builtin.models.jsonc");

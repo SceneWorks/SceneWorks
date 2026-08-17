@@ -721,6 +721,61 @@ def test_builtin_models_manifest_satisfies_authoring_schema():
     )
 
 
+def test_memory_declaration_withhold_is_authorable_on_both_backends():
+    """sc-20246: the withhold the declaration projector honors must pass the authoring schema.
+
+    `memoryDeclarationWithhold` is how a backend block records that it declares LESS than
+    `config/engine-capabilities/capabilities.<backend>.json` dumps, on purpose, because a measurement
+    says the wider claim is wrong. No committed entry needs one today — the dumps happen to agree with
+    every recorded verdict — so without this test the property's FIRST real use would red
+    `test_builtin_models_manifest_satisfies_authoring_schema` at the moment somebody needed it, which
+    is precisely when a red is least useful. Validated against the real manifest plus a synthetic
+    withhold rather than against a hand-built document, so the property is exercised where it lives.
+    """
+    schema = _load_schema(SCHEMA_PATH)
+    validator = jsonschema.Draft202012Validator(schema)
+
+    def validate_with(withhold, backend):
+        manifest = _load_builtin_models_manifest()
+        model = next(
+            candidate
+            for candidate in manifest["models"]
+            if candidate.get(backend) is not None
+        )
+        model[backend]["memoryDeclarationWithhold"] = withhold
+        return sorted(
+            validator.iter_errors(manifest), key=lambda error: list(error.absolute_path)
+        )
+
+    for backend in ("mlx", "candle"):
+        for rungs in (["bounded_decode", "bounded_attention"], "all"):
+            errors = validate_with(
+                {
+                    "rungs": rungs,
+                    "story": "SC-15525",
+                    "reason": "rung 2 is withheld on quality: the production latent drifts 84/255.",
+                },
+                backend,
+            )
+            assert not errors, (backend, rungs, [error.message for error in errors])
+
+    # Uncited or malformed withholds must be REJECTED, matching what `withheldRungs` throws on.
+    for bad in (
+        {"rungs": ["bounded_decode"], "reason": "no story"},
+        {"rungs": ["bounded_decode"], "story": "SC-15525"},
+        {"rungs": [], "story": "SC-15525", "reason": "empty"},
+        {"rungs": ["not_a_rung"], "story": "SC-15525", "reason": "unknown rung"},
+        {"rungs": "everything", "story": "SC-15525", "reason": "not the all literal"},
+        {
+            "rungs": "all",
+            "story": "SC-15525",
+            "reason": "extra key",
+            "unexpected": True,
+        },
+    ):
+        assert validate_with(bad, "mlx"), bad
+
+
 def test_sensenova_models_do_not_advertise_lora_compatibility():
     """sc-18476: SenseNova has no diffusion-LoRA merge path, so advertise none."""
     manifest = _load_builtin_models_manifest()
