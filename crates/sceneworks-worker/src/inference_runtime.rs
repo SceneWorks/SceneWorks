@@ -81,6 +81,27 @@ pub(crate) fn media() -> &'static ProviderRegistry {
     }
 }
 
+/// Fresh, weights-free provider-owned memory-contract surfaces for generated capability facts.
+/// Kept separate from the process catalog so each platform dumper can construct its contract-only
+/// inventory without loading model weights.
+pub(crate) fn memory_contract_surface_registry() -> gen_core::Result<ProviderRegistry> {
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    {
+        platform_runtime::memory_contract_surface_registry()
+    }
+
+    #[cfg(not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )))]
+    {
+        gen_core::ProviderRegistryBuilder::new().build()
+    }
+}
+
 /// A registered trainer descriptor without loading model weights. Used by the training dry-run and
 /// real-run shared preflight so both paths validate the active backend's exact network surface.
 pub(crate) fn trainer_descriptor(id: &str) -> Option<gen_core::TrainerDescriptor> {

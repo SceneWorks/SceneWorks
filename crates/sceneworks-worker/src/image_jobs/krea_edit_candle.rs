@@ -1,16 +1,18 @@
 use super::resolve_seed;
 use super::{
-    admit_candle_base, attach_manifest_text_encoder, consume_gen_events, drive_gen_items,
-    fit_engine_image, load_reference_image, resolve_adapters, resolve_advanced_or_manifest_f32,
-    resolve_advanced_or_manifest_u32, resolve_text_style_gain, resolve_weights_dir,
-    safetensors_tensor_bytes_with_prefixes, start_gen_stream, ApiClient, CandleBaseEvidence, Image,
-    ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, Settings, Value, WorkerError,
-    WorkerResult,
+    admit_candle_base, attach_manifest_text_encoder, attach_required_components,
+    attach_selected_decoder, candle_certified_load_spec, candle_resolved_tier_key,
+    consume_gen_events, drive_gen_items, fit_engine_image, load_reference_image, load_spec,
+    optimized_shared_memory_context, pid_effective_dims, pid_output_tier, resolve_adapters,
+    resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32, resolve_pid_weights,
+    resolve_text_style_gain, resolve_weights_dir, safetensors_tensor_bytes_with_prefixes,
+    start_cached_gen_stream, ApiClient, CandleBaseEvidence, Image, ImagePlan, ImageRequest,
+    JobSnapshot, JsonObject, Path, Settings, Value, WorkerError, WorkerResult,
 };
 use serde_json::json;
 
 // Candle (Windows/CUDA) Krea 2 image-edit route (epic 10871) — the Kontext-style dual-conditioned edit
-// surface off-Mac via `runtime_cuda::providers::krea::pipeline::{load_components, load_edit_components, render_edit}`.
+// surface off-Mac through the registered `krea_2_edit` / `krea_2_turbo_edit` generators.
 // The candle sibling of the macOS `krea_edit.rs` (`generate_krea_edit_stream`): an `edit_image` job on
 // `krea_2_raw` carrying a source image (+ optional 2nd) is routed here rather than the plain Raw t2i path.
 // The source(s) ride as in-context VAE tokens at distinct RoPE frames AND ground the Qwen3-VL vision
@@ -18,8 +20,8 @@ use serde_json::json;
 // steer the edit (R5 — the base leaves it inert).
 //
 // **Candle-only.** macOS keeps the MLX Krea edit path (`krea_edit.rs`, `krea_2_edit` registry generator);
-// the candle Krea edit is a bespoke pipeline (no registered `krea_2_edit` candle generator — the candle
-// edit providers are all driven directly by the worker), so this whole file is gated to the Windows/CUDA
+// the candle Krea edit is now a registered-generator path so provider request scopes own staged
+// component loading, so this whole file is gated to the Windows/CUDA
 // candle build (the module declaration in image_jobs.rs carries the cfg). It is a child module of the `image_jobs`
 // module, so it shares that module's imports (ImageRequest/Settings/WorkerResult/WorkerError/
 // `load_reference_image`/`fit_engine_image`/`resolve_weights_dir`/`resolve_adapters`/`resolve_seed`/
@@ -27,7 +29,7 @@ use serde_json::json;
 // `gen_core`/`AdapterSpec`/… all in scope).
 //
 // Both Krea image variants edit: **Raw** on the full-CFG loop (epic 10871) and **Turbo** on the CFG-free
-// distilled few-step loop (`render_edit(distilled = true)`, sc-11640 — the fast-path); the same
+// distilled few-step loop (`krea_2_turbo_edit`, sc-11640 — the fast-path); the same
 // `krea2_identity_edit` LoRA drives both (family match, no base gating). One or two references in fixed
 // order — image 1 (required) + image 2 (optional), either can be a person
 // ([`KREA_EDIT_CANDLE_MAX_REFERENCES`]).
@@ -174,6 +176,75 @@ fn load_krea_edit_candle_references(
     Ok(references)
 }
 
+fn krea_edit_candle_conditioning(references: &[Image]) -> Vec<gen_core::Conditioning> {
+    if references.len() == 1 {
+        vec![gen_core::Conditioning::Reference {
+            image: references[0].clone(),
+            strength: None,
+        }]
+    } else {
+        vec![gen_core::Conditioning::MultiReference {
+            images: references.to_vec(),
+        }]
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn krea_edit_candle_generate_one(
+    generator: &dyn gen_core::Generator,
+    prompt: String,
+    negative_prompt: Option<String>,
+    width: u32,
+    height: u32,
+    seed: i64,
+    steps: u32,
+    guidance: f32,
+    conditioning: Vec<gen_core::Conditioning>,
+    use_pid: bool,
+    text_style_gain: Option<f32>,
+    memory: Option<gen_core::GenerationMemory>,
+    memory_strategy_context: Option<&gen_core::MemoryRunContext>,
+    preview: gen_core::PreviewSink,
+    cancel: &gen_core::CancelFlag,
+    on_progress: &mut dyn FnMut(gen_core::Progress),
+) -> WorkerResult<(u32, u32, Vec<u8>)> {
+    let mut request = gen_core::GenerationRequest {
+        prompt,
+        negative_prompt,
+        width,
+        height,
+        count: 1,
+        seed: Some(seed as u64),
+        steps: Some(steps),
+        guidance: Some(guidance),
+        conditioning,
+        use_pid,
+        text_style_gain,
+        memory,
+        preview,
+        cancel: cancel.clone(),
+        ..Default::default()
+    };
+    let output = crate::memory_strategy::generate_with_scope(
+        generator,
+        &mut request,
+        memory_strategy_context,
+        on_progress,
+    )
+    .map_err(|error| WorkerError::Engine(format!("Krea edit generation failed: {error}")))?;
+    match output {
+        gen_core::GenerationOutput::Images(mut images) => {
+            let image = images.pop().ok_or_else(|| {
+                WorkerError::Engine("Krea edit generator produced no image".to_owned())
+            })?;
+            Ok((image.width, image.height, image.pixels))
+        }
+        _ => Err(WorkerError::Engine(
+            "Krea edit generator returned non-image output".to_owned(),
+        )),
+    }
+}
+
 /// Flat telemetry recorded on candle Krea edit assets (parity with the macOS `krea_edit_raw_settings`).
 fn krea_edit_candle_raw_settings(
     request: &ImageRequest,
@@ -196,12 +267,12 @@ fn krea_edit_candle_raw_settings(
 }
 
 /// Real candle Krea 2 edit generation: resolve the Raw weights + source references on the async side,
-/// pre-fit each to the render geometry, then load the Krea components (the edit LoRA folded into the DiT)
-/// plus the edit components (Qwen3-VL vision tower and VAE encoder) once on the blocking thread and render
-/// each image — `request.count` edits of the same reference set, each its own seed. Mirrors
+/// pre-fit each to the render geometry, then load the exact registered edit generator once and render
+/// each image through its request-scope lifecycle — `request.count` edits of the same reference set,
+/// each its own seed. Mirrors
 /// [`generate_candle_flux2_edit_stream`]'s blocking-thread + streamed-events shape and reuses
 /// [`consume_gen_events`]; differs in the required edit LoRA (R5) and the direct pipeline-function API
-/// (`render_edit` with `count = 1` per streamed item).
+/// (`Generator::generate` with `count = 1` per streamed item).
 pub(super) async fn generate_candle_krea_edit_stream(
     api: &ApiClient,
     settings: &Settings,
@@ -253,13 +324,22 @@ pub(super) async fn generate_candle_krea_edit_stream(
     } else {
         "krea_2_edit"
     };
-    let strategy_spec = attach_manifest_text_encoder(
-        gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(weights_dir.clone()))
-            .with_adapters(adapters.clone()),
+    let resolved_tier = candle_resolved_tier_key(request, &weights_dir, false);
+    let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
+    let use_pid = pid_weights.is_some();
+    let mut strategy_spec = load_spec(weights_dir.clone(), None, adapters.clone(), None)
+        .with_resolved_route(request.model.clone());
+    if let Some(pid) = pid_weights.as_ref() {
+        strategy_spec = strategy_spec.with_pid(pid.checkpoint.clone(), pid.gemma.clone());
+    }
+    strategy_spec = attach_required_components(
+        strategy_spec,
         descriptor_id,
-        request,
+        &request.model_manifest_entry,
         settings,
     )?;
+    strategy_spec = attach_selected_decoder(strategy_spec, descriptor_id, request, settings)?;
+    strategy_spec = attach_manifest_text_encoder(strategy_spec, descriptor_id, request, settings)?;
     let selected_text_encoder_bytes = strategy_spec.text_encoder.as_ref().map_or(0, |source| {
         let path = match source {
             gen_core::WeightsSource::File(path) | gen_core::WeightsSource::Dir(path) => path,
@@ -288,16 +368,17 @@ pub(super) async fn generate_candle_krea_edit_stream(
         // deliberately conservative (the bundled decoder is not subtracted) and preserves the
         // estimated fallback when no route-specific evidence exists.
         .saturating_add(selected_text_encoder_bytes);
-    admit_candle_base(
+    let offload_policy = admit_candle_base(
         request,
         settings,
         &weights_dir,
         "Krea edit",
         CandleBaseEvidence::Catalog,
         adapter_resident_bytes,
-        false,
+        true,
     )
     .await?;
+    strategy_spec = strategy_spec.with_offload_policy(offload_policy);
     // Telemetry `repo` — the manifest `repo` else the Krea 2 Raw default.
     let repo = request
         .model_manifest_entry
@@ -310,11 +391,69 @@ pub(super) async fn generate_candle_krea_edit_stream(
         })
         .to_owned();
 
-    let (width, height) = (request.width, request.height);
+    let (width, height) = pid_effective_dims(
+        request.width,
+        request.height,
+        use_pid,
+        pid_output_tier(request),
+    );
     let references =
         load_krea_edit_candle_references(request, project_path, settings, width, height)?;
     let raw_settings =
         krea_edit_candle_raw_settings(request, &repo, steps, guidance, references.len());
+
+    let raw_budget = crate::vram_gate::apply_vram_cap(
+        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
+        crate::vram_gate::cuda_vram_cap_gb(),
+    );
+    let reclaimable_gb = crate::vram_gate::reclaimable_pool_gb(&settings.gpu_id);
+    let budget =
+        raw_budget.map(|budget| crate::vram_gate::with_reclaimable(budget, reclaimable_gb));
+    let predicted_peak_gb = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
+        &request.model_manifest_entry,
+        resolved_tier,
+        adapter_resident_bytes,
+    );
+    let memory_evaluation = crate::candle_memory_strategy::evaluate_shared_image(
+        descriptor_id,
+        &request.model,
+        &strategy_spec,
+        candle_certified_load_spec(
+            descriptor_id,
+            settings,
+            &strategy_spec,
+            &request.model_manifest_entry,
+            resolved_tier,
+        ),
+        &request.model_manifest_entry,
+        resolved_tier,
+        "edit_image",
+        Some("lora"),
+        gen_core::MemoryGeometry {
+            width,
+            height,
+            batch: 1,
+            frames: 1,
+            reference_count: references.len() as u32,
+        },
+        true,
+        use_pid,
+        false,
+        false,
+        budget,
+        predicted_peak_gb,
+        adapter_resident_bytes,
+        if reclaimable_gb > 0.0 {
+            gen_core::MemoryCacheState::Warm
+        } else {
+            gen_core::MemoryCacheState::Cold
+        },
+    )?;
+    let generation_memory = memory_evaluation
+        .as_ref()
+        .and_then(|evaluation| evaluation.memory);
+    let memory_strategy_context = memory_evaluation
+        .and_then(|evaluation| optimized_shared_memory_context(evaluation.context));
 
     // Per-image work items: (seed, prompt) — `request.count` edits of the same reference set.
     let work: Vec<(i64, String)> = (0..request.count as usize)
@@ -322,32 +461,13 @@ pub(super) async fn generate_candle_krea_edit_stream(
         .collect();
     let total = work.len();
 
-    let (cancel, rx, blocking) = start_gen_stream(
+    let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
-        "krea_edit",
+        descriptor_id,
         adapter_count,
-        move || {
-            let device = runtime_cuda::media::default_device()
-                .map_err(|error| WorkerError::Engine(format!("Krea edit device init: {error}")))?;
-            // Load the Krea Raw components with the edit LoRA merged into the DiT (R5), plus the edit-only
-            // components (Qwen3-VL vision tower + VAE encoder) — both cached for the whole batch.
-            let comps = runtime_cuda::providers::krea::pipeline::load_components_with_spec(
-                &weights_dir,
-                &strategy_spec,
-                &device,
-            )
-            .map_err(|error| WorkerError::Engine(format!("Krea edit load failed: {error}")))?;
-            let edit = runtime_cuda::providers::krea::pipeline::load_edit_components(
-                &weights_dir,
-                &device,
-            )
-            .map_err(|error| {
-                WorkerError::Engine(format!("Krea edit components load failed: {error}"))
-            })?;
-            Ok(((comps, edit, device), references))
-        },
-        move |(components, references), tx, cancel| {
-            let (comps, edit, device) = components;
+        strategy_spec,
+        format!("{descriptor_id} load failed"),
+        move |generator, tx, cancel| {
             drive_gen_items(
                 tx,
                 work,
@@ -355,51 +475,26 @@ pub(super) async fn generate_candle_krea_edit_stream(
                     if cancel.is_cancelled() {
                         return Ok(None);
                     }
-                    // One image per streamed item: `render_edit` batches on `count`, so pass `count = 1` and
-                    // the item's seed. The image 1 / image 2 references are passed directly (not via
-                    // `conditioning`) in fixed order.
-                    let req = gen_core::GenerationRequest {
+                    let conditioning = krea_edit_candle_conditioning(&references);
+                    let image = krea_edit_candle_generate_one(
+                        generator,
                         prompt,
-                        // The worker's `negative_prompt` is a plain String; the engine wants `Option` (empty
-                        // ⇒ no user negative, the Raw CFG uncond branch falls back to "").
-                        negative_prompt: if negative.trim().is_empty() {
-                            None
-                        } else {
-                            Some(negative.clone())
-                        },
+                        (!negative.trim().is_empty()).then(|| negative.clone()),
                         width,
                         height,
-                        count: 1,
-                        seed: Some(seed as u64),
-                        steps: Some(steps),
-                        guidance: Some(guidance),
+                        seed,
+                        steps,
+                        guidance,
+                        conditioning,
+                        use_pid,
                         text_style_gain,
+                        generation_memory,
+                        memory_strategy_context.as_ref(),
                         preview,
-                        cancel: cancel.clone(),
-                        ..Default::default()
-                    };
-                    let result = runtime_cuda::providers::krea::pipeline::render_edit(
-                        &comps,
-                        &edit,
-                        &req,
-                        &references,
-                        distilled,
-                        &device,
-                        &mut *on_progress,
-                    );
-                    let mut images = match result {
-                        Ok(images) => images,
-                        Err(_) if cancel.is_cancelled() => return Ok(None),
-                        Err(error) => {
-                            return Err(WorkerError::Engine(format!(
-                                "Krea edit generation failed: {error}"
-                            )));
-                        }
-                    };
-                    let image = images.pop().ok_or_else(|| {
-                        WorkerError::Engine("Krea edit produced no image".to_owned())
-                    })?;
-                    Ok(Some((seed, image.width, image.height, image.pixels)))
+                        &cancel,
+                        on_progress,
+                    )?;
+                    Ok(Some((seed, image.0, image.1, image.2)))
                 },
             )
         },

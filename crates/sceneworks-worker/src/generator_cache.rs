@@ -4,9 +4,9 @@ use std::thread;
 use std::time::Duration;
 
 use gen_core::{
-    AdapterKind, AdapterSpec, FileStatFingerprint, Generator, LoadShape, LoadSpec,
-    MemoryCacheState, MemoryDecodeGeometryPolicy, MoeExpert, OffloadPolicy, PinnedWeightsFile,
-    Precision, Quant, WeightsSource,
+    AdapterKind, AdapterSpec, FileStatFingerprint, Generator, LoadShape,
+    LoadShapeDeclarationResult, LoadSpec, MemoryCacheState, MemoryDecodeGeometryPolicy, MoeExpert,
+    OffloadPolicy, PinnedWeightsFile, Precision, Quant, WeightsSource,
 };
 
 #[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
@@ -101,6 +101,7 @@ pub(crate) struct LoadIdentity {
 pub(crate) struct ExecutionPolicy {
     pub(crate) offload_policy: OffloadPolicy,
     pub(crate) load_shape: LoadShape,
+    pub(crate) load_shape_declaration_result: LoadShapeDeclarationResult,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -177,6 +178,7 @@ impl LoadIdentity {
     }
 
     pub(crate) fn try_from_load_spec(engine_id: &str, spec: &LoadSpec) -> gen_core::Result<Self> {
+        spec.validate_load_shape_declaration()?;
         spec.validate_prepared_file_pins()?;
         Ok(Self {
             engine_id: engine_id.to_owned(),
@@ -264,6 +266,7 @@ impl ExecutionPolicy {
         Self {
             offload_policy: spec.offload_policy,
             load_shape: spec.load_shape,
+            load_shape_declaration_result: spec.load_shape_declaration_result,
         }
     }
 }
@@ -284,6 +287,8 @@ fn log_warm_policy_mismatch(
         loadedLoadShape = ?loaded_policy.load_shape,
         requestedOffloadPolicy = ?requested_policy.offload_policy,
         requestedLoadShape = ?requested_policy.load_shape,
+        loadedLoadShapeDeclarationResult = ?loaded_policy.load_shape_declaration_result,
+        requestedLoadShapeDeclarationResult = ?requested_policy.load_shape_declaration_result,
         "serving the cached generator under its cold-load policy"
     );
 }
@@ -1368,12 +1373,31 @@ mod tests {
         let staged_deferred = staged
             .clone()
             .with_load_shape(LoadShape::DeferredMaterialization);
+        let declared_applied = base.clone().with_applied_load_shape_declaration();
+        let declared_refused = base.clone().with_refused_load_shape_declaration();
 
-        let specs = [&base, &staged, &deferred, &staged_deferred];
+        let specs = [
+            &base,
+            &staged,
+            &deferred,
+            &staged_deferred,
+            &declared_applied,
+            &declared_refused,
+        ];
         let identities = specs.map(|spec| LoadIdentity::from_load_spec("z_image_turbo", spec));
         assert!(
             identities.iter().all(|identity| identity == &identities[0]),
-            "offload policy and load shape are request policy, not load identity"
+            "offload, load shape, and declaration authority are request policy, not load identity"
+        );
+        assert_eq!(
+            LoadIdentity::from_load_spec("z_image_turbo", &base),
+            LoadIdentity::from_load_spec("z_image_turbo", &declared_refused),
+            "a declaration refusal must not force a weights reload",
+        );
+        assert_ne!(
+            ExecutionPolicy::from_load_spec(&base),
+            ExecutionPolicy::from_load_spec(&declared_refused),
+            "NotEvaluated+Eager and Refused+Eager are distinct request policy",
         );
 
         let policies = specs.map(ExecutionPolicy::from_load_spec);
@@ -1381,7 +1405,7 @@ mod tests {
             for right in (left + 1)..policies.len() {
                 assert_ne!(
                     policies[left], policies[right],
-                    "the four residency/materialization combinations remain distinct policy intents"
+                    "residency/materialization/declaration combinations remain distinct policy intents"
                 );
             }
         }
@@ -1803,6 +1827,75 @@ mod tests {
     }
 
     #[test]
+    fn flux2_klein_cache_identity_binds_alias_packed_tier_edit_provider_pid_and_adapter() {
+        let root = tempfile::tempdir().expect("Klein cache fixture");
+        let tier = |route: &str, name: &str| {
+            let path = root.path().join(route).join(name);
+            std::fs::create_dir_all(&path).expect("tier dir");
+            path
+        };
+        let base_q4 = LoadSpec::new(WeightsSource::Dir(tier("base", "q4")))
+            .with_resolved_route("flux2_klein_9b");
+        let base_q8 = LoadSpec::new(WeightsSource::Dir(tier("base", "q8")))
+            .with_resolved_route("flux2_klein_9b");
+        let kv_q4 = LoadSpec::new(WeightsSource::Dir(tier("kv", "q4")))
+            .with_resolved_route("flux2_klein_9b_kv");
+        let true_v2 = LoadSpec::new(WeightsSource::Dir(tier("true-v2", "bf16")))
+            .with_resolved_route("flux2_klein_9b_true_v2");
+        for spec in [&base_q4, &base_q8, &kv_q4, &true_v2] {
+            assert_eq!(
+                spec.quantize, None,
+                "packed artifact tier is a path/route identity, never load-time quantization"
+            );
+        }
+        let identities = [&base_q4, &base_q8, &kv_q4, &true_v2]
+            .map(|spec| LoadIdentity::from_load_spec("flux2_klein_9b", spec));
+        for left in 0..identities.len() {
+            for right in left + 1..identities.len() {
+                assert_ne!(identities[left], identities[right]);
+            }
+        }
+
+        let edit = LoadIdentity::from_load_spec("flux2_klein_9b_edit", &base_q4);
+        let kv_edit = LoadIdentity::from_load_spec("flux2_klein_9b_kv_edit", &kv_q4);
+        assert_ne!(
+            edit, kv_edit,
+            "ordinary and KV edit providers cannot share a cache entry"
+        );
+
+        let pid_checkpoint = root.path().join("pid.safetensors");
+        let adapter = root.path().join("style.safetensors");
+        std::fs::write(&pid_checkpoint, b"pid").expect("PiD fixture");
+        std::fs::write(&adapter, b"adapter").expect("adapter fixture");
+        let with_pid = base_q4.clone().with_pid(
+            WeightsSource::File(pid_checkpoint),
+            WeightsSource::Dir(tier("pid", "gemma")),
+        );
+        let with_adapter = base_q4.clone().with_adapters(vec![AdapterSpec::new(
+            adapter.clone(),
+            0.8,
+            AdapterKind::Lora,
+        )]);
+        let with_lokr =
+            base_q4
+                .clone()
+                .with_adapters(vec![AdapterSpec::new(adapter, 0.8, AdapterKind::Lokr)]);
+        assert_ne!(
+            LoadIdentity::from_load_spec("flux2_klein_9b", &base_q4),
+            LoadIdentity::from_load_spec("flux2_klein_9b", &with_pid)
+        );
+        assert_ne!(
+            LoadIdentity::from_load_spec("flux2_klein_9b", &base_q4),
+            LoadIdentity::from_load_spec("flux2_klein_9b", &with_adapter)
+        );
+        assert_ne!(
+            LoadIdentity::from_load_spec("flux2_klein_9b", &with_adapter),
+            LoadIdentity::from_load_spec("flux2_klein_9b", &with_lokr),
+            "LoRA and LoKr remain distinct executable eager cache compositions"
+        );
+    }
+
+    #[test]
     fn cache_key_includes_control_and_ip_components() {
         let mut control = LoadSpec::new(WeightsSource::Dir(PathBuf::from("/models/base")));
         control.control = Some(WeightsSource::File(PathBuf::from(
@@ -1865,6 +1958,68 @@ mod tests {
             LoadIdentity::from_load_spec("provider", &components_reversed),
             "component insertion order must not perturb load identity"
         );
+    }
+
+    #[test]
+    fn pulid_cache_identity_binds_route_tier_and_each_identity_component() {
+        let root = tempfile::tempdir().expect("PuLID cache fixture");
+        let base = root.path().join("base-q4");
+        let face = root.path().join("face");
+        let other_face = root.path().join("other-face");
+        std::fs::create_dir_all(&base).expect("base dir");
+        std::fs::create_dir_all(&face).expect("face dir");
+        std::fs::create_dir_all(&other_face).expect("other face dir");
+        let encoder = root.path().join("pulid.safetensors");
+        let other_encoder = root.path().join("other-pulid.safetensors");
+        let eva = root.path().join("eva.safetensors");
+        let other_eva = root.path().join("other-eva.safetensors");
+        for (path, bytes) in [
+            (&encoder, b"pulid".as_slice()),
+            (&other_encoder, b"other-pulid".as_slice()),
+            (&eva, b"eva".as_slice()),
+            (&other_eva, b"other-eva".as_slice()),
+        ] {
+            std::fs::write(path, bytes).expect("identity component");
+        }
+        let exact = || {
+            let mut spec = LoadSpec::new(WeightsSource::Dir(base.clone()))
+                .with_quant(Quant::Q4)
+                .with_resolved_route("pulid_flux_dev");
+            spec.identity = Some(gen_core::IdentityWeights {
+                encoder: Some(WeightsSource::File(encoder.clone())),
+                eva: Some(WeightsSource::File(eva.clone())),
+                face_dir: Some(WeightsSource::Dir(face.clone())),
+            });
+            spec
+        };
+        let key = LoadIdentity::from_load_spec("pulid_flux", &exact());
+        assert_eq!(key, LoadIdentity::from_load_spec("pulid_flux", &exact()));
+
+        let mut crossed_route = exact();
+        crossed_route.resolved_route = Some("flux_dev".to_owned());
+        let mut crossed_tier = exact();
+        crossed_tier.quantize = Some(Quant::Q8);
+        let mut crossed_encoder = exact();
+        crossed_encoder.identity.as_mut().expect("identity").encoder =
+            Some(WeightsSource::File(other_encoder));
+        let mut crossed_eva = exact();
+        crossed_eva.identity.as_mut().expect("identity").eva = Some(WeightsSource::File(other_eva));
+        let mut crossed_face = exact();
+        crossed_face.identity.as_mut().expect("identity").face_dir =
+            Some(WeightsSource::Dir(other_face));
+        for (label, crossed) in [
+            ("route", crossed_route),
+            ("tier", crossed_tier),
+            ("PuLID encoder", crossed_encoder),
+            ("EVA", crossed_eva),
+            ("face stack", crossed_face),
+        ] {
+            assert_ne!(
+                key,
+                LoadIdentity::from_load_spec("pulid_flux", &crossed),
+                "{label} must be cache-distinct"
+            );
+        }
     }
 
     #[test]
@@ -2268,6 +2423,7 @@ mod tests {
                 loaded_policy: ExecutionPolicy {
                     offload_policy: OffloadPolicy::Resident,
                     load_shape: LoadShape::EagerMaterialization,
+                    load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
                 },
                 external_committed_bytes: 0,
                 reclaimable_weight_bytes: 0,
@@ -2315,6 +2471,8 @@ mod tests {
                             loaded_policy: ExecutionPolicy {
                                 offload_policy: OffloadPolicy::Sequential,
                                 load_shape: LoadShape::DeferredMaterialization,
+                                load_shape_declaration_result:
+                                    LoadShapeDeclarationResult::NotEvaluated,
                             },
                             external_committed_bytes: 0,
                             reclaimable_weight_bytes: 0,
@@ -2333,6 +2491,7 @@ mod tests {
                 ExecutionPolicy {
                     offload_policy: OffloadPolicy::Sequential,
                     load_shape: LoadShape::DeferredMaterialization,
+                    load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
                 }
             )
         );
@@ -2343,6 +2502,7 @@ mod tests {
                 ExecutionPolicy {
                     offload_policy: OffloadPolicy::Sequential,
                     load_shape: LoadShape::DeferredMaterialization,
+                    load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
                 }
             )
         );

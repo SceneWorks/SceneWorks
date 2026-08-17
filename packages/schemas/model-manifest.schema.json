@@ -900,7 +900,11 @@
             "additionalProperties": false,
             "description": "macOS/Apple-Silicon MLX variant metadata (desktop only). Surfaced by the Model Manager to show MLX availability, conversion status, and the minimum unified-memory tier. Inference repos/paths are owned by the Python MlxVideoAdapter; these mirror them for catalog display.",
             "properties": {
-              "quantize": { "type": "integer", "minimum": 1 },
+              "quantize": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Default MLX transformer tier, in bits. `resolve_quant` (crates/sceneworks-worker/src/image_jobs/base.rs) reads this as: <=0 -> dense bf16 with no packed tier, <=4 -> q4, anything else -> q8. 0 is therefore the ONLY way to declare a dense-only artifact: OMITTING the key means q8, not dense. The former `minimum: 1` forbade a value the runtime has always honored, which made FLUX.2 [klein] 9B True V2 — a converted, fixed dense-BF16 transformer — unrepresentable."
+              },
               "minQualityTier": { "type": "string" },
               "converter": { "type": "string" },
               "convertSourceFile": { "type": "string" },
@@ -1071,10 +1075,55 @@
                       "additionalProperties": false,
                       "properties": {
                         "rung": { "enum": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"] },
+                        "runtimeProvider": {
+                          "type": "string",
+                          "minLength": 1,
+                          "description": "Exact runtime provider implementing this row when it differs from the contract provider, such as a composed strict-control provider. Omission means the contract provider."
+                        },
                         "fingerprint": { "type": "string", "minLength": 1 },
                         "tiers": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "enum": ["bf16", "q4", "q8"] } },
                         "modes": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
                         "overlays": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "enum": ["none", "lora", "identity", "control"] } },
+                        "loadProfiles": {
+                          "type": "array",
+                          "minItems": 1,
+                          "uniqueItems": true,
+                          "items": { "enum": ["plain", "lora", "lora_pid", "lora_single_control", "lora_ip_adapter", "ip_adapter_pid", "lora_ip_adapter_pid", "single_control", "multi_control", "ip_adapter", "pid", "identity"] },
+                          "description": "Exact LoadSpec component profiles served by this implementation. Omission retains the legacy one-profile-per-overlay interpretation; declaration-driven request-strategy routes must name this axis explicitly."
+                        },
+                        "sourceKinds": {
+                          "type": "array",
+                          "minItems": 1,
+                          "uniqueItems": true,
+                          "items": { "enum": ["dir", "file"] },
+                          "description": "Exact primary weight-source kinds admitted by this implementation."
+                        },
+                        "requestContexts": {
+                          "type": "array",
+                          "minItems": 1,
+                          "uniqueItems": true,
+                          "items": {
+                            "type": "object",
+                            "required": ["mode", "providerMode", "referenceCounts", "pid", "hasPhases"],
+                            "additionalProperties": false,
+                            "properties": {
+                              "mode": { "type": "string", "minLength": 1 },
+                              "providerMode": { "enum": ["text_to_image", "image_to_image", "edit_image"] },
+                              "referenceCounts": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "integer", "minimum": 0 } },
+                              "pid": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "boolean" } },
+                              "hasPhases": { "type": "boolean" }
+                            }
+                          },
+                          "description": "Exact public request coordinates admitted by a declaration-owned request-strategy route, plus the provider-facing mode bound to that same coordinate. hasPhases means GenerationRequest.phases, never Hires.fix or another worker multipass."
+                        },
+                        "providerOverlay": {
+                          "enum": ["none", "lora", "identity", "control", "adapters", "pid", "adapters-pid", "ip-adapter", "adapters-ip-adapter", "ip-adapter-pid", "adapters-ip-adapter-pid", "control-adapters"],
+                          "description": "Exact MemoryRunContext overlay sent to the provider. This may differ from the public matrix overlay when adapters are load identity rather than provider evidence identity."
+                        },
+                        "requiredOffloadPolicy": {
+                          "enum": ["resident", "sequential"],
+                          "description": "Optional exact load-policy prerequisite for this implementation row. This is distinct from engagedRungs: request-scoped staged residency can be implemented under a Resident load default, while providers such as FLUX.2 Klein expose BTR only for Sequential+Deferred."
+                        },
                         "engagedRungs": {
                           "type": "array",
                           "minItems": 1,
@@ -1090,7 +1139,7 @@
                 },
                 "x-sceneworks-contract": "derived-static-contract",
                 "x-sceneworks-readers": [{ "path": "scripts/generate-memory-matrix.mjs", "anchor": "memoryStrategyContract" }],
-                "description": "Pinned provider capability declaration for static matrix inventory. It cannot mark a cell Verified; exact promoted runtime evidence remains owned by mlx.calibrations. An exhaustive declaration also prevents generic route fallbacks from widening the provider's declared capability surface."
+                "description": "Pinned provider capability declaration for static matrix inventory. It cannot mark a cell Verified; exact promoted runtime evidence remains owned by mlx.calibrations. Per-row runtimeProvider binds composed implementations without aliases or inferred provider names. An exhaustive declaration also prevents generic route fallbacks from widening the provider's declared capability surface."
               },
               "repo": {
                 "type": "string",

@@ -28,19 +28,21 @@
 //! The pure decision logic is cross-platform and unit-tested on every lane; only the live
 //! `sysctl hw.memsize` probe is macOS-only (it returns `None` elsewhere, so the gate no-ops).
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use gen_core::{
-    GenerationMemory, LoadSpec, MemoryBackend, MemoryBackendRealization, MemoryBudget,
-    MemoryCacheState, MemoryConformanceState, MemoryDecodeArtifactIdentity,
-    MemoryDecodeGeometryPolicy, MemoryDecodePolicyQuery, MemoryDecodeQualityDisposition,
-    MemoryDecodeQualityFixture, MemoryDecodeQualityRuntimeIdentity, MemoryEvidence,
-    MemoryEvidenceDimensions, MemoryEvidenceKey, MemoryEvidenceVerdict, MemoryGeometry, MemoryMode,
-    MemoryNumericTier, MemoryOptimizationAuthority, MemoryParityContract, MemoryParityResult,
-    MemoryProviderContract, MemoryRunContext, MemorySelection, MemoryStrategy, OffloadPolicy,
-    PerComponentBytes, Precision, Quant, TransformerComponent, WeightsSource,
+    GenerationMemory, LoadShapeDeclarationResult, LoadSpec, MemoryBackend,
+    MemoryBackendRealization, MemoryBudget, MemoryCacheState, MemoryConformanceState,
+    MemoryDecodeArtifactIdentity, MemoryDecodeGeometryPolicy, MemoryDecodePolicyQuery,
+    MemoryDecodeQualityDisposition, MemoryDecodeQualityFixture, MemoryDecodeQualityRuntimeIdentity,
+    MemoryEvidence, MemoryEvidenceDimensions, MemoryEvidenceKey, MemoryEvidenceVerdict,
+    MemoryGeometry, MemoryMode, MemoryNumericTier, MemoryOptimizationAuthority,
+    MemoryParityContract, MemoryParityResult, MemoryProviderContract, MemoryRunContext,
+    MemorySelection, MemoryStrategy, OffloadPolicy, PerComponentBytes, Precision, Quant,
+    TransformerComponent, WeightsSource,
 };
 use sceneworks_core::memory_calibration::{
     Backend as CalibrationBackend, BundleLoad, CalibrationBinding, EvidenceBundle, EvidenceQuery,
@@ -439,9 +441,35 @@ pub(crate) struct MlxRequestPlan {
     /// `<= activation_headroom_bytes`, so the area term below can never go negative.
     fixed_reserve_bytes: u64,
     calibration: MlxCalibrationConfig,
+    /// Terminal declaration refusals retain safe eager execution, but may not consume any optimized
+    /// provider strategy later in the cache-aware selector. NotEvaluated preserves every legacy
+    /// route; Applied preserves the exact declaration-owned provider contract.
+    load_shape_declaration_result: LoadShapeDeclarationResult,
 }
 
 impl MlxRequestPlan {
+    /// Bind the already-resolved artifact tier without reinterpreting `LoadSpec::quantize`.
+    /// Prepacked Krea q4/q8 artifacts intentionally load with `quantize=None`; this explicit axis is
+    /// therefore required for request/evidence identity even when no calibration provenance exists.
+    pub(crate) fn with_resolved_artifact_tier(
+        mut self,
+        resolved_tier: Option<&str>,
+    ) -> WorkerResult<Self> {
+        let Some(resolved_tier) = resolved_tier else {
+            return Err(WorkerError::InvalidPayload(format!(
+                "{} has no resolved MLX artifact tier",
+                self.model_id
+            )));
+        };
+        self.tier = numeric_tier_for_resolved(
+            resolved_tier,
+            self.tier,
+            declared_component_floors(self.engine_id),
+        )
+        .map_err(|reason| WorkerError::InvalidPayload(format!("{}: {reason}", self.model_id)))?;
+        Ok(self)
+    }
+
     pub(crate) fn for_spec_and_manifest(
         engine_id: &'static str,
         model_id: &str,
@@ -630,6 +658,7 @@ impl MlxRequestPlan {
             activation_headroom_bytes: activation_anchor_bytes.saturating_add(fixed_reserve_bytes),
             fixed_reserve_bytes,
             calibration,
+            load_shape_declaration_result: spec.load_shape_declaration_result,
         }
     }
 
@@ -1274,6 +1303,157 @@ fn request_mode(mode: &str) -> (MemoryMode, &'static str) {
         "character_image" | "image_to_image" => (MemoryMode::ImageToImage, "image_to_image"),
         "edit_image" => (MemoryMode::Edit, "edit"),
         _ => (MemoryMode::Other(mode.to_owned()), "other"),
+    }
+}
+
+/// Provider-facing behavior identity for an exact routed request.
+///
+/// Krea Raw's public reference toggle deliberately remains the catalog's `image_generation`
+/// coordinate, but the provider executes that one-reference request through its latent-init
+/// image-to-image entrypoint. Keep that internal contract identity exact without inventing a new
+/// public route or a generic CFG axis.
+fn provider_request_mode(engine_id: &str, inputs: &MlxRequestInputs) -> (MemoryMode, &'static str) {
+    if (engine_id == "flux1_dev_control"
+        && matches!(
+            inputs.mode.as_str(),
+            "image_generation" | "text_to_image" | "style_variations" | "character_image"
+        ))
+        || (engine_id == "flux1_dev" && inputs.mode == "character_image")
+    {
+        (MemoryMode::ImageToImage, "image_to_image")
+    } else if matches!(engine_id, "flux1_schnell" | "flux1_dev")
+        && matches!(
+            inputs.mode.as_str(),
+            "image_generation" | "text_to_image" | "style_variations"
+        )
+    {
+        (MemoryMode::TextToImage, "text_to_image")
+    } else if matches!(engine_id, "flux2_klein_9b_edit" | "flux2_klein_9b_kv_edit")
+        && (1..=8).contains(&inputs.reference_count)
+    {
+        (MemoryMode::Edit, "edit")
+    } else if (engine_id == "flux2_klein_9b" && inputs.has_reference && inputs.reference_count == 1)
+        || is_krea_base_dit_reference_route(engine_id, inputs)
+    {
+        (MemoryMode::ImageToImage, "image_to_image")
+    } else {
+        request_mode(&inputs.mode)
+    }
+}
+
+fn is_krea_base_dit_provider(engine_id: &str) -> bool {
+    matches!(
+        engine_id,
+        "krea_2_raw" | "krea_2_turbo" | "krea_2_edit" | "krea_2_turbo_edit"
+    )
+}
+
+fn is_flux2_klein_provider(engine_id: &str) -> bool {
+    matches!(
+        engine_id,
+        "flux2_klein_9b" | "flux2_klein_9b_edit" | "flux2_klein_9b_kv_edit"
+    )
+}
+
+fn is_flux1_provider(engine_id: &str) -> bool {
+    matches!(
+        engine_id,
+        "flux1_schnell" | "flux1_dev" | "flux1_dev_control"
+    )
+}
+
+/// Provider-owned request overlay derived from the complete load identity.
+///
+/// FLUX.2 Klein authenticates every load-time composition at request scope, including conservative
+/// eager requests whose BTR declaration refused the shape. Mirror the provider's closed axis order
+/// from the actual `LoadSpec`; public labels such as `lora` and `references:1` are not evidence
+/// identities. Krea's base-DiT family deliberately carries the same features on typed request/load
+/// axes and always uses a provider overlay of None.
+pub(crate) fn provider_overlay_for_load_spec(
+    engine_id: &str,
+    spec: &LoadSpec,
+    public_overlay: Option<String>,
+) -> Option<String> {
+    if is_krea_base_dit_provider(engine_id) {
+        return None;
+    }
+    if is_flux1_provider(engine_id) {
+        let mut axes = Vec::new();
+        if engine_id == "flux1_dev_control" || spec.control.is_some() {
+            axes.push("control");
+        }
+        if !spec.extra_controls.is_empty() {
+            axes.push("extra-controls");
+        }
+        if !spec.adapters.is_empty() {
+            axes.push("adapters");
+        }
+        if spec.ip_adapter.is_some() {
+            axes.push("ip-adapter");
+        }
+        if spec.pid.is_some() {
+            axes.push("pid");
+        }
+        if spec.identity.is_some() {
+            axes.push("identity");
+        }
+        if spec.text_encoder.is_some() {
+            axes.push("external-text-encoder");
+        }
+        return (!axes.is_empty()).then(|| axes.join("-"));
+    }
+    if !is_flux2_klein_provider(engine_id) {
+        return public_overlay;
+    }
+    let mut axes = Vec::new();
+    if !spec.adapters.is_empty() {
+        axes.push("adapters");
+    }
+    if spec.control.is_some() {
+        axes.push("control");
+    }
+    if !spec.extra_controls.is_empty() {
+        axes.push("extra-controls");
+    }
+    if spec.ip_adapter.is_some() {
+        axes.push("ip-adapter");
+    }
+    if spec.identity.is_some() {
+        axes.push("identity");
+    }
+    if spec.text_encoder.is_some() {
+        axes.push("external-text-encoder");
+    }
+    if !spec.components.is_empty() {
+        axes.push("components");
+    }
+    (!axes.is_empty()).then(|| axes.join("-"))
+}
+
+fn is_krea_base_dit_reference_route(engine_id: &str, inputs: &MlxRequestInputs) -> bool {
+    matches!(engine_id, "krea_2_raw" | "krea_2_turbo")
+        && matches!(inputs.mode.as_str(), "image_generation" | "text_to_image")
+        && inputs.has_reference
+        && inputs.reference_count == 1
+}
+
+/// Enforce provider request identity after production has derived any load-dependent overlay from
+/// the complete `LoadSpec`. Krea always normalizes to None. Klein inputs already carry the exact
+/// provider overlay from [`provider_overlay_for_load_spec`]; reconstructing it here from only an
+/// adapter count would erase text-encoder and component axes on safe eager fallback routes.
+fn provider_request_inputs<'a>(
+    engine_id: &str,
+    inputs: &'a MlxRequestInputs,
+) -> Cow<'a, MlxRequestInputs> {
+    if !is_krea_base_dit_provider(engine_id) {
+        return Cow::Borrowed(inputs);
+    }
+    if inputs.overlay.is_some() {
+        let mut normalized = inputs.clone();
+        normalized.overlay = None;
+        Cow::Owned(normalized)
+    } else {
+        Cow::Borrowed(inputs)
     }
 }
 
@@ -2155,13 +2335,23 @@ fn estimate_floor_parameters(
                 .collect();
             return (candidates, vec![refusal]);
         }
-        let pair = decode
-            .parameters
-            .decode_tile_edges
-            .iter()
-            .copied()
-            .min()
-            .zip(decode.parameters.decode_overlaps.iter().copied().min());
+        let pair = if let Some(routes) = &contract.pid_decode_routes {
+            let route = if use_pid { &routes.pid } else { &routes.native };
+            route
+                .tile_edges
+                .iter()
+                .copied()
+                .min()
+                .zip(Some(route.tile_overlap))
+        } else {
+            decode
+                .parameters
+                .decode_tile_edges
+                .iter()
+                .copied()
+                .min()
+                .zip(decode.parameters.decode_overlaps.iter().copied().min())
+        };
         let Some((tile_edge, overlap)) = pair else {
             return (
                 Vec::new(),
@@ -2665,10 +2855,12 @@ fn evaluate_request_with_budget_using_bundle(
         &effective_plan
     };
 
+    let provider_inputs = provider_request_inputs(plan.engine_id, inputs);
+    let inputs = provider_inputs.as_ref();
     let geometry = request_geometry(inputs);
-    let (mode, mode_key) = request_mode(&inputs.mode);
+    let (mode, mode_key) = provider_request_mode(plan.engine_id, inputs);
     let mut fallback_contract;
-    let contract = if let Some(contract) = generator.memory_strategy_contract() {
+    let provider_contract = if let Some(contract) = generator.memory_strategy_contract() {
         contract
     } else {
         fallback_contract = MemoryProviderContract::compatibility_default(
@@ -2686,6 +2878,25 @@ fn evaluate_request_with_budget_using_bundle(
         // split — so carry the whole sum on the transformer axis rather than fail conformance.
         fallback_contract.asset_facts.transformer_bytes = plan.asset_bytes;
         &fallback_contract
+    };
+    let refused_contract;
+    let contract = if plan.load_shape_declaration_result == LoadShapeDeclarationResult::Refused {
+        // A declaration refusal is terminal authority, not an invitation for the later request
+        // selector to rediscover lower optimized rungs directly from the provider. Preserve only
+        // the exact provider/load/calibration handshake needed for a safe resident request; the
+        // provider's optimized table remains unreachable until a complete declaration applies.
+        let mut resident = MemoryProviderContract::compatibility_default(
+            provider_contract.provider_id.clone(),
+            provider_contract.backend.clone(),
+        );
+        resident.load_shape = provider_contract.load_shape;
+        resident.calibration = provider_contract.calibration.clone();
+        resident.asset_facts = provider_contract.asset_facts;
+        resident.resident_request_memory = provider_contract.resident_request_memory;
+        refused_contract = resident;
+        &refused_contract
+    } else {
+        provider_contract
     };
     if plan.engine_id.starts_with("mage_flow")
         && inputs.adapter_count > 0
@@ -4430,11 +4641,13 @@ fn weights_floor_load_admission(
 
 fn with_selected_sequential_shape(engine_id: &str, spec: LoadSpec) -> LoadSpec {
     let spec = spec.with_offload_policy(OffloadPolicy::Sequential);
-    if engine_id == "z_image_turbo" {
-        spec.with_load_shape(gen_core::LoadShape::DeferredMaterialization)
-    } else {
-        spec
-    }
+    crate::memory_route_registry::apply_registered_load_shape(
+        crate::memory_route_registry::MemoryRouteBackend::Mlx,
+        engine_id,
+        crate::memory_route_registry::MemoryRouteMode::TextToImage,
+        spec,
+        true,
+    )
 }
 
 /// Pre-load admission + residency-selection gate (sc-10835 Phase 0, sc-10839 Phase 1). Called on the
@@ -6554,6 +6767,7 @@ mod tests {
             activation_headroom_bytes: gib_to_bytes(6.0),
             fixed_reserve_bytes: gib_to_bytes(2.0),
             calibration: MlxCalibrationConfig::Absent,
+            load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
         }
     }
 
@@ -6612,6 +6826,228 @@ mod tests {
             use_pid: false,
             has_phases: false,
         }
+    }
+
+    #[test]
+    fn krea_raw_true_cfg_and_reference_img2img_keep_exact_public_and_provider_shapes() {
+        let plain = MlxRequestInputs {
+            width: 1024,
+            height: 1024,
+            count: 4,
+            mode: "image_generation".to_owned(),
+            overlay: None,
+            adapter_count: 0,
+            has_reference: false,
+            reference_count: 0,
+            use_pid: false,
+            has_phases: false,
+        };
+        let (mode, mode_key) = request_mode(&plain.mode);
+        assert_eq!(mode, MemoryMode::TextToImage);
+        assert_eq!(mode_key, "text_to_image");
+        assert_eq!(
+            provider_request_mode("krea_2_raw", &plain),
+            (MemoryMode::TextToImage, "text_to_image")
+        );
+        assert_eq!(request_geometry(&plain).batch, 1);
+        assert_eq!(request_geometry(&plain).reference_count, 0);
+
+        let reference = MlxRequestInputs {
+            overlay: Some("references:1".to_owned()),
+            has_reference: true,
+            reference_count: 1,
+            ..plain.clone()
+        };
+        assert_eq!(
+            request_mode(&reference.mode).0,
+            MemoryMode::TextToImage,
+            "the public catalog coordinate remains generation"
+        );
+        assert_eq!(
+            provider_request_mode("krea_2_raw", &reference),
+            (MemoryMode::ImageToImage, "image_to_image"),
+            "the Raw provider behavior contract sees its one-reference latent-init route"
+        );
+        assert_eq!(
+            provider_request_mode("krea_2_turbo", &reference),
+            (MemoryMode::ImageToImage, "image_to_image"),
+            "Turbo's one-reference latent-init route has the same provider-owned identity"
+        );
+        assert_eq!(
+            provider_request_inputs("krea_2_raw", &reference)
+                .as_ref()
+                .overlay
+                .as_deref(),
+            None,
+            "reference count is the exact Raw provider axis; no synthetic overlay is retained"
+        );
+        assert_eq!(
+            provider_request_inputs("krea_2_turbo", &reference)
+                .as_ref()
+                .overlay
+                .as_deref(),
+            None,
+            "Krea base-DiT reference cardinality is typed and never duplicated as an overlay"
+        );
+        assert_eq!(request_geometry(&reference).batch, 1);
+        assert_eq!(request_geometry(&reference).reference_count, 1);
+
+        let reference_low_rank_pid = MlxRequestInputs {
+            overlay: Some("references:1+adapters:1".to_owned()),
+            adapter_count: 1,
+            use_pid: true,
+            ..reference.clone()
+        };
+        let provider_inputs = provider_request_inputs("krea_2_raw", &reference_low_rank_pid);
+        assert_eq!(provider_inputs.as_ref().overlay, None);
+        assert_eq!(provider_inputs.as_ref().adapter_count, 1);
+        assert!(provider_inputs.as_ref().use_pid);
+        assert_eq!(provider_inputs.as_ref().reference_count, 1);
+
+        let pid = MlxRequestInputs {
+            use_pid: true,
+            ..plain
+        };
+        assert_eq!(
+            provider_request_mode("krea_2_raw", &pid),
+            (MemoryMode::TextToImage, "text_to_image")
+        );
+        assert_eq!(request_geometry(&pid).batch, 1);
+        assert!(pid.use_pid);
+
+        let edit = MlxRequestInputs {
+            mode: "edit_image".to_owned(),
+            overlay: Some("adapters:1+pid".to_owned()),
+            adapter_count: 1,
+            has_reference: true,
+            reference_count: 2,
+            use_pid: true,
+            ..reference
+        };
+        for provider in ["krea_2_edit", "krea_2_turbo_edit"] {
+            assert_eq!(
+                provider_request_mode(provider, &edit),
+                (MemoryMode::Edit, "edit")
+            );
+            let normalized = provider_request_inputs(provider, &edit);
+            assert_eq!(normalized.as_ref().overlay, None, "{provider}");
+            assert_eq!(normalized.as_ref().adapter_count, 1, "{provider}");
+            assert!(normalized.as_ref().use_pid, "{provider}");
+            assert_eq!(normalized.as_ref().reference_count, 2, "{provider}");
+        }
+        assert_eq!(
+            provider_request_inputs("krea_2_turbo_control", &edit)
+                .as_ref()
+                .overlay
+                .as_deref(),
+            Some("adapters:1+pid"),
+            "the independently keyed Krea control provider keeps its established overlay"
+        );
+    }
+
+    #[test]
+    fn flux1_provider_overlay_is_derived_from_the_complete_load_identity() {
+        let plain = LoadSpec::new(WeightsSource::Dir("flux".into()));
+        assert_eq!(
+            provider_overlay_for_load_spec("flux1_dev", &plain, None),
+            None
+        );
+        let low_rank = plain.clone().with_adapters(vec![gen_core::AdapterSpec::new(
+            "adapter.safetensors".into(),
+            1.0,
+            gen_core::AdapterKind::Lora,
+        )]);
+        assert_eq!(
+            provider_overlay_for_load_spec("flux1_dev", &low_rank, Some("lora".to_owned()))
+                .as_deref(),
+            Some("adapters")
+        );
+        let low_rank_pid = low_rank.clone().with_pid(
+            WeightsSource::File("pid.safetensors".into()),
+            WeightsSource::Dir("gemma".into()),
+        );
+        assert_eq!(
+            provider_overlay_for_load_spec("flux1_dev", &low_rank_pid, None).as_deref(),
+            Some("adapters-pid")
+        );
+        let identity = low_rank_pid.with_ip_adapter(WeightsSource::Dir("ip-adapter".into()));
+        assert_eq!(
+            provider_overlay_for_load_spec("flux1_dev", &identity, Some("identity".to_owned()))
+                .as_deref(),
+            Some("adapters-ip-adapter-pid")
+        );
+        let control = low_rank.with_control(WeightsSource::File("control.safetensors".into()));
+        assert_eq!(
+            provider_overlay_for_load_spec("flux1_dev_control", &control, Some("control".into()))
+                .as_deref(),
+            Some("control-adapters")
+        );
+
+        let text = MlxRequestInputs {
+            width: 1024,
+            height: 1024,
+            count: 1,
+            mode: "text_to_image".to_owned(),
+            overlay: None,
+            adapter_count: 0,
+            has_reference: false,
+            reference_count: 0,
+            use_pid: false,
+            has_phases: false,
+        };
+        for provider in ["flux1_schnell", "flux1_dev"] {
+            for mode in ["text_to_image", "style_variations"] {
+                let inputs = MlxRequestInputs {
+                    mode: mode.to_owned(),
+                    ..text.clone()
+                };
+                assert_eq!(
+                    provider_request_mode(provider, &inputs),
+                    (MemoryMode::TextToImage, "text_to_image"),
+                    "{provider} {mode}"
+                );
+            }
+        }
+
+        let character = MlxRequestInputs {
+            mode: "character_image".to_owned(),
+            overlay: Some("ip-adapter".to_owned()),
+            has_reference: true,
+            reference_count: 1,
+            ..text.clone()
+        };
+        assert_eq!(
+            provider_request_mode("flux1_dev", &character),
+            (MemoryMode::ImageToImage, "image_to_image")
+        );
+        for mode in ["text_to_image", "style_variations", "character_image"] {
+            let control = MlxRequestInputs {
+                mode: mode.to_owned(),
+                overlay: Some("control".to_owned()),
+                has_reference: true,
+                reference_count: 1,
+                ..text.clone()
+            };
+            assert_eq!(
+                provider_request_mode("flux1_dev_control", &control),
+                (MemoryMode::ImageToImage, "image_to_image"),
+                "control {mode}"
+            );
+        }
+
+        assert_eq!(
+            provider_request_mode(
+                "flux1_schnell",
+                &MlxRequestInputs {
+                    mode: "character_image".to_owned(),
+                    has_reference: true,
+                    reference_count: 1,
+                    ..text
+                }
+            ),
+            (MemoryMode::ImageToImage, "image_to_image"),
+            "Schnell has no declaration-owned character route; generic normalization remains visible to fail closed"
+        );
     }
 
     /// The fixture record carries its own synthetic revision and [`FIXTURE_CLOSURE_DIGEST`].
@@ -6864,6 +7300,7 @@ mod tests {
                 bindings: vec![fixture_binding("q4", variant)],
                 resolved: fixture_provenance("q4", variant),
             }),
+            load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
         }
     }
 
@@ -6988,6 +7425,7 @@ mod tests {
             activation_headroom_bytes: gib_to_bytes(2.0),
             fixed_reserve_bytes: 0,
             calibration: MlxCalibrationConfig::Valid(MlxCalibrationSet { bindings, resolved }),
+            load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
         }
     }
 
@@ -7146,6 +7584,41 @@ mod tests {
             reclaimable_bytes: 0,
             reserved_headroom_bytes: 0,
         }
+    }
+
+    /// The `full_ladder_generator` fixture's estimate floors in GiB, BEFORE the margin. Derived from
+    /// the fixture facts (base 3 GiB all-transformer, headroom 2 fixed + 4 area) and spelled out in
+    /// full on [`unmeasured_provider_under_a_small_budget_selects_a_deep_estimate_rung`]:
+    /// resident / staged / bounded-decode / bounded-attention all floor at 3 + 6 = 9 GiB, while
+    /// rung 4 windows the transformer out of residency and floors at 0 + 6 = 6 GiB.
+    const FIXTURE_DEEP_ESTIMATE_FLOOR_GB: f64 = 6.0;
+    const FIXTURE_SHALLOW_ESTIMATE_FLOOR_GB: f64 = 9.0;
+
+    /// The production widening an EstimateFloor candidate receives before the fit check.
+    ///
+    /// Read from the shipped constant rather than a literal on purpose. `MLX_ESTIMATE_MARGIN` is
+    /// re-derived from the calibration corpus and moved 5% -> 50.4073% when the corpus grew 65 -> 89
+    /// records; every fixture below that had hardcoded a host budget against the 5% term silently
+    /// FLIPPED DIRECTION at that point (a "reaches the deep rung" test became a refusal test, for the
+    /// wrong reason). Sizing budgets through this function instead keeps each test's direction fixed
+    /// across any future re-derivation, so an accepted-floor change stays bookkeeping.
+    fn widened_estimate_gb(floor_gb: f64) -> f64 {
+        floor_gb * (1.0 + crate::ladder_margin_policy::MLX_ESTIMATE_MARGIN)
+    }
+
+    /// A host budget that admits EXACTLY the deepest (rung-4) estimate floor and nothing shallower —
+    /// the midpoint of the widened window, so it cannot sit on either boundary. At the current margin
+    /// this is ~11.3 GiB (rung 4 widens to 9.02, everything shallower to 13.54); at the old 5% term
+    /// it would have been ~7.9 GiB, which is why these fixtures read 8.0.
+    fn budget_admitting_only_the_deepest_estimate_rung() -> MemoryBudget {
+        let deepest = widened_estimate_gb(FIXTURE_DEEP_ESTIMATE_FLOOR_GB);
+        let shallowest = widened_estimate_gb(FIXTURE_SHALLOW_ESTIMATE_FLOOR_GB);
+        assert!(
+            deepest < shallowest,
+            "the deep rung must stay strictly cheaper than the shallow floors: \
+             {deepest} vs {shallowest}"
+        );
+        fixture_budget((deepest + shallowest) / 2.0)
     }
 
     fn fixture_ladder() -> (EvidenceBundle, MlxRequestPlan) {
@@ -7768,6 +8241,679 @@ mod tests {
     }
 
     #[test]
+    fn pulid_identity_route_is_estimated_only_and_refusal_is_terminal() {
+        let mut generator = full_ladder_generator();
+        generator.descriptor.id = "pulid_flux";
+        let contract = generator.contract.as_mut().expect("fixture contract");
+        contract.provider_id = "pulid_flux".to_owned();
+        contract.calibration = None;
+        let decode = contract
+            .strategies
+            .iter_mut()
+            .find(|capability| capability.strategy == MemoryStrategy::BoundedDecode)
+            .expect("bounded decode capability");
+        decode.parameters.decode_tile_edges = vec![768, 640, 512];
+        decode.parameters.decode_overlaps = vec![64];
+        let attention = contract
+            .strategies
+            .iter_mut()
+            .find(|capability| capability.strategy == MemoryStrategy::BoundedAttention)
+            .expect("bounded attention capability");
+        attention.parameters.attention_chunk_sizes = vec![67_108_864];
+        let transformer = contract
+            .strategies
+            .iter_mut()
+            .find(|capability| capability.strategy == MemoryStrategy::BoundedTransformerResidency)
+            .expect("bounded transformer capability");
+        transformer.parameters.transformer_window_sizes = vec![1];
+
+        let mut plan = fixture_plan();
+        plan.engine_id = "pulid_flux";
+        plan.model_id = "pulid_flux_dev".to_owned();
+        plan.calibration = MlxCalibrationConfig::Absent;
+        plan.load_shape_declaration_result = LoadShapeDeclarationResult::Applied;
+        let mut inputs = fixture_inputs(1024, 1024);
+        inputs.mode = "character_image".to_owned();
+        inputs.overlay = Some("identity".to_owned());
+        inputs.has_reference = true;
+        inputs.reference_count = 1;
+
+        let evaluation = evaluate_request_with_budget(
+            &generator,
+            &plan,
+            &inputs,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Sequential,
+            budget_admitting_only_the_deepest_estimate_rung(),
+            gib_to_bytes(9.0),
+            0,
+            &[],
+        )
+        .expect("the exact unmeasured PuLID identity route must reach the estimate ladder");
+        assert_eq!(
+            evaluation.context.selection.strategy,
+            MemoryStrategy::BoundedTransformerResidency
+        );
+        assert_eq!(
+            evaluation.context.optimization_authority,
+            MemoryOptimizationAuthority::Estimated,
+            "PuLID must not inherit flux_dev measurements"
+        );
+        assert_eq!(evaluation.context.mode, MemoryMode::ImageToImage);
+        assert_eq!(evaluation.context.overlay.as_deref(), Some("identity"));
+        assert_eq!(evaluation.context.geometry.reference_count, 1);
+        assert_eq!(
+            evaluation.context.selection.parameters.decode_tile_edge,
+            Some(512)
+        );
+        assert_eq!(
+            evaluation.context.selection.parameters.decode_overlap,
+            Some(64)
+        );
+        assert_eq!(
+            evaluation.context.selection.parameters.attention_chunk_size,
+            Some(67_108_864)
+        );
+        assert_eq!(
+            evaluation
+                .context
+                .selection
+                .parameters
+                .transformer_window_size,
+            Some(1)
+        );
+        assert!(evaluation.process_limit_bytes.is_none());
+
+        let mut refused = plan.clone();
+        refused.load_shape_declaration_result = LoadShapeDeclarationResult::Refused;
+        let resident = evaluate_request_with_budget(
+            &generator,
+            &refused,
+            &inputs,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget(20.0),
+            gib_to_bytes(9.0),
+            0,
+            &[],
+        )
+        .expect("a refused declaration keeps the safe roomy resident path");
+        assert_eq!(
+            resident.context.selection.strategy,
+            MemoryStrategy::Resident
+        );
+        assert_eq!(
+            resident.context.optimization_authority,
+            MemoryOptimizationAuthority::Resident
+        );
+        // Deliberately the SAME budget as the admitted arm above: the only difference between the two
+        // is `LoadShapeDeclarationResult::Applied` vs `Refused`, so the refusal is attributable to the
+        // declaration rather than to a budget that would have refused either way. (It previously read
+        // 8.0 GiB, which under the current margin refuses every rung and would have passed for the
+        // wrong reason.)
+        let error = evaluate_request_with_budget(
+            &generator,
+            &refused,
+            &inputs,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            budget_admitting_only_the_deepest_estimate_rung(),
+            gib_to_bytes(9.0),
+            0,
+            &[],
+        )
+        .expect_err("a refused over-budget eager request cannot rediscover an optimized rung")
+        .to_string();
+        assert!(
+            error.contains("needs") && error.contains("safely available"),
+            "terminal refusal must surface the safe resident fit failure: {error}"
+        );
+    }
+
+    #[test]
+    fn krea_raw_estimate_floor_selects_exact_native_and_pid_decode_domains() {
+        let mut generator = full_ladder_generator();
+        generator.descriptor.id = "krea_2_raw";
+        let contract = generator.contract.as_mut().expect("fixture contract");
+        contract.provider_id = "krea_2_raw".to_owned();
+        let decode = contract
+            .strategies
+            .iter_mut()
+            .find(|capability| capability.strategy == MemoryStrategy::BoundedDecode)
+            .expect("bounded decode capability");
+        decode.parameters.decode_tile_edges = vec![2048, 512];
+        decode.parameters.decode_overlaps = vec![256, 64];
+        contract.pid_decode_routes = Some(gen_core::MemoryPidDecodeRoutes {
+            native: gen_core::MemoryDecodeRouteDomain {
+                tile_edges: vec![512],
+                tile_overlap: 64,
+            },
+            pid: gen_core::MemoryDecodeRouteDomain {
+                tile_edges: vec![2048],
+                tile_overlap: 256,
+            },
+        });
+        let mut plan = fixture_plan();
+        plan.engine_id = "krea_2_raw";
+        plan.model_id = "krea_2_raw".to_owned();
+        plan.calibration = MlxCalibrationConfig::Absent;
+        for (profile, adapter_count, use_pid, expected_edge, expected_overlap) in [
+            ("plain", 0, false, 512, 64),
+            ("low-rank", 1, false, 512, 64),
+            ("plain+pid", 0, true, 2048, 256),
+            ("low-rank+pid", 1, true, 2048, 256),
+        ] {
+            let mut inputs = fixture_inputs(1024, 1024);
+            inputs.use_pid = use_pid;
+            inputs.adapter_count = adapter_count;
+            let evaluation = evaluate_request_with_budget(
+                &generator,
+                &plan,
+                &inputs,
+                MemoryCacheState::Cold,
+                OffloadPolicy::Sequential,
+                budget_admitting_only_the_deepest_estimate_rung(),
+                gib_to_bytes(9.0),
+                0,
+                &[],
+            )
+            .expect("the exact Raw decode domain must admit the deep estimate rung");
+            assert_eq!(
+                evaluation.context.selection.strategy,
+                MemoryStrategy::BoundedTransformerResidency
+            );
+            assert_eq!(
+                evaluation.context.selection.parameters.decode_tile_edge,
+                Some(expected_edge),
+                "profile={profile}"
+            );
+            assert_eq!(
+                evaluation.context.selection.parameters.decode_overlap,
+                Some(expected_overlap),
+                "profile={profile}"
+            );
+            assert_eq!(evaluation.context.use_pid, use_pid);
+            assert_eq!(evaluation.context.overlay, None);
+        }
+    }
+
+    #[test]
+    fn flux2_klein_provider_axes_and_estimate_floor_keep_native_and_pid_domains_exact() {
+        let mut composed = LoadSpec::new(WeightsSource::Dir("klein".into()))
+            .with_adapters(vec![gen_core::AdapterSpec::new(
+                "adapter.safetensors".into(),
+                1.0,
+                gen_core::AdapterKind::Lora,
+            )])
+            .with_control(WeightsSource::File("control.safetensors".into()))
+            .with_extra_control(WeightsSource::File("extra-control.safetensors".into()))
+            .with_ip_adapter(WeightsSource::Dir("ip-adapter".into()))
+            .with_text_encoder(WeightsSource::Dir("external-text-encoder".into()))
+            .with_component(
+                "unknown",
+                WeightsSource::File("component.safetensors".into()),
+            );
+        composed.identity = Some(gen_core::IdentityWeights::default());
+        assert_eq!(
+            provider_overlay_for_load_spec("flux2_klein_9b", &composed, None).as_deref(),
+            Some(
+                "adapters-control-extra-controls-ip-adapter-identity-external-text-encoder-components"
+            ),
+            "Klein provider identity follows the pinned provider's complete closed axis order"
+        );
+        assert_eq!(
+            provider_overlay_for_load_spec(
+                "krea_2_raw",
+                &composed,
+                Some("public-label".to_owned())
+            ),
+            None,
+            "Krea base-DiT provider overlay remains None for the same typed load axes"
+        );
+
+        let public_base = MlxRequestInputs {
+            width: 1024,
+            height: 1024,
+            count: 1,
+            mode: "text_to_image".to_owned(),
+            overlay: Some("adapters".to_owned()),
+            adapter_count: 1,
+            has_reference: false,
+            reference_count: 0,
+            use_pid: false,
+            has_phases: false,
+        };
+        assert_eq!(
+            provider_request_mode("flux2_klein_9b", &public_base),
+            (MemoryMode::TextToImage, "text_to_image")
+        );
+        assert_eq!(
+            provider_request_inputs("flux2_klein_9b", &public_base)
+                .as_ref()
+                .overlay,
+            Some("adapters".to_owned()),
+            "Klein low-rank loads use the provider's one exact adapter identity"
+        );
+
+        let reference = MlxRequestInputs {
+            has_reference: true,
+            reference_count: 1,
+            ..public_base.clone()
+        };
+        assert_eq!(
+            provider_request_mode("flux2_klein_9b", &reference),
+            (MemoryMode::ImageToImage, "image_to_image")
+        );
+        for provider in ["flux2_klein_9b_edit", "flux2_klein_9b_kv_edit"] {
+            for references in 1..=8 {
+                let edit = MlxRequestInputs {
+                    mode: "character_image".to_owned(),
+                    reference_count: references,
+                    ..reference.clone()
+                };
+                assert_eq!(
+                    provider_request_mode(provider, &edit),
+                    (MemoryMode::Edit, "edit"),
+                    "{provider} refs={references}"
+                );
+                assert_eq!(
+                    provider_request_inputs(provider, &edit).as_ref().overlay,
+                    Some("adapters".to_owned())
+                );
+            }
+        }
+
+        for (provider, mode, references) in [
+            ("flux2_klein_9b", "text_to_image", 0),
+            ("flux2_klein_9b", "text_to_image", 1),
+            ("flux2_klein_9b_edit", "edit_image", 8),
+            ("flux2_klein_9b_kv_edit", "character_image", 2),
+        ] {
+            let mut generator = full_ladder_generator();
+            generator.descriptor.id = provider;
+            let contract = generator.contract.as_mut().expect("fixture contract");
+            contract.provider_id = provider.to_owned();
+            contract.calibration = None;
+            let decode = contract
+                .strategies
+                .iter_mut()
+                .find(|capability| capability.strategy == MemoryStrategy::BoundedDecode)
+                .expect("bounded decode capability");
+            decode.parameters.decode_tile_edges = vec![2048, 768, 640, 512];
+            decode.parameters.decode_overlaps = vec![256, 128];
+            contract.pid_decode_routes = Some(gen_core::MemoryPidDecodeRoutes {
+                native: gen_core::MemoryDecodeRouteDomain {
+                    tile_edges: vec![768, 640, 512],
+                    tile_overlap: 128,
+                },
+                pid: gen_core::MemoryDecodeRouteDomain {
+                    tile_edges: vec![2048],
+                    tile_overlap: 256,
+                },
+            });
+
+            let mut plan = fixture_plan();
+            plan.engine_id = provider;
+            plan.model_id = "flux2_klein_9b".to_owned();
+            plan.calibration = MlxCalibrationConfig::Absent;
+            plan.load_shape_declaration_result = LoadShapeDeclarationResult::Applied;
+            plan.tier.quant = None;
+            let plan = plan
+                .with_resolved_artifact_tier(Some("q4"))
+                .expect("packed q4 tier is explicit without load-time quantization");
+
+            for (use_pid, edge, overlap) in [(false, 512, 128), (true, 2048, 256)] {
+                let inputs = MlxRequestInputs {
+                    width: 1024,
+                    height: 1024,
+                    count: 1,
+                    mode: mode.to_owned(),
+                    overlay: None,
+                    adapter_count: 0,
+                    has_reference: references > 0,
+                    reference_count: references,
+                    use_pid,
+                    has_phases: false,
+                };
+                let evaluation = evaluate_request_with_budget(
+                    &generator,
+                    &plan,
+                    &inputs,
+                    MemoryCacheState::Cold,
+                    OffloadPolicy::Sequential,
+                    budget_admitting_only_the_deepest_estimate_rung(),
+                    gib_to_bytes(9.0),
+                    0,
+                    &[],
+                )
+                .expect("the exact Klein estimate route must reach BTR");
+                assert_eq!(
+                    evaluation.context.selection.strategy,
+                    MemoryStrategy::BoundedTransformerResidency,
+                    "{provider} pid={use_pid}"
+                );
+                assert_eq!(
+                    evaluation.context.optimization_authority,
+                    MemoryOptimizationAuthority::Estimated,
+                    "Klein aliases must not inherit measured Flux or sibling authority"
+                );
+                assert_eq!(
+                    evaluation.context.selection.parameters.decode_tile_edge,
+                    Some(edge)
+                );
+                assert_eq!(
+                    evaluation.context.selection.parameters.decode_overlap,
+                    Some(overlap)
+                );
+                assert_eq!(evaluation.context.overlay, None);
+                assert_eq!(evaluation.context.geometry.reference_count, references);
+                assert_eq!(evaluation.context.use_pid, use_pid);
+            }
+
+            let low_rank = MlxRequestInputs {
+                width: 1024,
+                height: 1024,
+                count: 1,
+                mode: mode.to_owned(),
+                overlay: Some("adapters".to_owned()),
+                adapter_count: 1,
+                has_reference: references > 0,
+                reference_count: references,
+                use_pid: true,
+                has_phases: false,
+            };
+            let mut refused = plan.clone();
+            refused.load_shape_declaration_result = LoadShapeDeclarationResult::Refused;
+            let resident = evaluate_request_with_budget(
+                &generator,
+                &refused,
+                &low_rank,
+                MemoryCacheState::Cold,
+                OffloadPolicy::Resident,
+                fixture_budget(20.0),
+                gib_to_bytes(9.0),
+                0,
+                &[],
+            )
+            .expect("LoRA/LoKr plus PiD stays executable on the safe eager path");
+            assert_eq!(
+                resident.context.selection.strategy,
+                MemoryStrategy::Resident
+            );
+            assert_eq!(
+                resident.context.optimization_authority,
+                MemoryOptimizationAuthority::Resident
+            );
+            // Same budget as the admitted arm on purpose — it admits rung 4 and nothing shallower, so
+            // "eager cannot fit" is a statement about the eager path, not about a budget too small for
+            // anything at all.
+            let error = evaluate_request_with_budget(
+                &generator,
+                &refused,
+                &low_rank,
+                MemoryCacheState::Cold,
+                OffloadPolicy::Resident,
+                budget_admitting_only_the_deepest_estimate_rung(),
+                gib_to_bytes(9.0),
+                0,
+                &[],
+            )
+            .expect_err("a refused low-rank route cannot rediscover BTR when eager cannot fit")
+            .to_string();
+            assert!(
+                error.contains("needs") && error.contains("safely available"),
+                "{error}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn flux2_klein_refused_low_rank_routes_remain_executable_through_real_provider_scope() {
+        let registry = crate::inference_runtime::media();
+        for (provider, public_mode, provider_mode, reference_count) in [
+            (
+                "flux2_klein_9b",
+                "text_to_image",
+                MemoryMode::TextToImage,
+                0,
+            ),
+            ("flux2_klein_9b_edit", "edit_image", MemoryMode::Edit, 1),
+        ] {
+            let registration = registry
+                .memory_strategy_registrations()
+                .find(|registration| registration.provider_id == provider)
+                .unwrap_or_else(|| panic!("{provider} memory registration"));
+            let fixture = registry
+                .memory_contract_fixture_registrations()
+                .find(|fixture| fixture.provider_id == provider)
+                .unwrap_or_else(|| panic!("{provider} weights-free contract fixture"));
+            let behavior = registry
+                .memory_behavior_registrations()
+                .find(|behavior| behavior.provider_id == provider)
+                .unwrap_or_else(|| panic!("{provider} behavior registration"));
+
+            for (label, kind, external_text_encoder, expected_overlay) in [
+                ("lora", Some(gen_core::AdapterKind::Lora), false, "adapters"),
+                ("lokr", Some(gen_core::AdapterKind::Lokr), false, "adapters"),
+                ("external-te", None, true, "external-text-encoder"),
+                (
+                    "lora-external-te",
+                    Some(gen_core::AdapterKind::Lora),
+                    true,
+                    "adapters-external-text-encoder",
+                ),
+                (
+                    "lokr-external-te",
+                    Some(gen_core::AdapterKind::Lokr),
+                    true,
+                    "adapters-external-text-encoder",
+                ),
+            ] {
+                let weights = tempfile::tempdir().expect("Klein weights fixture");
+                let mut spec = LoadSpec::new(WeightsSource::Dir(weights.path().to_owned()));
+                if let Some(kind) = kind {
+                    spec = spec.with_adapters(vec![gen_core::AdapterSpec::new(
+                        weights.path().join("adapter.safetensors"),
+                        1.0,
+                        kind,
+                    )]);
+                }
+                if external_text_encoder {
+                    spec = spec.with_text_encoder(WeightsSource::Dir(
+                        weights.path().join("external-text-encoder"),
+                    ));
+                }
+                let contract = (fixture.contract)(&spec)
+                    .unwrap_or_else(|error| panic!("{provider} weights-free contract: {error}"));
+                let mut generator = fixture_generator();
+                generator.descriptor.id = provider;
+                generator.contract = Some(contract.clone());
+
+                let mut plan = fixture_plan();
+                plan.engine_id = provider;
+                plan.model_id = provider.to_owned();
+                plan.tier.quant = None;
+                plan.calibration = MlxCalibrationConfig::Absent;
+                plan.load_shape_declaration_result = LoadShapeDeclarationResult::Refused;
+                let plan = plan
+                    .with_resolved_artifact_tier(Some("bf16"))
+                    .expect("Klein dense tier remains explicit");
+                let inputs = MlxRequestInputs {
+                    width: 1024,
+                    height: 1024,
+                    count: 1,
+                    mode: public_mode.to_owned(),
+                    overlay: provider_overlay_for_load_spec(provider, &spec, None),
+                    adapter_count: usize::from(kind.is_some()),
+                    has_reference: reference_count > 0,
+                    reference_count,
+                    use_pid: false,
+                    has_phases: false,
+                };
+                let evaluation = evaluate_request_with_budget(
+                    &generator,
+                    &plan,
+                    &inputs,
+                    MemoryCacheState::Cold,
+                    OffloadPolicy::Resident,
+                    fixture_budget(20.0),
+                    gib_to_bytes(9.0),
+                    0,
+                    &[],
+                )
+                .unwrap_or_else(|error| panic!("{provider} {label} resident request: {error}"));
+
+                assert_eq!(
+                    evaluation.context.selection.strategy,
+                    MemoryStrategy::Resident,
+                    "the refused low-rank declaration remains eager/resident"
+                );
+                assert_eq!(evaluation.context.mode, provider_mode);
+                assert_eq!(
+                    evaluation.context.overlay.as_deref(),
+                    Some(expected_overlay)
+                );
+                assert_eq!(
+                    (registration.safety_check)(&spec, &contract, &evaluation.context),
+                    gen_core::MemorySafetyDecision::Accept,
+                    "{provider} {label} must pass the real pinned provider safety seam"
+                );
+                assert!(
+                    (behavior.begin_request)(&spec, &contract, &evaluation.context)
+                        .unwrap_or_else(|error| {
+                            panic!("{provider} {label} begin_request: {error}")
+                        })
+                        .is_some(),
+                    "{provider} {label} must reach a real request scope"
+                );
+                assert_eq!(
+                    plan.load_shape_declaration_result,
+                    LoadShapeDeclarationResult::Refused,
+                    "provider execution must not reauthorize BTR"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn krea_turbo_and_edit_routes_use_provider_exact_estimated_authority() {
+        for (provider, model_id, mode, references) in [
+            ("krea_2_turbo", "krea_2_turbo", "image_generation", 0),
+            ("krea_2_edit", "krea_2_raw", "edit_image", 2),
+            ("krea_2_turbo_edit", "krea_2_turbo", "edit_image", 1),
+        ] {
+            let mut generator = full_ladder_generator();
+            generator.descriptor.id = provider;
+            generator.contract.as_mut().unwrap().provider_id = provider.to_owned();
+            let mut plan = fixture_plan();
+            plan.engine_id = provider;
+            plan.model_id = model_id.to_owned();
+            plan.calibration = MlxCalibrationConfig::Absent;
+            let mut inputs = fixture_inputs(1024, 1024);
+            inputs.mode = mode.to_owned();
+            inputs.overlay = Some("adapters:1".to_owned());
+            inputs.adapter_count = 1;
+            inputs.has_reference = references > 0;
+            inputs.reference_count = references;
+            inputs.use_pid = false;
+            let evaluation = evaluate_request_with_budget(
+                &generator,
+                &plan,
+                &inputs,
+                MemoryCacheState::Cold,
+                OffloadPolicy::Sequential,
+                budget_admitting_only_the_deepest_estimate_rung(),
+                gib_to_bytes(9.0),
+                0,
+                &[],
+            )
+            .expect("the provider-exact estimate ladder must admit the deep rung");
+            assert_eq!(
+                evaluation.context.selection.strategy,
+                MemoryStrategy::BoundedTransformerResidency,
+                "{provider}"
+            );
+            assert_eq!(
+                evaluation.context.optimization_authority,
+                MemoryOptimizationAuthority::Estimated,
+                "{provider} must not inherit a catalog sibling's measured authority"
+            );
+            assert_eq!(evaluation.context.overlay, None, "{provider}");
+            assert_eq!(evaluation.context.geometry.reference_count, references);
+            assert!(!evaluation.context.use_pid);
+        }
+    }
+
+    #[test]
+    fn krea_prepacked_tier_is_explicit_and_not_load_time_quantization() {
+        let mut plan = fixture_plan();
+        plan.engine_id = "krea_2_edit";
+        plan.model_id = "krea_2_raw".to_owned();
+        plan.tier.quant = None;
+        let q4 = plan
+            .clone()
+            .with_resolved_artifact_tier(Some("q4"))
+            .unwrap();
+        let q8 = plan.with_resolved_artifact_tier(Some("q8")).unwrap();
+        assert_eq!(q4.tier.quant, Some(gen_core::Quant::Q4));
+        assert_eq!(q8.tier.quant, Some(gen_core::Quant::Q8));
+        assert!(q8.with_resolved_artifact_tier(Some("unknown")).is_err());
+    }
+
+    #[test]
+    fn krea_eager_provider_refusal_runs_only_when_the_resident_path_fits() {
+        let mut generator = full_ladder_generator();
+        generator.descriptor.id = "krea_2_turbo";
+        let contract = generator.contract.as_mut().unwrap();
+        contract.provider_id = "krea_2_turbo".to_owned();
+        for capability in &mut contract.strategies {
+            if capability.strategy != MemoryStrategy::Resident {
+                capability.support = gen_core::MemoryStrategySupport::Missing;
+            }
+        }
+        let mut plan = fixture_plan();
+        plan.engine_id = "krea_2_turbo";
+        plan.model_id = "krea_2_turbo".to_owned();
+        plan.calibration = MlxCalibrationConfig::Absent;
+        // This fixture Missings every rung but Resident, so the ONLY floor is the 12 GiB resident
+        // estimate. The pair below brackets its WIDENED value from either side (+/-10%) rather than
+        // pinning 16.0 / 8.0, which bracketed the retired 5% margin's 12.6 GiB and left the admit arm
+        // 2 GiB under the current 18.05 GiB requirement.
+        let admitted = evaluate_request_with_budget(
+            &generator,
+            &plan,
+            &fixture_inputs(1024, 1024),
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget(widened_estimate_gb(12.0) * 1.10),
+            gib_to_bytes(12.0),
+            0,
+            &[],
+        )
+        .expect("the safe eager fallback remains executable when the resident path fits");
+        assert_eq!(
+            admitted.context.selection.strategy,
+            MemoryStrategy::Resident
+        );
+        let error = evaluate_request_with_budget(
+            &generator,
+            &plan,
+            &fixture_inputs(1024, 1024),
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget(widened_estimate_gb(12.0) * 0.90),
+            gib_to_bytes(12.0),
+            0,
+            &[],
+        )
+        .expect_err("a safe eager fallback cannot exceed the live host budget")
+        .to_string();
+        assert!(error.contains("needs"), "{error}");
+        assert!(error.contains("safely available"), "{error}");
+    }
+
+    #[test]
     fn uncalibrated_chroma_routes_authorize_exact_quality_backed_estimates() {
         for route in ["chroma1_hd", "chroma1_flash"] {
             let mut generator = full_ladder_generator();
@@ -7936,6 +9082,7 @@ mod tests {
             activation_headroom_bytes: gib_to_bytes(6.0),
             fixed_reserve_bytes: gib_to_bytes(2.0),
             calibration: MlxCalibrationConfig::Absent,
+            load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
         };
         let inputs = fixture_inputs(1024, 1024);
 
@@ -8086,6 +9233,7 @@ mod tests {
             activation_headroom_bytes: gib_to_bytes(6.0),
             fixed_reserve_bytes: gib_to_bytes(2.0),
             calibration: MlxCalibrationConfig::Absent,
+            load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
         };
         let inputs = fixture_inputs(1024, 1024);
 
@@ -11177,16 +12325,33 @@ mod tests {
         require_exact_source_bound_inventory(&source_inventory, &classified_inventory).expect(
             "the executable audit must classify the exact source-bound candidate inventory",
         );
-        // 32 -> 18 with the inference pin advance. Resident-only means "this cell has no ladder to
-        // fall back to", so the number SHRINKS as ladders are declared and made reachable — the
-        // advance brought the Bernini, Lens/Lens-Turbo, SANA and SD3.5 rung-4 ladders (sc-18609,
-        // sc-18605, sc-18607, sc-18606), which is 14 cells that now have somewhere to go. A rise
-        // here would be the alarming direction and is what this recorded result exists to catch.
-        assert_eq!(
-            cells.len(),
-            18,
-            "the source-derived Resident-only inventory changed; update the recorded audit result"
+        // Resident-only means "this cell has no ladder to fall back to", so this population SHRINKS
+        // monotonically as ladders are declared and made reachable: the pin advance brought the
+        // Bernini, Lens/Lens-Turbo, SANA and SD3.5 rung-4 ladders (sc-18609, sc-18605, sc-18607,
+        // sc-18606), and the SC-18460 contract chain declares more still. A RISE is the alarming
+        // direction and the only thing this recorded result exists to catch. Asserting the exact
+        // count instead froze the corpus: every re-capture and every newly declared ladder made a
+        // green branch red for the right reason and got "fixed" by editing the integer. So bound it
+        // — a ceiling that legitimately falls, plus the vacuity floor that keeps the budget walk
+        // below from passing on an empty inventory.
+        const RESIDENT_ONLY_CEILING: usize = 18;
+        assert!(
+            !cells.is_empty() && cells.len() <= RESIDENT_ONLY_CEILING,
+            "the source-derived Resident-only inventory is {} cells; it must stay non-empty and \
+             within the recorded ceiling of {RESIDENT_ONLY_CEILING}. A rise means a cell lost a \
+             reachable ladder — fix the declaration, do not raise the ceiling.",
+            cells.len()
         );
+        for route in [
+            "flux2_klein_9b",
+            "flux2_klein_9b_kv",
+            "flux2_klein_9b_true_v2",
+        ] {
+            assert!(
+                cells.iter().all(|cell| cell.manifest_id != route),
+                "{route}'s exact optimized declaration must remove it from the Resident-only audit"
+            );
+        }
         let legacy_reserve_bytes = gib_to_bytes(crate::fit_gate::legacy_unified_reserve(48.0).gb);
         let hosts = [48_u64, 64, 96, 128];
         let mut flips = Vec::new();
@@ -12445,6 +13610,7 @@ mod tests {
             activation_headroom_bytes: gib_to_bytes(HEADROOM_GB - 2.0),
             fixed_reserve_bytes: gib_to_bytes(OS_APP_RESERVE_GB - 2.0),
             calibration: MlxCalibrationConfig::Absent,
+            load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
         };
         // Go through `request_geometry` rather than hand-building a `batch: 1` geometry, so this
         // exercises the production count -> batch seam instead of asserting a value it supplies.
@@ -12571,6 +13737,7 @@ mod tests {
             activation_headroom_bytes: gib_to_bytes(HEADROOM_GB - 2.0),
             fixed_reserve_bytes: gib_to_bytes(OS_APP_RESERVE_GB - 2.0),
             calibration: MlxCalibrationConfig::Absent,
+            load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
         };
         let peak_gb = |width, height| {
             plan.generic_total_peak_bytes(request_geometry(&request_inputs(width, height, 1)))
@@ -12649,6 +13816,7 @@ mod tests {
                     .saturating_add(fixed_reserve_bytes),
                 fixed_reserve_bytes,
                 calibration: MlxCalibrationConfig::Absent,
+                load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
             }
         };
         let dense = plan(HeadroomAllowance::LENS_DENSE);
@@ -12745,6 +13913,7 @@ mod tests {
             activation_headroom_bytes: gib_to_bytes(6.0),
             fixed_reserve_bytes: gib_to_bytes(2.0),
             calibration: MlxCalibrationConfig::Absent,
+            load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
         };
         let selected = evaluate_request_with_budget(
             &request_generator(None),
@@ -13973,6 +15142,42 @@ mod tests {
             gen_core::LoadShape::DeferredMaterialization,
             "the shipped Z-Image rung-4 binding must be producible by the production cold-load route"
         );
+        let eager_edit = eager
+            .clone()
+            .with_resolved_route("z_image_edit")
+            .with_refused_load_shape_declaration();
+        let refused_edit = with_selected_sequential_shape("z_image_turbo", eager_edit);
+        assert_eq!(refused_edit.offload_policy, OffloadPolicy::Sequential);
+        assert_eq!(
+            refused_edit.load_shape,
+            gen_core::LoadShape::EagerMaterialization,
+            "the shared provider id must not bypass z_image_edit's declaration/predicate refusal"
+        );
+        let admitted_edit = eager
+            .clone()
+            .with_resolved_route("z_image_edit")
+            .with_applied_load_shape_declaration();
+        assert_eq!(
+            with_selected_sequential_shape("z_image_turbo", admitted_edit).load_shape,
+            gen_core::LoadShape::DeferredMaterialization,
+        );
+        for provider in ["anima_base", "chroma1_base", "kolors", "z_image"] {
+            let refused = eager
+                .clone()
+                .with_resolved_route(provider)
+                .with_refused_load_shape_declaration();
+            let refused = with_selected_sequential_shape(provider, refused);
+            assert_eq!(refused.offload_policy, OffloadPolicy::Sequential);
+            assert_eq!(
+                refused.load_shape,
+                gen_core::LoadShape::EagerMaterialization,
+                "{provider}: a same-id declaration refusal must survive the late sequential shaper",
+            );
+            assert_eq!(
+                refused.load_shape_declaration_result,
+                gen_core::LoadShapeDeclarationResult::Refused,
+            );
+        }
 
         let qwen_resident = eager
             .clone()

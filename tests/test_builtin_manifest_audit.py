@@ -1545,7 +1545,11 @@ def test_flux2_true_v2_manifest_install_time_conversion():
     # installs), reading them from its per-tier bf16/ subdir.
     assert mlx["convertBaseRepo"] == "SceneWorks/flux2-klein-9b-mlx"
     assert mlx["convertBaseSubdir"] == "bf16"
-    assert mlx["quantize"] == 8
+    # SC-18460: the converted transformer is a fixed dense BF16 artifact — there is no packed tier
+    # to default to. `resolve_quant` maps `<= 0` to dense/no-quant, and OMITTING the key would
+    # default to q8, so 0 is the only correct declaration here. The former `== 8` described a tier
+    # this entry never ships.
+    assert mlx["quantize"] == 0
 
 
 def test_flux2_klein_manifest_entries_present():

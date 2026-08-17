@@ -505,6 +505,21 @@ fn hires_fix_preflight_accepts_img2img_models_and_rejects_conflicts() {
         .to_string()
         .contains("mutually exclusive"));
 
+    let with_phases = request(json!({
+        "projectId": "p",
+        "model": "krea_2_raw",
+        "modelManifestEntry": {
+            "family": "krea_2",
+            "ui": { "img2img": true }
+        },
+        "advanced": { "phases": [{ "steps": 8 }] },
+        "hiresFix": { "enabled": true }
+    }));
+    assert!(validate_hires_fix_request(&with_phases)
+        .unwrap_err()
+        .to_string()
+        .contains("multi-phase"));
+
     let too_large = request(json!({
         "projectId": "p",
         "model": "sdxl",
@@ -530,6 +545,55 @@ struct HiresProbeGenerator {
     /// DECLARED geometry of every pass against the request that pass actually sent — the exact
     /// agreement the backend request scopes enforce.
     contexts: std::sync::Mutex<Vec<gen_core::MemoryRunContext>>,
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+struct ProbeMemoryRequestScope;
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+impl gen_core::MemoryRequestScope for ProbeMemoryRequestScope {
+    fn configure_request(&mut self, _request: &mut GenerationRequest) -> gen_core::Result<()> {
+        Ok(())
+    }
+
+    fn enter_phase(&mut self, _phase: gen_core::MemoryPhase) -> gen_core::Result<()> {
+        Ok(())
+    }
+
+    fn leave_phase(&mut self, _phase: gen_core::MemoryPhase) -> gen_core::Result<()> {
+        Ok(())
+    }
+
+    fn configure_decode(
+        &mut self,
+        _tile_edge: u32,
+        _overlap: u32,
+        _geometry: gen_core::MemoryGeometry,
+    ) -> gen_core::Result<()> {
+        Ok(())
+    }
+
+    fn configure_attention(&mut self, _chunk_size: u32) -> gen_core::Result<()> {
+        Ok(())
+    }
+
+    fn materialize_transformer_window(
+        &mut self,
+        _first_block: u32,
+        _block_count: u32,
+    ) -> gen_core::Result<()> {
+        Ok(())
+    }
+
+    fn finish(&mut self, _outcome: gen_core::MemoryRunOutcome) -> gen_core::Result<()> {
+        Ok(())
+    }
 }
 
 #[cfg(any(
@@ -569,12 +633,19 @@ impl Generator for HiresProbeGenerator {
         Ok(())
     }
 
+    fn memory_strategy_safety_check(
+        &self,
+        _context: &gen_core::MemoryRunContext,
+    ) -> gen_core::MemorySafetyDecision {
+        gen_core::MemorySafetyDecision::Accept
+    }
+
     fn begin_memory_strategy_request(
         &self,
         context: &gen_core::MemoryRunContext,
     ) -> gen_core::Result<Option<Box<dyn gen_core::MemoryRequestScope + '_>>> {
         self.contexts.lock().unwrap().push(context.clone());
-        Ok(None)
+        Ok(Some(Box::new(ProbeMemoryRequestScope)))
     }
 
     fn generate(
@@ -1292,6 +1363,122 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
             );
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn dedicated_krea_edit_and_multiphase_helpers_open_the_exact_mlx_request_scope() {
+    let selection = gen_core::MemorySelection {
+        strategy: gen_core::MemoryStrategy::BoundedTransformerResidency,
+        parameters: gen_core::MemoryStrategyParameters {
+            transformer_window_size: Some(1),
+            transformer_window_component: Some(gen_core::TransformerComponent::Dit),
+            ..Default::default()
+        },
+        tier: gen_core::MemoryNumericTier {
+            precision: gen_core::Precision::Bf16,
+            quant: Some(gen_core::Quant::Q4),
+            component_precision_floors: &[],
+        },
+    };
+    let evaluation = |mode, reference_count, use_pid, has_phases| {
+        let mut context = hires_memory_context(selection);
+        context.mode = mode;
+        context.has_reference = reference_count > 0;
+        context.geometry.width = 4;
+        context.geometry.height = 4;
+        context.geometry.reference_count = reference_count;
+        context.use_pid = use_pid;
+        context.has_phases = has_phases;
+        context.optimization_authority = gen_core::MemoryOptimizationAuthority::Estimated;
+        crate::mlx_fit_gate::MlxRequestEvaluation {
+            memory: gen_core::GenerationMemory {
+                stream_transformer_blocks: true,
+                ..Default::default()
+            },
+            context,
+            decode_quality_decisions: vec![],
+            process_limit_bytes: None,
+        }
+    };
+
+    let edit_generator = HiresProbeGenerator::new();
+    let edit = evaluation(gen_core::MemoryMode::Edit, 2, true, false);
+    krea_edit_generate_one(
+        &edit_generator,
+        "edit",
+        None,
+        4,
+        4,
+        7,
+        2,
+        None,
+        true,
+        vec![Conditioning::MultiReference {
+            images: vec![
+                Image {
+                    width: 4,
+                    height: 4,
+                    pixels: vec![1; 48],
+                },
+                Image {
+                    width: 4,
+                    height: 4,
+                    pixels: vec![2; 48],
+                },
+            ],
+        }],
+        None,
+        &edit,
+        gen_core::PreviewSink::default(),
+        &CancelFlag::new(),
+        &mut |_| {},
+    )
+    .unwrap();
+    assert_eq!(
+        edit_generator.contexts.lock().unwrap().as_slice(),
+        &[edit.context]
+    );
+    let edit_request = edit_generator.requests.lock().unwrap();
+    assert!(edit_request[0].use_pid);
+    assert_eq!(edit_request[0].image_reference_count(), 2);
+    assert!(edit_request[0]
+        .memory
+        .is_some_and(|memory| memory.stream_transformer_blocks));
+    drop(edit_request);
+
+    let phase_generator = HiresProbeGenerator::new();
+    let phase = evaluation(gen_core::MemoryMode::TextToImage, 0, false, true);
+    krea_multiphase_generate_one(
+        &phase_generator,
+        "phases",
+        None,
+        4,
+        4,
+        9,
+        None,
+        None,
+        vec![gen_core::GenerationPhase {
+            steps: 2,
+            guidance: None,
+            adapters: vec![],
+        }],
+        Some(phase.memory),
+        Some(&phase.context),
+        gen_core::PreviewSink::default(),
+        &CancelFlag::new(),
+        &mut |_| {},
+    )
+    .unwrap();
+    assert_eq!(
+        phase_generator.contexts.lock().unwrap().as_slice(),
+        &[phase.context]
+    );
+    let phase_request = phase_generator.requests.lock().unwrap();
+    assert!(phase_request[0].phases.is_some());
+    assert!(phase_request[0]
+        .memory
+        .is_some_and(|memory| memory.stream_transformer_blocks));
 }
 
 #[cfg(target_os = "macos")]
@@ -6909,6 +7096,105 @@ fn flux2_edit_engine_id_maps_variants() {
     ));
     assert_eq!(flux2_edit_engine_id("z_image_turbo"), None);
     assert_eq!(flux2_edit_engine_id("sdxl"), None);
+    assert!(!flux2_edit_route_mode(
+        "flux2_klein_9b_edit",
+        "image_generation"
+    ));
+    assert!(!flux2_edit_route_mode(
+        "flux2_klein_9b_edit",
+        "image_to_image"
+    ));
+    assert!(!flux2_edit_route_mode("flux2_klein_9b_edit", "reference"));
+    assert!(flux2_edit_route_mode(
+        "flux2_klein_9b_edit",
+        "character_image"
+    ));
+    assert!(flux2_edit_route_mode(
+        "flux2_klein_9b_kv_edit",
+        "style_variations"
+    ));
+
+    let eight = request(json!({
+        "mode": "edit_image",
+        "referenceAssetIds": ["a", "b", "c", "d", "e", "f", "g", "h"]
+    }));
+    assert_eq!(
+        flux2_edit_reference_ids(&eight, "flux2_klein_9b_edit")
+            .expect("eight Klein references")
+            .len(),
+        8
+    );
+    let nine = request(json!({
+        "mode": "edit_image",
+        "referenceAssetIds": ["a", "b", "c", "d", "e", "f", "g", "h", "i"]
+    }));
+    assert!(flux2_edit_reference_ids(&nine, "flux2_klein_9b_edit").is_err());
+    assert_eq!(
+        edit_reference_ids(&nine).len(),
+        MAX_EDIT_REFERENCES,
+        "the broader Klein limit must not widen the calibrated FLUX.2-dev/shared edit cap"
+    );
+    assert_eq!(flux2_edit_conditioning_reference_count(1, false), 1);
+    assert_eq!(flux2_edit_conditioning_reference_count(8, false), 8);
+    assert_eq!(
+        flux2_edit_conditioning_reference_count(1, true),
+        2,
+        "a pose request executes as skeleton plus primary reference"
+    );
+    assert_eq!(
+        flux2_edit_conditioning_reference_count(8, true),
+        2,
+        "declaration and request scope must describe the concrete pose conditioning, not discarded public references"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn flux2_klein_edit_route_owns_invalid_cardinality_and_preflight_refuses_it() {
+    let weights = tempfile::tempdir().unwrap();
+    let mut settings = Settings::from_env();
+    settings.data_dir = weights.path().to_path_buf();
+    let model_path = weights.path().to_string_lossy().to_string();
+    let references = |count: usize| {
+        (0..count)
+            .map(|index| format!("reference-{index}"))
+            .collect::<Vec<_>>()
+    };
+    for count in [0, 1, 8, 9] {
+        let request = request(json!({
+            "projectId": "p",
+            "model": "flux2_klein_9b",
+            "mode": "edit_image",
+            "referenceAssetIds": references(count),
+            "advanced": { "modelPath": model_path.clone() }
+        }));
+        assert_eq!(
+            resolve_image_route(&request, &settings),
+            Some(ImageRoute::Flux2Edit),
+            "Klein edit refs={count} must never fall through to generic MLX"
+        );
+        let preflight = flux2_edit_reference_ids(&request, "flux2_klein_9b_edit");
+        if (1..=MAX_KLEIN_EDIT_REFERENCES).contains(&count) {
+            assert_eq!(preflight.expect("valid Klein reference count").len(), count);
+        } else {
+            assert!(
+                matches!(preflight, Err(WorkerError::InvalidPayload(_))),
+                "Klein edit refs={count} must fail before load or generation"
+            );
+        }
+    }
+
+    let dev_without_reference = request(json!({
+        "projectId": "p",
+        "model": "flux2_dev",
+        "mode": "edit_image",
+        "advanced": { "modelPath": model_path }
+    }));
+    assert_ne!(
+        resolve_image_route(&dev_without_reference, &settings),
+        Some(ImageRoute::Flux2Edit),
+        "FLUX.2 Dev keeps its established reference-gated route"
+    );
 }
 
 // ---- sc-6124 / sc-6211: FLUX.2-dev provider memory admission context --------------------------
@@ -6986,6 +7272,22 @@ fn flux2_edit_memory_tier_follows_the_resolved_fallback_directory() {
     );
     assert_eq!(quant, Some(gen_core::Quant::Q8));
     assert_eq!(bits, Some(8));
+
+    let true_v2 = request(json!({
+        "model": "flux2_klein_9b_true_v2",
+        "advanced": { "mlxQuantize": 4 }
+    }));
+    assert_eq!(
+        flux2_edit_resolved_quant(
+            &true_v2,
+            Path::new("/models/mlx/flux2_klein_9b_true_v2"),
+            "flux2_klein_9b_true_v2",
+            "job-true-v2",
+            "mlx",
+        ),
+        (None, None),
+        "True-V2 is one fixed dense BF16 artifact, not a user-selectable packed tier"
+    );
 }
 
 // ---- sc-6135: FLUX.2-dev caption-upsampling (enhance_prompt) threading ------------------------
@@ -8168,6 +8470,7 @@ fn flux1_dev_control_real_weights_generates_each_mode() {
             28,
             Some(3.5), // dev embedded guidance
             conditioning,
+            None,
             gen_core::PreviewSink::default(),
             &cancel,
             &mut |_| {},
@@ -8252,38 +8555,63 @@ fn edit_reference_ids_takes_plural_multi_reference_set() {
 fn flux2_edit_image_guidance_lever() {
     // Off outside character_image mode (a plain image edit), even with the knob set.
     assert_eq!(
-        flux2_edit_image_guidance(&request(serde_json::json!({
-            "mode": "edit_image", "referenceAssetId": "a", "advanced": { "ipAdapterScale": 1.5 }
-        }))),
+        flux2_edit_image_guidance(
+            "flux2_klein_9b_edit",
+            &request(serde_json::json!({
+                "mode": "edit_image", "referenceAssetId": "a", "advanced": { "ipAdapterScale": 1.5 }
+            }))
+        ),
         None
     );
     // Off when no character reference is attached.
     assert_eq!(
-        flux2_edit_image_guidance(&request(serde_json::json!({
-            "mode": "character_image", "advanced": { "ipAdapterScale": 1.5 }
-        }))),
+        flux2_edit_image_guidance(
+            "flux2_klein_9b_edit",
+            &request(serde_json::json!({
+                "mode": "character_image", "advanced": { "ipAdapterScale": 1.5 }
+            }))
+        ),
         None
     );
     // Default 1.5 (realism-safe) when a reference is present and the knob is unspecified.
     assert_eq!(
-        flux2_edit_image_guidance(&request(serde_json::json!({
-            "mode": "character_image", "referenceAssetId": "a"
-        }))),
+        flux2_edit_image_guidance(
+            "flux2_klein_9b_edit",
+            &request(serde_json::json!({
+                "mode": "character_image", "referenceAssetId": "a"
+            }))
+        ),
         Some(1.5)
     );
     // Slider value honored, clamped to the 2.5 ceiling.
     assert_eq!(
-        flux2_edit_image_guidance(&request(serde_json::json!({
-            "mode": "character_image", "referenceAssetId": "a", "advanced": { "ipAdapterScale": 3.0 }
-        }))),
+        flux2_edit_image_guidance(
+            "flux2_klein_9b_edit",
+            &request(serde_json::json!({
+                "mode": "character_image", "referenceAssetId": "a", "advanced": { "ipAdapterScale": 3.0 }
+            }))
+        ),
         Some(2.5)
     );
     // A slider value at/below 1.0 reads as OFF (the engine's ≤1 = off).
     assert_eq!(
-        flux2_edit_image_guidance(&request(serde_json::json!({
-            "mode": "character_image", "referenceAssetId": "a", "advanced": { "ipAdapterScale": 0.8 }
-        }))),
+        flux2_edit_image_guidance(
+            "flux2_klein_9b_edit",
+            &request(serde_json::json!({
+                "mode": "character_image", "referenceAssetId": "a", "advanced": { "ipAdapterScale": 0.8 }
+            }))
+        ),
         None
+    );
+    assert_eq!(
+        flux2_edit_image_guidance(
+            "flux2_klein_9b_kv_edit",
+            &request(serde_json::json!({
+                "mode": "character_image", "referenceAssetId": "a", "advanced": { "ipAdapterScale": 2.0 }
+            }))
+        ),
+        None,
+        "KV edit rejects image_guidance instead of silently inheriting ordinary edit semantics"
     );
 }
 
@@ -8473,6 +8801,8 @@ fn flux2_edit_real_weights_generates_one_image() {
     let (w, h, pixels) = flux2_edit_generate_one(
         generator.as_ref(),
         false,
+        false,
+        None,
         None,
         None,
         "make it a watercolor painting",
@@ -9389,6 +9719,40 @@ fn request_has_multiphase_detects_presence() {
         !request_has_multiphase(&null),
         "an explicit null is not 'present'"
     );
+}
+
+// The multi-phase lane must never decide the tier behind the engine's back — tier is a
+// whole-pipeline contract, so a q4 job is q4 for every segment. The candle arm of this lane used to
+// hardcode `LoadSpec::quantize = None` while the sibling `krea_edit.rs` candle arm forwarded the
+// request, which made an imported native checkpoint's matching-tier multi-phase request unrunnable
+// (`candle-gen-krea`'s `actual_quant_tier` hard-rejects `companion packed / no request`). These two
+// tests pin BOTH arms of `multiphase_load_quant` so the arms cannot silently diverge again; the
+// candle assertion first RUNS on the windows-candle lane, which is the only place that cfg compiles.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_multiphase_forwards_the_requested_tier_to_the_engine() {
+    for requested in [None, Some(Quant::Q4), Some(Quant::Q8)] {
+        assert_eq!(
+            multiphase_load_quant("krea_2_raw", requested),
+            requested,
+            "the candle multi-phase arm must hand the engine the tier the job asked for"
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn mlx_multiphase_defers_the_tier_to_the_resolved_artifact_mapping() {
+    // Not a tautology: it pins that this lane routes through the SHARED mapping rather than growing
+    // its own opinion. The MLX turnkeys ship pre-quantized, so the mapping deliberately collapses a
+    // packed request to a `None` load quant — the divergence this asserts against is a future edit
+    // that bypasses the mapping, which is exactly how the candle arm drifted.
+    for requested in [None, Some(Quant::Q4), Some(Quant::Q8)] {
+        assert_eq!(
+            multiphase_load_quant("krea_2_raw", requested),
+            mlx_load_quant_for_resolved_artifact("krea_2_raw", requested)
+        );
+    }
 }
 
 // A valid `advanced.phases` parses into the SceneWorks plan with concrete steps / guidance / lora
@@ -11831,6 +12195,8 @@ fn flux2_pose_tier_real_weights_generates_one_image() {
     let (w, h, pixels) = flux2_edit_generate_one(
         generator.as_ref(),
         false,
+        false,
+        None,
         None,
         None,
         &augment_prompt_for_pose("a knight standing in a courtyard"),
@@ -11967,6 +12333,8 @@ fn flux2_pose_tier_ab_wholebody_vs_body_real_weights() {
             let (w, h, pixels) = flux2_edit_generate_one(
                 generator.as_ref(),
                 false,
+                false,
+                None,
                 None,
                 None,
                 &prompt,
@@ -14112,6 +14480,7 @@ fn matrix_flux1_render(
         28,
         Some(3.5),
         conditioning,
+        None,
         gen_core::PreviewSink::default(),
         &cancel,
         &mut |_| {},
@@ -18519,6 +18888,8 @@ fn sc_8253_8278_identity_angle_ab() {
                 let (w, h, pixels) = flux2_edit_generate_one(
                     generator.as_ref(),
                     false,
+                    false,
+                    None,
                     None,
                     None,
                     &prompt,

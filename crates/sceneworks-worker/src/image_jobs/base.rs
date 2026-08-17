@@ -1480,7 +1480,6 @@ const FLUX2_DEV_MLX_TURNKEY_REVISION: &str =
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const FLUX2_KLEIN_9B_MLX_TURNKEY_REVISION: &str =
     "acf05e8d5103838baba6a5e32dc91d6997a56023";
-
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -1780,6 +1779,16 @@ pub(super) fn resolved_mlx_artifact_tier(
     tier_key_from_resolved_dir(weights_dir).or_else(|| {
         quant_bits.map(|bits| if bits <= 4 { "q4" } else { "q8" })
     })
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn resolved_mlx_artifact_tier_for_model(
+    model_id: &str,
+    weights_dir: &Path,
+    quant_bits: Option<i64>,
+) -> Option<&'static str> {
+    fixed_mlx_artifact_tier(model_id)
+        .or_else(|| resolved_mlx_artifact_tier(weights_dir, quant_bits))
 }
 
 #[cfg(target_os = "macos")]
@@ -3046,12 +3055,19 @@ fn candle_certified_artifact_path(
     tier: &str,
 ) -> bool {
     let (repo, revision) = match engine_id {
-        "z_image" | "z_image_turbo" =>
-            (ZIMAGE_MLX_TURNKEY_REPO, ZIMAGE_MLX_TURNKEY_REVISION),
-        "flux1_schnell" =>
-            ("SceneWorks/flux1-schnell-mlx", FLUX1_SCHNELL_MLX_TURNKEY_REVISION),
-        "flux1_dev" => ("SceneWorks/flux1-dev-mlx", FLUX1_DEV_MLX_TURNKEY_REVISION),
-        "flux2_dev" => ("SceneWorks/flux2-dev-mlx", FLUX2_DEV_MLX_TURNKEY_REVISION),
+        "z_image" | "z_image_turbo" => (ZIMAGE_MLX_TURNKEY_REPO, ZIMAGE_MLX_TURNKEY_REVISION),
+        "flux1_schnell" => (
+            "SceneWorks/flux1-schnell-mlx",
+            FLUX1_SCHNELL_MLX_TURNKEY_REVISION,
+        ),
+        "flux1_dev" => (
+            "SceneWorks/flux1-dev-mlx",
+            FLUX1_DEV_MLX_TURNKEY_REVISION,
+        ),
+        "flux2_dev" => (
+            "SceneWorks/flux2-dev-mlx",
+            FLUX2_DEV_MLX_TURNKEY_REVISION,
+        ),
         "flux2_klein_9b" => (
             "SceneWorks/flux2-klein-9b-mlx",
             FLUX2_KLEIN_9B_MLX_TURNKEY_REVISION,
@@ -3080,7 +3096,7 @@ fn is_mage_engine(engine_id: &str) -> bool {
 /// Optimized evidence is admissible only when every descriptor-required component matches the
 /// exact manifest repo, revision, tier, and subdirectory that the eventual provider load receives.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn candle_certified_load_spec(
+pub(super) fn candle_certified_load_spec(
     engine_id: &str,
     settings: &Settings,
     spec: &LoadSpec,
@@ -3090,20 +3106,18 @@ fn candle_certified_load_spec(
     let WeightsSource::Dir(weights_dir) = &spec.weights else {
         return false;
     };
-    if !is_mage_engine(engine_id) {
+    if !is_mage_engine(engine_id)
+        && !crate::memory_route_registry::candle_declaration_owns_load_shape(engine_id)
+        && !crate::memory_route_registry::candle_manifest_declares_request_strategy_provider(
+            manifest_entry,
+            engine_id,
+        )
+    {
         return candle_certified_artifact_path(engine_id, settings, weights_dir, tier);
     }
-
     let Some(downloads) = manifest_entry.get("downloads").and_then(Value::as_array) else {
         return false;
     };
-    let Some(descriptor) = crate::inference_runtime::media_descriptor(engine_id) else {
-        return false;
-    };
-    if spec.components.len() != descriptor.required_components.len() {
-        return false;
-    }
-
     let certify = |component_id: Option<&str>, actual: &Path| {
         let mut matches = downloads.iter().filter(|download| {
             download.get("provider").and_then(Value::as_str) == Some("huggingface")
@@ -3136,6 +3150,18 @@ fn candle_certified_load_spec(
             actual,
         )
     };
+
+    if !is_mage_engine(engine_id) {
+        return spec.components.is_empty()
+            && (spec.text_encoder.is_none() || spec.validate_prepared_file_pins().is_ok())
+            && certify(None, weights_dir);
+    }
+    let Some(descriptor) = crate::inference_runtime::media_descriptor(engine_id) else {
+        return false;
+    };
+    if spec.components.len() != descriptor.required_components.len() {
+        return false;
+    }
 
     certify(None, weights_dir)
         && descriptor.required_components.iter().all(|component_id| {
@@ -3178,7 +3204,7 @@ mod mage_artifact_certification_tests {
         }
     }
 
-    fn mage_manifest(model_id: &str) -> JsonObject {
+    fn model_manifest(model_id: &str) -> JsonObject {
         let source = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
             .iter()
             .find(|(name, _)| *name == "builtin.models.jsonc")
@@ -3193,7 +3219,7 @@ mod mage_artifact_certification_tests {
             .find(|model| model["id"] == model_id)
             .and_then(Value::as_object)
             .cloned()
-            .expect("Mage manifest entry")
+            .expect("model manifest entry")
     }
 
     fn cached_snapshot(data_dir: &Path, repo: &str, revision: &str) -> PathBuf {
@@ -3214,7 +3240,7 @@ mod mage_artifact_certification_tests {
         ]);
         let data = tempfile::tempdir().expect("temp data dir");
         let settings = settings(data.path());
-        let manifest = mage_manifest("mage_flow_base");
+        let manifest = model_manifest("mage_flow_base");
         let downloads = manifest["downloads"].as_array().expect("downloads");
         let revision_for = |component_id: Option<&str>| {
             let download = downloads
@@ -3269,6 +3295,71 @@ mod mage_artifact_certification_tests {
             &incomplete,
             &manifest,
             "q4",
+        ));
+    }
+
+    #[test]
+    fn strict_z_control_requires_independent_primary_and_control_certification() {
+        let _env = crate::test_env::EnvVars::set(&[
+            ("HF_HUB_CACHE", ""),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+            ("HF_HOME", ""),
+        ]);
+        let data = tempfile::tempdir().expect("temp data dir");
+        let settings = settings(data.path());
+        let manifest = model_manifest("z_image");
+        let primary = manifest["downloads"]
+            .as_array()
+            .expect("downloads")
+            .iter()
+            .find(|download| download["variant"] == "q4")
+            .expect("q4 primary download");
+        let primary_repo = primary["repo"].as_str().expect("primary repo");
+        let primary_revision = primary["revision"].as_str().expect("primary revision");
+        let primary_path = cached_snapshot(data.path(), primary_repo, primary_revision).join("q4");
+        fs::create_dir_all(&primary_path).expect("primary tier");
+
+        let control_root = cached_snapshot(
+            data.path(),
+            crate::image_jobs::zimage_control::ZIMAGE_CTRL_BASE_REPO,
+            crate::image_jobs::zimage_control::ZIMAGE_CTRL_BASE_REVISION,
+        );
+        let control_path =
+            control_root.join(crate::image_jobs::zimage_control::ZIMAGE_CTRL_BASE_FILE);
+        fs::write(&control_path, b"control").expect("control file");
+        let spec = LoadSpec::new(WeightsSource::Dir(primary_path.clone()))
+            .with_resolved_route("z_image")
+            .with_control(WeightsSource::File(control_path.clone()));
+
+        assert!(candle_certified_load_spec(
+            "z_image_control",
+            &settings,
+            &spec,
+            &manifest,
+            "q4",
+        ));
+        assert!(candle_certified_hf_artifact_path(
+            &settings,
+            crate::image_jobs::zimage_control::ZIMAGE_CTRL_BASE_REPO,
+            crate::image_jobs::zimage_control::ZIMAGE_CTRL_BASE_REVISION,
+            Path::new(crate::image_jobs::zimage_control::ZIMAGE_CTRL_BASE_FILE),
+            &control_path,
+        ));
+        assert!(!candle_certified_load_spec(
+            "z_image_control",
+            &settings,
+            &LoadSpec::new(WeightsSource::Dir(data.path().join("substituted-primary")))
+                .with_resolved_route("z_image")
+                .with_control(WeightsSource::File(control_path)),
+            &manifest,
+            "q4",
+        ));
+        assert!(!candle_certified_hf_artifact_path(
+            &settings,
+            crate::image_jobs::zimage_control::ZIMAGE_CTRL_BASE_REPO,
+            crate::image_jobs::zimage_control::ZIMAGE_CTRL_BASE_REVISION,
+            Path::new(crate::image_jobs::zimage_control::ZIMAGE_CTRL_BASE_FILE),
+            &data.path().join("substituted-control.safetensors"),
         ));
     }
 }
@@ -4067,6 +4158,47 @@ fn load_spec(
     spec
 }
 
+/// Krea's MLX base-DiT turnkeys are already packed in the resolved `bf16/q4/q8`
+/// artifact directory. `LoadSpec::quantize` is a load-time transform request, not
+/// that artifact-tier identity, so forwarding the UI tier as a quant transform
+/// would make the provider predicate reject the otherwise exact production spec.
+/// Keep the resolved tier on the request plan/declaration axes instead.
+#[cfg(target_os = "macos")]
+pub(super) fn mlx_load_quant_for_resolved_artifact(
+    engine_id: &str,
+    quant: Option<Quant>,
+) -> Option<Quant> {
+    if matches!(
+        engine_id,
+        "krea_2_raw"
+            | "krea_2_turbo"
+            | "krea_2_edit"
+            | "krea_2_turbo_edit"
+            | "flux2_klein_9b"
+            | "flux2_klein_9b_edit"
+            | "flux2_klein_9b_kv_edit"
+    ) {
+        None
+    } else {
+        quant
+    }
+}
+
+/// Fixed converted artifacts whose resolved precision is independent of a request preference.
+/// Returning `Some` lets callers skip tier reconciliation entirely, avoiding both a false recipe
+/// identity and a false downgrade event before the provider sees the load.
+#[cfg(target_os = "macos")]
+pub(super) fn fixed_mlx_artifact_quant(
+    model_id: &str,
+) -> Option<(Option<Quant>, Option<i64>)> {
+    (model_id == "flux2_klein_9b_true_v2").then_some((None, None))
+}
+
+#[cfg(target_os = "macos")]
+fn fixed_mlx_artifact_tier(model_id: &str) -> Option<&'static str> {
+    (model_id == "flux2_klein_9b_true_v2").then_some("bf16")
+}
+
 /// Validate the API's fresh opaque resolution against this route's inference descriptor and attach
 /// the exact prepared source receipt before any planner, fit gate, or provider loader sees the spec.
 /// Default/absent selection is an exact no-op.
@@ -4147,54 +4279,62 @@ pub(super) fn prepare_manifest_text_encoder_with_file_pins(
 /// function's test module is itself macOS-excluded, so admitting bare `test` would leave it unused
 /// in a macOS test build and dead-code-error again under `-D warnings`.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn apply_candle_image_load_shape(engine_id: &str, spec: LoadSpec) -> LoadSpec {
-    let directory = matches!(&spec.weights, WeightsSource::Dir(_));
-    let qwen_native = matches!(engine_id, "qwen_image" | "qwen_image_edit")
-        && directory
-        && spec.control.is_none()
-        && spec.extra_controls.is_empty()
-        && spec.ip_adapter.is_none()
-        && spec.adapters.is_empty()
-        && spec.pid.is_none();
-    let flux_supported = matches!(engine_id, "flux1_schnell" | "flux1_dev")
-        && directory
-        && spec.adapters.is_empty()
-        && spec.extra_controls.is_empty()
-        && spec.pid.is_none()
-        && spec.identity.is_none()
-        && !(spec.control.is_some() && spec.ip_adapter.is_some());
-    let flux2_supported = matches!(engine_id, "flux2_dev" | "flux2_klein_9b")
-        && directory
-        && spec.adapters.is_empty()
-        && spec.extra_controls.is_empty()
-        && spec.ip_adapter.is_none()
-        && spec.pid.is_none()
-        && spec.identity.is_none();
-    let mage_supported = matches!(
+fn apply_declared_candle_image_load_shape(
+    engine_id: &str,
+    resolved_tier: Option<&str>,
+    request_mode: &str,
+    manifest: &JsonObject,
+    spec: LoadSpec,
+    sequential_selected: bool,
+) -> LoadSpec {
+    let mode = crate::memory_route_registry::MemoryRouteMode::from_request(request_mode);
+    let spec = crate::memory_route_registry::evaluate_declared_candle_load_shape(
         engine_id,
-        "mage_flow_base"
-            | "mage_flow"
-            | "mage_flow_turbo"
-            | "mage_flow_edit_base"
-            | "mage_flow_edit"
-            | "mage_flow_edit_turbo"
-    ) && directory
-        && spec.adapters.is_empty()
-        && spec.control.is_none()
-        && spec.extra_controls.is_empty()
-        && spec.ip_adapter.is_none()
-        && spec.pid.is_none()
-        && spec.identity.is_none();
-    if qwen_native || flux_supported || flux2_supported || mage_supported {
-        spec.with_load_shape(gen_core::LoadShape::DeferredMaterialization)
-    } else {
-        spec
-    }
+        resolved_tier,
+        mode,
+        manifest,
+        spec,
+        sequential_selected,
+    );
+    crate::memory_route_registry::apply_registered_load_shape(
+        crate::memory_route_registry::MemoryRouteBackend::Candle,
+        engine_id,
+        mode.unwrap_or(crate::memory_route_registry::MemoryRouteMode::TextToImage),
+        spec,
+        sequential_selected,
+    )
+}
+
+/// Unchanged legacy shaper for bespoke Candle call sites that do not carry a complete manifest
+/// declaration coordinate. Declaration-owned routes use [`apply_declared_candle_image_load_shape`]
+/// only after assembling their exact route, tier, mode, source, components, and selected encoder.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn apply_candle_image_load_shape(engine_id: &str, spec: LoadSpec) -> LoadSpec {
+    crate::memory_route_registry::apply_registered_load_shape(
+        crate::memory_route_registry::MemoryRouteBackend::Candle,
+        engine_id,
+        crate::memory_route_registry::MemoryRouteMode::TextToImage,
+        spec,
+        false,
+    )
 }
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn apply_candle_qwen_load_shape(engine_id: &str, spec: LoadSpec) -> LoadSpec {
-    apply_candle_image_load_shape(engine_id, spec)
+fn apply_candle_qwen_load_shape(
+    engine_id: &str,
+    resolved_tier: &str,
+    request_mode: &str,
+    manifest: &JsonObject,
+    spec: LoadSpec,
+) -> LoadSpec {
+    apply_declared_candle_image_load_shape(
+        engine_id,
+        Some(resolved_tier),
+        request_mode,
+        manifest,
+        spec,
+        false,
+    )
 }
 
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
@@ -4206,6 +4346,10 @@ mod candle_image_load_shape_tests {
         LoadSpec::new(WeightsSource::Dir(std::path::PathBuf::from(
             "qwen-image-fixture",
         )))
+    }
+
+    fn legacy_shape(engine_id: &str, spec: LoadSpec) -> LoadSpec {
+        apply_candle_image_load_shape(engine_id, spec)
     }
 
     #[test]
@@ -4225,7 +4369,7 @@ mod candle_image_load_shape_tests {
             "mage_flow_edit_turbo",
         ] {
             assert_eq!(
-                apply_candle_image_load_shape(engine_id, fixture_spec()).load_shape,
+                legacy_shape(engine_id, fixture_spec()).load_shape,
                 gen_core::LoadShape::DeferredMaterialization
             );
         }
@@ -4258,7 +4402,7 @@ mod candle_image_load_shape_tests {
         ];
         for (engine_id, spec) in cases {
             assert_eq!(
-                apply_candle_image_load_shape(engine_id, spec).load_shape,
+                legacy_shape(engine_id, spec).load_shape,
                 gen_core::LoadShape::EagerMaterialization
             );
         }
@@ -4284,7 +4428,7 @@ mod candle_image_load_shape_tests {
             fixture_spec().with_ip_adapter(WeightsSource::Dir(std::path::PathBuf::from("ip"))),
         ] {
             assert_eq!(
-                apply_candle_image_load_shape("flux1_dev", spec).load_shape,
+                legacy_shape("flux1_dev", spec).load_shape,
                 gen_core::LoadShape::DeferredMaterialization
             );
         }
@@ -4294,11 +4438,11 @@ mod candle_image_load_shape_tests {
             )))
             .with_ip_adapter(WeightsSource::Dir(std::path::PathBuf::from("ip")));
         assert_eq!(
-            apply_candle_image_load_shape("flux1_dev", combined).load_shape,
+            legacy_shape("flux1_dev", combined).load_shape,
             gen_core::LoadShape::EagerMaterialization
         );
         assert_eq!(
-            apply_candle_image_load_shape(
+            legacy_shape(
                 "flux2_dev",
                 fixture_spec().with_control(WeightsSource::File(std::path::PathBuf::from(
                     "control.safetensors",
@@ -4485,43 +4629,18 @@ fn apply_measured_mlx_load_shape_for_request(
     spec: LoadSpec,
     plain_text_to_image: bool,
 ) -> LoadSpec {
-    let directory_native = matches!(&spec.weights, WeightsSource::Dir(_))
-        && spec.precision == gen_core::Precision::Bf16;
-    let lens_native = directory_native
-        && ((engine_id == "lens" && spec.quantize == Some(gen_core::Quant::Q4))
-            || (engine_id == "lens_turbo" && spec.quantize.is_none()))
-        && spec.control.is_none()
-        && spec.extra_controls.is_empty()
-        && spec.ip_adapter.is_none()
-        && spec.adapters.is_empty()
-        && spec.pid.is_none();
-    let qwen_native = directory_native
-        && matches!(engine_id, "qwen_image" | "qwen_image_edit")
-        && spec.control.is_none()
-        && spec.extra_controls.is_empty()
-        && spec.ip_adapter.is_none()
-        && spec.pid.is_none();
-    let krea_native = directory_native
-        && engine_id == "krea_2_turbo"
-        && plain_text_to_image
-        && spec.control.is_none()
-        && spec.extra_controls.is_empty()
-        && spec.ip_adapter.is_none()
-        && spec.adapters.is_empty()
-        && spec.pid.is_none();
-    let sdxl_native = directory_native
-        && engine_id == "sdxl"
-        && plain_text_to_image
-        && spec.control.is_none()
-        && spec.extra_controls.is_empty()
-        && spec.ip_adapter.is_none()
-        && spec.adapters.is_empty()
-        && spec.pid.is_none();
-    if lens_native || qwen_native || krea_native || sdxl_native {
-        spec.with_load_shape(gen_core::LoadShape::DeferredMaterialization)
+    let mode = if plain_text_to_image {
+        crate::memory_route_registry::MemoryRouteMode::TextToImage
     } else {
-        spec
-    }
+        crate::memory_route_registry::MemoryRouteMode::EditImage
+    };
+    crate::memory_route_registry::apply_registered_load_shape(
+        crate::memory_route_registry::MemoryRouteBackend::Mlx,
+        engine_id,
+        mode,
+        spec,
+        false,
+    )
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -4761,23 +4880,48 @@ mod measured_mlx_load_shape_tests {
     }
 
     #[test]
-    fn worker_plain_krea_specs_reach_the_full_ladder_without_admitting_other_surfaces() {
-        for (tier, quant_bits, quant) in [
-            ("bf16", None, None),
-            ("q4", Some(4), Some(Quant::Q4)),
-            ("q8", Some(8), Some(Quant::Q8)),
-        ] {
+    fn worker_krea_declarations_reach_the_full_ladder_without_legacy_shaping() {
+        let source = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .expect("builtin model manifest")
+            .1;
+        let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+            source,
+        ))
+        .expect("builtin model manifest parses");
+        let turbo_manifest = manifest["models"]
+            .as_array()
+            .expect("model rows")
+            .iter()
+            .find(|model| model["id"] == "krea_2_turbo")
+            .and_then(Value::as_object)
+            .expect("Krea Turbo row");
+        let context = crate::memory_route_registry::MemoryRouteRequestContext {
+            mode: crate::memory_route_registry::MemoryRouteMode::TextToImage,
+            reference_count: 0,
+            use_pid: false,
+            has_phases: false,
+        };
+
+        for (tier, quant_bits) in [("bf16", None), ("q4", Some(4)), ("q8", Some(8))] {
             let root = tempfile::tempdir().unwrap();
-            let mut spec = fixture_spec(
+            let spec = fixture_spec(
                 root.path(),
                 quant_bits,
                 Some(("krea_2_turbo", quant_bits.map(i32::from))),
-            );
-            if let Some(quant) = quant {
-                spec = spec.with_quant(quant);
-            }
+            )
+            .with_resolved_route("krea_2_turbo");
+            assert_eq!(spec.quantize, None, "{tier} is a prepacked artifact tier");
             let shaped =
-                apply_measured_mlx_load_shape_for_request("krea_2_turbo", spec, true);
+                crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request(
+                    "krea_2_turbo",
+                    Some(tier),
+                    Some(context.mode),
+                    turbo_manifest,
+                    spec,
+                    context,
+                );
             assert_eq!(
                 shaped.load_shape,
                 gen_core::LoadShape::DeferredMaterialization,
@@ -4823,34 +4967,40 @@ mod measured_mlx_load_shape_tests {
             Some(4),
             Some(("krea_2_turbo", Some(4))),
         )
-        .with_quant(Quant::Q4);
+        .with_resolved_route("krea_2_turbo");
         assert_eq!(
-            apply_measured_mlx_load_shape_for_request("krea_2_turbo", base.clone(), false)
-                .load_shape,
-            gen_core::LoadShape::EagerMaterialization,
-            "a reference/edit/hires request is outside the plain Krea T2I apparatus even when its \
-             weight spec is otherwise clean"
-        );
-        let adapter = AdapterSpec::new(
-            root.path().join("adapter.safetensors"),
-            1.0,
-            AdapterKind::Lora,
-        );
-        for (engine, spec) in [
-            ("krea_2_turbo_edit", base.clone()),
-            ("krea_2_turbo_control", base.clone()),
-            ("krea_2_turbo", base.clone().with_adapters(vec![adapter])),
-            (
+            crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request(
                 "krea_2_turbo",
-                base.with_control(WeightsSource::File(root.path().join("control.safetensors"))),
-            ),
-        ] {
-            assert_eq!(
-                apply_measured_mlx_load_shape_for_request(engine, spec, true).load_shape,
-                gen_core::LoadShape::EagerMaterialization,
-                "{engine} overlay/edit/control surface is outside the base calibration identity"
-            );
-        }
+                Some("q4"),
+                Some(crate::memory_route_registry::MemoryRouteMode::EditImage),
+                turbo_manifest,
+                base.clone(),
+                crate::memory_route_registry::MemoryRouteRequestContext {
+                    mode: crate::memory_route_registry::MemoryRouteMode::EditImage,
+                    reference_count: 1,
+                    use_pid: false,
+                    has_phases: false,
+                },
+            )
+            .load_shape,
+            gen_core::LoadShape::EagerMaterialization,
+            "native Turbo cannot consume the route-local edit declaration"
+        );
+        let control = base.with_control(WeightsSource::File(root.path().join("control.safetensors")));
+        let refused = crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request(
+            "krea_2_turbo",
+            Some("q4"),
+            Some(context.mode),
+            turbo_manifest,
+            control,
+            context,
+        );
+        assert_eq!(refused.load_shape, gen_core::LoadShape::EagerMaterialization);
+        assert_eq!(
+            refused.load_shape_declaration_result,
+            gen_core::LoadShapeDeclarationResult::Refused,
+            "control cannot fall through to the former Turbo legacy shaper"
+        );
     }
 
     #[test]
@@ -7316,7 +7466,14 @@ async fn generate_stream(
     // packed-detected from disk, #653), so it flows through the normal resolve_quant path like every
     // other matrix model. The `else` arm stays for any future engine that genuinely advertises no
     // quant — such a model loads dense.
-    let (quant, quant_bits) = if model.supports_quant() {
+    // True-V2's converter consumes the sole BF16 source and writes a dense BF16 transformer. It
+    // has no packed tier matrix: fixing the pair before reconciliation means neither the historical
+    // catalog default nor a crafted advanced preference can emit a false tier-change event or
+    // relabel the declaration, fit, recipe, and provider identities.
+    let fixed_artifact_quant = fixed_mlx_artifact_quant(&request.model);
+    let (quant, quant_bits) = if let Some(fixed) = fixed_artifact_quant {
+        fixed
+    } else if model.supports_quant() {
         // `weights_dir` is the resolved tier subdir (sc-11042). NVFP4 is unreachable on this lane
         // regardless (`nvfp4_host_eligible()` is hard-`false` on macOS — Metal has no FP4 hardware), so
         // this is the same `(quant, bits)` it has always produced; passing the dir keeps the resolver's
@@ -7341,7 +7498,9 @@ async fn generate_stream(
     // asked for ([`dense_te_requested_tier_bits`], mirroring the `standard_tier_subdir` mapping) so it
     // records the resolved transformer precision on EVERY job and only warns/emits on a genuine
     // fallback. `allow_quant_change=false` keeps the load quant `None` (TE stays dense bf16).
-    let (quant, quant_bits) = if model.supports_quant() {
+    let (quant, quant_bits) = if fixed_artifact_quant.is_some() {
+        (quant, quant_bits)
+    } else if model.supports_quant() {
         let requested_for_reconcile = if is_dense_te_tier(request) {
             (None, dense_te_requested_tier_bits(request))
         } else {
@@ -7502,8 +7661,9 @@ async fn generate_stream(
     let quality_opt_in = crate::mlx_fit_gate::manifest_declares_decode_quality_policies(
         &request.model_manifest_entry,
     );
+    let effective_tier =
+        resolved_mlx_artifact_tier_for_model(&request.model, &weights_dir, quant_bits);
     let resolved_artifact = if calibration_opt_in || quality_opt_in {
-        let effective_tier = resolved_mlx_artifact_tier(&weights_dir, quant_bits);
         resolved_mlx_artifact_provenance(
             request,
             settings,
@@ -7514,7 +7674,11 @@ async fn generate_stream(
     } else {
         None
     };
-    let mut spec = load_spec(weights_dir, quant, adapters, flux_ip_dir);
+    #[cfg(target_os = "macos")]
+    let load_quant = mlx_load_quant_for_resolved_artifact(engine_id, quant);
+    #[cfg(not(target_os = "macos"))]
+    let load_quant = quant;
+    let mut spec = load_spec(weights_dir, load_quant, adapters, flux_ip_dir);
     if let Some(pid) = pid_weights {
         spec = spec.with_pid(pid.checkpoint, pid.gemma);
     }
@@ -7536,10 +7700,66 @@ async fn generate_stream(
         && edit_refs.is_empty()
         && ideogram_edit_mask.is_none()
         && hires_fix.is_none();
-    spec = apply_measured_mlx_load_shape_for_request(engine_id, spec, plain_text_to_image);
-    // Finalize the full load shape before exporting the encoder receipt: preparation covers every
-    // configured File slot (PiD, adapters, named components) and the same spec then drives fit/load.
+    // Finalize caller-selected text-encoder state before asking the provider about the real
+    // candidate. Chroma must see and reject an external encoder rather than being admitted against
+    // an incomplete LoadSpec which is mutated afterward.
     spec = attach_manifest_text_encoder(spec, engine_id, request, settings)?;
+    // SC-18457: provider adoption is an exact three-way intersection. A route-local BTR entry owns
+    // the decision: the typed registry enforces mode/overlay/source semantics and the linked
+    // provider must return BTR Implemented for this real deferred candidate. A refusal never falls
+    // through to legacy shaping; only a manifest with no relevant BTR entry uses that unchanged
+    // path. The tier is the resolved artifact tier, not the load-time quant field on the spec.
+    let declaration_reference_count = if hires_fix.is_some() {
+        hires_fix_reference_count()
+    } else {
+        lane_reference_count(
+            identity_init.is_some(),
+            edit_refs.len(),
+            ideogram_edit_mask.is_some(),
+        )
+    };
+    let declaration_mode = crate::memory_route_registry::MemoryRouteMode::from_mlx_request(
+        engine_id,
+        &request.mode,
+    );
+    let declaration_context = crate::memory_route_registry::MemoryRouteRequestContext {
+        mode: declaration_mode
+            .unwrap_or(crate::memory_route_registry::MemoryRouteMode::TextToImage),
+        reference_count: declaration_reference_count,
+        use_pid,
+        has_phases: false,
+    };
+    spec = crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request(
+        engine_id,
+        effective_tier,
+        declaration_mode,
+        &request.model_manifest_entry,
+        spec,
+        declaration_context,
+    );
+    spec = crate::memory_route_registry::apply_declared_mlx_load_policy_for_request(
+        engine_id,
+        effective_tier,
+        declaration_mode,
+        &request.model_manifest_entry,
+        spec,
+        declaration_context,
+    );
+    if let Some(warning) =
+        crate::memory_route_registry::mlx_load_shape_declaration_warning(&spec)
+    {
+        tracing::warn!(
+            event = "mlx_load_shape_declaration_warning",
+            provider = engine_id,
+            ?warning,
+            "provider refused deferred materialization; retaining the safe eager load path"
+        );
+    }
+    if spec.load_shape_declaration_result
+        == gen_core::LoadShapeDeclarationResult::NotEvaluated
+    {
+        spec = apply_measured_mlx_load_shape_for_request(engine_id, spec, plain_text_to_image);
+    }
     let decode_quality_binding = crate::mlx_fit_gate::bind_decode_quality_policies_from_manifest(
         &request.model_manifest_entry,
         &request.model,
@@ -7557,21 +7777,27 @@ async fn generate_stream(
         Some(&request.model_manifest_entry),
         resolved_artifact,
     );
+    let mlx_request_plan = if matches!(
+        engine_id,
+        "krea_2_raw"
+            | "krea_2_turbo"
+            | "krea_2_edit"
+            | "krea_2_turbo_edit"
+            | "flux1_schnell"
+            | "flux1_dev"
+            | "flux2_klein_9b"
+    ) {
+        mlx_request_plan.with_resolved_artifact_tier(effective_tier)?
+    } else {
+        mlx_request_plan
+    };
     let has_request_reference =
         identity_init.is_some() || !edit_refs.is_empty() || ideogram_edit_mask.is_some();
     // The admitted geometry describes the HEAVIEST pass: with hires fix that is the final
     // upscaled img2img refinement (one `Reference`, no mask), otherwise the single base pass. The
     // first hires pass renders at the base size with the caller's own conditioning and gets its own
     // request-scope identity inside `generate_one_with_hires`.
-    let reference_count = if hires_fix.is_some() {
-        hires_fix_reference_count()
-    } else {
-        lane_reference_count(
-            identity_init.is_some(),
-            edit_refs.len(),
-            ideogram_edit_mask.is_some(),
-        )
-    };
+    let reference_count = declaration_reference_count;
     let mut memory_overlays = Vec::new();
     if has_request_reference {
         memory_overlays.push(format!("references:{}", edit_refs.len().max(1)));
@@ -7594,12 +7820,17 @@ async fn generate_stream(
     if use_pid {
         memory_overlays.push("pid".to_owned());
     }
+    let provider_overlay = crate::mlx_fit_gate::provider_overlay_for_load_spec(
+        engine_id,
+        &spec,
+        (!memory_overlays.is_empty()).then(|| memory_overlays.join("+")),
+    );
     let mlx_request_inputs = crate::mlx_fit_gate::MlxRequestInputs {
         width: memory_width,
         height: memory_height,
         count: request.count,
         mode: request.mode.clone(),
-        overlay: (!memory_overlays.is_empty()).then(|| memory_overlays.join("+")),
+        overlay: provider_overlay,
         adapter_count,
         has_reference: reference_count > 0,
         reference_count,
@@ -8779,7 +9010,7 @@ mod krea_turbo_memory_route_tests {
 /// resolved bits. Opaque/flat paths retain the request-derived behavior because there is no tier
 /// basename to make a stronger artifact claim.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn candle_resolved_tier_key(
+pub(super) fn candle_resolved_tier_key(
     request: &ImageRequest,
     weights_dir: &Path,
     convrot_resolved: bool,
@@ -8865,7 +9096,18 @@ mod candle_resolved_tier_contract_tests {
 
     fn mage_spec(engine_id: &str, weights: &Path, quant: Option<Quant>) -> LoadSpec {
         let mut spec = load_spec(weights.to_path_buf(), quant, Vec::new(), None);
-        spec = apply_candle_image_load_shape(engine_id, spec);
+        spec = apply_declared_candle_image_load_shape(
+            engine_id,
+            weights.file_name().and_then(|value| value.to_str()),
+            if engine_id.contains("_edit") {
+                "edit_image"
+            } else {
+                "image_generation"
+            },
+            &JsonObject::new(),
+            spec,
+            false,
+        );
         let descriptor = crate::inference_runtime::media_descriptor(engine_id)
             .unwrap_or_else(|| panic!("missing Mage descriptor {engine_id}"));
         descriptor.required_components.iter().fold(spec, |spec, id| {
@@ -8921,6 +9163,7 @@ mod candle_resolved_tier_contract_tests {
                         reference_count: u32::from(edit),
                     },
                     edit,
+                    false,
                     false,
                     false,
                     Some(crate::vram_gate::VramBudget {
@@ -9688,12 +9931,12 @@ async fn generate_candle_stream(
     // Implemented/unverified declarations do not authorize optimized execution: this bridge always
     // submits the conservative resident estimate and adds deeper candidates only when an exact
     // authoritative record exists in the packaged evidence bundle.
-    let mut shared_contract_spec = load_spec(weights_dir.clone(), quant, adapters.clone(), None);
+    let mut shared_contract_spec = load_spec(weights_dir.clone(), quant, adapters.clone(), None)
+        .with_resolved_route(request.model.clone());
     if let Some(pid) = pid_weights.as_ref() {
         shared_contract_spec =
             shared_contract_spec.with_pid(pid.checkpoint.clone(), pid.gemma.clone());
     }
-    shared_contract_spec = apply_candle_image_load_shape(engine_id, shared_contract_spec);
     // The selector and the eventual provider load must inspect the SAME artifact set. Mage's tier
     // directory contains only the DiT; its shared text encoder and VAE are caller-staged named
     // components. Evaluating the bare tier dir undercounts the provider contract and can admit a
@@ -9715,6 +9958,14 @@ async fn generate_candle_stream(
     shared_contract_spec =
         attach_manifest_text_encoder(shared_contract_spec, engine_id, request, settings)?;
     let shared_request_mode = candle_base_memory_request_mode(engine_id, &request.mode);
+    shared_contract_spec = apply_declared_candle_image_load_shape(
+        engine_id,
+        Some(tier),
+        shared_request_mode,
+        &request.model_manifest_entry,
+        shared_contract_spec,
+        false,
+    );
     let reference_count = shared_image_reference_count(
         edit_refs.len(),
         edit_reference.is_some() || img2img_reference.is_some(),
@@ -9746,6 +9997,7 @@ async fn generate_candle_stream(
         reference_count > 0,
         use_pid,
         hires_fix.is_some(),
+        false,
         budget,
         needed,
         adapter_resident_bytes,
@@ -10194,6 +10446,14 @@ async fn generate_candle_stream(
     // Reuse the exact selector spec, including Mage's split text-encoder/VAE component paths. Only
     // the post-selection residency policy and optional ConvRot substitution may differ below.
     let mut spec = shared_contract_spec;
+    spec = apply_declared_candle_image_load_shape(
+        engine_id,
+        Some(tier),
+        shared_request_mode,
+        &request.model_manifest_entry,
+        spec,
+        use_sequential,
+    );
     if use_sequential {
         // Ask the provider (candle FLUX) to load→use→drop each component in phase order (sc-10821).
         spec = spec.with_offload_policy(gen_core::OffloadPolicy::Sequential);
@@ -13643,6 +13903,61 @@ mod quant_tier_reconcile_tests {
                 "mlx",
             ),
             (Some(Quant::Q8), Some(8)),
+        );
+    }
+
+    #[test]
+    fn krea_and_flux2_klein_turnkeys_keep_packed_tier_out_of_load_quantization() {
+        for engine_id in [
+            "krea_2_raw",
+            "krea_2_turbo",
+            "krea_2_edit",
+            "krea_2_turbo_edit",
+            "flux2_klein_9b",
+            "flux2_klein_9b_edit",
+            "flux2_klein_9b_kv_edit",
+        ] {
+            assert_eq!(
+                mlx_load_quant_for_resolved_artifact(engine_id, Some(Quant::Q4)),
+                None,
+                "{engine_id} q4 is an already-packed artifact tier"
+            );
+            assert_eq!(
+                mlx_load_quant_for_resolved_artifact(engine_id, Some(Quant::Q8)),
+                None,
+                "{engine_id} q8 is an already-packed artifact tier"
+            );
+        }
+        assert_eq!(
+            mlx_load_quant_for_resolved_artifact("qwen_image", Some(Quant::Q4)),
+            Some(Quant::Q4),
+            "unrelated loaders retain their existing load-time quantization contract"
+        );
+        for engine_id in ["flux1_schnell", "flux1_dev"] {
+            assert_eq!(
+                mlx_load_quant_for_resolved_artifact(engine_id, Some(Quant::Q4)),
+                Some(Quant::Q4),
+                "{engine_id} preserves the provider's matching packed-tier quant marker"
+            );
+        }
+        assert_eq!(
+            fixed_mlx_artifact_quant("flux2_klein_9b_true_v2"),
+            Some((None, None)),
+            "True-V2's converted artifact is fixed dense BF16"
+        );
+        assert_eq!(
+            resolved_mlx_artifact_tier_for_model(
+                "flux2_klein_9b_true_v2",
+                Path::new("/models/mlx/flux2_klein_9b_true_v2"),
+                None,
+            ),
+            Some("bf16"),
+            "the converted root is not a tier subdirectory, so its fixed BF16 tier must be explicit"
+        );
+        assert_eq!(
+            fixed_mlx_artifact_quant("flux2_klein_9b"),
+            None,
+            "the selectable base tier matrix remains request/resolution-derived"
         );
     }
 

@@ -557,6 +557,7 @@ pub(super) async fn generate_candle_flux2_control_stream(
         false,
         use_pid,
         false,
+        false,
         raw_budget,
         predicted_peak,
         runtime_overlay_bytes,

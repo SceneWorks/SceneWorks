@@ -1644,7 +1644,19 @@
             "fingerprint": "z-image-mlx-independent-materialization-v4",
               "tiers": ["bf16", "q4", "q8"],
               "modes": ["text_to_image", "edit_image", "image_to_image"],
-              "overlays": ["none", "lora", "control"],
+              "overlays": ["none", "lora"],
+              "engagedRungs": ["resident", "bounded_decode"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 },
+              "parameterRanges": { "decodeTileEdges": [2048, 768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [256, 64] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-z-image/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_decode",
+              "runtimeProvider": "z_image_turbo_control",
+            "fingerprint": "z-image-mlx-independent-materialization-v4",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image", "edit_image", "image_to_image"],
+              "overlays": ["control"],
               "engagedRungs": ["resident", "bounded_decode"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 },
               "parameterRanges": { "decodeTileEdges": [2048, 768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [256, 64] },
@@ -1655,7 +1667,19 @@
             "fingerprint": "z-image-mlx-independent-materialization-v4",
               "tiers": ["bf16", "q4", "q8"],
               "modes": ["text_to_image", "edit_image", "image_to_image"],
-              "overlays": ["none", "lora", "control"],
+              "overlays": ["none", "lora"],
+              "engagedRungs": ["resident", "bounded_decode", "bounded_attention"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 },
+              "parameterRanges": { "decodeTileEdges": [2048, 768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [256, 64], "attentionChunkSizes": [67108864] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-z-image/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_attention",
+              "runtimeProvider": "z_image_turbo_control",
+            "fingerprint": "z-image-mlx-independent-materialization-v4",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image", "edit_image", "image_to_image"],
+              "overlays": ["control"],
               "engagedRungs": ["resident", "bounded_decode", "bounded_attention"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 },
               "parameterRanges": { "decodeTileEdges": [2048, 768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [256, 64], "attentionChunkSizes": [67108864] },
@@ -1666,7 +1690,19 @@
             "fingerprint": "z-image-mlx-independent-materialization-v4",
               "tiers": ["bf16", "q4", "q8"],
               "modes": ["text_to_image", "edit_image", "image_to_image"],
-              "overlays": ["none", "lora", "control"],
+              "overlays": ["none", "lora"],
+              "engagedRungs": ["resident", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "decodeTileEdges": [2048, 768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [256, 64], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit", "TextEncoder", "Both"] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-z-image/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "runtimeProvider": "z_image_turbo_control",
+            "fingerprint": "z-image-mlx-independent-materialization-v4",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image", "edit_image", "image_to_image"],
+              "overlays": ["control"],
               "engagedRungs": ["resident", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
               "parameterRanges": { "decodeTileEdges": [2048, 768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [256, 64], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit", "TextEncoder", "Both"] },
@@ -1696,6 +1732,81 @@
             "parameters": { "attentionChunkSize": 67108864 },
             "overlays": ["none", "lora"]
           }
+        },
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "z_image_turbo",
+          "implementations": [
+            {
+              "rung": "bounded_decode",
+              "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image"],
+              "overlays": ["none", "lora"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 },
+              "parameterRanges": { "decodeTileEdges": [512], "decodeOverlaps": [128] },
+              "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_decode",
+              "runtimeProvider": "z_image_turbo_control",
+              "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image"],
+              "overlays": ["control"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 },
+              "parameterRanges": { "decodeTileEdges": [512], "decodeOverlaps": [128] },
+              "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_attention",
+              "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image"],
+              "overlays": ["none", "lora"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 67108864 },
+              "parameterRanges": { "decodeTileEdges": [512], "decodeOverlaps": [128], "attentionChunkSizes": [67108864] },
+              "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_attention",
+              "runtimeProvider": "z_image_turbo_control",
+              "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image"],
+              "overlays": ["control"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 67108864 },
+              "parameterRanges": { "decodeTileEdges": [512], "decodeOverlaps": [128], "attentionChunkSizes": [67108864] },
+              "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image"],
+              "overlays": ["none", "lora"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "decodeTileEdges": [512], "decodeOverlaps": [128], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "runtimeProvider": "z_image_turbo_control",
+              "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image"],
+              "overlays": ["control"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "decodeTileEdges": [512], "decodeOverlaps": [128], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+            }
+          ]
         },
         "minMemoryGb": 40,
         "vramGbByTier": { "q4": 18.4, "q8": 24.2, "bf16": 32.2 },
@@ -1841,7 +1952,19 @@
             "fingerprint": "z-image-mlx-independent-materialization-v4",
               "tiers": ["bf16", "q4", "q8"],
               "modes": ["text_to_image"],
-              "overlays": ["none", "lora", "control"],
+              "overlays": ["none", "lora"],
+              "engagedRungs": ["resident", "bounded_decode"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 },
+              "parameterRanges": { "decodeTileEdges": [2048, 768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [256, 64] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-z-image/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_decode",
+              "runtimeProvider": "z_image_control",
+            "fingerprint": "z-image-mlx-independent-materialization-v4",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image"],
+              "overlays": ["control"],
               "engagedRungs": ["resident", "bounded_decode"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 },
               "parameterRanges": { "decodeTileEdges": [2048, 768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [256, 64] },
@@ -1852,7 +1975,19 @@
             "fingerprint": "z-image-mlx-independent-materialization-v4",
               "tiers": ["bf16", "q4", "q8"],
               "modes": ["text_to_image"],
-              "overlays": ["none", "lora", "control"],
+              "overlays": ["none", "lora"],
+              "engagedRungs": ["resident", "bounded_decode", "bounded_attention"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 },
+              "parameterRanges": { "decodeTileEdges": [2048, 768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [256, 64], "attentionChunkSizes": [67108864] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-z-image/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_attention",
+              "runtimeProvider": "z_image_control",
+            "fingerprint": "z-image-mlx-independent-materialization-v4",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image"],
+              "overlays": ["control"],
               "engagedRungs": ["resident", "bounded_decode", "bounded_attention"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 },
               "parameterRanges": { "decodeTileEdges": [2048, 768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [256, 64], "attentionChunkSizes": [67108864] },
@@ -1863,7 +1998,19 @@
             "fingerprint": "z-image-mlx-independent-materialization-v4",
               "tiers": ["bf16", "q4", "q8"],
               "modes": ["text_to_image"],
-              "overlays": ["none", "lora", "control"],
+              "overlays": ["none", "lora"],
+              "engagedRungs": ["resident", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "decodeTileEdges": [2048, 768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [256, 64], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit", "TextEncoder", "Both"] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-z-image/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "runtimeProvider": "z_image_control",
+            "fingerprint": "z-image-mlx-independent-materialization-v4",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image"],
+              "overlays": ["control"],
               "engagedRungs": ["resident", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
               "parameterRanges": { "decodeTileEdges": [2048, 768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [256, 64], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit", "TextEncoder", "Both"] },
@@ -1915,6 +2062,7 @@
             },
             {
               "rung": "bounded_decode",
+              "runtimeProvider": "z_image_control",
               "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
               "tiers": ["bf16", "q4", "q8"],
               "modes": ["text_to_image"],
@@ -1937,6 +2085,7 @@
             },
             {
               "rung": "bounded_attention",
+              "runtimeProvider": "z_image_control",
               "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
               "tiers": ["bf16", "q4", "q8"],
               "modes": ["text_to_image"],
@@ -1959,6 +2108,7 @@
             },
             {
               "rung": "bounded_transformer_residency",
+              "runtimeProvider": "z_image_control",
               "fingerprint": "z-image-cuda-base-control-host-decode-streamed-device-format-blocks-v2",
               "tiers": ["bf16", "q4", "q8"],
               "modes": ["text_to_image"],
@@ -2084,6 +2234,53 @@
       "loraCompatibility": {
         "families": ["z-image"],
         "types": ["style", "enhance", "character"]
+      },
+      // This catalog id resolves through the z_image_turbo engine. The declaration is intentionally
+      // route-local: it admits only edit/img2img with plain or replayable LoRA state and cannot
+      // widen the base Z-Image or Turbo text/control populations.
+      "mlx": {
+        "minMemoryGb": 40,
+        "quantize": 4,
+        "standardTierLayout": true,
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "z_image_turbo",
+          "implementations": [
+            {
+              "rung": "bounded_transformer_residency",
+              // Same provider implementation as the Turbo MLX declaration above, so it carries that
+              // provider's fingerprint and parameter domain at the current pin (v4 + the widened
+              // decode-tile ladder). Only the mode/overlay population is narrowed here.
+              "fingerprint": "z-image-mlx-independent-materialization-v4",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["edit_image", "image_to_image"],
+              "overlays": ["none", "lora"],
+              "engagedRungs": ["resident", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "decodeTileEdges": [2048, 768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [256, 64], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit", "TextEncoder", "Both"] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-z-image/src/memory_strategy.rs"
+            }
+          ]
+        }
+      },
+      "candle": {
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "z_image_turbo",
+          "implementations": [
+            {
+              "rung": "bounded_transformer_residency",
+              "fingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["edit_image", "image_to_image"],
+              "overlays": ["none", "lora"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "decodeTileEdges": [512], "decodeOverlaps": [128], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs"
+            }
+          ]
+        }
       },
       "ui": {
         "label": "Z-Image-Edit",
@@ -3034,6 +3231,47 @@
         // directly from the turnkey snapshot.
         "quantize": 4,
         "standardTierLayout": true
+      },
+      "candle": {
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "lens",
+          "implementations": [
+            {
+              "rung": "bounded_decode",
+              "fingerprint": "lens-candle-cuda-shared-ladder-device-format-blocks-v1",
+              "tiers": ["q4", "q8"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 },
+              "parameterRanges": { "decodeTileEdges": [768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [128] },
+              "source": "inference:crates/media/candle-gen/candle-gen-lens/src/lib.rs"
+            },
+            {
+              "rung": "bounded_attention",
+              "fingerprint": "lens-candle-cuda-shared-ladder-device-format-blocks-v1",
+              "tiers": ["q4", "q8"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 16777216 },
+              "parameterRanges": { "decodeTileEdges": [768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [128], "attentionChunkSizes": [16777216] },
+              "source": "inference:crates/media/candle-gen/candle-gen-lens/src/lib.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "fingerprint": "lens-candle-cuda-shared-ladder-device-format-blocks-v1",
+              "tiers": ["q4", "q8"],
+              "modes": ["text_to_image"],
+              "overlays": ["none"],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 16777216, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "decodeTileEdges": [768, 640, 512, 448, 384, 320, 256], "decodeOverlaps": [128], "attentionChunkSizes": [16777216], "transformerWindowSizes": [1, 2, 4, 8, 12, 24], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/candle-gen/candle-gen-lens/src/lib.rs"
+            }
+          ]
+        }
       },
       "ui": {
         "label": "Lens (base)",
@@ -4151,7 +4389,79 @@
       // auto-downloads + loads packed; q8/ + bf16/ are selectable.
       "mlx": {
         "minMemoryGb": 42,
-        "quantize": 4
+        "quantize": 4,
+        // SC-18603: exact FLUX.1 schnell declarations. Matching Q4/Q8 values remain the loader's
+        // prepacked tier marker; only clean plain Sequential+Deferred requests own the upper rungs.
+        "memoryStrategyContract": {
+          "abi": 1, "provider": "flux1_schnell", "exhaustive": true,
+          "implementations": [
+            {
+              "rung": "resident", "fingerprint": "flux-one-static-registry-behavior-v2-schnell",
+              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image"], "overlays": ["none"],
+              "loadProfiles": ["plain"], "sourceKinds": ["dir"], "providerOverlay": "none",
+              "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }],
+              "engagedRungs": ["resident"], "parameters": {}, "parameterRanges": {}, "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
+            },
+            {
+              "rung": "staged_residency", "fingerprint": "flux-one-static-registry-behavior-v2-schnell", "requiredOffloadPolicy": "sequential",
+              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image"], "overlays": ["none"],
+              "loadProfiles": ["plain"], "sourceKinds": ["dir"], "providerOverlay": "none",
+              "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }],
+              "engagedRungs": ["resident", "staged_residency"], "parameters": {}, "parameterRanges": {}, "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_decode", "fingerprint": "flux-one-static-registry-behavior-v2-schnell",
+              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image"], "overlays": ["none"],
+              "loadProfiles": ["plain"], "sourceKinds": ["dir"], "providerOverlay": "none",
+              "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }],
+              "engagedRungs": ["resident", "bounded_decode"], "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 }, "parameterRanges": { "decodeTileEdges": [768, 640, 512], "decodeOverlaps": [64] }, "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_attention", "fingerprint": "flux-one-static-registry-behavior-v2-schnell",
+              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image"], "overlays": ["none"],
+              "loadProfiles": ["plain"], "sourceKinds": ["dir"], "providerOverlay": "none",
+              "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }],
+              "engagedRungs": ["resident", "bounded_decode", "bounded_attention"], "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 }, "parameterRanges": { "decodeTileEdges": [768, 640, 512], "decodeOverlaps": [64], "attentionChunkSizes": [67108864] }, "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency", "fingerprint": "flux-one-static-registry-behavior-v2-schnell", "requiredOffloadPolicy": "sequential",
+              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image"], "overlays": ["none"],
+              "loadProfiles": ["plain"], "sourceKinds": ["dir"], "providerOverlay": "none",
+              "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"], "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" }, "parameterRanges": { "decodeTileEdges": [768, 640, 512], "decodeOverlaps": [64], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit"] }, "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
+            },
+            {
+              "rung": "resident", "fingerprint": "flux-one-static-registry-behavior-v2-schnell",
+              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image"], "overlays": ["lora"], "loadProfiles": ["lora"], "sourceKinds": ["dir"], "providerOverlay": "adapters",
+              "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }], "engagedRungs": ["resident"], "parameters": {}, "parameterRanges": {}, "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
+            },
+            {
+              "rung": "staged_residency", "fingerprint": "flux-one-static-registry-behavior-v2-schnell", "requiredOffloadPolicy": "sequential",
+              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image"], "overlays": ["lora"], "loadProfiles": ["lora"], "sourceKinds": ["dir"], "providerOverlay": "adapters",
+              "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": false }], "engagedRungs": ["resident", "staged_residency"], "parameters": {}, "parameterRanges": {}, "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
+            },
+            {
+              "rung": "resident", "fingerprint": "flux-one-static-registry-behavior-v2-schnell",
+              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image"], "overlays": ["none"], "loadProfiles": ["pid"], "sourceKinds": ["dir"], "providerOverlay": "pid",
+              "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [true], "hasPhases": false }], "engagedRungs": ["resident"], "parameters": {}, "parameterRanges": {}, "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
+            },
+            {
+              "rung": "staged_residency", "fingerprint": "flux-one-static-registry-behavior-v2-schnell", "requiredOffloadPolicy": "sequential",
+              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image"], "overlays": ["none"], "loadProfiles": ["pid"], "sourceKinds": ["dir"], "providerOverlay": "pid",
+              "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [true], "hasPhases": false }], "engagedRungs": ["resident", "staged_residency"], "parameters": {}, "parameterRanges": {}, "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
+            },
+            {
+              "rung": "resident", "fingerprint": "flux-one-static-registry-behavior-v2-schnell",
+              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image"], "overlays": ["lora"], "loadProfiles": ["lora_pid"], "sourceKinds": ["dir"], "providerOverlay": "adapters-pid",
+              "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [true], "hasPhases": false }], "engagedRungs": ["resident"], "parameters": {}, "parameterRanges": {}, "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
+            },
+            {
+              "rung": "staged_residency", "fingerprint": "flux-one-static-registry-behavior-v2-schnell", "requiredOffloadPolicy": "sequential",
+              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image"], "overlays": ["lora"], "loadProfiles": ["lora_pid"], "sourceKinds": ["dir"], "providerOverlay": "adapters-pid",
+              "requestContexts": [{ "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [true], "hasPhases": false }], "engagedRungs": ["resident", "staged_residency"], "parameters": {}, "parameterRanges": {}, "source": "inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"
+            }
+          ]
+        }
       },
       // candle/CUDA VRAM gate (epic 10765 sc-10856). schnell shares FLUX.1's EXACT packed architecture
       // with dev — same 12B MMDiT, T5-XXL, CLIP-L, VAE (schnell only omits the tiny guidance embedding),
@@ -4351,7 +4661,37 @@
       // pre-quantized q4/ subdir auto-downloads + loads packed; q8/ + bf16/ selectable.
       "mlx": {
         "minMemoryGb": 42,
-        "quantize": 4
+        "quantize": 4,
+        // SC-18603: exhaustive base/IP/control declaration coordinates. Loaded overlays retain
+        // Resident/Staged execution; only clean plain base requests own decode/attention/BTR.
+        "memoryStrategyContract": {
+          "abi": 1, "provider": "flux1_dev", "exhaustive": true,
+          "implementations": [
+            {"rung":"resident","fingerprint":"flux-one-static-registry-behavior-v2-dev","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["none"],"loadProfiles":["plain"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[false],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
+            {"rung":"staged_residency","fingerprint":"flux-one-static-registry-behavior-v2-dev","requiredOffloadPolicy":"sequential","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["none"],"loadProfiles":["plain"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
+            {"rung":"bounded_decode","fingerprint":"flux-one-static-registry-behavior-v2-dev","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["none"],"loadProfiles":["plain"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","bounded_decode"],"parameters":{"decodeTileEdge":512,"decodeOverlap":64},"parameterRanges":{"decodeTileEdges":[768,640,512],"decodeOverlaps":[64]},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
+            {"rung":"bounded_attention","fingerprint":"flux-one-static-registry-behavior-v2-dev","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["none"],"loadProfiles":["plain"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","bounded_decode","bounded_attention"],"parameters":{"decodeTileEdge":512,"decodeOverlap":64,"attentionChunkSize":67108864},"parameterRanges":{"decodeTileEdges":[768,640,512],"decodeOverlaps":[64],"attentionChunkSizes":[67108864]},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
+            {"rung":"bounded_transformer_residency","fingerprint":"flux-one-static-registry-behavior-v2-dev","requiredOffloadPolicy":"sequential","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["none"],"loadProfiles":["plain"],"sourceKinds":["dir"],"providerOverlay":"none","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","staged_residency","bounded_decode","bounded_attention","bounded_transformer_residency"],"parameters":{"decodeTileEdge":512,"decodeOverlap":64,"attentionChunkSize":67108864,"transformerWindowSize":1,"transformerWindowComponent":"Dit"},"parameterRanges":{"decodeTileEdges":[768,640,512],"decodeOverlaps":[64],"attentionChunkSizes":[67108864],"transformerWindowSizes":[1],"transformerWindowComponents":["Dit"]},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
+            {"rung":"resident","fingerprint":"flux-one-static-registry-behavior-v2-dev","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["lora"],"loadProfiles":["lora"],"sourceKinds":["dir"],"providerOverlay":"adapters","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[false],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
+            {"rung":"staged_residency","fingerprint":"flux-one-static-registry-behavior-v2-dev","requiredOffloadPolicy":"sequential","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["lora"],"loadProfiles":["lora"],"sourceKinds":["dir"],"providerOverlay":"adapters","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
+            {"rung":"resident","fingerprint":"flux-one-static-registry-behavior-v2-dev","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["none"],"loadProfiles":["pid"],"sourceKinds":["dir"],"providerOverlay":"pid","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[true],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
+            {"rung":"staged_residency","fingerprint":"flux-one-static-registry-behavior-v2-dev","requiredOffloadPolicy":"sequential","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["none"],"loadProfiles":["pid"],"sourceKinds":["dir"],"providerOverlay":"pid","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[true],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
+            {"rung":"resident","fingerprint":"flux-one-static-registry-behavior-v2-dev","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["lora"],"loadProfiles":["lora_pid"],"sourceKinds":["dir"],"providerOverlay":"adapters-pid","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[true],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
+            {"rung":"staged_residency","fingerprint":"flux-one-static-registry-behavior-v2-dev","requiredOffloadPolicy":"sequential","tiers":["bf16","q4","q8"],"modes":["text_to_image"],"overlays":["lora"],"loadProfiles":["lora_pid"],"sourceKinds":["dir"],"providerOverlay":"adapters-pid","requestContexts":[{"mode":"text_to_image","providerMode":"text_to_image","referenceCounts":[0],"pid":[true],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
+            {"rung":"resident","fingerprint":"flux-one-static-registry-behavior-v2-dev","tiers":["bf16","q4","q8"],"modes":["character_image"],"overlays":["identity"],"loadProfiles":["ip_adapter"],"sourceKinds":["dir"],"providerOverlay":"ip-adapter","requestContexts":[{"mode":"character_image","providerMode":"image_to_image","referenceCounts":[1],"pid":[false],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
+            {"rung":"staged_residency","fingerprint":"flux-one-static-registry-behavior-v2-dev","requiredOffloadPolicy":"sequential","tiers":["bf16","q4","q8"],"modes":["character_image"],"overlays":["identity"],"loadProfiles":["ip_adapter"],"sourceKinds":["dir"],"providerOverlay":"ip-adapter","requestContexts":[{"mode":"character_image","providerMode":"image_to_image","referenceCounts":[1],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
+            {"rung":"resident","fingerprint":"flux-one-static-registry-behavior-v2-dev","tiers":["bf16","q4","q8"],"modes":["character_image"],"overlays":["identity"],"loadProfiles":["lora_ip_adapter"],"sourceKinds":["dir"],"providerOverlay":"adapters-ip-adapter","requestContexts":[{"mode":"character_image","providerMode":"image_to_image","referenceCounts":[1],"pid":[false],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
+            {"rung":"staged_residency","fingerprint":"flux-one-static-registry-behavior-v2-dev","requiredOffloadPolicy":"sequential","tiers":["bf16","q4","q8"],"modes":["character_image"],"overlays":["identity"],"loadProfiles":["lora_ip_adapter"],"sourceKinds":["dir"],"providerOverlay":"adapters-ip-adapter","requestContexts":[{"mode":"character_image","providerMode":"image_to_image","referenceCounts":[1],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
+            {"rung":"resident","fingerprint":"flux-one-static-registry-behavior-v2-dev","tiers":["bf16","q4","q8"],"modes":["character_image"],"overlays":["identity"],"loadProfiles":["ip_adapter_pid"],"sourceKinds":["dir"],"providerOverlay":"ip-adapter-pid","requestContexts":[{"mode":"character_image","providerMode":"image_to_image","referenceCounts":[1],"pid":[true],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
+            {"rung":"staged_residency","fingerprint":"flux-one-static-registry-behavior-v2-dev","requiredOffloadPolicy":"sequential","tiers":["bf16","q4","q8"],"modes":["character_image"],"overlays":["identity"],"loadProfiles":["ip_adapter_pid"],"sourceKinds":["dir"],"providerOverlay":"ip-adapter-pid","requestContexts":[{"mode":"character_image","providerMode":"image_to_image","referenceCounts":[1],"pid":[true],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
+            {"rung":"resident","fingerprint":"flux-one-static-registry-behavior-v2-dev","tiers":["bf16","q4","q8"],"modes":["character_image"],"overlays":["identity"],"loadProfiles":["lora_ip_adapter_pid"],"sourceKinds":["dir"],"providerOverlay":"adapters-ip-adapter-pid","requestContexts":[{"mode":"character_image","providerMode":"image_to_image","referenceCounts":[1],"pid":[true],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
+            {"rung":"staged_residency","fingerprint":"flux-one-static-registry-behavior-v2-dev","requiredOffloadPolicy":"sequential","tiers":["bf16","q4","q8"],"modes":["character_image"],"overlays":["identity"],"loadProfiles":["lora_ip_adapter_pid"],"sourceKinds":["dir"],"providerOverlay":"adapters-ip-adapter-pid","requestContexts":[{"mode":"character_image","providerMode":"image_to_image","referenceCounts":[1],"pid":[true],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
+            {"rung":"resident","runtimeProvider":"flux1_dev_control","fingerprint":"flux-one-static-registry-behavior-v2-dev-control","tiers":["bf16","q4","q8"],"modes":["text_to_image", "character_image"],"overlays":["control"],"loadProfiles":["single_control"],"sourceKinds":["dir"],"providerOverlay":"control","requestContexts":[{"mode":"text_to_image","providerMode":"image_to_image","referenceCounts":[1],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"image_to_image","referenceCounts":[1],"pid":[false],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
+            {"rung":"staged_residency","runtimeProvider":"flux1_dev_control","fingerprint":"flux-one-static-registry-behavior-v2-dev-control","requiredOffloadPolicy":"sequential","tiers":["bf16","q4","q8"],"modes":["text_to_image", "character_image"],"overlays":["control"],"loadProfiles":["single_control"],"sourceKinds":["dir"],"providerOverlay":"control","requestContexts":[{"mode":"text_to_image","providerMode":"image_to_image","referenceCounts":[1],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"image_to_image","referenceCounts":[1],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
+            {"rung":"resident","runtimeProvider":"flux1_dev_control","fingerprint":"flux-one-static-registry-behavior-v2-dev-control","tiers":["bf16","q4","q8"],"modes":["text_to_image", "character_image"],"overlays":["control"],"loadProfiles":["lora_single_control"],"sourceKinds":["dir"],"providerOverlay":"control-adapters","requestContexts":[{"mode":"text_to_image","providerMode":"image_to_image","referenceCounts":[1],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"image_to_image","referenceCounts":[1],"pid":[false],"hasPhases":false}],"engagedRungs":["resident"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"},
+            {"rung":"staged_residency","runtimeProvider":"flux1_dev_control","fingerprint":"flux-one-static-registry-behavior-v2-dev-control","requiredOffloadPolicy":"sequential","tiers":["bf16","q4","q8"],"modes":["text_to_image", "character_image"],"overlays":["control"],"loadProfiles":["lora_single_control"],"sourceKinds":["dir"],"providerOverlay":"control-adapters","requestContexts":[{"mode":"text_to_image","providerMode":"image_to_image","referenceCounts":[1],"pid":[false],"hasPhases":false},{"mode":"character_image","providerMode":"image_to_image","referenceCounts":[1],"pid":[false],"hasPhases":false}],"engagedRungs":["resident","staged_residency"],"parameters":{},"parameterRanges":{},"source":"inference:crates/media/mlx-gen/mlx-gen-flux/src/memory_strategy.rs"}
+          ]
+        }
       },
       // candle/CUDA VRAM gate (epic 10765 sc-10856) — MEASURED on an RTX PRO 6000 (Blackwell sm_120) at
       // 1024²/8-step via the candle-gen-flux offload A/B harness (flux_dev_probed_generate_for_offload_ab,
@@ -5371,11 +5711,9 @@
         "minMemoryGb": 48,
         "quantize": 8,
         "repo": "SceneWorks/krea-2-turbo-mlx",
-        // SC-18377: the clean base route now uses DeferredMaterialization. With Sequential selected,
-        // the pinned provider reopens one DiT block at a time and exposes the full request-scoped
-        // ladder. Edit/reference/control/PiD/adapter surfaces remain eager and are outside this
-        // declaration.
-        "supportsSequentialOffload": true,
+        // SC-18451: the declaration itself owns exact Turbo and Turbo-edit reachability. The
+        // pinned provider predicate, not the legacy supportsSequentialOffload mirror, validates the
+        // resolved tier, Dir source, low-rank/PiD composition, reference shape, and deferred loader.
         "memoryStrategyContract": {
           "abi": 1,
           "provider": "krea_2_turbo",
@@ -5385,10 +5723,17 @@
               "fingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
               "tiers": ["bf16", "q4", "q8"],
               "modes": ["text_to_image"],
-              "overlays": ["none"],
+              "overlays": ["none", "lora"],
+              "loadProfiles": ["plain", "lora", "lora_pid", "pid"],
+              "sourceKinds": ["dir"],
+              "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false, true], "hasPhases": false },
+                { "mode": "text_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false }
+              ],
               "engagedRungs": ["resident", "bounded_decode"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 },
-              "parameterRanges": { "decodeTileEdges": [512], "decodeOverlaps": [64] },
+              "parameterRanges": { "decodeTileEdges": [2048, 512], "decodeOverlaps": [256, 64] },
               "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs"
             },
             {
@@ -5396,21 +5741,89 @@
               "fingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
               "tiers": ["bf16", "q4", "q8"],
               "modes": ["text_to_image"],
-              "overlays": ["none"],
+              "overlays": ["none", "lora"],
+              "loadProfiles": ["plain", "lora", "lora_pid", "pid"],
+              "sourceKinds": ["dir"],
+              "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false, true], "hasPhases": false },
+                { "mode": "text_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false }
+              ],
               "engagedRungs": ["resident", "bounded_decode", "bounded_attention"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 },
-              "parameterRanges": { "decodeTileEdges": [512], "decodeOverlaps": [64], "attentionChunkSizes": [67108864] },
+              "parameterRanges": { "decodeTileEdges": [2048, 512], "decodeOverlaps": [256, 64], "attentionChunkSizes": [67108864] },
               "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs"
             },
             {
-              "rung": "bounded_transformer_residency",
+              "rung": "bounded_transformer_residency", "requiredOffloadPolicy": "sequential",
               "fingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
               "tiers": ["bf16", "q4", "q8"],
               "modes": ["text_to_image"],
-              "overlays": ["none"],
+              "overlays": ["none", "lora"],
+              "loadProfiles": ["plain", "lora", "lora_pid", "pid"],
+              "sourceKinds": ["dir"],
+              "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false, true], "hasPhases": false },
+                { "mode": "text_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false }
+              ],
               "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
               "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
-              "parameterRanges": { "decodeTileEdges": [512], "decodeOverlaps": [64], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit"] },
+              "parameterRanges": { "decodeTileEdges": [2048, 512], "decodeOverlaps": [256, 64], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_decode",
+              "runtimeProvider": "krea_2_turbo_edit",
+              "fingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["edit_image"],
+              "overlays": ["lora"],
+              "loadProfiles": ["lora", "lora_pid"],
+              "sourceKinds": ["dir"],
+              "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "bounded_decode"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 },
+              "parameterRanges": { "decodeTileEdges": [2048, 512], "decodeOverlaps": [256, 64] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_attention",
+              "runtimeProvider": "krea_2_turbo_edit",
+              "fingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["edit_image"],
+              "overlays": ["lora"],
+              "loadProfiles": ["lora", "lora_pid"],
+              "sourceKinds": ["dir"],
+              "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "bounded_decode", "bounded_attention"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 },
+              "parameterRanges": { "decodeTileEdges": [2048, 512], "decodeOverlaps": [256, 64], "attentionChunkSizes": [67108864] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency", "requiredOffloadPolicy": "sequential",
+              "runtimeProvider": "krea_2_turbo_edit",
+              "fingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["edit_image"],
+              "overlays": ["lora"],
+              "loadProfiles": ["lora", "lora_pid"],
+              "sourceKinds": ["dir"],
+              "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "decodeTileEdges": [2048, 512], "decodeOverlaps": [256, 64], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit"] },
               "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs"
             }
           ]
@@ -5454,6 +5867,33 @@
       // byte-identical. minMemoryGb 32 covers the common q4 resident lane with headroom.
       "candle": {
         "minMemoryGb": 32,
+        // SC-18462: Turbo edit is a distinct registered runtime provider. Native Turbo generation
+        // retains its established path; only this exact route-local declaration can authorize the
+        // request-scoped staged-residency contract.
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "krea_2_turbo_edit",
+          "exhaustive": true,
+          "implementations": [
+            {
+              "rung": "staged_residency",
+              "fingerprint": "krea-candle-request-scoped-staged-residency-v1",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["edit_image"],
+              "overlays": ["lora"],
+              "loadProfiles": ["lora", "lora_pid"],
+              "sourceKinds": ["dir"],
+              "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "staged_residency"],
+              "parameters": {},
+              "parameterRanges": {},
+              "source": "inference:crates/media/candle-gen/candle-gen-krea/src/lib.rs"
+            }
+          ]
+        },
         // sc-12425: the INT8-ConvRot tier's RESIDENT VRAM ceiling, now MEASURED (sc-12381) — 42.9 GB
         // overall-peak on an exclusive sm_120 at 1024²/8-step, the same shape used for the standard tiers.
         // This is the TE-CO-RESIDENT peak; the tier's efficient footprint is `sequentialPeakGb` (28.6).
@@ -6759,7 +7199,136 @@
         // the per-tier picker gates it). Mirrors Krea 2 Turbo's mlx block.
         "minMemoryGb": 48,
         "quantize": 8,
-        "repo": "SceneWorks/krea-2-raw-mlx"
+        "repo": "SceneWorks/krea-2-raw-mlx",
+        // SC-18452: the exact Raw provider owns this declaration. True CFG is internal to
+        // `krea_2_raw` (paired conditional/unconditional carries at batch 1), not a synthetic route
+        // mode. Plain, reference-latent img2img, PiD, low-rank, and low-rank+PiD generation use the
+        // same reopenable 28-block DiT. The public img2img toggle intentionally remains this
+        // declaration's
+        // `text_to_image` coordinate plus one runtime reference; the provider behavior context is
+        // `ImageToImage`/reference_count=1. PiD is the same route with its independently bounded 2048/256 decoder
+        // domain. The route-local `krea_2_edit` rows own Kontext edit without widening native Raw;
+        // dense diff patches, control, identity, File sources, and load-time quantization remain
+        // outside this declaration and fail closed in the typed intersection.
+        // Raw has no promoted calibration binding: these implementation rows enable conservative
+        // estimate-backed admission only and do not inherit Turbo measurements.
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "krea_2_raw",
+          "implementations": [
+            {
+              "rung": "bounded_decode",
+              "fingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image"],
+              "overlays": ["none", "lora"],
+              "loadProfiles": ["plain", "lora", "lora_pid", "pid"],
+              "sourceKinds": ["dir"],
+              "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false, true], "hasPhases": false },
+                { "mode": "text_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false },
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": true }
+              ],
+              "engagedRungs": ["resident", "bounded_decode"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 },
+              "parameterRanges": { "decodeTileEdges": [2048, 512], "decodeOverlaps": [256, 64] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_attention",
+              "fingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image"],
+              "overlays": ["none", "lora"],
+              "loadProfiles": ["plain", "lora", "lora_pid", "pid"],
+              "sourceKinds": ["dir"],
+              "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false, true], "hasPhases": false },
+                { "mode": "text_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false },
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": true }
+              ],
+              "engagedRungs": ["resident", "bounded_decode", "bounded_attention"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 },
+              "parameterRanges": { "decodeTileEdges": [2048, 512], "decodeOverlaps": [256, 64], "attentionChunkSizes": [67108864] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency", "requiredOffloadPolicy": "sequential",
+              "fingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image"],
+              "overlays": ["none", "lora"],
+              "loadProfiles": ["plain", "lora", "lora_pid", "pid"],
+              "sourceKinds": ["dir"],
+              "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false, true], "hasPhases": false },
+                { "mode": "text_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false },
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": true }
+              ],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "decodeTileEdges": [2048, 512], "decodeOverlaps": [256, 64], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_decode",
+              "runtimeProvider": "krea_2_edit",
+              "fingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["edit_image"],
+              "overlays": ["lora"],
+              "loadProfiles": ["lora", "lora_pid"],
+              "sourceKinds": ["dir"],
+              "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "bounded_decode"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 },
+              "parameterRanges": { "decodeTileEdges": [2048, 512], "decodeOverlaps": [256, 64] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_attention",
+              "runtimeProvider": "krea_2_edit",
+              "fingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["edit_image"],
+              "overlays": ["lora"],
+              "loadProfiles": ["lora", "lora_pid"],
+              "sourceKinds": ["dir"],
+              "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "bounded_decode", "bounded_attention"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 },
+              "parameterRanges": { "decodeTileEdges": [2048, 512], "decodeOverlaps": [256, 64], "attentionChunkSizes": [67108864] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency", "requiredOffloadPolicy": "sequential",
+              "runtimeProvider": "krea_2_edit",
+              "fingerprint": "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["edit_image"],
+              "overlays": ["lora"],
+              "loadProfiles": ["lora", "lora_pid"],
+              "sourceKinds": ["dir"],
+              "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "decodeTileEdges": [2048, 512], "decodeOverlaps": [256, 64], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-krea/src/block_memory_strategy.rs"
+            }
+          ]
+        }
       },
       // candle/CUDA VRAM gate (sc-9994, epic 9992). Raw shares Turbo's resident surface (the 12B
       // single-stream DiT + Qwen3-VL-4B TE + Qwen-Image VAE), and the resident weights dominate the peak.
@@ -6773,7 +7342,55 @@
         "minMemoryGb": 32,
         "vramGbByTier": { "q4": 28.8, "q8": 33.4, "bf16": 46.4 },
         "vramMeasuredPixels": 1048576,
-        "measured": false
+        "measured": false,
+        // SC-18462: request-scoped component staging is an exact provider contract, independent of
+        // deferred/BTR load shaping. The ordinary Raw route and its registered Kontext edit sibling
+        // keep their existing LoadSpec shape; the worker intersects these rows with the pinned provider
+        // predicate and only then passes a StagedResidency selection into the request scope.
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "krea_2_raw",
+          "exhaustive": true,
+          "implementations": [
+            {
+              "rung": "staged_residency",
+              "fingerprint": "krea-candle-request-scoped-staged-residency-v1",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["text_to_image"],
+              "overlays": ["none", "lora"],
+              "loadProfiles": ["plain", "lora", "lora_pid", "pid"],
+              "sourceKinds": ["dir"],
+              "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false, true], "hasPhases": false },
+                { "mode": "text_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false },
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false], "hasPhases": true }
+              ],
+              "engagedRungs": ["resident", "staged_residency"],
+              "parameters": {},
+              "parameterRanges": {},
+              "source": "inference:crates/media/candle-gen/candle-gen-krea/src/lib.rs"
+            },
+            {
+              "rung": "staged_residency",
+              "runtimeProvider": "krea_2_edit",
+              "fingerprint": "krea-candle-request-scoped-staged-residency-v1",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["edit_image"],
+              "overlays": ["lora"],
+              "loadProfiles": ["lora", "lora_pid"],
+              "sourceKinds": ["dir"],
+              "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "staged_residency"],
+              "parameters": {},
+              "parameterRanges": {},
+              "source": "inference:crates/media/candle-gen/candle-gen-krea/src/lib.rs"
+            }
+          ]
+        }
       },
       "licenseUrl": "https://www.krea.ai/krea-2-licensing",
       "ui": {
@@ -6845,7 +7462,7 @@
       "adapter": "mlx_flux2",
       // Unified model: txt2img + edit (single reference image) via mflux's
       // Flux2Klein / Flux2KleinEdit variants.
-      "capabilities": ["text_to_image", "edit_image", "character_image"],
+      "capabilities": ["text_to_image", "image_to_image", "edit_image", "character_image"],
       "macOnly": true,
       "downloads": [
         {
@@ -6921,7 +7538,145 @@
         // catalog, the audit table, and the parity lane, not just to `tier_resolver.rs`. The exception
         // row (cause, evidence, owing story) lives in `config/tier-integrity.jsonc`;
         // `scripts/check-tier-integrity.mjs` fails if this flag is set without one.
-        "denseTextEncoderTier": true
+        "denseTextEncoderTier": true,
+        // SC-18604: exact public base/img2img and routed edit aliases intersect these declarations
+        // with the pinned FLUX.2 Klein providers. Packed tier identity is explicit while production
+        // LoadSpec.quantize remains None. LoRA/LoKr and crossed sources/components remain executable
+        // only through the conservative eager path; they cannot consume these plain/PiD BTR rows.
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "flux2_klein_9b",
+          "exhaustive": true,
+          "implementations": [
+            {
+              "rung": "resident", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b",
+              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image", "image_to_image"], "overlays": ["none"],
+              "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false, true], "hasPhases": false },
+                { "mode": "text_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false },
+                { "mode": "image_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident"], "parameters": {}, "parameterRanges": {},
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+            },
+            {
+              "rung": "staged_residency", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b", "requiredOffloadPolicy": "sequential",
+              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image", "image_to_image"], "overlays": ["none"],
+              "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false, true], "hasPhases": false },
+                { "mode": "text_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false },
+                { "mode": "image_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "staged_residency"], "parameters": {}, "parameterRanges": {},
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_decode", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b",
+              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image", "image_to_image"], "overlays": ["none"],
+              "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false, true], "hasPhases": false },
+                { "mode": "text_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false },
+                { "mode": "image_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "bounded_decode"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 },
+              "parameterRanges": { "decodeTileEdges": [2048, 768, 640, 512], "decodeOverlaps": [256, 128] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_attention", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b",
+              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image", "image_to_image"], "overlays": ["none"],
+              "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false, true], "hasPhases": false },
+                { "mode": "text_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false },
+                { "mode": "image_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "bounded_decode", "bounded_attention"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 67108864 },
+              "parameterRanges": { "decodeTileEdges": [2048, 768, 640, 512], "decodeOverlaps": [256, 128], "attentionChunkSizes": [67108864] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b", "requiredOffloadPolicy": "sequential",
+              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image", "image_to_image"], "overlays": ["none"],
+              "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false, true], "hasPhases": false },
+                { "mode": "text_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false },
+                { "mode": "image_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "decodeTileEdges": [2048, 768, 640, 512], "decodeOverlaps": [256, 128], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+            },
+            {
+              "rung": "resident", "runtimeProvider": "flux2_klein_9b_edit", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b-edit",
+              "tiers": ["bf16", "q4", "q8"], "modes": ["edit_image", "character_image"], "overlays": ["none"],
+              "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
+                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident"], "parameters": {}, "parameterRanges": {},
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+            },
+            {
+              "rung": "staged_residency", "runtimeProvider": "flux2_klein_9b_edit", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b-edit", "requiredOffloadPolicy": "sequential",
+              "tiers": ["bf16", "q4", "q8"], "modes": ["edit_image", "character_image"], "overlays": ["none"],
+              "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
+                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "staged_residency"], "parameters": {}, "parameterRanges": {},
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_decode", "runtimeProvider": "flux2_klein_9b_edit", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b-edit",
+              "tiers": ["bf16", "q4", "q8"], "modes": ["edit_image", "character_image"], "overlays": ["none"],
+              "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
+                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "bounded_decode"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 },
+              "parameterRanges": { "decodeTileEdges": [2048, 768, 640, 512], "decodeOverlaps": [256, 128] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_attention", "runtimeProvider": "flux2_klein_9b_edit", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b-edit",
+              "tiers": ["bf16", "q4", "q8"], "modes": ["edit_image", "character_image"], "overlays": ["none"],
+              "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
+                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "bounded_decode", "bounded_attention"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 67108864 },
+              "parameterRanges": { "decodeTileEdges": [2048, 768, 640, 512], "decodeOverlaps": [256, 128], "attentionChunkSizes": [67108864] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency", "runtimeProvider": "flux2_klein_9b_edit", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b-edit", "requiredOffloadPolicy": "sequential",
+              "tiers": ["bf16", "q4", "q8"], "modes": ["edit_image", "character_image"], "overlays": ["none"],
+              "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
+                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "decodeTileEdges": [2048, 768, 640, 512], "decodeOverlaps": [256, 128], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+            }
+          ]
+        }
       },
       // candle/CUDA VRAM gate (epic 10765). ALL TIERS DIRECTLY MEASURED on an RTX PRO 6000 (Blackwell
       // sm_120) at 1024²/4-step CFG-free via the candle-gen-flux2 klein offload A/B harness
@@ -6973,6 +7728,10 @@
       "gated": false,
       "licenseUrl": "https://huggingface.co/SceneWorks/flux2-klein-9b-mlx/blob/main/LICENSE.md",
       "ui": {
+        // SC-18604: a single latent-init reference stays on the base Klein provider; instruction,
+        // character, and style edit modes continue through the dedicated edit provider.
+        "img2img": true,
+        "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
         "label": "FLUX.2 [klein] 9B",
         "description": "Black Forest Labs FLUX.2 [klein] 9B — 4-step distilled text-to-image + reference editing, running natively through MLX on Apple Silicon and Candle/CUDA on Windows/Linux. 9B flow transformer + 8B Qwen3 text embedder; ~36 GB bf16 peak at 1024². Pre-quantized and hosted by SceneWorks (Q4 default ~22 GB; Q8 and bf16 selectable) — downloads ready-to-run with no install-time conversion. Only the transformer is quantized; the Qwen3 text encoder stays full-precision bf16 in every tier for fidelity. Distributed under the FLUX Non-Commercial License (non-commercial use only); SceneWorks hosts a public, ungated re-host, so no Hugging Face token or license acceptance is needed before downloading. For faster reference editing on the same architecture, see FLUX.2 [klein] 9B-KV.",
         "recommendedFor": ["text_to_image", "character_image"],
@@ -7038,7 +7797,7 @@
       // Without a reference it runs plain text-to-image on par with the base
       // 9B — the cache simply doesn't engage (sc-2173), so the full
       // capability set is exposed rather than gating to character_image only.
-      "capabilities": ["text_to_image", "edit_image", "character_image"],
+      "capabilities": ["text_to_image", "image_to_image", "edit_image", "character_image"],
       "macOnly": true,
       "downloads": [
         {
@@ -7101,7 +7860,143 @@
         "quantize": 4,
         // sc-15799 (tier integrity): the above-tier text-encoder residency is DECLARED in the catalog —
         // see the base 9B entry above and `config/tier-integrity.jsonc` for the exception row.
-        "denseTextEncoderTier": true
+        "denseTextEncoderTier": true,
+        // SC-18604: KV text/img2img uses the base provider over the exact KV artifact; reference
+        // edits resolve only to the KV-edit provider. The shared declaration shape remains exact.
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "flux2_klein_9b",
+          "exhaustive": true,
+          "implementations": [
+            {
+              "rung": "resident", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b",
+              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image", "image_to_image"], "overlays": ["none"],
+              "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false, true], "hasPhases": false },
+                { "mode": "text_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false },
+                { "mode": "image_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident"], "parameters": {}, "parameterRanges": {},
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+            },
+            {
+              "rung": "staged_residency", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b", "requiredOffloadPolicy": "sequential",
+              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image", "image_to_image"], "overlays": ["none"],
+              "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false, true], "hasPhases": false },
+                { "mode": "text_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false },
+                { "mode": "image_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "staged_residency"], "parameters": {}, "parameterRanges": {},
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_decode", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b",
+              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image", "image_to_image"], "overlays": ["none"],
+              "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false, true], "hasPhases": false },
+                { "mode": "text_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false },
+                { "mode": "image_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "bounded_decode"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 },
+              "parameterRanges": { "decodeTileEdges": [2048, 768, 640, 512], "decodeOverlaps": [256, 128] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_attention", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b",
+              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image", "image_to_image"], "overlays": ["none"],
+              "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false, true], "hasPhases": false },
+                { "mode": "text_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false },
+                { "mode": "image_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "bounded_decode", "bounded_attention"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 67108864 },
+              "parameterRanges": { "decodeTileEdges": [2048, 768, 640, 512], "decodeOverlaps": [256, 128], "attentionChunkSizes": [67108864] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b", "requiredOffloadPolicy": "sequential",
+              "tiers": ["bf16", "q4", "q8"], "modes": ["text_to_image", "image_to_image"], "overlays": ["none"],
+              "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false, true], "hasPhases": false },
+                { "mode": "text_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false },
+                { "mode": "image_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "decodeTileEdges": [2048, 768, 640, 512], "decodeOverlaps": [256, 128], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+            },
+            {
+              "rung": "resident", "runtimeProvider": "flux2_klein_9b_kv_edit", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b-kv-edit",
+              "tiers": ["bf16", "q4", "q8"], "modes": ["edit_image", "character_image"], "overlays": ["none"],
+              "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
+                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident"], "parameters": {}, "parameterRanges": {},
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+            },
+            {
+              "rung": "staged_residency", "runtimeProvider": "flux2_klein_9b_kv_edit", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b-kv-edit", "requiredOffloadPolicy": "sequential",
+              "tiers": ["bf16", "q4", "q8"], "modes": ["edit_image", "character_image"], "overlays": ["none"],
+              "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
+                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "staged_residency"], "parameters": {}, "parameterRanges": {},
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_decode", "runtimeProvider": "flux2_klein_9b_kv_edit", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b-kv-edit",
+              "tiers": ["bf16", "q4", "q8"], "modes": ["edit_image", "character_image"], "overlays": ["none"],
+              "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
+                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "bounded_decode"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 },
+              "parameterRanges": { "decodeTileEdges": [2048, 768, 640, 512], "decodeOverlaps": [256, 128] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_attention", "runtimeProvider": "flux2_klein_9b_kv_edit", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b-kv-edit",
+              "tiers": ["bf16", "q4", "q8"], "modes": ["edit_image", "character_image"], "overlays": ["none"],
+              "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
+                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "bounded_decode", "bounded_attention"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 67108864 },
+              "parameterRanges": { "decodeTileEdges": [2048, 768, 640, 512], "decodeOverlaps": [256, 128], "attentionChunkSizes": [67108864] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency", "runtimeProvider": "flux2_klein_9b_kv_edit", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b-kv-edit", "requiredOffloadPolicy": "sequential",
+              "tiers": ["bf16", "q4", "q8"], "modes": ["edit_image", "character_image"], "overlays": ["none"],
+              "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
+                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "decodeTileEdges": [2048, 768, 640, 512], "decodeOverlaps": [256, 128], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+            }
+          ]
+        }
       },
       "candle": {
         // SC-15831 shared provider implementation. SC-17485 owns KV-specific artifact and
@@ -7125,6 +8020,8 @@
       "gated": false,
       "licenseUrl": "https://huggingface.co/SceneWorks/flux2-klein-9b-kv-mlx/blob/main/LICENSE.md",
       "ui": {
+        "img2img": true,
+        "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
         "label": "FLUX.2 [klein] 9B-KV",
         "description": "A KV-optimized distill of FLUX.2 [klein] 9B: text-to-image and reference editing, plus KV-cache acceleration that makes reference editing ~2.4× faster than the base 9B edit path on Apple Silicon (validated M5 Max 128 GB, sc-2163). The cache engages automatically when you attach a reference; without one it runs plain text-to-image on par with the base 9B (sc-2173). Pre-quantized and hosted by SceneWorks (Q4 default ~22 GB; Q8 and bf16 selectable) — only the transformer is quantized, the Qwen3 text encoder stays full-precision bf16 in every tier. Distributed under the FLUX Non-Commercial License (non-commercial use only); SceneWorks hosts a public, ungated re-host, so no Hugging Face token or license acceptance is needed before downloading. Same ~36 GB bf16 peak at 1024² as the base 9B.",
         "recommendedFor": ["character_image"],
@@ -7179,7 +8076,7 @@
       // pipeline — so it is converted at install (mlx.requiresConversion) into a
       // local diffusers dir that borrows the VAE/text-encoder/tokenizer from the
       // base FLUX.2-klein-9B install (mlx.convertBaseRepo). sc-2235.
-      "capabilities": ["text_to_image", "edit_image", "character_image"],
+      "capabilities": ["text_to_image", "image_to_image", "edit_image", "character_image"],
       "macOnly": true,
       "downloads": [
         {
@@ -7212,7 +8109,7 @@
       },
       "mlx": {
         "minMemoryGb": 42,
-        "quantize": 8,
+        "quantize": 0,
         // Install-time conversion: pull the bf16 single-file from convertSourceRepo,
         // run the FLUX.2-klein diffusers converter (sc-2235), and assemble a local
         // diffusers dir under <data>/models/mlx/flux2_klein_9b_true_v2 by borrowing
@@ -7231,7 +8128,144 @@
         "convertSourceRepo": "wikeeyang/Flux2-Klein-9B-True-V2",
         "convertSourceFile": "Flux2-Klein-9B-True-v2-bf16.safetensors",
         "convertBaseRepo": "SceneWorks/flux2-klein-9b-mlx",
-        "convertBaseSubdir": "bf16"
+        "convertBaseSubdir": "bf16",
+        // The converted True-V2 artifact remains dense BF16. Preserve that single resolved artifact
+        // tier independently of any stale/crafted quantization preference; unlike the base and KV
+        // turnkeys, this alias has no packed tier matrix or tier-integrity exception declaration.
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "flux2_klein_9b",
+          "exhaustive": true,
+          "implementations": [
+            {
+              "rung": "resident", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b",
+              "tiers": ["bf16"], "modes": ["text_to_image", "image_to_image"], "overlays": ["none"],
+              "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false, true], "hasPhases": false },
+                { "mode": "text_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false },
+                { "mode": "image_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident"], "parameters": {}, "parameterRanges": {},
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+            },
+            {
+              "rung": "staged_residency", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b", "requiredOffloadPolicy": "sequential",
+              "tiers": ["bf16"], "modes": ["text_to_image", "image_to_image"], "overlays": ["none"],
+              "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false, true], "hasPhases": false },
+                { "mode": "text_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false },
+                { "mode": "image_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "staged_residency"], "parameters": {}, "parameterRanges": {},
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_decode", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b",
+              "tiers": ["bf16"], "modes": ["text_to_image", "image_to_image"], "overlays": ["none"],
+              "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false, true], "hasPhases": false },
+                { "mode": "text_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false },
+                { "mode": "image_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "bounded_decode"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 },
+              "parameterRanges": { "decodeTileEdges": [2048, 768, 640, 512], "decodeOverlaps": [256, 128] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_attention", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b",
+              "tiers": ["bf16"], "modes": ["text_to_image", "image_to_image"], "overlays": ["none"],
+              "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false, true], "hasPhases": false },
+                { "mode": "text_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false },
+                { "mode": "image_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "bounded_decode", "bounded_attention"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 67108864 },
+              "parameterRanges": { "decodeTileEdges": [2048, 768, 640, 512], "decodeOverlaps": [256, 128], "attentionChunkSizes": [67108864] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b", "requiredOffloadPolicy": "sequential",
+              "tiers": ["bf16"], "modes": ["text_to_image", "image_to_image"], "overlays": ["none"],
+              "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "text_to_image", "providerMode": "text_to_image", "referenceCounts": [0], "pid": [false, true], "hasPhases": false },
+                { "mode": "text_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false },
+                { "mode": "image_to_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "decodeTileEdges": [2048, 768, 640, 512], "decodeOverlaps": [256, 128], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+            },
+            {
+              "rung": "resident", "runtimeProvider": "flux2_klein_9b_edit", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b-edit",
+              "tiers": ["bf16"], "modes": ["edit_image", "character_image"], "overlays": ["none"],
+              "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
+                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident"], "parameters": {}, "parameterRanges": {},
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+            },
+            {
+              "rung": "staged_residency", "runtimeProvider": "flux2_klein_9b_edit", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b-edit", "requiredOffloadPolicy": "sequential",
+              "tiers": ["bf16"], "modes": ["edit_image", "character_image"], "overlays": ["none"],
+              "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
+                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "staged_residency"], "parameters": {}, "parameterRanges": {},
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_decode", "runtimeProvider": "flux2_klein_9b_edit", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b-edit",
+              "tiers": ["bf16"], "modes": ["edit_image", "character_image"], "overlays": ["none"],
+              "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
+                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "bounded_decode"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128 },
+              "parameterRanges": { "decodeTileEdges": [2048, 768, 640, 512], "decodeOverlaps": [256, 128] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_attention", "runtimeProvider": "flux2_klein_9b_edit", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b-edit",
+              "tiers": ["bf16"], "modes": ["edit_image", "character_image"], "overlays": ["none"],
+              "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
+                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "bounded_decode", "bounded_attention"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 67108864 },
+              "parameterRanges": { "decodeTileEdges": [2048, 768, 640, 512], "decodeOverlaps": [256, 128], "attentionChunkSizes": [67108864] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency", "runtimeProvider": "flux2_klein_9b_edit", "fingerprint": "flux2-klein-static-registry-behavior-v2-flux2-klein-9b-edit", "requiredOffloadPolicy": "sequential",
+              "tiers": ["bf16"], "modes": ["edit_image", "character_image"], "overlays": ["none"],
+              "loadProfiles": ["plain", "pid"], "sourceKinds": ["dir"], "providerOverlay": "none",
+              "requestContexts": [
+                { "mode": "edit_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false },
+                { "mode": "character_image", "providerMode": "edit_image", "referenceCounts": [1, 2, 3, 4, 5, 6, 7, 8], "pid": [false, true], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 128, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "decodeTileEdges": [2048, 768, 640, 512], "decodeOverlaps": [256, 128], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs"
+            }
+          ]
+        }
       },
       "candle": {
         // SC-15831 shared provider implementation. SC-17486 owns True V2-specific artifact and
@@ -7254,6 +8288,8 @@
       },
       "licenseUrl": "https://huggingface.co/black-forest-labs/FLUX.2-klein-9B/blob/main/LICENSE.md",
       "ui": {
+        "img2img": true,
+        "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
         "label": "FLUX.2 [klein] 9B True V2",
         "description": "Community full fine-tune of FLUX.2 [klein] 9B (wikeeyang) tuned for stronger realism, texture, and prompt adherence, with cleaner reference editing. Runs through native MLX on Apple Silicon and native Candle/CUDA on Windows and Linux. This is the undistilled line, so it uses ~24 steps at guidance 1.0 (slower than the 4-step distill, ~50 s/image at 1024² on an M5 Max). Requires the base FLUX.2 [klein] 9B to be installed (its VAE/text-encoder/tokenizer are reused); local conversion applies only to the MLX install path. Distributed under the FLUX Non-Commercial License.",
         "recommendedFor": ["text_to_image", "character_image"],
@@ -7743,9 +8779,7 @@
               "tiers": [
                 "q4"
               ],
-              "modes": [
-                "text_to_image"
-              ],
+              "modes": ["text_to_image"],
               "overlays": [
                 "none"
               ],
@@ -8239,9 +9273,7 @@
               "tiers": [
                 "q4"
               ],
-              "modes": [
-                "text_to_image"
-              ],
+              "modes": ["text_to_image"],
               "overlays": [
                 "none"
               ],
@@ -8681,9 +9713,7 @@
               "tiers": [
                 "q4"
               ],
-              "modes": [
-                "text_to_image"
-              ],
+              "modes": ["text_to_image"],
               "overlays": [
                 "none"
               ],
@@ -9189,9 +10219,7 @@
               "tiers": [
                 "q4"
               ],
-              "modes": [
-                "text_to_image"
-              ],
+              "modes": ["text_to_image"],
               "overlays": [
                 "none"
               ],
@@ -11362,9 +12390,7 @@
               "tiers": [
                 "q4"
               ],
-              "modes": [
-                "text_to_image"
-              ],
+              "modes": ["text_to_image"],
               "overlays": [
                 "none"
               ],
@@ -12313,9 +13339,7 @@
               "tiers": [
                 "q4"
               ],
-              "modes": [
-                "text_to_image"
-              ],
+              "modes": ["text_to_image"],
               "overlays": [
                 "none"
               ],
@@ -13280,9 +14304,7 @@
               "tiers": [
                 "q4"
               ],
-              "modes": [
-                "text_to_image"
-              ],
+              "modes": ["text_to_image"],
               "overlays": [
                 "none"
               ],
@@ -14195,9 +15217,7 @@
               "tiers": [
                 "q4"
               ],
-              "modes": [
-                "text_to_image"
-              ],
+              "modes": ["text_to_image"],
               "overlays": [
                 "none"
               ],
@@ -15125,9 +16145,7 @@
               "tiers": [
                 "q4"
               ],
-              "modes": [
-                "text_to_image"
-              ],
+              "modes": ["text_to_image"],
               "overlays": [
                 "none"
               ],
@@ -16229,7 +17247,107 @@
       // a follow-up re-measures the now-lighter q4 default on-device.
       "mlx": {
         "minMemoryGb": 44,
-        "quantize": 4
+        "quantize": 4,
+        // SC-18602: the identity-conditioned PuLID provider owns this exact ladder declaration.
+        // The public `character_image` route is one provider-side ImageToImage reference; identity
+        // weights are part of LoadSpec/cache identity and the same `identity` value is the provider
+        // evidence overlay. No base FLUX, LoRA, PiD, multi-phase, File-source, or Candle coordinate
+        // inherits this authority. No calibration binding is declared: until final frozen-code
+        // evidence is promoted, optimized admission is conservative and Estimated only.
+        "memoryStrategyContract": {
+          "abi": 1,
+          "provider": "pulid_flux",
+          "exhaustive": true,
+          "implementations": [
+            {
+              "rung": "resident",
+              "fingerprint": "pulid-flux-static-registry-behavior-v2",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["character_image"],
+              "overlays": ["identity"],
+              "loadProfiles": ["identity"],
+              "sourceKinds": ["dir"],
+              "providerOverlay": "identity",
+              "requestContexts": [
+                { "mode": "character_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident"],
+              "parameters": {},
+              "parameterRanges": {},
+              "source": "inference:crates/media/mlx-gen/mlx-gen-pulid/src/memory_strategy.rs"
+            },
+            {
+              "rung": "staged_residency",
+              "requiredOffloadPolicy": "sequential",
+              "fingerprint": "pulid-flux-static-registry-behavior-v2",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["character_image"],
+              "overlays": ["identity"],
+              "loadProfiles": ["identity"],
+              "sourceKinds": ["dir"],
+              "providerOverlay": "identity",
+              "requestContexts": [
+                { "mode": "character_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "staged_residency"],
+              "parameters": {},
+              "parameterRanges": {},
+              "source": "inference:crates/media/mlx-gen/mlx-gen-pulid/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_decode",
+              "fingerprint": "pulid-flux-static-registry-behavior-v2",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["character_image"],
+              "overlays": ["identity"],
+              "loadProfiles": ["identity"],
+              "sourceKinds": ["dir"],
+              "providerOverlay": "identity",
+              "requestContexts": [
+                { "mode": "character_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "bounded_decode"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 },
+              "parameterRanges": { "decodeTileEdges": [768, 640, 512], "decodeOverlaps": [64] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-pulid/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_attention",
+              "fingerprint": "pulid-flux-static-registry-behavior-v2",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["character_image"],
+              "overlays": ["identity"],
+              "loadProfiles": ["identity"],
+              "sourceKinds": ["dir"],
+              "providerOverlay": "identity",
+              "requestContexts": [
+                { "mode": "character_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "bounded_decode", "bounded_attention"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864 },
+              "parameterRanges": { "decodeTileEdges": [768, 640, 512], "decodeOverlaps": [64], "attentionChunkSizes": [67108864] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-pulid/src/memory_strategy.rs"
+            },
+            {
+              "rung": "bounded_transformer_residency",
+              "requiredOffloadPolicy": "sequential",
+              "fingerprint": "pulid-flux-static-registry-behavior-v2",
+              "tiers": ["bf16", "q4", "q8"],
+              "modes": ["character_image"],
+              "overlays": ["identity"],
+              "loadProfiles": ["identity"],
+              "sourceKinds": ["dir"],
+              "providerOverlay": "identity",
+              "requestContexts": [
+                { "mode": "character_image", "providerMode": "image_to_image", "referenceCounts": [1], "pid": [false], "hasPhases": false }
+              ],
+              "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"],
+              "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "attentionChunkSize": 67108864, "transformerWindowSize": 1, "transformerWindowComponent": "Dit" },
+              "parameterRanges": { "decodeTileEdges": [768, 640, 512], "decodeOverlaps": [64], "attentionChunkSizes": [67108864], "transformerWindowSizes": [1], "transformerWindowComponents": ["Dit"] },
+              "source": "inference:crates/media/mlx-gen/mlx-gen-pulid/src/memory_strategy.rs"
+            }
+          ]
+        }
       },
       // SC-15839: static capability for the bespoke Candle route is separate from calibration and
       // measurement. The provider/worker execute the full ladder only for the exact identity request;
