@@ -191,10 +191,26 @@ const LTX_BOUNDED_CAMPAIGN_IDENTITY: &str =
 const LTX_BOUNDED_CAMPAIGN_LOGICAL_CASE_ID: &str = "implan-964db61ed3789af6386b";
 const LTX_BOUNDED_CAMPAIGN_FIXTURE: &str =
     "ltx-2-3-mlx-q4-768x512-f121-fps30-bounded-decode-192-64-seed18946";
+const LTX_BOUNDED_CAMPAIGN_Q8_IDENTITY: &str =
+    "sc-20430-q8-768x512-f121-fps30-bounded-192-64-authoritative-v1";
+const LTX_BOUNDED_CAMPAIGN_Q8_LOGICAL_CASE_ID: &str = "implan-d47640caa0c469f2ee13";
+const LTX_BOUNDED_CAMPAIGN_Q8_FIXTURE: &str =
+    "ltx-2-3-mlx-q8-768x512-f121-fps30-bounded-decode-192-64-seed18946";
+const LTX_BOUNDED_CAMPAIGN_BF16_IDENTITY: &str =
+    "sc-20430-bf16-768x512-f121-fps30-bounded-192-64-authoritative-v1";
+const LTX_BOUNDED_CAMPAIGN_BF16_LOGICAL_CASE_ID: &str = "implan-b3926164bf6bfbee98e1";
+const LTX_BOUNDED_CAMPAIGN_BF16_FIXTURE: &str =
+    "ltx-2-3-mlx-bf16-768x512-f121-fps30-bounded-decode-192-64-seed18946";
 const LTX_CANARY_ARTIFACT_REVISION: &str = "01df27d308466533aa09d251e3aebdcc627d07eb";
 const LTX_CANARY_Q4_INVENTORY_FILES: u64 = 11;
 const LTX_CANARY_Q4_INVENTORY_SHA256: &str =
     "4e811932e87bb258f642ada790525e36ef2a55959c520e755f1807caf6fa225a";
+const LTX_CANARY_Q8_INVENTORY_FILES: u64 = 11;
+const LTX_CANARY_Q8_INVENTORY_SHA256: &str =
+    "bb0bb7577157a158ca39494837d64cb36ded0380ca7ee0c930fea7311f22a247";
+const LTX_CANARY_BF16_INVENTORY_FILES: u64 = 10;
+const LTX_CANARY_BF16_INVENTORY_SHA256: &str =
+    "006caeaa9a8638b337cdf5a8622ce8535380b18ebaf90b36c3e2d5d15354f2a8";
 const LTX_CANARY_TEXT_ENCODER_INVENTORY_FILES: u64 = 17;
 const LTX_CANARY_TEXT_ENCODER_INVENTORY_BYTES: u64 = 26_427_894_918;
 const LTX_CANARY_TEXT_ENCODER_INVENTORY_SHA256: &str =
@@ -5859,17 +5875,72 @@ fn validate_ltx_bounded_carrier_proof(
     Ok(())
 }
 
-/// The sole promotable bounded campaign entry. The ordinary `run` action continues through the
-/// all-row pre-load refusal; the controller may inject this private action only after the canonical
-/// harness has selected the exact new SC-20318 row and acquired the contained-execution claim.
+#[derive(Clone, Copy)]
+struct LtxBoundedCampaignSpec {
+    tier: &'static str,
+    identity: &'static str,
+    logical_case_id: &'static str,
+    fixture: &'static str,
+    inventory_files: u64,
+    inventory_bytes: u64,
+    inventory_sha256: &'static str,
+    projection_bytes: u64,
+    story: &'static str,
+}
+
+fn ltx_bounded_campaign_spec(tier: &str) -> Result<LtxBoundedCampaignSpec, String> {
+    match tier {
+        "q4" => Ok(LtxBoundedCampaignSpec {
+            tier: "q4",
+            identity: LTX_BOUNDED_CAMPAIGN_IDENTITY,
+            logical_case_id: LTX_BOUNDED_CAMPAIGN_LOGICAL_CASE_ID,
+            fixture: LTX_BOUNDED_CAMPAIGN_FIXTURE,
+            inventory_files: LTX_CANARY_Q4_INVENTORY_FILES,
+            inventory_bytes: LTX_Q4_INVENTORY_BYTES,
+            inventory_sha256: LTX_CANARY_Q4_INVENTORY_SHA256,
+            projection_bytes: 84_694_536_320,
+            story: "SC-20318",
+        }),
+        "q8" => Ok(LtxBoundedCampaignSpec {
+            tier: "q8",
+            identity: LTX_BOUNDED_CAMPAIGN_Q8_IDENTITY,
+            logical_case_id: LTX_BOUNDED_CAMPAIGN_Q8_LOGICAL_CASE_ID,
+            fixture: LTX_BOUNDED_CAMPAIGN_Q8_FIXTURE,
+            inventory_files: LTX_CANARY_Q8_INVENTORY_FILES,
+            inventory_bytes: LTX_Q8_INVENTORY_BYTES,
+            inventory_sha256: LTX_CANARY_Q8_INVENTORY_SHA256,
+            projection_bytes: 93_955_566_576,
+            story: "SC-20430",
+        }),
+        "bf16" => Ok(LtxBoundedCampaignSpec {
+            tier: "bf16",
+            identity: LTX_BOUNDED_CAMPAIGN_BF16_IDENTITY,
+            logical_case_id: LTX_BOUNDED_CAMPAIGN_BF16_LOGICAL_CASE_ID,
+            fixture: LTX_BOUNDED_CAMPAIGN_BF16_FIXTURE,
+            inventory_files: LTX_CANARY_BF16_INVENTORY_FILES,
+            inventory_bytes: LTX_BF16_INVENTORY_BYTES,
+            inventory_sha256: LTX_CANARY_BF16_INVENTORY_SHA256,
+            projection_bytes: 111_319_657_852,
+            story: "SC-20430",
+        }),
+        other => Err(format!(
+            "SC-20430 bounded campaign tier {other:?} is not exactly allowlisted"
+        )),
+    }
+}
+
+/// The three exact promotable bounded campaign entries. The ordinary `run` action continues
+/// through the all-row pre-load refusal; the controller may inject this private action only after
+/// the canonical harness has selected one allowlisted row and acquired the contained-execution claim.
 fn validate_ltx_bounded_campaign_entry(
     request: &Value,
     tier: &str,
     geometry: LtxGeometry,
     selection: &MemorySelection,
 ) -> Result<(), String> {
+    let spec = ltx_bounded_campaign_spec(tier)?;
     if protocol::action(request)? != LTX_BOUNDED_CAMPAIGN_ACTION {
-        return Err("SC-20318 bounded campaign action changed".to_owned());
+        return Err(format!("{} bounded campaign action changed", spec.story));
     }
     let planned = protocol::planned(request)?;
     let exact = |pointer: &str, expected: &Value| -> Result<(), String> {
@@ -5878,20 +5949,18 @@ fn validate_ltx_bounded_campaign_entry(
             Ok(())
         } else {
             Err(format!(
-                "SC-20318 bounded campaign {pointer} must be {expected}, got {actual:?}"
+                "{} bounded campaign {pointer} must be {expected}, got {actual:?}",
+                spec.story
             ))
         }
     };
-    exact(
-        "/logicalCaseId",
-        &json!(LTX_BOUNDED_CAMPAIGN_LOGICAL_CASE_ID),
-    )?;
+    exact("/logicalCaseId", &json!(spec.logical_case_id))?;
     exact("/evidenceScope", &json!("authoritative"))?;
     exact("/backend", &json!("mlx"))?;
     exact("/loadShape", &json!("eager_materialization"))?;
     exact("/target/provider", &json!(LTX_PROVIDER))?;
     exact("/target/modelId", &json!(LTX_PROVIDER))?;
-    exact("/target/tier", &json!("q4"))?;
+    exact("/target/tier", &json!(spec.tier))?;
     exact("/target/mode", &json!("text_to_video"))?;
     exact("/target/overlay", &json!("none"))?;
     exact("/target/geometry/width", &json!(LTX_CAMPAIGN_ENTRY_WIDTH))?;
@@ -5914,7 +5983,7 @@ fn validate_ltx_bounded_campaign_entry(
         "/calibrationFingerprint",
         &json!(LTX_CALIBRATION_FINGERPRINT),
     )?;
-    exact("/fixture", &json!(LTX_BOUNDED_CAMPAIGN_FIXTURE))?;
+    exact("/fixture", &json!(spec.fixture))?;
     exact("/negative", &json!(false))?;
     exact("/expectedResult", &json!("passed"))?;
     exact("/modelLoadPolicy", &json!("fresh_per_case"))?;
@@ -5927,25 +5996,29 @@ fn validate_ltx_bounded_campaign_entry(
         "/_measurementSafety",
         &json!({
             "disposition": LTX_SAFETY_REFUSED_OPEN,
-            "tierInventoryBytes": LTX_Q4_INVENTORY_BYTES,
+            "tierInventoryBytes": spec.inventory_bytes,
             "incidentCrashFootprintBytes": LTX_Q4_F305_CRASH_FOOTPRINT_BYTES,
             "incidentCase": "mlx-ltx-2-3-q4-1280x704-f305-fps30-bounded_decode",
             "commonLoad": "complete numeric tier plus shared Gemma stack before geometry-specific work",
             "predictedDecodeBytes": 6_264_848_640_u64,
             "incidentPredictedDecodeBytes": LTX_INCIDENT_PREDICTED_DECODE_BYTES,
-            "incidentCalibratedProjectionBytes": 84_694_536_320_u64,
+            "incidentCalibratedProjectionBytes": spec.projection_bytes,
             "projectionAssumptions": [
                 "pinned provider decode cost is the only geometry-varying term used",
                 "immutable tier inventory delta is added byte-for-byte",
                 "incident binding phase is unknown, so the projection is not a physical-footprint bound and cannot admit execution",
             ],
-            "reason": "incident-calibrated projection is diagnostic only; ordinary run remains refused and only the exact privately contained SC-20318 action is admitted",
+            "reason": if spec.tier == "q4" {
+                "incident-calibrated projection is diagnostic only; ordinary run remains refused and only the exact privately contained SC-20318 action is admitted"
+            } else {
+                "incident-calibrated projection is diagnostic only; ordinary run remains refused and only the exact privately contained SC-20430 action is admitted"
+            },
         }),
     )?;
     exact(
         "/_boundedCampaignEntry",
         &json!({
-            "identity": LTX_BOUNDED_CAMPAIGN_IDENTITY,
+            "identity": spec.identity,
             "fps": LTX_CAMPAIGN_ENTRY_FPS,
             "seed": LTX_SEED,
             "videoMode": "default_av",
@@ -5954,9 +6027,9 @@ fn validate_ltx_bounded_campaign_entry(
                 "repository": protocol::LTX_REPOSITORY,
                 "revision": LTX_CANARY_ARTIFACT_REVISION,
                 "numericTierInventory": {
-                    "files": LTX_CANARY_Q4_INVENTORY_FILES,
-                    "bytes": LTX_Q4_INVENTORY_BYTES,
-                    "sha256": LTX_CANARY_Q4_INVENTORY_SHA256,
+                    "files": spec.inventory_files,
+                    "bytes": spec.inventory_bytes,
+                    "sha256": spec.inventory_sha256,
                 },
                 "textEncoderInventory": {
                     "files": LTX_CANARY_TEXT_ENCODER_INVENTORY_FILES,
@@ -5966,15 +6039,17 @@ fn validate_ltx_bounded_campaign_entry(
             },
         }),
     )?;
-    if tier != "q4"
-        || geometry.width != LTX_CAMPAIGN_ENTRY_WIDTH
+    if geometry.width != LTX_CAMPAIGN_ENTRY_WIDTH
         || geometry.height != LTX_CAMPAIGN_ENTRY_HEIGHT
         || geometry.frames != LTX_CAMPAIGN_ENTRY_FRAMES
         || selection.strategy != MemoryStrategy::BoundedDecode
         || selection.parameters.decode_tile_edge != Some(LTX_CANARY_TILE_EDGE)
         || selection.parameters.decode_overlap != Some(LTX_CANARY_OVERLAP)
     {
-        return Err("SC-20318 bounded campaign resolved a foreign tuple or strategy".to_owned());
+        return Err(format!(
+            "{} bounded campaign resolved a foreign tuple or strategy",
+            spec.story
+        ));
     }
     let (fps, seed) = planned_ltx_capture(request, tier, geometry)?;
     if fps != LTX_CAMPAIGN_ENTRY_FPS || seed != LTX_SEED {
@@ -8991,6 +9066,11 @@ fn run_ltx_campaign_entry(request: &Value) -> Result<Value, String> {
 
 fn run_ltx_bounded_campaign_entry(request: &Value) -> Result<Value, String> {
     prevalidate_ltx_bounded_campaign_entry(request)?;
+    let tier = protocol::planned(request)?
+        .pointer("/target/tier")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "bounded campaign target tier must be a string".to_owned())?;
+    let bounded_spec = ltx_bounded_campaign_spec(tier)?;
     let mut watchdog = consume_ltx_canary_watchdog_attestation(request)?;
     let mut watchdog_lease = watchdog.start_lease_for(&LTX_BOUNDED_CARRIER_PHASE_NAMES)?;
     watchdog_lease.mark("common_load")?;
@@ -9010,7 +9090,7 @@ fn run_ltx_bounded_campaign_entry(request: &Value) -> Result<Value, String> {
     let post_cleanup = AllocatorState::capture_current();
     validate_ltx_canary_cleanup(pre_provider, post_cleanup, expected_persistent_active)?;
     fragment["_boundedCampaignEntry"] = json!({
-        "identity": LTX_BOUNDED_CAMPAIGN_IDENTITY,
+        "identity": bounded_spec.identity,
         "inferenceRevision": protocol::INFERENCE_PIN,
         "watchdog": {
             "required": true,
@@ -10409,6 +10489,30 @@ mod ltx_tests {
         request
     }
 
+    fn ltx_bounded_campaign_request_json_for(tier: &str) -> Value {
+        let mut request = ltx_bounded_campaign_request_json();
+        let spec = ltx_bounded_campaign_spec(tier).expect("test tier must be allowlisted");
+        request["planned"]["target"]["tier"] = json!(spec.tier);
+        request["planned"]["logicalCaseId"] = json!(spec.logical_case_id);
+        request["planned"]["fixture"] = json!(spec.fixture);
+        request["planned"]["_boundedCampaignEntry"]["identity"] = json!(spec.identity);
+        request["planned"]["_boundedCampaignEntry"]["artifact"]["numericTierInventory"] = json!({
+            "files": spec.inventory_files,
+            "bytes": spec.inventory_bytes,
+            "sha256": spec.inventory_sha256,
+        });
+        request["planned"]["_measurementSafety"]["tierInventoryBytes"] =
+            json!(spec.inventory_bytes);
+        request["planned"]["_measurementSafety"]["incidentCalibratedProjectionBytes"] =
+            json!(spec.projection_bytes);
+        request["planned"]["_measurementSafety"]["reason"] = json!(if tier == "q4" {
+            "incident-calibrated projection is diagnostic only; ordinary run remains refused and only the exact privately contained SC-20318 action is admitted"
+        } else {
+            "incident-calibrated projection is diagnostic only; ordinary run remains refused and only the exact privately contained SC-20430 action is admitted"
+        });
+        request
+    }
+
     #[test]
     fn sc_20318_admits_only_the_exact_two_render_bounded_campaign_row() {
         let request = ltx_bounded_campaign_request_json();
@@ -10464,7 +10568,9 @@ mod ltx_tests {
             let error = prevalidate_ltx_bounded_campaign_entry(&mutated)
                 .expect_err("every SC-20318 identity mutation must fail before weights");
             assert!(
-                error.contains("SC-20318") || error.contains("SC-18946"),
+                error.contains("SC-20318")
+                    || error.contains("SC-20430")
+                    || error.contains("SC-18946"),
                 "{pointer}: {error}"
             );
         }
@@ -10484,6 +10590,57 @@ mod ltx_tests {
         let refusal = run_ltx(&ordinary)
             .expect_err("the new row must remain refused by the ordinary campaign action");
         assert!(refusal.contains("safety_refused_open"), "{refusal}");
+    }
+
+    #[test]
+    fn sc_20430_exactly_allowlists_q8_and_bf16_bounded_campaign_rows() {
+        for tier in ["q8", "bf16"] {
+            let request = ltx_bounded_campaign_request_json_for(tier);
+            prevalidate_ltx_bounded_campaign_entry(&request)
+                .unwrap_or_else(|error| panic!("exact {tier} bounded entry rejected: {error}"));
+            for (pointer, mutation) in [
+                ("/action", json!("run")),
+                ("/planned/target/tier", json!("q4")),
+                (
+                    "/planned/logicalCaseId",
+                    json!(LTX_BOUNDED_CAMPAIGN_LOGICAL_CASE_ID),
+                ),
+                ("/planned/fixture", json!(LTX_BOUNDED_CAMPAIGN_FIXTURE)),
+                ("/planned/_boundedCampaignEntry/identity", json!("mutated")),
+                (
+                    "/planned/_boundedCampaignEntry/artifact/numericTierInventory/bytes",
+                    json!(LTX_Q4_INVENTORY_BYTES),
+                ),
+                ("/planned/_boundedCampaignEntry/seed", json!(LTX_SEED + 1)),
+                (
+                    "/planned/strategy/parameters/decodeTileEdge",
+                    json!(LTX_CANARY_TILE_EDGE + 1),
+                ),
+            ] {
+                let mut changed = request.clone();
+                *changed.pointer_mut(pointer).expect("mutation pointer") = mutation;
+                assert!(
+                    prevalidate_ltx_bounded_campaign_entry(&changed).is_err(),
+                    "{tier} mutation {pointer} reached model resolution"
+                );
+            }
+            let direct = run_ltx_bounded_campaign_entry(&request)
+                .expect_err("private JSON alone cannot bypass the watchdog");
+            assert!(
+                direct.contains("live external watchdog channel"),
+                "{direct}"
+            );
+            let mut ordinary = request.clone();
+            ordinary["action"] = json!("run");
+            ordinary["planned"]
+                .as_object_mut()
+                .unwrap()
+                .remove("_boundedCampaignEntry");
+            let refusal = run_ltx(&ordinary)
+                .expect_err("the ordinary 73-row action must refuse every new tier");
+            assert!(refusal.contains("safety_refused_open"), "{refusal}");
+        }
+        assert!(ltx_bounded_campaign_spec("fp16").is_err());
     }
 
     #[test]

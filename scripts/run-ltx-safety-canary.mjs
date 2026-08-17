@@ -4,7 +4,7 @@ import { execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants, createReadStream } from "node:fs";
 import {
-  chmod, copyFile, link, lstat, mkdtemp, mkdir, readFile, readdir, realpath, rm,
+  chmod, copyFile, link, lstat, mkdtemp, mkdir, open, readFile, readdir, realpath, rm,
   rename, stat, unlink, writeFile,
 } from "node:fs/promises";
 import { arch } from "node:os";
@@ -40,6 +40,8 @@ export const PRODUCT_ENVELOPE_CANARY_PROFILE = "product-envelope";
 export const CAMPAIGN_ENTRY_PROFILE = "campaign-entry";
 export const BOUNDED_CARRIER_PROFILE = "bounded-carrier";
 export const BOUNDED_CAMPAIGN_ENTRY_PROFILE = "bounded-campaign-entry";
+export const BOUNDED_CAMPAIGN_ENTRY_Q8_PROFILE = "bounded-campaign-entry-q8";
+export const BOUNDED_CAMPAIGN_ENTRY_BF16_PROFILE = "bounded-campaign-entry-bf16";
 export const CAMPAIGN_ENTRY_PROVIDER =
   "mlx-ltx-2-3-q4-768x512-f121-fps30-staged_residency";
 export const CAMPAIGN_ENTRY_FIXTURE =
@@ -120,6 +122,55 @@ const BOUNDED_CAMPAIGN_ENTRY_SAFETY = Object.freeze({
   projectionAssumptions: CAMPAIGN_ENTRY_SAFETY.projectionAssumptions,
   reason: "incident-calibrated projection is diagnostic only; ordinary run remains refused and only the exact privately contained SC-20318 action is admitted",
 });
+export const BOUNDED_CAMPAIGN_ENTRY_SPECS = Object.freeze({
+  q4: Object.freeze({
+    profile: BOUNDED_CAMPAIGN_ENTRY_PROFILE,
+    story: "sc-20318",
+    tier: "q4",
+    provider: BOUNDED_CAMPAIGN_ENTRY_PROVIDER,
+    fixture: BOUNDED_CAMPAIGN_ENTRY_FIXTURE,
+    logicalCaseId: BOUNDED_CAMPAIGN_ENTRY_LOGICAL_CASE_ID,
+    identity: BOUNDED_CAMPAIGN_ENTRY_IDENTITY,
+  }),
+  q8: Object.freeze({
+    profile: BOUNDED_CAMPAIGN_ENTRY_Q8_PROFILE,
+    story: "sc-20430",
+    tier: "q8",
+    provider: "mlx-ltx-2-3-q8-768x512-f121-fps30-bounded_decode-192x64",
+    fixture: "ltx-2-3-mlx-q8-768x512-f121-fps30-bounded-decode-192-64-seed18946",
+    logicalCaseId: "implan-d47640caa0c469f2ee13",
+    identity: "sc-20430-q8-768x512-f121-fps30-bounded-192-64-authoritative-v1",
+  }),
+  bf16: Object.freeze({
+    profile: BOUNDED_CAMPAIGN_ENTRY_BF16_PROFILE,
+    story: "sc-20430",
+    tier: "bf16",
+    provider: "mlx-ltx-2-3-bf16-768x512-f121-fps30-bounded_decode-192x64",
+    fixture: "ltx-2-3-mlx-bf16-768x512-f121-fps30-bounded-decode-192-64-seed18946",
+    logicalCaseId: "implan-b3926164bf6bfbee98e1",
+    identity: "sc-20430-bf16-768x512-f121-fps30-bounded-192-64-authoritative-v1",
+  }),
+});
+
+function boundedCampaignEntrySpec(value = "q4") {
+  const spec = BOUNDED_CAMPAIGN_ENTRY_SPECS[value]
+    ?? Object.values(BOUNDED_CAMPAIGN_ENTRY_SPECS).find((candidate) => candidate.profile === value);
+  if (spec === undefined) fail(`unsupported bounded campaign entry ${JSON.stringify(value)}`);
+  return spec;
+}
+
+function boundedCampaignSafety(spec) {
+  if (spec.tier === "q4") return structuredClone(BOUNDED_CAMPAIGN_ENTRY_SAFETY);
+  const inventory = NUMERIC_TIER_INVENTORIES[spec.tier];
+  return {
+    ...structuredClone(BOUNDED_CAMPAIGN_ENTRY_SAFETY),
+    tierInventoryBytes: inventory.bytes,
+    incidentCalibratedProjectionBytes:
+      BOUNDED_CAMPAIGN_ENTRY_SAFETY.incidentCalibratedProjectionBytes
+      + inventory.bytes - Q4_INVENTORY_BYTES,
+    reason: "incident-calibrated projection is diagnostic only; ordinary run remains refused and only the exact privately contained SC-20430 action is admitted",
+  };
+}
 const CANARY_PROFILES = Object.freeze({
   [SAFETY_CANARY_PROFILE]: Object.freeze({
     action: "canary",
@@ -156,6 +207,19 @@ const ARTIFACT_REPOSITORY = "SceneWorks/ltx-2.3-mlx";
 const ARTIFACT_REVISION = "01df27d308466533aa09d251e3aebdcc627d07eb";
 const Q4_INVENTORY_BYTES = 20_467_690_460;
 const Q4_INVENTORY_SHA256 = "4e811932e87bb258f642ada790525e36ef2a55959c520e755f1807caf6fa225a";
+const NUMERIC_TIER_INVENTORIES = Object.freeze({
+  q4: Object.freeze({ files: 11, bytes: Q4_INVENTORY_BYTES, sha256: Q4_INVENTORY_SHA256 }),
+  q8: Object.freeze({
+    files: 11,
+    bytes: 29_728_720_716,
+    sha256: "bb0bb7577157a158ca39494837d64cb36ded0380ca7ee0c930fea7311f22a247",
+  }),
+  bf16: Object.freeze({
+    files: 10,
+    bytes: 47_092_811_992,
+    sha256: "006caeaa9a8638b337cdf5a8622ce8535380b18ebaf90b36c3e2d5d15354f2a8",
+  }),
+});
 const TEXT_ENCODER_INVENTORY_FILES = 17;
 const TEXT_ENCODER_INVENTORY_BYTES = 26_427_894_918;
 const TEXT_ENCODER_INVENTORY_SHA256 = "abde2d155aa8991747cc2999d40688d29a50261c080c0d51fac20357653928d7";
@@ -202,7 +266,8 @@ export function runtimeFreeFloor(memoryBytes) {
   return MIN_RUNTIME_FREE_BYTES + telemetryResolutionBytes(memoryBytes);
 }
 
-export function privateArtifactRoots(scratch) {
+export function privateArtifactRoots(scratch, tier = "q4") {
+  if (!Object.hasOwn(NUMERIC_TIER_INVENTORIES, tier)) fail(`unsupported prepared tier ${tier}`);
   const snapshotRoot = path.join(
     scratch,
     "artifacts",
@@ -211,18 +276,20 @@ export function privateArtifactRoots(scratch) {
     ARTIFACT_REVISION,
   );
   return {
-    numericTier: path.join(snapshotRoot, "q4"),
+    numericTier: path.join(snapshotRoot, tier),
     textEncoder: path.join(snapshotRoot, "gemma"),
   };
 }
 
-export function preparationIdentity(sceneWorksTree, inferenceTree, toolchainChannel) {
+export function preparationIdentity(sceneWorksTree, inferenceTree, toolchainChannel, tier = "q4") {
   for (const [label, value] of [
     ["SceneWorks tree", sceneWorksTree], ["inference tree", inferenceTree],
   ]) {
     if (!/^[0-9a-f]{40}$/.test(value)) fail(`${label} must be an exact git tree`);
   }
   if (!/^\d+\.\d+\.\d+$/.test(toolchainChannel)) fail("toolchain channel must be exact");
+  const numericTier = NUMERIC_TIER_INVENTORIES[tier];
+  if (numericTier === undefined) fail(`unsupported preparation tier ${tier}`);
   return {
     schemaVersion: PREPARATION_SCHEMA_VERSION,
     sceneWorksTree,
@@ -233,9 +300,7 @@ export function preparationIdentity(sceneWorksTree, inferenceTree, toolchainChan
     artifact: {
       repository: ARTIFACT_REPOSITORY,
       revision: ARTIFACT_REVISION,
-      numericTier: {
-        files: 11, bytes: Q4_INVENTORY_BYTES, sha256: Q4_INVENTORY_SHA256,
-      },
+      numericTier: structuredClone(numericTier),
       textEncoder: {
         files: TEXT_ENCODER_INVENTORY_FILES,
         bytes: TEXT_ENCODER_INVENTORY_BYTES,
@@ -624,47 +689,48 @@ export function campaignEntryPlan(config) {
   return { provider, planned: planned[0] };
 }
 
-export function boundedCampaignEntryPlan(config) {
+export function boundedCampaignEntryPlan(config, requested = "q4") {
+  const spec = boundedCampaignEntrySpec(requested);
   const matches = config?.providers?.filter((provider) =>
-    provider.name === BOUNDED_CAMPAIGN_ENTRY_PROVIDER) ?? [];
-  if (matches.length !== 1) fail("SC-20318 requires exactly one bounded campaign provider");
+    provider.name === spec.provider) ?? [];
+  if (matches.length !== 1) fail(`${spec.story} requires exactly one bounded campaign provider`);
   const provider = matches[0];
   const exactProvider = {
-    name: BOUNDED_CAMPAIGN_ENTRY_PROVIDER,
+    name: spec.provider,
     _role: "bounded_carrier_entry",
     _campaignPhase: "bounded_carrier_ratification",
     _coverageExpectation: "captured_or_attempted",
     _latentTokens: 6_144,
     _writableFrameCap: 682,
     _outputVoxels: 47_579_136,
-    _measurementSafety: structuredClone(BOUNDED_CAMPAIGN_ENTRY_SAFETY),
+    _measurementSafety: boundedCampaignSafety(spec),
     evidenceScope: "authoritative",
     backend: "mlx",
     loadShape: "eager_materialization",
     target: {
-      provider: PROVIDER, modelId: PROVIDER, tier: "q4", mode: "text_to_video",
+      provider: PROVIDER, modelId: PROVIDER, tier: spec.tier, mode: "text_to_video",
       overlay: "none", geometry: { width: 768, height: 512, batch: 1, frames: 121 },
     },
     rung: "bounded_decode",
     engagedRungs: ["resident", "staged_residency", "bounded_decode"],
     calibrationFingerprint: FINGERPRINT,
-    fixture: BOUNDED_CAMPAIGN_ENTRY_FIXTURE,
+    fixture: spec.fixture,
     cases: [{ parameters: { decodeTileEdge: 192, decodeOverlap: 64 }, expectedResult: "passed" }],
     _predictedDecodeBytes: 6_264_848_640,
     _predictedDecodeFormula:
       "3.3e9 + 40*(width*height*frames) + 300*(192*192*96) bytes",
   };
   if (!isDeepStrictEqual(provider, exactProvider)) {
-    fail("SC-20318 bounded campaign provider changed");
+    fail(`${spec.story} bounded campaign provider changed`);
   }
   const planned = expandPlan({ providers: [provider] });
   if (planned.length !== 1
-      || planned[0].logicalCaseId !== BOUNDED_CAMPAIGN_ENTRY_LOGICAL_CASE_ID
+      || planned[0].logicalCaseId !== spec.logicalCaseId
       || planned[0].modelLoadPolicy !== "fresh_per_case"
       || planned[0].modelLoadGroup !== null) {
-    fail("SC-20318 bounded campaign logical identity changed");
+    fail(`${spec.story} bounded campaign logical identity changed`);
   }
-  return { provider, planned: planned[0] };
+  return { provider, planned: planned[0], spec };
 }
 
 export function validateCampaignEntryHarnessRequest(request, expectedPlanned, {
@@ -723,11 +789,14 @@ export function campaignEntryAdapterRequest(request, expectedPlanned, expectedSo
   return transformed;
 }
 
-export function boundedCampaignEntryAdapterRequest(request, expectedPlanned, expectedSource) {
+export function boundedCampaignEntryAdapterRequest(
+  request, expectedPlanned, expectedSource, requested = "q4",
+) {
+  const spec = boundedCampaignEntrySpec(requested);
   if (request?.action !== "run"
       || !isDeepStrictEqual(request?.planned, expectedPlanned)
-      || request.planned.logicalCaseId !== BOUNDED_CAMPAIGN_ENTRY_LOGICAL_CASE_ID
-      || request.planned.fixture !== BOUNDED_CAMPAIGN_ENTRY_FIXTURE
+      || request.planned.logicalCaseId !== spec.logicalCaseId
+      || request.planned.fixture !== spec.fixture
       || request.planned.evidenceScope !== "authoritative"
       || request.planned.modelLoadPolicy !== "fresh_per_case"
       || request.planned.modelLoadGroup !== null
@@ -743,19 +812,19 @@ export function boundedCampaignEntryAdapterRequest(request, expectedPlanned, exp
         && request.repositoryPaths?.inference !== expectedSource.inferenceRepo)
       || !Number.isSafeInteger(request.hardware?.memoryBytes)
       || request.hardware.memoryBytes <= 0) {
-    fail("SC-20318 provider wrapper received a non-canonical harness request");
+    fail(`${spec.story} provider wrapper received a non-canonical harness request`);
   }
   for (const field of ["_watchdog", "_boundedCampaignEntry", "_measurementSafety"]) {
     if (Object.hasOwn(request.planned, field)) {
-      fail(`canonical SC-20318 request unexpectedly contains ${field}`);
+      fail(`canonical ${spec.story} request unexpectedly contains ${field}`);
     }
   }
   const transformed = structuredClone(request);
   transformed.action = BOUNDED_CAMPAIGN_ENTRY_ACTION;
   transformed.planned._watchdog = { maxFootprintBytes: MAX_FOOTPRINT_BYTES };
-  transformed.planned._measurementSafety = structuredClone(BOUNDED_CAMPAIGN_ENTRY_SAFETY);
+  transformed.planned._measurementSafety = boundedCampaignSafety(spec);
   transformed.planned._boundedCampaignEntry = {
-    identity: BOUNDED_CAMPAIGN_ENTRY_IDENTITY,
+    identity: spec.identity,
     fps: 30,
     seed: 18_946,
     videoMode: "default_av",
@@ -764,7 +833,7 @@ export function boundedCampaignEntryAdapterRequest(request, expectedPlanned, exp
       repository: ARTIFACT_REPOSITORY,
       revision: ARTIFACT_REVISION,
       numericTierInventory: {
-        files: 11, bytes: Q4_INVENTORY_BYTES, sha256: Q4_INVENTORY_SHA256,
+        ...NUMERIC_TIER_INVENTORIES[spec.tier],
       },
       textEncoderInventory: {
         files: TEXT_ENCODER_INVENTORY_FILES,
@@ -871,8 +940,9 @@ export function validateCampaignEntryAdapterResponse(response, {
 }
 
 export function validateBoundedCampaignEntryResponse(response, {
-  inferenceRevision, hostMemoryBytes,
+  inferenceRevision, hostMemoryBytes, tier = "q4",
 } = {}) {
+  const spec = boundedCampaignEntrySpec(tier);
   const diagnostics = diagnosticMeasurements(response);
   for (const [name, expected] of [
     ["renderedFrames", 121], ["outputFps", 30], ["audioTrackDecoded", 1],
@@ -908,7 +978,7 @@ export function validateBoundedCampaignEntryResponse(response, {
       || response?.loadShape !== "eager_materialization"
       || response?.artifact?.repository !== ARTIFACT_REPOSITORY
       || response?.artifact?.resolvedRevision !== ARTIFACT_REVISION
-      || response?.artifact?.variant !== "q4"
+      || response?.artifact?.variant !== spec.tier
       || !isDeepStrictEqual(response?.strategy, {
         rung: "bounded_decode",
         engagedRungs: ["resident", "staged_residency", "bounded_decode"],
@@ -929,7 +999,7 @@ export function validateBoundedCampaignEntryResponse(response, {
       || response.output.audio.sampleRate <= 0
       || response?.output?.audio?.channels !== 2
       || response?.output?.firstFrameNondegenerate !== true
-      || sidecar?.identity !== BOUNDED_CAMPAIGN_ENTRY_IDENTITY
+      || sidecar?.identity !== spec.identity
       || (inferenceRevision !== undefined && sidecar?.inferenceRevision !== inferenceRevision)
       || sidecar?.watchdog?.required !== true
       || sidecar?.watchdog?.protocol !== "sceneworks-memory-watchdog-v1"
@@ -948,7 +1018,7 @@ export function validateBoundedCampaignEntryResponse(response, {
       || !Number.isSafeInteger(sidecar?.mlxLimits?.wiredLimitBytes)
       || sidecar.mlxLimits.wiredLimitBytes <= 0
       || sidecar.mlxLimits.wiredLimitBytes > MAX_FOOTPRINT_BYTES) {
-    fail("SC-20318 adapter response changed the exact bounded campaign entry");
+    fail(`${spec.story} adapter response changed the exact bounded campaign entry`);
   }
   const cleanup = sidecar.cleanup;
   for (const field of [
@@ -1463,17 +1533,19 @@ export function validateCampaignEntryBundle(bundle) {
   return bundle;
 }
 
-export function validateBoundedCampaignEntryBundle(bundle) {
+export function validateBoundedCampaignEntryBundle(bundle, requested = "q4") {
+  const spec = boundedCampaignEntrySpec(requested);
   validateBundle(bundle);
   if (bundle.records.length !== 1 || (bundle.sourceSessions?.length ?? 0) !== 0) {
     fail("SC-20318 must publish exactly one canonical record and no source session");
   }
   const record = bundle.records[0];
   const scenarios = new Map(record?.scenarios?.map((item) => [item.name, item]) ?? []);
-  if (record.logicalCaseId !== BOUNDED_CAMPAIGN_ENTRY_LOGICAL_CASE_ID
+  if (record.logicalCaseId !== spec.logicalCaseId
       || record.status !== "runtime_complete"
       || record.evidenceScope !== "authoritative"
-      || record.fixture !== BOUNDED_CAMPAIGN_ENTRY_FIXTURE
+      || record.fixture !== spec.fixture
+      || record.target?.tier !== spec.tier
       || !isDeepStrictEqual(record.strategy, {
         rung: "bounded_decode",
         engagedRungs: ["resident", "staged_residency", "bounded_decode"],
@@ -1509,7 +1581,16 @@ export function validateBoundedCampaignEntryBundle(bundle) {
   const post = diagnostics.get("boundedCampaignPostCleanupActiveBytes");
   const observed = diagnostics.get("boundedCampaignWatchdogMaxObservedFootprintBytes");
   const host = diagnostics.get("boundedCampaignWatchdogHostMemoryBytes");
-  if (!Number.isSafeInteger(pre) || post !== pre + ltxOnesCacheBytes()
+  const phaseAnchors = [
+    record.observedMemory?.conditioning?.activeBytes,
+    record.observedMemory?.denoise?.activeBytes,
+    record.observedMemory?.decode?.activeBytes,
+    diagnostics.get("warmConditioningActivePeak"),
+    diagnostics.get("warmDenoiseActivePeak"),
+    diagnostics.get("warmDecodeActivePeak"),
+  ];
+  if (phaseAnchors.some((value) => !Number.isSafeInteger(value) || value <= 0)
+      || !Number.isSafeInteger(pre) || post !== pre + ltxOnesCacheBytes()
       || host !== record.hardware.memoryBytes
       || diagnostics.get("boundedCampaignWatchdogMinInitialMemoryFreeBytes")
         !== preflightFreeFloor(host)
@@ -1521,6 +1602,198 @@ export function validateBoundedCampaignEntryBundle(bundle) {
   return bundle;
 }
 
+export function boundedSelectorAnchorReport(bundlesByTier) {
+  const phaseNames = ["conditioning", "denoise", "decode"];
+  let matchBasis = null;
+  const anchors = Object.keys(BOUNDED_CAMPAIGN_ENTRY_SPECS).map((tier) => {
+    const bundle = bundlesByTier?.[tier];
+    validateBoundedCampaignEntryBundle(bundle, tier);
+    const record = bundle.records[0];
+    const diagnostics = diagnosticMeasurements(record);
+    const recordMatchBasis = {
+      hardware: Object.fromEntries([
+        "memoryBytes", "model", "chip", "osVersion", "metalDevice",
+        "mlxMemoryLimitBytes", "wiredLimitBytes",
+      ].map((name) => [name, record.hardware[name]])),
+      inference: {
+        revision: record.repositories.inference.revision,
+        closureDigest: record.repositories.inference.closureDigest,
+      },
+      calibrationFingerprint: record.calibrationFingerprint,
+      artifact: {
+        repository: record.artifact.repository,
+        resolvedRevision: record.artifact.resolvedRevision,
+      },
+      geometry: structuredClone(record.target.geometry),
+      strategy: structuredClone(record.strategy),
+    };
+    if (matchBasis === null) matchBasis = recordMatchBasis;
+    else if (!isDeepStrictEqual(recordMatchBasis, matchBasis)) {
+      fail(`SC-20430 ${tier} capture does not match the bounded-selector comparison basis`);
+    }
+    const selected = Object.fromEntries(phaseNames.map((phase) => {
+      const value = record.observedMemory?.[phase]?.activeBytes;
+      if (!Number.isSafeInteger(value) || value <= 0) {
+        fail(`SC-20430 ${tier} selected ${phase} phase anchor must be positive`);
+      }
+      return [phase, value];
+    }));
+    const warm = Object.fromEntries(phaseNames.map((phase) => {
+      const diagnostic = `warm${phase[0].toUpperCase()}${phase.slice(1)}ActivePeak`;
+      const value = diagnostics.get(diagnostic);
+      if (!Number.isSafeInteger(value) || value <= 0) {
+        fail(`SC-20430 ${tier} warm ${phase} phase anchor must be positive`);
+      }
+      return [phase, value];
+    }));
+    const binding = (values) => {
+      const maximum = Math.max(...Object.values(values));
+      return {
+        phases: phaseNames.filter((phase) => values[phase] === maximum),
+        activePeakBytes: maximum,
+      };
+    };
+    return {
+      tier,
+      logicalCaseId: record.logicalCaseId,
+      recordId: record.id,
+      fixture: record.fixture,
+      source: {
+        sceneWorksRevision: record.repositories.sceneWorks.revision,
+        inferenceRevision: record.repositories.inference.revision,
+        inferenceClosureDigest: record.repositories.inference.closureDigest,
+      },
+      selected: { activePeakBytesByPhase: selected, binding: binding(selected) },
+      warm: { activePeakBytesByPhase: warm, binding: binding(warm) },
+    };
+  });
+  const q8Source = anchors.find(({ tier }) => tier === "q8").source;
+  const bf16Source = anchors.find(({ tier }) => tier === "bf16").source;
+  if (q8Source.sceneWorksRevision !== bf16Source.sceneWorksRevision
+      || q8Source.inferenceRevision !== bf16Source.inferenceRevision
+      || q8Source.inferenceClosureDigest !== bf16Source.inferenceClosureDigest) {
+    fail("SC-20430 q8 and bf16 captures must share the exact ratification source");
+  }
+  const report = {
+    schemaVersion: 1,
+    recordType: "sceneworks_bounded_selector_anchor_v1",
+    status: "diagnostic_anchor_complete",
+    diagnosticOnly: true,
+    promotable: false,
+    ingestible: false,
+    scope: "matched_q4_q8_bf16_bounded_selector",
+    coefficientTransferClaim: false,
+    pooledWithStagedOrSinglePass: false,
+    sourcePolicy: {
+      q4MayPrecedeRatificationSource: true,
+      q8AndBf16SceneWorksRevision: q8Source.sceneWorksRevision,
+    },
+    matchBasis,
+    anchors,
+  };
+  try {
+    validateBundle(report);
+    fail("SC-20430 bounded-selector anchor report became canonically ingestible");
+  } catch (error) {
+    if (String(error?.message ?? error).includes("became canonically ingestible")) throw error;
+  }
+  return report;
+}
+
+function exactFileIdentity(file, stats) {
+  return {
+    path: file,
+    device: stats.dev.toString(),
+    inode: stats.ino.toString(),
+    size: Number(stats.size),
+    mtimeNs: stats.mtimeNs.toString(),
+    ctimeNs: stats.ctimeNs.toString(),
+    mode: Number(stats.mode & 0o777n),
+  };
+}
+
+export async function validateQ8IndependentAudit(auditPath, {
+  sceneWorksRevision, inferenceRevision,
+} = {}) {
+  const absoluteAuditPath = path.resolve(auditPath);
+  const handle = await open(
+    absoluteAuditPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
+  ).catch((error) => fail(`SC-20430 q8 audit must be an exact sealed file: ${error.message}`));
+  let auditBytes;
+  let auditFile;
+  try {
+    const before = await handle.stat({ bigint: true });
+    if (!before.isFile() || Number(before.mode & 0o777n) !== 0o400 || before.size <= 0n
+        || before.size > BigInt(Number.MAX_SAFE_INTEGER)) {
+      fail("SC-20430 q8 audit must be a non-empty read-only regular file");
+    }
+    auditBytes = await handle.readFile();
+    const after = await handle.stat({ bigint: true });
+    if (!isDeepStrictEqual(exactFileIdentity(absoluteAuditPath, before),
+      exactFileIdentity(absoluteAuditPath, after))) {
+      fail("SC-20430 q8 audit changed while it was read");
+    }
+    auditFile = exactFileIdentity(absoluteAuditPath, after);
+  } finally {
+    await handle.close();
+  }
+  const audit = JSON.parse(auditBytes.toString("utf8"));
+  const canonicalOutput = audit?.q8?.canonicalOutput;
+  if (audit?.schemaVersion !== 1
+      || audit?.recordType !== "sceneworks_sc20430_q8_independent_audit_v1"
+      || audit?.result !== "passed"
+      || audit?.independent !== true
+      || audit?.diagnosticOnly !== true
+      || audit?.ingestible !== false
+      || !path.isAbsolute(canonicalOutput ?? "")
+      || !/^[0-9a-f]{64}$/.test(audit?.q8?.canonicalSha256 ?? "")
+      || audit?.q8?.logicalCaseId !== BOUNDED_CAMPAIGN_ENTRY_SPECS.q8.logicalCaseId
+      || !/^imc-[0-9a-f]{20}$/.test(audit?.q8?.recordId ?? "")
+      || !/^[0-9a-f]{40}$/.test(audit?.q8?.sceneWorksRevision ?? "")
+      || !/^[0-9a-f]{40}$/.test(audit?.q8?.inferenceRevision ?? "")) {
+    fail("SC-20430 bf16 release requires an exact passed independent q8 audit");
+  }
+  const bundleBytes = await readFile(canonicalOutput, "utf8");
+  const bundle = JSON.parse(bundleBytes);
+  validateBoundedCampaignEntryBundle(bundle, "q8");
+  const digest = createHash("sha256").update(canonicalJson(bundle)).digest("hex");
+  if (digest !== audit.q8.canonicalSha256
+      || bundle.records[0].id !== audit.q8.recordId
+      || bundle.records[0].repositories?.sceneWorks?.revision !== audit.q8.sceneWorksRevision
+      || bundle.records[0].repositories?.inference?.revision !== audit.q8.inferenceRevision
+      || (sceneWorksRevision !== undefined && audit.q8.sceneWorksRevision !== sceneWorksRevision)
+      || (inferenceRevision !== undefined && audit.q8.inferenceRevision !== inferenceRevision)) {
+    fail("SC-20430 q8 independent audit does not bind the exact canonical bundle");
+  }
+  return {
+    schemaVersion: 1,
+    recordType: "sceneworks_sc20430_q8_release_authorization_v1",
+    auditFile: { ...auditFile, sha256: createHash("sha256").update(auditBytes).digest("hex") },
+    q8: structuredClone(audit.q8),
+  };
+}
+
+async function assertQ8ReleaseAuthorization(expected, auditPath, revisions) {
+  if (expected === null) return null;
+  const current = await validateQ8IndependentAudit(auditPath, revisions);
+  if (!isDeepStrictEqual(current, expected)) {
+    fail("SC-20430 q8 independent-audit authorization changed after release approval");
+  }
+  return current;
+}
+
+export async function publishBoundedSelectorAnchorReport({
+  q4Bundle, q8Bundle, bf16Bundle, output, signal,
+}) {
+  const report = boundedSelectorAnchorReport({
+    q4: JSON.parse(await readFile(path.resolve(q4Bundle), "utf8")),
+    q8: JSON.parse(await readFile(path.resolve(q8Bundle), "utf8")),
+    bf16: JSON.parse(await readFile(path.resolve(bf16Bundle), "utf8")),
+  });
+  await publishExclusiveJson(path.resolve(output), report, signal);
+  return report;
+}
+
 export function campaignEntryFailurePath(canonicalOutput) {
   return path.join(path.dirname(canonicalOutput), "sc-20216-campaign-entry-failure.json");
 }
@@ -1529,12 +1802,20 @@ export function campaignEntryOutcomeReservationPath(canonicalOutput) {
   return path.join(path.dirname(canonicalOutput), ".sc-20216-campaign-entry-outcome");
 }
 
-export function boundedCampaignEntryFailurePath(canonicalOutput) {
-  return path.join(path.dirname(canonicalOutput), "sc-20318-bounded-campaign-entry-failure.json");
+export function boundedCampaignEntryFailurePath(canonicalOutput, requested = "q4") {
+  const spec = boundedCampaignEntrySpec(requested);
+  const filename = spec.tier === "q4"
+    ? "sc-20318-bounded-campaign-entry-failure.json"
+    : `sc-20430-${spec.tier}-bounded-campaign-entry-failure.json`;
+  return path.join(path.dirname(canonicalOutput), filename);
 }
 
-export function boundedCampaignEntryOutcomeReservationPath(canonicalOutput) {
-  return path.join(path.dirname(canonicalOutput), ".sc-20318-bounded-campaign-entry-outcome");
+export function boundedCampaignEntryOutcomeReservationPath(canonicalOutput, requested = "q4") {
+  const spec = boundedCampaignEntrySpec(requested);
+  const filename = spec.tier === "q4"
+    ? ".sc-20318-bounded-campaign-entry-outcome"
+    : `.sc-20430-${spec.tier}-bounded-campaign-entry-outcome`;
+  return path.join(path.dirname(canonicalOutput), filename);
 }
 
 export function campaignEntryFailureReceipt({
@@ -1614,7 +1895,9 @@ export function campaignEntryFailureReceipt({
 export function boundedCampaignEntryFailureReceipt({
   sceneWorksRevision, sceneWorksTree, inferenceRevision, inferenceTree,
   identity, preparationKey, preparationRoot, prepared, hostMemoryBytes, events, outcome,
+  tier = "q4",
 }) {
+  const spec = boundedCampaignEntrySpec(tier);
   const failure = validateCampaignEntryFailureEvents(
     events, hostMemoryBytes, BOUNDED_CARRIER_PHASES,
   );
@@ -1627,20 +1910,20 @@ export function boundedCampaignEntryFailureReceipt({
     ingestible: false,
     canonicalBundlePublished: false,
     outcome: structuredClone(outcome),
-    story: "sc-20318",
+    story: spec.story,
     source: {
       sceneWorks: { revision: sceneWorksRevision, tree: sceneWorksTree },
       inference: { revision: inferenceRevision, tree: inferenceTree },
     },
     campaignCase: {
       plan: BOUNDED_CAMPAIGN_ENTRY_PLAN,
-      provider: BOUNDED_CAMPAIGN_ENTRY_PROVIDER,
-      logicalCaseId: BOUNDED_CAMPAIGN_ENTRY_LOGICAL_CASE_ID,
-      fixture: BOUNDED_CAMPAIGN_ENTRY_FIXTURE,
-      identity: BOUNDED_CAMPAIGN_ENTRY_IDENTITY,
+      provider: spec.provider,
+      logicalCaseId: spec.logicalCaseId,
+      fixture: spec.fixture,
+      identity: spec.identity,
       action: BOUNDED_CAMPAIGN_ENTRY_ACTION,
       target: {
-        provider: PROVIDER, tier: "q4",
+        provider: PROVIDER, tier: spec.tier,
         geometry: { width: 768, height: 512, batch: 1, frames: 121, fps: 30 },
       },
       strategy: {
@@ -1685,10 +1968,10 @@ export function boundedCampaignEntryFailureReceipt({
       preparationTransientResidueVerified: true,
     },
   };
-  return validateBoundedCampaignEntryFailureReceipt(receipt);
+  return validateBoundedCampaignEntryFailureReceipt(receipt, spec.tier);
 }
 
-function validateContainedReceiptArtifactIdentity(receipt, label) {
+function validateContainedReceiptArtifactIdentity(receipt, label, expectedTier = null) {
   for (const source of [receipt.source?.sceneWorks, receipt.source?.inference]) {
     if (!/^[0-9a-f]{40}$/.test(source?.revision ?? "")
         || !/^[0-9a-f]{40}$/.test(source?.tree ?? "")) {
@@ -1703,11 +1986,29 @@ function validateContainedReceiptArtifactIdentity(receipt, label) {
     && Number.isSafeInteger(file?.size) && file.size > 0
     && typeof file?.mtimeNs === "string" && typeof file?.ctimeNs === "string"
     && file?.mode === mode;
+  const expectedNumericTier = expectedTier === null
+    ? NUMERIC_TIER_INVENTORIES.q4 : NUMERIC_TIER_INVENTORIES[expectedTier];
+  const expectedIdentity = {
+    schemaVersion: PREPARATION_SCHEMA_VERSION,
+    sceneWorksTree: receipt.source.sceneWorks.tree,
+    inferenceTree: receipt.source.inference.tree,
+    toolchainChannel: identity?.toolchainChannel,
+    platform: "darwin",
+    architecture: "arm64",
+    artifact: {
+      repository: ARTIFACT_REPOSITORY,
+      revision: ARTIFACT_REVISION,
+      numericTier: expectedNumericTier,
+      textEncoder: {
+        files: TEXT_ENCODER_INVENTORY_FILES,
+        bytes: TEXT_ENCODER_INVENTORY_BYTES,
+        sha256: TEXT_ENCODER_INVENTORY_SHA256,
+      },
+    },
+  };
   if (receipt.artifacts?.repository !== ARTIFACT_REPOSITORY
       || receipt.artifacts?.revision !== ARTIFACT_REVISION
-      || !isDeepStrictEqual(receipt.artifacts?.numericTierInventory, {
-        files: 11, bytes: Q4_INVENTORY_BYTES, sha256: Q4_INVENTORY_SHA256,
-      })
+      || !isDeepStrictEqual(receipt.artifacts?.numericTierInventory, expectedNumericTier)
       || !isDeepStrictEqual(receipt.artifacts?.textEncoderInventory, {
         files: TEXT_ENCODER_INVENTORY_FILES,
         bytes: TEXT_ENCODER_INVENTORY_BYTES,
@@ -1717,6 +2018,7 @@ function validateContainedReceiptArtifactIdentity(receipt, label) {
       || !path.isAbsolute(preparation?.root ?? "")
       || path.basename(preparation?.root ?? "") !== preparation.key
       || preparation?.manifest?.key !== preparation.key
+      || preparation?.key !== preparationCacheKey(expectedIdentity)
       || preparation?.manifest?.schemaVersion !== PREPARATION_SCHEMA_VERSION
       || !isDeepStrictEqual(preparation?.manifest?.identity, identity)
       || preparation?.manifest?.preparedFrom?.sceneWorksRevision
@@ -1730,6 +2032,8 @@ function validateContainedReceiptArtifactIdentity(receipt, label) {
       || identity?.sceneWorksTree !== receipt.source.sceneWorks.tree
       || identity?.inferenceTree !== receipt.source.inference.tree
       || identity?.schemaVersion !== PREPARATION_SCHEMA_VERSION
+      || !/^\d+\.\d+\.\d+$/.test(identity?.toolchainChannel ?? "")
+      || !isDeepStrictEqual(identity, expectedIdentity)
       || !isDeepStrictEqual(identity?.artifact, {
         repository: ARTIFACT_REPOSITORY,
         revision: ARTIFACT_REVISION,
@@ -1819,18 +2123,19 @@ export function validateCampaignEntryFailureReceipt(receipt) {
   return receipt;
 }
 
-export function validateBoundedCampaignEntryFailureReceipt(receipt) {
+export function validateBoundedCampaignEntryFailureReceipt(receipt, requested = "q4") {
+  const spec = boundedCampaignEntrySpec(requested);
   let ingestible = true;
   try { validateBundle(receipt); } catch { ingestible = false; }
   const expectedCase = {
     plan: BOUNDED_CAMPAIGN_ENTRY_PLAN,
-    provider: BOUNDED_CAMPAIGN_ENTRY_PROVIDER,
-    logicalCaseId: BOUNDED_CAMPAIGN_ENTRY_LOGICAL_CASE_ID,
-    fixture: BOUNDED_CAMPAIGN_ENTRY_FIXTURE,
-    identity: BOUNDED_CAMPAIGN_ENTRY_IDENTITY,
+    provider: spec.provider,
+    logicalCaseId: spec.logicalCaseId,
+    fixture: spec.fixture,
+    identity: spec.identity,
     action: BOUNDED_CAMPAIGN_ENTRY_ACTION,
     target: {
-      provider: PROVIDER, tier: "q4",
+      provider: PROVIDER, tier: spec.tier,
       geometry: { width: 768, height: 512, batch: 1, frames: 121, fps: 30 },
     },
     strategy: {
@@ -1849,6 +2154,25 @@ export function validateBoundedCampaignEntryFailureReceipt(receipt) {
     preparedCacheVerified: true,
     preparationTransientResidueVerified: true,
   };
+  const authorization = receipt?.outcome?.q8ReleaseAuthorization;
+  const exactBf16Authorization = spec.tier === "bf16"
+    && authorization?.schemaVersion === 1
+    && authorization?.recordType === "sceneworks_sc20430_q8_release_authorization_v1"
+    && path.isAbsolute(authorization?.auditFile?.path ?? "")
+    && authorization?.auditFile?.mode === 0o400
+    && Number.isSafeInteger(authorization?.auditFile?.size)
+    && authorization.auditFile.size > 0
+    && typeof authorization?.auditFile?.device === "string"
+    && typeof authorization?.auditFile?.inode === "string"
+    && typeof authorization?.auditFile?.mtimeNs === "string"
+    && typeof authorization?.auditFile?.ctimeNs === "string"
+    && /^[0-9a-f]{64}$/.test(authorization?.auditFile?.sha256 ?? "")
+    && path.isAbsolute(authorization?.q8?.canonicalOutput ?? "")
+    && /^[0-9a-f]{64}$/.test(authorization?.q8?.canonicalSha256 ?? "")
+    && authorization?.q8?.logicalCaseId === BOUNDED_CAMPAIGN_ENTRY_SPECS.q8.logicalCaseId
+    && /^imc-[0-9a-f]{20}$/.test(authorization?.q8?.recordId ?? "")
+    && authorization?.q8?.sceneWorksRevision === receipt?.source?.sceneWorks?.revision
+    && authorization?.q8?.inferenceRevision === receipt?.source?.inference?.revision;
   if (ingestible
       || receipt?.recordType !== BOUNDED_CAMPAIGN_FAILURE_RECEIPT_TYPE
       || receipt?.status !== "diagnostic_failure"
@@ -1858,11 +2182,14 @@ export function validateBoundedCampaignEntryFailureReceipt(receipt) {
       || receipt?.outcome?.outcomeReservationHeldAtPublication !== true
       || receipt?.outcome?.outcomeChoice !== "failure"
       || receipt?.outcome?.failureOutput
-        !== boundedCampaignEntryFailurePath(receipt?.outcome?.canonicalOutput ?? "")
+        !== boundedCampaignEntryFailurePath(receipt?.outcome?.canonicalOutput ?? "", spec.tier)
       || receipt?.outcome?.reservation
-        !== boundedCampaignEntryOutcomeReservationPath(receipt?.outcome?.canonicalOutput ?? "")
+        !== boundedCampaignEntryOutcomeReservationPath(
+          receipt?.outcome?.canonicalOutput ?? "", spec.tier,
+        )
       || receipt?.outcome?.choice !== `${receipt?.outcome?.reservation}.choice`
-      || receipt?.story !== "sc-20318"
+      || receipt?.story !== spec.story
+      || (spec.tier === "bf16" ? !exactBf16Authorization : authorization != null)
       || !isDeepStrictEqual(receipt?.campaignCase, expectedCase)
       || receipt?.watchdog?.protocol !== "sceneworks-memory-watchdog-v1"
       || receipt?.watchdog?.providerPhaseProtocol !== PROVIDER_PHASE_PROTOCOL
@@ -1872,7 +2199,7 @@ export function validateBoundedCampaignEntryFailureReceipt(receipt) {
       || !isDeepStrictEqual(receipt?.cleanup, expectedCleanup)) {
     fail("SC-20318 failure receipt is ingestible, incomplete, or identity-drifted");
   }
-  validateContainedReceiptArtifactIdentity(receipt, "SC-20318 failure");
+  validateContainedReceiptArtifactIdentity(receipt, "SC-20318 failure", spec.tier);
   const validated = validateCampaignEntryFailureEvents(
     receipt.watchdog.events, receipt.watchdog.hostMemoryBytes, BOUNDED_CARRIER_PHASES,
   );
@@ -2535,10 +2862,10 @@ function preparedFileManifestIdentity(file) {
   };
 }
 
-async function validatePreparedStructure(preparationRoot) {
+async function validatePreparedStructure(preparationRoot, tier = "q4") {
   await exactMetadata(preparationRoot, "directory", 0o500);
   await exactEntries(preparationRoot, ["adapter", "artifacts", "prepared.json", "prepared.sha256"]);
-  const roots = privateArtifactRoots(preparationRoot);
+  const roots = privateArtifactRoots(preparationRoot, tier);
   const revisionDirectory = path.dirname(roots.numericTier);
   const snapshotsDirectory = path.dirname(revisionDirectory);
   const modelDirectory = path.dirname(snapshotsDirectory);
@@ -2552,12 +2879,12 @@ async function validatePreparedStructure(preparationRoot) {
   await exactEntries(artifactsDirectory, [path.basename(modelDirectory)]);
   await exactEntries(modelDirectory, ["snapshots"]);
   await exactEntries(snapshotsDirectory, [ARTIFACT_REVISION]);
-  await exactEntries(revisionDirectory, ["gemma", "q4"]);
+  await exactEntries(revisionDirectory, ["gemma", tier]);
   await exactEntries(adapterDirectory, ["memory-mlx-adapter", "mlx.metallib"]);
   return roots;
 }
 
-export async function validatePreparedCache(preparationRoot, key, identity, signal) {
+export async function validatePreparedCache(preparationRoot, key, identity, signal, tier = "q4") {
   const rootMetadata = await lstat(preparationRoot, { bigint: true }).catch((error) => {
     if (error.code === "ENOENT") return null;
     throw error;
@@ -2566,7 +2893,7 @@ export async function validatePreparedCache(preparationRoot, key, identity, sign
   const manifestPath = path.join(preparationRoot, "prepared.json");
   const completionPath = path.join(preparationRoot, "prepared.sha256");
   if (!(await pathExists(manifestPath)) || !(await pathExists(completionPath))) return null;
-  const roots = await validatePreparedStructure(preparationRoot);
+  const roots = await validatePreparedStructure(preparationRoot, tier);
   await exactMetadata(manifestPath, "file", 0o400);
   await exactMetadata(completionPath, "file", 0o400);
   const manifestBytes = await readFile(manifestPath, "utf8");
@@ -2614,12 +2941,14 @@ async function sealPreparationDirectories(directory) {
   if (((await lstat(directory)).mode & 0o777) !== 0o500) await chmod(directory, 0o500);
 }
 
-async function writePreparedManifest(stage, key, identity, preparedFrom, builtArtifacts, signal) {
+async function writePreparedManifest(
+  stage, key, identity, preparedFrom, builtArtifacts, signal, tier = "q4",
+) {
   if (!/^[0-9a-f]{40}$/.test(preparedFrom.sceneWorksRevision)
       || !/^[0-9a-f]{40}$/.test(preparedFrom.inferenceRevision)) {
     fail("prepared canary source revisions must be exact commits");
   }
-  const roots = privateArtifactRoots(stage);
+  const roots = privateArtifactRoots(stage, tier);
   const artifacts = {};
   for (const [name, root] of Object.entries(roots)) {
     const content = assertInventory(
@@ -2805,18 +3134,19 @@ export async function prepareCanaryCache({
   signal,
   hooks = {},
   processIdentityProbe = osProcessIdentity,
+  tier = "q4",
 }) {
   const parent = path.dirname(preparationRoot);
   await mkdir(parent, { recursive: true, mode: 0o700 });
   await exactMetadata(parent, "directory", 0o700);
-  const alreadyPrepared = await validatePreparedCache(preparationRoot, key, identity, signal);
+  const alreadyPrepared = await validatePreparedCache(preparationRoot, key, identity, signal, tier);
   if (alreadyPrepared !== null) return alreadyPrepared;
   const release = await acquirePreparationLock(preparationRoot, signal, processIdentityProbe);
   let stage = null;
   let operationError = null;
   let cleanupError = null;
   try {
-    const wonRace = await validatePreparedCache(preparationRoot, key, identity, signal);
+    const wonRace = await validatePreparedCache(preparationRoot, key, identity, signal, tier);
     if (wonRace !== null) return wonRace;
     if (await pathExists(preparationRoot)) await cleanupCanaryScratch(preparationRoot);
     await cleanupStalePreparationStages(preparationRoot);
@@ -2825,13 +3155,13 @@ export async function prepareCanaryCache({
     const built = await build(stage, signal, hooks);
     signal?.throwIfAborted();
     await hooks.buildComplete?.(stage, signal);
-    await writePreparedManifest(stage, key, identity, preparedFrom, built?.artifacts, signal);
+    await writePreparedManifest(stage, key, identity, preparedFrom, built?.artifacts, signal, tier);
     signal?.throwIfAborted();
     await hooks.beforePublish?.(stage, signal);
     signal?.throwIfAborted();
     await rename(stage, preparationRoot);
     stage = null;
-    const prepared = await validatePreparedCache(preparationRoot, key, identity, signal);
+    const prepared = await validatePreparedCache(preparationRoot, key, identity, signal, tier);
     if (prepared === null) fail("atomic prepared canary publication is incomplete");
     return { ...prepared, reused: false };
   } catch (error) {
@@ -3107,21 +3437,25 @@ function campaignProviderOptions(argv) {
 }
 
 async function campaignProviderInvocation(options, input, {
-  signal, setActiveWatchdog = () => {}, canonicalClaim, executionClaim, bounded = false,
+  signal, setActiveWatchdog = () => {}, canonicalClaim, executionClaim,
+  bounded = false, boundedTier = null, q8ReleaseAuthorization = null,
 } = {}) {
   signal?.throwIfAborted();
-  const spec = bounded ? {
-    story: "SC-20318",
+  const boundedEntry = bounded || boundedTier !== null;
+  const boundedSpec = boundedEntry ? boundedCampaignEntrySpec(boundedTier ?? "q4") : null;
+  const spec = boundedEntry ? {
+    story: boundedSpec.story.toUpperCase(),
     plan: BOUNDED_CAMPAIGN_ENTRY_PLAN,
-    planEntry: boundedCampaignEntryPlan,
-    failurePath: boundedCampaignEntryFailurePath,
-    outcomePath: boundedCampaignEntryOutcomeReservationPath,
-    adapterRequest: boundedCampaignEntryAdapterRequest,
+    planEntry: (config) => boundedCampaignEntryPlan(config, boundedSpec.tier),
+    failurePath: (output) => boundedCampaignEntryFailurePath(output, boundedSpec.tier),
+    outcomePath: (output) => boundedCampaignEntryOutcomeReservationPath(output, boundedSpec.tier),
+    adapterRequest: (request, planned, source) =>
+      boundedCampaignEntryAdapterRequest(request, planned, source, boundedSpec.tier),
     validateResponse: validateBoundedCampaignEntryResponse,
     canonicalFragment: boundedCampaignEntryCanonicalFragment,
     phases: BOUNDED_CARRIER_PHASES,
     phaseProfile: "bounded-campaign-entry",
-    childName: "sc-20318-bounded-campaign-entry",
+    childName: `${boundedSpec.story}-${boundedSpec.tier}-bounded-campaign-entry`,
   } : {
     story: "SC-20191",
     plan: CAMPAIGN_ENTRY_PLAN,
@@ -3144,6 +3478,7 @@ async function campaignProviderInvocation(options, input, {
     token: options["outcome-token"],
     canonicalClaim,
     executionClaim,
+    q8ReleaseAuthorization,
   };
   if (campaignOutcome.failureOutput !== spec.failurePath(campaignOutcome.canonicalOutput)
       || campaignOutcome.reservation !== spec.outcomePath(campaignOutcome.canonicalOutput)) {
@@ -3152,15 +3487,17 @@ async function campaignProviderInvocation(options, input, {
   const config = JSON.parse(await readFile(path.join(ROOT, spec.plan), "utf8"));
   const { planned } = spec.planEntry(config);
   const toolchainChannel = await repositoryToolchain();
+  const preparationTier = boundedSpec?.tier ?? "q4";
   const identity = preparationIdentity(
     options["scene-tree"], options["inference-tree"], toolchainChannel,
+    preparationTier,
   );
   if (preparationCacheKey(identity) !== options["preparation-key"]) {
     fail("SC-20191 campaign provider preparation key changed");
   }
   await assertCampaignSourceState(options, signal);
   const prepared = await validatePreparedCache(
-    options["preparation-root"], options["preparation-key"], identity, signal,
+    options["preparation-root"], options["preparation-key"], identity, signal, preparationTier,
   );
   if (prepared === null) fail("SC-20191 prepared cache disappeared before provider invocation");
   await assertRuntimeAssetIdentities(prepared.adapter, prepared.metallib, signal);
@@ -3188,7 +3525,7 @@ async function campaignProviderInvocation(options, input, {
       await assertCampaignSourceState(options, signal);
       await assertRuntimeAssetIdentities(prepared.adapter, prepared.metallib, signal);
       if (await validatePreparedCache(
-        options["preparation-root"], options["preparation-key"], identity, signal,
+        options["preparation-root"], options["preparation-key"], identity, signal, preparationTier,
       ) === null) fail("SC-20191 prepared cache disappeared after provider probe");
       output = probeOutput;
     } else {
@@ -3225,8 +3562,16 @@ async function campaignProviderInvocation(options, input, {
       await assertCampaignSourceState(options, signal);
       await assertRuntimeAssetIdentities(prepared.adapter, prepared.metallib, signal);
       if (await validatePreparedCache(
-        options["preparation-root"], options["preparation-key"], identity, signal,
+        options["preparation-root"], options["preparation-key"], identity, signal, preparationTier,
       ) === null) fail("SC-20191 prepared cache disappeared before model release");
+      if (boundedSpec?.tier === "bf16") {
+        await assertQ8ReleaseAuthorization(
+          q8ReleaseAuthorization, options["q8-audit"], {
+            sceneWorksRevision: options["scene-revision"],
+            inferenceRevision: options["inference-revision"],
+          },
+        );
+      }
       // This immediate actual-GPU-owner and two-boundary pressure check is deliberately the final
       // operation before the watchdog takes ownership of the model process.
       await assertHostPreflight(hostMemoryBytes, signal);
@@ -3260,7 +3605,8 @@ async function campaignProviderInvocation(options, input, {
           await assertCampaignSourceState(options);
           await assertRuntimeAssetIdentities(prepared.adapter, prepared.metallib);
           if (await validatePreparedCache(
-            options["preparation-root"], options["preparation-key"], identity,
+            options["preparation-root"], options["preparation-key"], identity, undefined,
+            preparationTier,
           ) === null) fail("SC-20216 prepared cache disappeared after watchdog failure");
           failureEvents = events;
           failureHostMemoryBytes = hostMemoryBytes;
@@ -3274,6 +3620,7 @@ async function campaignProviderInvocation(options, input, {
       const events = eventBytes.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
       spec.validateResponse(response, {
         inferenceRevision: options["inference-revision"], hostMemoryBytes,
+        tier: boundedSpec?.tier ?? "q4",
       });
       const maxObservedFootprintBytes = validateCampaignEntryWatchdogEvents(
         events, hostMemoryBytes, spec.phases,
@@ -3288,7 +3635,7 @@ async function campaignProviderInvocation(options, input, {
       await assertCampaignSourceState(options, signal);
       await assertRuntimeAssetIdentities(prepared.adapter, prepared.metallib, signal);
       if (await validatePreparedCache(
-        options["preparation-root"], options["preparation-key"], identity, signal,
+        options["preparation-root"], options["preparation-key"], identity, signal, preparationTier,
       ) === null) fail("SC-20191 prepared cache disappeared after campaign entry");
       output = canonicalJson(spec.canonicalFragment(response, maxObservedFootprintBytes));
     }
@@ -3307,7 +3654,7 @@ async function campaignProviderInvocation(options, input, {
     let publicationError = null;
     if (failureEvents !== null && cleanupError === null) {
       try {
-        const publishFailure = bounded
+        const publishFailure = boundedEntry
           ? publishBoundedCampaignEntryFailure : publishCampaignEntryFailureReceipt;
         await publishFailure(campaignOutcome, {
           verify: async () => {
@@ -3315,11 +3662,20 @@ async function campaignProviderInvocation(options, input, {
             await assertCampaignSourceState(options);
             await assertRuntimeAssetIdentities(prepared.adapter, prepared.metallib);
             if (await validatePreparedCache(
-              options["preparation-root"], options["preparation-key"], identity,
+              options["preparation-root"], options["preparation-key"], identity, undefined,
+              preparationTier,
             ) === null) fail("SC-20216 prepared cache disappeared before failure publication");
             await assertPreparationHasNoTransientResidue(options["preparation-root"]);
+            if (boundedSpec?.tier === "bf16") {
+              await assertQ8ReleaseAuthorization(
+                q8ReleaseAuthorization, options["q8-audit"], {
+                  sceneWorksRevision: options["scene-revision"],
+                  inferenceRevision: options["inference-revision"],
+                },
+              );
+            }
           },
-          build: (outcome) => (bounded
+          build: (outcome) => (boundedEntry
             ? boundedCampaignEntryFailureReceipt({
               sceneWorksRevision: options["scene-revision"],
               sceneWorksTree: options["scene-tree"],
@@ -3332,6 +3688,7 @@ async function campaignProviderInvocation(options, input, {
               hostMemoryBytes: failureHostMemoryBytes,
               events: failureEvents,
               outcome,
+              tier: boundedSpec.tier,
             })
             : campaignEntryFailureReceipt({
             sceneWorksRevision: options["scene-revision"],
@@ -3364,6 +3721,21 @@ async function campaignProvider(argv) {
     campaignProviderOptions(argv), await readStandardInput(),
   );
   process.stdout.write(output);
+}
+
+async function boundedSelectorReportController(argv) {
+  const options = parseArgs(argv);
+  const expected = ["q4-bundle", "q8-bundle", "bf16-bundle", "output"];
+  if (!isDeepStrictEqual(Object.keys(options).sort(), [...expected].sort())) {
+    fail(`bounded-selector report requires exactly ${expected.map((name) => `--${name}`).join(", ")}`);
+  }
+  await publishBoundedSelectorAnchorReport({
+    q4Bundle: options["q4-bundle"],
+    q8Bundle: options["q8-bundle"],
+    bf16Bundle: options["bf16-bundle"],
+    output: options.output,
+  });
+  process.stdout.write(`${path.resolve(options.output)}\n`);
 }
 
 function parseArgs(argv) {
@@ -3463,16 +3835,27 @@ export async function publishCampaignEntryFailureReceipt(outcome, { verify, buil
   });
 }
 
-export async function acquireBoundedCampaignEntryOutcome(canonicalOutput) {
+export async function acquireBoundedCampaignEntryOutcome(
+  canonicalOutput, requested = "q4", q8ReleaseAuthorization = null,
+) {
+  const spec = boundedCampaignEntrySpec(requested);
+  if ((spec.tier === "bf16") !== (q8ReleaseAuthorization !== null)) {
+    fail("SC-20430 bf16 outcome must bind exactly one q8 release authorization");
+  }
   const outcome = {
     canonicalOutput,
-    failureOutput: boundedCampaignEntryFailurePath(canonicalOutput),
-    reservation: boundedCampaignEntryOutcomeReservationPath(canonicalOutput),
-    choice: `${boundedCampaignEntryOutcomeReservationPath(canonicalOutput)}.choice`,
+    failureOutput: boundedCampaignEntryFailurePath(canonicalOutput, spec.tier),
+    reservation: boundedCampaignEntryOutcomeReservationPath(canonicalOutput, spec.tier),
+    choice: `${boundedCampaignEntryOutcomeReservationPath(canonicalOutput, spec.tier)}.choice`,
     token: randomUUID(),
+    tier: spec.tier,
+    q8ReleaseAuthorization: structuredClone(q8ReleaseAuthorization),
   };
+  outcome.ownerBytes = spec.tier === "bf16"
+    ? canonicalJson({ token: outcome.token, tier: spec.tier, q8ReleaseAuthorization })
+    : `${outcome.token}\n`;
   await mkdir(path.dirname(canonicalOutput), { recursive: true });
-  await writeFile(outcome.reservation, `${outcome.token}\n`, { flag: "wx", mode: 0o400 });
+  await writeFile(outcome.reservation, outcome.ownerBytes, { flag: "wx", mode: 0o400 });
   if (await pathExists(outcome.canonicalOutput) || await pathExists(outcome.failureOutput)) {
     await unlink(outcome.reservation);
     fail("SC-20318 already has an immutable canonical or failure outcome");
@@ -3482,7 +3865,7 @@ export async function acquireBoundedCampaignEntryOutcome(canonicalOutput) {
 
 async function assertBoundedCampaignEntryOutcomeOwner(outcome) {
   if (await readFile(outcome?.reservation ?? "", "utf8").catch(() => null)
-      !== `${outcome?.token}\n`) fail("SC-20318 outcome reservation ownership changed");
+      !== outcome?.ownerBytes) fail("SC-20318 outcome reservation ownership changed");
 }
 
 export async function releaseUnpublishedBoundedCampaignEntryOutcome(outcome) {
@@ -3517,7 +3900,8 @@ async function publishBoundedCampaignEntryFailure(outcome, { verify, build }) {
       outcomeChoice: "failure",
       canonicalBundleAbsentAtPublication: true,
       outcomeReservationHeldAtPublication: true,
-    }));
+      q8ReleaseAuthorization: structuredClone(outcome.q8ReleaseAuthorization),
+    }), outcome.tier);
   });
 }
 
@@ -3950,16 +4334,21 @@ async function assertPreparationHasNoTransientResidue(preparationRoot) {
 async function runCampaignEntryController({
   output, inferenceRepo, sceneWorksRevision, inferenceRevision,
   sceneWorksTree, inferenceTree, identity, preparationKey, preparationRoot,
-  prepared, signal, setActiveWatchdog, bounded = false,
+  prepared, signal, setActiveWatchdog, bounded = false, boundedTier = null,
+  q8AuditPath = null, q8ReleaseAuthorization = null,
 }) {
-  const spec = bounded ? {
+  const boundedEntry = bounded || boundedTier !== null;
+  const boundedSpec = boundedEntry ? boundedCampaignEntrySpec(boundedTier ?? "q4") : null;
+  const spec = boundedEntry ? {
     plan: BOUNDED_CAMPAIGN_ENTRY_PLAN,
-    planEntry: boundedCampaignEntryPlan,
-    acquireOutcome: acquireBoundedCampaignEntryOutcome,
+    planEntry: (config) => boundedCampaignEntryPlan(config, boundedSpec.tier),
+    acquireOutcome: (output) => acquireBoundedCampaignEntryOutcome(
+      output, boundedSpec.tier, q8ReleaseAuthorization,
+    ),
     releaseOutcome: releaseUnpublishedBoundedCampaignEntryOutcome,
-    provider: BOUNDED_CAMPAIGN_ENTRY_PROVIDER,
-    logicalCaseId: BOUNDED_CAMPAIGN_ENTRY_LOGICAL_CASE_ID,
-    validateBundle: validateBoundedCampaignEntryBundle,
+    provider: boundedSpec.provider,
+    logicalCaseId: boundedSpec.logicalCaseId,
+    validateBundle: (bundle) => validateBoundedCampaignEntryBundle(bundle, boundedSpec.tier),
   } : {
     plan: CAMPAIGN_ENTRY_PLAN,
     planEntry: campaignEntryPlan,
@@ -3971,6 +4360,11 @@ async function runCampaignEntryController({
   };
   const config = JSON.parse(await readFile(path.join(ROOT, spec.plan), "utf8"));
   spec.planEntry(config);
+  if (boundedSpec?.tier === "bf16") {
+    await assertQ8ReleaseAuthorization(q8ReleaseAuthorization, q8AuditPath, {
+      sceneWorksRevision, inferenceRevision,
+    });
+  }
   const executionClaim = await acquireCanonicalPublicationClaim(
     containedCampaignExecutionClaimTarget(output), signal,
   );
@@ -4008,6 +4402,7 @@ async function runCampaignEntryController({
     "failure-output": campaignOutcome.failureOutput,
     "outcome-reservation": campaignOutcome.reservation,
     "outcome-token": campaignOutcome.token,
+    ...(boundedSpec?.tier === "bf16" ? { "q8-audit": q8AuditPath } : {}),
   };
   const providerCommand = [fileURLToPath(import.meta.url), "--campaign-provider"];
   let operationError = null;
@@ -4036,7 +4431,9 @@ async function runCampaignEntryController({
           fail("SC-20191 harness attempted a foreign provider command");
         }
         return campaignProviderInvocation(providerOptions, input, {
-          signal, setActiveWatchdog, canonicalClaim, executionClaim, bounded,
+          signal, setActiveWatchdog, canonicalClaim, executionClaim,
+          bounded: boundedEntry, boundedTier: boundedSpec?.tier ?? null,
+          q8ReleaseAuthorization,
         });
       },
     });
@@ -4045,11 +4442,16 @@ async function runCampaignEntryController({
     await assertCampaignSourceState(providerOptions, signal);
     await assertRuntimeAssetIdentities(prepared.adapter, prepared.metallib, signal);
     if (await validatePreparedCache(
-      preparationRoot, preparationKey, identity, signal,
+      preparationRoot, preparationKey, identity, signal, boundedSpec?.tier ?? "q4",
     ) === null) fail("SC-20191 prepared cache disappeared before publication");
     await assertPreparationHasNoTransientResidue(preparationRoot);
+    if (boundedSpec?.tier === "bf16") {
+      await assertQ8ReleaseAuthorization(q8ReleaseAuthorization, q8AuditPath, {
+        sceneWorksRevision, inferenceRevision,
+      });
+    }
     spec.validateBundle(bundle);
-    if (bounded) {
+    if (boundedEntry) {
       await publishBoundedCampaignEntryOutcome(
         campaignOutcome, "canonical", async () => bundle, signal,
       );
@@ -4320,17 +4722,24 @@ async function controller(argv) {
     if (!options[name]) fail(`--${name} is required`);
   }
   const unexpected = Object.keys(options).filter(
-    (name) => !["inference-repo", "output", "profile"].includes(name),
+    (name) => !["inference-repo", "output", "profile", "q8-audit"].includes(name),
   );
   if (unexpected.length) fail(`unsupported option(s): ${unexpected.join(", ")}`);
   const profileName = options.profile ?? SAFETY_CANARY_PROFILE;
   const campaignEntry = profileName === CAMPAIGN_ENTRY_PROFILE;
   const boundedCarrier = profileName === BOUNDED_CARRIER_PROFILE;
-  const boundedCampaignEntry = profileName === BOUNDED_CAMPAIGN_ENTRY_PROFILE;
+  const boundedCampaignSpec = Object.values(BOUNDED_CAMPAIGN_ENTRY_SPECS)
+    .find((candidate) => candidate.profile === profileName) ?? null;
+  const boundedCampaignEntry = boundedCampaignSpec !== null;
+  if (boundedCampaignSpec?.tier === "bf16") {
+    if (!options["q8-audit"]) fail("--q8-audit is required for the SC-20430 bf16 profile");
+  } else if (options["q8-audit"] !== undefined) {
+    fail("--q8-audit is only valid for the SC-20430 bf16 profile");
+  }
   const profile = campaignEntry
     ? { story: "sc-20191" }
     : boundedCarrier ? { story: "sc-20254" }
-      : boundedCampaignEntry ? { story: "sc-20318" } : canaryProfile(profileName);
+      : boundedCampaignEntry ? { story: boundedCampaignSpec.story } : canaryProfile(profileName);
   const inferenceRepo = path.resolve(options["inference-repo"]);
   const output = path.resolve(options.output);
   const relativeOutput = path.relative(ROOT, output);
@@ -4339,6 +4748,12 @@ async function controller(argv) {
   }
   const sceneWorksRevision = await cleanHead(ROOT, "SceneWorks");
   const inferenceRevision = await cleanHead(inferenceRepo, "inference");
+  let q8ReleaseAuthorization = null;
+  if (boundedCampaignSpec?.tier === "bf16") {
+    q8ReleaseAuthorization = await validateQ8IndependentAudit(options["q8-audit"], {
+      sceneWorksRevision, inferenceRevision,
+    });
+  }
   const [sceneWorksTree, inferenceTree, toolchainChannel] = await Promise.all([
     git(ROOT, ["rev-parse", "HEAD^{tree}"]),
     git(inferenceRepo, ["rev-parse", "HEAD^{tree}"]),
@@ -4357,7 +4772,10 @@ async function controller(argv) {
   if (!Number.isSafeInteger(memoryBytes) || memoryBytes < MIN_PREFLIGHT_FREE_BYTES) {
     fail(`host memory ${memoryBytes} cannot preserve two canary stop boundaries`);
   }
-  const identity = preparationIdentity(sceneWorksTree, inferenceTree, toolchainChannel);
+  const preparationTier = boundedCampaignSpec?.tier ?? "q4";
+  const identity = preparationIdentity(
+    sceneWorksTree, inferenceTree, toolchainChannel, preparationTier,
+  );
   const preparationKey = preparationCacheKey(identity);
   const preparationRoot = preparationCacheRoot(output, preparationKey);
   let activeWatchdog = null;
@@ -4387,6 +4805,7 @@ async function controller(argv) {
       identity,
       preparedFrom: { sceneWorksRevision, inferenceRevision },
       signal,
+      tier: preparationTier,
       build: async (stage, buildSignal, hooks) => {
         const numericTierRoot = await realpath(path.resolve(
           process.env.SCENEWORKS_LTX_ROOT ?? fail("SCENEWORKS_LTX_ROOT is required to prepare q4"),
@@ -4406,7 +4825,7 @@ async function controller(argv) {
           "local text-encoder",
         );
         const preparationDevice = (await stat(stage, { bigint: true })).dev;
-        const roots = privateArtifactRoots(stage);
+        const roots = privateArtifactRoots(stage, preparationTier);
         await mkdir(path.dirname(roots.numericTier), { recursive: true, mode: 0o700 });
         await cloneArtifactTree(numericTierRoot, roots.numericTier, preparationDevice, buildSignal);
         const preparedNumericTier = assertInventory(
@@ -4498,6 +4917,9 @@ async function controller(argv) {
         signal,
         setActiveWatchdog: (child) => { activeWatchdog = child; },
         bounded: true,
+        boundedTier: boundedCampaignSpec.tier,
+        q8AuditPath: options["q8-audit"] ?? null,
+        q8ReleaseAuthorization,
       });
       return;
     }
@@ -4686,6 +5108,8 @@ try {
   if (process.argv[1] === fileURLToPath(import.meta.url)) {
     if (process.argv[2] === "--campaign-provider") {
       await campaignProvider(process.argv.slice(3));
+    } else if (process.argv[2] === "--bounded-selector-report") {
+      await boundedSelectorReportController(process.argv.slice(3));
     } else {
       await controller(process.argv.slice(2));
     }
