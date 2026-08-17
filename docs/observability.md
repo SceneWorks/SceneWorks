@@ -200,7 +200,14 @@ only the request-scoped planner knows whether honoring the switch changed anythi
     who decided the shape rather than what runs.
   - `route_has_no_request_scoped_memory` — this route assembles its provider request
     without a `GenerationMemory` block, so it has no seam a switch could act through.
-- `refused_switch` / `source_not_reopenable` (**warn**) — the only outcome worth acting on.
+    Also covers a route whose memory plan is absent for this particular request.
+- `refused_switch` / `no_execution_seam_for_load_shape_alone` (**warn**) — the request
+  tightened only `LoadShape`, leaving `OffloadPolicy` unchanged. `OffloadPolicy` reaches the
+  provider through the memory ladder's staged-residency selection, which a grant floors;
+  `LoadShape` has no request-scoped selector at all. Granting such a switch would report a
+  re-materialization whose deferred half executed nowhere, so it is refused until that axis
+  has an execution seam. Benign — the request runs under the loaded shape.
+- `refused_switch` / `source_not_reopenable` (**warn**) — the outcome most worth acting on.
   The resident weights are a single-file / imported base source, so the provider's residency
   driver could answer a staging request with
   `unsupported: resident-only component source cannot stage or rematerialize components`.
@@ -219,6 +226,13 @@ only the request-scoped planner knows whether honoring the switch changed anythi
 Memory admission always uses the **loaded** policy regardless of the decision: it names the
 shape the resident weights are actually in, which is what the budget was proved against. A
 granted switch only ever lowers the predicted peak, so it stays inside that envelope.
+
+**One warm hit emits one event, whatever the image count.** A multi-image job evaluates one
+request per image, and a granted switch floors *every* one of them — the decision is a fact
+about the resident generator, not about an image. Only the first evaluation reports it, so a
+four-image job that switched staging logs one `rematerialized`, not four. A job cancelled
+before its first evaluation logs nothing at all: no request ran, so there is no decision to
+report.
 
 ### Typed execution domains — `execution_domains_selected` (Rust worker, sc-18317)
 

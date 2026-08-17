@@ -7904,6 +7904,10 @@ async fn generate_stream(
                 external_committed_bytes
             };
             let likeness_source_ref = likeness_source.as_ref().map(|(_, id)| id.clone());
+            // sc-18317: ONE warm hit is ONE decision, but this lane evaluates the request once per
+            // item. Hand the real proposal to the first evaluation and an inert one to the rest, so a
+            // multi-image job settles exactly one decision and emits exactly one event.
+            let mut warm_policy = crate::execution_planner::WarmPolicyOnce::new(warm_policy);
             drive_gen_items_scored_reported(
                 tx,
                 seeds,
@@ -7914,8 +7918,8 @@ async fn generate_stream(
                     &mlx_request_inputs,
                     cache_state,
                     loaded_policy.offload_policy,
-                                        warm_policy,
-request_external_committed_bytes,
+                    warm_policy.take(),
+                    request_external_committed_bytes,
                 )?;
                 // Exact promoted MLX evidence may tighten the soft process limit for this request.
                 // The RAII guard restores the process-global/user limit after all retries and never

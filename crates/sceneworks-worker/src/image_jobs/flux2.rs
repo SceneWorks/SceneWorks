@@ -769,6 +769,10 @@ async fn generate_flux2_edit_stream(
                 _ => None,
             };
             let mut request_cache_state = cache_state;
+            // sc-18317: one warm hit is one decision. This lane also has a no-memory-plan path, so the
+            // holder both rations the proposal across items AND guarantees the unevaluated path still
+            // settles it.
+            let mut warm_policy = crate::execution_planner::WarmPolicyOnce::new(warm_policy);
             drive_gen_items_scored_reported(
                 tx,
                 seeds.into_iter().zip(prompts),
@@ -804,20 +808,26 @@ async fn generate_flux2_edit_stream(
                         }
                         None => build_edit_conditioning(&references),
                     };
-                    let memory_evaluation = memory_plan
-                        .as_ref()
-                        .map(|memory_plan| {
-                            crate::mlx_fit_gate::evaluate_request(
-                                generator,
-                                memory_plan,
-                                &memory_inputs,
-                                request_cache_state,
-                                loaded_policy.offload_policy,
-                                                                warm_policy,
-external_committed_bytes,
-                            )
-                        })
-                        .transpose()?;
+                    // The `map` here used to swallow the proposal outright: with no memory plan the
+                    // closure never runs, and `#[must_use]` cannot see a closure-parameter binding.
+                    // Both arms now settle, so a warm decision is reported on every path.
+                    let memory_evaluation = match memory_plan.as_ref() {
+                        Some(memory_plan) => Some(crate::mlx_fit_gate::evaluate_request(
+                            generator,
+                            memory_plan,
+                            &memory_inputs,
+                            request_cache_state,
+                            loaded_policy.offload_policy,
+                            warm_policy.take(),
+                            external_committed_bytes,
+                        )?),
+                        None => {
+                            warm_policy.decline_if_unsettled(
+                                crate::execution_planner::ServedAsIsReason::RouteHasNoRequestScopedMemory,
+                            );
+                            None
+                        }
+                    };
                     request_cache_state = gen_core::MemoryCacheState::Warm;
                     let _request_memory_limit = memory_evaluation
                         .as_ref()

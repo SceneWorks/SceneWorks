@@ -891,8 +891,8 @@ async fn generate_krea_imported_control_stream(
                     &memory_inputs,
                     cache_state,
                     loaded_policy.offload_policy,
-                                        warm_policy,
-external_committed_bytes,
+                    warm_policy,
+                    external_committed_bytes,
                 )?;
                 cache_state = gen_core::MemoryCacheState::Warm;
                 let (out_w, out_h, pixels) = krea_control_generate_one(
@@ -1658,6 +1658,9 @@ where
     ) -> WorkerResult<crate::mlx_fit_gate::MlxRequestEvaluation>,
 {
     let mut cache_state = initial_cache_state;
+    // sc-18317: ONE warm hit is ONE decision, but this driver evaluates the request once per item.
+    // Hand the real proposal to the first evaluation and an inert one to the rest.
+    let mut warm_policy = crate::execution_planner::WarmPolicyOnce::new(warm_policy);
     drive_gen_items(tx, work, move |_index, (seed, prompt), preview, on_progress| {
         if cancel.is_cancelled() {
             return Ok(None);
@@ -1668,7 +1671,7 @@ where
             memory_inputs,
             cache_state,
             loaded_offload_policy,
-            warm_policy,
+            warm_policy.take(),
             external_committed_bytes,
         )?;
         cache_state = gen_core::MemoryCacheState::Warm;

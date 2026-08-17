@@ -3496,25 +3496,26 @@ fn evaluate_request_with_budget_using_bundle(
                 selector_budget,
                 &staged,
             );
-            match (&floored, &baseline) {
-                // The floor produced a fitting staged selection the baseline would not have made.
-                (
-                    Selection::Selected {
-                        selection: chosen, ..
-                    },
-                    _,
-                ) if !matches!(&baseline, Selection::Selected { selection: base, .. } if base == chosen) => {
+            match &floored {
+                // A fitting staged selection, and it necessarily differs from the baseline's: control
+                // only reaches here when the baseline does NOT engage staged residency, while every
+                // candidate offered to this call does. Asserted rather than re-tested, so the
+                // reasoning is checked in debug builds instead of hidden in an unreachable arm.
+                Selection::Selected {
+                    selection: chosen, ..
+                } => {
+                    debug_assert!(
+                        !matches!(&baseline, Selection::Selected { selection: base, .. } if base == chosen),
+                        "a floored staged selection cannot equal a non-staging baseline"
+                    );
                     (
                         floored,
                         Some(crate::execution_planner::GrantOutcome::SelectionMovedToStaged),
                     )
                 }
-                // A staged candidate existed but does not fit this request's budget. The baseline
-                // stands; this is not a refusal, it is the ordinary fit check.
-                (Selection::Selected { .. }, _) => (
-                    baseline,
-                    Some(crate::execution_planner::GrantOutcome::AlreadyStaged),
-                ),
+                // The staged candidates did not fit this request's budget, or their evidence is
+                // structurally unusable. The baseline stands; not a refusal, just the ordinary fit
+                // check every selection passes.
                 _ => (
                     baseline,
                     Some(crate::execution_planner::GrantOutcome::StagedCandidateDidNotFit),
@@ -9548,6 +9549,48 @@ mod tests {
         assert!(
             !text.contains("decision=\"rematerialized\""),
             "no re-materialization happened, so none may be claimed: {text:?}"
+        );
+    }
+
+    /// MINOR 3 (review cycle 2): a MULTI-ITEM job settles ONE decision and emits ONE event.
+    ///
+    /// Every image lane calls `evaluate_request` once per seed or pose with the same `Copy` proposal, so
+    /// before `WarmPolicyOnce` a four-image warm job emitted four identical decision events for one
+    /// cache access — contradicting the one-settlement contract the seam test asserts. This drives four
+    /// evaluations through the holder exactly as a lane does.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_multi_item_job_settles_one_decision_and_emits_one_event() {
+        let fixture = SdxlSelectorFixture::new();
+        let capture = EventCapture::install();
+        let mut warm_policy =
+            crate::execution_planner::WarmPolicyOnce::new(fixture.granted_proposal());
+        let roomy = fixture_budget(20.0);
+        let mut staged_items = 0;
+        for _ in 0..4 {
+            let evaluation = fixture
+                .evaluate(OffloadPolicy::Resident, warm_policy.take(), roomy)
+                .expect("every item of the job must be admitted");
+            if evaluation.memory.stage_residency {
+                staged_items += 1;
+            }
+        }
+        let text = capture.text();
+        assert_eq!(
+            text.matches("generator_cache_warm_policy_decision").count(),
+            1,
+            "four items, one warm hit, one decision event: {text:?}"
+        );
+        assert!(
+            text.contains("decision=\"rematerialized\""),
+            "the one event must be the granted outcome from the FIRST item: {text:?}"
+        );
+        // EVERY item is floored, not just the one that reported. The decision is a fact about the
+        // resident generator, so it holds for the whole job; rationing the decision instead of only its
+        // event would have let items 2..N run at the very peak the switch exists to avoid.
+        assert_eq!(
+            staged_items, 4,
+            "the grant must apply to every item of the job, not only the reporting one"
         );
     }
 

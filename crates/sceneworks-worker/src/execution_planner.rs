@@ -252,6 +252,16 @@ pub(crate) enum RefusalReason {
     /// The resident weights are a bare single-file/imported source. Staging or deferred
     /// materialization would return `Error::Unsupported` from the provider.
     SourceNotReopenable,
+    /// The switch tightens ONLY `LoadShape`, and the worker has no seam that executes that axis
+    /// per-request.
+    ///
+    /// `OffloadPolicy` reaches the provider through the memory ladder's `stage_residency` selection,
+    /// which is what [`WarmPolicyProposal::requires_staged_residency`] floors. `LoadShape` has no such
+    /// request-scoped selector: it is fixed at load time and the ladder has no rung that toggles it. So
+    /// granting a load-shape-only switch would report a re-materialization while the deferred half
+    /// executed nowhere. Refused with this reason until an execution seam for the axis exists, rather
+    /// than reported as a half-performed switch.
+    NoExecutionSeamForLoadShapeAlone,
 }
 
 impl WarmPolicyDecision {
@@ -290,6 +300,9 @@ impl WarmPolicyDecision {
             }
             Self::Rematerialized => "components_rematerialized_in_place",
             Self::RefusedSwitch(RefusalReason::SourceNotReopenable) => "source_not_reopenable",
+            Self::RefusedSwitch(RefusalReason::NoExecutionSeamForLoadShapeAlone) => {
+                "no_execution_seam_for_load_shape_alone"
+            }
         }
     }
 
@@ -351,8 +364,16 @@ pub(crate) fn decide_warm_policy(
         return WarmPolicyDecision::ServedAsIs(ServedAsIsReason::LoadedPolicyBoundsThePeak);
     }
     // From here the request asks for a strictly tighter shape than the load chose, which is inside
-    // the admitted envelope. Whether the resident source can deliver it is the remaining question,
-    // and it is answered before the provider is asked rather than by letting the provider refuse.
+    // the admitted envelope.
+    //
+    // First: is there a seam that EXECUTES the tightening it asks for? Only the `OffloadPolicy` half
+    // has one (the ladder's staged-residency selection). A switch that tightens `LoadShape` alone has
+    // nowhere to take effect, so granting it would report a re-materialization that never happened.
+    if requested.offload_policy == loaded.offload_policy {
+        return WarmPolicyDecision::RefusedSwitch(RefusalReason::NoExecutionSeamForLoadShapeAlone);
+    }
+    // Then: can the resident instance deliver it? Answered before the provider is asked rather than by
+    // letting the provider refuse mid-generation.
     if !reopenability.is_reopenable() {
         return WarmPolicyDecision::RefusedSwitch(RefusalReason::SourceNotReopenable);
     }
@@ -394,6 +415,68 @@ pub(crate) struct WarmPolicyProposal {
     requested: ExecutionPolicy,
     reopenability: SourceReopenability,
     attestation: StagingAttestation,
+    /// Whether settling this copy emits the event.
+    ///
+    /// A multi-item job evaluates one request per image and every one of them must be floored by the
+    /// grant — the decision is about the resident generator, so it holds for the whole job. But the
+    /// EVENT describes one cache access, so only the first copy reports. Separating the two is what
+    /// lets `WarmPolicyOnce` silence the duplicates without also silencing the optimization.
+    report: bool,
+}
+
+/// One-shot holder for a multi-item job's warm-policy proposal.
+///
+/// A job renders N images by calling the request planner once per seed or pose, and the proposal is
+/// `Copy`, so a naive lane settles it N times and emits N identical events for ONE warm hit. The
+/// decision is a property of the cache access, not of the item, so it must be settled exactly once.
+///
+/// [`Self::take`] yields the same decision to EVERY item — a grant floors the ladder for the whole job,
+/// because it is a fact about the resident generator rather than about one image — but only the first
+/// copy reports. Rationing the decision itself would have been the wrong fix: items 2..N would have
+/// silently lost the staging the request asked for and run at the higher peak the switch existed to
+/// avoid.
+pub(crate) struct WarmPolicyOnce {
+    engine_id: &'static str,
+    /// The reporting copy, until it is handed out.
+    proposal: Option<WarmPolicyProposal>,
+    /// The silent copy handed to every later item.
+    silenced: Option<WarmPolicyProposal>,
+}
+
+impl WarmPolicyOnce {
+    pub(crate) fn new(proposal: WarmPolicyProposal) -> Self {
+        Self {
+            engine_id: proposal.engine_id,
+            proposal: Some(proposal),
+            silenced: None,
+        }
+    }
+
+    /// The decision, reporting on the first call and silent on every call after it.
+    pub(crate) fn take(&mut self) -> WarmPolicyProposal {
+        match self.proposal.take() {
+            Some(proposal) => {
+                // Keep the decision for later items; drop only its right to log again.
+                self.silenced = Some(proposal.silenced());
+                proposal
+            }
+            None => self
+                .silenced
+                .unwrap_or_else(|| WarmPolicyProposal::inert(self.engine_id).silenced()),
+        }
+    }
+
+    /// Settle the proposal without evaluating any request, for a route that turns out to have no
+    /// request-scoped memory plan at all. A no-op once [`Self::take`] has handed it out.
+    ///
+    /// A holder that is simply DROPPED unsettled reports nothing, and that is the intended outcome for
+    /// a job cancelled before its first evaluation: no request ran, so there is no decision to report.
+    /// The alternative — logging a policy decision for work that never happened — would be noise.
+    pub(crate) fn decline_if_unsettled(&mut self, reason: ServedAsIsReason) {
+        if let Some(proposal) = self.proposal.take() {
+            proposal.decline(reason);
+        }
+    }
 }
 
 /// What the request-scoped selection did with a granted proposal.
@@ -407,7 +490,8 @@ pub(crate) enum GrantOutcome {
     NoStagedCandidate,
     /// A staged candidate existed but did not fit the budget, so the baseline selection stands.
     StagedCandidateDidNotFit,
-    /// The baseline selection already engaged staged residency, so the floor was a no-op.
+    /// The baseline selection already engaged staged residency, so the floor was a no-op — the request
+    /// was going to stage anyway.
     AlreadyStaged,
 }
 
@@ -428,6 +512,15 @@ impl WarmPolicyProposal {
             requested,
             reopenability,
             attestation,
+            report: true,
+        }
+    }
+
+    /// The same decision, settling silently. See the `report` field.
+    fn silenced(self) -> Self {
+        Self {
+            report: false,
+            ..self
         }
     }
 
@@ -466,13 +559,19 @@ impl WarmPolicyProposal {
 
     /// Whether the request-scoped ladder must be floored to candidates that engage staged residency.
     ///
-    /// True only for a granted proposal whose effective policy asks for more staging than the load
-    /// chose. A grant that only tightens `LoadShape` needs no candidate floor: materialization shape
-    /// is not a ladder rung.
+    /// Equivalent to "this proposal was granted": [`decide_warm_policy`] refuses a switch that does not
+    /// move the `OffloadPolicy` axis (`NoExecutionSeamForLoadShapeAlone`), precisely because the floor
+    /// is the only seam a grant executes through. The policy comparison is kept as a debug assertion so
+    /// the two cannot drift apart silently.
     pub(crate) fn requires_staged_residency(self) -> bool {
-        self.decision.grants_requested_policy()
-            && self.requested.offload_policy == OffloadPolicy::Sequential
-            && self.loaded.offload_policy == OffloadPolicy::Resident
+        let granted = self.decision.grants_requested_policy();
+        debug_assert!(
+            !granted
+                || (self.requested.offload_policy == OffloadPolicy::Sequential
+                    && self.loaded.offload_policy == OffloadPolicy::Resident),
+            "a granted proposal must move the staging axis: {self:?}"
+        );
+        granted
     }
 
     /// Settle a proposal against what the request-scoped selection actually did.
@@ -509,6 +608,9 @@ impl WarmPolicyProposal {
     }
 
     fn log(self, decision: WarmPolicyDecision) {
+        if !self.report {
+            return;
+        }
         log_warm_policy_decision(
             self.engine_id,
             decision,
@@ -522,6 +624,11 @@ impl WarmPolicyProposal {
     #[cfg(test)]
     pub(crate) fn decision(self) -> WarmPolicyDecision {
         self.decision
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reports(self) -> bool {
+        self.report
     }
 }
 
@@ -801,10 +908,11 @@ mod tests {
 
     #[test]
     fn a_non_reopenable_source_refuses_every_tighter_switch() {
+        // Only switches that MOVE THE STAGING AXIS reach the source question; a load-shape-only
+        // switch is refused earlier, for having no execution seam at all (see the test below).
         for requested in [
             staged_deferred(),
             policy(OffloadPolicy::Sequential, LoadShape::EagerMaterialization),
-            policy(OffloadPolicy::Resident, LoadShape::DeferredMaterialization),
         ] {
             let decision = decide_warm_policy(
                 resident_eager(),
@@ -838,6 +946,120 @@ mod tests {
             ),
             WarmPolicyDecision::ServedAsIs(ServedAsIsReason::LoadedPolicyBoundsThePeak)
         );
+    }
+
+    /// MINOR 2 (review cycle 2): a switch that tightens ONLY `LoadShape` is REFUSED, not reported as a
+    /// served-as-is or a re-materialization.
+    ///
+    /// `OffloadPolicy` reaches the provider through the ladder's staged-residency selection, which the
+    /// grant floors. `LoadShape` has no request-scoped selector at all, so granting such a switch would
+    /// claim a re-materialization whose deferred half executed nowhere. Refusing names the real
+    /// situation. Mutation sentinel: delete the guard in `decide_warm_policy` and this goes red.
+    #[test]
+    fn a_load_shape_only_switch_is_refused_for_having_no_execution_seam() {
+        for (loaded, requested) in [
+            (
+                resident_eager(),
+                policy(OffloadPolicy::Resident, LoadShape::DeferredMaterialization),
+            ),
+            (
+                policy(OffloadPolicy::Sequential, LoadShape::EagerMaterialization),
+                staged_deferred(),
+            ),
+        ] {
+            // Both fail-closed signals admit it, so nothing else can be the cause of the refusal.
+            let decision = decide_warm_policy(
+                loaded,
+                requested,
+                SourceReopenability::Reopenable,
+                StagingAttestation::Implemented,
+            );
+            assert_eq!(
+                decision,
+                WarmPolicyDecision::RefusedSwitch(RefusalReason::NoExecutionSeamForLoadShapeAlone),
+                "load-shape-only {loaded:?} -> {requested:?} must be refused, never half-granted"
+            );
+            assert!(!decision.grants_requested_policy());
+            assert_eq!(
+                effective_policy(loaded, requested, decision),
+                loaded,
+                "a refused switch executes under the loaded policy"
+            );
+            assert_eq!(decision.reason(), "no_execution_seam_for_load_shape_alone");
+        }
+    }
+
+    /// Every granted proposal moves the staging axis, so the ladder floor is the seam it executes
+    /// through. This is the invariant `requires_staged_residency`'s debug assertion encodes.
+    #[test]
+    fn a_grant_always_requires_the_staged_residency_floor() {
+        let decision = decide_warm_policy(
+            resident_eager(),
+            staged_deferred(),
+            SourceReopenability::Reopenable,
+            StagingAttestation::Implemented,
+        );
+        let proposal = WarmPolicyProposal::new(
+            "fixture",
+            decision,
+            resident_eager(),
+            staged_deferred(),
+            SourceReopenability::Reopenable,
+            StagingAttestation::Implemented,
+        );
+        assert!(proposal.requires_staged_residency());
+        assert!(!WarmPolicyProposal::inert("fixture").requires_staged_residency());
+    }
+
+    /// The one-shot holder rations a `Copy` proposal across a multi-item job: the real decision goes to
+    /// the first evaluation, every later item gets an inert one, so N images settle ONE decision.
+    #[test]
+    fn the_one_shot_holder_yields_the_real_proposal_exactly_once() {
+        let granted = decide_warm_policy(
+            resident_eager(),
+            staged_deferred(),
+            SourceReopenability::Reopenable,
+            StagingAttestation::Implemented,
+        );
+        let mut once = WarmPolicyOnce::new(WarmPolicyProposal::new(
+            "fixture",
+            granted,
+            resident_eager(),
+            staged_deferred(),
+            SourceReopenability::Reopenable,
+            StagingAttestation::Implemented,
+        ));
+        let first = once.take();
+        assert_eq!(first.decision(), granted);
+        assert!(first.requires_staged_residency());
+        assert!(first.reports());
+        for item in 1..4 {
+            let later = once.take();
+            assert_eq!(
+                later.decision(),
+                granted,
+                "item {item} must keep the grant: it is a fact about the resident generator, and \
+                 dropping it would run later items at the peak the switch exists to avoid"
+            );
+            assert!(
+                later.requires_staged_residency(),
+                "item {item} must still be floored to staged candidates"
+            );
+            assert!(
+                !later.reports(),
+                "item {item} must not re-emit the one cache access's decision"
+            );
+        }
+    }
+
+    /// `decline_if_unsettled` covers the path where no request is ever evaluated, and is one-shot too.
+    #[test]
+    fn declining_an_unused_holder_is_one_shot_as_well() {
+        let mut once = WarmPolicyOnce::new(WarmPolicyProposal::inert("fixture"));
+        once.decline_if_unsettled(ServedAsIsReason::RouteHasNoRequestScopedMemory);
+        let after = once.take();
+        assert_eq!(after.decision(), WarmPolicyDecision::Unchanged);
+        assert!(!after.reports(), "the decision was already settled");
     }
 
     #[test]
