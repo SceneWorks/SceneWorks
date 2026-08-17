@@ -7563,6 +7563,41 @@ mod tests {
         }
     }
 
+    /// The `full_ladder_generator` fixture's estimate floors in GiB, BEFORE the margin. Derived from
+    /// the fixture facts (base 3 GiB all-transformer, headroom 2 fixed + 4 area) and spelled out in
+    /// full on [`unmeasured_provider_under_a_small_budget_selects_a_deep_estimate_rung`]:
+    /// resident / staged / bounded-decode / bounded-attention all floor at 3 + 6 = 9 GiB, while
+    /// rung 4 windows the transformer out of residency and floors at 0 + 6 = 6 GiB.
+    const FIXTURE_DEEP_ESTIMATE_FLOOR_GB: f64 = 6.0;
+    const FIXTURE_SHALLOW_ESTIMATE_FLOOR_GB: f64 = 9.0;
+
+    /// The production widening an EstimateFloor candidate receives before the fit check.
+    ///
+    /// Read from the shipped constant rather than a literal on purpose. `MLX_ESTIMATE_MARGIN` is
+    /// re-derived from the calibration corpus and moved 5% -> 50.4073% when the corpus grew 65 -> 89
+    /// records; every fixture below that had hardcoded a host budget against the 5% term silently
+    /// FLIPPED DIRECTION at that point (a "reaches the deep rung" test became a refusal test, for the
+    /// wrong reason). Sizing budgets through this function instead keeps each test's direction fixed
+    /// across any future re-derivation, so an accepted-floor change stays bookkeeping.
+    fn widened_estimate_gb(floor_gb: f64) -> f64 {
+        floor_gb * (1.0 + crate::ladder_margin_policy::MLX_ESTIMATE_MARGIN)
+    }
+
+    /// A host budget that admits EXACTLY the deepest (rung-4) estimate floor and nothing shallower —
+    /// the midpoint of the widened window, so it cannot sit on either boundary. At the current margin
+    /// this is ~11.3 GiB (rung 4 widens to 9.02, everything shallower to 13.54); at the old 5% term
+    /// it would have been ~7.9 GiB, which is why these fixtures read 8.0.
+    fn budget_admitting_only_the_deepest_estimate_rung() -> MemoryBudget {
+        let deepest = widened_estimate_gb(FIXTURE_DEEP_ESTIMATE_FLOOR_GB);
+        let shallowest = widened_estimate_gb(FIXTURE_SHALLOW_ESTIMATE_FLOOR_GB);
+        assert!(
+            deepest < shallowest,
+            "the deep rung must stay strictly cheaper than the shallow floors: \
+             {deepest} vs {shallowest}"
+        );
+        fixture_budget((deepest + shallowest) / 2.0)
+    }
+
     fn fixture_ladder() -> (EvidenceBundle, MlxRequestPlan) {
         use sceneworks_core::memory_calibration::RequiredNullable;
 
@@ -8226,7 +8261,7 @@ mod tests {
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Sequential,
-            fixture_budget(8.0),
+            budget_admitting_only_the_deepest_estimate_rung(),
             gib_to_bytes(9.0),
             0,
             &[],
@@ -8288,13 +8323,18 @@ mod tests {
             resident.context.optimization_authority,
             MemoryOptimizationAuthority::Resident
         );
+        // Deliberately the SAME budget as the admitted arm above: the only difference between the two
+        // is `LoadShapeDeclarationResult::Applied` vs `Refused`, so the refusal is attributable to the
+        // declaration rather than to a budget that would have refused either way. (It previously read
+        // 8.0 GiB, which under the current margin refuses every rung and would have passed for the
+        // wrong reason.)
         let error = evaluate_request_with_budget(
             &generator,
             &refused,
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
-            fixture_budget(8.0),
+            budget_admitting_only_the_deepest_estimate_rung(),
             gib_to_bytes(9.0),
             0,
             &[],
@@ -8349,7 +8389,7 @@ mod tests {
                 &inputs,
                 MemoryCacheState::Cold,
                 OffloadPolicy::Sequential,
-                fixture_budget(8.0),
+                budget_admitting_only_the_deepest_estimate_rung(),
                 gib_to_bytes(9.0),
                 0,
                 &[],
@@ -8518,7 +8558,7 @@ mod tests {
                     &inputs,
                     MemoryCacheState::Cold,
                     OffloadPolicy::Sequential,
-                    fixture_budget(8.0),
+                    budget_admitting_only_the_deepest_estimate_rung(),
                     gib_to_bytes(9.0),
                     0,
                     &[],
@@ -8581,13 +8621,16 @@ mod tests {
                 resident.context.optimization_authority,
                 MemoryOptimizationAuthority::Resident
             );
+            // Same budget as the admitted arm on purpose — it admits rung 4 and nothing shallower, so
+            // "eager cannot fit" is a statement about the eager path, not about a budget too small for
+            // anything at all.
             let error = evaluate_request_with_budget(
                 &generator,
                 &refused,
                 &low_rank,
                 MemoryCacheState::Cold,
                 OffloadPolicy::Resident,
-                fixture_budget(8.0),
+                budget_admitting_only_the_deepest_estimate_rung(),
                 gib_to_bytes(9.0),
                 0,
                 &[],
@@ -8757,7 +8800,7 @@ mod tests {
                 &inputs,
                 MemoryCacheState::Cold,
                 OffloadPolicy::Sequential,
-                fixture_budget(8.0),
+                budget_admitting_only_the_deepest_estimate_rung(),
                 gib_to_bytes(9.0),
                 0,
                 &[],
@@ -8810,13 +8853,17 @@ mod tests {
         plan.engine_id = "krea_2_turbo";
         plan.model_id = "krea_2_turbo".to_owned();
         plan.calibration = MlxCalibrationConfig::Absent;
+        // This fixture Missings every rung but Resident, so the ONLY floor is the 12 GiB resident
+        // estimate. The pair below brackets its WIDENED value from either side (+/-10%) rather than
+        // pinning 16.0 / 8.0, which bracketed the retired 5% margin's 12.6 GiB and left the admit arm
+        // 2 GiB under the current 18.05 GiB requirement.
         let admitted = evaluate_request_with_budget(
             &generator,
             &plan,
             &fixture_inputs(1024, 1024),
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
-            fixture_budget(16.0),
+            fixture_budget(widened_estimate_gb(12.0) * 1.10),
             gib_to_bytes(12.0),
             0,
             &[],
@@ -8832,7 +8879,7 @@ mod tests {
             &fixture_inputs(1024, 1024),
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
-            fixture_budget(8.0),
+            fixture_budget(widened_estimate_gb(12.0) * 0.90),
             gib_to_bytes(12.0),
             0,
             &[],
