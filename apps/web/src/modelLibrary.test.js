@@ -1,0 +1,256 @@
+import { describe, it, expect, vi } from "vitest";
+import {
+  createModelLibraryGate,
+  modelLibraryContext,
+  modelLibraryContextForModel,
+  modelLibraryUnavailable,
+  MODEL_LIBRARY_UNAVAILABLE_CODE,
+} from "./modelLibrary.js";
+
+function unavailableError(overrides = {}) {
+  return {
+    code: MODEL_LIBRARY_UNAVAILABLE_CODE,
+    message: "Model 'z-image' is installed on an external model library…",
+    context: {
+      schemaVersion: 1,
+      availability: "installed_external_unavailable",
+      modelId: "z-image",
+      modelName: "Z-Image",
+      configuredLibraryPath: "/Volumes/Models/hf/hub",
+      expectedLibraryPath: "/Volumes/Models/hf/hub",
+      expectedVolumeId: "macos-volume:abc",
+      ...overrides,
+    },
+  };
+}
+
+// A probe whose answer the test releases by hand, so a second event can be injected while the
+// first attempt is genuinely still in flight.
+function deferredProbe() {
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const probe = vi.fn(() => gate);
+  return { probe, release: (value) => release(value) };
+}
+
+describe("modelLibraryContext", () => {
+  it("recognizes only the typed rejection, never a message that reads like one", () => {
+    expect(modelLibraryContext(unavailableError())?.modelId).toBe("z-image");
+    expect(
+      modelLibraryContext({
+        message: "external model library is currently unavailable",
+        status: 503,
+      }),
+    ).toBeNull();
+    // Code without the typed payload is not enough to open a prompt that must name a library.
+    expect(
+      modelLibraryContext({ code: MODEL_LIBRARY_UNAVAILABLE_CODE }),
+    ).toBeNull();
+    // A different typed availability is a different story (missing/incomplete keep their
+    // established download path).
+    expect(
+      modelLibraryContext(unavailableError({ availability: "missing" })),
+    ).toBeNull();
+  });
+
+  it("reads a catalog row's availability from the seam rather than re-deriving it", () => {
+    const row = {
+      id: "z-image",
+      name: "Z-Image",
+      installState: "installed",
+      modelAvailability: "installed_external_unavailable",
+      modelResolution: {
+        schemaVersion: 1,
+        configuredLibraryPath: "/Volumes/Models/hf/hub",
+        expectedLibrary: {
+          canonicalPath: "/Volumes/Models/hf/hub",
+          physicalIdentity: { volumeId: "macos-volume:abc" },
+        },
+      },
+    };
+    expect(modelLibraryUnavailable(row)).toBe(true);
+    expect(modelLibraryContextForModel(row)).toMatchObject({
+      modelId: "z-image",
+      modelName: "Z-Image",
+      expectedLibraryPath: "/Volumes/Models/hf/hub",
+      expectedVolumeId: "macos-volume:abc",
+    });
+    // A complete local model is never prompted about.
+    expect(
+      modelLibraryUnavailable({ id: "local", modelAvailability: "local_ready" }),
+    ).toBe(false);
+    expect(
+      modelLibraryContextForModel({ id: "local", modelAvailability: "local_ready" }),
+    ).toBeNull();
+  });
+});
+
+describe("model library gate", () => {
+  it("resumes the blocked action exactly once when the library comes back", async () => {
+    const action = vi.fn(async () => "job-1");
+    const probe = vi.fn(async () => ({ available: true }));
+    const gate = createModelLibraryGate({ probe });
+
+    expect(gate.block(unavailableError().context, action)).toBe(true);
+    expect(gate.getState().status).toBe("blocked");
+    expect(action).not.toHaveBeenCalled();
+
+    await expect(gate.retry()).resolves.toBe("job-1");
+    expect(action).toHaveBeenCalledTimes(1);
+    expect(gate.getState()).toMatchObject({ status: "idle", context: null });
+
+    // The pending slot is empty: a retry after the resume can never re-fire it.
+    await gate.retry();
+    expect(action).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not double-submit when a reconnect event lands while a retry is in flight", async () => {
+    const action = vi.fn(async () => "job-1");
+    const { probe, release } = deferredProbe();
+    const gate = createModelLibraryGate({ probe });
+    gate.block(unavailableError().context, action);
+
+    const first = gate.retry();
+    // The drive-watcher fires again, and the user clicks the button, both mid-probe.
+    const second = gate.retry({ auto: true });
+    const third = gate.retry();
+    release({ available: true });
+    await Promise.all([first, second, third]);
+
+    expect(probe).toHaveBeenCalledTimes(1);
+    expect(action).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps exactly one pending action when a second rejection arrives while blocked", async () => {
+    const first = vi.fn(async () => "job-1");
+    const second = vi.fn(async () => "job-2");
+    const gate = createModelLibraryGate({ probe: async () => ({ available: true }) });
+
+    gate.block(unavailableError().context, first);
+    // The second click is owned by the gate (no second dialog, no second error banner) but its
+    // action is dropped rather than queued behind the first.
+    expect(gate.block(unavailableError().context, second)).toBe(true);
+    await gate.retry();
+
+    expect(first).toHaveBeenCalledTimes(1);
+    expect(second).not.toHaveBeenCalled();
+  });
+
+  it("stays blocked, and keeps the action runnable, when the library is still missing", async () => {
+    const action = vi.fn(async () => "job-1");
+    const probe = vi
+      .fn()
+      .mockResolvedValueOnce({ available: false })
+      .mockResolvedValueOnce({ available: true });
+    const gate = createModelLibraryGate({ probe });
+    gate.block(unavailableError().context, action);
+
+    await gate.retry();
+    expect(action).not.toHaveBeenCalled();
+    expect(gate.getState()).toMatchObject({ status: "blocked" });
+    expect(gate.getState().hint).toBeTruthy();
+
+    await gate.retry();
+    expect(action).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a probe failure without losing the pending action, and never as a raw throw", async () => {
+    const action = vi.fn(async () => "job-1");
+    const probe = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("Request failed with 500"))
+      .mockResolvedValueOnce({ available: true });
+    const gate = createModelLibraryGate({ probe });
+    gate.block(unavailableError().context, action);
+
+    await expect(gate.retry()).resolves.toBeNull();
+    expect(gate.getState()).toMatchObject({ status: "blocked" });
+    expect(gate.getState().error).toBeTruthy();
+
+    await gate.retry();
+    expect(action).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves nothing queued on cancel — including a retry already in flight", async () => {
+    const action = vi.fn(async () => "job-1");
+    const { probe, release } = deferredProbe();
+    const gate = createModelLibraryGate({ probe });
+    gate.block(unavailableError().context, action);
+
+    const inFlight = gate.retry();
+    gate.cancel();
+    expect(gate.getState()).toMatchObject({ status: "idle", context: null });
+    // The drive really did come back — but the user already cancelled, so nothing may submit.
+    release({ available: true });
+    await inFlight;
+    expect(action).not.toHaveBeenCalled();
+
+    await gate.retry();
+    expect(action).not.toHaveBeenCalled();
+  });
+
+  it("relocates through the seam, persists the returned home, and queues nothing afterwards", async () => {
+    const action = vi.fn(async () => "job-1");
+    const adopted = {
+      libraryRoot: "/Volumes/Models 1/hf/hub",
+      hfHome: "/Volumes/Models 1/hf",
+      status: { available: true },
+    };
+    const relocate = vi.fn(async () => adopted);
+    const persist = vi.fn(async () => ({}));
+    const gate = createModelLibraryGate({
+      probe: async () => ({ available: false }),
+      relocate,
+      persist,
+    });
+    gate.block(unavailableError().context, action);
+
+    await expect(gate.relocate("/Volumes/Models 1/hf")).resolves.toBe(adopted);
+    expect(relocate).toHaveBeenCalledWith("/Volumes/Models 1/hf");
+    expect(persist).toHaveBeenCalledWith(adopted);
+    expect(gate.getState()).toMatchObject({ status: "idle", relocated: adopted });
+    // Relocation takes effect on the next launch, so resuming now would only be refused again:
+    // the action is dropped, exactly like cancel, rather than left queued.
+    expect(action).not.toHaveBeenCalled();
+    await gate.retry();
+    expect(action).not.toHaveBeenCalled();
+  });
+
+  it("keeps the prompt open with actionable guidance when a relocation is rejected", async () => {
+    const action = vi.fn(async () => "job-1");
+    const rejection = new Error(
+      "That folder does not contain a SceneWorks model library.",
+    );
+    const relocate = vi.fn().mockRejectedValueOnce(rejection);
+    const persist = vi.fn();
+    const gate = createModelLibraryGate({
+      probe: async () => ({ available: true }),
+      relocate,
+      persist,
+    });
+    gate.block(unavailableError().context, action);
+
+    await expect(gate.relocate("/Users/me/Pictures")).resolves.toBeNull();
+    expect(persist).not.toHaveBeenCalled();
+    expect(gate.getState()).toMatchObject({ status: "blocked" });
+    expect(gate.getState().error).toBe(rejection.message);
+    // The original action survived the rejected attempt.
+    await gate.retry();
+    expect(action).toHaveBeenCalledTimes(1);
+  });
+
+  it("notifies subscribers on every settled transition", async () => {
+    const listener = vi.fn();
+    const gate = createModelLibraryGate({ probe: async () => ({ available: true }) });
+    const unsubscribe = gate.subscribe(listener);
+    gate.block(unavailableError().context, async () => "job-1");
+    await gate.retry();
+    expect(listener).toHaveBeenCalled();
+    unsubscribe();
+    const seen = listener.mock.calls.length;
+    gate.block(unavailableError().context, async () => "job-2");
+    expect(listener.mock.calls.length).toBe(seen);
+  });
+});

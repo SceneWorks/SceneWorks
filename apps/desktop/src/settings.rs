@@ -945,6 +945,25 @@ pub async fn choose_data_dir(app: AppHandle) -> Option<String> {
     pick_folder(&app)
 }
 
+/// Persist a relocated model library (sc-19709).
+///
+/// The API has already validated the chosen root and re-bound its durable identity; it returns the
+/// exact `HF_HOME` that resolves to that library, and this is the ONE place it becomes durable.
+/// Deliberately the same field, normalization and file as the first-run storage step — relocation
+/// is a change to the existing library-path configuration, not a parallel setting. Like the data
+/// directory, the sidecars receive it as spawn environment, so it applies on the next launch.
+#[tauri::command]
+pub fn set_model_library(path: String) -> Result<AppSettings, String> {
+    let mut settings = load_settings();
+    let hf_home = storage_override_input("Model library folder", &path)?;
+    if hf_home.is_none() {
+        return Err("A model library folder is required.".to_owned());
+    }
+    settings.hf_home = hf_home;
+    save_settings(&settings)?;
+    Ok(settings)
+}
+
 #[tauri::command]
 pub fn reveal_in_os(path: String) -> Result<(), String> {
     let target = validate_reveal_target(&path)?;
