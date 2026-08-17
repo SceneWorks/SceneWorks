@@ -81,6 +81,64 @@ fn resolver(root: &Path, registry: ActiveArtifactLeaseRegistry) -> ModelArtifact
     ModelArtifactResolver::with_lease_registry(ArtifactSourceLibrary::new(root).unwrap(), registry)
 }
 
+#[cfg(windows)]
+struct WindowsDirectoryJunction {
+    path: PathBuf,
+    removed: bool,
+}
+
+#[cfg(windows)]
+impl WindowsDirectoryJunction {
+    fn create(path: &Path, target: &Path) -> Self {
+        let output = Command::new("cmd")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(path)
+            .arg(target)
+            .output()
+            .expect("launch cmd.exe to create directory junction");
+        assert!(
+            output.status.success(),
+            "mklink /J failed with {}\nstdout: {}\nstderr: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let metadata = std::fs::symlink_metadata(path)
+            .expect("read the created directory junction without following it");
+        assert!(
+            metadata_is_reparse_point(&metadata),
+            "mklink /J fixture must carry FILE_ATTRIBUTE_REPARSE_POINT"
+        );
+        Self {
+            path: path.to_path_buf(),
+            removed: false,
+        }
+    }
+
+    fn remove(mut self) {
+        std::fs::remove_dir(&self.path)
+            .expect("remove the junction itself without traversing its target");
+        self.removed = true;
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsDirectoryJunction {
+    fn drop(&mut self) {
+        if !self.removed {
+            let _ = std::fs::remove_dir(&self.path);
+        }
+    }
+}
+
+#[test]
+fn reservation_outcome_keeps_the_lock_holding_reservation_behind_indirection() {
+    assert!(
+        std::mem::size_of::<ReservationOutcome>() <= 4 * std::mem::size_of::<usize>(),
+        "ReservationOutcome must not inline the lock-holding reservation"
+    );
+}
+
 #[test]
 fn policy_defaults_are_finite_disabled_and_serde_defaults_upgrade() {
     let policy = ResolvedCachePolicy::default();
@@ -448,8 +506,7 @@ fn complete_validation_rejects_a_post_publication_bundle_swap_everywhere() {
 
 #[cfg(windows)]
 #[test]
-fn completion_rejects_a_directory_reparse_point_when_windows_allows_fixture_creation() {
-    use std::os::windows::fs::symlink_dir;
+fn completion_rejects_a_directory_junction_without_touching_external_bytes() {
     let scratch = TempDir::new().unwrap();
     let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
     let source = scratch.path().join("source");
@@ -461,13 +518,9 @@ fn completion_rejects_a_directory_reparse_point_when_windows_allows_fixture_crea
     let external = scratch.path().join("external");
     std::fs::create_dir(&external).unwrap();
     std::fs::write(external.join("weights.bin"), b"external-model-bytes").unwrap();
+    std::fs::write(external.join("sentinel"), b"external-must-survive").unwrap();
     let bundle = reservation.bundle_path().unwrap();
-    if let Err(error) = symlink_dir(&external, &bundle) {
-        if error.kind() == std::io::ErrorKind::PermissionDenied {
-            return;
-        }
-        panic!("create directory reparse fixture: {error}");
-    }
+    let junction = WindowsDirectoryJunction::create(&bundle, &external);
     let mut local = candidate.artifact.clone();
     local.location = ArtifactLocation::ResolvedLocal { root: bundle };
     assert!(reservation.record_complete(local).is_err());
@@ -475,12 +528,17 @@ fn completion_rejects_a_directory_reparse_point_when_windows_allows_fixture_crea
         std::fs::read(external.join("weights.bin")).unwrap(),
         b"external-model-bytes"
     );
+    assert_eq!(
+        std::fs::read(external.join("sentinel")).unwrap(),
+        b"external-must-survive"
+    );
+    junction.remove();
+    assert!(external.is_dir());
 }
 
 #[cfg(windows)]
 #[test]
-fn complete_validation_rejects_a_post_publication_directory_reparse_point() {
-    use std::os::windows::fs::symlink_dir;
+fn complete_validation_rejects_a_post_publication_directory_junction_everywhere() {
     let scratch = TempDir::new().unwrap();
     let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
     let source = scratch.path().join("source");
@@ -492,21 +550,38 @@ fn complete_validation_rejects_a_post_publication_directory_reparse_point() {
     std::fs::create_dir(&external).unwrap();
     std::fs::write(external.join("weights.bin"), b"model-weights").unwrap();
     std::fs::write(external.join("sentinel"), b"external-must-survive").unwrap();
-    if let Err(error) = symlink_dir(&external, &bundle) {
-        if error.kind() == std::io::ErrorKind::PermissionDenied {
-            return;
-        }
-        panic!("create directory reparse fixture: {error}");
-    }
+    let junction = WindowsDirectoryJunction::create(&bundle, &external);
     assert!(store.lookup_complete(&candidate.cache_key).is_err());
     let resolver = resolver(&source, ActiveArtifactLeaseRegistry::default());
     assert!(store
         .acquire_complete(&candidate.cache_key, &resolver, "runtime:image:model")
         .is_err());
+    assert!(store.enumerate().is_err());
+    let digest = cache_key_digest(&candidate.cache_key).unwrap();
+    let metadata_lock = store.lock_metadata(&digest).unwrap();
+    assert_eq!(
+        store.read_metadata_locked(&digest).unwrap().last_used_at,
+        None
+    );
+    drop(metadata_lock);
+
+    let entry = store.entry_path(&candidate.cache_key).unwrap();
+    for slot in 0..=1 {
+        std::fs::write(entry.join(format!("metadata.{slot}.json")), b"corrupt").unwrap();
+    }
+    let recovered = store.recover().unwrap();
+    assert_eq!(recovered[0].state, ResolvedCacheEntryState::Corrupt);
+    assert!(recovered[0].metadata.is_none());
+    assert_eq!(
+        std::fs::read(external.join("weights.bin")).unwrap(),
+        b"model-weights"
+    );
     assert_eq!(
         std::fs::read(external.join("sentinel")).unwrap(),
         b"external-must-survive"
     );
+    junction.remove();
+    assert!(external.is_dir());
 }
 
 #[test]
@@ -914,7 +989,7 @@ fn cross_process_store_child() {
     let candidate = source_candidate(&source, REVISION_A);
     let _held: Box<dyn std::any::Any> = if mode == "reserve" {
         match store.reserve(&candidate, &source, "child:model").unwrap() {
-            ReservationOutcome::Acquired(reservation) => Box::new(reservation),
+            ReservationOutcome::Acquired(reservation) => reservation,
             ReservationOutcome::AlreadyComplete(_) => panic!("child entry is already complete"),
             ReservationOutcome::Contended => panic!("child reservation contended"),
         }

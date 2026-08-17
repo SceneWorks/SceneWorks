@@ -1618,6 +1618,15 @@ test("dropping the PR path filter did not expose the self-hosted pools", async (
     "build-windows is the required check; it must actually run on the speculative merge rather " +
       "than skip into a free Success.",
   );
+  const buildStart = desktop.indexOf("\n  build-windows:");
+  const packageStart = desktop.indexOf("\n  package-windows:");
+  assert.ok(buildStart >= 0 && packageStart > buildStart, "desktop Windows jobs must be parseable");
+  const requiredBuild = desktop.slice(buildStart, packageStart);
+  assert.match(
+    requiredBuild,
+    /run: "cargo test -p sceneworks-core model_artifacts::resolved_cache::tests:: -- --test-threads=1"/,
+    "required build-windows must execute the native resolved-cache safety suite, not only compile it",
+  );
 });
 
 test("windows-candle stays out of the queue and out of the required set", async () => {
