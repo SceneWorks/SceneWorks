@@ -309,13 +309,29 @@ const ROUTE_MODES = new Set([
   "character_image",
 ]);
 const ROUTE_OVERLAYS = new Set(["none", "lora", "control", "identity"]);
+// Which matrix overlay cell each load profile serves. A profile can COMPOSE several load-time
+// concerns, and the cell it lands in follows one precedence: identity > control > lora > none. That
+// is not invented here — it is what the existing rows already encode (`lora_pid` -> `lora`, because
+// PiD alone is `none` and LoRA outranks it) and what both engine dumps independently declare on the
+// witnesses themselves, which this map is then used to CHECK.
+//
+// The four composed profiles below were missing, and a missing entry is a hard throw rather than a
+// finding: at pin 931366f62 the MLX registry emits 24 witnesses across them, so the reconciliation
+// crashed on a legitimate route instead of reconciling it. Adding them widens what the consistency
+// check COVERS; it does not widen what satisfies a manifest declaration — `MANIFEST_ROUTE_PROFILES`
+// below is deliberately left alone, so a bare `identity` cell is still served only by the plain
+// identity profiles and never by `lora_ip_adapter`.
 const ROUTE_LOAD_PROFILES = new Map([
   ["plain", "none"],
   ["lora", "lora"],
   ["lora_pid", "lora"],
   ["single_control", "control"],
   ["multi_control", "control"],
+  ["lora_single_control", "control"],
   ["ip_adapter", "identity"],
+  ["ip_adapter_pid", "identity"],
+  ["lora_ip_adapter", "identity"],
+  ["lora_ip_adapter_pid", "identity"],
   ["pid", "none"],
   ["identity", "identity"],
 ]);
