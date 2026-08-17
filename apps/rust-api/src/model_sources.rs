@@ -284,7 +284,7 @@ pub(crate) async fn resolve_model_manifest_entry_by_repo(
         .find(|entry| declares_repository(entry))
         .and_then(|entry| entry.get("id").and_then(Value::as_str).map(str::to_owned));
     if resolved.is_none() {
-        resolved = crate::models::embedded_builtin_catalog_entry(&declares_repository)?
+        resolved = crate::models::embedded_builtin_catalog_entry(declares_repository)?
             .and_then(|entry| entry.get("id").and_then(Value::as_str).map(str::to_owned));
     }
     let model_id = resolved.ok_or_else(|| {
