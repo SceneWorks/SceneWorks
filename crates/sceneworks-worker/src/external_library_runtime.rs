@@ -769,6 +769,79 @@ mod tests {
         });
     }
 
+    /// The runtimes whose model directory is a concrete path resolved BEFORE the load — training
+    /// base models, captioners, analyzers (the `ManagedModelPath` entrypoint) — and the
+    /// receipt-provenance lane both read the leased bundle too, so no model-consuming surface is
+    /// left on the source tier while a lease is active.
+    #[test]
+    fn payload_resolved_and_receipt_paths_are_served_from_the_leased_bundle() {
+        let temp = TempDir::new().unwrap();
+        let (settings, library, payload) = installed_model(&temp);
+        with_local_cache(&library, || {
+            let artifact = publish_bundle(
+                &settings.data_dir,
+                &library,
+                "owner/model",
+                REV_A,
+                "default",
+                &["model.safetensors"],
+            );
+            let bundle_snapshot = artifact
+                .location
+                .root()
+                .join(format!("models--owner--model/snapshots/{REV_A}"));
+            let source_snapshot = ArtifactSourceLibrary::new(&library)
+                .unwrap()
+                .repository_root("owner/model")
+                .unwrap()
+                .join("snapshots")
+                .join(REV_A);
+
+            // Without a lease the authoritative source path survives untouched.
+            let before = crate::paths::normalize_app_managed_model_path(
+                &settings,
+                source_snapshot.to_str().unwrap(),
+                "base model",
+            )
+            .unwrap();
+            assert!(before.ends_with(format!("snapshots/{REV_A}")));
+            assert!(!before.starts_with(artifact.location.root()));
+
+            let guard =
+                RuntimeSourceGuard::begin(&JobType::ImageGenerate, &payload, &settings).unwrap();
+            let during = crate::paths::normalize_app_managed_model_path(
+                &settings,
+                source_snapshot.to_str().unwrap(),
+                "base model",
+            )
+            .unwrap();
+            assert_eq!(during, bundle_snapshot);
+            // The receipt lane proves its install against the source and then hands the loader the
+            // leased local path.
+            assert_eq!(
+                crate::model_jobs::huggingface_receipt_weights_dir(
+                    &settings.data_dir,
+                    "owner/model",
+                    Some("m"),
+                    None
+                ),
+                Some(bundle_snapshot)
+            );
+            guard.finish_success().unwrap();
+
+            // And the redirect is gone with the lease.
+            assert_eq!(
+                crate::paths::normalize_app_managed_model_path(
+                    &settings,
+                    source_snapshot.to_str().unwrap(),
+                    "base model",
+                )
+                .unwrap(),
+                before
+            );
+        });
+    }
+
     /// The epic's headline outcome: with the configured library disconnected, a complete local
     /// bundle still admits and still resolves — without the runtime ever reaching a downloader or
     /// recreating the configured library root.

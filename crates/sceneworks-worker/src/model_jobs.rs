@@ -2915,8 +2915,20 @@ pub(crate) fn huggingface_receipt_weights_dir(
 ) -> Option<PathBuf> {
     // Path-only callers never read provenance, so they must not trigger a receipt write as a side
     // effect of locating weights. Repair belongs to the provenance consumer.
-    huggingface_receipt_weights(data_dir, repo, model_id, variant, ProvenanceRepair::Skip)
-        .map(|resolved| resolved.path)
+    let resolved =
+        huggingface_receipt_weights(data_dir, repo, model_id, variant, ProvenanceRepair::Skip)?;
+    // sc-19707: the receipt resolves and PROVES its install against the authoritative source
+    // (its tree stamp is a source-tree fact and must stay one); only the path handed to the loader
+    // is then served from a leased app-owned bundle covering that exact snapshot. Inert without an
+    // active lease.
+    let library = sceneworks_core::hf_home::model_source_library(data_dir);
+    Some(
+        sceneworks_core::model_artifacts::local_preference::redirect_source_library_path(
+            library.root(),
+            &resolved.path,
+        )
+        .unwrap_or(resolved.path),
+    )
 }
 
 #[cfg(any(target_os = "macos", feature = "backend-candle", test))]
