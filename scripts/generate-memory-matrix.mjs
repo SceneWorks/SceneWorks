@@ -20,7 +20,12 @@ const OUTPUT_MD = "docs/generated/memory-matrix.md";
 const EXPECTED_IMAGE_COUNT = 53;
 // SC-18218 removed FLUX.2-dev from this census: the pinned MLX provider is eager/resident-only,
 // so counting its generic route as staged coverage would contradict the captured contract.
-const EXPECTED_MLX_STAGED_COUNT = 37;
+//
+// Back to 38 with the sc-18304 pin advance to inference 81ed5aa1: sc-18609 made bernini_image's
+// DECLARED MLX rung-4 ladder actually reachable on both variants, so it re-enters the implemented
+// staged set it had dropped out of while the ladder was declared-but-unreachable. FLUX.2-dev is
+// still excluded — this is bernini rejoining, not the SC-18218 exclusion being reversed.
+const EXPECTED_MLX_STAGED_COUNT = 38;
 // Provider calibration ABI versions are deliberate invalidation switches. A provider-specific
 // execution/layout/quantization change that makes measurements unsafe must add or bump its key;
 // ecosystem-wide contract changes bump `default`. Exact source revisions remain provenance only.
@@ -42,8 +47,15 @@ const GENERATION_CAPABILITIES = new Set([
   "image_inpaint",
   "image_detail",
   "character_image",
-  "style_variations",
 ]);
+
+export function activeCalibrationPlan(calibrationPlan) {
+  const retiredModes = new Set(Object.keys(calibrationPlan.retiredModes ?? {}));
+  return {
+    ...calibrationPlan,
+    providers: calibrationPlan.providers.filter((entry) => !retiredModes.has(entry.target.mode)),
+  };
+}
 
 // This is ownership metadata, not conformance data. Drift is checked against the
 // source-owned EXPECTED_IMAGE_IDS list and the shipped manifest below.
@@ -2177,7 +2189,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
   const mlxFitBody = bodies.mlxFitGate;
   const cargoBody = bodies.cargo;
   const calibrationBundle = validateCalibrationBundle(JSON.parse(bodies.calibrationEvidence));
-  const calibrationPlan = JSON.parse(bodies.calibrationPlan);
+  const calibrationPlan = activeCalibrationPlan(JSON.parse(bodies.calibrationPlan));
   // sc-17774: per-provider compile-closure digests, gated against the Cargo pin. `closureIsCurrent`
   // wants the Map; `evidenceSemantics` takes a plain object so the harness needs no Map plumbing.
   const inferenceClosureDigests = validatedInferenceClosures(

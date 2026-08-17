@@ -7,6 +7,7 @@ import {
   FAMILY_STORIES,
   MODEL_STORIES,
   SOURCE_PATHS,
+  activeCalibrationPlan,
   assertCellOwnershipIsBackendScoped,
   assertCalibrationPlanTargetsResolvedCoordinates,
   assertCellInventoryMatchesCatalog,
@@ -683,13 +684,17 @@ test("FLUX.2-dev MLX exposes only the captured q4/q8 T2I Resident cells and keep
     }],
   );
 
-  const matrix = await buildMatrix({ publish: false });
-  const cells = matrix.cells.filter(
+  const shipped = await buildMatrix({ publish: false });
+  const shippedCells = shipped.cells.filter(
     (cell) => cell.modelId === "flux2_dev" && cell.backend === "mlx",
   );
-  assert.equal(cells.length, 180, "the full 3-tier x 4-mode x 3-overlay x 5-rung slice must exist");
+  assert.equal(
+    shippedCells.length,
+    135,
+    "the full 3-tier x 3-active-mode x 3-overlay x 5-rung slice must exist after style retirement",
+  );
   assert.deepEqual(
-    cells.filter((cell) => cell.state !== "Missing").map((cell) => cell.id).sort(),
+    shippedCells.filter((cell) => cell.state !== "Missing").map((cell) => cell.id).sort(),
     [
       "flux2_dev:flux2_dev:mlx:q4:text_to_image:none:resident",
       "flux2_dev:flux2_dev:mlx:q8:text_to_image:none:resident",
@@ -697,7 +702,7 @@ test("FLUX.2-dev MLX exposes only the captured q4/q8 T2I Resident cells and keep
     "BF16 and every sibling mode, overlay, and rung must remain Missing",
   );
   assert.ok(
-    cells
+    shippedCells
       .filter((cell) => cell.state !== "Missing")
       .every(
         (cell) =>
@@ -2554,7 +2559,7 @@ async function currentManifestCalibrationFixture({
   return JSON.stringify(parsed);
 }
 
-/// Retained Qwen q8 records using the shared rung-4 fingerprint, re-stamped current.
+/// Retained Qwen production-deferred records using the shared fingerprint, re-stamped current.
 ///
 /// Selected by their calibration fingerprint, which is what separates them from the 22 older Qwen
 /// records in the bundle: the rung-4 ingest and SC-18237's production-deferred pair carry the bare
@@ -2562,12 +2567,14 @@ async function currentManifestCalibrationFixture({
 /// `-deferred` load-shape variants. Q4/BF16 are deliberately not re-stamped: their physical source
 /// sessions bind the superseded closure and cannot truthfully be made current by a synthetic fixture.
 const QWEN_RUNG4_FINGERPRINT = "qwen-image-mlx-shared-ladder-2026-08-01-v1";
+const QWEN_PRODUCTION_DEFERRED_REVISION = "014134e3035ad7e4eca5c2ed7bded2375dc3c071";
 const qwenRung4OnCurrentPin = () =>
   currentEvidenceFixture({
     select: (record) =>
       record.target.provider === "qwen_image" &&
-      record.target.tier === "q8" &&
-      record.calibrationFingerprint === QWEN_RUNG4_FINGERPRINT,
+      record.calibrationFingerprint === QWEN_RUNG4_FINGERPRINT &&
+      (record.target.tier === "q8" ||
+        record.repositories.inference.revision === QWEN_PRODUCTION_DEFERRED_REVISION),
   });
 
 test("current evidence promotes a cell to Verified, and historical evidence does not (sc-16060)", async () => {
@@ -2922,9 +2929,9 @@ test("every conformance and characterization state carries a definition (sc-1606
 test("publication keeps every planned, measured, bound and cited coordinate — and nothing else", async () => {
   const resolved = await buildMatrix({ publish: false });
   const publishedDocument = await buildMatrix();
-  const plan = JSON.parse(
+  const plan = activeCalibrationPlan(JSON.parse(
     await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url), "utf8"),
-  );
+  ));
 
   const planned = plannedCellIds(plan, resolved.cells);
   assert.ok(planned.size > 100, "the shipped plan must target a substantial set of coordinates");
@@ -3279,8 +3286,17 @@ test("a calibration-plan entry that addresses no coordinate fails generation (sc
   // that capability `edit_image`, so they matched ZERO coordinates. Nothing caught it —
   // `expectedEngagedRungs` just returned null, and `memory-calibration.schema.json` types `mode` as a
   // free string — and a capture run against them would have produced records binding to nothing.
-  const plan = JSON.parse(
+  const rawPlan = JSON.parse(
     await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url), "utf8"),
+  );
+  const retiredStyleRows = rawPlan.providers.filter(
+    (entry) => entry.target.mode === "style_variations",
+  );
+  assert.ok(retiredStyleRows.length > 0, "historical style captures remain provenance");
+  const plan = activeCalibrationPlan(rawPlan);
+  assert.ok(
+    plan.providers.every((entry) => entry.target.mode !== "style_variations"),
+    "retired product modes are excluded from the active calibration plan",
   );
 
   // The shipped plan is clean, which is the property worth pinning: every entry addresses something.

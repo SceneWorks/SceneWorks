@@ -4,7 +4,8 @@ use super::{
     prepare_manifest_text_encoder_with_file_pins, resolve_advanced_or_manifest_u32, resolve_seed,
     start_cached_gen_stream_after_cold_admission, ApiClient, ColdLoadAdmission, GenerationOutput,
     GenerationRequest, ImageRequest, JobSnapshot, JsonObject, LoadSpec, Path, PathBuf,
-    PreparedFileDispatch, Quant, Settings, Value, WeightsSource, WorkerError, WorkerResult,
+    PreparedAdapters, PreparedFileDispatch, Quant, Settings, Value, WeightsSource, WorkerError,
+    WorkerResult,
 };
 use serde_json::json;
 
@@ -58,6 +59,10 @@ pub(super) struct ComfyuiFlux2Paths {
     snapshot_dir: PathBuf,
     /// Exact registry-validated on-the-fly tier selected before dispatch.
     quant: Quant,
+    /// Request LoRA/LoKr stack, resolved and pinned once by production preparation. The specs ride
+    /// the same `LoadSpec` admission and the provider load consume, so the adapter bytes are priced
+    /// from the finalized tokens rather than re-stat'd after the scheduler gap.
+    adapters: PreparedAdapters,
 }
 
 /// Resolve the ComfyUI FLUX.2-dev DiT path + the resident snapshot tier from the forwarded
@@ -120,6 +125,10 @@ pub(super) fn resolve_flux2_comfyui_paths(
         // Structural resolution does not claim the route by itself; production preparation replaces
         // this default with the exact request selection after registry validation.
         quant: FLUX2_COMFYUI_DEFAULT_QUANT,
+        adapters: PreparedAdapters {
+            specs: Vec::new(),
+            pins: Vec::new(),
+        },
     }))
 }
 
@@ -159,6 +168,7 @@ pub(super) fn prepare_flux2_comfyui_sources(
         return Ok(None);
     };
     paths.quant = quant;
+    paths.adapters = super::resolve_prepared_adapters(request, settings)?;
     Ok(Some(paths))
 }
 
@@ -317,7 +327,11 @@ pub(super) fn prepare_flux2_comfyui_load_spec_for_request(
     engine_id: &str,
 ) -> WorkerResult<(LoadSpec, PathBuf)> {
     let snapshot_dir = paths.snapshot_dir;
-    let spec = LoadSpec::new(WeightsSource::File(
+    let PreparedAdapters {
+        specs: adapters,
+        pins: adapter_pins,
+    } = paths.adapters;
+    let mut spec = LoadSpec::new(WeightsSource::File(
         paths.transformer.loader_path().to_path_buf(),
     ))
     .with_component(
@@ -325,12 +339,17 @@ pub(super) fn prepare_flux2_comfyui_load_spec_for_request(
         WeightsSource::Dir(snapshot_dir.clone()),
     )
     .with_quant(quant);
+    if !adapters.is_empty() {
+        spec = spec.with_adapters(adapters);
+    }
+    let mut pins = vec![paths.transformer];
+    pins.extend(adapter_pins);
     let spec = prepare_manifest_text_encoder_with_file_pins(
         spec,
         engine_id,
         request,
         settings,
-        [paths.transformer],
+        pins,
         "ComfyUI FLUX.2 source preparation failed",
     )?;
     Ok((spec, snapshot_dir))

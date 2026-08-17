@@ -4473,6 +4473,195 @@ fn validate_prompt_extras(negative_prompt: &str, advanced: &JsonObject) -> Resul
     Ok(())
 }
 
+const PROMPT_ENHANCE_MAX_TOKENS: u64 = 2048;
+const PROMPT_ENHANCE_MAX_TEMPERATURE: f64 = 2.0;
+const PROMPT_ENHANCEMENT_FACT_KEY: &str = "promptEnhancement";
+
+/// Validate the typed, bounded part of the FLUX.2 prompt-enhancement request at every image enqueue
+/// boundary. `advanced` is otherwise intentionally extensible, but these fields cross into a native
+/// LLM sampler and must never inherit the old truthy/coercing behavior.
+fn validate_prompt_enhancement_fields(advanced: &JsonObject) -> Result<bool, ApiError> {
+    if advanced.contains_key(PROMPT_ENHANCEMENT_FACT_KEY) {
+        return Err(ApiError::bad_request(format!(
+            "advanced.{PROMPT_ENHANCEMENT_FACT_KEY} is worker-owned and cannot be supplied by a client"
+        )));
+    }
+    let enabled = match advanced.get("enhancePrompt") {
+        None => false,
+        Some(Value::Bool(enabled)) => *enabled,
+        Some(_) => {
+            return Err(ApiError::bad_request(
+                "advanced.enhancePrompt must be a boolean",
+            ));
+        }
+    };
+    if let Some(value) = advanced.get("enhanceTemperature") {
+        let temperature = value
+            .as_f64()
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| {
+                ApiError::bad_request("advanced.enhanceTemperature must be a finite number")
+            })?;
+        if !(0.0..=PROMPT_ENHANCE_MAX_TEMPERATURE).contains(&temperature) {
+            return Err(ApiError::bad_request(format!(
+                "advanced.enhanceTemperature must be between 0 and {PROMPT_ENHANCE_MAX_TEMPERATURE}"
+            )));
+        }
+        if !enabled {
+            return Err(ApiError::bad_request(
+                "advanced.enhanceTemperature requires advanced.enhancePrompt=true",
+            ));
+        }
+    }
+    if let Some(value) = advanced.get("enhanceMaxTokens") {
+        let tokens = value
+            .as_u64()
+            .ok_or_else(|| ApiError::bad_request("advanced.enhanceMaxTokens must be an integer"))?;
+        if !(1..=PROMPT_ENHANCE_MAX_TOKENS).contains(&tokens) {
+            return Err(ApiError::bad_request(format!(
+                "advanced.enhanceMaxTokens must be between 1 and {PROMPT_ENHANCE_MAX_TOKENS}"
+            )));
+        }
+        if !enabled {
+            return Err(ApiError::bad_request(
+                "advanced.enhanceMaxTokens requires advanced.enhancePrompt=true",
+            ));
+        }
+    }
+    Ok(enabled)
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn prompt_enhancement_payload_string(payload: &JsonObject, key: &str) -> bool {
+    payload
+        .get(key)
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn prompt_enhancement_payload_references(payload: &JsonObject) -> bool {
+    prompt_enhancement_payload_string(payload, "referenceAssetId")
+        || payload
+            .get("referenceAssetIds")
+            .and_then(Value::as_array)
+            .is_some_and(|values| {
+                values
+                    .iter()
+                    .any(|value| value.as_str().is_some_and(|value| !value.trim().is_empty()))
+            })
+}
+
+fn validate_prompt_enhancement_route(payload: &JsonObject) -> Result<(), ApiError> {
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    let mode = payload
+        .get("mode")
+        .and_then(Value::as_str)
+        .unwrap_or("text_to_image");
+
+    #[cfg(target_os = "macos")]
+    if !matches!(
+        mode,
+        "text_to_image" | "edit_image" | "character_image" | "style_variations"
+    ) {
+        return Err(ApiError::bad_request(format!(
+            "advanced.enhancePrompt on MLX does not support image mode {mode}"
+        )));
+    }
+
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    if !matches!(mode, "text_to_image" | "edit_image") {
+        return Err(ApiError::bad_request(format!(
+            "advanced.enhancePrompt on Candle supports only text_to_image and edit_image; mode {mode} is unsupported"
+        )));
+    }
+
+    #[cfg(not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )))]
+    {
+        let _ = payload;
+        Err(ApiError::bad_request(
+            "advanced.enhancePrompt requires a native MLX or Candle image backend",
+        ))
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    {
+        let has_references = prompt_enhancement_payload_references(payload);
+        let has_edit_input =
+            has_references || prompt_enhancement_payload_string(payload, "sourceAssetId");
+        if mode == "text_to_image" && has_edit_input {
+            return Err(ApiError::bad_request(
+                "advanced.enhancePrompt text_to_image cannot include source or reference image assets",
+            ));
+        }
+        if mode == "edit_image" && !has_edit_input {
+            return Err(ApiError::bad_request(
+                "advanced.enhancePrompt edit_image requires a source or reference image asset",
+            ));
+        }
+        if matches!(mode, "character_image" | "style_variations") && !has_references {
+            return Err(ApiError::bad_request(format!(
+                "advanced.enhancePrompt {mode} requires a reference image asset"
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Validate the canonical, post-preset image payload. Enhancement is deliberately scoped to the
+/// actual native backend route: MLX owns base/edit/character plus the defensive legacy style alias,
+/// while Candle owns only base and its bespoke `edit_image` lane. It is not inherited by Klein,
+/// strict control, backendless builds,
+/// or a reference-bearing mode that would fall through to a plain base render. Keeping this check
+/// on the final payload also covers presets and retry/duplicate's shallow-merged canonical payload.
+fn validate_prompt_enhancement_payload(payload: &JsonObject) -> Result<(), ApiError> {
+    let empty = JsonObject::new();
+    let advanced = payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    if !validate_prompt_enhancement_fields(advanced)? {
+        return Ok(());
+    }
+    let model = payload
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if model != "flux2_dev" {
+        return Err(ApiError::bad_request(
+            "advanced.enhancePrompt is supported only by FLUX.2-dev; FLUX.2-Klein and other models reject it",
+        ));
+    }
+    let strict_control = advanced
+        .get("poses")
+        .and_then(Value::as_array)
+        .is_some_and(|poses| !poses.is_empty())
+        || advanced.contains_key("controlWeights")
+        || advanced.contains_key("controlImage")
+        || advanced.contains_key("controlMode");
+    if strict_control {
+        return Err(ApiError::bad_request(
+            "advanced.enhancePrompt cannot be combined with FLUX.2-dev strict control",
+        ));
+    }
+    validate_prompt_enhancement_route(payload)
+}
+
 /// Reject a `model` id that is not a safe single path component (F-003 / sc-11159).
 ///
 /// The id flows verbatim from the untrusted job payload into the worker's asset
@@ -4519,6 +4708,7 @@ fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
         ));
     }
     validate_prompt_extras(&payload.negative_prompt, &payload.advanced)?;
+    validate_prompt_enhancement_fields(&payload.advanced)?;
     validate_image_pose_count(&payload.advanced)?;
     if payload.loras.len() > sceneworks_core::lora_family::MAX_JOB_LORAS {
         return Err(ApiError::bad_request(format!(

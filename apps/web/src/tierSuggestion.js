@@ -220,7 +220,7 @@ function measuredSiblingPeakEstimateBytes(variant, model, targetDisk) {
 //
 // Crossing them is NOT merely imprecise, it can UNDER-state, which is the one direction that OOMs:
 // `lens_turbo` measures 30.50 GiB on MLX while its candle q4 row declares 37.3 GB of VRAM at the same
-// tier (that row is `candle.measured: false` — an explicit ESTIMATE, not a measurement; see below), and
+// tier (that row is `candle.measured: false` — uncalibrated on the Candle lane; see below), and
 // `qwen_image` declares `mlx.minMemoryGb` 50 against a `candle.minMemoryGb` of 56. So there is no "the MLX number is
 // at least conservative" shortcut — every helper below takes the lane explicitly and reads only that
 // lane's fields. `options.backend === "candle"` selects the candle lane; anything else is MLX (the
@@ -248,22 +248,21 @@ function measuredSiblingPeakEstimateBytes(variant, model, targetDisk) {
 //     `TRANSIENT_HEADROOM_BYTES`, a 14 GiB MLX 1024²-VAE-decode measurement with no candle counterpart,
 //     and candle converts additively, so the two would not even compose into a comparable quantity.
 //   * a filled tier makes the answer ESTIMATED, so it can never LOWER the blanket (`maxHostGb`), exactly
-//     as `laneEvidenceEstimated` does. Without that, `qwen_image`'s `{q4}` install would read its
+//     as `laneEvidenceUncalibrated` does. Without that, `qwen_image`'s `{q4}` install would read its
 //     filled q4 estimate INSTEAD OF the larger blanket 50 — trading one under-statement for another.
 // When a tier has no lane number AND no estimable size either (`krea_2_raw` ships neither a footprint
 // nor a `diskSizeBytes`), the set stays genuinely unbounded and `installedFloorHostGb` says so.
 //
-// "Declared" is not the same as "measured", and the candle lane says which it is. `candle.measured`
-// is `false` on 13 shipped entries; five of the 13 also carry `vramGbByTier` (`lens_turbo`,
-// `flux_schnell`, `krea_2_raw`, `sd3_5_large_turbo`, `sd3_5_medium`) and are the set meant here, the
-// other eight being blanket-only audio entries (`kokoro_82m`, `chatterbox_tts`, …) where the flag has
-// nothing per-tier to qualify — schema: "false when ESTIMATED (scaled from weight size + a measured
-// sibling) pending a real measurement". The flag covers `minMemoryGb` AND `vramGbByTier` TOGETHER,
-// which decides what to do about it: on such an entry the blanket integer is ITSELF an estimate, so
-// "distrust the per-tier row and fall through to the blanket" would merely swap one estimate for
-// another. What it CAN do is refuse to let either estimate lower the other, so `laneEvidenceEstimated`
-// makes the blanket a FLOOR under the per-tier figure (`max`, identical to the incomplete-coverage rule
-// above). Concretely: `lens_turbo`'s estimated candle q4 row of 37.3 converts to a 40 GB host, below the
+// "Declared" is not the same as "calibrated", and the candle lane says which it is. `candle.measured`
+// is `false` on 20 shipped entries; 12 of those carry `vramGbByTier`. Most are estimates or inherited
+// sibling envelopes, while `flux2_dev` is different: its conservative 256² real-GPU high-water is a
+// fail-closed tier gate, not a 1024² catalog calibration and not an estimate. The other eight rows are
+// blanket-only, where the flag has nothing per-tier to qualify. The flag therefore means the lane is
+// UNCALIBRATED, not that every number was produced by one estimation method. It covers `minMemoryGb`
+// and `vramGbByTier` together, so the safe policy is the same for every provenance: refuse to let
+// either declared number lower the other. `laneEvidenceUncalibrated` makes the blanket a FLOOR under
+// the per-tier figure (`max`, identical to the incomplete-coverage rule above). Concretely:
+// `lens_turbo`'s estimated candle q4 row of 37.3 converts to a 40 GB host, below the
 // curated blanket of 44 — so the row reports 44. There is no `mlx.measured` counterpart because the MLX
 // per-tier evidence is a harness measurement by construction (`footprint_measure.rs`), so the flag is
 // read on the candle lane only.
@@ -462,12 +461,12 @@ export function evidenceRunFitsHostBytes(run, hostBytes) {
   );
 }
 
-// Whether `backend`'s per-tier numbers for `model` are ESTIMATED rather than measured. See the
-// `candle.measured` discussion in the section header: the flag covers `minMemoryGb` and `vramGbByTier`
-// together, so it does not make one of them trustworthy — it makes NEITHER a safe lower bound on the
-// other, and the caller takes the max. MLX has no counterpart flag: its per-tier evidence is a harness
-// measurement by construction.
-export function laneEvidenceEstimated(model, backend) {
+// Whether `backend`'s declared lane numbers are uncalibrated. `candle.measured: false` covers both
+// estimates and conservative functional-minimum high-waters such as FLUX.2-dev's 256² gate; it must
+// not be narrowed to "estimated". Either way, neither the blanket nor the per-tier row is a safe lower
+// bound on the other, so callers take their max. MLX has no counterpart flag: its per-tier evidence is
+// a harness measurement by construction.
+export function laneEvidenceUncalibrated(model, backend) {
   return backend === "candle" ? model?.candle?.measured === false : false;
 }
 
@@ -639,7 +638,7 @@ function installedCeiling(model, options, fill = null) {
 //      The blanket alone was never right either: it is the DEFAULT (lightest) tier's peak plus headroom,
 //      so it can sit below a heavier installed tier's MEASURED requirement — `flux_dev`'s 24 against a
 //      measured q8 of 31.8 (a 34 GB host), `krea_2_turbo`'s 32 against a measured bf16 of 47.2 (50 GB).
-//   3. The lane flags its numbers ESTIMATED, or a candle-only tier fell back to the q8 proxy ⇒ `max` as
+//   3. The lane flags its numbers UNCALIBRATED, or a candle-only tier fell back to the q8 proxy ⇒ `max` as
 //      well, for the reason in the section header.
 //   4. STILL unbounded after the fill (an installed tier has no lane number, and no estimable size on a
 //      lane that can estimate) AND no blanket ⇒ null, so the surface says NOTHING. A ceiling over a
@@ -668,7 +667,7 @@ export function installedFloorHostGb(model, options = {}) {
     return null;
   }
   const converted = hostGbForPeakGb(ceiling, backend);
-  if (complete && !estimated && !laneEvidenceEstimated(model, backend)) {
+  if (complete && !estimated && !laneEvidenceUncalibrated(model, backend)) {
     return converted;
   }
   const blanket = blanketFloorGb(model, backend);
@@ -679,12 +678,12 @@ export function installedFloorHostGb(model, options = {}) {
 }
 
 // The host size (GB) to quote as an ENTRY floor for a model that is NOT installed yet, or null when the
-// lane has no per-tier evidence. Same estimated-lane rule as above; see `cheapestDeclaredTierPeakGb` for
+// lane has no per-tier evidence. Same uncalibrated-lane rule as above; see `cheapestDeclaredTierPeakGb` for
 // why this is a floor rather than a specific tier's requirement.
 export function declaredFloorHostGb(model, options = {}) {
   const backend = options.backend;
   const converted = hostGbForPeakGb(cheapestDeclaredTierPeakGb(model, options), backend);
-  if (converted === null || !laneEvidenceEstimated(model, backend)) {
+  if (converted === null || !laneEvidenceUncalibrated(model, backend)) {
     return converted;
   }
   return maxHostGb(converted, blanketFloorGb(model, backend));

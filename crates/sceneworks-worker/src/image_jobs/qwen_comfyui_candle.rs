@@ -4,7 +4,8 @@ use super::{
     prepare_manifest_text_encoder_with_file_pins, resolve_advanced_or_manifest_u32, resolve_seed,
     start_cached_gen_stream_after_cold_admission, ApiClient, ColdLoadAdmission, GenerationOutput,
     GenerationRequest, ImageRequest, JobSnapshot, JsonObject, LoadSpec, Path, PathBuf,
-    PreparedFileDispatch, Settings, Value, WeightsSource, WorkerError, WorkerResult,
+    PreparedAdapters, PreparedFileDispatch, Settings, Value, WeightsSource, WorkerError,
+    WorkerResult,
 };
 use serde_json::json;
 
@@ -58,6 +59,9 @@ pub(super) struct ComfyuiQwenPaths {
     /// folded it into the row (sc-10830). `None` ⇒ the snapshot tier's VAE. The TE + tokenizer always
     /// come from the snapshot (the tree TE is scaled-fp8, sc-10671).
     vae: Option<gen_core::PinnedWeightsFile>,
+    /// The job's LoRA/LoKr stack, resolved through the same pinned tokens the loader installs. Empty
+    /// on the routing probe; populated only by [`prepare_qwen_comfyui_sources`] for a real dispatch.
+    adapters: PreparedAdapters,
 }
 
 #[cfg(test)]
@@ -145,6 +149,10 @@ pub(super) fn resolve_qwen_comfyui_paths(
         )?,
         snapshot_dir,
         vae,
+        adapters: PreparedAdapters {
+            specs: Vec::new(),
+            pins: Vec::new(),
+        },
     }))
 }
 
@@ -175,7 +183,11 @@ pub(super) fn prepare_qwen_comfyui_sources(
     {
         return Ok(None);
     }
-    resolve_qwen_comfyui_paths(request, settings)
+    let Some(mut paths) = resolve_qwen_comfyui_paths(request, settings)? else {
+        return Ok(None);
+    };
+    paths.adapters = super::resolve_prepared_adapters(request, settings)?;
+    Ok(Some(paths))
 }
 
 /// Flat telemetry recorded on candle ComfyUI Qwen-Image assets. Qwen-Image base is non-distilled, so
@@ -214,6 +226,10 @@ pub(super) fn prepare_qwen_comfyui_load_spec_for_request(
 ) -> WorkerResult<(LoadSpec, PathBuf, bool)> {
     let snapshot_dir = paths.snapshot_dir;
     let has_imported_vae = paths.vae.is_some();
+    let PreparedAdapters {
+        specs: adapters,
+        pins: adapter_pins,
+    } = paths.adapters;
     let mut spec = LoadSpec::new(WeightsSource::File(
         paths.transformer.loader_path().to_path_buf(),
     ))
@@ -227,8 +243,14 @@ pub(super) fn prepare_qwen_comfyui_load_spec_for_request(
             WeightsSource::File(vae.loader_path().to_path_buf()),
         );
     }
+    if !adapters.is_empty() {
+        spec = spec.with_adapters(adapters);
+    }
     let mut pins = vec![paths.transformer];
     pins.extend(paths.vae);
+    // Adapter tokens are finalized on the same spec that admission prices and the loader consumes, so
+    // the LoRA bytes are counted in the cold floor without a second path list (sc-14111 plumbing).
+    pins.extend(adapter_pins);
     spec = prepare_manifest_text_encoder_with_file_pins(
         spec,
         engine_id,

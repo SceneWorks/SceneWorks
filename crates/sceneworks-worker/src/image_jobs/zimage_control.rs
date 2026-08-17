@@ -1,11 +1,11 @@
 use super::{advanced, ensure_hf_cached_file, huggingface_snapshot_dir};
 use super::{
     attach_manifest_text_encoder, pid_effective_dims, pid_output_tier, pose_entries,
-    resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32_with, resolve_pid_weights,
-    run_candle_strict_control, trusted_control_weight_revision, ApiClient, CancelFlag,
-    CandleStrictControl, Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path, PathBuf,
-    Progress, Settings, Value, WorkerError, WorkerResult, ZImageControl, ZImageControlPaths,
-    ZImageControlRequest,
+    resolve_adapters, resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32_with,
+    resolve_pid_weights, run_candle_strict_control, trusted_control_weight_revision, ApiClient,
+    CancelFlag, CandleStrictControl, Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject, Path,
+    PathBuf, Progress, Settings, Value, WorkerError, WorkerResult, ZImageControl,
+    ZImageControlPaths, ZImageControlRequest,
 };
 use super::{
     resolve_app_managed_model_dir, safe_weight_filename, standard_tier_subdir, DownloadContext,
@@ -320,6 +320,9 @@ pub(super) struct ZImageStrictControl {
     /// The [`STRICT_CONTROL_ENGINES`] catalog id for this job's model — `z_image_turbo_control` (Turbo) or
     /// `z_image_control` (base, sc-8379) — the `advanced.controlMode` validation key.
     engine_id: &'static str,
+    /// The job's LoRA/LoKr stack, applied over the control-branch base at load and priced into the
+    /// conditioning floor. (PiD now rides `load_spec.pid` rather than a separate field.)
+    adapters: Vec<gen_core::AdapterSpec>,
 }
 
 #[cfg(test)]
@@ -348,6 +351,7 @@ pub(super) fn zimage_strict_control_test_fixture(
         } else {
             ZIMAGE_CTRL_ENGINE_ID
         },
+        adapters: Vec::new(),
     }
 }
 
@@ -386,6 +390,9 @@ impl CandleStrictControl for ZImageStrictControl {
         overlays.extend(crate::conditioning_fit::pid_paths(
             self.load_spec.pid.as_ref(),
         ));
+        // The LoRA/LoKr stack is co-resident with the control branch, so it belongs in both the
+        // selected-encoder floor below and the plain snapshot floor.
+        overlays.extend(self.adapters.iter().map(|adapter| adapter.path.as_path()));
         if let Some(text_encoder) = self.load_spec.text_encoder.as_ref() {
             let transformer = self.snapshot.join("transformer");
             let vae = self.snapshot.join("vae");
@@ -421,10 +428,10 @@ impl CandleStrictControl for ZImageStrictControl {
             snapshot: self.snapshot.clone(),
             text_encoder: None,
             control: self.controlnet.clone(),
-            adapters: Vec::new(),
             // Base `z_image` (sc-8680) → the faithful undistilled control path (shift-6.0, ~50-step,
             // real CFG); `z_image_turbo` → the distilled Turbo path (byte-unchanged).
             base: self.is_base,
+            adapters: self.adapters.clone(),
         };
         self.load_spec
             .read_prepared_files_unchanged(|| {
@@ -559,6 +566,7 @@ pub(super) async fn generate_candle_zimage_control_stream(
     // Mark PiD output on the sidecar (NSCLv1 NC flows to PiD output); record whether PiD actually ran.
     raw_settings.insert("usePid".to_owned(), Value::Bool(use_pid));
 
+    let adapters = resolve_adapters(request, settings)?;
     let mut selected_spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(base.clone()))
         .with_control(gen_core::WeightsSource::File(controlnet.clone()));
     if let Some(pid) = pid_weights.as_ref() {
@@ -579,6 +587,7 @@ pub(super) async fn generate_candle_zimage_control_stream(
         guidance,
         negative_prompt,
         engine_id,
+        adapters,
     };
 
     run_candle_strict_control(

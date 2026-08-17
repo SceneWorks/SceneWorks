@@ -198,10 +198,26 @@ export function loraHasResolvableFamily(lora) {
   return loraFamilies(lora).length > 0;
 }
 
+function isSensenovaU1Model(model) {
+  return (
+    normalizeLoraFamily(model?.family) === "sensenova-u1" ||
+    String(model?.id ?? "").trim().toLowerCase().startsWith("sensenova_u1_")
+  );
+}
+
 export function loraMatchesModel(lora, model) {
+  // SenseNova has no diffusion-LoRA merge path. Its six builtin manifests intentionally omit
+  // `loraCompatibility` (an absent advertisement is the only schema-valid representation), while
+  // the two pre-catalog fallback rows are identified by id. Fail closed before the generic
+  // no-family permissive branch so startup/catalog loading cannot surface an adapter the worker
+  // deliberately cannot consume.
+  if (isSensenovaU1Model(model)) {
+    return false;
+  }
   // The API WITHDREW this model's synthesized LoRA advertisement because no backend lane on this
-  // deployment can honour it — for example, a ComfyUI Qwen-Image tree whose registered provider
-  // accepts the imported transformer assembly but advertises no adapter format.
+  // deployment can honour it — a Mage-Flow full fine-tune, whose native single-file loaders
+  // deliberately reject inference adapters, or a ComfyUI Qwen-Image tree whose registered
+  // provider accepts the imported transformer assembly but advertises no adapter format.
   // Fail CLOSED, and check this BEFORE the family test: the withdrawal also empties
   // `loraCompatibility.families`, which would otherwise fall into the "cannot gate" permissive
   // branch below and keep offering every LoRA — a selection the API now 400s on. The models the

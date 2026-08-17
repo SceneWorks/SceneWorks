@@ -7,7 +7,7 @@ import { macModelBlock, macModelFeatureBlock, macVideoModeBlock } from "./macGat
 import { POSE_DETECT_MODEL_ID, VISION_CAPTION_MODEL_ID } from "./constants.js";
 
 // Image generation modes a model can serve (ImageStudio mode tabs).
-const IMAGE_MODES = ["text_to_image", "edit_image", "character_image", "style_variations"];
+const IMAGE_MODES = ["text_to_image", "edit_image", "character_image"];
 
 // Video generation modes a model can advertise (VideoStudio modeOptions).
 export const VIDEO_MODES = [
@@ -46,6 +46,7 @@ export function imageModelServesMode(model, mode, caps) {
   // still can never leak into Text.
   const capabilitiesDeclared = Array.isArray(model?.capabilities);
   const capabilities = capabilitiesDeclared ? model.capabilities : [];
+  if (!IMAGE_MODES.includes(mode)) return false;
   if (mode === "edit_image") {
     return (
       (capabilities.includes("edit_image") || capabilities.includes("image_edit")) &&
@@ -54,9 +55,6 @@ export function imageModelServesMode(model, mode, caps) {
   }
   if (mode === "character_image") {
     return capabilities.includes("character_image") && !macModelFeatureBlock(model, caps, "reference");
-  }
-  if (mode === "style_variations") {
-    return capabilities.includes("style_variations") && !macModelFeatureBlock(model, caps, "reference");
   }
   return !capabilitiesDeclared || capabilities.includes("text_to_image");
 }

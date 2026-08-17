@@ -3482,11 +3482,12 @@ pub(crate) fn evaluate_request(
 /// would SIGKILL. `supports_sequential_offload` is precisely the provider's own machine-readable
 /// attestation that it wired that lifecycle (the gen-core discovery signal, sc-11126). Reading it
 /// per-engine makes the gate self-maintaining: every family the mlx-gen Phase-1 fan-out wires
-/// (sc-10840 — sd3/sana/flux/flux2/chroma/ideogram/kolors/anima/boogu/bernini alongside the earlier
+/// (sc-10840 — sd3/sana/flux/flux2/chroma/ideogram/kolors/anima/boogu alongside the earlier
 /// sdxl/z-image/qwen/lens/krea families) is covered the moment its descriptor advertises the bit, with
-/// no lockstep edit here. An engine that does not separate a text encoder (e.g. sensenova's fused MoT,
-/// `footprint` te=0) leaves the bit `false` and is correctly never offered `Sequential` — a no-op that
-/// would OOM.
+/// no lockstep edit here. Providers that stage unconditionally (for example Bernini) deliberately
+/// leave the selectable-control bit `false`; an engine that cannot benefit from staging (for example
+/// SenseNova's fused MoT, `footprint` te=0) does the same. Neither is offered a no-op `Sequential`
+/// selection.
 ///
 /// This is a pre-load, weights-free registry lookup (`(descriptor)()` allocates no tensors), the same
 /// query shape the worker already uses for family/guidance/quant capability advertisement and the
@@ -13825,7 +13826,9 @@ mod tests {
     /// providers — anchored (`use mlx_gen_* as _;` in `image_jobs`) only on macOS, the sole platform the
     /// MLX gate runs on. Off-Mac the image registry is empty, so this is macOS-gated exactly like the
     /// `engines.rs` descriptor sweeps. The assertions below mirror the capability bits of the
-    /// currently pinned providers, so the shared registry query stays the only source of truth.
+    /// currently pinned providers, so the shared registry query stays the only source of truth:
+    /// selectable engines resolve true through that query, while a registered provider that stages
+    /// unconditionally remains false for this specific request-selectable control.
     #[cfg(target_os = "macos")]
     #[test]
     fn engine_supports_sequential_is_derived_from_the_registered_capability() {
@@ -13886,15 +13889,25 @@ mod tests {
         ] {
             assert!(
                 engine_supports_sequential(id),
-                "{id}: sc-10840 fan-out engine must stay sequential-capable at the pinned inference revision"
+                "{id}: sc-10840 fan-out engine must advertise selectable sequential residency at the \
+                 pinned inference revision"
             );
         }
-        // REGISTERED engines that do NOT advertise the bit stay false. Bernini's pinned descriptor
-        // deliberately omits sequential offload, while sensenova's encoder is fused into a unified
-        // MoT (`footprint` te=0) — no separable text encoder to drop, so residency buys nothing and
-        // Sequential would be a no-op that OOMs. This proves the query reads the descriptor BIT,
-        // not mere registry membership.
+        // Bernini's provider is registered and physically stages every request, but it has no
+        // Resident-warm mode and does not consume `OffloadPolicy`. Its descriptor must therefore
+        // expose unconditional staging without falsely advertising the selectable Sequential control.
+        let bernini = crate::inference_runtime::media()
+            .generators()
+            .find(|registration| (registration.descriptor)().id == "bernini")
+            .expect("Bernini provider must be registered in the MLX runtime");
+        let bernini_capabilities = (bernini.descriptor)().capabilities;
+        assert!(!bernini_capabilities.supports_sequential_offload);
+        assert!(bernini_capabilities.unconditionally_engages_staged_residency);
         assert!(!engine_supports_sequential("bernini"));
+        // A REGISTERED engine that does NOT advertise the bit stays false: sensenova's encoder is fused
+        // into a unified MoT (`footprint` te=0) — no separable text encoder to drop, so residency buys
+        // nothing and Sequential would be a no-op that OOMs. This proves the query reads the descriptor
+        // BIT, not mere registry membership.
         assert!(!engine_supports_sequential("sensenova_u1_8b"));
     }
 

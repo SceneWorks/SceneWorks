@@ -3422,6 +3422,69 @@ mod download_receipt_tests {
             }
         }
     }
+
+    /// The live SCAIL-2 manifest must give off-Mac users the dense shared package and the catalog's
+    /// install badge must enforce the exact provider-required six-file layout. This binds product
+    /// advertisement, Model Manager filtering, and worker loadability without duplicating weights.
+    #[test]
+    fn scail2_shared_bf16_package_is_installable_off_macos_and_fails_closed() {
+        let _env = isolate_hf_cache();
+        let data = tempfile::tempdir().unwrap();
+        let original = builtin_models_entry("scail2_14b");
+
+        for os in ["windows", "linux"] {
+            let mut model = original.clone();
+            retain_downloads_for_os(&mut model, os);
+            let downloads = model["downloads"].as_array().unwrap();
+            assert_eq!(downloads.len(), 1, "{os} must expose one installable tier");
+            assert_eq!(downloads[0]["variant"], "bf16");
+            assert_eq!(downloads[0]["files"], json!(["bf16/*"]));
+            assert_eq!(model_download(&model).unwrap()["variant"], "bf16");
+        }
+
+        let mut model = original;
+        retain_downloads_for_os(&mut model, "windows");
+        let download = model_download(&model).unwrap();
+        let repo = download["repo"].as_str().unwrap();
+        let revision = download["revision"].as_str().unwrap();
+        let tier = huggingface_repo_cache_path(data.path(), repo)
+            .unwrap()
+            .join("snapshots")
+            .join(revision)
+            .join("bf16");
+        std::fs::create_dir_all(&tier).unwrap();
+
+        std::fs::write(tier.join("dit.safetensors"), b"").unwrap();
+        let partial =
+            install_state_for(model_download_context(&model).unwrap(), &model, data.path());
+        assert!(!partial.installed);
+        assert!(partial.cache_incomplete);
+        assert!(
+            partial
+                .missing_required_files
+                .iter()
+                .any(|file| file.contains("bf16") && file.contains("incomplete")),
+            "got {:?}",
+            partial.missing_required_files
+        );
+
+        for file in sceneworks_core::mlx_tier_completeness::SCAIL2_TIER_FILES {
+            std::fs::write(tier.join(file), b"").unwrap();
+        }
+        let installed =
+            install_state_for(model_download_context(&model).unwrap(), &model, data.path());
+        assert!(installed.installed);
+        assert!(!installed.cache_incomplete);
+
+        std::fs::remove_file(tier.join("t5_encoder.safetensors")).unwrap();
+        let torn = install_state_for(model_download_context(&model).unwrap(), &model, data.path());
+        assert!(!torn.installed, "a provider-required file was removed");
+        assert!(torn.cache_incomplete);
+
+        let description = model["ui"]["description"].as_str().unwrap();
+        assert!(description.contains("Candle on NVIDIA Windows/Linux"));
+        assert!(!description.contains("macOS native MLX only"));
+    }
 }
 
 // Resolve a model's install/cache state from its (optional) download source. A
@@ -3737,6 +3800,7 @@ fn no_model_index_family_predicate(family: &str, model_id: &str) -> Option<fn(&F
         "anima" => Some(tc::anima_tier_complete),
         "boogu" => Some(tc::boogu_tier_complete),
         "sana" => Some(tc::sana_tier_complete),
+        "scail2" => Some(tc::scail2_tier_complete),
         // sc-14432: the SenseNova-U1 turnkeys ship a FLAT unified tier (backbone + config at the tier
         // root, no `model_index.json`), so without a predicate a torn tier read `installed` and then
         // failed at load — "complete but unloadable", with re-downloading the only (useless) repair.
@@ -4177,20 +4241,21 @@ fn tier_subdir_has_weights(tier_dir: &FsPath) -> bool {
 }
 
 /// Withdraw a synthesized LoRA advertisement that no lane on THIS deployment can honour (the
-/// sc-15328 class, reopened by sc-14135 for imported Krea 2).
+/// sc-15328 class).
 ///
 /// An imported / fine-tuned image model has no manifest row: `apply_model_manifest_defaults`
 /// synthesizes `loraCompatibility.families = [family]` from the family token alone. For some
-/// families that is a promise nothing keeps — an imported Krea 2 checkpoint on a candle host (the
-/// candle single-file entrypoint takes no adapters, sc-14135) and a Mage-Flow fine-tune on any host.
+/// families that is a promise nothing keeps — currently a Mage-Flow fine-tune on either native
+/// backend. Imported Krea 2 used to be another case, but both native single-file entrypoints now
+/// accept adapters (sc-18480), so its synthesized advertisement remains intact.
 /// Left standing, the picker offers adapters, `validate_lora_specs_for_model` passes, the job is
 /// created, and NO worker claims it: it sits on "Waiting for an available GPU worker" forever, with
 /// no error and no terminal state. That is strictly worse than a rejection.
 ///
 /// Applied HERE — on the catalog projection every read goes through — rather than baked into the
 /// stored manifest at import time, because the verdict is a property of the DEPLOYMENT, not of the
-/// checkpoint: the same imported Krea 2 file legitimately takes LoRAs on macOS/MLX and cannot on
-/// candle. A stored strip would be wrong on one of the two platforms the moment the data dir moved.
+/// checkpoint. Keeping this a deployment projection also makes future backend-specific capability
+/// changes safe when a data dir moves between platforms.
 ///
 /// 🔴 The withdrawal is an EXPLICIT EMPTY `families` array, never `remove("loraCompatibility")`.
 /// Removing the key is a no-op: `families_from_value_chain` (lib.rs) falls back to the top-level
@@ -4202,13 +4267,11 @@ fn tier_subdir_has_weights(tier_dir: &FsPath) -> bool {
 /// permissive and keep offering every LoRA.
 /// Binds [`apply_imported_lora_advertisement_for_lanes`] to the lanes THIS build can run: macOS
 /// ships the in-process MLX worker and no candle engine; Windows/Linux/Docker ship candle and no
-/// MLX. Mirrors the worker's own `KREA_IMPORTED_SUPPORTS_ADAPTERS` cfg split, so the advertisement
-/// and the claim gate agree.
+/// MLX. The verdict is derived from the same per-lane request gates the scheduler uses, so the
+/// advertisement and claim behavior stay aligned.
 ///
 /// The lane split is a ONE-LINE binding here and a parameter below precisely so the behaviour is
-/// testable on both lanes from either platform: the reported bug (imported Krea 2 + LoRA) only
-/// exists on the candle lane, which a macOS dev box can never reach, and a `cfg!` buried inside the
-/// logic would have left it covered by nothing but the developer's own OS.
+/// testable on both lanes from either platform.
 fn apply_imported_lora_advertisement(object: &mut JsonObject) {
     let mlx_lane = cfg!(target_os = "macos");
     apply_imported_lora_advertisement_for_lanes(object, mlx_lane, !mlx_lane);
@@ -5319,8 +5382,13 @@ mod model_size_concurrency_tests {
         // the off-Mac candle lane — so every OS gains exactly one: macOS 86 → 87, windows/linux
         // 83 → 84.
         // Still far below `MODEL_SIZE_CACHE_LIMIT` (256), which is what this guard protects.
+        // SCAIL-2 bf16 is now the shared cross-backend package, so Windows and Linux
+        // each gain its exact pinned download context while macOS keeps the same one.
+        // sc-18481 retired AuraSR from the installable catalog because every production backend
+        // rejects its dead `engine:aura-sr` route. Its unscoped download row had contributed one
+        // context on every OS, so removing it reduces macOS 87 → 86 and windows/linux 85 → 84.
         for (os, expected_distinct_contexts) in
-            [("macos", 87_usize), ("windows", 84), ("linux", 84)]
+            [("macos", 86_usize), ("windows", 84), ("linux", 84)]
         {
             let mut keys = std::collections::HashSet::new();
             for mut model in manifest["models"]
@@ -8462,11 +8530,7 @@ mod variant_delete_tests {
 /// Lane-parameterized coverage for the imported-model LoRA advertisement withdrawal.
 ///
 /// These drive `apply_imported_lora_advertisement_for_lanes` directly rather than through the
-/// platform-bound wrapper, so BOTH deployment topologies are exercised on every CI platform. That
-/// is the whole point: the reported bug (imported Krea 2 + LoRA queuing forever) exists only on the
-/// candle lane, which a macOS developer machine can never reach — an earlier revision of this
-/// change asserted the macOS shape unconditionally and went red on the Linux parity lane, covering
-/// the actual bug nowhere.
+/// platform-bound wrapper, so BOTH deployment topologies are exercised on every CI platform.
 #[cfg(test)]
 mod imported_lora_advertisement_tests {
     use super::*;
@@ -8521,6 +8585,9 @@ mod imported_lora_advertisement_tests {
             && object["loraCompatibility"]["supported"] == json!(false)
     }
 
+    /// Both native imported Krea 2 single-file loaders take adapters (sc-18480), so neither platform
+    /// projection may withdraw the synthesized family promise — each scheduler gate can claim the
+    /// adapter shape, so the projection AFFIRMS it instead.
     #[test]
     fn imported_krea_2_advertises_adapters_on_both_registered_backends() {
         let mut on_candle = entry("user_kreamania_variant5", "krea_2");
@@ -8537,22 +8604,19 @@ mod imported_lora_advertisement_tests {
         assert_eq!(on_mlx["loraCompatibility"]["supported"], json!(true));
     }
 
-    /// Mage-Flow refuses adapters on every backend, so the MLX lane withdraws. On candle it is not
-    /// in `CANDLE_ROUTED_FAMILIES` at all — the model renders nothing there, LoRA or not — so this
-    /// projection has no opinion and leaves the entry alone rather than papering over a whole-model
-    /// routing gap with a LoRA-shaped message.
+    /// Generated Mage-Flow full fine-tunes render plain text-to-image on both native backends, but
+    /// both provider seams reject adapters. Each projection must therefore withdraw only the LoRA
+    /// promise while preserving the now-routable model itself.
     #[test]
-    fn mage_flow_withdraws_on_mlx_and_abstains_where_the_model_is_unroutable() {
-        let mut on_mlx = entry("finetune_9f3c", "mage-flow");
-        apply_imported_lora_advertisement_for_lanes(&mut on_mlx, true, false);
-        assert!(withdrawn(&on_mlx), "{on_mlx:?}");
-
-        let mut on_candle = entry("finetune_9f3c", "mage-flow");
-        apply_imported_lora_advertisement_for_lanes(&mut on_candle, false, true);
-        assert!(
-            on_candle.get("loraCompatibility").is_none(),
-            "no candle Mage engine exists, so there is no adapter promise to withdraw"
-        );
+    fn mage_flow_withdraws_adapters_on_both_native_lanes() {
+        for (lane, mlx, candle) in [("MLX", true, false), ("Candle", false, true)] {
+            let mut object = entry("finetune_9f3c", "mage-flow");
+            apply_imported_lora_advertisement_for_lanes(&mut object, mlx, candle);
+            assert!(
+                withdrawn(&object),
+                "{lane} renders generated Mage t2i but cannot load adapters: {object:?}"
+            );
+        }
     }
 
     /// SDXL genuinely serves adapters on both native loaders, and a builtin routes by id rather
@@ -8576,19 +8640,31 @@ mod imported_lora_advertisement_tests {
         }
     }
 
-    /// The withdrawal must not clobber sibling keys — `loraCompatibility.types` drives the
-    /// multi-phase surface, and only the families promise is being retracted.
+    /// A supported advertisement is byte-preserved, while a real withdrawal changes only the
+    /// adapter verdict and keeps sibling compatibility metadata intact.
     #[test]
-    fn withdrawal_preserves_sibling_compatibility_keys() {
-        let mut object = entry("finetune_mage", "mage-flow");
-        object.insert(
-            "loraCompatibility".to_owned(),
-            json!({ "families": ["mage-flow"], "types": ["character", "style"] }),
-        );
-        apply_imported_lora_advertisement_for_lanes(&mut object, true, false);
-        assert!(withdrawn(&object));
+    fn support_and_withdrawal_preserve_sibling_compatibility_keys() {
+        // The canonical family token, so the affirming branch finds it already present and the
+        // entry is byte-preserved rather than gaining a second, duplicate family entry.
+        let compatibility =
+            json!({ "families": ["krea_2"], "supported": true, "types": ["character", "style"] });
+        let mut supported = entry("user_kreamania_variant5", "krea_2");
+        supported.insert("loraCompatibility".to_owned(), compatibility.clone());
+        apply_imported_lora_advertisement_for_lanes(&mut supported, false, true);
         assert_eq!(
-            object["loraCompatibility"]["types"],
+            supported["loraCompatibility"], compatibility,
+            "Candle's supported Krea adapter family and sibling keys must remain untouched"
+        );
+
+        let mut withdrawn_entry = entry("finetune_9f3c", "mage-flow");
+        withdrawn_entry.insert(
+            "loraCompatibility".to_owned(),
+            json!({ "families": ["mage-flow"], "supported": true, "types": ["character", "style"] }),
+        );
+        apply_imported_lora_advertisement_for_lanes(&mut withdrawn_entry, true, false);
+        assert!(withdrawn(&withdrawn_entry));
+        assert_eq!(
+            withdrawn_entry["loraCompatibility"]["types"],
             json!(["character", "style"])
         );
     }

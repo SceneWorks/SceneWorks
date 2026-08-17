@@ -82,6 +82,7 @@ on:
       # both lanes. Path filters match DELETES and ADDS too, so a restamp, delete or re-add of this
       # file still triggers the lane.
       - "config/engine-capabilities/capabilities.mlx.json"
+      - "config/engine-capabilities/runtime/capabilities.mlx.json"
       # The AUDIO dump, which the verify step below ALSO diffs (sc-17593). Both lanes read this one,
       # because `AUDIO_BACKEND` is candle on every platform and either box can produce it -- so
       # unlike the sibling media file, waking this job for it is not a wasted run: the step opens it.
@@ -350,7 +351,10 @@ jobs:
       # `<workspace>/target` — the path this action derives and stores. See the block above
       # `jobs:`; pointing the two at different directories caches nothing and says nothing,
       # which is exactly what the first version of this step did.
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2 (v2.9.1+1)
+      # Save only on `main` — see the note on the `parity-rust` cache step in check.yml.
+      - uses: Swatinem/rust-cache@258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 # v2 (v2.9.1+1)
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Ensure Metal compiler
         # The hosted image ships Xcode but not necessarily the Metal toolchain component,
         # and mlx-sys's build script shells out to `xcrun metal`. Same step the inference
@@ -388,6 +392,50 @@ jobs:
       # this skip cannot quietly become a hole.
       - name: Workspace tests (excluding the NAX guard, which needs M5)
         run: cargo test -- --skip nax_16bit_sdpa_is_correct
+
+      # sc-17119/sc-18477. This is an ordinary weights-free registry walk, so it belongs on the
+      # hosted half rather than the scarce M5/NAX pool. A pin bump deliberately makes descriptor-
+      # backed workspace tests fail closed until the fresh facts are committed; `always()` lets the
+      # producer and its paired upload break that bootstrap cycle without hand-authoring Mac data.
+      - name: Verify capabilities.mlx.json is a real dump, not a restamp
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          scratch="$RUNNER_TEMP/engine-capability-facts-verify"
+          rm -rf "$scratch"
+          mkdir -p "$scratch"
+          cargo run -p sceneworks-worker --bin dump-engine-capabilities -- "$scratch"
+          if ! diff -u config/engine-capabilities/capabilities.mlx.json \
+                     "$scratch/capabilities.mlx.json"; then
+            echo "::error::config/engine-capabilities/capabilities.mlx.json does not match a fresh"\
+                 "dump at this pin. Re-dump it on a Mac:"\
+                 "cargo run -p sceneworks-worker --bin dump-engine-capabilities,"\
+                 "then (cd apps/web && npm run gen:preview-support)."
+            exit 1
+          fi
+          if ! diff -u config/engine-capabilities/runtime/capabilities.mlx.json \
+                     "$scratch/runtime/capabilities.mlx.json"; then
+            echo "::error::config/engine-capabilities/runtime/capabilities.mlx.json does not"\
+                 " match inference's fresh runtime capability snapshot. Download the"\
+                 " backend-capability-facts-mlx artifact from this run; never hand-author it."
+            exit 1
+          fi
+          if ! diff -u config/engine-capabilities/audio/capabilities.candle.json \
+                     "$scratch/audio/capabilities.candle.json"; then
+            echo "::error::config/engine-capabilities/audio/capabilities.candle.json does not"\
+                 "match a fresh dump at this pin. Either box re-dumps it --"\
+                 "cargo run -p sceneworks-worker --bin dump-engine-capabilities"\
+                 "[--no-default-features --features backend-candle] --"\
+                 "then (cd apps/web && npm run gen:preview-support)."
+            exit 1
+          fi
+      - name: Upload fresh MLX capability facts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: backend-capability-facts-mlx
+          path: ${{ runner.temp }}/engine-capability-facts-verify
+          if-no-files-found: error
 
   nax-worker:
     # Same-repo only — never execute untrusted fork code on the self-hosted runner.
@@ -509,72 +557,6 @@ jobs:
       # would re-dark every non-worker crate.
       - name: NAX 16-bit SDPA guard (needs M5 matrix units)
         run: cargo test -p sceneworks-worker --test nax_guard
-      # sc-17119. THE ONLY LANE THAT CAN PRODUCE capabilities.mlx.json, so it is the only place the
-      # checked-in file can be checked against a real registry rather than taken on trust.
-      #
-      # Every other guard reads that file as a source: `verifyEngineCapabilityFacts` checks that it
-      # exists, names a backend SCENEWORKS_BACKENDS declares, and carries the current
-      # `inferenceRevision` -- nothing about the engine list -- and the vitest drift guard re-derives
-      # the catalog from its contents. Both are satisfied by editing one line. That is not
-      # hypothetical -- the file was RESTAMPED (revision line rewritten, 334 lines of content
-      # untouched) through two consecutive pin bumps, 35251a88 and 06e0c5e9, because no Mac was
-      # available to re-dump it and nothing could tell the difference. The restamps happened to be
-      # correct; nothing proved it until this step existed.
-      #
-      # Cheap: the build and test steps above already built the mlx-gen graph, so this is a link plus
-      # a weights-free registry walk. Dumps to a scratch dir, never over the checked-in file, so a
-      # red run leaves a readable diff instead of a mutated tree.
-      #
-      # LAST, deliberately -- the same rule the clippy steps above are ordered by, applied to a step
-      # that fires on a PREDICTABLE, routine event. A step failure aborts the job, and this one goes
-      # red on exactly the pin-bump PRs where nobody re-dumped on a Mac. Placed earlier it would
-      # cancel both clippy steps and `cargo test` -- and this lane is the ONLY place in CI that runs
-      # `nax_guard`, so a stale facts file would cost the repo its entire NAX kernel verdict for that
-      # commit, on precisely the PRs where descriptors just moved. A missing dump must not suppress
-      # unrelated coverage; it is the least urgent signal in this job, so it reports last.
-      #
-      # When this fails after a pin bump, the fix is to commit the dump it just produced and re-run
-      # `npm run gen:preview-support` from apps/web -- not to restamp the revision line.
-      #
-      # capabilities.candle.json had the same hole (it was restamped by the same commits); the mirror
-      # could NOT be written here, because it needs the CUDA box and windows-candle.yml runs every
-      # step under `shell: cmd`/`powershell` -- its own header records that `bash` there resolves to
-      # the box's WSL stub, and `cmd` has no `diff`. sc-17592 closed it there instead, as a `cmd` step
-      # using `git diff --no-index --exit-code`. Keep the two in sync: a change to the semantics here
-      # wants the same change in windows-candle.yml's "Verify capabilities.candle.json" step.
-      #
-      # The AUDIO dump (sc-17593) is verified in BOTH lanes, and deliberately so. It is the one facts
-      # file both lanes write -- `AUDIO_BACKEND` is `candle` on every platform -- so it is the most
-      # exposed to a restamp and the only one whose correctness rests on a cross-lane claim: that a
-      # Mac and the CUDA box produce identical bytes. That claim holds by construction
-      # (`candle-audio-catalog` gates no registration on the platform, and the audio provenance
-      # stamps a lane-neutral invocation rather than this build's own), and checking it on both lanes
-      # is what turns it from an argument into a measurement. Costs nothing either side: the same
-      # `dump-engine-capabilities` run already writes it. If this half fails while the mlx half
-      # passes, lane-independence is what broke, not the dump.
-      - name: Verify capabilities.mlx.json is a real dump, not a restamp
-        run: |
-          set -euo pipefail
-          scratch="$(mktemp -d)"
-          trap 'rm -rf "$scratch"' EXIT
-          cargo run -p sceneworks-worker --bin dump-engine-capabilities -- "$scratch"
-          if ! diff -u config/engine-capabilities/capabilities.mlx.json \
-                     "$scratch/capabilities.mlx.json"; then
-            echo "::error::config/engine-capabilities/capabilities.mlx.json does not match a fresh"\
-                 "dump at this pin. Re-dump it on a Mac:"\
-                 "cargo run -p sceneworks-worker --bin dump-engine-capabilities,"\
-                 "then (cd apps/web && npm run gen:preview-support)."
-            exit 1
-          fi
-          if ! diff -u config/engine-capabilities/audio/capabilities.candle.json \
-                     "$scratch/audio/capabilities.candle.json"; then
-            echo "::error::config/engine-capabilities/audio/capabilities.candle.json does not"\
-                 "match a fresh dump at this pin. Either box re-dumps it --"\
-                 "cargo run -p sceneworks-worker --bin dump-engine-capabilities"\
-                 "[--no-default-features --features backend-candle] --"\
-                 "then (cd apps/web && npm run gen:preview-support)."
-            exit 1
-          fi
       - name: Validate Qwen provisioning mode
         if: ${{ github.event_name == 'workflow_dispatch' }}
         env:
