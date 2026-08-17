@@ -1380,6 +1380,8 @@ enum ScopedGenerationFailureKind {
     Finish,
 }
 
+type AfterConfigurationHook = fn(&mut GenerationRequest) -> Result<(), String>;
+
 fn scoped_generate_observed(
     generator: &dyn Generator,
     request: GenerationRequest,
@@ -1406,7 +1408,7 @@ fn scoped_generate_observed_after_configuration(
     error_phase: Option<MemoryPhase>,
     observed_failure: &mut Option<ScopedGenerationFailureKind>,
     on_progress: &mut dyn FnMut(Progress),
-    after_configuration: Option<fn(&mut GenerationRequest) -> Result<(), String>>,
+    after_configuration: Option<AfterConfigurationHook>,
 ) -> Result<GenerationOutput, String> {
     if let MemorySafetyDecision::Reject { reason } = generator.memory_strategy_safety_check(context)
     {
