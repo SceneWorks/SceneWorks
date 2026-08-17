@@ -724,9 +724,10 @@ mod tests {
             let loaded =
                 crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, "owner/model")
                     .expect("leased local snapshot");
-            assert_eq!(loaded, bundle_root.join(format!(
-                "models--owner--model/snapshots/{REV_A}"
-            )));
+            assert_eq!(
+                loaded,
+                bundle_root.join(format!("models--owner--model/snapshots/{REV_A}"))
+            );
             assert!(loaded.join("model.safetensors").is_file());
             // And so does the pinned-component resolver used by the utility/co-requisite lanes.
             assert_eq!(
@@ -742,18 +743,18 @@ mod tests {
             let evictor = ResolvedCacheStore::open(&settings.data_dir).unwrap();
             let candidate = sceneworks_core::model_artifacts::PromotionCandidate {
                 cache_key: cache_key.clone(),
-                artifact: ModelArtifactResolver::new(
-                    ArtifactSourceLibrary::new(&library).unwrap(),
-                )
-                .resolve_source(
-                    artifact.identity.clone(),
-                    artifact.closure.clone(),
-                    sceneworks_core::model_artifacts::ArtifactAvailability::Available,
-                )
-                .unwrap(),
+                artifact: ModelArtifactResolver::new(ArtifactSourceLibrary::new(&library).unwrap())
+                    .resolve_source(
+                        artifact.identity.clone(),
+                        artifact.closure.clone(),
+                        sceneworks_core::model_artifacts::ArtifactAvailability::Available,
+                    )
+                    .unwrap(),
             };
             assert!(matches!(
-                evictor.reserve(&candidate, &library, "owner/model").unwrap(),
+                evictor
+                    .reserve(&candidate, &library, "owner/model")
+                    .unwrap(),
                 sceneworks_core::model_artifacts::resolved_cache::ReservationOutcome::Contended
             ));
 

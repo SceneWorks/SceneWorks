@@ -121,7 +121,9 @@ pub fn overlay_entries_for_artifact(
         }
         let safe = safe_repository_dir(&member.source.repository)?;
         let repository_root = root.join(format!("models--{safe}"));
-        let snapshot_root = repository_root.join("snapshots").join(&member.source.revision);
+        let snapshot_root = repository_root
+            .join("snapshots")
+            .join(&member.source.revision);
         let entry = LocalArtifactOverlayEntry {
             repository: member.source.repository.clone(),
             revision: member.source.revision.clone(),
@@ -190,9 +192,10 @@ pub fn prefer_local_artifacts(
     let mut requested: Vec<LocalArtifactOverlayEntry> = Vec::new();
     for artifact in artifacts {
         for entry in overlay_entries_for_artifact(artifact)? {
-            if let Some(existing) = requested.iter().find(|held| {
-                held.repository == entry.repository && held.revision == entry.revision
-            }) {
+            if let Some(existing) = requested
+                .iter()
+                .find(|held| held.repository == entry.repository && held.revision == entry.revision)
+            {
                 if existing != &entry {
                     return Err(ArtifactContractError(format!(
                         "two resolved-local bundles claim {}@{}",

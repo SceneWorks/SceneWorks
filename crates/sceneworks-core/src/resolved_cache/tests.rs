@@ -170,12 +170,13 @@ fn resolver(root: &Path, registry: ActiveArtifactLeaseRegistry) -> ModelArtifact
 fn hub_layout_candidate(root: &Path, revision: &str) -> PromotionCandidate {
     let mut candidate = source_candidate(root, revision);
     let mut members = candidate.artifact.closure.members.clone();
-    members[0].destination = crate::model_artifacts::local_preference::hub_cache_member_destination(
-        &members[0].source.repository,
-        &members[0].source.revision,
-        Path::new(""),
-    )
-    .unwrap();
+    members[0].destination =
+        crate::model_artifacts::local_preference::hub_cache_member_destination(
+            &members[0].source.repository,
+            &members[0].source.revision,
+            Path::new(""),
+        )
+        .unwrap();
     candidate.artifact.closure = ResolvedBundleClosure::new(members).unwrap();
     candidate.cache_key = candidate.artifact.cache_key().unwrap();
     candidate

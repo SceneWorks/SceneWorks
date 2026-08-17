@@ -196,13 +196,13 @@ pub(crate) fn normalize_app_managed_model_path(
             roots.push(canonical);
         }
     }
-    let confined = sceneworks_core::model_artifacts::confine_artifact_path(
-        Path::new(raw_path),
-        &roots,
-    )
-    .map_err(|_| {
-        WorkerError::InvalidPayload(format!("{label} must be inside an app-managed directory."))
-    })?;
+    let confined =
+        sceneworks_core::model_artifacts::confine_artifact_path(Path::new(raw_path), &roots)
+            .map_err(|_| {
+                WorkerError::InvalidPayload(format!(
+                    "{label} must be inside an app-managed directory."
+                ))
+            })?;
     // sc-19707: a model directory the API already resolved to a concrete source-library path
     // (training base models, captioners, analyzers) is served from the leased app-owned bundle
     // when one covers that exact snapshot. Purely a read redirect inside the app data dir, applied

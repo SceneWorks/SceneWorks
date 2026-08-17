@@ -116,7 +116,9 @@ fn member_destination_mirrors_the_source_library_layout() {
         PathBuf::from(format!("models--owner--model/snapshots/{PRIMARY_REV}/q4"))
     );
     assert!(hub_cache_member_destination("owner/model", "main", Path::new("")).is_err());
-    assert!(hub_cache_member_destination("owner/model", PRIMARY_REV, Path::new("../escape")).is_err());
+    assert!(
+        hub_cache_member_destination("owner/model", PRIMARY_REV, Path::new("../escape")).is_err()
+    );
 }
 
 /// A bundle stored in any other layout cannot be handed to the shared snapshot resolvers, so it is
@@ -150,7 +152,12 @@ fn an_active_scope_serves_every_member_and_drop_restores_the_source_tier() {
     let _serialized = overlay_guard();
     let temp = tempfile::tempdir().unwrap();
     let library_root = temp.path().join("external-hf");
-    let primary_source = seed_source(&library_root, "owner/model", PRIMARY_REV, "q4/model.safetensors");
+    let primary_source = seed_source(
+        &library_root,
+        "owner/model",
+        PRIMARY_REV,
+        "q4/model.safetensors",
+    );
     let encoder_source = seed_source(
         &library_root,
         "owner/encoder",
@@ -172,9 +179,13 @@ fn an_active_scope_serves_every_member_and_drop_restores_the_source_tier() {
     let (_, primary) = configured
         .discover_snapshot("owner/model", Some(PRIMARY_REV))
         .unwrap();
-    assert_eq!(primary, artifact.location.root().join(format!(
-        "models--owner--model/snapshots/{PRIMARY_REV}"
-    )));
+    assert_eq!(
+        primary,
+        artifact
+            .location
+            .root()
+            .join(format!("models--owner--model/snapshots/{PRIMARY_REV}"))
+    );
     assert!(primary.join("q4/model.safetensors").is_file());
     let (_, encoder) = configured
         .discover_snapshot("owner/encoder", Some(COMPONENT_REV))
@@ -210,7 +221,12 @@ fn a_superseded_revision_is_served_from_the_source_tier() {
     let _serialized = overlay_guard();
     let temp = tempfile::tempdir().unwrap();
     let library_root = temp.path().join("external-hf");
-    let newer = seed_source(&library_root, "owner/model", OTHER_REV, "q4/model.safetensors");
+    let newer = seed_source(
+        &library_root,
+        "owner/model",
+        OTHER_REV,
+        "q4/model.safetensors",
+    );
     write_refs_main(&library_root, "owner/model", OTHER_REV);
     let artifact = bundle(&temp.path().join("bundle"));
     let configured = ArtifactSourceLibrary::new_preferring_local(&library_root).unwrap();
@@ -260,7 +276,9 @@ fn conflicting_bundles_refuse_to_install_a_scope() {
     let second = bundle(&temp.path().join("bundle-b"));
     let error = prefer_local_artifacts(&[first.clone(), second]).unwrap_err();
     assert!(
-        error.to_string().contains("two resolved-local bundles claim"),
+        error
+            .to_string()
+            .contains("two resolved-local bundles claim"),
         "{error}"
     );
     // The failed installation left nothing behind.
@@ -280,7 +298,12 @@ fn a_resolved_source_path_is_redirected_only_when_the_bundle_holds_it() {
     let _serialized = overlay_guard();
     let temp = tempfile::tempdir().unwrap();
     let library_root = temp.path().join("external-hf");
-    let source = seed_source(&library_root, "owner/model", PRIMARY_REV, "q4/model.safetensors");
+    let source = seed_source(
+        &library_root,
+        "owner/model",
+        PRIMARY_REV,
+        "q4/model.safetensors",
+    );
     let artifact = bundle(&temp.path().join("bundle"));
     let _scope = prefer_local_artifacts(std::slice::from_ref(&artifact)).unwrap();
 
