@@ -8,6 +8,9 @@ publish = false
 [dependencies]
 directories = "5"
 fs2 = "0.4"
+# sc-19708: exact-file requirement selection matches receipt files against the manifest's
+# declared download patterns with the same glob semantics the API install path uses.
+glob = "0.3"
 getrandom = "0.3"
 parking_lot = "0.12"
 rusqlite = { version = "0.32", features = ["bundled", "functions"] }
