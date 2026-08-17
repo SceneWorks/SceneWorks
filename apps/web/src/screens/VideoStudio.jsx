@@ -57,10 +57,10 @@ import {
   useQuantTierPicker,
   useSavePreset,
 } from "../components/generationStudio.jsx";
-import { ReplacePersonPanel, replacementModeApplies } from "./ReplacePersonPanel.jsx";
+import { ReplacePersonPanel } from "./ReplacePersonPanel.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
-import { videoGenerateValidation } from "../videoStudioValidation.js";
+import { replacementModeApplies, videoGenerateValidation } from "../videoStudioValidation.js";
 import { useValidation } from "../validation/useValidation.js";
 import { ValidationSummary } from "../validation/Validation.jsx";
 import {

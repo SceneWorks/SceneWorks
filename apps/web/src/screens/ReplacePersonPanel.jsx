@@ -3,25 +3,10 @@ import { API_BASE_URL, withMediaTicket } from "../api.js";
 import { VideoSourcePickerField } from "../components/AssetPicker.jsx";
 import { AssetMedia } from "../components/assetMedia.jsx";
 import { StudioUpdateBadge, StudioUpdateNotice, updateOptionLabel } from "../components/StudioUpdateNotice.jsx";
-
-// SCAIL-2's catalog id, exported so the panel that HIDES the Replacement mode control and the
-// studio that stops SENDING it (`VideoStudio.jsx`) key on one spelling rather than two literals
-// that can drift apart. See `REPLACEMENT_MODE_HONORED_BY` below.
-export const SCAIL2_MODEL_ID = "scail2_14b";
-
-// Whether a replacement engine actually consumes `replacementMode`. Today it is a single negative
-// fact rather than a per-model table: SCAIL-2 re-renders the whole tracked person from the
-// character reference, so face-only / keep-outfit has nothing to select, and every scail2
-// conditioning site in the worker emits `ReplacementMode::default()` LITERALLY — the user's choice
-// never reached the engine. The engine now refuses a non-default mode outright (sc-20262), so a
-// control that can still set one is a refusal waiting to happen rather than a knob.
-//
-// The Wan-VACE inpainting engines DO honor it, so the control is hidden for SCAIL-2 alone and is
-// unchanged everywhere else. sc-20262 is the story that would make this honored — if it lands,
-// delete this predicate rather than adding a second model to it.
-export function replacementModeApplies(modelId) {
-  return modelId !== SCAIL2_MODEL_ID;
-}
+// sc-20262: whether the selected replacement engine actually consumes `replacementMode`. Defined
+// in the validation module rather than here so this panel and `VideoStudio.jsx` (which stops SENDING
+// the value) read one predicate, and so it sits inside the capability-matrix fingerprint.
+import { replacementModeApplies } from "../videoStudioValidation.js";
 
 const MASK_STATE_COPY = {
   active: "Per-frame segmentation masks generated for tracked frames.",
