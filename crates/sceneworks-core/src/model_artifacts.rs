@@ -5,6 +5,9 @@
 //! distinct prevents a cache path from silently becoming artifact identity, and gives the hot
 //! cache a behavior-preserving migration seam.
 
+#[path = "resolved_cache.rs"]
+pub mod resolved_cache;
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;

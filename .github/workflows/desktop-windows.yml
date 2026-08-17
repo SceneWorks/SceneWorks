@@ -165,6 +165,8 @@ jobs:
         run: node apps/desktop/scripts/stage-test-sidecars.mjs
       - name: Run Windows project-registry fingerprint regression
         run: cargo test -p sceneworks-core windows_registry_cache_detects_between_window_rewrite_with_restored_mtime
+      - name: Run Windows resolved-cache safety regressions
+        run: "cargo test -p sceneworks-core model_artifacts::resolved_cache::tests:: -- --test-threads=1"
       - name: Run desktop Rust tests
         run: cargo test -p sceneworks-desktop
       - name: Check desktop Rust lint

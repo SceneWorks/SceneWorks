@@ -6,6 +6,10 @@ pub struct Settings {
     pub api_url: String,
     pub access_token: Option<String>,
     pub data_dir: PathBuf,
+    /// App-owned resolved-model cache policy. Invalid environment is fail-closed to the finite,
+    /// disabled shared default rather than enabling or unbounding the cache.
+    #[cfg(not(test))]
+    pub resolved_cache: sceneworks_core::model_artifacts::resolved_cache::ResolvedCachePolicy,
     pub config_dir: PathBuf,
     pub worker_id: String,
     pub gpu_id: String,
@@ -58,11 +62,14 @@ pub struct Settings {
 
 impl fmt::Debug for Settings {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("Settings")
+        let mut debug = formatter.debug_struct("Settings");
+        debug
             .field("api_url", &self.api_url)
             .field("access_token", &self.access_token.as_ref().map(|_| "***"))
-            .field("data_dir", &self.data_dir)
+            .field("data_dir", &self.data_dir);
+        #[cfg(not(test))]
+        debug.field("resolved_cache", &self.resolved_cache);
+        debug
             .field("config_dir", &self.config_dir)
             .field("worker_id", &self.worker_id)
             .field("gpu_id", &self.gpu_id)
@@ -100,6 +107,9 @@ impl Settings {
                 .map(|value| value.trim().to_owned())
                 .filter(|value| !value.is_empty()),
             data_dir: env_path_or("SCENEWORKS_DATA_DIR", &defaults.data_dir),
+            #[cfg(not(test))]
+            resolved_cache:
+                sceneworks_core::model_artifacts::resolved_cache::ResolvedCachePolicy::from_env_or_safe_default(),
             config_dir: config_dir.clone(),
             worker_id: env_string("SCENEWORKS_WORKER_ID", "rust-utility-worker"),
             gpu_id: env_string("SCENEWORKS_GPU_ID", "cpu"),

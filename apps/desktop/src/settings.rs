@@ -253,6 +253,10 @@ pub struct AppSettings {
     /// only today — the candle/Windows path is tracked separately (sc-7826).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu_memory_limit_fraction: Option<f32>,
+    /// App-owned resolved-model hot-cache policy. Nested serde defaults preserve upgrades from
+    /// settings files written before the cache existed. Disabled by default.
+    #[serde(default)]
+    pub resolved_cache: sceneworks_core::model_artifacts::resolved_cache::ResolvedCachePolicy,
 }
 
 fn settings_path() -> PathBuf {
@@ -305,10 +309,11 @@ fn sanitize_storage_overrides(settings: &mut AppSettings, linux_absolute: bool) 
 }
 
 pub fn load_settings() -> AppSettings {
-    let settings = std::fs::read_to_string(settings_path())
+    let mut settings: AppSettings = std::fs::read_to_string(settings_path())
         .ok()
         .and_then(|body| serde_json::from_str(&body).ok())
         .unwrap_or_default();
+    sanitize_resolved_cache_policy(&mut settings);
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         let mut settings = settings;
@@ -318,6 +323,13 @@ pub fn load_settings() -> AppSettings {
     #[cfg(not(all(unix, not(target_os = "macos"))))]
     {
         settings
+    }
+}
+
+fn sanitize_resolved_cache_policy(settings: &mut AppSettings) {
+    if let Err(error) = settings.resolved_cache.validate() {
+        eprintln!("invalid persisted resolved-cache policy; disabling cache: {error}");
+        settings.resolved_cache = Default::default();
     }
 }
 
@@ -791,6 +803,19 @@ pub fn set_gpu_memory_limit(fraction: Option<f32>) -> Result<AppSettings, String
     save_settings(&settings)?;
     #[cfg(target_os = "macos")]
     write_gpu_memory_limit_file();
+    Ok(settings)
+}
+
+/// Persist a validated resolved-model cache policy. The three process environments are captured
+/// when the API/MLX/Candle sidecars start, so callers should present this as requiring restart.
+#[tauri::command]
+pub fn set_resolved_cache_policy(
+    policy: sceneworks_core::model_artifacts::resolved_cache::ResolvedCachePolicy,
+) -> Result<AppSettings, String> {
+    policy.validate().map_err(|error| error.to_string())?;
+    let mut settings = load_settings();
+    settings.resolved_cache = policy;
+    save_settings(&settings)?;
     Ok(settings)
 }
 
@@ -2105,5 +2130,55 @@ mod tests {
             !remote_access_change_needs_confirmation(false),
             "disabling is fail-safe and must not be gated"
         );
+    }
+
+    #[test]
+    fn resolved_cache_settings_upgrade_round_trip_and_invalid_values_fail_closed() {
+        let legacy: AppSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            legacy.resolved_cache,
+            sceneworks_core::model_artifacts::resolved_cache::ResolvedCachePolicy::default()
+        );
+        assert!(!legacy.resolved_cache.enabled);
+
+        let policy = sceneworks_core::model_artifacts::resolved_cache::ResolvedCachePolicy {
+            enabled: true,
+            max_bytes: 8_589_934_592,
+            inactivity_seconds: 86_400,
+        };
+        let settings = AppSettings {
+            resolved_cache: policy.clone(),
+            ..AppSettings::default()
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        assert!(json.contains("resolvedCache"));
+        assert_eq!(
+            serde_json::from_str::<AppSettings>(&json)
+                .unwrap()
+                .resolved_cache,
+            policy
+        );
+
+        let mut invalid = AppSettings {
+            resolved_cache: sceneworks_core::model_artifacts::resolved_cache::ResolvedCachePolicy {
+                enabled: true,
+                max_bytes: 0,
+                inactivity_seconds: 0,
+            },
+            ..AppSettings::default()
+        };
+        sanitize_resolved_cache_policy(&mut invalid);
+        assert_eq!(invalid.resolved_cache, Default::default());
+        assert!(!invalid.resolved_cache.enabled);
+    }
+
+    #[test]
+    fn resolved_cache_setter_is_registered_and_granted() {
+        let capability = include_str!("../capabilities/default.json");
+        assert!(capability.contains("allow-set-resolved-cache-policy"));
+        let build = include_str!("../build.rs");
+        assert!(build.contains("\"set_resolved_cache_policy\""));
+        let main = include_str!("main.rs");
+        assert!(main.contains("settings::set_resolved_cache_policy"));
     }
 }
