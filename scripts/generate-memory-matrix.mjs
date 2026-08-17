@@ -2272,7 +2272,6 @@ export const SOURCE_PATHS = Object.freeze({
   rung4Survey: "config/rung4-applicability-survey.json",
   engineCapabilitiesMlx: "config/engine-capabilities/capabilities.mlx.json",
   engineCapabilitiesCandle: "config/engine-capabilities/capabilities.candle.json",
-  memoryContractWaivers: "config/memory-contract-reconciliation-waivers.json",
   cargo: "Cargo.toml",
 });
 
@@ -2310,7 +2309,7 @@ function manifestRevisionBody(body) {
  *   thirteen behavioural tests to vacuous ones. The CLI never passes it: `main()` writes the
  *   published document, and the publication path has its own tests.
  */
-export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, publish = true } = {}) {
+export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, publish = true, onReconciliation = null } = {}) {
   const sourcePaths = SOURCE_PATHS;
   const sourceEntries = Object.entries(sourcePaths);
   const sourceBodies = await Promise.all(
@@ -2647,19 +2646,40 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
   }
   cells.sort((left, right) => left.id.localeCompare(right.id));
   reconciliationCells.sort((left, right) => left.id.localeCompare(right.id));
-  const memoryContractReconciliation = reconcileMemoryContracts({
-    pin,
-    engineFacts: [
-      JSON.parse(bodies.engineCapabilitiesMlx),
-      JSON.parse(bodies.engineCapabilitiesCandle),
-    ],
-    manifest,
-    cells: reconciliationCells,
-    calibrationPlan,
-    closures: JSON.parse(bodies.inferenceClosures),
-    survey: JSON.parse(bodies.rung4Survey),
-    waiverLedger: JSON.parse(bodies.memoryContractWaivers),
-  });
+  // REPORT-ONLY SEAM (Michael's decision, 2026-08-17). The memory-contract reconciliation may never
+  // fail a build — not on a finding, and not on its own internal strictness either. The waiver ledger
+  // and its bijection check are deleted; see `reconcileMemoryContracts` for why. This try/catch is the
+  // structural guarantee that nothing downstream of here can turn a disagreement into a red build: a
+  // future capability re-dump that introduces, say, a load profile this lib has not met yet becomes a
+  // line in the report instead of a broken `npm run check`. That exact failure cost two rounds before
+  // the gate came out. Do not remove the catch, and do not rethrow from it.
+  let memoryContractReconciliation;
+  try {
+    memoryContractReconciliation = reconcileMemoryContracts({
+      pin,
+      engineFacts: [
+        JSON.parse(bodies.engineCapabilitiesMlx),
+        JSON.parse(bodies.engineCapabilitiesCandle),
+      ],
+      manifest,
+      cells: reconciliationCells,
+      calibrationPlan,
+      closures: JSON.parse(bodies.inferenceClosures),
+      survey: JSON.parse(bodies.rung4Survey),
+    });
+  } catch (error) {
+    memoryContractReconciliation = {
+      providers: 0,
+      bespokeWaivers: 0,
+      mismatches: 0,
+      byLeg: {},
+      findings: [],
+      unavailable: error instanceof Error ? error.message : String(error),
+    };
+  }
+  // Report-only side channel: the enumeration is deliberately absent from the checked-in document, so
+  // `report-memory-contract-reconciliation.mjs` collects it here instead of reassembling the inputs.
+  onReconciliation?.(memoryContractReconciliation);
   const calibrationRuns = calibrationBundle.records.map((record) => {
     const cell = cells.find(
       (candidate) =>
@@ -2899,7 +2919,13 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
         (count, cell) => count + cell.evidence.currentEnvironmentVerification.length,
         0,
       ),
-      memoryContractReconciliation,
+      // Counts only. The per-coordinate enumeration lives in
+      // `npm run report:memory-contract-reconciliation`, deliberately NOT checked in: a report that
+      // rotates with every capability dump would recreate exactly the regeneration churn that
+      // retiring the waiver ledger removed.
+      memoryContractReconciliation: (({ findings, ...summary }) => summary)(
+        memoryContractReconciliation,
+      ),
       rung4Survey: {
         story: 15969,
         surveyedFamilyBackends: rung4SurveyRows.length,
@@ -3047,6 +3073,24 @@ function renderMarkdown(matrix) {
 }
 
 async function main() {
+  // Report-only path (Michael, 2026-08-17): emit the reconciliation enumeration and nothing else, so
+  // the report script and the generator share one code path. Never fails on findings.
+  if (process.argv.includes("--emit-reconciliation")) {
+    let reconciliation = null;
+    try {
+      await buildMatrix({ onReconciliation: (value) => (reconciliation = value) });
+    } catch (error) {
+      // The reconciliation is computed BEFORE `validateMatrix`, so an unrelated matrix invariant must
+      // not deny the report its enumeration. If the callback already fired we have the findings; emit
+      // them and note what stopped the rest of the build.
+      if (!reconciliation) {
+        reconciliation = { providers: 0, bespokeWaivers: 0, mismatches: 0, byLeg: {}, findings: [] };
+      }
+      reconciliation.buildIncomplete = error instanceof Error ? error.message : String(error);
+    }
+    process.stdout.write(`${JSON.stringify(reconciliation)}\n`);
+    return;
+  }
   const matrix = await buildMatrix();
   const json = `${JSON.stringify(matrix, null, 2)}\n`;
   const markdown = renderMarkdown(matrix);

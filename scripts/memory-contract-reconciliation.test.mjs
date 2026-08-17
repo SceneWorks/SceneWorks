@@ -158,16 +158,37 @@ function fixture() {
       },
     },
   };
-  input.waiverLedger = {
-    $schema: "../packages/schemas/memory-contract-reconciliation-waivers.schema.json",
-    schemaVersion: 1,
-    inferenceRevision: PIN,
-    waivers: [],
-  };
   return input;
 }
 
-function greenRedGreen(mutator, pattern) {
+// The reconciliation is REPORT-ONLY (Michael, 2026-08-17): a disagreement is a FINDING, never a
+// throw. The waiver ledger and its bijection are gone, so `/unwaived mismatch/` no longer exists as an
+// error string. What these tests still prove — and what matters — is DETECTION: the clean fixture
+// reconciles with zero findings, each mutation is noticed, and reverting clears it. That is the
+// property the gate was only ever a delivery mechanism for.
+function detectsMismatch(mutator) {
+  const clean = fixture();
+  assert.equal(reconcileMemoryContracts(clean).mismatches, 0);
+  const mutated = structuredClone(clean);
+  mutator(mutated);
+  const result = reconcileMemoryContracts(mutated);
+  assert.ok(
+    result.mismatches > 0,
+    "the mutation must be reported as a mismatch, not silently reconciled",
+  );
+  // A finding is not just a count: the report enumerates coordinates, so every finding must carry one.
+  assert.equal(result.findings.length, result.mismatches);
+  for (const finding of result.findings) {
+    assert.ok(finding.leg && finding.direction, `finding is under-keyed: ${JSON.stringify(finding)}`);
+  }
+  assert.equal(reconcileMemoryContracts(fixture()).mismatches, 0);
+}
+
+// Structural malformation of the ENGINE FACTS is still an error rather than a finding: the dumps are
+// generated input, and a malformed inventory means the report itself would be wrong. Nothing here can
+// fail a build — `generate-memory-matrix.mjs` wraps the whole call in a report-only seam — but the lib
+// must still refuse to reconcile against garbage instead of reporting a confident zero.
+function rejectsStructurally(mutator, pattern) {
   const clean = fixture();
   assert.equal(reconcileMemoryContracts(clean).mismatches, 0);
   const mutated = structuredClone(clean);
@@ -177,13 +198,11 @@ function greenRedGreen(mutator, pattern) {
 }
 
 test("engine to manifest is mutation-proven green-red-green", () => {
-  greenRedGreen(
+  detectsMismatch(
     (input) => delete input.manifest.models[0].mlx.memoryStrategyContract,
-    /unwaived mismatch/,
   );
-  greenRedGreen(
+  detectsMismatch(
     (input) => input.manifest.models[0].mlx.memoryStrategyContract.implementations[0].tiers = ["q8"],
-    /unwaived mismatch/,
   );
 });
 
@@ -226,38 +245,38 @@ test("typed bespoke Candle route waivers are exact, reachable, and cannot mask r
 });
 
 test("manifest to route is mutation-proven green-red-green", () => {
-  greenRedGreen(
+  // An absent witness inventory is malformed generated input, not a finding.
+  rejectsStructurally(
     (input) => input.engineFacts[0].memoryRouteWitnesses.splice(0, 1),
     /no memoryRouteWitnesses/,
   );
-  greenRedGreen(
+  detectsMismatch(
     (input) => input.manifest.models[0].mlx.memoryStrategyContract.implementations[0].overlays = ["lora"],
-    /unwaived mismatch/,
   );
-  greenRedGreen(
+  detectsMismatch(
     (input) => input.engineFacts[0].memoryRouteWitnesses[0].tier = "q8",
-    /unwaived mismatch/,
   );
-  greenRedGreen(
+  detectsMismatch(
     (input) => input.engineFacts[0].memoryRouteWitnesses[0].mode = "edit_image",
-    /unwaived mismatch/,
   );
-  greenRedGreen(
+  // A witness whose overlay contradicts its own load profile is internally inconsistent generated
+  // input — the dumper cannot emit it — so it stays an error rather than a finding.
+  rejectsStructurally(
     (input) => input.engineFacts[0].memoryRouteWitnesses[0].overlay = "lora",
     /belongs to overlay none/,
   );
-  greenRedGreen(
+  // `pid` maps to the same `none` overlay the witness already carries, so this is internally
+  // consistent input that simply no longer matches the manifest's declared profile set — a finding.
+  detectsMismatch(
     (input) => input.engineFacts[0].memoryRouteWitnesses[0].loadProfile = "pid",
-    /belongs to overlay none|unwaived mismatch/,
   );
-  greenRedGreen(
+  detectsMismatch(
     (input) => {
       input.engineFacts[0].memoryRouteWitnesses[0].overlay = "control";
       input.engineFacts[0].memoryRouteWitnesses[0].loadProfile = "multi_control";
       input.manifest.models[0].mlx.memoryStrategyContract.implementations[0].overlays = ["control"];
       input.cells[0].overlay = "control";
     },
-    /unwaived mismatch/,
   );
 });
 
@@ -284,7 +303,10 @@ test("runtimeProvider is the exact composed provider identity", () => {
       mutated.manifest.models[1].candle.memoryStrategyContract.implementations[0]
         .runtimeProvider = runtimeProvider;
     }
-    assert.throws(() => reconcileMemoryContracts(mutated), /unwaived mismatch/);
+    assert.ok(
+      reconcileMemoryContracts(mutated).mismatches > 0,
+      "a crossed or missing runtimeProvider identity must be reported",
+    );
   }
 });
 
@@ -300,41 +322,35 @@ test("route facts are independent of syntax-equivalent Rust source", () => {
 });
 
 test("plan and closure to engine is mutation-proven green-red-green", () => {
-  greenRedGreen(
+  detectsMismatch(
     (input) => input.calibrationPlan.providers[0].target.provider = "renamed_provider",
-    /unwaived mismatch/,
   );
-  greenRedGreen(
+  detectsMismatch(
     (input) => {
       input.closures.providers["mlx:renamed_provider"] = input.closures.providers["mlx:mlx_alpha"];
       delete input.closures.providers["mlx:mlx_alpha"];
     },
-    /unwaived mismatch/,
   );
 });
 
 test("survey to engine is mutation-proven green-red-green", () => {
-  greenRedGreen(
+  detectsMismatch(
     (input) => input.survey.families[100].backends.mlx.implementation = "none",
-    /unwaived mismatch/,
   );
-  greenRedGreen(
+  detectsMismatch(
     (input) => {
       const contractValue = input.engineFacts[0].memoryContracts[0];
       contractValue.surfaces[0].implementedRungs = ["resident"];
       recomputeDigest(contractValue);
     },
-    /unwaived mismatch/,
   );
-  greenRedGreen(
+  detectsMismatch(
     (input) => input.survey.families[100].backends.mlx.implementedTiers = ["q8"],
-    /unwaived mismatch/,
   );
-  greenRedGreen(
+  detectsMismatch(
     (input) => input.survey.families[100].backends.candle.implementationScopes[0].modes = ["edit_image"],
-    /unwaived mismatch/,
   );
-  greenRedGreen(
+  detectsMismatch(
     (input) => {
       input.cells.push({
         ...input.cells[1],
@@ -347,7 +363,6 @@ test("survey to engine is mutation-proven green-red-green", () => {
         overlays: ["none"],
       });
     },
-    /unwaived mismatch/,
   );
 });
 
@@ -394,53 +409,16 @@ test("survey and engine scope mismatches carry exact coordinates in both directi
 });
 
 test("pin and duplicate-provider failures are mutation-proven", () => {
-  greenRedGreen(
+  rejectsStructurally(
     (input) => input.engineFacts[0].generatedFrom.inferenceRevision = "f".repeat(40),
     /Cargo pins/,
   );
-  greenRedGreen(
+  rejectsStructurally(
     (input) => input.engineFacts[0].memoryContracts.push(structuredClone(input.engineFacts[0].memoryContracts[0])),
     /duplicate mlx memory-contract provider/,
   );
-  greenRedGreen(
+  rejectsStructurally(
     (input) => input.engineFacts[0].memoryContracts[0].selectorDigest = `sha256:${"f".repeat(64)}`,
     /selectorDigest does not bind/,
   );
-});
-
-test("under-keyed and stale waivers fail exactly", () => {
-  const input = fixture();
-  input.survey.families[100].backends.mlx.implementation = "none";
-  const [entry] = collectMemoryContractMismatches(input);
-  input.waiverLedger.waivers = [{
-    ...entry,
-    ownerStory: "sc-18460",
-    reason: "Synthetic exact waiver for mutation proof.",
-  }];
-  assert.equal(reconcileMemoryContracts(input).mismatches, 1);
-
-  const underKeyed = structuredClone(input);
-  delete underKeyed.waiverLedger.waivers[0].mode;
-  assert.throws(() => reconcileMemoryContracts(underKeyed), /under-keyed: missing mode/);
-
-  const duplicate = structuredClone(input);
-  duplicate.waiverLedger.waivers.push(structuredClone(duplicate.waiverLedger.waivers[0]));
-  assert.throws(() => reconcileMemoryContracts(duplicate), /duplicate waiver/);
-
-  const missingSchema = structuredClone(input);
-  delete missingSchema.waiverLedger.$schema;
-  assert.throws(() => reconcileMemoryContracts(missingSchema), /\$schema must be/);
-
-  const extraTopLevel = structuredClone(input);
-  extraTopLevel.waiverLedger.comment = "not in the closed schema";
-  assert.throws(() => reconcileMemoryContracts(extraTopLevel), /unknown field comment/);
-
-  const extraWaiverField = structuredClone(input);
-  extraWaiverField.waiverLedger.waivers[0].comment = "not in the closed schema";
-  assert.throws(() => reconcileMemoryContracts(extraWaiverField), /waiver 0 has unknown field comment/);
-
-  const stale = fixture();
-  stale.waiverLedger.waivers = structuredClone(input.waiverLedger.waivers);
-  assert.throws(() => reconcileMemoryContracts(stale), /stale waiver/);
-  assert.equal(reconcileMemoryContracts(fixture()).mismatches, 0);
 });

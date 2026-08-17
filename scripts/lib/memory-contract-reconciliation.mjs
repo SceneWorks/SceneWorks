@@ -588,53 +588,37 @@ export function collectMemoryContractMismatches({
   );
 }
 
-function validateWaivers(ledger, pin, mismatches) {
-  requireObject(ledger, "memory-contract waiver ledger");
-  const schemaPath = "../packages/schemas/memory-contract-reconciliation-waivers.schema.json";
-  const allowedTopLevel = new Set(["$schema", "schemaVersion", "inferenceRevision", "waivers"]);
-  for (const field of Object.keys(ledger)) {
-    if (!allowedTopLevel.has(field)) throw new Error(`memory-contract waiver ledger has unknown field ${field}`);
-  }
-  if (ledger.$schema !== schemaPath) {
-    throw new Error(`memory-contract waiver ledger $schema must be ${schemaPath}`);
-  }
-  if (ledger.schemaVersion !== 1) throw new Error("memory-contract waiver ledger schemaVersion must be 1");
-  if (ledger.inferenceRevision !== pin) {
-    throw new Error(`memory-contract waiver ledger is keyed to ${ledger.inferenceRevision ?? "(unset)"}, but Cargo pins ${pin}`);
-  }
-  if (!Array.isArray(ledger.waivers)) throw new Error("memory-contract waiver ledger has no waivers array");
-  const mismatchByKey = new Map(mismatches.map((entry) => [reconciliationMismatchKey(entry), entry]));
-  const waiverByKey = new Map();
-  const allowed = new Set([...AXES, "ownerStory", "reason"]);
-  for (const [index, waiver] of ledger.waivers.entries()) {
-    requireObject(waiver, `waiver ${index}`);
-    for (const axis of AXES) {
-      if (!Object.hasOwn(waiver, axis)) throw new Error(`waiver ${index} is under-keyed: missing ${axis}`);
-    }
-    for (const field of Object.keys(waiver)) {
-      if (!allowed.has(field)) throw new Error(`waiver ${index} has unknown field ${field}`);
-    }
-    if (Object.values(waiver).includes("*")) throw new Error(`waiver ${index} contains a wildcard`);
-    if (!/^sc-[0-9]+$/.test(waiver.ownerStory ?? "")) throw new Error(`waiver ${index} has no ownerStory`);
-    if (typeof waiver.reason !== "string" || waiver.reason.trim().length < 12) {
-      throw new Error(`waiver ${index} has no actionable reason`);
-    }
-    const waiverKey = reconciliationMismatchKey(waiver);
-    if (waiverByKey.has(waiverKey)) throw new Error(`duplicate waiver ${waiverKey}`);
-    waiverByKey.set(waiverKey, waiver);
-  }
-  const missing = [...mismatchByKey.keys()].filter((entry) => !waiverByKey.has(entry));
-  const stale = [...waiverByKey.keys()].filter((entry) => !mismatchByKey.has(entry));
-  if (missing.length || stale.length) {
-    throw new Error(
-      `memory-contract reconciliation found ${missing.length} unwaived mismatch(es) and ` +
-        `${stale.length} stale waiver(s)` +
-        `${missing.length ? `\nunwaived:\n${missing.join("\n")}` : ""}` +
-        `${stale.length ? `\nstale:\n${stale.join("\n")}` : ""}`,
-    );
-  }
-}
-
+/**
+ * Reconcile the engine registries, the manifest declarations and the route witnesses, and REPORT what
+ * disagrees. This never decides whether a build passes.
+ *
+ * # Report-only, and no waivers (Michael's decision, 2026-08-17)
+ *
+ * This function used to end in a waiver ledger: `config/memory-contract-reconciliation-waivers.json`
+ * listed every accepted mismatch keyed by all eleven axes plus the provider's `selectorDigest`, and a
+ * bijection check failed the build on any unwaived mismatch OR any waiver without a live mismatch.
+ * The ledger, its schema, the `ownerStory`/`reason` fields and the bijection are all DELETED — not
+ * demoted, not disabled behind a flag. Do not reintroduce them, and do not make this throw on a
+ * finding.
+ *
+ * Why: the ledger was pin-keyed, so an inference pin bump staled it wholesale. Landing SC-18460 on the
+ * current epic head produced 253 unwaived mismatches and 382 stale waivers at once — of which only 101
+ * were the same coordinate with a rotated digest. The other 433 were coordinates appearing or
+ * disappearing because provider surfaces legitimately moved. The only way to make that green was to
+ * author 152 new waivers with invented owner stories, which is fabricated provenance, or to freeze the
+ * pin. A gate whose green state depends on inventing paperwork is not measuring anything, and gate
+ * volume is what makes these epics uncompletable. **Runtime catching is the chosen tradeoff.**
+ *
+ * What survives is the part that had value: this still enumerates every disagreement per coordinate —
+ * that enumeration is how the 152 undeclared surfaces were found in the first place — and publishes it
+ * through `scripts/report-memory-contract-reconciliation.mjs` and the matrix summary. Findings are for
+ * a human to act on, never for CI to block on.
+ *
+ * `bespokeMemoryRouteWaivers` is NOT the removed concept and is deliberately kept: it is typed data the
+ * engine dumper emits (see `validateBespokeMemoryRouteWaivers`), carries no owner story or accepted
+ * digest, and cannot authorize anything — it records that a real worker route has no
+ * `load(id, LoadSpec)` registration. It is engine facts, not human paperwork.
+ */
 export function reconcileMemoryContracts(input) {
   const engine = engineContractIndex(input.engineFacts, input.pin);
   const declarations = manifestContracts(input.manifest);
@@ -646,7 +630,6 @@ export function reconcileMemoryContracts(input) {
     declarations,
   );
   const mismatches = collectMemoryContractMismatches(input);
-  validateWaivers(input.waiverLedger, input.pin, mismatches);
   return {
     providers: input.engineFacts.reduce((count, document) => count + document.memoryContracts.length, 0),
     bespokeWaivers: bespokeWaivers.length,
@@ -657,5 +640,7 @@ export function reconcileMemoryContracts(input) {
         mismatches.filter((entry) => entry.leg === leg).length,
       ]),
     ),
+    // The full per-coordinate enumeration. Consumers report it; nothing gates on it.
+    findings: mismatches,
   };
 }

@@ -53,7 +53,8 @@
     "tauri:dev": "npm --prefix apps/desktop run dev",
     "tauri:build": "npm --prefix apps/desktop run build",
     "release": "node scripts/release.mjs",
-    "version": "node scripts/sync-version.mjs && git add Cargo.toml Cargo.lock apps/desktop/tauri.conf.json apps/desktop/package.json apps/desktop/package-lock.json apps/web/package.json apps/web/package-lock.json"
+    "version": "node scripts/sync-version.mjs && git add Cargo.toml Cargo.lock apps/desktop/tauri.conf.json apps/desktop/package.json apps/desktop/package-lock.json apps/web/package.json apps/web/package-lock.json",
+    "report:memory-contract-reconciliation": "node scripts/report-memory-contract-reconciliation.mjs"
   },
   "engines": {
     "node": ">=20"

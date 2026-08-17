@@ -37,7 +37,6 @@ import {
 import { recordId } from "./memory-calibration-harness.mjs";
 import { recordsNeedingDigest } from "./backfill-closure-digests.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
-import { reconciliationMismatchKey } from "./lib/memory-contract-reconciliation.mjs";
 import { stripInertLines } from "./lib/source-revision.mjs";
 import { routedLanes } from "./check-tier-integrity.mjs";
 
@@ -198,62 +197,17 @@ test("exact declaration composition supplies staged residency without a legacy f
   );
 });
 
-async function surveyWaiverFixture(sourceOverrides) {
-  const ledger = await memoryContractSource("memoryContractWaivers");
-  let failure;
-  try {
-    await buildMatrix({
-      publish: false,
-      sourceOverrides: {
-        ...sourceOverrides,
-        memoryContractWaivers: JSON.stringify(ledger),
-      },
-    });
-    return JSON.stringify(ledger);
-  } catch (error) {
-    failure = error;
-  }
-
-  const message = String(failure?.message ?? failure);
-  if (!message.startsWith("memory-contract reconciliation found ")) throw failure;
-  const keys = { unwaived: [], stale: [] };
-  let section = null;
-  for (const line of message.split("\n")) {
-    if (line === "unwaived:" || line === "stale:") {
-      section = line.slice(0, -1);
-    } else if (section && line.startsWith("{")) {
-      keys[section].push(line);
-    }
-  }
-  assert.ok(keys.unwaived.length + keys.stale.length > 0, "fixture must expose exact mismatch keys");
-
-  const stale = new Set(keys.stale);
-  ledger.waivers = ledger.waivers.filter(
-    (waiver) => !stale.has(reconciliationMismatchKey(waiver)),
-  );
-  for (const key of keys.unwaived) {
-    ledger.waivers.push({
-      ...JSON.parse(key),
-      ownerStory: "sc-18461",
-      reason: "Synthetic survey mutation keeps this exact reconciliation coordinate waived.",
-    });
-  }
-  return JSON.stringify(ledger);
-}
 
 async function memoryContractPinOverrides(pin) {
-  const [mlx, candle, waivers] = await Promise.all([
+  const [mlx, candle] = await Promise.all([
     memoryContractSource("engineCapabilitiesMlx"),
     memoryContractSource("engineCapabilitiesCandle"),
-    memoryContractSource("memoryContractWaivers"),
   ]);
   mlx.generatedFrom.inferenceRevision = pin;
   candle.generatedFrom.inferenceRevision = pin;
-  waivers.inferenceRevision = pin;
   return {
     engineCapabilitiesMlx: JSON.stringify(mlx),
     engineCapabilitiesCandle: JSON.stringify(candle),
-    memoryContractWaivers: JSON.stringify(waivers),
   };
 }
 
@@ -353,7 +307,6 @@ test("the fingerprint covers every declared source, and the artifact publishes t
     "inferenceClosures",
     "instantId",
     "manifest",
-    "memoryContractWaivers",
     "memoryStrategy",
     "mlxFitGate",
     "routingCandle",
@@ -2104,7 +2057,6 @@ test("the rung-1 prerequisite gates the rung-4 claim, and is the ONLY thing sepa
     verdict.implementedEntries = [entry];
     verdict.strategyParameters = { transformerWindowSize: 1 };
     const sourceOverrides = { rung4Survey: JSON.stringify(survey) };
-    sourceOverrides.memoryContractWaivers = await surveyWaiverFixture(sourceOverrides);
     const matrix = await buildMatrix({
       publish: false,
       sourceOverrides,
@@ -2496,7 +2448,6 @@ test("`requires-different-primitive` is a finding, never an exemption or an impl
   delete stated.families["15511"].backends.mlx.implementedOverlays;
   stated.families["15511"].backends.mlx.findings = ["fixture: the driver's shape cannot express it"];
   const sourceOverrides = { rung4Survey: JSON.stringify(stated) };
-  sourceOverrides.memoryContractWaivers = await surveyWaiverFixture(sourceOverrides);
   const matrix = await buildMatrix({
     publish: false,
     sourceOverrides,
