@@ -11,6 +11,14 @@ pub use materialization::{
     PromotionScheduleOutcome, ResolvedCacheMaterializer, ResolvedCachePromotionScheduler,
 };
 
+#[path = "resolved_cache/retention.rs"]
+mod retention;
+pub use retention::{
+    EvictedRecord, EvictionCause, ManualRemovalOutcome, ManualRemovalPreview, ReconciliationReport,
+    ResolvedCacheRetention, RetainedRecord, RetentionCheckpointOutcome, RetentionHold,
+    RetentionReport, SourceLifecycleSelector,
+};
+
 use crate::model_artifacts::{
     ActiveArtifactLease, ArtifactLocation, ModelArtifactResolver, PromotionCandidate,
     ResolvedModelArtifact,
@@ -36,6 +44,8 @@ pub const RESOLVED_CACHE_STORE_VERSION: u32 = 1;
 
 const STORE_MARKER: &str = ".sceneworks-resolved-cache-v1";
 const STORE_MARKER_BODY: &[u8] = b"sceneworks-resolved-cache\nschema=1\n";
+const EVICTED_MARKER_FILE: &str = "evicted.marker.json";
+const AUDIT_DIR: &str = "audit";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -186,6 +196,10 @@ pub enum ResolvedCacheEntryState {
     Interrupted,
     Complete,
     Corrupt,
+    /// Summary-only state for an entry with a durable eviction tombstone whose removal has not
+    /// finished yet. Never persisted into the metadata journal; `validate_metadata_shape` rejects
+    /// it there.
+    Evicting,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -407,6 +421,13 @@ impl ResolvedCacheStore {
         let _metadata_lock = self.lock_metadata(&digest)?;
         let existing = match self.read_metadata_unlocked(&digest)? {
             JournalRead::Missing => None,
+            JournalRead::Evicted { .. } => {
+                // A crash interrupted a sanctioned removal. Finish it under the locks this
+                // reservation already holds, then materialize from scratch.
+                self.finish_pending_eviction(&digest)?;
+                ensure_managed_entry_dir(&entry)?;
+                None
+            }
             JournalRead::Valid { metadata, .. } => Some(*metadata),
         };
         if let Some(mut metadata) = existing {
@@ -544,6 +565,11 @@ impl ResolvedCacheStore {
                         metadata: Some(*metadata),
                     }
                 }
+                Ok(JournalRead::Evicted { .. }) => ResolvedCacheEntrySummary {
+                    cache_key: format!("sha256:{digest}"),
+                    state: ResolvedCacheEntryState::Evicting,
+                    metadata: None,
+                },
                 Ok(JournalRead::Missing) => ResolvedCacheEntrySummary {
                     cache_key: format!("sha256:{digest}"),
                     state: ResolvedCacheEntryState::Corrupt,
@@ -700,13 +726,39 @@ impl ResolvedCacheStore {
                         self.write_metadata_unlocked(&digest, &metadata)?;
                     }
                 }
-                Ok(JournalRead::Missing) => self.write_corrupt_marker(&digest)?,
+                Ok(JournalRead::Evicted { .. }) => {
+                    // A valid tombstone means removal was sanctioned before the interruption;
+                    // finishing it is the safe convergence.
+                    self.finish_pending_eviction(&digest)?;
+                }
+                Ok(JournalRead::Missing) => {
+                    // Another session may have finished an eviction (removing the whole entry
+                    // directory) between enumeration and this pass; only an entry that still
+                    // exists without readable metadata is parked as corrupt.
+                    if self
+                        .inner
+                        .root
+                        .join("entries")
+                        .join(&digest)
+                        .symlink_metadata()
+                        .is_ok()
+                    {
+                        self.write_corrupt_marker(&digest)?;
+                    }
+                }
                 Err(_) => {
                     let receipt = self.read_complete_receipt(&digest).and_then(|metadata| {
                         validate_complete_metadata(self, &metadata)?;
                         Ok(metadata)
                     });
                     if let Ok(mut metadata) = receipt {
+                        // An INVALID tombstone routed us here (a valid one is handled above). It
+                        // does not prove a sanctioned eviction, so fail safe: drop the garbage
+                        // tombstone and resurrect the receipt-validated entry pinned.
+                        let marker_path = self.eviction_marker_path(&digest);
+                        if std::fs::symlink_metadata(&marker_path).is_ok() {
+                            std::fs::remove_file(&marker_path)?;
+                        }
                         metadata.recovery_status = RecoveryStatus::ReconstructedFromCompleteReceipt;
                         metadata.artifact_pinned = true;
                         metadata.refresh_effective_pin();
@@ -807,11 +859,99 @@ impl ResolvedCacheStore {
     ) -> Result<ResolvedCacheMetadata, ResolvedCacheError> {
         match self.read_metadata_unlocked(digest)? {
             JournalRead::Valid { metadata, .. } => Ok(*metadata),
+            JournalRead::Evicted { .. } => Err(ResolvedCacheError::new(
+                "cache entry has a pending eviction tombstone",
+            )),
             JournalRead::Missing => Err(ResolvedCacheError::new("cache metadata is missing")),
         }
     }
 
+    fn eviction_marker_path(&self, digest: &str) -> PathBuf {
+        self.inner
+            .root
+            .join("entries")
+            .join(digest)
+            .join(EVICTED_MARKER_FILE)
+    }
+
+    /// Reads the eviction tombstone if one exists. An unreadable or checksum-invalid tombstone is
+    /// an error, never a sanction to delete: readers surface it and recovery either resurrects the
+    /// entry from a valid complete receipt or parks it as corrupt.
+    fn read_eviction_marker(
+        &self,
+        digest: &str,
+    ) -> Result<Option<EvictionMarker>, ResolvedCacheError> {
+        let path = self.eviction_marker_path(digest);
+        let body = match std::fs::read(&path) {
+            Ok(body) => body,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let envelope: EvictionMarkerEnvelope = serde_json::from_slice(&body).map_err(|error| {
+            ResolvedCacheError::new(format!("decode eviction tombstone: {error}"))
+        })?;
+        envelope.validate(digest)?;
+        Ok(Some(envelope.marker))
+    }
+
+    /// Writes the durable eviction tombstone. Caller holds the exclusive artifact lock and the
+    /// metadata lock and has already re-verified every eviction protection under those locks.
+    fn write_eviction_marker(
+        &self,
+        digest: &str,
+        marker: &EvictionMarker,
+    ) -> Result<(), ResolvedCacheError> {
+        if cache_key_digest(&marker.cache_key)? != digest {
+            return Err(ResolvedCacheError::new(
+                "eviction tombstone cache key does not match its entry",
+            ));
+        }
+        let envelope = EvictionMarkerEnvelope::new(marker.clone())?;
+        atomic_write_json(&self.eviction_marker_path(digest), &envelope)
+    }
+
+    /// Finishes a tombstoned removal: records the audit trail outside the entry, then removes the
+    /// whole entry directory (bundle, journal slots, receipt, tombstone) with the confined
+    /// deleter. Caller holds the exclusive artifact lock and the metadata lock. Idempotent under
+    /// interruption: rerunning after a crash converges because the tombstone survives until the
+    /// directory removal completes.
+    fn finish_pending_eviction(&self, digest: &str) -> Result<EvictionMarker, ResolvedCacheError> {
+        let marker = self.read_eviction_marker(digest)?.ok_or_else(|| {
+            ResolvedCacheError::new("cache entry has no eviction tombstone to finish")
+        })?;
+        self.write_eviction_audit_record(&marker)?;
+        let entries = self.inner.root.join("entries");
+        remove_managed_tree(&entries.join(digest), &entries)?;
+        Ok(marker)
+    }
+
+    fn write_eviction_audit_record(
+        &self,
+        marker: &EvictionMarker,
+    ) -> Result<(), ResolvedCacheError> {
+        let audit = self.inner.root.join(AUDIT_DIR);
+        match std::fs::create_dir(&audit) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+        ensure_regular_directory(&audit)?;
+        let record = EvictionAuditRecord {
+            schema_version: RESOLVED_CACHE_STORE_VERSION,
+            marker: marker.clone(),
+            completed_at: now_seconds()?,
+            completed_by_session: self.inner.session_id.clone(),
+        };
+        let name = format!("{}-{}.json", marker.requested_at, random_id()?);
+        atomic_write_json(&audit.join(name), &record)
+    }
+
     fn read_metadata_unlocked(&self, digest: &str) -> Result<JournalRead, ResolvedCacheError> {
+        if let Some(marker) = self.read_eviction_marker(digest)? {
+            return Ok(JournalRead::Evicted {
+                marker: Box::new(marker),
+            });
+        }
         let entry = self.inner.root.join("entries").join(digest);
         let mut valid = Vec::new();
         let mut had_file = false;
@@ -1288,10 +1428,80 @@ impl ReceiptEnvelope {
 
 enum JournalRead {
     Missing,
+    /// A durable eviction tombstone governs this entry: removal was sanctioned and must finish
+    /// before the entry can be read or reused. The journal slots are no longer authoritative.
+    Evicted {
+        marker: Box<EvictionMarker>,
+    },
     Valid {
         metadata: Box<ResolvedCacheMetadata>,
         had_invalid_slot: bool,
     },
+}
+
+/// Durable, checksummed eviction tombstone. Written under the exclusive artifact and metadata
+/// locks before any byte of the entry is deleted, so an interrupted removal always converges:
+/// every reader treats a valid tombstone as "this entry is gone", and recovery finishes the
+/// deletion instead of resurrecting a half-removed entry.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EvictionMarker {
+    pub schema_version: u32,
+    pub cache_key: String,
+    pub cause: retention::EvictionCause,
+    pub reclaimable_bytes: u64,
+    pub requested_at: u64,
+    pub session_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EvictionMarkerEnvelope {
+    schema_version: u32,
+    checksum: String,
+    marker: EvictionMarker,
+}
+
+impl EvictionMarkerEnvelope {
+    fn new(marker: EvictionMarker) -> Result<Self, ResolvedCacheError> {
+        let checksum = eviction_marker_checksum(&marker)?;
+        Ok(Self {
+            schema_version: RESOLVED_CACHE_STORE_VERSION,
+            checksum,
+            marker,
+        })
+    }
+
+    fn validate(&self, digest: &str) -> Result<(), ResolvedCacheError> {
+        if self.schema_version != RESOLVED_CACHE_STORE_VERSION
+            || self.marker.schema_version != RESOLVED_CACHE_STORE_VERSION
+            || self.checksum != eviction_marker_checksum(&self.marker)?
+            || cache_key_digest(&self.marker.cache_key)? != digest
+        {
+            return Err(ResolvedCacheError::new(
+                "eviction tombstone checksum is invalid",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn eviction_marker_checksum(marker: &EvictionMarker) -> Result<String, ResolvedCacheError> {
+    let bytes = serde_json::to_vec(marker).map_err(|error| {
+        ResolvedCacheError::new(format!("encode eviction tombstone checksum: {error}"))
+    })?;
+    Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
+}
+
+/// Post-removal audit record persisted outside the removed entry so the eviction remains
+/// auditable after the entry directory is gone.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EvictionAuditRecord {
+    schema_version: u32,
+    marker: EvictionMarker,
+    completed_at: u64,
+    completed_by_session: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1494,6 +1704,7 @@ fn validate_metadata_shape(
         }
     };
     if metadata.schema_version != RESOLVED_CACHE_STORE_VERSION
+        || metadata.state == ResolvedCacheEntryState::Evicting
         || cache_key_digest(&metadata.cache_key)? != digest
         || artifact_key != metadata.cache_key
         || metadata.entry_relative_path != PathBuf::from("entries").join(digest)
