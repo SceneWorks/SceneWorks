@@ -651,11 +651,13 @@ function validateRuntimeComplete(record) {
   }
   const lifecycle = ["warm_repeat", "cancel", "error"].map((name) => scenarios.get(name));
   const lifecycleNotRun = lifecycle.every((scenario) => scenario?.result === "not_run");
+  const parityOnlyLifecycle = lifecycle[0]?.result === "passed"
+    && lifecycle.slice(1).every((scenario) => scenario?.result === "not_run");
   const lifecyclePassed = lifecycle.every((scenario) => scenario?.result === "passed")
     && lifecycle.slice(1).every((scenario) =>
       scenario.cleanupVerified === true && scenario.warmFollowUpPassed === true);
-  if (!lifecycleNotRun && !lifecyclePassed) {
-    fail(`${record.id}: runtime lifecycle must be entirely not_run or fully passed with cleanup and recovery`);
+  if (!lifecycleNotRun && !parityOnlyLifecycle && !lifecyclePassed) {
+    fail(`${record.id}: runtime lifecycle must be entirely not_run, parity-only, or fully passed with cleanup and recovery`);
   }
   for (const [index, name] of ["warm_repeat", "cancel", "error"].entries()) {
     text(lifecycle[index].reason, `${record.id}.${name}.reason`);

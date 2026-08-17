@@ -18,6 +18,11 @@ export const SEED = 18946;
 // at a time, but the checked-in plan must preserve that reviewed operator order too.
 export const TIERS = Object.freeze(["q4", "q8", "bf16"]);
 export const RUNG2_PARAMETERS = Object.freeze({ decodeTileEdge: 384, decodeOverlap: 64 });
+export const RATIFIED_BOUNDED_PARAMETERS = Object.freeze({ decodeTileEdge: 192, decodeOverlap: 64 });
+export const RATIFIED_BOUNDED_PROVIDER =
+  "mlx-ltx-2-3-q4-768x512-f121-fps30-bounded_decode-192x64";
+export const RATIFIED_BOUNDED_FIXTURE =
+  "ltx-2-3-mlx-q4-768x512-f121-fps30-bounded-decode-192-64-seed18946";
 // SC-19642: these are immutable bytes from the exact tier inventories prepared for this campaign.
 // The q4 f305 process later reached the incident footprint below and starved watchdogd. Every row
 // loads its complete tier plus the same Gemma stack before geometry-specific work, so a smaller
@@ -155,6 +160,57 @@ function providerRow(tier, [width, height, frames, fps, role, campaignPhase], ru
   return row;
 }
 
+function ratifiedBoundedRow() {
+  const width = 768;
+  const height = 512;
+  const frames = 121;
+  const outputVoxels = width * height * frames;
+  return {
+    name: RATIFIED_BOUNDED_PROVIDER,
+    _role: "bounded_carrier_entry",
+    _campaignPhase: "bounded_carrier_ratification",
+    _coverageExpectation: "captured_or_attempted",
+    _latentTokens: 6_144,
+    _writableFrameCap: writableFrameCap(width, height),
+    _outputVoxels: outputVoxels,
+    _measurementSafety: {
+      disposition: SAFETY_DISPOSITIONS.SAFETY_REFUSED_OPEN,
+      tierInventoryBytes: TIER_INVENTORY_BYTES.q4,
+      incidentCrashFootprintBytes: Q4_F305_CRASH_FOOTPRINT_BYTES,
+      incidentCase: "mlx-ltx-2-3-q4-1280x704-f305-fps30-bounded_decode",
+      commonLoad: "complete numeric tier plus shared Gemma stack before geometry-specific work",
+      predictedDecodeBytes: 6_264_848_640,
+      incidentPredictedDecodeBytes: INCIDENT_PREDICTED_DECODE_BYTES,
+      incidentCalibratedProjectionBytes: 84_694_536_320,
+      projectionAssumptions: [
+        "pinned provider decode cost is the only geometry-varying term used",
+        "immutable tier inventory delta is added byte-for-byte",
+        "incident binding phase is unknown, so the projection is not a physical-footprint bound and cannot admit execution",
+      ],
+      reason: "incident-calibrated projection is diagnostic only; ordinary run remains refused and only the exact privately contained SC-20318 action is admitted",
+    },
+    evidenceScope: "authoritative",
+    backend: "mlx",
+    loadShape: "eager_materialization",
+    target: {
+      provider: PROVIDER,
+      modelId: PROVIDER,
+      tier: "q4",
+      mode: "text_to_video",
+      overlay: "none",
+      geometry: { width, height, batch: 1, frames },
+    },
+    rung: "bounded_decode",
+    engagedRungs: ["resident", "staged_residency", "bounded_decode"],
+    calibrationFingerprint: FINGERPRINT,
+    fixture: RATIFIED_BOUNDED_FIXTURE,
+    cases: [{ parameters: RATIFIED_BOUNDED_PARAMETERS, expectedResult: "passed" }],
+    _predictedDecodeBytes: 6_264_848_640,
+    _predictedDecodeFormula:
+      "3.3e9 + 40*(width*height*frames) + 300*(192*192*96) bytes",
+  };
+}
+
 function plan(comment, rows, rung, { rowMajor = false } = {}) {
   return {
     _comment: comment,
@@ -170,6 +226,16 @@ function plan(comment, rows, rung, { rowMajor = false } = {}) {
   };
 }
 
+function rung2Plan() {
+  const frozen = plan(
+    "SC-18946 rung-2-first matrix. The original q4/q8/bf16 rows retain the 384/64 carrier at 1280x704 f305/f449. One separately identified q4 768x512 f121 row uses the SC-20254-proven 192/64, 24-tile carrier and is the only privately admitted campaign entry. These records are never pooled into the single-pass temporal fit.",
+    rung2Rows,
+    "bounded_decode",
+    { rowMajor: true },
+  );
+  return { ...frozen, providers: [...frozen.providers, ratifiedBoundedRow()] };
+}
+
 export function buildPlans() {
   return {
     "ltx-mlx-single-pass-sweep.json": plan(
@@ -177,12 +243,7 @@ export function buildPlans() {
       singlePassRows,
       "staged_residency",
     ),
-    "ltx-mlx-rung2-sweep.json": plan(
-      "SC-18946 rung-2-first matrix. Every q4/q8/bf16 row explicitly selects decodeTileEdge=384 and decodeOverlap=64 at 1280x704 f305/f449. These records are ingested as canonical evidence but never pooled into the single-pass temporal fit.",
-      rung2Rows,
-      "bounded_decode",
-      { rowMajor: true },
-    ),
+    "ltx-mlx-rung2-sweep.json": rung2Plan(),
     "ltx-mlx-host-risk-probes.json": {
       ...plan(
         "SC-18946 predeclared single-pass host-risk probes. Their coverage state must distinguish captured, attempted/aborted, arithmetic-unmeasurable, and never planned. This unscored bundle is not a curve source.",

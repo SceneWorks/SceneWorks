@@ -1,5 +1,5 @@
 {
-  "_comment": "SC-18946 rung-2-first matrix. Every q4/q8/bf16 row explicitly selects decodeTileEdge=384 and decodeOverlap=64 at 1280x704 f305/f449. These records are ingested as canonical evidence but never pooled into the single-pass temporal fit.",
+  "_comment": "SC-18946 rung-2-first matrix. The original q4/q8/bf16 rows retain the 384/64 carrier at 1280x704 f305/f449. One separately identified q4 768x512 f121 row uses the SC-20254-proven 192/64, 24-tile carrier and is the only privately admitted campaign entry. These records are never pooled into the single-pass temporal fit.",
   "story": "sc-18946",
   "campaignIdentity": {
     "inferenceRevision": "6f3a84ef4ad4f858c6fe199e14925a01a7943f97",
@@ -366,6 +366,66 @@
       ],
       "_predictedDecodeBytes": 23730848000,
       "_predictedDecodeFormula": "3.3e9 + 40*(width*height*frames) + 300*(384*384*96) bytes"
+    },
+    {
+      "name": "mlx-ltx-2-3-q4-768x512-f121-fps30-bounded_decode-192x64",
+      "_role": "bounded_carrier_entry",
+      "_campaignPhase": "bounded_carrier_ratification",
+      "_coverageExpectation": "captured_or_attempted",
+      "_latentTokens": 6144,
+      "_writableFrameCap": 682,
+      "_outputVoxels": 47579136,
+      "_measurementSafety": {
+        "disposition": "safety_refused_open",
+        "tierInventoryBytes": 20467690460,
+        "incidentCrashFootprintBytes": 96970084480,
+        "incidentCase": "mlx-ltx-2-3-q4-1280x704-f305-fps30-bounded_decode",
+        "commonLoad": "complete numeric tier plus shared Gemma stack before geometry-specific work",
+        "predictedDecodeBytes": 6264848640,
+        "incidentPredictedDecodeBytes": 18540396800,
+        "incidentCalibratedProjectionBytes": 84694536320,
+        "projectionAssumptions": [
+          "pinned provider decode cost is the only geometry-varying term used",
+          "immutable tier inventory delta is added byte-for-byte",
+          "incident binding phase is unknown, so the projection is not a physical-footprint bound and cannot admit execution"
+        ],
+        "reason": "incident-calibrated projection is diagnostic only; ordinary run remains refused and only the exact privately contained SC-20318 action is admitted"
+      },
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 768,
+          "height": 512,
+          "batch": 1,
+          "frames": 121
+        }
+      },
+      "rung": "bounded_decode",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode"
+      ],
+      "calibrationFingerprint": "sc-19109-ltx-2-3-mlx-memory-ladder-v1",
+      "fixture": "ltx-2-3-mlx-q4-768x512-f121-fps30-bounded-decode-192-64-seed18946",
+      "cases": [
+        {
+          "parameters": {
+            "decodeTileEdge": 192,
+            "decodeOverlap": 64
+          },
+          "expectedResult": "passed"
+        }
+      ],
+      "_predictedDecodeBytes": 6264848640,
+      "_predictedDecodeFormula": "3.3e9 + 40*(width*height*frames) + 300*(192*192*96) bytes"
     }
   ]
 }

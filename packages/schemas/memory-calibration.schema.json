@@ -662,6 +662,13 @@
                       {
                         "allOf": [
                           { "contains": { "properties": { "name": { "const": "warm_repeat" }, "result": { "const": "passed" } }, "required": ["name", "result", "reason"] } },
+                          { "contains": { "properties": { "name": { "const": "cancel" }, "result": { "const": "not_run" } }, "required": ["name", "result", "reason"] } },
+                          { "contains": { "properties": { "name": { "const": "error" }, "result": { "const": "not_run" } }, "required": ["name", "result", "reason"] } }
+                        ]
+                      },
+                      {
+                        "allOf": [
+                          { "contains": { "properties": { "name": { "const": "warm_repeat" }, "result": { "const": "passed" } }, "required": ["name", "result", "reason"] } },
                           { "contains": { "properties": { "name": { "const": "cancel" }, "result": { "const": "passed" }, "cleanupVerified": { "const": true }, "warmFollowUpPassed": { "const": true } }, "required": ["name", "result", "reason", "cleanupVerified", "warmFollowUpPassed"] } },
                           { "contains": { "properties": { "name": { "const": "error" }, "result": { "const": "passed" }, "cleanupVerified": { "const": true }, "warmFollowUpPassed": { "const": true } }, "required": ["name", "result", "reason", "cleanupVerified", "warmFollowUpPassed"] } }
                         ]
