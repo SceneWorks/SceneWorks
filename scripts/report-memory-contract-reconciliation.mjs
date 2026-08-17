@@ -104,8 +104,13 @@ console.log(
   `  ${plural(findings.length, "mismatch", "mismatches")}${legFilter ? ` on leg ${legFilter}` : ""}.`,
 );
 
-for (const [leg, count] of Object.entries(result.byLeg ?? {})) {
-  console.log(`    ${leg}: ${count}`);
+// Derived from the FILTERED findings rather than `result.byLeg`, so the breakdown and the headline
+// count above always describe the same set. Reading the unfiltered summary here made `--leg` print a
+// total that contradicted its own headline.
+const legTotals = new Map();
+for (const entry of findings) legTotals.set(entry.leg, (legTotals.get(entry.leg) ?? 0) + 1);
+for (const leg of [...legTotals.keys()].sort()) {
+  console.log(`    ${leg}: ${legTotals.get(leg)}`);
 }
 
 const byLegThenDirection = new Map();
