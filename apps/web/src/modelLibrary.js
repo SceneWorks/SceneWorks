@@ -87,6 +87,25 @@ export function handleModelLibraryRejection(error, action) {
   return blockedHandler?.(context, action) === true;
 }
 
+// The failure a call site rethrows once the prompt has taken ownership. Its message is empty on
+// purpose: the ~85 `setError(err.message)` / `setConfigError(err.message)` handlers in this app then
+// CLEAR their banner instead of printing a second, redundant surface beside the dialog.
+export class ModelLibraryPrompted extends Error {
+  constructor() {
+    super("");
+    this.name = "ModelLibraryPrompted";
+  }
+}
+
+// The throw-shaped counterpart of `handleModelLibraryRejection`, for the submission paths that
+// propagate their failure to a caller rather than swallowing it (training). Always throws.
+export function rethrowUnlessPrompted(error, action) {
+  if (handleModelLibraryRejection(error, action)) {
+    throw new ModelLibraryPrompted();
+  }
+  throw error;
+}
+
 // Raise the prompt for a model the catalog already reports as unavailable (selection time), with
 // no queued action: the recovery is the point, and there is nothing to resume.
 export function raiseModelLibraryPrompt(context) {

@@ -4,6 +4,9 @@ import {
   modelLibraryContext,
   modelLibraryContextForModel,
   modelLibraryUnavailable,
+  rethrowUnlessPrompted,
+  setModelLibraryHandler,
+  ModelLibraryPrompted,
   MODEL_LIBRARY_UNAVAILABLE_CODE,
 } from "./modelLibrary.js";
 
@@ -239,6 +242,31 @@ describe("model library gate", () => {
     // The original action survived the rejected attempt.
     await gate.retry();
     expect(action).toHaveBeenCalledTimes(1);
+  });
+
+  // The throwing submission paths (training) must not print a second surface beside the dialog,
+  // and must still propagate every other failure untouched.
+  it("converts a typed rejection into a silent throw for propagating call sites", async () => {
+    const action = vi.fn(async () => "training-job-1");
+    const gate = createModelLibraryGate({ probe: async () => ({ available: true }) });
+    const unregister = setModelLibraryHandler(gate.block);
+
+    expect(() => rethrowUnlessPrompted(unavailableError(), action)).toThrow(
+      ModelLibraryPrompted,
+    );
+    // An empty message is what makes `setError(err.message)` CLEAR rather than print.
+    try {
+      rethrowUnlessPrompted(unavailableError(), action);
+    } catch (error) {
+      expect(error.message).toBe("");
+    }
+    expect(gate.getState()).toMatchObject({ status: "blocked" });
+    await gate.retry();
+    expect(action).toHaveBeenCalledTimes(1);
+
+    const ordinary = new Error("network down");
+    expect(() => rethrowUnlessPrompted(ordinary, action)).toThrow(ordinary);
+    unregister();
   });
 
   it("notifies subscribers on every settled transition", async () => {
