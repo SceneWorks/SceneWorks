@@ -254,8 +254,7 @@ impl ResolvedCacheStore {
         });
         let mut survivors = Vec::new();
         for candidate in candidates {
-            let expired =
-                now.saturating_sub(candidate.activity) >= policy.inactivity_seconds;
+            let expired = now.saturating_sub(candidate.activity) >= policy.inactivity_seconds;
             if expired {
                 self.apply_eviction_attempt(
                     self.evict_candidate(&candidate, EvictionCause::TtlExpired, now),
@@ -303,53 +302,49 @@ impl ResolvedCacheStore {
         }
         let reclaimable_bytes = measure_entry_bytes(&entry)?;
         let active = self.artifact_lock_is_contended(&digest)?;
-        let (state, artifact_pinned, pin_owners, source_warning, blocked) =
-            match self.read_metadata_unlocked(&digest) {
-                Ok(JournalRead::Valid { metadata, .. }) => {
-                    let live_materializing = metadata.state
-                        == ResolvedCacheEntryState::Materializing
-                        && self.materializing_session_is_live(&metadata)?;
-                    let warning = if metadata.state == ResolvedCacheEntryState::Complete {
-                        self.probe_source_reachable(&metadata).err()
-                    } else {
-                        None
-                    };
-                    let blocked = if active {
-                        Some("an active lease or reservation holds this entry".to_owned())
-                    } else if live_materializing {
-                        Some("a live session is materializing this entry".to_owned())
-                    } else if metadata.effective_pin {
-                        Some("entry is pinned; unpin it before removal".to_owned())
-                    } else {
-                        None
-                    };
-                    (
-                        metadata.state.clone(),
-                        metadata.artifact_pinned,
-                        metadata.model_pin_owners.iter().cloned().collect(),
-                        warning,
-                        blocked,
-                    )
-                }
-                Ok(JournalRead::Evicted { .. }) => (
-                    ResolvedCacheEntryState::Evicting,
-                    false,
-                    Vec::new(),
-                    None,
-                    active.then(|| {
-                        "an active lease or reservation holds this entry".to_owned()
-                    }),
-                ),
-                Ok(JournalRead::Missing) | Err(_) => (
-                    ResolvedCacheEntryState::Corrupt,
-                    false,
-                    Vec::new(),
-                    None,
-                    active.then(|| {
-                        "an active lease or reservation holds this entry".to_owned()
-                    }),
-                ),
-            };
+        let (state, artifact_pinned, pin_owners, source_warning, blocked) = match self
+            .read_metadata_unlocked(&digest)
+        {
+            Ok(JournalRead::Valid { metadata, .. }) => {
+                let live_materializing = metadata.state == ResolvedCacheEntryState::Materializing
+                    && self.materializing_session_is_live(&metadata)?;
+                let warning = if metadata.state == ResolvedCacheEntryState::Complete {
+                    self.probe_source_reachable(&metadata).err()
+                } else {
+                    None
+                };
+                let blocked = if active {
+                    Some("an active lease or reservation holds this entry".to_owned())
+                } else if live_materializing {
+                    Some("a live session is materializing this entry".to_owned())
+                } else if metadata.effective_pin {
+                    Some("entry is pinned; unpin it before removal".to_owned())
+                } else {
+                    None
+                };
+                (
+                    metadata.state.clone(),
+                    metadata.artifact_pinned,
+                    metadata.model_pin_owners.iter().cloned().collect(),
+                    warning,
+                    blocked,
+                )
+            }
+            Ok(JournalRead::Evicted { .. }) => (
+                ResolvedCacheEntryState::Evicting,
+                false,
+                Vec::new(),
+                None,
+                active.then(|| "an active lease or reservation holds this entry".to_owned()),
+            ),
+            Ok(JournalRead::Missing) | Err(_) => (
+                ResolvedCacheEntryState::Corrupt,
+                false,
+                Vec::new(),
+                None,
+                active.then(|| "an active lease or reservation holds this entry".to_owned()),
+            ),
+        };
         Ok(ManualRemovalPreview {
             cache_key: cache_key.to_owned(),
             state,
@@ -486,7 +481,9 @@ impl ResolvedCacheStore {
             }
             let _metadata_lock = self.lock_metadata(&digest)?;
             let metadata = match self.read_metadata_unlocked(&digest) {
-                Ok(JournalRead::Valid { metadata, .. }) if selector_matches(selector, &metadata) => {
+                Ok(JournalRead::Valid { metadata, .. })
+                    if selector_matches(selector, &metadata) =>
+                {
                     *metadata
                 }
                 _ => continue,
