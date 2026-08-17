@@ -142,6 +142,12 @@ const LTX_CANARY_SEED: u64 = 1234;
 const LTX_CANARY_TILE_EDGE: u32 = 192;
 const LTX_CANARY_OVERLAP: u32 = 64;
 const LTX_CANARY_FIXTURE: &str = "ltx-2-3-mlx-q4-256x256-f9-fps24-seed1234-safety-canary";
+const LTX_PRODUCT_CANARY_WIDTH: u32 = 768;
+const LTX_PRODUCT_CANARY_HEIGHT: u32 = 512;
+const LTX_PRODUCT_CANARY_FRAMES: u32 = 97;
+const LTX_PRODUCT_CANARY_FPS: u32 = 24;
+const LTX_PRODUCT_CANARY_FIXTURE: &str =
+    "ltx-2-3-mlx-q4-768x512-f97-fps24-seed1234-product-envelope-canary";
 const LTX_CANARY_ARTIFACT_REVISION: &str = "01df27d308466533aa09d251e3aebdcc627d07eb";
 const LTX_CANARY_Q4_INVENTORY_FILES: u64 = 11;
 const LTX_CANARY_Q4_INVENTORY_SHA256: &str =
@@ -164,6 +170,93 @@ const LTX_ARITHMETIC_UNMEASURABLE: &str = "arithmetic_unmeasurable";
 const LTX_SAFETY_REFUSED_OPEN: &str = "safety_refused_open";
 const LTX_INCIDENT_PREDICTED_DECODE_BYTES: u64 =
     3_300_000_000 + 40 * (1280 * 704 * 305) + 300 * 384 * 384 * 96;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LtxCanaryProfile {
+    Safety,
+    ProductEnvelope,
+}
+
+impl LtxCanaryProfile {
+    fn action(self) -> &'static str {
+        match self {
+            Self::Safety => "canary",
+            Self::ProductEnvelope => "product_envelope_canary",
+        }
+    }
+
+    fn width(self) -> u32 {
+        match self {
+            Self::Safety => LTX_CANARY_WIDTH,
+            Self::ProductEnvelope => LTX_PRODUCT_CANARY_WIDTH,
+        }
+    }
+
+    fn height(self) -> u32 {
+        match self {
+            Self::Safety => LTX_CANARY_HEIGHT,
+            Self::ProductEnvelope => LTX_PRODUCT_CANARY_HEIGHT,
+        }
+    }
+
+    fn frames(self) -> u32 {
+        match self {
+            Self::Safety => LTX_CANARY_FRAMES,
+            Self::ProductEnvelope => LTX_PRODUCT_CANARY_FRAMES,
+        }
+    }
+
+    fn fps(self) -> u32 {
+        match self {
+            Self::Safety => LTX_CANARY_FPS,
+            Self::ProductEnvelope => LTX_PRODUCT_CANARY_FPS,
+        }
+    }
+
+    fn fixture(self) -> &'static str {
+        match self {
+            Self::Safety => LTX_CANARY_FIXTURE,
+            Self::ProductEnvelope => LTX_PRODUCT_CANARY_FIXTURE,
+        }
+    }
+
+    fn prompt(self) -> &'static str {
+        match self {
+            Self::Safety => "a sunlit pine branch, static camera",
+            Self::ProductEnvelope => {
+                "a slow dolly through a sunlit pine forest, drifting motes of pollen, cinematic"
+            }
+        }
+    }
+
+    fn video_mode(self) -> Option<&'static str> {
+        match self {
+            Self::Safety => Some("no_audio"),
+            Self::ProductEnvelope => None,
+        }
+    }
+
+    fn video_mode_identity(self) -> &'static str {
+        match self {
+            Self::Safety => "no_audio",
+            Self::ProductEnvelope => "default_av",
+        }
+    }
+
+    fn completion_status(self) -> &'static str {
+        match self {
+            Self::Safety => "diagnostic_canary_complete",
+            Self::ProductEnvelope => "diagnostic_product_envelope_canary_complete",
+        }
+    }
+
+    fn identity(self) -> &'static str {
+        match self {
+            Self::Safety => "sc-19741-safety",
+            Self::ProductEnvelope => "sc-20169-product-envelope",
+        }
+    }
+}
 /// LTX's video VAE is x32 spatial and **x8 causal temporal**, so `out_f = 1 + (t_lat - 1) * 8` and
 /// the engine's `validate_request` hard-rejects any `num_frames` that is not `1 + 8k`. Latent
 /// temporal depth — not raw frame count — is the physically motivated regressor for a frames-aware
@@ -5502,20 +5595,20 @@ fn ltx_request(geometry: LtxGeometry, fps: u32, seed: u64) -> GenerationRequest 
     }
 }
 
-/// The non-promotable safety canary. This is intentionally outside the product calibration
-/// envelope: it reuses the inference provider's historical 256x256x9 q4 residency baseline, skips
-/// only the downstream audio decoder/vocoder, then forces the smallest shipped spatial decode
-/// carrier so the permanent-pin per-tile release path executes without a campaign geometry.
-fn ltx_canary_generation_request() -> GenerationRequest {
+/// One non-promotable diagnostic request. The safety profile is intentionally outside the product
+/// envelope and skips only downstream audio decode. The product-envelope profile is the smallest
+/// shipped four-second geometry and leaves `video_mode` unset so it follows the ordinary full-A/V
+/// provider path. Both force the same bounded-decode carrier without admitting a campaign row.
+fn ltx_canary_generation_request_for(profile: LtxCanaryProfile) -> GenerationRequest {
     GenerationRequest {
-        prompt: "a sunlit pine branch, static camera".to_owned(),
-        width: LTX_CANARY_WIDTH,
-        height: LTX_CANARY_HEIGHT,
+        prompt: profile.prompt().to_owned(),
+        width: profile.width(),
+        height: profile.height(),
         count: 1,
         seed: Some(LTX_CANARY_SEED),
-        frames: Some(LTX_CANARY_FRAMES),
-        fps: Some(LTX_CANARY_FPS),
-        video_mode: Some("no_audio".to_owned()),
+        frames: Some(profile.frames()),
+        fps: Some(profile.fps()),
+        video_mode: profile.video_mode().map(str::to_owned),
         memory: Some(GenerationMemory {
             tile_vae_decode: true,
             decode_tile_edge: Some(LTX_CANARY_TILE_EDGE),
@@ -5524,6 +5617,14 @@ fn ltx_canary_generation_request() -> GenerationRequest {
         }),
         ..Default::default()
     }
+}
+
+fn ltx_canary_generation_request() -> GenerationRequest {
+    ltx_canary_generation_request_for(LtxCanaryProfile::Safety)
+}
+
+fn ltx_product_envelope_canary_generation_request() -> GenerationRequest {
+    ltx_canary_generation_request_for(LtxCanaryProfile::ProductEnvelope)
 }
 
 fn ltx_canary_request_for_provider_admission(
@@ -5990,6 +6091,34 @@ impl LtxDecodePlan {
             .and_then(|config| config.spatial)
             .map_or(0, |spatial| u64::from(spatial.overlap_px.max(0) as u32))
     }
+
+    /// Count physical spatial decode tiles from the same shared plan geometry the provider executes.
+    /// A configured tiling object alone is insufficient evidence: a carrier smaller than its tile
+    /// edge can still produce a one-tile plan.
+    fn spatial_tile_count(self, geometry: LtxGeometry) -> Result<u64, String> {
+        let Some(config) = self.tiling else {
+            return Ok(1);
+        };
+        let spatial_scale = u32::try_from(VaeTiling::LTX.spatial_scale)
+            .map_err(|_| "LTX spatial scale must fit u32".to_owned())?;
+        let latent_height = i32::try_from(geometry.height / spatial_scale)
+            .map_err(|_| "LTX latent height must fit i32".to_owned())?;
+        let latent_width = i32::try_from(geometry.width / spatial_scale)
+            .map_err(|_| "LTX latent width must fit i32".to_owned())?;
+        let latent_frames = i32::try_from(geometry.latent_frames)
+            .map_err(|_| "LTX latent frames must fit i32".to_owned())?;
+        let plan = config.plan(VaeTiling::LTX, latent_frames, latent_height, latent_width);
+        [plan.h.len(), plan.w.len()]
+            .into_iter()
+            .try_fold(1_u64, |count, axis| {
+                count
+                    .checked_mul(
+                        u64::try_from(axis)
+                            .map_err(|_| "LTX decode tile-axis count must fit u64".to_owned())?,
+                    )
+                    .ok_or_else(|| "LTX decode tile-count arithmetic overflowed".to_owned())
+            })
+    }
 }
 
 /// Bind the plan to the provider contract's actual engaged composition. SC-19109 made bounded
@@ -6030,6 +6159,63 @@ fn video_frames(output: GenerationOutput) -> Result<(Vec<Image>, u32, bool), Str
         GenerationOutput::Audio(_) => {
             Err("MLX LTX-2.3 render returned an audio track, not a video clip".to_owned())
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DiagnosticAudioIdentity {
+    samples: u64,
+    sample_rate: u32,
+    channels: u16,
+}
+
+/// Extract a diagnostic clip while retaining enough audio identity to prove the full default-A/V
+/// decoder returned a non-empty track. The samples themselves drop here, before provider cleanup.
+fn diagnostic_video_frames(
+    output: GenerationOutput,
+) -> Result<(Vec<Image>, u32, Option<DiagnosticAudioIdentity>), String> {
+    match output {
+        GenerationOutput::Video { frames, fps, audio } => {
+            if frames.is_empty() {
+                return Err("MLX LTX-2.3 render returned no frames".to_owned());
+            }
+            let audio = audio
+                .map(|track| {
+                    Ok::<_, String>(DiagnosticAudioIdentity {
+                        samples: u64::try_from(track.samples.len()).map_err(|_| {
+                            "LTX diagnostic audio sample count must fit u64".to_owned()
+                        })?,
+                        sample_rate: track.sample_rate,
+                        channels: track.channels,
+                    })
+                })
+                .transpose()?;
+            Ok((frames, fps, audio))
+        }
+        GenerationOutput::Images(_) => {
+            Err("MLX LTX-2.3 render returned images, not a video clip".to_owned())
+        }
+        GenerationOutput::Audio(_) => {
+            Err("MLX LTX-2.3 render returned an audio track, not a video clip".to_owned())
+        }
+    }
+}
+
+fn validate_diagnostic_audio(
+    profile: LtxCanaryProfile,
+    audio: Option<DiagnosticAudioIdentity>,
+) -> Result<(), String> {
+    match (profile, audio) {
+        (LtxCanaryProfile::Safety, None) => Ok(()),
+        (LtxCanaryProfile::ProductEnvelope, Some(audio))
+            if audio.samples > 0 && audio.sample_rate > 0 && audio.channels > 0 =>
+        {
+            Ok(())
+        }
+        _ => Err(format!(
+            "LTX diagnostic canary returned invalid {:?} audio identity {audio:?}",
+            profile
+        )),
     }
 }
 
@@ -6447,7 +6633,16 @@ fn verify_ltx_lifecycle(
     Ok(metrics)
 }
 
-fn validate_ltx_canary_plan(request: &Value) -> Result<MemorySelection, String> {
+fn validate_ltx_canary_plan_for(
+    request: &Value,
+    profile: LtxCanaryProfile,
+) -> Result<MemorySelection, String> {
+    if protocol::action(request)? != profile.action() {
+        return Err(format!(
+            "LTX diagnostic canary action must be {:?}",
+            profile.action()
+        ));
+    }
     let planned = protocol::planned(request)?;
     if planned.get("_diagnosticOnly").and_then(Value::as_bool) != Some(true) {
         return Err("LTX safety canary requires planned._diagnosticOnly == true".to_owned());
@@ -6495,10 +6690,10 @@ fn validate_ltx_canary_plan(request: &Value) -> Result<MemorySelection, String> 
         .and_then(Value::as_object)
         .ok_or_else(|| "planned.target.geometry must be an object".to_owned())?;
     let exact_geometry = [
-        ("width", u64::from(LTX_CANARY_WIDTH)),
-        ("height", u64::from(LTX_CANARY_HEIGHT)),
+        ("width", u64::from(profile.width())),
+        ("height", u64::from(profile.height())),
         ("batch", 1),
-        ("frames", u64::from(LTX_CANARY_FRAMES)),
+        ("frames", u64::from(profile.frames())),
     ];
     for (field, expected) in exact_geometry {
         if geometry.get(field).and_then(Value::as_u64) != Some(expected) {
@@ -6507,9 +6702,10 @@ fn validate_ltx_canary_plan(request: &Value) -> Result<MemorySelection, String> 
             ));
         }
     }
-    if planned.get("fixture").and_then(Value::as_str) != Some(LTX_CANARY_FIXTURE) {
+    if planned.get("fixture").and_then(Value::as_str) != Some(profile.fixture()) {
         return Err(format!(
-            "LTX safety canary fixture must be {LTX_CANARY_FIXTURE:?}"
+            "LTX safety canary fixture must be {:?}",
+            profile.fixture()
         ));
     }
     if planned
@@ -6535,12 +6731,16 @@ fn validate_ltx_canary_plan(request: &Value) -> Result<MemorySelection, String> 
         .get("_canary")
         .and_then(Value::as_object)
         .ok_or_else(|| "LTX safety canary requires planned._canary".to_owned())?;
-    if canary.get("videoMode").and_then(Value::as_str) != Some("no_audio")
-        || canary.get("fps").and_then(Value::as_u64) != Some(u64::from(LTX_CANARY_FPS))
+    if canary.get("identity").and_then(Value::as_str) != Some(profile.identity())
+        || canary.get("videoMode").and_then(Value::as_str) != Some(profile.video_mode_identity())
+        || canary.get("fps").and_then(Value::as_u64) != Some(u64::from(profile.fps()))
         || canary.get("seed").and_then(Value::as_u64) != Some(LTX_CANARY_SEED)
     {
         return Err(format!(
-            "LTX safety canary requires the no-audio route, fps {LTX_CANARY_FPS}, seed {LTX_CANARY_SEED}"
+            "LTX safety canary requires identity {:?}, video mode {:?}, fps {}, seed {LTX_CANARY_SEED}",
+            profile.identity(),
+            profile.video_mode_identity(),
+            profile.fps(),
         ));
     }
     let artifact = planned
@@ -6603,6 +6803,16 @@ fn validate_ltx_canary_plan(request: &Value) -> Result<MemorySelection, String> 
         ));
     }
     Ok(selection)
+}
+
+#[cfg(test)]
+fn validate_ltx_canary_plan(request: &Value) -> Result<MemorySelection, String> {
+    validate_ltx_canary_plan_for(request, LtxCanaryProfile::Safety)
+}
+
+#[cfg(test)]
+fn validate_ltx_product_envelope_canary_plan(request: &Value) -> Result<MemorySelection, String> {
+    validate_ltx_canary_plan_for(request, LtxCanaryProfile::ProductEnvelope)
 }
 
 #[derive(Debug)]
@@ -6834,8 +7044,8 @@ fn validate_ltx_canary_cleanup(
     Ok(())
 }
 
-fn run_ltx_canary(request: &Value) -> Result<Value, String> {
-    let selection = validate_ltx_canary_plan(request)?;
+fn run_ltx_canary_for(request: &Value, profile: LtxCanaryProfile) -> Result<Value, String> {
+    let selection = validate_ltx_canary_plan_for(request, profile)?;
     let mut watchdog = consume_ltx_canary_watchdog_attestation(request)?;
     let watchdog_lease = watchdog.start_lease()?;
     let limits = LtxCanaryLimits::install()?;
@@ -6844,10 +7054,10 @@ fn run_ltx_canary(request: &Value) -> Result<Value, String> {
     validate_ltx_canary_pre_provider(pre_provider)?;
     let expected_persistent_active = ltx_canary_ones_cache_bytes()?;
     let geometry = LtxGeometry {
-        width: LTX_CANARY_WIDTH,
-        height: LTX_CANARY_HEIGHT,
-        frames: LTX_CANARY_FRAMES,
-        latent_frames: 1 + (LTX_CANARY_FRAMES - 1) / LTX_TEMPORAL_SCALE,
+        width: profile.width(),
+        height: profile.height(),
+        frames: profile.frames(),
+        latent_frames: 1 + (profile.frames() - 1) / LTX_TEMPORAL_SCALE,
     };
     let (repository, revision, root, text_encoder_root, spec) =
         ltx_load_spec(request, "q4", &selection)?;
@@ -6885,6 +7095,10 @@ fn run_ltx_canary(request: &Value) -> Result<Value, String> {
             "LTX safety canary did not resolve the exact multi-tile decode carrier".to_owned(),
         );
     }
+    let spatial_decode_tile_count = decode_plan.spatial_tile_count(geometry)?;
+    if spatial_decode_tile_count <= 1 {
+        return Err("LTX safety canary resolved no physical multi-tile decode".to_owned());
+    }
     let generator = registry
         .load(LTX_PROVIDER, &spec)
         .map_err(|error| format!("load real LTX-2.3 q4 canary provider: {error}"))?;
@@ -6915,29 +7129,42 @@ fn run_ltx_canary(request: &Value) -> Result<Value, String> {
         active: 0,
         cache: 0,
     };
-    let (frames, fps, has_audio) = video_frames(scoped_generate_ltx_no_audio_canary(
-        generator.as_ref(),
-        ltx_canary_generation_request(),
-        &context,
-        &mut |progress| match progress {
-            Progress::Step { current: 1, .. } => {
-                conditioning = PhaseMemory::capture();
-                reset_peak_memory();
-            }
-            Progress::Decoding => {
-                denoise = PhaseMemory::capture();
-                reset_peak_memory();
-            }
-            _ => {}
-        },
-    )?)?;
+    let mut observe_progress = |progress| match progress {
+        Progress::Step { current: 1, .. } => {
+            conditioning = PhaseMemory::capture();
+            reset_peak_memory();
+        }
+        Progress::Decoding => {
+            denoise = PhaseMemory::capture();
+            reset_peak_memory();
+        }
+        _ => {}
+    };
+    let generated = match profile {
+        LtxCanaryProfile::Safety => scoped_generate_ltx_no_audio_canary(
+            generator.as_ref(),
+            ltx_canary_generation_request(),
+            &context,
+            &mut observe_progress,
+        ),
+        LtxCanaryProfile::ProductEnvelope => scoped_generate(
+            generator.as_ref(),
+            ltx_product_envelope_canary_generation_request(),
+            &context,
+            None,
+            &mut observe_progress,
+        ),
+    }?;
+    let (frames, fps, audio) = diagnostic_video_frames(generated)?;
     let decode = PhaseMemory::capture();
-    if frames.len() != LTX_CANARY_FRAMES as usize || fps != LTX_CANARY_FPS || has_audio {
+    let expected_audio = profile == LtxCanaryProfile::ProductEnvelope;
+    if frames.len() != profile.frames() as usize || fps != profile.fps() {
         return Err(format!(
-            "LTX safety canary returned frames={}, fps={fps}, audio={has_audio}",
-            frames.len()
+            "LTX safety canary returned frames={}, fps={fps}, audio={audio:?}",
+            frames.len(),
         ));
     }
+    validate_diagnostic_audio(profile, audio)?;
     let first = frames
         .first()
         .ok_or_else(|| "LTX safety canary returned no frames".to_owned())?;
@@ -6957,9 +7184,12 @@ fn run_ltx_canary(request: &Value) -> Result<Value, String> {
         .get("_artifact")
         .cloned()
         .ok_or_else(|| "LTX safety canary lost planned._artifact".to_owned())?;
+    let mut strategy = ltx_attested_strategy(request, &context.selection, &contract)?;
+    strategy["spatialDecodeTiles"] = json!(spatial_decode_tile_count);
     watchdog_lease.complete()?;
     Ok(json!({
-        "status": "diagnostic_canary_complete",
+        "status": profile.completion_status(),
+        "canaryIdentity": profile.identity(),
         "diagnosticOnly": true,
         "promotable": false,
         "ingestible": false,
@@ -6978,14 +7208,15 @@ fn run_ltx_canary(request: &Value) -> Result<Value, String> {
             "provider": LTX_PROVIDER,
             "tier": "q4",
             "geometry": {
-                "width": LTX_CANARY_WIDTH,
-                "height": LTX_CANARY_HEIGHT,
-                "frames": LTX_CANARY_FRAMES,
-                "fps": LTX_CANARY_FPS,
+                "width": profile.width(),
+                "height": profile.height(),
+                "frames": profile.frames(),
+                "fps": profile.fps(),
             },
-            "audio": false,
+            "videoMode": profile.video_mode_identity(),
+            "audio": expected_audio,
         },
-        "strategy": ltx_attested_strategy(request, &context.selection, &contract)?,
+        "strategy": strategy,
         "watchdog": {
             "required": true,
             "protocol": LTX_CANARY_WATCHDOG_PROTOCOL,
@@ -7019,12 +7250,27 @@ fn run_ltx_canary(request: &Value) -> Result<Value, String> {
             "postCleanupCacheBytes": cleanup.cache,
         },
         "output": {
-            "frames": LTX_CANARY_FRAMES,
-            "fps": LTX_CANARY_FPS,
+            "frames": profile.frames(),
+            "fps": profile.fps(),
+            "audio": {
+                "present": audio.is_some(),
+                "samples": audio.map_or(0, |value| value.samples),
+                "sampleRate": audio.map_or(0, |value| value.sample_rate),
+                "channels": audio.map_or(0, |value| value.channels),
+            },
+            "frameTimelineSeconds": f64::from(profile.frames() - 1) / f64::from(profile.fps()),
             "firstFrameNondegenerate": true,
         },
         "capturedAt": protocol::captured_at(),
     }))
+}
+
+fn run_ltx_canary(request: &Value) -> Result<Value, String> {
+    run_ltx_canary_for(request, LtxCanaryProfile::Safety)
+}
+
+fn run_ltx_product_envelope_canary(request: &Value) -> Result<Value, String> {
+    run_ltx_canary_for(request, LtxCanaryProfile::ProductEnvelope)
 }
 
 /// The `mlx:ltx_2_3` SC-18946 arm. SC-19109 moved strategy ownership into the provider: this path
@@ -7406,6 +7652,7 @@ fn main() {
         "probe" => probe(),
         "run" => run(&request),
         "canary" => run_ltx_canary(&request),
+        "product_envelope_canary" => run_ltx_product_envelope_canary(&request),
         "assess_batch" => assess_z_image_batch(&request),
         other => Err(format!("unsupported action {other:?}")),
     }
@@ -8553,6 +8800,7 @@ mod ltx_tests {
                     "maxFootprintBytes": LTX_CANARY_MAX_FOOTPRINT_BYTES,
                 },
                 "_canary": {
+                    "identity": LtxCanaryProfile::Safety.identity(),
                     "videoMode": "no_audio",
                     "fps": LTX_CANARY_FPS,
                     "seed": LTX_CANARY_SEED,
@@ -8575,6 +8823,25 @@ mod ltx_tests {
         })
     }
 
+    fn ltx_product_envelope_canary_request_json() -> Value {
+        let mut request = ltx_canary_request_json();
+        request["action"] = json!("product_envelope_canary");
+        request["planned"]["target"]["geometry"] = json!({
+            "width": LTX_PRODUCT_CANARY_WIDTH,
+            "height": LTX_PRODUCT_CANARY_HEIGHT,
+            "batch": 1,
+            "frames": LTX_PRODUCT_CANARY_FRAMES,
+        });
+        request["planned"]["fixture"] = json!(LTX_PRODUCT_CANARY_FIXTURE);
+        request["planned"]["_canary"] = json!({
+            "identity": LtxCanaryProfile::ProductEnvelope.identity(),
+            "videoMode": "default_av",
+            "fps": LTX_PRODUCT_CANARY_FPS,
+            "seed": LTX_CANARY_SEED,
+        });
+        request
+    }
+
     #[test]
     fn the_ltx_safety_canary_is_an_exact_non_promotable_multi_tile_tuple() {
         let request = ltx_canary_request_json();
@@ -8590,6 +8857,7 @@ mod ltx_tests {
             Some(LTX_CANARY_OVERLAP)
         );
         let generated = ltx_canary_generation_request();
+        assert_eq!(generated.prompt, "a sunlit pine branch, static camera");
         assert_eq!(
             (generated.width, generated.height, generated.frames),
             (LTX_CANARY_WIDTH, LTX_CANARY_HEIGHT, Some(LTX_CANARY_FRAMES))
@@ -8614,6 +8882,84 @@ mod ltx_tests {
         let mut provider_override = ltx_canary_generation_request();
         provider_override.video_mode = Some("default".to_owned());
         assert!(restore_ltx_canary_no_audio_after_configuration(&mut provider_override).is_err());
+    }
+
+    #[test]
+    fn the_ltx_product_envelope_canary_is_exact_full_av_and_physically_multi_tile() {
+        let request = ltx_product_envelope_canary_request_json();
+        let selection = validate_ltx_product_envelope_canary_plan(&request)
+            .expect("exact product-envelope canary tuple");
+        assert_eq!(selection.strategy, MemoryStrategy::BoundedDecode);
+        let generated = ltx_product_envelope_canary_generation_request();
+        assert_eq!(
+            (
+                generated.width,
+                generated.height,
+                generated.frames,
+                generated.fps
+            ),
+            (
+                LTX_PRODUCT_CANARY_WIDTH,
+                LTX_PRODUCT_CANARY_HEIGHT,
+                Some(LTX_PRODUCT_CANARY_FRAMES),
+                Some(LTX_PRODUCT_CANARY_FPS),
+            )
+        );
+        assert_eq!(
+            generated.prompt,
+            "a slow dolly through a sunlit pine forest, drifting motes of pollen, cinematic"
+        );
+        assert_eq!(generated.video_mode, None, "default A/V must stay unset");
+        let geometry = LtxGeometry {
+            width: LTX_PRODUCT_CANARY_WIDTH,
+            height: LTX_PRODUCT_CANARY_HEIGHT,
+            frames: LTX_PRODUCT_CANARY_FRAMES,
+            latent_frames: 1 + (LTX_PRODUCT_CANARY_FRAMES - 1) / LTX_TEMPORAL_SCALE,
+        };
+        let decode = LtxDecodePlan::resolve_for_selection(&selection, geometry)
+            .expect("exact bounded decode plan");
+        assert_eq!(decode.spatial_tile_count(geometry).unwrap(), 24);
+        assert!(validate_diagnostic_audio(
+            LtxCanaryProfile::ProductEnvelope,
+            Some(DiagnosticAudioIdentity {
+                samples: 1,
+                sample_rate: 24_000,
+                channels: 2,
+            }),
+        )
+        .is_ok());
+        for audio in [
+            None,
+            Some(DiagnosticAudioIdentity {
+                samples: 0,
+                sample_rate: 24_000,
+                channels: 2,
+            }),
+            Some(DiagnosticAudioIdentity {
+                samples: 1,
+                sample_rate: 0,
+                channels: 2,
+            }),
+            Some(DiagnosticAudioIdentity {
+                samples: 1,
+                sample_rate: 24_000,
+                channels: 0,
+            }),
+        ] {
+            assert!(validate_diagnostic_audio(LtxCanaryProfile::ProductEnvelope, audio).is_err());
+        }
+        assert!(validate_diagnostic_audio(
+            LtxCanaryProfile::Safety,
+            Some(DiagnosticAudioIdentity {
+                samples: 1,
+                sample_rate: 24_000,
+                channels: 2,
+            }),
+        )
+        .is_err());
+        let direct = run_ltx_product_envelope_canary(&request)
+            .expect_err("product-envelope canary must refuse without the external watchdog");
+        assert!(direct.contains("live external watchdog channel"));
     }
 
     #[test]
@@ -8799,7 +9145,10 @@ mod ltx_tests {
     #[test]
     fn the_ltx_safety_canary_rejects_every_identity_or_safety_mutation_before_load() {
         type CanaryMutation = (&'static str, fn(&mut Value));
-        let mutations: [CanaryMutation; 15] = [
+        let mutations: [CanaryMutation; 16] = [
+            ("wrong canary identity", |request| {
+                request["planned"]["_canary"]["identity"] = json!("sc-20169-product-envelope")
+            }),
             ("promotable scope", |request| {
                 request["planned"]["evidenceScope"] = json!("authoritative")
             }),
@@ -8856,6 +9205,53 @@ mod ltx_tests {
             mutate(&mut request);
             assert!(
                 validate_ltx_canary_plan(&request).is_err(),
+                "{name} must fail before environment/provider/model access"
+            );
+        }
+    }
+
+    #[test]
+    fn the_ltx_product_envelope_canary_rejects_every_tuple_mutation_before_load() {
+        type CanaryMutation = (&'static str, fn(&mut Value));
+        let mutations: [CanaryMutation; 10] = [
+            ("wrong action", |request| {
+                request["action"] = json!("canary")
+            }),
+            ("no audio", |request| {
+                request["planned"]["_canary"]["videoMode"] = json!("no_audio")
+            }),
+            ("wrong width", |request| {
+                request["planned"]["target"]["geometry"]["width"] = json!(512)
+            }),
+            ("wrong height", |request| {
+                request["planned"]["target"]["geometry"]["height"] = json!(768)
+            }),
+            ("wrong frames", |request| {
+                request["planned"]["target"]["geometry"]["frames"] = json!(89)
+            }),
+            ("wrong fps", |request| {
+                request["planned"]["_canary"]["fps"] = json!(30)
+            }),
+            ("wrong carrier", |request| {
+                request["planned"]["strategy"]["parameters"]["decodeTileEdge"] = json!(384)
+            }),
+            ("campaign scope", |request| {
+                request["planned"]["evidenceScope"] = json!("campaign")
+            }),
+            ("watchdog threshold", |request| {
+                request["planned"]["_watchdog"]["maxFootprintBytes"] =
+                    json!(LTX_CANARY_MAX_FOOTPRINT_BYTES - 1)
+            }),
+            ("artifact drift", |request| {
+                request["planned"]["_artifact"]["numericTierInventory"]["sha256"] =
+                    json!("0".repeat(64))
+            }),
+        ];
+        for (name, mutate) in mutations {
+            let mut request = ltx_product_envelope_canary_request_json();
+            mutate(&mut request);
+            assert!(
+                validate_ltx_product_envelope_canary_plan(&request).is_err(),
                 "{name} must fail before environment/provider/model access"
             );
         }

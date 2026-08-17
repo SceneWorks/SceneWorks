@@ -30,7 +30,40 @@ export const MIN_PREFLIGHT_FREE_BYTES = MAX_FOOTPRINT_BYTES * 2;
 export const MIN_RUNTIME_FREE_BYTES = MAX_FOOTPRINT_BYTES;
 const PROVIDER = "ltx_2_3";
 const FINGERPRINT = "sc-19109-ltx-2-3-mlx-memory-ladder-v1";
-const FIXTURE = "ltx-2-3-mlx-q4-256x256-f9-fps24-seed1234-safety-canary";
+export const SAFETY_CANARY_PROFILE = "safety";
+export const PRODUCT_ENVELOPE_CANARY_PROFILE = "product-envelope";
+const CANARY_PROFILES = Object.freeze({
+  [SAFETY_CANARY_PROFILE]: Object.freeze({
+    action: "canary",
+    identity: "sc-19741-safety",
+    story: "sc-19741",
+    status: "diagnostic_canary_complete",
+    fixture: "ltx-2-3-mlx-q4-256x256-f9-fps24-seed1234-safety-canary",
+    width: 256,
+    height: 256,
+    frames: 9,
+    fps: 24,
+    videoMode: "no_audio",
+    audio: false,
+    spatialDecodeTiles: 4,
+    frameTimelineSeconds: 1 / 3,
+  }),
+  [PRODUCT_ENVELOPE_CANARY_PROFILE]: Object.freeze({
+    action: "product_envelope_canary",
+    identity: "sc-20169-product-envelope",
+    story: "sc-20169",
+    status: "diagnostic_product_envelope_canary_complete",
+    fixture: "ltx-2-3-mlx-q4-768x512-f97-fps24-seed1234-product-envelope-canary",
+    width: 768,
+    height: 512,
+    frames: 97,
+    fps: 24,
+    videoMode: "default_av",
+    audio: true,
+    spatialDecodeTiles: 24,
+    frameTimelineSeconds: 4,
+  }),
+});
 const ARTIFACT_REPOSITORY = "SceneWorks/ltx-2.3-mlx";
 const ARTIFACT_REVISION = "01df27d308466533aa09d251e3aebdcc627d07eb";
 const Q4_INVENTORY_BYTES = 20_467_690_460;
@@ -52,6 +85,12 @@ function ltxOnesCacheBytes() {
 
 function fail(message) {
   throw new Error(message);
+}
+
+function canaryProfile(name) {
+  const profile = CANARY_PROFILES[name];
+  if (profile === undefined) fail(`unsupported canary profile ${JSON.stringify(name)}`);
+  return profile;
 }
 
 export class CanaryInterrupted extends Error {
@@ -335,14 +374,19 @@ async function cleanCargoSourceHead(cwd, signal) {
   return head;
 }
 
-export function canaryRequest(memoryBytes, textEncoderInventory) {
+export function canaryRequest(
+  memoryBytes,
+  textEncoderInventory,
+  profileName = SAFETY_CANARY_PROFILE,
+) {
+  const profile = canaryProfile(profileName);
   assertInventory(textEncoderInventory, {
     files: TEXT_ENCODER_INVENTORY_FILES,
     bytes: TEXT_ENCODER_INVENTORY_BYTES,
     sha256: TEXT_ENCODER_INVENTORY_SHA256,
   }, "immutable text-encoder");
   return {
-    action: "canary",
+    action: profile.action,
     hardware: { memoryBytes },
     planned: {
       _diagnosticOnly: true,
@@ -353,7 +397,9 @@ export function canaryRequest(memoryBytes, textEncoderInventory) {
         tier: "q4",
         mode: "text_to_video",
         overlay: "none",
-        geometry: { width: 256, height: 256, batch: 1, frames: 9 },
+        geometry: {
+          width: profile.width, height: profile.height, batch: 1, frames: profile.frames,
+        },
       },
       backend: "mlx",
       loadShape: "eager_materialization",
@@ -363,9 +409,11 @@ export function canaryRequest(memoryBytes, textEncoderInventory) {
         parameters: { decodeTileEdge: 192, decodeOverlap: 64 },
       },
       calibrationFingerprint: FINGERPRINT,
-      fixture: FIXTURE,
+      fixture: profile.fixture,
       _watchdog: { maxFootprintBytes: MAX_FOOTPRINT_BYTES },
-      _canary: { videoMode: "no_audio", fps: 24, seed: 1234 },
+      _canary: {
+        identity: profile.identity, videoMode: profile.videoMode, fps: profile.fps, seed: 1234,
+      },
       _artifact: {
         repository: ARTIFACT_REPOSITORY,
         revision: ARTIFACT_REVISION,
@@ -410,8 +458,10 @@ export function validateCanaryResponse(
   expectedInferenceRevision,
   expectedTextEncoderInventory,
   expectedHostMemoryBytes,
+  profileName = SAFETY_CANARY_PROFILE,
 ) {
-  if (response?.status !== "diagnostic_canary_complete"
+  const profile = canaryProfile(profileName);
+  if (response?.status !== profile.status
       || response?.diagnosticOnly !== true
       || response?.promotable !== false
       || response?.ingestible !== false) {
@@ -420,14 +470,32 @@ export function validateCanaryResponse(
   if (response?.calibrationFingerprint !== FINGERPRINT
       || (expectedInferenceRevision !== undefined
         && response?.inferenceRevision !== expectedInferenceRevision)
+      || response?.canaryIdentity !== profile.identity
       || response?.target?.provider !== PROVIDER
       || response?.target?.tier !== "q4"
-      || response?.target?.geometry?.width !== 256
-      || response?.target?.geometry?.height !== 256
-      || response?.target?.geometry?.frames !== 9
-      || response?.target?.geometry?.fps !== 24
-      || response?.target?.audio !== false) {
+      || response?.target?.geometry?.width !== profile.width
+      || response?.target?.geometry?.height !== profile.height
+      || response?.target?.geometry?.frames !== profile.frames
+      || response?.target?.geometry?.fps !== profile.fps
+      || response?.target?.videoMode !== profile.videoMode
+      || response?.target?.audio !== profile.audio
+      || response?.output?.frames !== profile.frames
+      || response?.output?.fps !== profile.fps
+      || response?.output?.frameTimelineSeconds !== profile.frameTimelineSeconds) {
     fail("adapter response changed the exact canary identity");
+  }
+  const outputAudio = response?.output?.audio;
+  if (outputAudio?.present !== profile.audio
+      || (profile.audio && (!Number.isSafeInteger(outputAudio?.samples)
+        || outputAudio.samples <= 0
+        || !Number.isSafeInteger(outputAudio?.sampleRate)
+        || outputAudio.sampleRate <= 0
+        || !Number.isSafeInteger(outputAudio?.channels)
+        || outputAudio.channels <= 0))
+      || (!profile.audio && (outputAudio?.samples !== 0
+        || outputAudio?.sampleRate !== 0
+        || outputAudio?.channels !== 0))) {
+    fail("adapter response did not attest the exact canary audio output");
   }
   if (response?.artifact?.repository !== ARTIFACT_REPOSITORY
       || response?.artifact?.resolvedRevision !== ARTIFACT_REVISION
@@ -448,6 +516,8 @@ export function validateCanaryResponse(
         !== JSON.stringify(["resident", "staged_residency", "bounded_decode"])
       || response?.strategy?.parameters?.decodeTileEdge !== 192
       || response?.strategy?.parameters?.decodeOverlap !== 64
+      || response?.strategy?.spatialDecodeTiles !== profile.spatialDecodeTiles
+      || response.strategy.spatialDecodeTiles <= 1
       || response?.watchdog?.required !== true
       || response?.watchdog?.protocol !== "sceneworks-memory-watchdog-v1"
       || response?.watchdog?.maxFootprintBytes !== MAX_FOOTPRINT_BYTES
@@ -467,6 +537,24 @@ export function validateCanaryResponse(
       || response.mlxLimits.wiredLimitBytes > MAX_FOOTPRINT_BYTES
       || response?.output?.firstFrameNondegenerate !== true) {
     fail("adapter response did not attest the exact bounded canary execution");
+  }
+  const phaseActive = [];
+  for (const phaseName of ["conditioning", "denoise", "decode"]) {
+    const phase = response?.observedMemory?.[phaseName];
+    for (const field of ["activeBytes", "allocatorBytes", "reclaimableBytes"]) {
+      if (!Number.isSafeInteger(phase?.[field]) || phase[field] < 0) {
+        fail(`adapter response observedMemory.${phaseName}.${field} must be a non-negative safe integer`);
+      }
+    }
+    if (phase.activeBytes <= 0
+        || phase.allocatorBytes !== phase.activeBytes + phase.reclaimableBytes
+        || !Number.isSafeInteger(phase.allocatorBytes)) {
+      fail(`adapter response observedMemory.${phaseName} is not an exact phase-memory attestation`);
+    }
+    phaseActive.push(phase.activeBytes);
+  }
+  if (response?.observedMemory?.peakActiveBytes !== Math.max(...phaseActive)) {
+    fail("adapter response observedMemory.peakActiveBytes did not equal the maximum phase active bytes");
   }
   for (const field of [
     "preProviderActiveBytes",
@@ -1284,8 +1372,12 @@ async function controller(argv) {
   for (const name of ["inference-repo", "output"]) {
     if (!options[name]) fail(`--${name} is required`);
   }
-  const unexpected = Object.keys(options).filter((name) => !["inference-repo", "output"].includes(name));
+  const unexpected = Object.keys(options).filter(
+    (name) => !["inference-repo", "output", "profile"].includes(name),
+  );
   if (unexpected.length) fail(`unsupported option(s): ${unexpected.join(", ")}`);
+  const profileName = options.profile ?? SAFETY_CANARY_PROFILE;
+  const profile = canaryProfile(profileName);
   const inferenceRepo = path.resolve(options["inference-repo"]);
   const output = path.resolve(options.output);
   const relativeOutput = path.relative(ROOT, output);
@@ -1422,7 +1514,7 @@ async function controller(argv) {
     );
     const runRoot = path.join(path.dirname(output), "runs");
     await mkdir(runRoot, { recursive: true, mode: 0o700 });
-    runScratch = await mkdtemp(path.join(runRoot, "sc19741-run-"));
+    runScratch = await mkdtemp(path.join(runRoot, `${profile.story}-run-`));
     const runtimeHome = path.join(runScratch, "home");
     await mkdir(runtimeHome, { mode: 0o700 });
     await exactMetadata(runtimeHome, "directory", 0o700);
@@ -1430,7 +1522,7 @@ async function controller(argv) {
     const requestPath = path.join(runScratch, "request.json");
     const responsePath = path.join(runScratch, "response.json");
     const eventsPath = path.join(runScratch, "watchdog.jsonl");
-    const request = canaryRequest(memoryBytes, textEncoderInventory);
+    const request = canaryRequest(memoryBytes, textEncoderInventory, profileName);
     await writeFile(requestPath, `${JSON.stringify(request)}\n`, { flag: "wx" });
     const launchPrepared = await validatePreparedCache(
       preparationRoot, preparationKey, identity, signal,
@@ -1455,7 +1547,7 @@ async function controller(argv) {
       "--require-child-attestation",
       "--",
       "/bin/sh", "-c", 'set -C; exec "$1" <"$2" >"$3"',
-      "sc19741-canary", adapter.path, requestPath, responsePath,
+      `${profile.story}-canary`, adapter.path, requestPath, responsePath,
     ];
     const watchdogEnv = canaryWatchdogEnvironment(
       process.env,
@@ -1502,6 +1594,7 @@ async function controller(argv) {
       inferenceRevision,
       textEncoderInventory,
       memoryBytes,
+      profileName,
     );
     const events = (await readFile(eventsPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
     const attestedIndex = events.findIndex((event) => event.event === "child_attested");
@@ -1525,7 +1618,8 @@ async function controller(argv) {
     if (maxObservedFootprintBytes >= MAX_FOOTPRINT_BYTES) fail("successful watchdog stream crossed its stop boundary");
     const receipt = {
     schemaVersion: 1,
-    story: "sc-19741",
+    story: profile.story,
+    canaryIdentity: profile.identity,
     diagnosticOnly: true,
     promotable: false,
     ingestible: false,

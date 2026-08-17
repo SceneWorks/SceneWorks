@@ -3,6 +3,7 @@ import { readFile, readdir } from "node:fs/promises";
 import test from "node:test";
 
 import { SOURCE_PATHS } from "./generate-memory-matrix.mjs";
+import { buildPlans as buildLtxPlans } from "./generate-ltx-sc18946-plan.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 
 async function source(path) {
@@ -1948,6 +1949,36 @@ test("the MLX LTX arm's manifest constants match the shipped ltx_2_3 limits", as
   const reachable = limits.durations.flatMap((duration) =>
     limits.fps.map((fps) => snap(duration * fps)),
   );
+  const productWidth = Number(rustConst("LTX_PRODUCT_CANARY_WIDTH"));
+  const productHeight = Number(rustConst("LTX_PRODUCT_CANARY_HEIGHT"));
+  const productFrames = Number(rustConst("LTX_PRODUCT_CANARY_FRAMES"));
+  const productFps = Number(rustConst("LTX_PRODUCT_CANARY_FPS"));
+  const productResolution = `${productWidth}x${productHeight}`;
+  assert.equal(
+    model.defaults.resolution,
+    productResolution,
+    "the product-envelope canary must use the shipped default resolution",
+  );
+  assert.ok(
+    limits.resolutions.includes(productResolution),
+    "the product-envelope resolution must remain inside the shipped envelope",
+  );
+  const defaultDownloads = model.downloads.filter((download) => download.default === true);
+  assert.equal(defaultDownloads.length, 1, "LTX must retain exactly one default artifact variant");
+  assert.equal(
+    defaultDownloads[0].variant,
+    "q4",
+    "the product-envelope canary must measure the default product artifact variant",
+  );
+  const productDuration = (productFrames - 1) / productFps;
+  assert.ok(Number.isInteger(productDuration), "the product tuple must span an exact duration");
+  assert.ok(limits.durations.includes(productDuration), "the product duration must remain shipped");
+  assert.ok(limits.fps.includes(productFps), "the product FPS must remain shipped");
+  assert.equal(
+    snap(productDuration * productFps),
+    productFrames,
+    "the shipped duration/FPS snap must resolve to the exact product frame count",
+  );
   assert.match(
     adapter,
     /const LTX_FRAME_ENVELOPE: \(u32, u32\) = ltx_frame_envelope\(\);/,
@@ -1988,24 +2019,38 @@ test("the LTX real-weight safety canary cannot relax or masquerade as campaign e
     campaign.indexOf("refuse_unsafe_ltx_capture(") < campaign.indexOf("ltx_load_spec("),
     "the campaign must still refuse before model-path/provider/weights access",
   );
-  assert.doesNotMatch(campaign, /LTX_CANARY_FIXTURE|diagnostic_canary_complete/);
+  const campaignRows = Object.values(buildLtxPlans()).flatMap((plan) => plan.providers);
+  assert.equal(campaignRows.length, 70, "the frozen SC-18946 campaign must retain all 70 rows");
+  for (const row of campaignRows) {
+    assert.ok(
+      ["incident_forbidden", "arithmetic_unmeasurable", "safety_refused_open"]
+        .includes(row._measurementSafety.disposition),
+      `${row.name} must retain an explicit refusal disposition`,
+    );
+  }
+  assert.doesNotMatch(
+    campaign,
+    /LTX_(?:CANARY|PRODUCT_CANARY)_FIXTURE|diagnostic_(?:product_envelope_)?canary_complete/,
+  );
 
   const canary = adapter.slice(
-    adapter.indexOf("fn validate_ltx_canary_plan("),
+    adapter.indexOf("fn validate_ltx_canary_plan_for("),
     adapter.indexOf("/// The `mlx:ltx_2_3` SC-18946 arm"),
   );
   for (const required of [
     "_diagnosticOnly",
     'Some("fixture")',
-    "LTX_CANARY_WIDTH",
-    "LTX_CANARY_HEIGHT",
-    "LTX_CANARY_FRAMES",
+    "profile.width()",
+    "profile.height()",
+    "profile.frames()",
     "LTX_CANARY_TILE_EDGE",
     "LTX_CANARY_OVERLAP",
-    'Some("no_audio")',
-    '"status": "diagnostic_canary_complete"',
+    "profile.video_mode_identity()",
+    '"status": profile.completion_status()',
+    '"canaryIdentity": profile.identity()',
     '"promotable": false',
     '"ingestible": false',
+    'strategy["spatialDecodeTiles"]',
     '"preProviderActiveBytes": pre_provider.active',
     '"preProviderCacheBytes": pre_provider.cache',
     '"identity": LTX_CANARY_ONES_CACHE_IDENTITY',
@@ -2029,13 +2074,25 @@ test("the LTX real-weight safety canary cannot relax or masquerade as campaign e
   assert.doesNotMatch(campaign, /validate_ltx_canary_(?:pre_provider|cleanup)/,
     "production generation must not use the diagnostic canary residue exception");
 
+  const profiles = adapter.slice(
+    adapter.indexOf("enum LtxCanaryProfile"),
+    adapter.indexOf("/// LTX's video VAE"),
+  );
+  for (const required of [
+    'Self::Safety => Some("no_audio")',
+    "Self::ProductEnvelope => None",
+    'Self::Safety => "diagnostic_canary_complete"',
+    'Self::ProductEnvelope => "diagnostic_product_envelope_canary_complete"',
+    'Self::Safety => "a sunlit pine branch, static camera"',
+    'Self::ProductEnvelope => "sc-20169-product-envelope"',
+  ]) assert.ok(profiles.includes(required), `diagnostic profiles must retain ${required}`);
   const generationRequest = adapter.slice(
-    adapter.indexOf("fn ltx_canary_generation_request("),
+    adapter.indexOf("fn ltx_canary_generation_request_for("),
     adapter.indexOf("fn ltx_load_spec("),
   );
   assert.match(
     generationRequest,
-    /video_mode: Some\("no_audio"\.to_owned\(\)\)/,
+    /video_mode: profile\.video_mode\(\)\.map\(str::to_owned\)/,
     "the canary must skip the downstream audio decoder and vocoder",
   );
   const admissionBridge = adapter.slice(
@@ -2068,6 +2125,26 @@ test("the LTX real-weight safety canary cannot relax or masquerade as campaign e
   for (const lifecycle of ["enter_phase", "leave_phase", "scope.finish", "settle_scoped_generation"]) {
     assert.ok(configuredScope.includes(lifecycle), `canary scope must retain ${lifecycle}`);
   }
+  const diagnosticRun = adapter.slice(
+    adapter.indexOf("fn run_ltx_canary_for("),
+    adapter.indexOf("/// The `mlx:ltx_2_3` SC-18946 arm"),
+  );
+  assert.match(
+    diagnosticRun,
+    /LtxCanaryProfile::ProductEnvelope => scoped_generate\(/,
+    "the product-envelope canary must use the ordinary provider request-scope lifecycle",
+  );
+  assert.doesNotMatch(
+    diagnosticRun,
+    /LtxCanaryProfile::ProductEnvelope => scoped_generate_ltx_no_audio_canary/,
+  );
+  for (const required of [
+    "LTX_PRODUCT_CANARY_WIDTH",
+    "LTX_PRODUCT_CANARY_HEIGHT",
+    "LTX_PRODUCT_CANARY_FRAMES",
+    "spatial_tile_count",
+    "validate_diagnostic_audio",
+  ]) assert.ok(adapter.includes(required), `product-envelope canary must retain ${required}`);
 
   const limitsLifecycle = adapter.slice(
     adapter.indexOf("impl LtxCanaryLimits"),

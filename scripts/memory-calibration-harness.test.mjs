@@ -30,14 +30,15 @@ const stubClosureDigest = async (provider) =>
 const execFileAsync = promisify(execFile);
 
 test("diagnostic LTX safety canary output is structurally non-ingestible", () => {
-  assert.throws(
-    () => validateRecord({
-      id: "ltx-safety-canary",
-      logicalCaseId: "ltx-safety-canary",
-      status: "diagnostic_canary_complete",
-    }),
-    /invalid status/,
-  );
+  for (const [id, status] of [
+    ["ltx-safety-canary", "diagnostic_canary_complete"],
+    ["ltx-product-envelope-canary", "diagnostic_product_envelope_canary_complete"],
+  ]) {
+    assert.throws(
+      () => validateRecord({ id, logicalCaseId: id, status }),
+      /invalid status/,
+    );
+  }
 });
 
 async function cleanFixtureRepo() {
