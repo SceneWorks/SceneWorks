@@ -853,6 +853,55 @@ describe("SceneWorks app shell", () => {
     expect(moveButton.disabled).toBe(true);
   });
 
+  it("reveals the full original prompt from a shortened Queue title", async () => {
+    const prompt = "A cinematic aerial view of a coastal city at blue hour with ferries crossing a glowing harbor";
+    const queuedJob = {
+      id: "job-long-prompt",
+      type: "video_generate",
+      title: "Generate Video — A cinematic aerial view of a coastal city…",
+      status: "queued",
+      stage: "queued",
+      progress: 0,
+      projectId: "project-1",
+      projectName: "Project 1",
+      requestedGpu: "auto",
+      payload: { prompt },
+      attempts: 1,
+      createdAt: "2026-05-19T09:00:00Z",
+    };
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withAppContext(
+          {
+            activeProject: { id: "project-1", name: "Project 1" },
+            createPlaceholderJob: (event) => event.preventDefault(),
+            filteredJobs: [queuedJob],
+            gpuOptions: ["auto", "0"],
+            jobAction: () => {},
+            projectFilter: "all",
+            projects: [{ id: "project-1", name: "Project 1" }],
+            requestedGpu: "auto",
+            setProjectFilter: () => {},
+            setRequestedGpu: () => {},
+            visibleWorkers: [],
+          },
+          <QueueScreen />,
+        ),
+      );
+    });
+
+    const title = container.querySelector(".worker-progress-card__title");
+    const toggle = container.querySelector(".worker-progress-card__title-toggle");
+    expect(title.textContent).toBe(queuedJob.title);
+    expect(toggle.textContent).toBe("Show full prompt");
+
+    await act(async () => toggle.click());
+    expect(title.textContent).toBe(`Generate Video — ${prompt}`);
+    expect(toggle.textContent).toBe("Show less");
+  });
+
   it("dismisses an individual completed queue item via the per-card × (issue #1556)", async () => {
     const clearJob = vi.fn(() => Promise.resolve());
     const completedJob = {

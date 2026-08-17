@@ -59,6 +59,7 @@ Terminal statuses (`completed`, `canceled`, `failed`, `interrupted`) are non-pul
 
 - **Job Title** (left) — human-readable, derived per type (see [Job Title rules](#job-title-rules))
 - **Job ID** (right, monospace) — copyable on click; truncated middle-ellipsis if needed
+- **Queue prompt expansion** — prompt-based titles on the Queue include a `Show full prompt` control when the original prompt was shortened. Expanding affects only that card and does not change the job title stored by the server.
 
 ### Row 3 — Hardware
 
@@ -200,6 +201,7 @@ type WorkerProgressCardProps = {
   onRetry?: (job: Job) => void;
   onDuplicate?: (job: Job) => void;
   onOpenQueue?: (job: Job) => void;          // omitted on the queue screen itself
+  allowTitleExpansion?: boolean;             // Queue-only full-prompt disclosure
   onThumbnailClick?: (asset: Asset) => void; // opens full asset view
   className?: string;
 };

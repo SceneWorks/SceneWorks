@@ -14993,6 +14993,12 @@ details[open] > summary.lora-scope-group-heading::before,
   gap: 8px;
 }
 
+.worker-progress-card__title-content {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
 .worker-progress-card__title {
   margin: 0;
   font-size: 15px;
@@ -15003,6 +15009,34 @@ details[open] > summary.lora-scope-group-heading::before,
   -webkit-line-clamp: 2;
   overflow: hidden;
   overflow-wrap: anywhere;
+}
+
+.worker-progress-card__title.expanded {
+  display: block;
+  overflow: visible;
+  -webkit-line-clamp: unset;
+}
+
+.worker-progress-card__title-toggle {
+  width: fit-content;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.35;
+  cursor: pointer;
+}
+
+.worker-progress-card__title-toggle:hover {
+  text-decoration: underline;
+}
+
+.worker-progress-card__title-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 2px;
 }
 
 .worker-progress-card__id {

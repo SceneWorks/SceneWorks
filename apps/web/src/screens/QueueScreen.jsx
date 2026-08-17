@@ -459,6 +459,7 @@ export function QueueScreen() {
                 ) : null}
                 <WorkerProgressCard
                   job={enrichedJob}
+                  allowTitleExpansion
                   thumbnailsVariant={variant}
                   thumbnailAssets={thumbnails}
                   onThumbnailClick={setPreviewAsset ? (asset) => setPreviewAsset(asset, thumbnails) : undefined}
