@@ -3382,6 +3382,85 @@ async fn cancel_pending_jobs_cancels_every_queued_item_but_not_active_ones() {
 }
 
 #[tokio::test]
+async fn prioritize_jobs_moves_selected_pending_work_ahead_for_the_next_claim() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({
+            "workerId": "worker-priority",
+            "gpuId": "gpu-0",
+            "gpuName": "GPU 0",
+            "capabilities": ["image_detail"],
+            "loadedModels": []
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, first) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "image_detail",
+            "projectId": "project-1",
+            "payload": { "prompt": "first" },
+            "requestedGpu": "auto"
+        }),
+    )
+    .await;
+    let (_, selected) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "image_detail",
+            "projectId": "project-1",
+            "payload": { "prompt": "selected" },
+            "requestedGpu": "auto"
+        }),
+    )
+    .await;
+
+    let selected_id = selected["id"].as_str().expect("selected id");
+    let (status, prioritized) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/prioritize",
+        json!({ "jobIds": [selected_id] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(prioritized["prioritized"], 1);
+    assert_eq!(prioritized["jobs"][0]["id"], selected["id"]);
+    assert!(prioritized["jobs"][0]["queueRank"]
+        .as_i64()
+        .is_some_and(|rank| rank > 0));
+
+    let (status, claimed) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({ "workerId": "worker-priority" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(claimed["job"]["id"], selected["id"]);
+    let (_, first_after) = request(
+        app,
+        "GET",
+        &format!("/api/v1/jobs/{}", first["id"].as_str().expect("first id")),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(first_after["status"], "queued");
+}
+
+#[tokio::test]
 async fn clear_single_job_soft_hides_only_that_terminal_job() {
     // sc-12231 / issue #1556: POST /api/v1/jobs/:id/clear (the per-card ×) drops one
     // terminal job from the queue and leaves its siblings alone.

@@ -3952,6 +3952,9 @@ fn krea_realtime_coverage_uses_engine_reports_not_header_predictions() {
     );
     assert_eq!(stamped[0].get("totalKeys").and_then(Value::as_u64), Some(2));
 
+    // Concurrent subscriber-less tests can first-hit this warn's callsite and cache
+    // `Interest::never`, silently emptying this capture (see test_env).
+    crate::test_env::install_tracing_interest_floor();
     let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let subscriber = tracing_subscriber::fmt()
         .json()
@@ -9919,14 +9922,22 @@ fn ltx_gemma_override_path_requires_complete_dir() {
 
 /// `resolve_ltx_eros_gemma_dir`: a complete `models/mlx/gemma` sibling of the eros checkpoint wins;
 /// an incomplete/absent sibling with no bundle snapshot → `None` (provider surfaces the clear
-/// "set LTX_GEMMA_DIR" error). Skipped when an operator `$LTX_GEMMA_DIR` is set (the override path
-/// returns `None` by design, exercised by [`resolve_bundled_ltx_gemma_dir`]'s own coverage).
+/// "set LTX_GEMMA_DIR" error). The override path returning `None` by design is exercised by
+/// [`ltx_gemma_override_path_requires_complete_dir`].
 #[cfg(target_os = "macos")]
 #[test]
 fn resolve_ltx_eros_gemma_prefers_local_sibling() {
-    if std::env::var_os("LTX_GEMMA_DIR").is_some() {
-        return;
-    }
+    // The resolver reads `$LTX_GEMMA_DIR` and the HF cache env chain BEFORE `data_dir`, so pin all
+    // of them removed under the crate env lock. The prior `if $LTX_GEMMA_DIR is set { return }`
+    // guard read the env WITHOUT the lock — under full-suite load, a concurrent
+    // `ltx_with_hermetic_cache` test's pinned `HF_HUB_CACHE` (whose fixture hub holds a COMPLETE
+    // bundle gemma) made the first `is_none()` assert observe `Some` (2026-08-17 flake).
+    let _env = crate::test_env::EnvVars::set(&[
+        ("LTX_GEMMA_DIR", ""),
+        ("HF_HUB_CACHE", ""),
+        ("HUGGINGFACE_HUB_CACHE", ""),
+        ("HF_HOME", ""),
+    ]);
     let data_guard = tempfile::Builder::new()
         .prefix("sw_eros_gemma_")
         .tempdir()

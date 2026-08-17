@@ -3160,6 +3160,31 @@ export function App() {
     [setError, token],
   );
 
+  // Move an explicit Queue-screen selection ahead of all work that was waiting when the action
+  // was submitted. The server ignores anything a worker claimed in the meantime, so this updates
+  // ordering without becoming a preemption control. Returned snapshots carry their durable
+  // queueRank and are upserted immediately; SSE mirrors the same update to other clients.
+  const prioritizeJobs = useCallback(
+    async (jobIds) => {
+      try {
+        const response = await apiFetch("/api/v1/jobs/prioritize", token, {
+          method: "POST",
+          body: JSON.stringify({ jobIds }),
+        });
+        const prioritized = response?.jobs ?? [];
+        if (prioritized.length) {
+          setJobs((items) => prioritized.reduce((acc, job) => upsertJobNewest(acc, job), items));
+        }
+        setError("");
+        return true;
+      } catch (err) {
+        setError(err.message);
+        return false;
+      }
+    },
+    [setError, token],
+  );
+
   // Clear a single completed item from the queue (issue #1556 / sc-12231) — the
   // per-card "×". The server soft-hides just this terminal job; drop it from the
   // live list on success so the card disappears immediately.
@@ -3298,6 +3323,7 @@ export function App() {
     jobAction,
     clearCompletedJobs,
     cancelPendingJobs,
+    prioritizeJobs,
     clearJob,
     createVqaJob,
     createInterleaveJob,
@@ -3449,7 +3475,7 @@ export function App() {
     createTimeline, saveTimeline, exportTimeline, extractTimelineFrame, queueTimelineVideoJob,
     assets, loadedAssetsProjectId, activeAssetLoadState, selectedAsset, selectedAssetId, setSelectedAssetId, deleteAsset, purgeAsset, moveAssetToLibrary, moveAssetToCharacter, importAsset,
     updateAssetStatus, updateAssetTags, latestImageAssets,
-    jobAction, clearCompletedJobs, cancelPendingJobs, clearJob, createVqaJob, createInterleaveJob, createPlaceholderJob,
+    jobAction, clearCompletedJobs, cancelPendingJobs, prioritizeJobs, clearJob, createVqaJob, createInterleaveJob, createPlaceholderJob,
     projectFilter, setProjectFilter, projects,
     createVideoJob, createVideoUpscaleJob, createImageJob, createAudioJob, refinePrompt, magicPrompt, imageCaption, imageDescribe, compareFaceLikeness, latestVideoAssets, recentImageAssets,
     recentVideoAssets, recentAudioAssets, studioLaunch,
