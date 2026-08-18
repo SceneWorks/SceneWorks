@@ -9,6 +9,8 @@
 pub mod artifact_selection;
 #[path = "model_artifacts/external_library.rs"]
 pub mod external_library;
+#[path = "model_artifacts/promotion.rs"]
+pub mod promotion;
 #[path = "resolved_cache.rs"]
 pub mod resolved_cache;
 

@@ -738,11 +738,51 @@ pub enum PromotionScheduleOutcome {
     Stopped,
 }
 
+/// Why an admitted-to-the-queue promotion was not materialized after all. Both reasons are
+/// ordinary policy outcomes, never failures: the queue is a hint recorded at load time, and the
+/// world may legitimately have moved on by the time the worker went idle.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PromotionDeclineReason {
+    /// The bundle cannot be held within the size limit without evicting entries that retention is
+    /// not allowed to evict, so promoting it would only be undone by the next sweep.
+    ExceedsSizeLimit {
+        candidate_bytes: u64,
+        protected_bytes: u64,
+        max_bytes: u64,
+    },
+    /// The authoritative source no longer validates. Promotion COPIES what is already installed;
+    /// it never fetches, so an unavailable or incomplete source declines.
+    SourceUnavailable(String),
+}
+
+impl std::fmt::Display for PromotionDeclineReason {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ExceedsSizeLimit {
+                candidate_bytes,
+                protected_bytes,
+                max_bytes,
+            } => write!(
+                formatter,
+                "promoting {candidate_bytes} bytes alongside {protected_bytes} unevictable bytes \
+                 would exceed the {max_bytes} byte resolved-cache limit"
+            ),
+            Self::SourceUnavailable(detail) => {
+                write!(formatter, "promotion source is unavailable: {detail}")
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum IdlePromotionOutcome {
     NotIdle,
     Empty,
     Stopped,
+    /// The entry is already published and complete, so it was skipped WITHOUT taking its exclusive
+    /// artifact lock — a lock a concurrent load of that same bundle holds shared.
+    AlreadyComplete(Box<ResolvedCacheMetadata>),
+    Declined(PromotionDeclineReason),
     Materialized(MaterializationOutcome),
 }
 
@@ -847,14 +887,61 @@ impl ResolvedCachePromotionScheduler {
             state.active = Some((scheduled.candidate.cache_key.clone(), cancellation.clone()));
             (scheduled, cancellation)
         };
-        let result = self.materializer.materialize(
-            &scheduled.candidate,
-            &scheduled.source_configured_path,
-            &scheduled.logical_model_owner,
-            &cancellation,
-        );
+        let result = self.admit(&scheduled).and_then(|admission| match admission {
+            Admission::AlreadyComplete(metadata) => Ok(IdlePromotionOutcome::AlreadyComplete(
+                Box::new(*metadata),
+            )),
+            Admission::Declined(reason) => Ok(IdlePromotionOutcome::Declined(reason)),
+            Admission::Proceed => self
+                .materializer
+                .materialize(
+                    &scheduled.candidate,
+                    &scheduled.source_configured_path,
+                    &scheduled.logical_model_owner,
+                    &cancellation,
+                )
+                .map(IdlePromotionOutcome::Materialized),
+        });
         lock_scheduler(&self.state).active = None;
-        result.map(IdlePromotionOutcome::Materialized)
+        result
+    }
+
+    /// Policy admission, applied when the worker goes idle rather than when the candidate was
+    /// recorded: the queue is a hint taken at load time, and completeness, cache size and source
+    /// availability are all live facts that must be judged against the world as it is now.
+    fn admit(&self, scheduled: &ScheduledPromotion) -> Result<Admission, ResolvedCacheError> {
+        let store = self.materializer.store();
+        // Never promote what is already published. Checked before anything takes the entry's
+        // EXCLUSIVE artifact lock, which a live local-tier load of that same bundle holds shared.
+        if let Some(metadata) = store.lookup_complete(&scheduled.candidate.cache_key)? {
+            return Ok(Admission::AlreadyComplete(Box::new(metadata)));
+        }
+        // Promotion copies bytes that are already installed. Resolving the closure against the
+        // configured source library is the only way it learns where those bytes are, so a source
+        // that cannot be resolved declines here and no fetch of any kind is reachable.
+        let candidate_bytes = match source_bundle_bytes(&scheduled.candidate) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return Ok(Admission::Declined(
+                    PromotionDeclineReason::SourceUnavailable(error.to_string()),
+                ));
+            }
+        };
+        // Admit only what retention could still hold. Sizing against the entries retention is
+        // FORBIDDEN to evict — pinned ones — is what stops promote-then-immediately-evict churn:
+        // an unpinned entry can lose its place to a fresher bundle, a pinned one never can, so a
+        // candidate that does not fit beside the pinned set can only ever be evicted straight back.
+        let protected_bytes = protected_bytes(store)?;
+        if protected_bytes.saturating_add(candidate_bytes) > self.policy.max_bytes {
+            return Ok(Admission::Declined(
+                PromotionDeclineReason::ExceedsSizeLimit {
+                    candidate_bytes,
+                    protected_bytes,
+                    max_bytes: self.policy.max_bytes,
+                },
+            ));
+        }
+        Ok(Admission::Proceed)
     }
 
     pub fn cancel_active(&self) -> bool {
@@ -883,6 +970,60 @@ impl ResolvedCachePromotionScheduler {
     pub fn queued_len(&self) -> usize {
         lock_scheduler(&self.state).queue.len()
     }
+}
+
+enum Admission {
+    Proceed,
+    AlreadyComplete(Box<ResolvedCacheMetadata>),
+    Declined(PromotionDeclineReason),
+}
+
+/// The on-disk size of everything the bundle would copy, counting each distinct source file once
+/// because the materializer hard-links repeats within one bundle rather than copying them twice.
+///
+/// Resolving the locations is what proves the source is present: it walks the exact repositories,
+/// immutable revisions and files, refusing links out of the repository. Nothing is fetched.
+fn source_bundle_bytes(candidate: &PromotionCandidate) -> Result<u64, ResolvedCacheError> {
+    let ArtifactLocation::SourceLibrary { root } = &candidate.artifact.location else {
+        return Err(ResolvedCacheError::new(
+            "only a source-library artifact can be materialized",
+        ));
+    };
+    let locations = candidate
+        .artifact
+        .closure
+        .source_file_locations(&candidate.artifact.identity, root)
+        .map_err(|error| ResolvedCacheError::new(error.to_string()))?;
+    let mut counted = BTreeSet::new();
+    let mut total = 0_u64;
+    for location in locations {
+        if !counted.insert(location.source_path.clone()) {
+            continue;
+        }
+        let metadata = std::fs::metadata(&location.source_path)?;
+        total = total.checked_add(metadata.len()).ok_or_else(|| {
+            ResolvedCacheError::new("promotion candidate byte total overflow")
+        })?;
+    }
+    Ok(total)
+}
+
+/// Bytes retention is not permitted to reclaim: pinned complete entries. Entries in flight or
+/// merely fresh are deliberately excluded — those CAN lose their place to a newer bundle, so
+/// counting them would refuse promotions the cache is able to hold.
+fn protected_bytes(store: &ResolvedCacheStore) -> Result<u64, ResolvedCacheError> {
+    store
+        .enumerate()?
+        .into_iter()
+        .filter_map(|entry| entry.metadata)
+        .filter(|metadata| {
+            metadata.state == ResolvedCacheEntryState::Complete && metadata.effective_pin
+        })
+        .try_fold(0_u64, |total, metadata| {
+            total.checked_add(metadata.verified_bytes).ok_or_else(|| {
+                ResolvedCacheError::new("resolved-cache protected byte total overflow")
+            })
+        })
 }
 
 fn lock_scheduler<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
