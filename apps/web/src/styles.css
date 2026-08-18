@@ -7036,6 +7036,58 @@ details[open] > summary.lora-scope-group-heading::before,
   font-size: 12px;
 }
 
+/* Resolved-model local copies on a model card (sc-19711). Deliberately the same divider-above,
+   badge-then-detail shape as .mlx-status so the card gains no new visual idiom. */
+.model-local-copy {
+  display: grid;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.model-local-copy-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.model-local-copy p {
+  margin: 0;
+  font-size: 12px;
+}
+
+.model-local-copy-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.model-local-copy-entry {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.model-local-copy-text {
+  display: grid;
+  gap: 2px;
+  font-size: 12px;
+}
+
+.model-local-copy-text small {
+  color: var(--muted);
+}
+
+.model-local-copy-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .local-job-stack {
   display: grid;
   gap: 10px;

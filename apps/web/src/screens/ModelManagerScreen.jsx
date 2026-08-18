@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { WorkPanel } from "../components/WorkPanel.jsx";
 import { WAN_MOE_PAIRED_LORA_MODEL_IDS, terminalStatuses } from "../constants.js";
@@ -14,6 +14,18 @@ import {
 import { useAppContext } from "../context/AppContext.js";
 import { DEFAULT_MAC_CAPABILITIES, macModelBlock } from "../macGating.js";
 import { appConfirm } from "../appConfirm.jsx";
+import { formatBytes } from "../formatting.js";
+import {
+  availabilityBadge,
+  canHoldLocalCopy,
+  describeRemovalPreview,
+  entriesForModel,
+  fetchModelCache,
+  previewCacheRemoval,
+  removalIsAllowed,
+  removeCacheEntry,
+  setCacheEntryPin,
+} from "../modelCache.js";
 import { KeywordTagEditor } from "../components/KeywordTagEditor.jsx";
 import { useHostMemory } from "../hooks/useHostMemory.js";
 import { hostMemoryGbForBackend } from "../hostMemory.js";
@@ -719,6 +731,13 @@ export function ModelManagerScreen() {
   const [modelFileInputKey, setModelFileInputKey] = useState(0);
   const [deletingItem, setDeletingItem] = useState("");
   const [deleteMessage, setDeleteMessage] = useState({ tone: "neutral", text: "" });
+  // Resolved-model hot cache (epic 19703, sc-19711). ONE status read backs every card's local-copy
+  // block; it is refreshed on mount and after each keep/remove, never on a timer — a journal
+  // listing grows with the number of cached bundles, so polling it would put exactly the per-row
+  // read cost back on a screen that sc-19708 took it off.
+  const [modelCache, setModelCache] = useState(null);
+  // Cache key of the entry whose keep/remove request is in flight, so its buttons disable.
+  const [cacheBusyKey, setCacheBusyKey] = useState("");
   // Tabbed interface (epic 10309): the active tab, the tab to restore when a search
   // clears, and the persistent search query. Every model now renders as an always-open
   // card, so the old per-row expand state is gone. Tabs: image | video | utility | lora,
@@ -879,6 +898,76 @@ export function ModelManagerScreen() {
       setPendingUpdate(next);
     }
   }, [jobs, pendingUpdate, createModelConvertJob]);
+
+  // One resolved-cache status read for the whole screen. A failure leaves `modelCache` null, which
+  // renders no local-copy blocks at all — never an empty-but-confident "no local copies".
+  const refreshModelCache = useCallback(async () => {
+    try {
+      setModelCache(await fetchModelCache());
+    } catch {
+      setModelCache(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshModelCache();
+  }, [refreshModelCache]);
+
+  // "Keep locally" / "Allow automatic removal" — the artifact pin. Re-reads the authoritative
+  // status afterwards rather than optimistically flipping the row: the UI must not claim a state
+  // the store hasn't committed.
+  async function toggleKeepLocalCopy(entry) {
+    setCacheBusyKey(entry.cacheKey);
+    try {
+      await setCacheEntryPin(entry.cacheKey, !entry.pinned);
+      await refreshModelCache();
+      setDeleteMessage({
+        tone: "neutral",
+        text: entry.pinned
+          ? "This local copy can now be removed automatically when space is needed."
+          : "This local copy will be kept until you allow automatic removal.",
+      });
+    } catch (error) {
+      setDeleteMessage({ tone: "error", text: String(error?.message ?? error) });
+    } finally {
+      setCacheBusyKey("");
+    }
+  }
+
+  // "Remove local copy". The preview is fetched FIRST and the confirm is built entirely from it —
+  // measured bytes, the typed pin answer (including "can't determine"), and any refusal reason —
+  // so the dialog can never promise a removal the store would then refuse. A blocked preview is
+  // reported and the destructive path is not offered at all.
+  async function removeLocalCopy(model, entry) {
+    setCacheBusyKey(entry.cacheKey);
+    try {
+      const preview = await previewCacheRemoval(entry.cacheKey);
+      const lines = describeRemovalPreview(preview);
+      if (!removalIsAllowed(preview)) {
+        setDeleteMessage({ tone: "error", text: lines.join(" ") });
+        return;
+      }
+      const proceed = await appConfirm({
+        title: `Remove the local copy of ${model.name}?`,
+        message: lines.join(" "),
+        confirmLabel: "Remove local copy",
+        tone: "danger",
+      });
+      if (!proceed) return;
+      const outcome = await removeCacheEntry(entry.cacheKey);
+      await refreshModelCache();
+      setDeleteMessage({
+        tone: "neutral",
+        text: outcome.sourceUnavailableWarning
+          ? `Removed the local copy and freed ${formatBytes(outcome.reclaimedBytes)}. ${model.name} stays unusable until its model library is reconnected.`
+          : `Removed the local copy and freed ${formatBytes(outcome.reclaimedBytes)}.`,
+      });
+    } catch (error) {
+      setDeleteMessage({ tone: "error", text: String(error?.message ?? error) });
+    } finally {
+      setCacheBusyKey("");
+    }
+  }
 
   // First half of the "Update" flow: re-download the newer source, then track its job so the effect
   // above can auto-convert once it lands. Reuses the existing download + convert endpoints.
@@ -1204,6 +1293,14 @@ export function ModelManagerScreen() {
     // neutral for missing.
     const statusClass = incomplete ? "status-badge warning" : installed ? "status-badge installed" : "status-badge";
     const statusText = incomplete ? "incomplete" : installed ? "installed" : "missing";
+    // Where this model's files actually resolve from, straight off the typed judgement the one
+    // shared resolver produced (sc-19708). NEVER re-derived here from paths or error text — that
+    // discipline is the whole reason a second, drifting availability opinion can't exist.
+    const availability = availabilityBadge(model);
+    // Local copies of THIS model, joined by the backend. `modelCache` is null when the status read
+    // failed, which correctly renders nothing rather than "no local copies".
+    const localCopies = entriesForModel(modelCache, model.id);
+    const showLocalCopySection = localCopies.length > 0 || canHoldLocalCopy(model);
     return (
       <article className={model.recommended ? "model-card recommended" : "model-card"} key={model.id}>
         <div className="model-card-head">
@@ -1213,6 +1310,14 @@ export function ModelManagerScreen() {
           </span>
           <span className="model-card-status">
             <span className={statusClass}>{statusText}</span>
+            {availability ? (
+              <span
+                className={availability.tone ? `status-badge ${availability.tone}` : "status-badge"}
+                title={availability.title}
+              >
+                {availability.text}
+              </span>
+            ) : null}
             {model.updateAvailable ? <span className="status-badge warning">update available</span> : null}
             {unassociated ? (
               <span className="status-badge warning" title="Set this model's family in user.models.jsonc before using it for generation.">
@@ -1353,6 +1458,70 @@ export function ModelManagerScreen() {
             onDeleteVariant={deleteModelVariant}
             deletingItem={deletingItem}
           />
+        ) : null}
+        {/* Local copies of this model in the resolved-model cache (sc-19711). Separate from the
+            download/install job surface above on purpose: promoting or reclaiming a local copy is
+            not an install, and conflating them would make "removed" read as "uninstalled". */}
+        {showLocalCopySection ? (
+          <div className="model-local-copy">
+            <div className="model-local-copy-head">
+              <span className="status-badge">Local copy</span>
+              {model.modelAvailability === "installed_external_unavailable" && !localCopies.length ? (
+                <span className="status-badge warning">library disconnected</span>
+              ) : null}
+            </div>
+            {localCopies.length === 0 ? (
+              <p>
+                No local copy yet. SceneWorks makes one the next time it loads this model, if local
+                copies are turned on in Settings.
+              </p>
+            ) : (
+              <ul className="model-local-copy-list">
+                {localCopies.map((entry) => {
+                  const busy = cacheBusyKey === entry.cacheKey;
+                  const ready = entry.state === "complete";
+                  return (
+                    <li className="model-local-copy-entry" key={entry.cacheKey}>
+                      <span className="model-local-copy-text">
+                        <span>
+                          {entry.tier ? `${tierLabel(entry.tier)} · ` : ""}
+                          {formatBytes(entry.bytes)}
+                        </span>
+                        <small>
+                          {ready
+                            ? entry.pinned
+                              ? "Kept — never removed automatically"
+                              : "Can be removed automatically when space is needed"
+                            : `Not ready to use (${entry.state}) — SceneWorks finishes or clears it on the next check`}
+                        </small>
+                      </span>
+                      <span className="model-local-copy-actions">
+                        <button
+                          disabled={busy || !ready}
+                          onClick={() => toggleKeepLocalCopy(entry)}
+                          type="button"
+                        >
+                          {entry.pinned ? "Allow automatic removal" : "Keep locally"}
+                        </button>
+                        <button
+                          className="danger-action"
+                          disabled={busy}
+                          onClick={() => removeLocalCopy(model, entry)}
+                          type="button"
+                        >
+                          {busy ? "Working…" : "Remove local copy"}
+                        </button>
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+            <p>
+              Removing a local copy never uninstalls the model — the original files in the model
+              library are untouched.
+            </p>
+          </div>
         ) : null}
         {model.updateAvailable && !mlxState ? (
           <p className="inline-warning">A newer model download is available; the installed version remains usable.</p>
@@ -1944,7 +2113,17 @@ export function ModelManagerScreen() {
         {isModelTab ? renderRecommendedPicks(effectiveTab) : null}
       </WorkPanel>
 
-      {deleteMessage.text ? <p className={deleteMessage.tone === "success" ? "inline-success" : "inline-warning"}>{deleteMessage.text}</p> : null}
+      {/* Live region so a delete / local-copy outcome is announced, not only painted — the
+          keep/remove buttons sit far down a long card and their result lands up here. */}
+      {deleteMessage.text ? (
+        <p
+          aria-live="polite"
+          className={deleteMessage.tone === "success" ? "inline-success" : "inline-warning"}
+          role="status"
+        >
+          {deleteMessage.text}
+        </p>
+      ) : null}
 
       {isModelTab ? renderModelTabPanel(effectiveTab) : null}
       {isSearchTab ? renderSearchTabPanel() : null}
