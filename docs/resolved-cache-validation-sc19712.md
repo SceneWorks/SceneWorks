@@ -4,11 +4,15 @@ Terminal validation story for epic 19703 (app-managed two-tier model cache: an a
 Hugging Face library on an external volume, plus backend-ready copies on internal disk that
 survive disconnection).
 
-**Verdict: the mechanism works end to end on a real external volume — a model promoted from the
-external tier loads and generates with the source drive physically unmounted — but the epic must
-not ship as it stands. Three defects were found, one of which (F-3) makes the feature
-self-defeating in production: once the cache holds anything, every job submission synchronously
-re-hashes the entire cache inside the HTTP request.**
+**Verdict: the core promise is proven on real hardware. With the external drive physically
+unmounted, a promoted model loaded from its local copy and completed a job (`tier=resolved_local`),
+while a model without a local copy was refused with the typed reconnect context and no download
+attempt; reconnecting restored everything with the library byte-identical to its pre-campaign
+state. But the epic must not ship as it stands.** Four defects were found. F-3 makes the feature
+self-defeating in production — once the cache holds anything, every job submission synchronously
+re-hashes the entire cache inside the HTTP request, and the worker guard then repeats it — and F-4
+means the UI tells the user the opposite of the truth in exactly the scenario the feature exists
+for.
 
 Subject under test: `feature/sc-19703-resolved-model-hot-cache` @ `449461a5c` (all nine code
 stories merged). `claude/sc-19712-validation` adds **documentation only — no behavioural change**.
@@ -164,6 +168,26 @@ contention at the seam, not the choice of verification level:
   so the Settings "Local model copies" card and the Model Manager badges stall exactly when a
   user is watching them.
 
+Three further facets of the same cost, all measured on the 5.57 GB cache:
+
+- **A sweep outlasts its own interval.** The checkpoint took ≈ 20 minutes against a 600 s
+  interval. The poll loop's own comment (`worker/src/lib.rs:1416-1429`) spells out the
+  consequence: a sweep longer than the interval "is already due again when it finishes and sweeps
+  run back to back, with no idle turn left over for a drain", i.e. promotion is starved. That
+  comment argues the situation is "self-stabilizing rather than a defect — a sweep that slow means
+  the cache is over its limit, which is the condition promotion must not be adding to". **That
+  justification does not hold here:** the cache held 5.57 GB against a 20 GiB budget, comfortably
+  under. Sweep duration tracks total cache bytes, not budget pressure, so the regime is reachable
+  with a perfectly healthy cache.
+- **A worker will not shut down while a sweep is running.** `SIGTERM` was not honoured; the
+  process stayed at 100 % CPU until the sweep finished, because graceful shutdown waits for the
+  in-flight maintenance task. On a populated cache that is a multi-minute delay on app quit or
+  restart.
+- **Every API start pays a full re-hash before the first cache answer.** On a freshly started API
+  with no worker running at all, the first `GET /api/v1/model-cache` had still not answered at
+  90 s: the store session is created lazily on first use and its recovery pass re-hashes the cache
+  before anything is served.
+
 Not fixed here: downgrading `:650` would remove real corruption detection, and the right answer
 (a non-blocking try-lock for the status read reporting from the journal, and/or a cheap
 change-detection gate before re-hashing) is a design decision for the store's author. Note that
@@ -222,6 +246,36 @@ there. Memoizing the scan needs cross-process invalidation, because the **worker
 bundles and the **API** reads them, and a TTL reintroduces the same disagreement window. Choosing
 between those is the store author's decision.
 
+### F-4 — a promoted model is shown as "library disconnected" until the API's catalog cache turns over · severity **medium** · in subject · reported
+
+The clearest between-story gap of the campaign, and it is user-facing.
+
+The **worker** publishes bundles; the **API** caches the model catalog snapshot
+(`state.model_catalog_cache`, invalidated on the API's own model mutations). Nothing invalidates
+that snapshot when a promotion lands in another process. So after a model is promoted, the catalog
+keeps serving its pre-promotion availability.
+
+Measured, with the drive unmounted and `person_detector` holding a complete, working bundle:
+
+| Catalog read | `person_detector` availability |
+|---|---|
+| cached snapshot (0.02 s) | `installed_external_unavailable` |
+| forced fresh build after an API restart (7.6 s) | `local_ready`, `localArtifact: true` |
+
+Both readings were taken at the same moment against the same on-disk state, and in between the
+model had **just completed a job offline** from `tier=resolved_local`. So the stale row is not a
+resolution bug — `resolve_model_availability` is right — it is a cache that nobody invalidates.
+
+This is not cosmetic. `modelLibraryUnavailable()` (`apps/web/src/modelLibrary.js:32-34`) keys the
+blocked state on exactly this field, so the Model Manager and Generation Studio will present the
+reconnect/relocate prompt and withhold a model that demonstrably works with the drive absent —
+the precise reassurance the epic exists to deliver, inverted. A user who unplugs the drive sees
+"library disconnected" on the very models they promoted to survive unplugging.
+
+Reported, not fixed: the fix is a cross-process invalidation signal from the worker's publish to
+the API's catalog cache (or a cheap generation counter on the store that the catalog reads), which
+is a design addition rather than a correction.
+
 ### Receipt backfill silently excludes a model from the local tier
 
 Not a new defect so much as an interaction nobody appears to have costed. On first catalog build
@@ -273,11 +327,14 @@ were executed against the real external volume through the real API/worker surfa
 |---|---|---|---|---|
 | 1 | Library configured directly at the volume root | `HF_HUB_CACHE=/Volumes/Models/huggingface/hub`; `GET /api/v1/model-library` | — | **live · pass** — `probeStatus: available`; binding stamped `macos-volume:cd01d2ad…804bd`, `directoryId 346`, canonical path equal to the configured path |
 | 2 | First external use + idle-drain promotion | `POST /api/v1/image/jobs` (`sana_1600m`, 1024², 20 steps, seed 19712) | `ac421696` | **live · pass** — `model_source_tier_selected tier=source_library`; job completed in **27 s**; `resolved_cache_promotion_scheduled` fired 2 s after completion; bundle published `complete`, 5,574,343,418 B, `modelIds:[sana_1600m]`, `sourceVolumeRelation: different` |
-| 3 | Local hot load | resubmit the identical job | `ac421696` | **live · see F-3** — the *load* resolves from the bundle, but submission is blocked by F-3; measured separately below |
-| 4a | Locally resolved model completes with the drive absent | `diskutil unmountDisk /Volumes/Models`, then generate | `ac421696` | see run log below |
-| 4b | External-only model reads typed unavailable | `sana_sprint_1600m` while unmounted | `0b0d1848` | see run log below |
-| 5 | Remount → recovery, no transfer, receipts unchanged | `diskutil mountDisk`, snapshot diff | — | see run log below |
-| 7 | Delete semantics confined | disposable copied library (never `/Volumes/Models`) | `09f741ba` | see run log below |
+| 2b | Second promotion, different artifact class | `POST /api/v1/jobs` type `person_detect` → `person_detector` (`SceneWorks/yolo11m-person-detect-mlx`, flat single-file MLX, no variant, `utility` type) | `d7027d3a` | **live · pass** — source-tier load, then published `complete` at 80,388,864 B in ≈ 10 s |
+| 3 | Local hot load | resubmit the identical job | `d7027d3a` | **live · pass** — `model_source_tier_selected tier=resolved_local` (first run had been `tier=source_library`) |
+| 4a | **Locally resolved model completes with the drive absent** | `diskutil unmountDisk`, then `person_detect` | `d7027d3a` | **live · PASS** — with `/Volumes/Models` unmounted the job completed ("Person candidates detected.") and the worker logged `model_source_tier_selected tier=resolved_local revision=d7027d3a…` |
+| 4b | **External-only model reads typed unavailable before loader access** | `POST /api/v1/image/jobs` `sana_1600m` while unmounted | `ac421696` | **live · PASS** — `HTTP 503`, `code: external_model_library_unavailable`, `availability: installed_external_unavailable`, context naming `configuredLibraryPath`, `expectedLibraryPath` and `expectedVolumeId: macos-volume:cd01d2ad…804bd`, `libraryPresent: false`. No ENOENT, no download attempt (worker ran with `HF_HUB_OFFLINE=1`) |
+| 4c | Catalog refresh while disconnected does not erase installed state | `GET /api/v1/models` while unmounted | — | **live · pass** — every affected model kept `installState: installed`; only `modelAvailability` changed |
+| 5 | Remount → recovery, no transfer, receipts unchanged, no duplicate | `diskutil mountDisk /dev/disk5`, snapshot diff | — | **live · PASS** — same `VolumeUUID CD01D2AD-…-322816A804BD`; source tier **byte-identical to the pre-campaign baseline** (4399 files, 1,811,018,365,416 B, sha `72b94cffd042…`); receipts sha unchanged; local tier unchanged at 80,398,761 B (no duplicate entry); `sana_1600m`/`sana_sprint_1600m` back to `external_ready`, `person_detector` `local_ready` |
+| 6 | Confined removal through the real API | `POST /api/v1/model-cache/removal-preview` then `/remove` on the 5.57 GB Sana bundle | `ac421696` | **live · pass** — preview `reclaimableBytes: 5574354639`, `pins.kind: known`, `blocked: null`, returned in **2.7 ms**; remove reclaimed **5,574,354,639 B** in **40 ms**; cache went to 0 entries and **the external library stayed byte-identical** |
+| 7 | Uninstall reconciliation | **not run against `/Volumes/Models` — deliberately.** `delete_model` is authorised to delete from the configured library root (`models.rs:1184-1189`), so uninstalling here would have removed ~5.5 GB of the real weights. Covered by `reconciliation_covers_tier_deletion_revision_replacement_and_full_uninstall` (`retention_tests.rs:678`), `reconciliation_defers_active_leases_and_surfaces_unreadable_entries` (`:779`), `a_disconnected_source_library_retains_and_reports_but_never_removes` (`:1109`), and API-level `status_lists_a_real_entry_and_removal_runs_through_the_real_preview` (`tests/model_cache.rs:139`) | — | cited; the confined-removal half is covered live by row 6 |
 
 ### Adversarial probes
 
@@ -346,6 +403,11 @@ hash-bound figure inflated by the unoptimized build.
 | **Job submission, empty cache** | **sub-second** |
 | **Job submission, 5.57 GB cache** | **929.6 s (15 min 30 s)**, `HTTP 201` (F-3), API pegged at ~600 % CPU |
 | Worker pre-load guard, same 5.57 GB cache | a further **> 16 min** ⧗ in `select_local_tier → validate_artifact_file` before the load starts |
+| Job submission, 80 MB cache | **0.109 s** — the same endpoint, same model class, 70× smaller cache |
+| Promotion of the 80 MB bundle, end to end | **≈ 10 s** |
+| Removal preview / removal of the 5.57 GB bundle | **2.7 ms** / **40 ms** (both are metadata operations, not content passes) |
+| Typed refusal of an external-only model, drive absent | **5.0 s** (80 MB cache) |
+| Catalog build, drive absent, 80 MB cache | **7.6 s** fresh, **0.02 s** cached (and the cached answer is wrong — F-4) |
 
 The last three rows are the finding, stated plainly: **loading `sana_1600m` from the external
 drive took 27 seconds; loading the same model from its local copy cost over half an hour of
@@ -354,12 +416,20 @@ structure is not: one full-strength re-hash of the whole cache on the API submis
 second on the worker guard, and a third on every retention checkpoint — none of them conditional
 on anything having changed.
 
-**The load-time benefit the acceptance criteria ask for cannot be reported honestly from this
-build.** The local-vs-external delta is an I/O-bound quantity, but on this machine the two tiers
-are an internal NVMe and an 80 Gb/s-attached external NVMe, so the raw read delta is small to
-begin with; and F-3 puts a multi-minute hash in front of every submission, which swamps it. A
-meaningful figure needs a release build with F-3 resolved. Recorded as **not established** rather
-than estimated.
+**The load-time benefit the acceptance criteria ask for is NOT established, and is recorded as
+such rather than estimated.** Three reasons, all of them honest limits rather than omissions:
+
+1. On this machine both tiers are NVMe — an internal one and an 80 Gb/s-attached external one — so
+   the raw read delta is small before anything else is considered.
+2. F-3 puts a full-cache hash in front of every submission, which swamps the quantity being
+   measured.
+3. The unoptimized build inflates every hash-bound number, and hashing dominates the cache's cost
+   model.
+
+What *is* established is the availability benefit, which is the epic's actual purpose: with the
+drive unmounted the promoted model ran and the unpromoted one did not. A defensible speed figure
+needs a release build with F-3 resolved, and ideally a slower source volume (USB 2, spinning disk,
+or a network share) where the tier difference is real.
 
 ---
 
