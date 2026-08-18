@@ -167,6 +167,18 @@ fn budget(total_gb: f64) -> Option<Budget> {
     })
 }
 
+/// A host budget derived FROM the margin policy: `peak_gib` GiB of estimate-backed floor widened
+/// by [`MLX_ESTIMATE_MARGIN`] (in integer bytes, exactly as `select_strategy` widens it), plus
+/// `slack_gb`. Fixtures use this to sit a budget in a window — admit every candidate whose widened
+/// peak is at or under this floor's, refuse every wider one — without hardcoding the margin's
+/// arithmetic into magic floats that rot when the corpus-derived constant moves (sc-18094).
+fn mlx_widened_gb(peak_gib: u64, slack_gb: f64) -> f64 {
+    crate::memory_strategy::peak_bytes_to_gb(crate::memory_strategy::widened_peak_bytes(
+        peak_gib * GIB,
+        crate::ladder_margin_policy::MLX_ESTIMATE_MARGIN,
+    )) + slack_gb
+}
+
 fn geometry(frames: u32, role: VideoGeometryRole) -> VideoAdmissionGeometry {
     VideoAdmissionGeometry {
         width: 1280,
@@ -508,13 +520,15 @@ fn a_roomy_host_selects_the_resident_rung_through_the_shared_selector() {
 #[test]
 fn a_constrained_host_walks_down_the_ladder_instead_of_refusing() {
     // 20 GiB of weights (4 conditioning + 16 transformer) + 18 GiB headroom = 38 GiB resident,
-    // widened by the 10% MLX estimate margin to 41.8. Staged drops the co-residency to
-    // max(4, 16) = 16, i.e. 34 GiB → 37.4 widened. A 40 GiB host therefore refuses resident and
-    // admits staged: the ladder's whole point.
+    // widened by MLX_ESTIMATE_MARGIN to ~57.2. Staged drops the co-residency to max(4, 16) = 16,
+    // i.e. 34 GiB → ~51.1 widened. A host 0.5 GiB above the widened staged floor therefore
+    // refuses resident and admits staged: the ladder's whole point.
+    let host_gb = mlx_widened_gb(34, 0.5);
+    assert!(host_gb < mlx_widened_gb(38, 0.0), "the window must exist");
     let contract = fixture_contract(20, 4, &[MemoryStrategy::StagedResidency]);
     let (verdict, _) = select_once(
         &contract,
-        budget(40.0),
+        budget(host_gb),
         18 * GIB,
         geometry(241, VideoGeometryRole::Requested),
     );
@@ -528,7 +542,7 @@ fn a_constrained_host_walks_down_the_ladder_instead_of_refusing() {
     let flat = fixture_contract(20, 4, &[]);
     let (flat_verdict, _) = select_once(
         &flat,
-        budget(40.0),
+        budget(host_gb),
         18 * GIB,
         geometry(241, VideoGeometryRole::Requested),
     );
@@ -674,8 +688,13 @@ fn a_selected_optimized_rung_reaches_the_generation_request() {
         4,
         &[MemoryStrategy::StagedResidency],
     )));
-    let outcome =
-        admit_video_generation_with_curves(&generator, inputs(241, budget(40.0), 18 * GIB), None);
+    // In the walk-down window: above the widened 34 GiB staged floor, below the widened 38 GiB
+    // resident floor (see `a_constrained_host_walks_down_the_ladder_instead_of_refusing`).
+    let outcome = admit_video_generation_with_curves(
+        &generator,
+        inputs(241, budget(mlx_widened_gb(34, 0.5)), 18 * GIB),
+        None,
+    );
     let memory = outcome.memory.expect("staged residency was selected");
     assert!(memory.stage_residency, "{memory:?}");
     assert!(outcome.refusal.is_none());
@@ -688,12 +707,15 @@ fn provider_profiles_make_bounded_decode_a_reachable_production_fallback() {
         4,
         &[MemoryStrategy::BoundedDecode],
     )));
-    // The conservative resident profile is 20 + 35 = 55 GiB, which cannot fit. The exact
-    // bounded carrier retains the generic 20 + 18 = 38 GiB lower bound and fits after the shared
-    // 10% estimate margin. Without consuming the selected profile, Resident would win first.
+    // The conservative resident profile is 20 + 35 = 55 GiB, which cannot fit (~82.7 widened by
+    // MLX_ESTIMATE_MARGIN). The exact bounded carrier retains the generic 20 + 18 = 38 GiB lower
+    // bound and fits a host 0.5 GiB above that floor's widened ceiling (~57.2). Without consuming
+    // the selected profile, Resident would win first.
+    let host_gb = mlx_widened_gb(38, 0.5);
+    assert!(host_gb < mlx_widened_gb(55, 0.0), "the window must exist");
     let outcome = admit_video_generation_with_curves_and_profiles(
         &generator,
-        inputs(241, budget(42.0), 18 * GIB),
+        inputs(241, budget(host_gb), 18 * GIB),
         None,
         tiered_decode_profile,
     );
@@ -730,7 +752,10 @@ fn provider_profile_refusal_is_not_suppressed_by_the_smaller_generic_floor() {
     let refusal = outcome
         .refusal
         .expect("a provider profile that does not fit is a real refusal");
-    assert!(refusal.contains("needs about 60.5 GB"), "{refusal}");
+    // The reported need is the 55 GiB profiled peak widened by MLX_ESTIMATE_MARGIN, exactly as
+    // the selector admits it.
+    let widened_profile = format!("needs about {:.1} GB", mlx_widened_gb(55, 0.0));
+    assert!(refusal.contains(&widened_profile), "{refusal}");
     assert!(outcome.memory.is_none());
     assert!(outcome.context.is_none());
 }
@@ -988,7 +1013,9 @@ fn a_request_above_the_cap_grades_the_cap_geometry_through_the_real_selector() {
             expected_closure_digest: crate::mlx_fit_gate::UNCALIBRATED_CLOSURE,
         },
         &contract,
-        budget(40.0),
+        // In the staged-not-resident window: above the widened 34 GiB staged floor, below the
+        // widened 38 GiB resident floor, so both graded geometries land on the same staged rung.
+        budget(mlx_widened_gb(34, 0.5)),
         18 * GIB,
         0,
     );
@@ -1039,7 +1066,8 @@ fn a_request_above_the_cap_grades_the_cap_geometry_through_the_real_selector() {
 fn a_refusal_inside_the_estimate_margin_band_is_suppressed() {
     // 20 GiB weights + 18 GiB headroom = 38 GiB unwidened resident floor. Every implemented rung
     // is `Missing` beyond resident, so the ladder has nowhere to go; at 39 GiB the unwidened floor
-    // FITS while 38 * 1.10 = 41.8 does not, which is exactly the band.
+    // FITS while its MLX_ESTIMATE_MARGIN-widened ceiling (~57.2) does not, which is exactly the
+    // band.
     let generator = fixture_generator(Some(fixture_contract(20, 4, &[])));
     let banded =
         admit_video_generation_with_curves(&generator, inputs(241, budget(39.0), 18 * GIB), None);
@@ -1462,12 +1490,15 @@ fn a_rung_whose_prerequisite_is_unmet_is_not_offered() {
         fixture_contract(20, 4, &[MemoryStrategy::BoundedTransformerResidency]),
         LoadShape::EagerMaterialization,
     );
-    // 20 GiB weights + 18 GiB headroom = 38 GiB resident (41.8 widened); rung 4 sheds the whole
-    // 16 GiB transformer, so its floor is 22 GiB (24.2 widened). A 30 GiB host can hold ONLY
-    // rung 4 — which is exactly why offering it here would be the harm.
+    // 20 GiB weights + 18 GiB headroom = 38 GiB resident (~57.2 widened by MLX_ESTIMATE_MARGIN);
+    // rung 4 sheds the whole 16 GiB transformer, so its floor is 22 GiB (~33.1 widened). A host
+    // 0.5 GiB above rung 4's widened floor can hold ONLY rung 4 — which is exactly why offering
+    // it here would be the harm.
+    let host_gb = mlx_widened_gb(22, 0.5);
+    assert!(host_gb < mlx_widened_gb(38, 0.0), "the window must exist");
     let (verdict, selections) = select_once(
         &eager,
-        budget(30.0),
+        budget(host_gb),
         18 * GIB,
         geometry(241, VideoGeometryRole::Requested),
     );
@@ -1479,14 +1510,14 @@ fn a_rung_whose_prerequisite_is_unmet_is_not_offered() {
     assert!(selections.is_empty());
 
     // The SAME contract under the deferred shape the rung requires DOES reach it, so the
-    // assertion above is about the prerequisite and not about 30 GiB being too small.
+    // assertion above is about the prerequisite and not about the host being too small.
     let deferred = with_load_shape(
         fixture_contract(20, 4, &[MemoryStrategy::BoundedTransformerResidency]),
         LoadShape::DeferredMaterialization,
     );
     let (reachable, _) = select_once(
         &deferred,
-        budget(30.0),
+        budget(host_gb),
         18 * GIB,
         geometry(241, VideoGeometryRole::Requested),
     );
@@ -1615,11 +1646,16 @@ fn the_floor_is_phase_uniform_and_its_peak_is_the_unchanged_scalar() {
 fn fitted_frames_change_the_selected_outcome_inside_the_measured_hull() {
     let contract = fixture_contract(20, 4, &[MemoryStrategy::StagedResidency]);
     let curves = fixture_curve_bundle();
+    // 1 GiB under the widened 38 GiB resident floor: above the f121 fitted staged peak's
+    // MLX_ESTIMATE_MARGIN-widened ceiling (~53.2) and below both f145 rejection thresholds (the
+    // f145 fitted widened peak ~62.9 and the widened resident floor ~57.2), so the frame count is
+    // the only thing that changes between the two verdicts.
+    let host_gb = mlx_widened_gb(38, -1.0);
 
     let at_121 = select_once_with_curves(
         &contract,
         &curves,
-        budget(40.0),
+        budget(host_gb),
         geometry(121, VideoGeometryRole::Requested),
     );
     assert!(
@@ -1630,13 +1666,13 @@ fn fitted_frames_change_the_selected_outcome_inside_the_measured_hull() {
                 ..
             }
         ),
-        "the f121 fitted staged peak still fits 40 GiB: {at_121:?}"
+        "the f121 fitted staged peak still fits {host_gb} GiB: {at_121:?}"
     );
 
     let at_145 = select_once_with_curves(
         &contract,
         &curves,
-        budget(40.0),
+        budget(host_gb),
         geometry(145, VideoGeometryRole::Requested),
     );
     assert!(
@@ -1688,7 +1724,12 @@ fn mutating_the_ratified_cross_coefficient_changes_selector_outcome() {
     let contract = fixture_contract(20, 4, &[MemoryStrategy::StagedResidency]);
     let original = fixture_curve_bundle();
     let geometry = geometry(145, VideoGeometryRole::Requested);
-    let original_verdict = select_once_with_curves(&contract, &original, budget(41.0), geometry);
+    // 0.5 GiB under the widened 38 GiB resident floor (~57.2): the f145 fitted peak's
+    // MLX_ESTIMATE_MARGIN-widened ceiling (~62.9) rejects, while zeroing the decode cross term
+    // drops the widened peak to the denoise phase's (~55.9), which admits. Resident never fits, so
+    // the coefficient alone flips the verdict.
+    let host_gb = mlx_widened_gb(38, -0.5);
+    let original_verdict = select_once_with_curves(&contract, &original, budget(host_gb), geometry);
     assert!(
         matches!(original_verdict, VideoRungSelection::Reject { .. }),
         "the generated decode cross coefficient must bind: {original_verdict:?}"
@@ -1696,7 +1737,7 @@ fn mutating_the_ratified_cross_coefficient_changes_selector_outcome() {
 
     let mut mutated = original.clone();
     mutated.curves[0].phases.decode.per_mpx_frame_gb = 0.0;
-    let mutated_verdict = select_once_with_curves(&contract, &mutated, budget(41.0), geometry);
+    let mutated_verdict = select_once_with_curves(&contract, &mutated, budget(host_gb), geometry);
     assert!(
         matches!(
             mutated_verdict,
@@ -1714,7 +1755,12 @@ fn mutating_a_phase_residual_changes_the_admission_decision() {
     let contract = fixture_contract(20, 4, &[MemoryStrategy::StagedResidency]);
     let original = fixture_curve_bundle();
     let request = geometry(121, VideoGeometryRole::Requested);
-    let original_verdict = select_once_with_curves(&contract, &original, budget(40.0), request);
+    // 1 GiB under the widened 38 GiB resident floor (~57.2): the f121 fitted peak's
+    // MLX_ESTIMATE_MARGIN-widened ceiling (~53.2) admits, while growing the decode residual by
+    // 12 GiB pushes it (~71.2) past the budget — and resident never fits, so the residual alone
+    // flips the verdict.
+    let host_gb = mlx_widened_gb(38, -1.0);
+    let original_verdict = select_once_with_curves(&contract, &original, budget(host_gb), request);
     assert!(
         matches!(original_verdict, VideoRungSelection::Selected { .. }),
         "the shipped residual-bounded curve must fit the bracket: {original_verdict:?}"
@@ -1722,7 +1768,7 @@ fn mutating_a_phase_residual_changes_the_admission_decision() {
 
     let mut mutated = original.clone();
     mutated.curves[0].phases.decode.max_residual_gb += 12.0;
-    let mutated_verdict = select_once_with_curves(&contract, &mutated, budget(40.0), request);
+    let mutated_verdict = select_once_with_curves(&contract, &mutated, budget(host_gb), request);
     assert!(
         matches!(mutated_verdict, VideoRungSelection::Reject { .. }),
         "the residual is admission evidence, not report-only metadata: {mutated_verdict:?}"
@@ -1754,9 +1800,13 @@ fn historical_q8_curve_fixture_is_tier_exact_while_q4_and_bf16_keep_an_honest_fl
     }
 
     let generator = fixture_generator(Some(contract));
+    // 1 GiB under the widened 38 GiB resident floor: admits the q8 fitted f121 peak (~53.2
+    // widened by MLX_ESTIMATE_MARGIN) and the q4/bf16 staged floor (~51.1 widened) while resident
+    // stays refused, so every tier lands on the staged rung its basis assertion above describes.
+    let host_gb = mlx_widened_gb(38, -1.0);
     for quant in [Some(Quant::Q8), Some(Quant::Q4), None] {
         for cache_state in [MemoryCacheState::Cold, MemoryCacheState::Warm] {
-            let mut request = inputs(121, budget(40.0), 18 * GIB);
+            let mut request = inputs(121, budget(host_gb), 18 * GIB);
             request.tier.quant = quant;
             request.expected_closure_digest = FITTED_CURVE_CLOSURE;
             request.runtime.as_mut().unwrap().cache_state = cache_state;
@@ -1815,7 +1865,9 @@ fn checkpoint_bound_ltx_tiers_drive_curve_or_floor_safety_on_cold_and_warm_reque
         assert_eq!(resolved.quant, expected_quant, "{label}");
 
         for cache_state in [MemoryCacheState::Cold, MemoryCacheState::Warm] {
-            let mut request = inputs(121, budget(40.0), 18 * GIB);
+            // Same staged-rung window as the historical-q8 test: admits the q8 fitted f121 peak
+            // and the q4/bf16 staged floor under MLX_ESTIMATE_MARGIN, refuses resident.
+            let mut request = inputs(121, budget(mlx_widened_gb(38, -1.0)), 18 * GIB);
             request.tier = resolved;
             request.expected_closure_digest = FITTED_CURVE_CLOSURE;
             request.runtime.as_mut().unwrap().cache_state = cache_state;
@@ -1860,11 +1912,15 @@ fn assert_curve_mismatch_falls_back(
     curves: &VideoMemoryCurveBundle,
     geometry: VideoAdmissionGeometry,
 ) {
+    // In the staged-floor window — above the widened 34 GiB staged floor (~51.1 under
+    // MLX_ESTIMATE_MARGIN), below the widened 38 GiB resident floor (~57.2) — so the floor
+    // decision being preserved is a real staged selection.
+    let host_gb = mlx_widened_gb(34, 0.5);
     let expected = {
-        let mut selector = selector_with_curves(contract, None, budget(40.0));
+        let mut selector = selector_with_curves(contract, None, budget(host_gb));
         selector.select(geometry)
     };
-    let actual = select_once_with_curves(contract, curves, budget(40.0), geometry);
+    let actual = select_once_with_curves(contract, curves, budget(host_gb), geometry);
     assert_eq!(
         actual, expected,
         "{label}: an inapplicable fitted curve must preserve the prior floor decision"
@@ -1899,10 +1955,11 @@ fn every_identity_or_envelope_mismatch_falls_back_to_the_unchanged_floor() {
     assert_curve_mismatch_falls_back("foreign calibration ABI", &contract, &curves, inside);
 
     let curves = fixture_curve_bundle();
-    let mut selector = selector_with_curves(&contract, Some(&curves), budget(40.0));
+    let mut selector =
+        selector_with_curves(&contract, Some(&curves), budget(mlx_widened_gb(34, 0.5)));
     selector.identity.calibration_abi += 1;
     let live_abi_mismatch = selector.select(inside);
-    let mut no_curves = selector_with_curves(&contract, None, budget(40.0));
+    let mut no_curves = selector_with_curves(&contract, None, budget(mlx_widened_gb(34, 0.5)));
     assert_eq!(
         live_abi_mismatch,
         no_curves.select(inside),
@@ -1912,7 +1969,11 @@ fn every_identity_or_envelope_mismatch_falls_back_to_the_unchanged_floor() {
 
     let mut stale_contract = fixture_contract(20, 4, &[MemoryStrategy::StagedResidency]);
     stale_contract.calibration.as_mut().unwrap().abi += 1;
-    let selector = selector_with_curves(&stale_contract, Some(&curves), budget(40.0));
+    let selector = selector_with_curves(
+        &stale_contract,
+        Some(&curves),
+        budget(mlx_widened_gb(34, 0.5)),
+    );
     let engaged = stale_contract.engaged_composition(MemoryStrategy::StagedResidency);
     let (_, basis, ..) =
         fitted_or_floor_phase_peaks(&selector, inside, MemoryStrategy::StagedResidency, &engaged);
@@ -1998,22 +2059,26 @@ fn the_single_pass_cap_geometry_can_bind_the_graded_set() {
         },
     ];
 
+    // In the staged-floor window: above the 34 GiB staged floor widened by MLX_ESTIMATE_MARGIN
+    // (~51.1), below the widened 38 GiB resident floor (~57.2) — and far below the fitted f297
+    // cap peak's widened ceiling (~124.7), which is what makes the cap row the binding refusal.
+    let host_gb = mlx_widened_gb(34, 0.5);
     let requested = VideoAdmissionGeometry {
         decode_pass: VideoDecodePass::Tiled,
         ..geometry(305, VideoGeometryRole::Requested)
     };
     assert!(
         matches!(
-            select_once_with_curves(&contract, &curves, budget(40.0), requested),
+            select_once_with_curves(&contract, &curves, budget(host_gb), requested),
             VideoRungSelection::Selected {
                 rung: StrategyRung::StagedResidency,
                 ..
             }
         ),
-        "the tiled request itself falls back to the 37.4 GiB staged floor"
+        "the tiled request itself falls back to the widened 34 GiB staged floor"
     );
 
-    let mut selector = selector_with_curves(&contract, Some(&curves), budget(40.0));
+    let mut selector = selector_with_curves(&contract, Some(&curves), budget(host_gb));
     let verdict = video_admission(
         "ltx_2_3",
         VideoLane::Mlx,
@@ -2080,7 +2145,21 @@ fn same_rung_cap_binding_carries_cap_peak_but_actual_request_geometry() {
             .peak_bytes()
     };
 
-    let mut request = inputs(305, budget(95.0), 0);
+    // 0.5 GiB above the cap's fitted peak widened by MLX_ESTIMATE_MARGIN, which is the larger of
+    // the two staged candidates (the requested f305 geometry sits outside the hull and takes the
+    // 45 GiB staged floor, ~67.7 widened) — and below the widened 90 GiB resident floor, so both
+    // geometries select STAGED and the same-rung tie is what is under test.
+    let host_gb =
+        crate::memory_strategy::peak_bytes_to_gb(crate::memory_strategy::widened_peak_bytes(
+            expected_peak,
+            crate::ladder_margin_policy::MLX_ESTIMATE_MARGIN,
+        )) + 0.5;
+    assert!(
+        host_gb < mlx_widened_gb(90, 0.0),
+        "the staged-not-resident window must exist: {host_gb}"
+    );
+
+    let mut request = inputs(305, budget(host_gb), 0);
     request.expected_closure_digest = FITTED_CURVE_CLOSURE;
     let outcome = admit_video_generation_with_curves(&generator, request, Some(&curves));
     let context = outcome
