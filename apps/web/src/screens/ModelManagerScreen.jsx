@@ -738,6 +738,9 @@ export function ModelManagerScreen() {
   const [modelCache, setModelCache] = useState(null);
   // Cache key of the entry whose keep/remove request is in flight, so its buttons disable.
   const [cacheBusyKey, setCacheBusyKey] = useState("");
+  // Why the local-copy controls are absent, when they are. Held apart from `deleteMessage` so an
+  // action outcome cannot clobber a standing explanation, and vice versa.
+  const [cacheError, setCacheError] = useState("");
   // Tabbed interface (epic 10309): the active tab, the tab to restore when a search
   // clears, and the persistent search query. Every model now renders as an always-open
   // card, so the old per-row expand state is gone. Tabs: image | video | utility | lora,
@@ -900,12 +903,19 @@ export function ModelManagerScreen() {
   }, [jobs, pendingUpdate, createModelConvertJob]);
 
   // One resolved-cache status read for the whole screen. A failure leaves `modelCache` null, which
-  // renders no local-copy blocks at all — never an empty-but-confident "no local copies".
+  // renders no local-copy blocks at all — never an empty-but-confident "no local copies". The
+  // reason is kept separately so the screen can say ONCE why the controls are missing: the failure
+  // is global, so repeating it on every model card would be noise, and staying silent would leave
+  // the user to guess whether they have no local copies or no answer.
   const refreshModelCache = useCallback(async () => {
     try {
-      setModelCache(await fetchModelCache());
-    } catch {
+      const snapshot = await fetchModelCache();
+      setModelCache(snapshot);
+      // A 200 can still carry `error`: the store exists but could not be listed.
+      setCacheError(snapshot?.error ? String(snapshot.error) : "");
+    } catch (error) {
       setModelCache(null);
+      setCacheError(String(error?.message ?? error));
     }
   }, []);
 
@@ -2127,6 +2137,15 @@ export function ModelManagerScreen() {
           role="status"
         >
           {deleteMessage.text}
+        </p>
+      ) : null}
+
+      {/* Stated once for the whole screen, because the read that failed was one read for the whole
+          screen. Says what is unavailable and why, without implying anything about what is or is
+          not cached — that is precisely what could not be determined. */}
+      {cacheError ? (
+        <p className="inline-warning">
+          Local model copies can’t be shown right now, so their controls are hidden: {cacheError}
         </p>
       ) : null}
 

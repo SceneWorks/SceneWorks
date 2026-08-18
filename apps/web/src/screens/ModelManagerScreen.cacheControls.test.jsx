@@ -165,6 +165,10 @@ describe("ModelManagerScreen local model copies (sc-19711)", () => {
     vi.restoreAllMocks();
   });
 
+  // Retained so a test can re-render the same screen under a changed backend without rebuilding
+  // the whole app context by hand.
+  let contextValue;
+
   async function render(models) {
     const value = {
       activeProject: null,
@@ -183,6 +187,7 @@ describe("ModelManagerScreen local model copies (sc-19711)", () => {
       createLoraImportJob: () => {},
       createModelImportJob: () => {},
     };
+    contextValue = value;
     await act(async () => {
       root.render(
         <AppContext.Provider value={value}>
@@ -299,6 +304,24 @@ describe("ModelManagerScreen local model copies (sc-19711)", () => {
     expect(container.textContent).not.toContain("No local copy yet");
   });
 
+  // Hiding the controls silently would leave the user unable to tell "no local copies" from "no
+  // answer". The reason is stated ONCE for the whole screen, because one read failed for the whole
+  // screen — not once per model card.
+  it("explains once why the local-copy controls are hidden", async () => {
+    status = new Error("cache listing failed");
+    await render([
+      externalModel(),
+      externalModel({ id: "z", name: "Z-Image-Turbo", family: "z-image" }),
+    ]);
+    const notices = [...container.querySelectorAll(".inline-warning")].filter((node) =>
+      node.textContent.includes("Local model copies can’t be shown"),
+    );
+    expect(notices).toHaveLength(1);
+    expect(notices[0].textContent).toContain("cache listing failed");
+    // It must not imply anything about what is cached — that is what could not be determined.
+    expect(notices[0].textContent).not.toMatch(/no local copies|none|0 copies/i);
+  });
+
   // The subtler half of the same defect: the request SUCCEEDS but the store could not be listed,
   // so the snapshot carries `error` and an empty `entries`. That empty list is "no answer", not
   // "no copies", and must not be rendered as the latter.
@@ -307,6 +330,29 @@ describe("ModelManagerScreen local model copies (sc-19711)", () => {
     await render([externalModel()]);
     expect(section()).toBeNull();
     expect(container.textContent).not.toContain("No local copy yet");
+    // Same explanation as an outright transport failure — from the user's side it is the same
+    // situation: the answer is unavailable.
+    expect(container.textContent).toContain("Local model copies can’t be shown");
+    expect(container.textContent).toContain("resolved-cache journal is unreadable");
+  });
+
+  // A read that recovers must clear the standing explanation rather than leave a stale alarm.
+  it("clears the explanation once a later read succeeds", async () => {
+    status = new Error("cache listing failed");
+    await render([externalModel()]);
+    expect(container.textContent).toContain("Local model copies can’t be shown");
+    status = cacheStatus([cacheEntry()]);
+    // Any action re-reads status; use the one that needs no local-copy button to be present.
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={{ ...contextValue, models: [externalModel()] }}>
+          <ModelManagerScreen key="remount" />
+        </AppContext.Provider>,
+      );
+    });
+    await settle();
+    expect(container.textContent).not.toContain("Local model copies can’t be shown");
+    expect(section()).toBeTruthy();
   });
 
   // ---- keep locally / allow automatic removal -------------------------------------
