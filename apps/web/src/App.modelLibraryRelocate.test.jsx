@@ -72,8 +72,16 @@ describe("App model library relocation + restart disclosure (sc-19709)", () => {
     relocateRequests = [];
     runningJobs = [];
     invoke.mockReset();
+    // The real command always answers with `hfHomeDefault` even before a library is configured,
+    // so the fixture has to as well: the persist step refuses outright without a previous location.
     invoke.mockImplementation((command) => {
-      if (command === "get_storage_setup") return Promise.resolve({ setupCompleted: true });
+      if (command === "get_storage_setup") {
+        return Promise.resolve({
+          setupCompleted: true,
+          hfHome: "/Volumes/Models/hf",
+          hfHomeDefault: "/Users/me/.cache/huggingface",
+        });
+      }
       if (command === "choose_folder") return Promise.resolve("/Volumes/Models 1/hf");
       return Promise.resolve(null);
     });
@@ -141,6 +149,25 @@ describe("App model library relocation + restart disclosure (sc-19709)", () => {
       .find((item) => item.textContent === label);
   }
 
+  function status() {
+    return dialogs()
+      .map((dialog) => dialog.querySelector('[role="status"]')?.textContent ?? "")
+      .join(" ");
+  }
+
+  // Submit a generation (refused by the seam), then answer the prompt by picking a new library.
+  async function submitAndChooseLocation(prompt = "a lighthouse at dusk") {
+    const form = document.body.querySelector(".image-studio form");
+    const promptField = field(form, "Prompt") ?? form.querySelector("textarea");
+    await changeField(promptField, prompt);
+    await act(async () => form.requestSubmit());
+    await settle();
+
+    expect(button("Choose a different library location")).toBeTruthy();
+    await act(async () => button("Choose a different library location").click());
+    await settle();
+  }
+
   async function relocate() {
     root = createRoot(container);
     await act(async () => root.render(<App />));
@@ -152,15 +179,7 @@ describe("App model library relocation + restart disclosure (sc-19709)", () => {
     await act(async () => imageNav.closest("button").click());
     await settle();
 
-    const form = document.body.querySelector(".image-studio form");
-    const prompt = field(form, "Prompt") ?? form.querySelector("textarea");
-    await changeField(prompt, "a lighthouse at dusk");
-    await act(async () => form.requestSubmit());
-    await settle();
-
-    expect(button("Choose a different library location")).toBeTruthy();
-    await act(async () => button("Choose a different library location").click());
-    await settle();
+    await submitAndChooseLocation();
   }
 
   it("persists through the shell, then discloses the restart and performs it exactly once", async () => {
@@ -207,6 +226,87 @@ describe("App model library relocation + restart disclosure (sc-19709)", () => {
     expect(document.body.textContent).toContain("restart SceneWorks to apply it");
     // The notice outlives the dialog, so the abandoned generation is still accounted for.
     expect(document.body.textContent).toContain("was not queued");
+  });
+
+  // Reading the previous location is what makes the relocation UNDOABLE. If that read fails there
+  // is no undo, so the shell must not be written at all — otherwise a later re-bind failure would
+  // leave the shell's copy changed while the prompt claimed the previous location was still in use.
+  it("refuses the relocation before any durable write when the previous location cannot be read", async () => {
+    invoke.mockImplementation((command) => {
+      if (command === "get_storage_setup") {
+        return Promise.reject(new Error("settings file is unreadable"));
+      }
+      if (command === "choose_folder") return Promise.resolve("/Volumes/Models 1/hf");
+      return Promise.resolve(null);
+    });
+    await relocate();
+
+    // The shell was never written, and the server was never re-bound: only the dry-run probe ran.
+    expect(invoke.mock.calls.filter(([command]) => command === "set_model_library")).toEqual([]);
+    expect(relocateRequests).toEqual([{ path: "/Volumes/Models 1/hf", dryRun: true }]);
+
+    // No restart disclosure — nothing was relocated.
+    expect(button("Restart now")).toBeUndefined();
+    // …and the message matches the state the user is actually in.
+    const prompt = dialogs()[0];
+    expect(prompt.textContent).toContain("previous location is still in use");
+    expect(prompt.textContent).not.toContain("could not restore the previous location");
+    expect(prompt.textContent).toContain("could not be read");
+    // The blocked generation is still there to resume, and was never queued behind the failure.
+    expect(button("Connect drive and retry")).toBeTruthy();
+    expect(imageJobPosts).toHaveLength(1);
+  });
+
+  // A restart that never launches must leave the disclosure usable. Before this, the once-only
+  // latch and the restarting state were never released, so the dialog stayed on "Restarting
+  // SceneWorks…" with both buttons dead — for this relocation AND every later one.
+  it("recovers when the restart fails, and a later relocation can restart again", async () => {
+    let restartAttempts = 0;
+    invoke.mockImplementation((command) => {
+      if (command === "get_storage_setup") {
+        return Promise.resolve({ setupCompleted: true, hfHomeDefault: "/Volumes/Models/hf" });
+      }
+      if (command === "choose_folder") return Promise.resolve("/Volumes/Models 1/hf");
+      if (command === "restart_app") {
+        restartAttempts += 1;
+        return restartAttempts <= 2
+          ? Promise.reject(new Error("relaunch refused"))
+          : Promise.resolve(null);
+      }
+      return Promise.resolve(null);
+    });
+    await relocate();
+
+    await act(async () => button("Restart now").click());
+    await settle();
+    expect(restartAttempts).toBe(1);
+    // The failure is surfaced, and the dialog is actionable again rather than stuck.
+    expect(document.body.textContent).toContain("SceneWorks could not restart");
+    expect(status()).not.toContain("Restarting SceneWorks");
+    expect(button("Restart now").disabled).toBe(false);
+    expect(button("Later").disabled).toBe(false);
+
+    // Retrying from the very same disclosure works.
+    await act(async () => button("Restart now").click());
+    await settle();
+    expect(restartAttempts).toBe(2);
+
+    // Deferring is still available after the failures, so the disclosure can be dismissed at all.
+    expect(button("Later").disabled).toBe(false);
+    await act(async () => button("Later").click());
+    await settle();
+    expect(dialogs()).toHaveLength(0);
+
+    // And a whole new relocation opens a LIVE dialog, not the dead restarting one.
+    await submitAndChooseLocation("a second lighthouse");
+    expect(button("Restart now")).toBeTruthy();
+    expect(button("Restart now").disabled).toBe(false);
+    expect(status()).not.toContain("Restarting SceneWorks");
+    await act(async () => button("Restart now").click());
+    await settle();
+    expect(restartAttempts).toBe(3);
+    // This one launched, so the dialog correctly stays in its restarting state.
+    expect(status()).toContain("Restarting SceneWorks");
   });
 
   it("withholds Restart now while a job is running", async () => {

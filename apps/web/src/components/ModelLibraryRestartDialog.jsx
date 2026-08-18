@@ -1,4 +1,4 @@
-import React, { useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Modal } from "./Modal.jsx";
 
 // The disclosure shown after a model library has been successfully relocated (sc-19709).
@@ -22,14 +22,33 @@ export function ModelLibraryRestartDialog({
   // epic's gate exists to prevent.
   const requested = useRef(false);
   const [restarting, setRestarting] = useState(false);
+  // This component stays mounted across relocations, so the once-only latch and the restarting
+  // state are per-RELOCATION, not per-mount. Without this reset a restart that failed to launch
+  // would leave every later relocation opening straight into a dead "Restarting SceneWorks…" with
+  // both buttons disabled, and restart could never fire again without reloading the app.
+  useEffect(() => {
+    requested.current = false;
+    setRestarting(false);
+  }, [relocation]);
   if (!relocation) return null;
 
   const jobRunning = runningJobCount > 0;
+  // A restart that never launches must not wedge the dialog: `onRestart` reports that by rejecting
+  // (or returning false), and the dialog returns to an actionable state so the user can try again
+  // or dismiss. On success the app is going away, so nothing settles here.
   const restartNow = () => {
     if (requested.current) return;
     requested.current = true;
     setRestarting(true);
-    onRestart?.();
+    Promise.resolve()
+      .then(() => onRestart?.())
+      .then((result) => {
+        if (result === false) throw new Error("restart did not start");
+      })
+      .catch(() => {
+        requested.current = false;
+        setRestarting(false);
+      });
   };
 
   return (

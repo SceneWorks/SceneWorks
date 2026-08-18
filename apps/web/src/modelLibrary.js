@@ -137,7 +137,9 @@ const IDLE = Object.freeze({
 //   `probe`    — the seam's library status; a retry gates on its `available`.
 //   `validate` — check a candidate root, writing nothing anywhere.
 //   `adopt`    — re-bind the server's durable identity to that root.
-//   `persist`  — store the client's own copy of the location; may return an undo function.
+//   `persist`  — store the client's own copy of the location. It must either return an undo that
+//                restores the previous location, or throw BEFORE writing anything. Returning
+//                without an undo is treated as "changed and unrestorable", never as "unchanged".
 //
 // Relocation has TWO durable writes in different places (the shell's `HF_HOME` and the server's
 // binding ledger) and they must not be allowed to disagree: `validate` first so every ordinary
@@ -247,15 +249,31 @@ export function createModelLibraryGate({ probe, validate, adopt, persist } = {})
       // 2. Persist the client's copy, then 3. re-bind the server's. If the re-bind fails, undo the
       //    persist so the two cannot disagree — and say what actually happened either way.
       let undoPersist = null;
+      // Whether `persist` got far enough to have written anything. A `persist` that THREW wrote
+      // nothing (it is required to fail before its own durable write), so the previous location
+      // really is still in use; one that returned is the only case where restoring is in question.
+      let persisted = false;
       try {
-        undoPersist = (await persist?.(target)) ?? null;
+        if (persist) {
+          undoPersist = (await persist(target)) ?? null;
+          persisted = true;
+        }
         await adopt?.(path);
       } catch (error) {
         let restored = true;
-        try {
-          await undoPersist?.();
-        } catch {
-          restored = false;
+        if (persisted) {
+          if (typeof undoPersist === "function") {
+            try {
+              await undoPersist();
+            } catch {
+              restored = false;
+            }
+          } else {
+            // Persisted, but handed back no undo: the client's copy has changed and cannot be put
+            // back. Claiming "the previous location is still in use" here would be a lie, and the
+            // two copies would be left disagreeing with the user told otherwise.
+            restored = false;
+          }
         }
         if (attempt !== epoch) return null;
         pending = action;

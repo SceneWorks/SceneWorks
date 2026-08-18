@@ -314,6 +314,71 @@ describe("model library gate", () => {
     expect(gate.getState().error).toContain("Settings");
   });
 
+  // A `persist` that returns WITHOUT an undo has still changed the client's copy. Treating that as
+  // "restored" would emit "the previous location is still in use" while the shell was in fact
+  // pointed at the new library — the two-copies-disagree state with the wrong message on top.
+  it("never claims the previous location survived when persist handed back no undo", async () => {
+    const persist = vi.fn(async () => null);
+    const gate = createModelLibraryGate({
+      probe: async () => ({ available: true }),
+      validate: async () => ({ libraryRoot: "/new/hub", hfHome: "/new" }),
+      persist,
+      adopt: async () => {
+        throw new Error("re-bind failed");
+      },
+    });
+    gate.block(unavailableError().context, vi.fn());
+
+    await expect(gate.relocate("/new")).resolves.toBeNull();
+    expect(persist).toHaveBeenCalledTimes(1);
+    expect(gate.getState().error).toContain("could not restore the previous location");
+    expect(gate.getState().error).not.toContain("previous location is still in use");
+  });
+
+  // A shell that keeps no copy of its own says so with a NO-OP undo, and must not be mistaken for
+  // one that wrote and cannot undo: nothing changed, so the previous location really is in use.
+  it("reports the previous location still in use when persist wrote nothing", async () => {
+    const gate = createModelLibraryGate({
+      probe: async () => ({ available: true }),
+      validate: async () => ({ libraryRoot: "/new/hub", hfHome: "/new" }),
+      persist: async () => () => {},
+      adopt: async () => {
+        throw new Error("re-bind failed");
+      },
+    });
+    gate.block(unavailableError().context, vi.fn());
+
+    await expect(gate.relocate("/new")).resolves.toBeNull();
+    expect(gate.getState().error).toContain("previous location is still in use");
+    expect(gate.getState().error).not.toContain("could not restore");
+  });
+
+  // The other half of the contract: a `persist` that THREW is required to have written nothing, so
+  // the previous location genuinely is still in use and the message must say exactly that.
+  it("reports the previous location still in use when persist refused before writing", async () => {
+    const action = vi.fn(async () => "job-1");
+    const adopt = vi.fn();
+    const gate = createModelLibraryGate({
+      probe: async () => ({ available: true }),
+      validate: async () => ({ libraryRoot: "/new/hub", hfHome: "/new" }),
+      persist: async () => {
+        throw new Error("The current model library location could not be read.");
+      },
+      adopt,
+    });
+    gate.block(unavailableError().context, action);
+
+    await expect(gate.relocate("/new")).resolves.toBeNull();
+    // A refusal in persist happens before the server is ever re-bound.
+    expect(adopt).not.toHaveBeenCalled();
+    expect(gate.getState().error).toContain("previous location is still in use");
+    expect(gate.getState().error).toContain("could not be read");
+    expect(gate.getState()).toMatchObject({ status: "blocked" });
+    // The blocked submission survives, so the user can reconnect the original drive instead.
+    await gate.retry();
+    expect(action).toHaveBeenCalledTimes(1);
+  });
+
   it("clears a stale error when a later retry answers with a hint", async () => {
     const gate = createModelLibraryGate({
       probe: vi

@@ -82,6 +82,54 @@ describe("ModelLibraryRestartDialog (sc-19709)", () => {
     expect(dialog.querySelector('[role="status"]').textContent).toContain("Restarting");
   });
 
+  // The dialog stays mounted across relocations, so a restart that never launched must not latch it
+  // permanently into "Restarting…" with both buttons disabled.
+  it("leaves the restarting state when the relaunch rejects, and can be retried", async () => {
+    const onRestart = vi.fn().mockRejectedValueOnce(new Error("relaunch refused"));
+    const dialog = await render({ onRestart });
+    await act(async () => button(dialog, "Restart now").click());
+    await act(async () => {});
+
+    expect(dialog.querySelector('[role="status"]').textContent).not.toContain("Restarting");
+    expect(button(dialog, "Restart now").disabled).toBe(false);
+    expect(button(dialog, "Later").disabled).toBe(false);
+    await act(async () => button(dialog, "Restart now").click());
+    expect(onRestart).toHaveBeenCalledTimes(2);
+  });
+
+  it("treats a false result from the relaunch as a failure too", async () => {
+    const onRestart = vi.fn(async () => false);
+    const dialog = await render({ onRestart });
+    await act(async () => button(dialog, "Restart now").click());
+    await act(async () => {});
+    expect(button(dialog, "Restart now").disabled).toBe(false);
+  });
+
+  // Both the once-only latch and the restarting state are per-RELOCATION, not per-mount: this
+  // component stays mounted, so without a reset the dead restarting state carries straight into the
+  // NEXT relocation and restart can never fire again without reloading the app. Driven here with a
+  // relaunch that never settles, so the reset is proven independently of the rejection path.
+  it("resets for a new relocation after a restart that never completed", async () => {
+    const onRestart = vi.fn(() => new Promise(() => {}));
+    let dialog = await render({ onRestart });
+    await act(async () => button(dialog, "Restart now").click());
+    expect(dialog.querySelector('[role="status"]').textContent).toContain("Restarting");
+
+    // The disclosure is dismissed, then a fresh relocation opens it again.
+    await render({ onRestart, relocation: null });
+    dialog = await render({
+      onRestart,
+      relocation: { ...RELOCATION, hfHome: "/Volumes/Models 2/hf" },
+    });
+
+    expect(dialog.textContent).toContain("/Volumes/Models 2/hf");
+    expect(dialog.querySelector('[role="status"]').textContent).not.toContain("Restarting");
+    expect(button(dialog, "Restart now").disabled).toBe(false);
+    await act(async () => button(dialog, "Restart now").click());
+    expect(onRestart).toHaveBeenCalledTimes(2);
+    expect(dialog.querySelector('[role="status"]').textContent).toContain("Restarting");
+  });
+
   it("withholds the restart while a job is running, and says why", async () => {
     const onRestart = vi.fn();
     const dialog = await render({ onRestart, runningJobCount: 1 });

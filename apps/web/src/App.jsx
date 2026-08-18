@@ -726,14 +726,32 @@ export function App() {
         // HF_HOME the shell must store, in the same field, file and normalization as the first-run
         // storage step. Returns an undo so the gate can restore the previous location if the
         // server's re-bind then fails — the two copies must never disagree.
+        //
+        // Fails CLOSED when the previous location cannot be read, BEFORE the first durable write:
+        // without a previous location there is no undo, so a re-bind failure afterwards would leave
+        // the shell pointed at the new library while the gate reported the previous location still
+        // in use — the disagreement this undo path exists to prevent, with the wrong message on top.
         persist: async (target) => {
-          if (!isDesktopShell || !target?.hfHome) return null;
-          const before = await tauriInvoke("get_storage_setup").catch(() => null);
+          // Nothing to persist — the browser shell keeps no copy of the location. A NO-OP undo, not
+          // `null`: the gate treats a missing undo as "changed and unrestorable", and here nothing
+          // changed, so the previous location genuinely is still in use.
+          if (!isDesktopShell || !target?.hfHome) return () => {};
+          let before = null;
+          try {
+            before = await tauriInvoke("get_storage_setup");
+          } catch (error) {
+            throw new Error(
+              `The current model library location could not be read, so nothing was changed. ${String(error)}`.trim(),
+            );
+          }
           const previous = before?.hfHome ?? before?.hfHomeDefault ?? null;
+          if (!previous) {
+            throw new Error(
+              "The current model library location could not be read, so nothing was changed.",
+            );
+          }
           await tauriInvoke("set_model_library", { path: target.hfHome });
-          return previous
-            ? () => tauriInvoke("set_model_library", { path: previous })
-            : null;
+          return () => tauriInvoke("set_model_library", { path: previous });
         },
       }),
     [token],
@@ -3192,11 +3210,15 @@ export function App() {
       <ModelLibraryRestartDialog
         canRestart={isDesktopShell}
         onLater={() => setModelLibraryRelocation(null)}
-        onRestart={() => {
-          void tauriInvoke("restart_app").catch((error) =>
-            pushNotice("general", `SceneWorks could not restart: ${String(error)}`),
-          );
-        }}
+        // The rejection is RE-THROWN after the notice: the dialog needs it to leave its restarting
+        // state, or a restart that never launched would leave the disclosure permanently stuck on
+        // "Restarting SceneWorks…" with both buttons disabled, for this and every later relocation.
+        onRestart={() =>
+          tauriInvoke("restart_app").catch((error) => {
+            pushNotice("general", `SceneWorks could not restart: ${String(error)}`);
+            throw error;
+          })
+        }
         relocation={modelLibraryRelocation}
         runningJobCount={runningJobCount}
       />
