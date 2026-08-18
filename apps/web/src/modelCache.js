@@ -166,9 +166,14 @@ export function describeDisableConsequence(status) {
     return "No local copies exist yet, so turning this off changes nothing on disk.";
   }
   const used = formatBytes(status?.usedBytes ?? 0);
+  const one = count === 1;
   return `SceneWorks stops making new local copies. The ${count} existing ${
-    count === 1 ? "copy" : "copies"
-  } (${used}) stay on disk — remove them per model in Model Manager, or turn this back on and let automatic cleanup reclaim them.`;
+    one ? "copy" : "copies"
+  } (${used}) ${one ? "stays" : "stay"} on disk — remove ${
+    one ? "it" : "them"
+  } per model in Model Manager, or turn this back on and let automatic cleanup reclaim ${
+    one ? "it" : "them"
+  }.`;
 }
 
 // What LOWERING the size limit would actually mean. Nothing is swept at the moment of the change:

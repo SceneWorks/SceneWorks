@@ -1297,10 +1297,15 @@ export function ModelManagerScreen() {
     // shared resolver produced (sc-19708). NEVER re-derived here from paths or error text — that
     // discipline is the whole reason a second, drifting availability opinion can't exist.
     const availability = availabilityBadge(model);
-    // Local copies of THIS model, joined by the backend. `modelCache` is null when the status read
-    // failed, which correctly renders nothing rather than "no local copies".
+    // Local copies of THIS model, joined by the backend.
     const localCopies = entriesForModel(modelCache, model.id);
-    const showLocalCopySection = localCopies.length > 0 || canHoldLocalCopy(model);
+    // The block renders ONLY when the cache state is actually known. `modelCache` is null when the
+    // status read failed outright, and a returned snapshot carries `error` when the store exists
+    // but could not be listed — in both cases the entry list is empty for want of an answer, not
+    // because there are no copies. Gating on `cacheKnown` is what stops "No local copy yet." from
+    // being rendered as a confident claim over a read that never succeeded.
+    const cacheKnown = Boolean(modelCache) && !modelCache.error;
+    const showLocalCopySection = cacheKnown && (localCopies.length > 0 || canHoldLocalCopy(model));
     return (
       <article className={model.recommended ? "model-card recommended" : "model-card"} key={model.id}>
         <div className="model-card-head">
