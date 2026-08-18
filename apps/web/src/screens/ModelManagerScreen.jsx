@@ -18,14 +18,17 @@ import { formatBytes } from "../formatting.js";
 import {
   availabilityBadge,
   canHoldLocalCopy,
+  describeEntryState,
   describeRemovalPreview,
   entriesForModel,
   fetchModelCache,
+  isTransitionalEntry,
   previewCacheRemoval,
   removalIsAllowed,
   removeCacheEntry,
   setCacheEntryPin,
 } from "../modelCache.js";
+import { useCacheConvergence } from "../hooks/useCacheConvergence.js";
 import { KeywordTagEditor } from "../components/KeywordTagEditor.jsx";
 import { useHostMemory } from "../hooks/useHostMemory.js";
 import { hostMemoryGbForBackend } from "../hostMemory.js";
@@ -732,9 +735,10 @@ export function ModelManagerScreen() {
   const [deletingItem, setDeletingItem] = useState("");
   const [deleteMessage, setDeleteMessage] = useState({ tone: "neutral", text: "" });
   // Resolved-model hot cache (epic 19703, sc-19711). ONE status read backs every card's local-copy
-  // block; it is refreshed on mount and after each keep/remove, never on a timer — a journal
-  // listing grows with the number of cached bundles, so polling it would put exactly the per-row
-  // read cost back on a screen that sc-19708 took it off.
+  // block: on mount, after each keep/remove, and — only while the store is still working on an
+  // entry — on a bounded cadence, so a copy in flight visibly converges instead of freezing at
+  // whatever state the screen happened to open on. A settled cache costs exactly the one mount
+  // read it always did, which is what keeps the per-row cost sc-19708 removed from coming back.
   const [modelCache, setModelCache] = useState(null);
   // Cache key of the entry whose keep/remove request is in flight, so its buttons disable.
   const [cacheBusyKey, setCacheBusyKey] = useState("");
@@ -922,6 +926,13 @@ export function ModelManagerScreen() {
   useEffect(() => {
     refreshModelCache();
   }, [refreshModelCache]);
+
+  // Bounded convergence refresh. It runs ONLY while the snapshot actually holds an entry the store
+  // is still moving (queued, copying, being removed) and stops the moment every entry is terminal,
+  // so an all-settled cache is read exactly once. `stalled` is the honest end of the bound: still
+  // in flight, but nothing is re-reading any more, which the card has to say rather than leave a
+  // "checking…" line that has quietly stopped meaning anything.
+  const { stalled: cacheConvergenceStalled } = useCacheConvergence(modelCache, refreshModelCache);
 
   // "Keep locally" / "Allow automatic removal" — the artifact pin. Re-reads the authoritative
   // status afterwards rather than optimistically flipping the row: the UI must not claim a state
@@ -1484,6 +1495,21 @@ export function ModelManagerScreen() {
               {model.modelAvailability === "installed_external_unavailable" && !localCopies.length ? (
                 <span className="status-badge warning">library disconnected</span>
               ) : null}
+              {/* Convergence is visible, and it is honest about having stopped. While the store is
+                  still working the screen re-reads on its own; once the bounded refresh gives up it
+                  says so, and "Check again" remains the way to re-read at any point. */}
+              {localCopies.some(isTransitionalEntry) ? (
+                <>
+                  <span className="model-local-copy-progress">
+                    {cacheConvergenceStalled
+                      ? "Still in progress — SceneWorks has stopped checking automatically."
+                      : "Checking for changes…"}
+                  </span>
+                  <button onClick={refreshModelCache} type="button">
+                    Check again
+                  </button>
+                </>
+              ) : null}
             </div>
             {localCopies.length === 0 ? (
               <p>
@@ -1495,6 +1521,9 @@ export function ModelManagerScreen() {
                 {localCopies.map((entry) => {
                   const busy = cacheBusyKey === entry.cacheKey;
                   const ready = entry.state === "complete";
+                  // What this state means, in words, straight off the store's typed value — with a
+                  // remedy attached for the states nothing resolves on its own.
+                  const stateNote = describeEntryState(entry);
                   return (
                     <li className="model-local-copy-entry" key={entry.cacheKey}>
                       <span className="model-local-copy-text">
@@ -1502,12 +1531,8 @@ export function ModelManagerScreen() {
                           {entry.tier ? `${tierLabel(entry.tier)} · ` : ""}
                           {formatBytes(entry.bytes)}
                         </span>
-                        <small>
-                          {ready
-                            ? entry.pinned
-                              ? "Kept — never removed automatically"
-                              : "Can be removed automatically when space is needed"
-                            : `Not ready to use (${entry.state}) — SceneWorks finishes or clears it on the next check`}
+                        <small className={stateNote.failure ? "model-local-copy-failure" : undefined}>
+                          {stateNote.text}
                         </small>
                       </span>
                       <span className="model-local-copy-actions">

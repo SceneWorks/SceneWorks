@@ -334,7 +334,7 @@ impl ResolvedCacheStore {
         let _metadata_lock = self.lock_metadata(&digest)?;
         let entry = self.inner.root.join("entries").join(&digest);
         if std::fs::symlink_metadata(&entry).is_err() {
-            return Err(ResolvedCacheError::new("no such resolved-cache entry"));
+            return Err(ResolvedCacheError::request("no such resolved-cache entry"));
         }
         // A preview must stay renderable even for an entry that cannot be walked (for example one
         // holding a link, which the confined deleter would also refuse). Measurement failure
@@ -443,7 +443,7 @@ impl ResolvedCacheStore {
         match FileExt::try_lock_exclusive(&artifact_lock) {
             Ok(()) => {}
             Err(error) if is_lock_contended(&error) => {
-                return Err(ResolvedCacheError::new(
+                return Err(ResolvedCacheError::request(
                     "cannot remove a resolved-cache entry with an active lease or reservation",
                 ));
             }
@@ -452,7 +452,7 @@ impl ResolvedCacheStore {
         let _metadata_lock = self.lock_metadata(&digest)?;
         let entry = self.inner.root.join("entries").join(&digest);
         if std::fs::symlink_metadata(&entry).is_err() {
-            return Err(ResolvedCacheError::new("no such resolved-cache entry"));
+            return Err(ResolvedCacheError::request("no such resolved-cache entry"));
         }
         let mut warning = None;
         match self.read_metadata_unlocked(&digest) {
@@ -468,12 +468,12 @@ impl ResolvedCacheStore {
                 if metadata.state == ResolvedCacheEntryState::Materializing
                     && self.materializing_session_is_live(&metadata)?
                 {
-                    return Err(ResolvedCacheError::new(
+                    return Err(ResolvedCacheError::request(
                         "cannot remove a resolved-cache entry that a live session is materializing",
                     ));
                 }
                 if metadata.effective_pin {
-                    return Err(ResolvedCacheError::new(
+                    return Err(ResolvedCacheError::request(
                         "resolved-cache entry is pinned; unpin it before removal",
                     ));
                 }
@@ -750,8 +750,13 @@ impl ResolvedCacheStore {
             Ok(EvictAttempt::AlreadyGone) => {
                 *complete_total = complete_total.saturating_sub(candidate.bytes);
             }
-            Ok(EvictAttempt::Failed(error)) | Err(ResolvedCacheError(error)) => {
+            Ok(EvictAttempt::Failed(error)) => {
                 report.failed.push((candidate.cache_key.clone(), error));
+            }
+            Err(error) => {
+                report
+                    .failed
+                    .push((candidate.cache_key.clone(), error.to_string()));
             }
         }
     }

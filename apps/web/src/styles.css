@@ -7082,6 +7082,18 @@ details[open] > summary.lora-scope-group-heading::before,
   color: var(--muted);
 }
 
+/* An entry state nothing resolves on its own. Uses the existing warm warning token so a failed
+   copy is not read as ordinary muted detail, and no new colour idiom enters the screen. */
+.model-local-copy-text small.model-local-copy-failure {
+  color: var(--warm);
+}
+
+.model-local-copy-progress {
+  align-self: center;
+  font-size: 12px;
+  color: var(--muted);
+}
+
 .model-local-copy-actions {
   display: flex;
   flex-wrap: wrap;

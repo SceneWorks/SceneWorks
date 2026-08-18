@@ -169,24 +169,69 @@ fn parse_optional_u64(
     }
 }
 
+/// Whether a healthy store REFUSED a request, or a broken one could not answer it. Carried on the
+/// error itself rather than recovered by matching on its message, so an HTTP surface can answer
+/// 4xx and 5xx correctly without a second, drifting classification built out of string comparisons.
+///
+/// The line is drawn at "is anything actually wrong with the machine":
+///
+/// * [`Request`](Self::Request) — the store is intact and is declining THIS request: a malformed
+///   cache key, an entry it does not hold, or an entry whose own sanctioned state (pinned, leased,
+///   being materialized, being evicted) forbids the operation. Nothing is broken, and the reply
+///   tells the caller what to change.
+/// * [`Internal`](Self::Internal) — the store could not answer at all: IO faults, lock-file
+///   failures, clock failures, damaged journals and unreadable tombstones. Reporting these as
+///   client errors is what sends an operator to fix their request while the real fault sits on the
+///   host, and it hides genuine damage from anything watching 5xx rates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResolvedCacheErrorKind {
+    /// An intact store declining this particular request.
+    Request,
+    /// A store or host that could not answer. Not caused by, and not fixable from, the request.
+    Internal,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ResolvedCacheError(String);
+pub struct ResolvedCacheError {
+    message: String,
+    kind: ResolvedCacheErrorKind,
+}
 
 impl ResolvedCacheError {
+    /// The default construction. Unattributed failures are [`ResolvedCacheErrorKind::Internal`] on
+    /// purpose: a new failure path that nobody classified must not silently start reporting host
+    /// faults as the caller's mistake.
     fn new(message: impl Into<String>) -> Self {
-        Self(message.into())
+        Self {
+            message: message.into(),
+            kind: ResolvedCacheErrorKind::Internal,
+        }
+    }
+
+    /// An intact store declining this request. Used only where nothing is wrong with the store or
+    /// the host — a malformed key, an entry that is not held, or an entry state that forbids the
+    /// operation.
+    fn request(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            kind: ResolvedCacheErrorKind::Request,
+        }
+    }
+
+    pub fn kind(&self) -> ResolvedCacheErrorKind {
+        self.kind
     }
 
     /// True only for the journal read failure that proves the entry retains no recoverable
     /// state — never for a transient, environmental, or fail-closed refusal.
     pub fn is_unrecoverable_metadata(&self) -> bool {
-        self.0 == BOTH_METADATA_SLOTS_CORRUPT
+        self.message == BOTH_METADATA_SLOTS_CORRUPT
     }
 }
 
 impl std::fmt::Display for ResolvedCacheError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.0)
+        formatter.write_str(&self.message)
     }
 }
 
@@ -194,7 +239,7 @@ impl std::error::Error for ResolvedCacheError {}
 
 impl From<std::io::Error> for ResolvedCacheError {
     fn from(error: std::io::Error) -> Self {
-        Self(error.to_string())
+        Self::new(error.to_string())
     }
 }
 
@@ -935,10 +980,12 @@ impl ResolvedCacheStore {
     ) -> Result<ResolvedCacheMetadata, ResolvedCacheError> {
         match self.read_metadata_unlocked(digest)? {
             JournalRead::Valid { metadata, .. } => Ok(*metadata),
-            JournalRead::Evicted { .. } => Err(ResolvedCacheError::new(
+            // Both are an intact store declining this request, not a store that broke: a removal
+            // is genuinely in flight for the first, and the second names an entry it does not hold.
+            JournalRead::Evicted { .. } => Err(ResolvedCacheError::request(
                 "cache entry has a pending eviction tombstone",
             )),
-            JournalRead::Missing => Err(ResolvedCacheError::new("cache metadata is missing")),
+            JournalRead::Missing => Err(ResolvedCacheError::request("cache metadata is missing")),
         }
     }
 
@@ -2394,7 +2441,8 @@ fn cache_key_digest(cache_key: &str) -> Result<String, ResolvedCacheError> {
         .strip_prefix("sha256:")
         .filter(|value| is_lower_hex_64(value))
         .ok_or_else(|| {
-            ResolvedCacheError::new("resolved-cache key must be sha256:<64 lower hex>")
+            // The caller's own key is unusable — nothing about the store or the host is wrong.
+            ResolvedCacheError::request("resolved-cache key must be sha256:<64 lower hex>")
         })?;
     Ok(digest.to_owned())
 }

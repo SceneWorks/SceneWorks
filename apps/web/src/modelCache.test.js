@@ -17,8 +17,11 @@ import {
   describeLimitConsequence,
   describeRemovalPreview,
   entriesForModel,
+  describeEntryState,
   fetchModelCache,
   gibToBytes,
+  hasTransitionalEntries,
+  isTransitionalEntry,
   policyNeedsRestart,
   previewCacheRemoval,
   removalIsAllowed,
@@ -427,5 +430,91 @@ describe("removalIsAllowed", () => {
   it("refuses without a preview", () => {
     expect(removalIsAllowed(null)).toBe(false);
     expect(removalIsAllowed(undefined)).toBe(false);
+  });
+});
+
+// ---- entry state, progress and actionable failure --------------------------------
+
+// The states the store is still moving on its own are what a screen has to keep watching. Getting
+// this set wrong in either direction is a real defect: too narrow and a copy in flight looks
+// frozen forever, too wide and a settled cache polls for nothing.
+describe("isTransitionalEntry / hasTransitionalEntries", () => {
+  it.each([
+    ["pending", true],
+    ["materializing", true],
+    ["evicting", true],
+    ["complete", false],
+    ["interrupted", false],
+    ["corrupt", false],
+  ])("classifies %s as transitional=%s", (state, expected) => {
+    expect(isTransitionalEntry({ state })).toBe(expected);
+  });
+
+  // An unrecognized state is NOT treated as still-moving. Polling a state this build cannot
+  // interpret would be a guess, and it would never terminate.
+  it("does not treat an unrecognized state as still moving", () => {
+    expect(isTransitionalEntry({ state: "quantizing" })).toBe(false);
+    expect(isTransitionalEntry(null)).toBe(false);
+    expect(isTransitionalEntry({})).toBe(false);
+  });
+
+  it("reports a snapshot as converging only while one of its entries is", () => {
+    expect(hasTransitionalEntries({ entries: [{ state: "complete" }] })).toBe(false);
+    expect(
+      hasTransitionalEntries({ entries: [{ state: "complete" }, { state: "materializing" }] }),
+    ).toBe(true);
+    // No answer is not "converging": a failed or absent read must not start a poll loop.
+    expect(hasTransitionalEntries({ entries: [] })).toBe(false);
+    expect(hasTransitionalEntries(null)).toBe(false);
+    expect(hasTransitionalEntries({})).toBe(false);
+  });
+});
+
+describe("describeEntryState", () => {
+  // A complete entry's line is about what happens to it next, and it must flip with the pin.
+  it("describes a complete copy by whether it is kept", () => {
+    const unpinned = describeEntryState({ state: "complete", pinned: false });
+    expect(unpinned.text).toContain("removed automatically");
+    expect(unpinned.progress).toBe(false);
+    expect(unpinned.failure).toBe(false);
+    expect(describeEntryState({ state: "complete", pinned: true }).text).toContain("Kept");
+  });
+
+  it.each([
+    ["pending", "Queued"],
+    ["materializing", "Copying now"],
+    ["evicting", "Removing now"],
+  ])("marks %s as progress and says what is happening", (state, fragment) => {
+    const described = describeEntryState({ state });
+    expect(described.progress).toBe(true);
+    expect(described.failure).toBe(false);
+    expect(described.text).toContain(fragment);
+  });
+
+  // The point of a failure line is that it is ACTIONABLE. A bare state name tells a user neither
+  // whether the model still works nor what to press, which is exactly the gap these replace.
+  it("gives an interrupted copy a remedy rather than a state name", () => {
+    const described = describeEntryState({ state: "interrupted" });
+    expect(described.failure).toBe(true);
+    expect(described.progress).toBe(false);
+    expect(described.text).toContain("can't be used");
+    expect(described.text).toMatch(/remove it now to reclaim the space/i);
+  });
+
+  it("says a corrupt copy is unrepairable and that the model still loads", () => {
+    const described = describeEntryState({ state: "corrupt" });
+    expect(described.failure).toBe(true);
+    expect(described.text).toContain("can't be used or repaired");
+    expect(described.text).toContain("still loads from its own library");
+  });
+
+  // Same rule the availability badge follows: a state this build does not know is labelled as
+  // unknown, never coerced into a reassuring one.
+  it("labels an unrecognized state instead of implying the copy is fine", () => {
+    const described = describeEntryState({ state: "quantizing" });
+    expect(described.failure).toBe(true);
+    expect(described.text).toContain("quantizing");
+    expect(described.text).toMatch(/doesn’t recognize/);
+    expect(described.text).not.toMatch(/can be removed automatically|Kept/);
   });
 });

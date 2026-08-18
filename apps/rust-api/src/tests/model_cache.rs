@@ -150,6 +150,29 @@ async fn status_lists_a_real_entry_and_removal_runs_through_the_real_preview() {
     assert_eq!(body["initialized"], json!(true));
     assert_eq!(body["error"], Value::Null);
     assert_eq!(body["entryCount"], json!(1));
+    // The store→API isolation seam. The fixture puts the data directory and the source library
+    // under one temp root, so they genuinely share a volume and the local copies buy no disconnect
+    // or performance isolation at all — "a same-volume configuration clearly reports no isolation"
+    // is an acceptance criterion, and it is asserted HERE because the web suite mocks this field.
+    // Without this, `compare_source_volume` could be replaced by a hardcoded `Unknown` and every
+    // endpoint test would stay green.
+    assert_eq!(
+        body["sourceVolumeRelation"],
+        json!("same"),
+        "the fixture's cache and source library share a volume; the API must say so rather than \
+         reporting an unknown relation the UI would render as no warning at all"
+    );
+    // The configured external library location, so the UI can name the location the same-volume
+    // warning is about instead of telling the user to move "the model library" they can't find.
+    let configured_library =
+        sceneworks_core::hf_home::model_source_library(&fixture.temp_dir.path().join("data"))
+            .root()
+            .to_path_buf();
+    assert_eq!(
+        body["sourceLibraryPath"],
+        json!(configured_library),
+        "the status read must report the library location it actually compared against"
+    );
     let listed = entry_for(&body, &fixture.cache_key);
     assert_eq!(listed["state"], json!("complete"));
     assert_eq!(listed["repository"], json!("owner/cached-model"));
@@ -320,6 +343,9 @@ async fn an_unreadable_entry_previews_unknown_pins_rather_than_no_pins() {
         .expect("an unreadable entry is blocked")
         .contains("cannot be read"));
 
+    // The removal fails CLOSED, and it does so because the entry's own stored state is damaged —
+    // an unreadable tombstone is the host's problem, not a badly-formed request. So this is a 500:
+    // the store could not answer, which is a different thing from the store declining to.
     let (status, _) = request(
         create_app(test_settings(&fixture.temp_dir)).expect("app creates"),
         "POST",
@@ -327,7 +353,7 @@ async fn an_unreadable_entry_previews_unknown_pins_rather_than_no_pins() {
         json!({ "cacheKey": fixture.cache_key }),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     assert!(fixture
         .entry
         .join("bundle")
@@ -428,6 +454,168 @@ async fn an_uninitialized_cache_reports_empty_and_never_creates_the_store() {
             .join("resolved")
             .exists(),
         "a refused control must not materialize a cache root"
+    );
+}
+
+/// Session slots a store handed out, by directory name. `ResolvedCacheStore::open` creates one
+/// `sessions/<id>/` per handle and holds its lock for the handle's life; only a later `recover()`
+/// reclaims the slots of processes that are gone.
+fn session_slots(store: &ResolvedCacheStore) -> Vec<String> {
+    let mut slots = std::fs::read_dir(store.root().join("sessions"))
+        .expect("sessions dir reads")
+        .filter_map(|item| {
+            let item = item.expect("session entry reads");
+            item.file_type()
+                .expect("session file type")
+                .is_dir()
+                .then(|| item.file_name().to_string_lossy().into_owned())
+        })
+        .collect::<Vec<_>>();
+    slots.sort();
+    slots
+}
+
+/// Every control POST goes through ONE session for the API process, not one per request.
+///
+/// `ResolvedCacheStore::open` claims a session slot and holds its exclusive lock for the handle's
+/// lifetime; the store's design is that a slot belongs to a process, and stale slots are reclaimed
+/// by a later `recover()`. An API that opened a store per request would therefore strand a fresh
+/// directory and lock file on every keep/preview/remove the UI performs — debris that accumulates
+/// for as long as the app runs. Driving the SAME router (and therefore the same `AppState`) across
+/// several actions is what makes that visible.
+#[tokio::test]
+async fn control_actions_share_one_cache_session_for_the_api_process() {
+    let fixture = cache_fixture("q8");
+    let fixture_slots = session_slots(&fixture.store);
+    assert_eq!(
+        fixture_slots.len(),
+        1,
+        "the fixture's own store holds exactly one session"
+    );
+
+    let app = create_app(test_settings(&fixture.temp_dir)).expect("app creates");
+    for pinned in [true, false] {
+        let (status, _) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/model-cache/pin",
+            json!({ "cacheKey": fixture.cache_key, "pinned": pinned }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/model-cache/removal-preview",
+            json!({ "cacheKey": fixture.cache_key }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/model-cache/remove",
+        json!({ "cacheKey": fixture.cache_key }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let slots = session_slots(&fixture.store);
+    assert_eq!(
+        slots.len(),
+        fixture_slots.len() + 1,
+        "five control actions must leave ONE api session behind, not one per request; found {slots:?}"
+    );
+    // And it is a genuine, still-locked runtime session rather than a slot the API deleted behind
+    // itself: the whole point is that the store's session semantics are unchanged, only reused.
+    let api_slot = slots
+        .iter()
+        .find(|slot| !fixture_slots.contains(slot))
+        .expect("the api session slot exists");
+    assert!(
+        fixture
+            .store
+            .root()
+            .join("sessions")
+            .join(format!("{api_slot}.lock"))
+            .is_file(),
+        "the api session must still hold its own session lock file"
+    );
+}
+
+/// A store fault is a 500 and a caller's mistake is a 400. Reporting every failure as a client
+/// error tells an operator to fix their request when the machine is what is broken, and hides a
+/// real fault from anything watching 5xx rates.
+#[tokio::test]
+async fn store_faults_answer_500_while_a_bad_request_stays_a_client_error() {
+    let fixture = cache_fixture("q8");
+    let app = create_app(test_settings(&fixture.temp_dir)).expect("app creates");
+
+    // Caller's mistake #1: a key that is not a cache key at all.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/model-cache/removal-preview",
+        json!({ "cacheKey": "not-a-cache-key" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["detail"].as_str().expect("detail").contains("sha256:"));
+
+    // Caller's mistake #2: a well-formed key for an entry this store does not hold.
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/model-cache/pin",
+        json!({ "cacheKey": format!("sha256:{}", "c".repeat(64)), "pinned": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Caller's mistake #3: a refusal from an intact store. The entry is pinned, so removal is
+    // declined — nothing is broken, and the reply tells the caller what to change. This is the
+    // guard against over-correcting: an implementation that answered 500 for every store `Err`
+    // would turn ordinary refusals into fake server faults.
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/model-cache/pin",
+        json!({ "cacheKey": fixture.cache_key, "pinned": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/model-cache/remove",
+        json!({ "cacheKey": fixture.cache_key }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["detail"].as_str().expect("detail").contains("pinned"));
+
+    // Now a genuine store fault on a key the caller named correctly: both journal slots are
+    // unreadable, so the store cannot answer at all. Nothing about the request is wrong, and a
+    // 4xx here would send an operator to fix their request while real damage sits on the host.
+    for slot in 0..=1 {
+        std::fs::write(
+            fixture.entry.join(format!("metadata.{slot}.json")),
+            b"not-json",
+        )
+        .expect("journal garbage writes");
+    }
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/model-cache/pin",
+        json!({ "cacheKey": fixture.cache_key, "pinned": false }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a damaged journal is the host's fault, not the caller's"
     );
 }
 

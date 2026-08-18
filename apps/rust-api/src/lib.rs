@@ -1296,6 +1296,7 @@ fn create_app_with_state_mode(
         thumbnail_generation_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         workflow_strip_slots: Arc::new(tokio::sync::Semaphore::new(WORKFLOW_STRIP_SLOTS)),
         auth_throttle: Arc::new(AuthThrottle::default()),
+        resolved_cache_session: Arc::new(AsyncMutex::new(None)),
         manifest_cache: Arc::new(Mutex::new(ManifestCache::default())),
         manifest_write_locks: Arc::new(Mutex::new(HashMap::new())),
         model_catalog_cache: Arc::new(ModelCatalogCache::default()),

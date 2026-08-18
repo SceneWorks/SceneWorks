@@ -85,6 +85,102 @@ export function canHoldLocalCopy(model) {
   );
 }
 
+// ---- entry states ----------------------------------------------------------------
+
+// The store's typed entry states (`ResolvedCacheEntryState`), verbatim. Nothing here invents a
+// state or re-derives one; this module only says what each one MEANS to a person.
+export const CACHE_ENTRY_STATE = {
+  PENDING: "pending",
+  MATERIALIZING: "materializing",
+  INTERRUPTED: "interrupted",
+  COMPLETE: "complete",
+  CORRUPT: "corrupt",
+  EVICTING: "evicting",
+};
+
+// The states the store is still moving on its own. A screen showing one of these has to keep
+// looking, because the entry it is describing will change without any user action.
+const TRANSITIONAL_STATES = new Set([
+  CACHE_ENTRY_STATE.PENDING,
+  CACHE_ENTRY_STATE.MATERIALIZING,
+  CACHE_ENTRY_STATE.EVICTING,
+]);
+
+export function isTransitionalEntry(entry) {
+  return TRANSITIONAL_STATES.has(entry?.state);
+}
+
+// The bounded convergence refresh both cache surfaces run, defined once so they cannot drift.
+//
+// The cadence is slow on purpose: a status read is one journal listing, and materializing a
+// multi-GB bundle takes minutes, so a faster poll would buy nothing but load. The cap is what
+// makes it BOUNDED — after this many consecutive refreshes with an entry still in flight, the
+// screen stops re-reading rather than polling forever behind a user who has walked away.
+export const CACHE_CONVERGENCE_POLL_MS = 3000;
+export const MAX_CACHE_CONVERGENCE_POLLS = 40;
+
+// True when the snapshot contains at least one entry the store is still working on — the condition
+// under which a screen must re-read rather than freeze on what it first saw.
+export function hasTransitionalEntries(status) {
+  return Array.isArray(status?.entries) && status.entries.some(isTransitionalEntry);
+}
+
+// What one entry's state means, and what — if anything — the person should do about it.
+//
+// `progress` marks the states that resolve on their own, so the screen keeps refreshing.
+// `failure` marks the states nothing will fix by itself: those get an ACTIONABLE sentence naming
+// the remedy, because a bare "interrupted" tells a user neither whether the model still works nor
+// what to press. An unrecognized state is labelled as unrecognized rather than being folded into a
+// reassuring one — the same rule the availability badge follows.
+export function describeEntryState(entry) {
+  switch (entry?.state) {
+    case CACHE_ENTRY_STATE.COMPLETE:
+      return {
+        progress: false,
+        failure: false,
+        text: entry.pinned
+          ? "Kept — never removed automatically"
+          : "Can be removed automatically when space is needed",
+      };
+    case CACHE_ENTRY_STATE.PENDING:
+      return {
+        progress: true,
+        failure: false,
+        text: "Queued — SceneWorks is about to copy this model.",
+      };
+    case CACHE_ENTRY_STATE.MATERIALIZING:
+      return {
+        progress: true,
+        failure: false,
+        text: "Copying now — this becomes usable when the copy finishes.",
+      };
+    case CACHE_ENTRY_STATE.EVICTING:
+      return {
+        progress: true,
+        failure: false,
+        text: "Removing now — SceneWorks is reclaiming this copy's space.",
+      };
+    case CACHE_ENTRY_STATE.INTERRUPTED:
+      return {
+        progress: false,
+        failure: true,
+        text: "The copy stopped before it finished, so it can't be used. SceneWorks starts it again the next time it loads this model — or remove it now to reclaim the space.",
+      };
+    case CACHE_ENTRY_STATE.CORRUPT:
+      return {
+        progress: false,
+        failure: true,
+        text: "This copy is damaged and can't be used or repaired. Remove it to reclaim the space; the model still loads from its own library.",
+      };
+    default:
+      return {
+        progress: false,
+        failure: true,
+        text: `This build doesn’t recognize the state “${entry?.state}”, so it can’t say whether this copy is usable. Removing it is safe — the original files aren’t touched.`,
+      };
+  }
+}
+
 // ---- transport ------------------------------------------------------------------
 
 export function fetchModelCache() {

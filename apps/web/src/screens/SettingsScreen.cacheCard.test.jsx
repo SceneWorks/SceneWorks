@@ -123,6 +123,8 @@ describe("SettingsScreen local model copies card (sc-19711)", () => {
     delete window.__TAURI__;
     vi.doUnmock("../api.js");
     vi.restoreAllMocks();
+    // Faked per-test by the convergence cases only; restored here either way.
+    vi.useRealTimers();
   });
 
   async function render() {
@@ -236,6 +238,24 @@ describe("SettingsScreen local model copies card (sc-19711)", () => {
     expect(container.textContent).not.toContain("Can be reclaimed");
   });
 
+  // The configured external library location. Every other number in this card is relative to it,
+  // and it is what the same-volume warning below tells the user to move — so it has to be on
+  // screen. The card must show the API's own `sourceLibraryPath`, because that is the exact path
+  // the status read compared volumes against; anything re-derived here could name a location the
+  // comparison never used.
+  it("shows the configured external library location", async () => {
+    await render();
+    const inset = container.querySelector(".settings-inset");
+    expect(inset.textContent).toContain("Library");
+    expect(inset.textContent).toContain("/Volumes/Models/huggingface/hub");
+  });
+
+  it("shows whatever library location the API reports, not a fixed one", async () => {
+    status = cacheStatus({ sourceLibraryPath: "/mnt/nas/hf/hub" });
+    await render();
+    expect(container.querySelector(".settings-inset").textContent).toContain("/mnt/nas/hf/hub");
+  });
+
   // Same-volume is not an error, but it silently removes the entire point of the feature.
   it("states plainly that a same-volume configuration buys nothing", async () => {
     status = cacheStatus({ sourceVolumeRelation: "same" });
@@ -243,6 +263,9 @@ describe("SettingsScreen local model copies card (sc-19711)", () => {
     const notice = container.querySelector(".settings-notice");
     expect(notice.textContent).toContain("same disk as the model library");
     expect(notice.textContent).toContain("neither a disconnect nor a slow drive");
+    // "Point the model library at a different volume" is not actionable to someone who cannot see
+    // where it currently points, so the warning names the configured location.
+    expect(notice.textContent).toContain("/Volumes/Models/huggingface/hub");
   });
 
   it("shows no same-volume warning when the volumes differ", async () => {
@@ -425,6 +448,53 @@ describe("SettingsScreen local model copies card (sc-19711)", () => {
     const region = container.querySelector(".settings-status");
     expect(region.getAttribute("role")).toBe("status");
     expect(region.getAttribute("aria-live")).toBe("polite");
+  });
+
+  // ---- convergence while the store is working --------------------------------------
+  //
+  // Storage totals move as a promotion runs. Freezing them at whatever the screen opened on would
+  // show a user a number that is already wrong, so the card re-reads while (and only while) the
+  // store still has an entry in flight.
+
+  async function tick(times = 1) {
+    for (let i = 0; i < times; i += 1) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      await settle();
+    }
+  }
+
+  it("re-reads the storage totals while a copy is materializing, then stops", async () => {
+    vi.useFakeTimers();
+    status = cacheStatus({
+      entries: [{ cacheKey: "sha256:aaa", state: "materializing", bytes: 0, pinned: false }],
+      usedBytes: 0,
+      entryCount: 1,
+    });
+    await render();
+    expect(cacheReads).toBe(1);
+    expect(container.querySelector(".settings-inset").textContent).toContain("0 B of 64.0 GiB");
+
+    status = cacheStatus({
+      entries: [{ cacheKey: "sha256:aaa", state: "complete", bytes: 12 * GIB, pinned: false }],
+      usedBytes: 12 * GIB,
+      entryCount: 1,
+    });
+    await tick();
+    expect(cacheReads).toBe(2);
+    expect(container.querySelector(".settings-inset").textContent).toContain("12.0 GiB of");
+
+    // Terminal: the timer must be gone, not merely quiet.
+    await tick(4);
+    expect(cacheReads).toBe(2);
+  });
+
+  it("never arms a refresh for a settled cache", async () => {
+    vi.useFakeTimers();
+    await render();
+    await tick(5);
+    expect(cacheReads).toBe(1);
   });
 });
 

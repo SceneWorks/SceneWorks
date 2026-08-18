@@ -32,7 +32,7 @@ use axum::extract::State;
 use axum::Json;
 use sceneworks_core::model_artifacts::resolved_cache::{
     ManualRemovalPins, ResolvedCacheEntryState, ResolvedCacheEntrySummary, ResolvedCacheError,
-    ResolvedCacheStore, SourceVolumeRelation,
+    ResolvedCacheErrorKind, ResolvedCacheStore, SourceVolumeRelation,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -162,8 +162,17 @@ pub(crate) struct RemovalOutcomeDto {
     pub(crate) source_unavailable_warning: Option<String>,
 }
 
+/// Report a store failure as what it actually is. The store attributes its own errors
+/// ([`ResolvedCacheErrorKind`]) rather than leaving the HTTP layer to guess from message text, so
+/// a lock that could not be taken, a journal that could not be read, or a host clock that failed
+/// answers 500 — a caller retrying those is right to, and telling them their request was bad would
+/// send them to fix the wrong thing. Only a malformed cache key or an entry the store does not
+/// hold is the caller's to correct.
 fn cache_error(error: ResolvedCacheError) -> ApiError {
-    ApiError::bad_request(error.to_string())
+    match error.kind() {
+        ResolvedCacheErrorKind::Request => ApiError::bad_request(error.to_string()),
+        ResolvedCacheErrorKind::Internal => ApiError::internal(error.to_string()),
+    }
 }
 
 /// Map every entry's primary repository to the catalog model ids that own it. One pass over the
@@ -309,8 +318,17 @@ pub(crate) async fn get_model_cache(
     }))
 }
 
-/// Open the store for a mutating operation. Never creates the cache root as a side effect of a
+/// The store handle for a mutating operation. Never creates the cache root as a side effect of a
 /// pin or a removal: with no store there is nothing to act on.
+///
+/// The handle is opened at most ONCE per API process and then shared. `ResolvedCacheStore::open`
+/// claims a session slot — `sessions/<id>/` plus its exclusive lock — which the store's design
+/// treats as belonging to a process for that process's lifetime; a later `recover()` reclaims the
+/// slots of processes that are gone. Opening one per request would strand a new slot on every UI
+/// action, so the session is cached in [`AppState`] under an async mutex that also serializes the
+/// cold open, meaning two concurrent first requests take one slot between them rather than two.
+/// Nothing about the store's locking is relaxed here: the same exclusive session lock is taken,
+/// and every per-entry metadata lock is still acquired inside each operation.
 async fn open_mutable(state: &AppState) -> Result<ResolvedCacheStore, ApiError> {
     let data_dir = state.settings.data_dir.clone();
     if !data_dir.join("models").join("resolved").exists() {
@@ -318,10 +336,16 @@ async fn open_mutable(state: &AppState) -> Result<ResolvedCacheStore, ApiError> 
             "No local model cache exists on this machine.",
         ));
     }
-    tokio::task::spawn_blocking(move || ResolvedCacheStore::open(&data_dir))
+    let mut session = state.resolved_cache_session.lock().await;
+    if let Some(store) = session.as_ref() {
+        return Ok(store.clone());
+    }
+    let store = tokio::task::spawn_blocking(move || ResolvedCacheStore::open(&data_dir))
         .await
         .map_err(|error| ApiError::internal(format!("resolved-cache open task failed: {error}")))?
-        .map_err(cache_error)
+        .map_err(cache_error)?;
+    *session = Some(store.clone());
+    Ok(store)
 }
 
 pub(crate) async fn preview_model_cache_removal(

@@ -29,6 +29,7 @@ import {
   policyNeedsRestart,
   secondsToDays,
 } from "../modelCache.js";
+import { useCacheConvergence } from "../hooks/useCacheConvergence.js";
 import { WorkPanel } from "../components/WorkPanel.jsx";
 import { Icon } from "../components/Icons.jsx";
 import { ModeTabs } from "../components/generationStudio.jsx";
@@ -128,9 +129,10 @@ export function SettingsScreen({
   const defaultQualityRequest = useRef(0);
   // Resolved-model hot cache (epic 19703, sc-19711). `cache` is the API's authoritative snapshot:
   // the policy the RUNNING sidecars captured at spawn, plus the store's own usage accounting.
-  // Deliberately NOT polled — a journal listing is proportional to the number of cached bundles,
-  // and a timer over it is exactly the per-row read cost sc-19708 removed from the catalog. It is
-  // fetched on mount and re-fetched after any action that could have changed it.
+  // Fetched on mount, re-fetched after any action that could have changed it, and re-read on a
+  // bounded cadence ONLY while the store still has an entry in flight — so the storage totals
+  // converge while a promotion runs, and a settled cache is still read exactly once. A timer that
+  // ran unconditionally would put back the per-row read cost sc-19708 removed from the catalog.
   const [cache, setCache] = useState(null);
   const [cacheError, setCacheError] = useState("");
   // Draft limit/interval so typing doesn't fire a save per keystroke; committed on blur / Apply.
@@ -187,6 +189,10 @@ export function SettingsScreen({
   useEffect(() => {
     refreshCache();
   }, [refreshCache]);
+
+  // Bounded convergence refresh — the same one the Model Manager runs, so the two surfaces cannot
+  // disagree about when the app stops polling. It re-reads only while an entry is still moving.
+  useCacheConvergence(cache, refreshCache);
 
   // The persisted (shell-owned) policy seeds the editable fields. On a non-desktop deployment
   // there is no shell to ask, so the running policy is both what is persisted and what applies.
@@ -791,17 +797,34 @@ export function SettingsScreen({
                   <span>Kept</span>
                   <span className="settings-mono">{formatBytes(cache.pinnedBytes)}</span>
                 </div>
+                {/* The external library these copies are made FROM. It is the location every other
+                    line here is relative to — and the one the same-volume warning below is about —
+                    so a user who has to act on that warning can see what is actually configured
+                    instead of hunting for "the model library". Reported by the API rather than
+                    re-derived here: the status read compares against this exact path, so showing
+                    anything else could name a location the comparison never used. */}
+                {cache.sourceLibraryPath ? (
+                  <div className="settings-kv">
+                    <span>Library</span>
+                    <span className="settings-mono" title={cache.sourceLibraryPath}>
+                      {cache.sourceLibraryPath}
+                    </span>
+                  </div>
+                ) : null}
               </div>
             ) : null}
             {/* Same-volume is not an error, but it silently removes the whole point of the
-                feature, so it is stated plainly rather than left for the user to infer. */}
+                feature, so it is stated plainly rather than left for the user to infer — and it
+                names the configured location, because "point the model library elsewhere" is not
+                an actionable instruction to someone who cannot see where it currently points. */}
             {cache?.sourceVolumeRelation === "same" ? (
               <div className="settings-notice">
                 <Icon.Warning size={16} />
                 <span>
-                  Local copies are on the same disk as the model library, so they protect against
-                  neither a disconnect nor a slow drive — they only use extra space. Point the
-                  model library at a different volume to get the benefit.
+                  Local copies are on the same disk as the model library
+                  {cache.sourceLibraryPath ? ` (${cache.sourceLibraryPath})` : ""}, so they protect
+                  against neither a disconnect nor a slow drive — they only use extra space. Point
+                  the model library at a different volume to get the benefit.
                 </span>
               </div>
             ) : null}

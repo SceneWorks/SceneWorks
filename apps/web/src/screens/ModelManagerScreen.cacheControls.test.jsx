@@ -163,6 +163,9 @@ describe("ModelManagerScreen local model copies (sc-19711)", () => {
     container.remove();
     vi.doUnmock("../api.js");
     vi.restoreAllMocks();
+    // Timers are faked per-test by the convergence cases only; unmount above clears any pending
+    // refresh, and this returns the shared environment to real timers either way.
+    vi.useRealTimers();
   });
 
   // Retained so a test can re-render the same screen under a changed backend without rebuilding
@@ -274,7 +277,7 @@ describe("ModelManagerScreen local model copies (sc-19711)", () => {
   it("disables Keep locally for an entry that is not ready, but still allows removal", async () => {
     status = cacheStatus([cacheEntry({ state: "materializing" })]);
     await render([externalModel()]);
-    expect(section().textContent).toContain("Not ready to use (materializing)");
+    expect(section().textContent).toContain("Copying now");
     expect(copyButton("Keep locally").disabled).toBe(true);
     expect(copyButton("Remove local copy").disabled).toBe(false);
   });
@@ -515,5 +518,137 @@ describe("ModelManagerScreen local model copies (sc-19711)", () => {
       externalModel({ id: "y", name: "Yet Another", family: "flux" }),
     ]);
     expect(cacheReads).toBe(1);
+  });
+
+  // ---- convergence: progress and actionable failures -------------------------------
+  //
+  // The scope this section closes: a materializing entry used to render one static line and stay
+  // there for as long as the screen was open, so nothing the store did was ever visible. The
+  // status endpoint already reports per-entry states from the journal; these tests hold the UI to
+  // reflecting them as they change, and to saying something actionable when they stop changing.
+
+  // Advance the bounded refresh by one tick and let the resulting read settle.
+  async function tick(times = 1) {
+    for (let i = 0; i < times; i += 1) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3000);
+      });
+      await settle();
+    }
+  }
+
+  it("converges a materializing entry to its terminal state while the screen stays open", async () => {
+    vi.useFakeTimers();
+    status = cacheStatus([cacheEntry({ state: "materializing" })]);
+    await render([externalModel()]);
+    expect(section().textContent).toContain("Copying now");
+    expect(cacheReads).toBe(1);
+
+    // The store finishes. Nothing the user does re-reads — the screen has to notice on its own.
+    status = cacheStatus([cacheEntry({ state: "complete" })]);
+    await tick();
+    expect(cacheReads).toBe(2);
+    expect(section().textContent).toContain("Can be removed automatically");
+    expect(section().textContent).not.toContain("Copying now");
+    // And once it is terminal, the refresh STOPS: an all-settled cache costs one read, not a
+    // permanent timer.
+    await tick(3);
+    expect(cacheReads).toBe(2);
+  });
+
+  // The keep control is meaningless on an unusable bundle, so it must un-disable the moment the
+  // entry becomes complete — the same convergence, seen from the affordance side.
+  it("re-enables Keep locally once the copy finishes", async () => {
+    vi.useFakeTimers();
+    status = cacheStatus([cacheEntry({ state: "materializing" })]);
+    await render([externalModel()]);
+    expect(copyButton("Keep locally").disabled).toBe(true);
+    status = cacheStatus([cacheEntry({ state: "complete" })]);
+    await tick();
+    expect(copyButton("Keep locally").disabled).toBe(false);
+  });
+
+  // A settled cache must never arm the timer at all.
+  it("never re-reads while every entry is terminal", async () => {
+    vi.useFakeTimers();
+    await render([externalModel()]);
+    await tick(5);
+    expect(cacheReads).toBe(1);
+  });
+
+  // An entry being reclaimed is also in flight, and its disappearance is the convergence.
+  it("converges an evicting entry to gone", async () => {
+    vi.useFakeTimers();
+    status = cacheStatus([cacheEntry({ state: "evicting" })]);
+    await render([externalModel()]);
+    expect(section().textContent).toContain("Removing now");
+    status = cacheStatus([]);
+    await tick();
+    expect(section().textContent).toContain("No local copy yet");
+  });
+
+  // Failure states are terminal, so they must NOT poll — and they must say what to do, not just
+  // name the state. This is the half a poll alone would not fix.
+  it.each([
+    ["interrupted", "remove it now to reclaim the space"],
+    ["corrupt", "can't be used or repaired"],
+  ])("renders %s as an actionable failure and stops refreshing", async (state, remedy) => {
+    vi.useFakeTimers();
+    status = cacheStatus([cacheEntry({ state })]);
+    await render([externalModel()]);
+    const note = container.querySelector(".model-local-copy-failure");
+    expect(note, "a failed copy is marked as a failure, not muted detail").toBeTruthy();
+    expect(note.textContent).toContain(remedy);
+    // Removal stays available — clearing the residue is exactly the remedy the line names.
+    expect(copyButton("Remove local copy").disabled).toBe(false);
+    await tick(3);
+    expect(cacheReads).toBe(1);
+  });
+
+  // "Check again" is the manual half: it re-reads immediately rather than making the user wait out
+  // the cadence, and it is only offered while something is actually in flight.
+  it("offers a manual re-read only while a copy is in flight", async () => {
+    status = cacheStatus([cacheEntry({ state: "materializing" })]);
+    await render([externalModel()]);
+    const button = [...container.querySelectorAll(".model-local-copy-head button")].find(
+      (node) => node.textContent.trim() === "Check again",
+    );
+    expect(button).toBeTruthy();
+    status = cacheStatus([cacheEntry({ state: "complete" })]);
+    await click(button);
+    await settle();
+    expect(cacheReads).toBe(2);
+    expect(section().textContent).toContain("Can be removed automatically");
+    expect(
+      [...container.querySelectorAll(".model-local-copy-head button")].find(
+        (node) => node.textContent.trim() === "Check again",
+      ),
+      "a settled cache offers no refresh affordance",
+    ).toBeFalsy();
+  });
+
+  // The refresh is BOUNDED. An entry that never converges — a worker that died mid-copy — must not
+  // leave the screen re-reading for the life of the session, and the screen must admit it stopped
+  // rather than leave a "checking…" line that has quietly stopped meaning anything.
+  it("stops refreshing a wedged copy and says so", async () => {
+    vi.useFakeTimers();
+    const { MAX_CACHE_CONVERGENCE_POLLS } = await import("../modelCache.js");
+    status = cacheStatus([cacheEntry({ state: "materializing" })]);
+    await render([externalModel()]);
+    expect(section().textContent).toContain("Checking for changes");
+
+    await tick(MAX_CACHE_CONVERGENCE_POLLS);
+    expect(cacheReads).toBe(1 + MAX_CACHE_CONVERGENCE_POLLS);
+    expect(section().textContent).toContain("stopped checking automatically");
+
+    // Bounded means bounded: further time buys no further reads.
+    await tick(5);
+    expect(cacheReads).toBe(1 + MAX_CACHE_CONVERGENCE_POLLS);
+    // The manual affordance survives, so the user is not stranded.
+    expect(
+      [...container.querySelectorAll(".model-local-copy-head button")].find(
+        (node) => node.textContent.trim() === "Check again",
+      ),
+    ).toBeTruthy();
   });
 });
