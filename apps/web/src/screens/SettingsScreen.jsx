@@ -191,11 +191,18 @@ export function SettingsScreen({
   // The persisted (shell-owned) policy seeds the editable fields. On a non-desktop deployment
   // there is no shell to ask, so the running policy is both what is persisted and what applies.
   const persistedPolicy = isDesktop ? (settings?.resolvedCache ?? null) : (cache?.policy ?? null);
+  // Re-seed only when the persisted VALUES change, never on the containing object's identity:
+  // `settings` is a fresh object after every `get_app_settings`, so depending on the policy object
+  // would clobber whatever the user is mid-way through typing on each refresh. The primitives are
+  // lifted into their own bindings so that intent survives `react-hooks/exhaustive-deps` instead
+  // of being expressed as a dependency list the rule can't verify.
+  const persistedMaxBytes = persistedPolicy?.maxBytes;
+  const persistedInactivitySeconds = persistedPolicy?.inactivitySeconds;
   useEffect(() => {
-    if (!persistedPolicy) return;
-    setCacheLimitGb(String(Math.round(bytesToGib(persistedPolicy.maxBytes))));
-    setCacheDays(String(Math.round(secondsToDays(persistedPolicy.inactivitySeconds))));
-  }, [persistedPolicy?.maxBytes, persistedPolicy?.inactivitySeconds]);
+    if (persistedMaxBytes === undefined || persistedInactivitySeconds === undefined) return;
+    setCacheLimitGb(String(Math.round(bytesToGib(persistedMaxBytes))));
+    setCacheDays(String(Math.round(secondsToDays(persistedInactivitySeconds))));
+  }, [persistedMaxBytes, persistedInactivitySeconds]);
 
   // Poll live MLX memory telemetry while the GPU card is visible (epic 7819, sc-7825). macOS-only —
   // the worker only publishes the snapshot on the MLX path; elsewhere the command returns null.

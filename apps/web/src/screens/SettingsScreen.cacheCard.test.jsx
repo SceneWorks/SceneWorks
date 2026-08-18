@@ -188,6 +188,25 @@ describe("SettingsScreen local model copies card (sc-19711)", () => {
     expect(inset.textContent).toContain("3");
   });
 
+  // The status read is deliberately NOT polled: a journal listing is proportional to the number of
+  // cached bundles, and a timer over it is exactly the per-row read cost sc-19708 removed. It is
+  // read on mount, and again only after an action that could have changed it.
+  it("reads status once on mount and again only after a commit", async () => {
+    await render();
+    expect(cacheReads).toBe(1);
+    await settle();
+    expect(cacheReads).toBe(1);
+    await commitField(limitInput(), "128");
+    expect(cacheReads).toBe(2);
+  });
+
+  // A refused input changes nothing, so it must not cost a re-read either.
+  it("does not re-read status when a commit is refused", async () => {
+    await render();
+    await commitField(limitInput(), "0");
+    expect(cacheReads).toBe(1);
+  });
+
   it("seeds the editable fields from the SHELL-persisted policy, not the running one", async () => {
     // Persisted 32 GiB / 7 days; the API is still running the old 64 GiB / 14 days.
     shellSettings = { dataDir: "/data", resolvedCache: policy({ maxBytes: 32 * GIB, inactivitySeconds: 7 * DAY }) };

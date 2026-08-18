@@ -283,6 +283,30 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
             entrypoint: TypedResolverEntrypoint::SourceLibrary,
         },
     },
+    // sc-19711: the resolved-model hot cache's read + control surface. It reads the source library
+    // ONLY to report its path and to compare its volume against the local tier's — it never
+    // resolves weights for a load, so it constructs no model root of its own and goes through the
+    // same shared source-library contract. Every category is listed because the resolved cache is
+    // artifact-shape agnostic: whatever the shared resolver materializes, this surface reports and
+    // can remove.
+    ModelConsumerInventoryEntry {
+        source_files: &["apps/rust-api/src/model_cache.rs"],
+        categories: &[
+            Category::Image,
+            Category::Video,
+            Category::Audio,
+            Category::CaptioningUtility,
+            Category::Training,
+            Category::LoraControl,
+            Category::Primary,
+            Category::OptionalComponent,
+            Category::CoRequisite,
+            Category::ImportedConverted,
+        ],
+        resolution: Resolution::SharedContract {
+            entrypoint: TypedResolverEntrypoint::SourceLibrary,
+        },
+    },
 ];
 
 pub const EXPLICITLY_UNSUPPORTED_ARTIFACTS: &[ModelConsumerInventoryEntry] = &[
