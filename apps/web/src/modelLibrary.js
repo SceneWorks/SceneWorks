@@ -48,6 +48,7 @@ export function modelLibraryContextForModel(model) {
     configuredLibraryPath: resolution.configuredLibraryPath ?? null,
     expectedLibraryPath: binding?.canonicalPath ?? null,
     expectedVolumeId: binding?.physicalIdentity?.volumeId ?? null,
+    libraryPresent: resolution.libraryPresent === true,
   };
 }
 

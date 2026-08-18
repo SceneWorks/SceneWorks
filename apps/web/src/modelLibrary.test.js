@@ -79,7 +79,16 @@ describe("modelLibraryContext", () => {
       modelName: "Z-Image",
       expectedLibraryPath: "/Volumes/Models/hf/hub",
       expectedVolumeId: "macos-volume:abc",
+      // Absent means "not present" — a stamped resolution from before this field existed must not
+      // read as a mismatched library.
+      libraryPresent: false,
     });
+    expect(
+      modelLibraryContextForModel({
+        ...row,
+        modelResolution: { ...row.modelResolution, libraryPresent: true },
+      }).libraryPresent,
+    ).toBe(true);
     // A complete local model is never prompted about.
     expect(
       modelLibraryUnavailable({ id: "local", modelAvailability: "local_ready" }),

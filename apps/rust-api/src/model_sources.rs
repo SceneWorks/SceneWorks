@@ -436,6 +436,9 @@ fn refresh_live_external_availability_blocking(
                 Some(binding.clone()),
                 resolution.requirements.clone(),
             )
+            // Present-but-mismatched vs disconnected drives a different prompt (sc-19709), and the
+            // catalog READ path has to make the same distinction the resolver does.
+            .with_library_present(resolution.configured_library_path.is_dir())
         };
         if let Some(object) = model.as_object_mut() {
             object.insert(

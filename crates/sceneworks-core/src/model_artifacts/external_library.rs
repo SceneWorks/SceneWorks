@@ -118,6 +118,14 @@ pub struct ModelResolution {
     pub expected_library: Option<ExternalLibraryBinding>,
     pub requirements: Vec<ExternalArtifactRequirement>,
     pub local_artifact: Option<ResolvedModelArtifact>,
+    /// The configured library root is a readable directory RIGHT NOW, while the model still reads
+    /// unavailable (sc-19709). That is the "present but the recorded identity disagrees" case — a
+    /// different volume mounted where the library used to be, or a binding that predates a move —
+    /// and it is not fixed by reconnecting anything, so the prompt leads with relocation instead.
+    ///
+    /// `serde(default)` keeps resolutions stamped into jobs before this field readable.
+    #[serde(default)]
+    pub library_present: bool,
 }
 
 impl ModelResolution {
@@ -134,6 +142,7 @@ impl ModelResolution {
             expected_library: Some(expected_library),
             requirements,
             local_artifact: None,
+            library_present: false,
         })
     }
 
@@ -149,6 +158,7 @@ impl ModelResolution {
             expected_library,
             requirements,
             local_artifact: None,
+            library_present: false,
         }
     }
 
@@ -172,7 +182,16 @@ impl ModelResolution {
             expected_library: None,
             requirements,
             local_artifact: None,
+            library_present: false,
         })
+    }
+
+    /// Mark an unavailable resolution as one whose configured library root IS readable right now —
+    /// the "present but the recorded identity disagrees" case, which reconnecting cannot fix.
+    #[must_use]
+    pub fn with_library_present(mut self, present: bool) -> Self {
+        self.library_present = present;
+        self
     }
 
     pub fn local_ready(artifact: ResolvedModelArtifact) -> Result<Self, ExternalLibraryError> {
@@ -191,6 +210,7 @@ impl ModelResolution {
             expected_library: None,
             requirements: Vec::new(),
             local_artifact: Some(artifact),
+            library_present: false,
         })
     }
 
@@ -332,8 +352,17 @@ impl ExternalLibraryBindingStore {
         if let Some(binding) = self.read_unlocked()? {
             let probe = probe_binding(configured_path, &binding);
             if probe.status == ExternalLibraryProbeStatus::Available {
+                // The library is reachable under a name the ledger does not record — the operator
+                // configured the drive directly where the binding remembers the symlink, or vice
+                // versa. Canonical path and volume identity already proved it is the SAME library,
+                // so record the name in use. Nothing else about the binding changes (not the
+                // canonical path, not the identity, not `bound_at`): this is the ledger catching up
+                // with an alias, not a re-bind, and it keeps the `configured_path` invariant that
+                // stamped resolutions and the worker's pre-loader guard check.
+                let binding = self.realias_unlocked(binding, configured_path)?;
                 validate_requirements_at_root(&binding.canonical_path, requirements)?;
                 self.remember_validated_closure_unlocked(requirements)?;
+                return Ok((binding, probe));
             }
             return Ok((binding, probe));
         }
@@ -546,6 +575,26 @@ impl ExternalLibraryBindingStore {
             }
         }
         Ok(probe_before)
+    }
+
+    /// Record the name the library is currently configured as, when it differs from the one the
+    /// ledger holds and the probe has ALREADY proven both name the same directory on the same
+    /// volume. A no-op when the names match, which is the overwhelmingly common case.
+    fn realias_unlocked(
+        &self,
+        binding: ExternalLibraryBinding,
+        configured_path: &Path,
+    ) -> Result<ExternalLibraryBinding, ExternalLibraryError> {
+        let configured_path = absolute_lexical(configured_path)?;
+        if configured_path == binding.configured_path {
+            return Ok(binding);
+        }
+        let realiased = ExternalLibraryBinding {
+            configured_path,
+            ..binding
+        };
+        self.write_unlocked(&realiased)?;
+        Ok(realiased)
     }
 
     fn ledger_path(&self) -> PathBuf {
@@ -1118,6 +1167,10 @@ pub struct ExternalLibraryUnavailableContext {
     pub configured_library_path: PathBuf,
     pub expected_library_path: Option<PathBuf>,
     pub expected_volume_id: Option<String>,
+    /// The configured library is present and browsable, but its identity disagrees with the
+    /// recording. The prompt leads with "choose the library" rather than "reconnect the drive",
+    /// because there is nothing to reconnect.
+    pub library_present: bool,
 }
 
 impl ExternalLibraryUnavailableContext {
@@ -1140,10 +1193,24 @@ impl ExternalLibraryUnavailableContext {
                 .expected_library
                 .as_ref()
                 .map(|binding| binding.physical_identity.volume_id.clone()),
+            library_present: resolution.library_present,
         }
     }
 }
 
+/// Live identity probe of the configured library against its durable binding.
+///
+/// The authority is the CANONICAL path plus the volume's physical identity — never the lexical
+/// string the library happens to be configured as. Those two prove "the same directory on the same
+/// volume", and nothing else does: `~/.cache/huggingface/hub` symlinked to
+/// `/Volumes/Models/huggingface/hub` is one library reached by two names, and rejecting the second
+/// name on the lexical difference alone was a pure false negative that pinned every receipt-backed
+/// model to `installed_external_unavailable` — and every other one back onto the download path —
+/// the moment an operator configured the drive directly instead of through the symlink (sc-19709).
+///
+/// It still fails closed where it must: a different canonical path is a different library, and the
+/// SAME canonical path on a different volume (a decoy remounted where the real drive was) is an
+/// identity mismatch, because the physical identity half of the comparison catches it.
 pub fn probe_binding(
     configured_path: &Path,
     binding: &ExternalLibraryBinding,
@@ -1152,13 +1219,6 @@ pub fn probe_binding(
         Ok(path) => path,
         Err(_) => return unknown_probe(),
     };
-    if configured_path != binding.configured_path {
-        return ExternalLibraryProbe {
-            status: ExternalLibraryProbeStatus::IdentityMismatch,
-            observed_path: None,
-            observed_identity: None,
-        };
-    }
     let canonical = match std::fs::canonicalize(&configured_path) {
         Ok(path) => path,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1648,6 +1708,7 @@ pub fn resolve_model_availability(
             expected_library: None,
             requirements: Vec::new(),
             local_artifact: None,
+            library_present: false,
         };
     }
     let not_installed = || {
@@ -1695,7 +1756,11 @@ pub fn resolve_model_availability(
             configured_library.to_path_buf(),
             Some(binding),
             requirements.to_vec(),
-        ),
+        )
+        // The probe was not Available, yet the root reads as a directory: the library is present
+        // and browsable but its recorded identity disagrees. Reconnecting cannot fix that, so the
+        // prompt has to offer the re-bind instead of asking for a drive that is already there.
+        .with_library_present(configured_library.is_dir()),
         // The bound volume is disconnected, but nothing proves THIS model was ever installed on
         // it (no receipt, no validated-closure record): it is a missing model, and its
         // established install path must stay reachable.
@@ -1735,6 +1800,7 @@ pub fn resolve_model_availability(
                     existing_binding,
                     requirements.to_vec(),
                 )
+                .with_library_present(configured_library.is_dir())
             }
         }
     }

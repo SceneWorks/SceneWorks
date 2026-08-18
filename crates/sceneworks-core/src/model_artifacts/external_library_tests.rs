@@ -836,3 +836,168 @@ fn a_resolution_stamped_before_relocation_no_longer_matches_the_binding() {
         vec![canonical_requirement_closure(&requirements)]
     );
 }
+
+/// The full identity matrix behind `probe_binding` (sc-19709). CANONICAL PATH + VOLUME IDENTITY are
+/// the authority; the lexical name the library is configured as is not.
+///
+/// The case that forced this: `~/.cache/huggingface/hub` is a symlink to a real external drive, so
+/// an operator who configures the drive directly — the intended way to use an external library —
+/// was handing the app a second NAME for the library it had already bound. Comparing names first
+/// made that an identity mismatch, which pinned every receipt-backed model to
+/// `installed_external_unavailable` and pushed every other one back onto the download path, for a
+/// library that was sitting right there.
+#[cfg(unix)]
+#[test]
+fn an_alias_of_the_bound_library_probes_available_while_real_changes_still_fail_closed() {
+    use std::os::unix::fs::symlink;
+    let temp = TempDir::new().unwrap();
+    let data = temp.path().join("data");
+    let real = temp.path().join("Volumes").join("Models").join("hub");
+    std::fs::create_dir_all(&real).unwrap();
+    seed_snapshot(&real, "owner/model", "model.safetensors");
+    let requirements = vec![requirement("owner/model", "model.safetensors")];
+    let store = ExternalLibraryBindingStore::new(&data).unwrap();
+    let (binding, _) = store.bind_or_probe_validated(&real, &requirements).unwrap();
+
+    // 1. Same lexical name → available (unchanged behavior).
+    assert_eq!(
+        probe_binding(&real, &binding).status,
+        ExternalLibraryProbeStatus::Available
+    );
+
+    // 2. DIFFERENT lexical name, same canonical path, same volume: the symlink an HF cache home
+    //    normally is. Provably the same directory, so it must be available.
+    let alias_home = temp.path().join("home-cache");
+    std::fs::create_dir_all(&alias_home).unwrap();
+    let alias = alias_home.join("hub");
+    symlink(&real, &alias).unwrap();
+    assert_eq!(
+        probe_binding(&alias, &binding).status,
+        ExternalLibraryProbeStatus::Available,
+        "a symlink to the bound library is the SAME library"
+    );
+
+    // 3. Different lexical name AND different canonical path → still a mismatch.
+    let other = temp.path().join("other").join("hub");
+    std::fs::create_dir_all(&other).unwrap();
+    assert_eq!(
+        probe_binding(&other, &binding).status,
+        ExternalLibraryProbeStatus::IdentityMismatch
+    );
+
+    // 4. Same canonical path, DIFFERENT recorded volume identity — the decoy remounted where the
+    //    real drive was. The identity half of the comparison is what catches this.
+    let decoy_binding = ExternalLibraryBinding {
+        physical_identity: ExternalLibraryPhysicalIdentity {
+            volume_id: "some-other-volume".to_owned(),
+            directory_id: binding.physical_identity.directory_id,
+        },
+        ..binding.clone()
+    };
+    assert_eq!(
+        probe_binding(&real, &decoy_binding).status,
+        ExternalLibraryProbeStatus::IdentityMismatch,
+        "the same path on a different volume must never read available"
+    );
+
+    // 5. A missing configured root is unavailable (disconnected), not a mismatch.
+    assert_eq!(
+        probe_binding(&temp.path().join("never-mounted"), &binding).status,
+        ExternalLibraryProbeStatus::Unavailable
+    );
+}
+
+/// End to end on the resolver: switching the configured library from the symlink to the drive it
+/// points at keeps every installed model ready, with no user action, no re-download, and no typed
+/// disconnect. The ledger quietly records the name now in use so the rest of the seam — stamped
+/// resolutions, the worker's pre-loader guard — keeps its `configured_path` invariant.
+#[cfg(unix)]
+#[test]
+fn configuring_the_drive_directly_instead_of_its_symlink_stays_ready() {
+    use std::os::unix::fs::symlink;
+    let temp = TempDir::new().unwrap();
+    let data = temp.path().join("data");
+    let real = temp.path().join("Volumes").join("Models").join("hub");
+    std::fs::create_dir_all(&real).unwrap();
+    seed_snapshot(&real, "owner/model", "model.safetensors");
+    let alias_home = temp.path().join("home-cache");
+    std::fs::create_dir_all(&alias_home).unwrap();
+    let alias = alias_home.join("hub");
+    symlink(&real, &alias).unwrap();
+    let requirements = vec![requirement("owner/model", "model.safetensors")];
+
+    // Bound while configured through the symlink, as an existing install would be.
+    let through_symlink = resolve_model_availability(&data, &alias, &requirements, true, &[]);
+    assert_eq!(
+        through_symlink.availability,
+        ModelAvailability::ExternalReady
+    );
+
+    // The operator now configures the drive directly. Same library, so it stays ready.
+    let direct = resolve_model_availability(&data, &real, &requirements, true, &[]);
+    assert_eq!(
+        direct.availability,
+        ModelAvailability::ExternalReady,
+        "the same library under its real path must not read as a different one"
+    );
+    direct.validate().unwrap();
+    let binding = direct.expected_library.as_ref().unwrap();
+    assert_eq!(
+        binding.configured_path, real,
+        "the ledger records the name now in use, so stamped resolutions stay valid"
+    );
+    assert_eq!(
+        binding.canonical_path,
+        std::fs::canonicalize(&real).unwrap()
+    );
+
+    // And back again: neither name is privileged.
+    let back = resolve_model_availability(&data, &alias, &requirements, true, &[]);
+    assert_eq!(back.availability, ModelAvailability::ExternalReady);
+}
+
+/// A library that is PRESENT but whose identity disagrees is a different problem from a
+/// disconnected one, and it is not fixed by reconnecting anything. The resolution says so, which is
+/// what lets the prompt lead with "choose the library" instead of "reconnect the drive" — the state
+/// was otherwise a dead end with no path out the user could find.
+#[test]
+fn a_present_but_mismatched_library_is_flagged_separately_from_a_disconnected_one() {
+    let temp = TempDir::new().unwrap();
+    let data = temp.path().join("data");
+    let library = temp.path().join("external-hf");
+    std::fs::create_dir_all(&library).unwrap();
+    seed_snapshot(&library, "owner/model", "model.safetensors");
+    let requirements = vec![requirement("owner/model", "model.safetensors")];
+    let ready = resolve_model_availability(&data, &library, &requirements, true, &[]);
+    assert_eq!(ready.availability, ModelAvailability::ExternalReady);
+
+    // Disconnected: the configured root is gone.
+    let detached = temp.path().join("detached");
+    std::fs::rename(&library, &detached).unwrap();
+    let disconnected = resolve_model_availability(&data, &library, &requirements, true, &[]);
+    assert_eq!(
+        disconnected.availability,
+        ModelAvailability::InstalledExternalUnavailable
+    );
+    assert!(
+        !disconnected.library_present,
+        "a disconnected drive is not present"
+    );
+
+    // Present but different: an unrelated directory now occupies the configured path.
+    std::fs::create_dir_all(&library).unwrap();
+    seed_snapshot(&library, "owner/model", "model.safetensors");
+    let mismatched = resolve_model_availability(&data, &library, &requirements, true, &[]);
+    assert_eq!(
+        mismatched.availability,
+        ModelAvailability::InstalledExternalUnavailable
+    );
+    assert!(
+        mismatched.library_present,
+        "a browsable library with the wrong identity must be distinguishable from a missing one"
+    );
+    assert!(
+        ExternalLibraryUnavailableContext::from_resolution("m", None, &mismatched).library_present,
+        "the typed context the prompt reads must carry the same distinction"
+    );
+}

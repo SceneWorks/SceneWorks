@@ -139,6 +139,34 @@ describe("ModelLibraryDialog", () => {
     );
   });
 
+  // A library that is present but whose identity disagrees is not fixed by reconnecting anything,
+  // so the prompt must not tell the user to. Same three exits; relocation leads.
+  it("leads with relocation when the library is present but is not the recorded one", async () => {
+    const dialog = await render({
+      state: blocked({ context: { ...CONTEXT, libraryPresent: true } }),
+    });
+    expect(dialog.textContent).toContain("is on a different model library");
+    expect(dialog.textContent).toContain("point SceneWorks at the library holding your models");
+    expect(dialog.textContent).not.toContain("reconnect the drive");
+    const named = buttons(dialog);
+    expect(named["Choose a different library location"].className).toContain(
+      "primary-action",
+    );
+    expect(named["Connect drive and retry"].className).not.toContain("primary-action");
+    // Retrying is still offered — it is simply no longer the recommended answer.
+    expect(named["Connect drive and retry"]).toBeTruthy();
+  });
+
+  it("keeps reconnect as the lead when the library is genuinely disconnected", async () => {
+    const dialog = await render({ state: blocked() });
+    expect(dialog.textContent).toContain("needs its model library");
+    const named = buttons(dialog);
+    expect(named["Connect drive and retry"].className).toContain("primary-action");
+    expect(named["Choose a different library location"].className).not.toContain(
+      "primary-action",
+    );
+  });
+
   it("replaces the relocate action with server guidance when relocation is not this app's to do", async () => {
     const dialog = await render({ state: blocked(), canRelocate: false });
     expect(Object.keys(buttons(dialog))).toEqual([
