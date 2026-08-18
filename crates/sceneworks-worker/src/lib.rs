@@ -379,6 +379,13 @@ mod ltx_eros_gpu_smoke;
 // hardware evidence backing `macOnly: false` / `candle_routed = true`.
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod sana_candle_gpu_smoke;
+// Hardware-gated evidence for the CUDA primary-context lease the generator cache takes around a
+// cold load. Test-only + candle-only; proves an unbound thread cannot read device memory at all,
+// that the lease makes the pre-load snapshot readable, and that releasing it destroys the context —
+// the three facts `generator_cache::bind_backend_load_context` is built on, none of which a unit
+// seam can see (the seams stub both helpers away).
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod generator_cache_context_gpu_smoke;
 // Hardware-gated evidence that a FAILED `cuda_preflight` does not poison the process (sc-16260 AC 4).
 // Test-only + candle-only; hides the devices with `CUDA_VISIBLE_DEVICES=-1`, probes (must fail),
 // restores visibility and probes again in the SAME process — the exact move `recheck_gpu_health`
