@@ -44,7 +44,7 @@ import { useJobEvents } from "./hooks/useJobEvents.js";
 import { AppStaticContext, AppLiveContext } from "./context/AppContext.js";
 import { ScreenActiveContext } from "./context/ScreenActiveContext.js";
 import { DEFAULT_MAC_CAPABILITIES } from "./macGating.js";
-import { generationModelsForType } from "./modelEligibility.js";
+import { generationModelsForType, videoModelUsable } from "./modelEligibility.js";
 import { isAccentId } from "./accents.js";
 import { writeDefaultGenerationQuality } from "./generationQuality.js";
 import { persistNavigationPreferences, putUiPreferences } from "./uiPreferences.js";
@@ -1238,8 +1238,10 @@ export function App() {
   }, [models]);
   const videoModels = useMemo(() => {
     const items = generationModelsForType(models, "video");
-    return items.length || models.length ? items : fallbackModels.filter((model) => model.type === "video");
-  }, [models]);
+    return items.length || models.length
+      ? items
+      : fallbackModels.filter((model) => videoModelUsable(model, macCapabilities));
+  }, [models, macCapabilities]);
   // Audio models (epic 13400) — same live-catalog-then-fallback split as image/video, consumed by
   // the Audio Studio (C0/C1). Per-mode eligibility comes from audioModelServesMode.
   const audioModels = useMemo(() => {
@@ -3204,6 +3206,31 @@ export function App() {
     [setError, token],
   );
 
+  // Move an explicit Queue-screen selection ahead of all work that was waiting when the action
+  // was submitted. The server ignores anything a worker claimed in the meantime, so this updates
+  // ordering without becoming a preemption control. Returned snapshots carry their durable
+  // queueRank and are upserted immediately; SSE mirrors the same update to other clients.
+  const prioritizeJobs = useCallback(
+    async (jobIds) => {
+      try {
+        const response = await apiFetch("/api/v1/jobs/prioritize", token, {
+          method: "POST",
+          body: JSON.stringify({ jobIds }),
+        });
+        const prioritized = response?.jobs ?? [];
+        if (prioritized.length) {
+          setJobs((items) => prioritized.reduce((acc, job) => upsertJobNewest(acc, job), items));
+        }
+        setError("");
+        return true;
+      } catch (err) {
+        setError(err.message);
+        return false;
+      }
+    },
+    [setError, token],
+  );
+
   // Clear a single completed item from the queue (issue #1556 / sc-12231) — the
   // per-card "×". The server soft-hides just this terminal job; drop it from the
   // live list on success so the card disappears immediately.
@@ -3342,6 +3369,7 @@ export function App() {
     jobAction,
     clearCompletedJobs,
     cancelPendingJobs,
+    prioritizeJobs,
     clearJob,
     createVqaJob,
     createInterleaveJob,
@@ -3497,7 +3525,7 @@ export function App() {
     createTimeline, saveTimeline, exportTimeline, extractTimelineFrame, queueTimelineVideoJob,
     assets, loadedAssetsProjectId, activeAssetLoadState, selectedAsset, selectedAssetId, setSelectedAssetId, deleteAsset, purgeAsset, moveAssetToLibrary, moveAssetToCharacter, importAsset,
     updateAssetStatus, updateAssetTags, latestImageAssets,
-    jobAction, clearCompletedJobs, cancelPendingJobs, clearJob, createVqaJob, createInterleaveJob, createPlaceholderJob,
+    jobAction, clearCompletedJobs, cancelPendingJobs, prioritizeJobs, clearJob, createVqaJob, createInterleaveJob, createPlaceholderJob,
     projectFilter, setProjectFilter, projects,
     createVideoJob, createVideoUpscaleJob, createImageJob, createAudioJob, refinePrompt, magicPrompt, imageCaption, imageDescribe, compareFaceLikeness, latestVideoAssets, recentImageAssets,
     recentVideoAssets, recentAudioAssets, studioLaunch,

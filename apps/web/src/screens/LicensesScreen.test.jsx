@@ -122,6 +122,29 @@ describe("LicensesScreen", () => {
     );
   });
 
+  it("binds the public LTX IC-LoRA rehost to its full license and immutable provenance", async () => {
+    await render();
+    const loras = [...container.querySelectorAll(".licenses-item")].find((button) =>
+      button.textContent.includes("LTX-2.3 IC-LoRA HDR and LipDub"),
+    );
+    expect(loras).toBeTruthy();
+    await act(async () => loras.click());
+    expect(container.querySelector(".licenses-text").textContent).toContain(
+      "LTX-2 Community License Agreement",
+    );
+
+    const noticeTab = [...container.querySelectorAll(".segmented-control button")].find((button) =>
+      button.textContent.includes("immutable provenance"),
+    );
+    expect(noticeTab).toBeTruthy();
+    await act(async () => noticeTab.click());
+    const notice = container.querySelector(".licenses-text").textContent;
+    expect(notice).toContain("ca287bbae91f939481b3b36764d1e8b2cfb6160b");
+    expect(notice).toContain("ltx-2.3-22b-ic-lora-hdr-0.9.safetensors");
+    expect(notice).toContain("ltx-2.3-22b-ic-lora-hdr-scene-emb.safetensors");
+    expect(notice).toContain("ltx-2.3-22b-ic-lora-dubit-0.9.safetensors");
+  });
+
   it("switches between a component's license documents", async () => {
     await render();
     // ffmpeg has two docs (notice + GPL text); pick the GPL tab.

@@ -4,36 +4,36 @@
   "summary": {
     "modelCount": 91,
     "importedFamilyCount": 3,
-    "cellCount": 871,
-    "mlxOnlyCellCount": 49,
+    "cellCount": 868,
+    "mlxOnlyCellCount": 60,
     "candleOnlyCellCount": 42,
-    "exceptionCount": 7
+    "exceptionCount": 11
   },
   "sources": {
-    "apiContractEntry": "ec989b2adc53a7f17ae092133e687ec83782d111ebeceb3b7a50b37c9b3c117c",
+    "apiContractEntry": "552da42490245ae6c8fc62e8c6e44311a3c7ee668f355f3df2f92261ad5931e9",
     "apiDto": "3b82a42da63ce67eb67beefdb7047ecdc6cdb908c6864a6366317ea31f8ecce1",
-    "apiGeneration": "e40bf25a4c7c6f7501b21a9d1a364df14f38fb1840af4485e075151cab4a9105",
-    "apiValidation": "2cb57b8ee34a135f66da3434be7907beb565770416f23f7fdab9642a941cef17",
-    "baseWeightImports": "f61da9f523417d6ad075fabfd6eb57edc7ae7f533aa213606cd6f0f5cad219d2",
-    "descriptorAudioFacts": "9c979bffaacd12eaeec42a65d4a49f0cd354a68e368a226c6a010b97d9d12f5c",
-    "descriptorCandleFacts": "008e071b0eb355f3618204e167c11074d82e97c67f6b1b42b193450a4c37528e",
-    "descriptorCandleRuntime": "7fbb865fc33af1b62efb2e092913f0a120fd8b9aed65016aca6a5b4bd3de6b8a",
-    "descriptorMlxFacts": "9794733d1e4a1b0ed50763f93c21ca4129d7d1e0fe0e2284ffe4c680afe0f4b6",
-    "descriptorMlxRuntime": "7bec57e0927574661ed16202bbdc64bb958f54b1ef2cea2bc9ba8d643ef8354d",
-    "descriptorPreviewFacts": "6e4af8eb597c33dd5bc32d01c377bed172e68c1f67ca9ef943f5a2b9c168c1d3",
-    "exceptionRegister": "569ce534af0e1a1d1fb11f0e5ae1462ceb71d9efd6f29cf570b81c0dd419ab21",
-    "manifest": "231a26bb88566ff481786697a4c7fc11bfd3951ffa8af4abf70cb508cf97bf1b",
+    "apiGeneration": "e32eb306ae16eedaf20922d8ee845673b23a2a5b23eb588b9390b7cef73139ef",
+    "apiValidation": "a0ce2eb05c35df1da06502bab3847a1bfff607be4e9711fbf04b6d5253c559a0",
+    "baseWeightImports": "18f12c8747eb2d8a35d71f53773a824c19d658c1f99a5d7b9975ec53e497465a",
+    "descriptorAudioFacts": "dfc7c3dca324c45739d9186e67cc28785000f403d8cf31c44a4cd54a8dadedd5",
+    "descriptorCandleFacts": "c93cfee4f03f90e84be7274f36a61eb831c15007bd0746ab410102c019ac4055",
+    "descriptorCandleRuntime": "0e63f5ff92a561c4c5f513e4ed1f9d59ebf590efaa37f54c01e7dc74683b95a9",
+    "descriptorMlxFacts": "ab6d78683a4e8e059cd967e399abb9135c00d9c679b68d531e5dd6497a90960e",
+    "descriptorMlxRuntime": "7b493fe044566b4d4895e2432e2d88f9aec3c11a37298f51b861c139e1555d86",
+    "descriptorPreviewFacts": "6f069d7ce971cc53383d4323a0d2870d9c6dc3857f54acd446effd55b1654010",
+    "exceptionRegister": "1c89d8c3dad1025e119d9faed44c3f44173b3f316c1b70faccfed4f44157f704",
+    "manifest": "1ac28517a47bdd5a133b9075340d223b73058034c4b1fa8e8b7c7528bbc61f60",
     "modelImportDefaults": "be25b4d008912a83668bf9faf3af4c02bafa9b9cb6003bf161fef1901247a6a9",
-    "routerCandle": "93826f98018743ed67a6be671d93e1e56e17131fe477b9dc9ff758daa1dc1f77",
-    "routerCatalog": "e13df7eb5ebdd3110ff1e04ec6bb1e12949ec21207393b693149919a44ec4d01",
+    "routerCandle": "cd96bc5d220e87074629dfa3607afc0732f7fd08015ea78ea9cc1ee49aa04955",
+    "routerCatalog": "f1112f855836572de7f1f619ecf097690342017c037dfd5f3b20904cb91dcfec",
     "routerGaps": "8394caf69f506be09eb64a91a5541088df7286c1c6c6d2301d4b35fe141d511e",
-    "routerMlx": "984f9bb1cad82425de44ed8c9cf23e0b32f6862d7e1651de3fecb0a48ab146a4",
-    "scheduler": "f628401271b71bdd23baac455f53752de85f0459b0cba351f56dee9656ba410a",
+    "routerMlx": "1adc4088e44cf039dde4398f2f11e7f083a0f9b220cab2c2fdc8afb4e14e04d7",
+    "scheduler": "03fb4ce1a878c1143f436ea511bb70b0e64f6f39373e43366253fc4533dfd4ac",
     "trainingCatalog": "ba87e0cb93ab872fd2a430f2ac4aeaedf8c65d6869b37b7ff7df4071309289e0",
     "webAudioStudio": "9b0e0c85ee0117b122e1f7968198f37bcf864c1efcbd405fa45570e63b6f9b16",
-    "webFallbackCatalog": "ca8308672d41e1759896a6f5c4bc5c20cd81826afbf864d53c62db3d38100f8a",
-    "webImageAdvanced": "b18fa5be38f71fa65b88e8e7eef48e96f44d6031196dcfc4d434d27438f8516d",
-    "webImageRequest": "07833b54289d0c457ebb05b9db06e32b0221bc8c2d5d7eb1f4ae04124b0a60e3",
+    "webFallbackCatalog": "666d6ed33238ec92e28c9bb5419d058d01401c16354e4d989911e803d4b8e512",
+    "webImageAdvanced": "98c945022fe4b9ba9d976fff4efbe69b522aa6e91a9903b7f3169a45aa749dcf",
+    "webImageRequest": "a46fe3824501f0ded99ab2cb0163b7fd661c58da4a325908c6dadc8c9bdc385c",
     "webMacGating": "ddeb0176d098322bf560ae1c55a4faea27c27df7b5ae94a9531b448e58a7a324",
     "webPreviewGating": "febc16c07bef46a6004d24a2556d37cdb0513c208e60416e170875ff80ea78fe",
     "webSimpleAudio": "e23261b5f19326c7aae617600c2379e81dfcc75b1ecaaab9e23da6855aa31054",
@@ -44,30 +44,30 @@
     "webVideoStudio": "86ee842bbb5a59029f7b96b84ea928e539becae126a42a6a7e1fd7969ea5fed5",
     "webVideoUpscale": "2efa76213ce9b6e6e2b958e0aadd77f2f0f91b70c1d25d11e083b3d627472daa",
     "webVideoValidation": "96e4706c436f7d61ea378ece6aabb328e0dd5531272bf6b00b8368aa7c064a9c",
-    "workerAudioDispatch": "aeb30734a088abddc46610baa3c5bf9c78830ac4f6291e7a8b0616147a715926",
-    "workerDispatch": "a709f6b18b3fc0738f30abef445d36457989ed3a7a9609144d60800c75251690",
-    "workerEngineTable": "ca30f79981d9c59b18268f82e7577f7a3e632e44578447c88d02894229d54564",
+    "workerAudioDispatch": "1679977fd1fbd9427572df035fd32e2644f79363eadceef90305ea54083043b1",
+    "workerDispatch": "26223d28610f87f80434b9c22a26e3c9c3d78baf50b9d24f816dfb006eaaf4d8",
+    "workerEngineTable": "1182db8365ca96c03ee65120a55570d3af3c29db32de98e39b64f1fe8711bcf1",
     "workerGpuCapabilities": "46bed541b0f722bdbe73e28fcd31039ef66b0f3dd491bb1880a6f38d4cb7de0f",
-    "workerImageDispatch": "c98add3cecf9150fb58517ce3b05ba225fe782aa1f17e5870406872e5124273c",
-    "workerImageKreaImported": "c7a1af86834cf39019704117d220d5a65bd45346e93e5a68cabb007ea90b28e6",
-    "workerImageMageFinetuned": "9cba14a96d3900768a1306752af6ec6d07fbf68d604449f9611c8ad08d091f1b",
-    "workerImagePulid": "7809ccd7ef6059a09b976ec7f00ff3d1a95f120050b9f343a9aabc4b0ebac199",
+    "workerImageDispatch": "633fcfb3dc8e1b69becb75c39e8e39f848b17172b5cb05dc0fd554ceecc6e30b",
+    "workerImageKreaImported": "5a4c848d27b7d7f04414118cb93d293ee1be59087482173a0608c8c131c2f699",
+    "workerImageMageFinetuned": "689eae8f805eb8bd227478425a3b8b2fb20b235ef22eee8b83897b839feda1c3",
+    "workerImagePulid": "7e1c855946446ccdbd5801f96050a0d8e428856587b144abc40be3dd16bb2b7e",
     "workerImagePulidCandle": "e03c33082e5e8c1762a166769ada64cc4942abc5c06a8c6990a5a8914ea205c2",
     "workerImageQwenEditCandle": "13d893e31e031ca1fadafa1b93f284ef669f7154d4d3fdf954838fb00884ae2c",
     "workerImageSdxlImported": "63e5f2891be1f3e8ea1dc77ef3837254ab188ccc63fdaf608de2d37499332efd",
     "workerTrainingDispatch": "479520bfabe44f79ff1e18617c442fadead941e2a8dac973b26ee1e54100c447",
     "workerUtilityDispatch": "017142f8ac644fa2d275e35b94827af4f60644340956dfb84576d7e940737f0d",
     "workerVideoBernini": "352991ae26c8d842c9af1c37e9c6d3261ae6554debe5089744ef8e7972fd15ed",
-    "workerVideoCandle": "5ed923d9c38891293e3401bfd1103fc1e82a93902ce11fbd5787620208f7a1ef",
-    "workerVideoDispatch": "9bb7813013171f23145ab66aa38224fff68b38e7faa8296f9864fa0f015a8949",
+    "workerVideoCandle": "4527f7c7f42bac9d65daa2004f993657391ec3cdc872bac0bc9e2c012c93e949",
+    "workerVideoDispatch": "f29a1c62603f4556397c5fddb6672be445e458520784bc849215d2e951ce86bd",
     "workerVideoKreaRealtime": "590b65273e5d87c350feec0f677ee05295aa05835cac12348e2f5520fc1724e7",
-    "workerVideoLtx": "07b72f1cd2901efe4d30c8264340b939218be4b9b40b2b03a4896923b93bca58",
+    "workerVideoLtx": "35c4f69f9bb82aeb065dbcbab5ebc1386dc4d8b061c5567c8656e1d7257c7030",
     "workerVideoMochi": "5a0868693b1cbf1c08a6acfc5151c3e3542d812b7cec6f73bfa53d701883dcbc",
     "workerVideoScail2": "49e53adb08ea322e674150e6f2d6eb7183e915d6df2b6eb3e5ffd3c6acaa24a2",
     "workerVideoSeedvr2": "c8ece41e96b75730fed40dcf9cd2497c4940bda213e214e24c1557aa481bea86",
     "workerVideoSvd": "eb2a97a5cd66c7459394ff75e53624154f754932ed1d8b6e1011a3bfdb3a0250",
     "workerVideoVace": "010cd26c1e06fa5d3f7171fabc7068f06367a358400add69e2e6845523d700df",
-    "workerVideoWan": "c569893ce758712c6f482acaf8a00d1eb4dbab9a554a643e45d793ddb5c19274"
+    "workerVideoWan": "c00cdf317a030df25ccb1e7c0fd300c782cea4c0a35d2121088e5c83558367eb"
   },
   "models": [
     {
@@ -2829,17 +2829,29 @@
         {
           "capability": "extend_clip",
           "mlx": true,
-          "candle": true
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18481",
+            "url": "https://app.shortcut.com/trefry/story/18481"
+          }
         },
         {
           "capability": "first_last_frame",
           "mlx": true,
-          "candle": true
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18481",
+            "url": "https://app.shortcut.com/trefry/story/18481"
+          }
         },
         {
           "capability": "image_to_video",
           "mlx": true,
-          "candle": true
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18481",
+            "url": "https://app.shortcut.com/trefry/story/18481"
+          }
         },
         {
           "capability": "multi_video_to_video",
@@ -2859,17 +2871,29 @@
         {
           "capability": "replace_person",
           "mlx": true,
-          "candle": true
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18481",
+            "url": "https://app.shortcut.com/trefry/story/18481"
+          }
         },
         {
           "capability": "text_to_video",
           "mlx": true,
-          "candle": true
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18481",
+            "url": "https://app.shortcut.com/trefry/story/18481"
+          }
         },
         {
           "capability": "video_bridge",
           "mlx": true,
-          "candle": true
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18481",
+            "url": "https://app.shortcut.com/trefry/story/18481"
+          }
         },
         {
           "capability": "video_to_video",
@@ -2881,48 +2905,81 @@
         {
           "capability": "controlClip",
           "mlx": true,
-          "candle": true
+          "candle": false,
+          "parityObligation": {
+            "workItem": "epic-8588",
+            "url": "https://app.shortcut.com/trefry/epic/8588",
+            "authority": "epic-8588"
+          }
         },
         {
           "capability": "keyframe",
           "mlx": true,
-          "candle": true
+          "candle": false,
+          "parityObligation": {
+            "workItem": "epic-8588",
+            "url": "https://app.shortcut.com/trefry/epic/8588",
+            "authority": "epic-8588"
+          }
         },
         {
           "capability": "reference",
           "mlx": true,
-          "candle": true
+          "candle": false,
+          "parityObligation": {
+            "workItem": "epic-8588",
+            "url": "https://app.shortcut.com/trefry/epic/8588",
+            "authority": "epic-8588"
+          }
         },
         {
           "capability": "videoClip",
           "mlx": true,
-          "candle": true
+          "candle": false,
+          "parityObligation": {
+            "workItem": "epic-8588",
+            "url": "https://app.shortcut.com/trefry/epic/8588",
+            "authority": "epic-8588"
+          }
         }
       ],
       "userAdapters": [
         {
           "capability": "lora",
           "mlx": true,
-          "candle": true
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18481",
+            "url": "https://app.shortcut.com/trefry/story/18481"
+          }
         },
         {
           "capability": "lokr",
           "mlx": true,
-          "candle": true
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18481",
+            "url": "https://app.shortcut.com/trefry/story/18481"
+          }
         }
       ],
       "precisionTier": [
         {
           "capability": "bf16",
           "mlx": true,
-          "candle": true
+          "candle": false,
+          "parityObligation": {
+            "workItem": "epic-9083",
+            "url": "https://app.shortcut.com/trefry/epic/9083",
+            "authority": "epic-9083"
+          }
         }
       ],
       "guidanceMethod": [],
       "preview": {
         "capability": "live_preview",
         "mlx": false,
-        "candle": false
+        "candle": null
       }
     },
     {
@@ -7138,6 +7195,71 @@
         "models/illustrious_xl_v2/guidanceMethod/cfg_pp",
         "models/realvisxl/guidanceMethod/cfg_pp",
         "models/sdxl/guidanceMethod/cfg_pp"
+      ]
+    },
+    {
+      "id": "epic-18803-eros-candle-operation-withdrawal",
+      "category": "operation",
+      "decisionType": "product_decision",
+      "evidence": "SC-18902 exact-head Candle/CUDA run 31766800005 completed the shipped Eros render, but artifact 9207109616 showed unresolved noise, no prompt subject, and no coherent motion. Michael Trefry approved withdrawing the Eros Candle product route under epic-18803; the reviewed removal merged in SceneWorks PR #2312.",
+      "approver": "Michael Trefry",
+      "authority": "epic-18803",
+      "approvedDate": "2026-08-14",
+      "userFacingBehavior": "Eros remains available on MLX; its unsupported Candle operation controls are hidden or disabled with an explanation, and direct Candle requests fail closed.",
+      "revisitCondition": "Revisit only after a complete Candle-native Eros distillation recipe passes exact-head CUDA runtime evidence, generated matrix verification, and routing tests for every named operation.",
+      "cells": [
+        "models/ltx_2_3_eros/operationAndMode/extend_clip",
+        "models/ltx_2_3_eros/operationAndMode/first_last_frame",
+        "models/ltx_2_3_eros/operationAndMode/image_to_video",
+        "models/ltx_2_3_eros/operationAndMode/replace_person",
+        "models/ltx_2_3_eros/operationAndMode/text_to_video",
+        "models/ltx_2_3_eros/operationAndMode/video_bridge"
+      ]
+    },
+    {
+      "id": "epic-18803-eros-candle-conditioning-withdrawal",
+      "category": "conditioning",
+      "decisionType": "product_decision",
+      "evidence": "SC-18902 exact-head Candle/CUDA run 31766800005 completed the shipped Eros render, but artifact 9207109616 showed unresolved noise, no prompt subject, and no coherent motion. Michael Trefry approved withdrawing the Eros Candle product route under epic-18803; the reviewed removal merged in SceneWorks PR #2312.",
+      "approver": "Michael Trefry",
+      "authority": "epic-18803",
+      "approvedDate": "2026-08-14",
+      "userFacingBehavior": "Eros remains available on MLX; its unsupported Candle conditioning controls are hidden or disabled with an explanation, and direct Candle requests fail closed.",
+      "revisitCondition": "Revisit only after a complete Candle-native Eros distillation recipe passes exact-head CUDA runtime evidence, generated matrix verification, and routing tests for every named conditioning shape.",
+      "cells": [
+        "models/ltx_2_3_eros/conditioningShape/controlClip",
+        "models/ltx_2_3_eros/conditioningShape/keyframe",
+        "models/ltx_2_3_eros/conditioningShape/reference",
+        "models/ltx_2_3_eros/conditioningShape/videoClip"
+      ]
+    },
+    {
+      "id": "epic-18803-eros-candle-adapter-withdrawal",
+      "category": "adapter",
+      "decisionType": "product_decision",
+      "evidence": "SC-18902 exact-head Candle/CUDA run 31766800005 completed the shipped Eros render, but artifact 9207109616 showed unresolved noise, no prompt subject, and no coherent motion. Michael Trefry approved withdrawing the Eros Candle product route under epic-18803; the reviewed removal merged in SceneWorks PR #2312.",
+      "approver": "Michael Trefry",
+      "authority": "epic-18803",
+      "approvedDate": "2026-08-14",
+      "userFacingBehavior": "Eros remains available on MLX; its unsupported Candle adapter controls are hidden or disabled with an explanation, and direct Candle requests fail closed.",
+      "revisitCondition": "Revisit only after a complete Candle-native Eros distillation recipe passes exact-head CUDA runtime evidence, generated matrix verification, and routing tests for every named adapter type.",
+      "cells": [
+        "models/ltx_2_3_eros/userAdapters/lora",
+        "models/ltx_2_3_eros/userAdapters/lokr"
+      ]
+    },
+    {
+      "id": "epic-18803-eros-candle-precision-withdrawal",
+      "category": "precision",
+      "decisionType": "product_decision",
+      "evidence": "SC-18902 exact-head Candle/CUDA run 31766800005 completed the shipped Eros render, but artifact 9207109616 showed unresolved noise, no prompt subject, and no coherent motion. Michael Trefry approved withdrawing the Eros Candle product route under epic-18803; the reviewed removal merged in SceneWorks PR #2312.",
+      "approver": "Michael Trefry",
+      "authority": "epic-18803",
+      "approvedDate": "2026-08-14",
+      "userFacingBehavior": "Eros remains available on MLX; its unsupported Candle precision control is hidden or disabled with an explanation, and direct Candle requests fail closed.",
+      "revisitCondition": "Revisit only after a complete Candle-native Eros distillation recipe passes exact-head CUDA runtime evidence, generated matrix verification, and routing tests for the named precision tier.",
+      "cells": [
+        "models/ltx_2_3_eros/precisionTier/bf16"
       ]
     }
   ]

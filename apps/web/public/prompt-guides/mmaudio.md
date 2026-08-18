@@ -6,7 +6,7 @@ MMAudio generates a **synchronized soundtrack for a silent video clip** (Foley).
 
 ## Installation
 
-Install from the **Models** screen. Each tier downloads its five components — the DFN5B-CLIP conditioner (`apple/DFN5B-CLIP-ViT-H-14-384`), the Synchformer / MM-DiT / mel-VAE weights (`hkchengrex/MMAudio`), and the vocoder (the in-repo BigVGAN for 16 kHz, or the external `nvidia/bigvgan_v2_44khz_128band_512x` for 44.1 kHz). Everything is pinned to exact revisions for a reproducible, offline-resolvable install.
+Install from the **Models** screen. Each tier downloads its five components — the 378px DFN5B-CLIP conditioner (`apple/DFN5B-CLIP-ViT-H-14-378`), the Synchformer / MM-DiT / mel-VAE weights (`hkchengrex/MMAudio`), and the vocoder (the in-repo BigVGAN for 16 kHz, or the external `nvidia/bigvgan_v2_44khz_128band_512x` for 44.1 kHz). Everything is pinned to exact revisions for a reproducible, offline-resolvable install.
 
 ## Practical Notes
 

@@ -831,11 +831,14 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
 /// Legend for the [`VideoModelCaps::new`] positional args:
 /// `new(id, video_mlx_routed, candle_video_routed, candle_video_i2v, candle_video_vace)`.
 pub(crate) const VIDEO_MODEL_CAPS: &[VideoModelCaps] = &[
-    // LTX-2.3 base + eros (sc-18478): both native backends serve T2V, I2V, FLF, extend, bridge,
-    // replacement, and user adapters. These are dual-mode models, so they remain outside the legacy
-    // `candle_video_i2v` column, whose meaning is I2V-only; the per-mode gate owns the richer shape.
+    // LTX-2.3 base (sc-18478): both native backends serve the provider's current mode surface.
     VideoModelCaps::new("ltx_2_3", true, true, false, false),
-    VideoModelCaps::new("ltx_2_3_eros", true, true, false, false),
+    // 10Eros remains MLX-only (sc-18902). Exact-head Candle/CUDA acceptance run 31766800005
+    // rendered the dense, undistilled checkpoint through the single-pass distilled engine at the
+    // shipped 8-step defaults and produced unresolved noise with no prompt subject. The required
+    // cond_safe distill LoRA is a two-pass MLX recipe and only 768/3,320 keys match Candle's adapter
+    // surface, so Candle must not claim this model until it has a complete validated recipe.
+    VideoModelCaps::new("ltx_2_3_eros", true, false, false, false),
     // Wan2.2 TI2V-5B (sc-18478): T2V plus native I2V/FLF and user adapters on both backends. Its
     // legacy VACE membership remains for the established extend/bridge fallback.
     VideoModelCaps::new("wan_2_2", true, true, false, true),
@@ -889,7 +892,8 @@ pub(crate) const VIDEO_MODEL_CAPS: &[VideoModelCaps] = &[
     // `candle-gen-krea-realtime` at all (parity is a deliberately separate follow-up epic), the MLX
     // descriptor is `mac_only: true`, and `run_video_generate_job` already fails a non-mac krea job
     // loudly rather than routing it elsewhere. So it is neither candle-routed nor a candle i2v/VACE
-    // model — the same all-false candle shape `scail2_14b` carries, and for the same reason.
+    // model. The positional row has the same all-false Candle shape as `scail2_14b`, but NOT the same
+    // meaning: SCAIL-2 is unioned through its distinct-engine predicate below; Krea has no such lane.
     VideoModelCaps::new("krea_realtime_14b", true, false, false, false),
 ];
 
@@ -1637,6 +1641,48 @@ derive_model_list! {
     pub(crate) VIDEO_MLX_ROUTED_MODELS, VIDEO_MODEL_CAPS, video_mlx_routed
 }
 
+/// Whether `model` has ANY MLX video route (sc-18814). The `video_mlx_routed` column of
+/// [`VIDEO_MODEL_CAPS`], asked without a payload — the mode-level question is
+/// [`super::mlx::video_mode_is_mlx_eligible`].
+///
+/// Exists so the video memory gate (`crate::video_request::video_admission_surface`) can state its
+/// per-family backend surface from the routing catalog — the backend authority — instead of from
+/// the manifest's advisory `mlx` / `candle` hint objects, which describe intent rather than
+/// routing.
+pub(crate) fn video_model_is_mlx_video_routed(model: &str) -> bool {
+    VIDEO_MLX_ROUTED_MODELS.contains(&model)
+}
+
+/// Whether `model` has ANY candle video route (sc-18814) — the candle half of
+/// [`video_model_is_mlx_video_routed`], and **not** simply the `candle_video_routed` column.
+///
+/// Two families reach candle through their OWN distinct engines rather than through
+/// `CANDLE_VIDEO_ROUTED_MODELS`, so reading that column alone would report them unroutable:
+///
+/// * `scail2_14b` — `candle_video_routed = false` by design (it is not a Wan-VACE model), yet
+///   [`super::candle::scail2_animate_candle_eligible`] /
+///   [`super::candle::scail2_replace_candle_eligible`] route it to the distinct candle SCAIL-2
+///   engine (sc-6837), which the worker dispatches as `CandleVideoRoute::AnimateScail2` /
+///   `::ReplacePersonScail2`.
+/// * `bernini` — in the column, but reached via
+///   [`super::candle::bernini_video_candle_eligible`] rather than the generic txt2video arm.
+///
+/// `krea_realtime_14b` is the one video family with genuinely NO candle engine: there is no
+/// `candle-gen-krea-realtime` at all, its MLX descriptor is `mac_only`, and
+/// `run_video_generate_job` fails an off-Mac krea job loudly rather than routing it elsewhere.
+///
+/// Pinned against the per-model predicates by `crate::video_request`'s
+/// `video_admission_surface_matches_the_routing_catalog`.
+pub(crate) fn video_model_has_candle_video_route(model: &str) -> bool {
+    CANDLE_VIDEO_ROUTED_MODELS.contains(&model) || CANDLE_SCAIL2_VIDEO_MODELS.contains(&model)
+}
+
+/// Video models served off-Mac by a DISTINCT candle engine that is deliberately absent from
+/// [`CANDLE_VIDEO_ROUTED_MODELS`] (sc-6837): the candle SCAIL-2 engine, gated by
+/// [`super::candle::scail2_animate_candle_eligible`] /
+/// [`super::candle::scail2_replace_candle_eligible`] rather than by table membership.
+pub(crate) const CANDLE_SCAIL2_VIDEO_MODELS: &[&str] = &["scail2_14b"];
+
 /// SceneWorks training kernels with a native mlx-gen Rust trainer (epic 3039):
 /// the engine registers `z_image_turbo`/`sdxl`/`kolors`/`ltx_2_3`/`wan2_2_*` trainers,
 /// which the worker reaches via these SceneWorks kernel ids (the mlx worker maps the
@@ -1973,7 +2019,6 @@ mod tests {
     const EXPECTED_CANDLE_VIDEO_ROUTED_MODELS: &[&str] = &[
         "wan_2_2",
         "ltx_2_3",
-        "ltx_2_3_eros",
         "wan_2_2_t2v_14b",
         "wan_2_2_i2v_14b",
         "svd",

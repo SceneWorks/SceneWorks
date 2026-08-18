@@ -2,19 +2,19 @@
 compile_error!("memory-mlx-adapter is supported only on macOS");
 
 use mlx_gen::gen_core::{
-    MemoryBudget, MemoryCacheState, MemoryCalibrationIdentity, MemoryGeometry, MemoryMode,
-    MemoryNumericTier, MemoryOptimizationAuthority, MemoryPhase, MemoryRunContext,
+    GenerationMemory, MemoryBudget, MemoryCacheState, MemoryCalibrationIdentity, MemoryGeometry,
+    MemoryMode, MemoryNumericTier, MemoryOptimizationAuthority, MemoryPhase, MemoryRunContext,
     MemoryRunOutcome, MemorySafetyDecision, MemorySelection, MemoryStrategy,
     MemoryStrategyParameters, TransformerComponent,
 };
-use mlx_gen::tiling::{SpatialTiling, TilingConfig};
+use mlx_gen::tiling::{SpatialTiling, TilingConfig, VaeTiling};
 use mlx_gen::{
     Conditioning, ControlKind, GenerationOutput, GenerationRequest, Generator, Image, LoadShape,
     LoadSpec, OffloadPolicy, Precision, Progress, Quant, WeightsSource,
 };
 use mlx_rs::memory::{
     clear_cache, get_active_memory, get_cache_memory, get_memory_limit, get_peak_memory,
-    reset_peak_memory,
+    reset_peak_memory, set_memory_limit, set_wired_limit,
 };
 use mlx_rs::Array;
 use runtime_macos::providers::qwen_image::{load_vae, QwenVae};
@@ -23,9 +23,11 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::cell::Cell;
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{Read, Write};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 const EDGES: [u32; 7] = [768, 640, 512, 448, 384, 320, 256];
 const MAX_THRESHOLD: f64 = 3e-2;
@@ -92,7 +94,308 @@ const FLUX2_RMS_THRESHOLD: f64 = 1.5 / 255.0;
 /// One fixed seed for every q4/q8 `mlx:flux2_dev` fixture
 /// (`flux2-dev-mlx-<tier>-<edge>-seed18218-step2`).
 const FLUX2_SEED: u64 = 18218;
+/// LTX-2.3 quality is the same KIND of claim as FLUX.2-dev's — repeat determinism on one loaded
+/// provider, with no alternate code path selected between the two renders — so it adopts the same
+/// numeric envelope deliberately rather than inventing a looser one for video. The values are
+/// restated under LTX names because the record embeds them as `maximumErrorThreshold` and friends:
+/// an `mlx:ltx_2_3` receipt must not be traceable to a constant that asserts a FLUX.2 provenance.
+/// The margin is if anything wider here: LTX's distilled schedule is fully seeded and the measured
+/// warm repeat is bit-identical (0/255 on all three metrics), while the mandatory broad-bias
+/// mutation must breach all three.
+const LTX_MAX_THRESHOLD: f64 = FLUX2_MAX_THRESHOLD;
+const LTX_MEAN_THRESHOLD: f64 = FLUX2_MEAN_THRESHOLD;
+const LTX_RMS_THRESHOLD: f64 = FLUX2_RMS_THRESHOLD;
+/// The `mlx:ltx_2_3` lane (sc-18808) — the FIRST video arm in this adapter. Every arm above it is an
+/// image arm and keeps its `geometry.frames == 1` refusal (`protocol::validate_still_geometry`);
+/// this one is the single arm allowed to accept a multi-frame geometry, and it pays for that by
+/// validating against LTX's OWN declared envelope instead of accepting any frame count at all.
+const LTX_PROVIDER: &str = "ltx_2_3";
+const LTX_PLAIN_EXECUTION_PATH: &str = "the MLX LTX-2.3 base-only text-to-video path";
+/// Expected provider-owned identity at the permanent inference pin. The adapter always reads the
+/// loaded registry contract and refuses any mismatch; this local expectation merely prevents a
+/// provider re-fingerprint from silently reusing SC-18946's plan and fixtures.
+const LTX_CALIBRATION_FINGERPRINT: &str = "sc-19109-ltx-2-3-mlx-memory-ladder-v1";
+/// One fixed seed for every `mlx:ltx_2_3` fixture
+/// (`ltx-2-3-mlx-<tier>-<width>x<height>-f<frames>-fps<fps>-seed18946`). Historical SC-18810
+/// evidence remains bound to seed 18808 and is never relabelled.
+const LTX_SEED: u64 = 18946;
+// SC-19642 incident evidence. These are the exact immutable tier inventories prepared for
+// SC-18946, not estimates. The q4 f305 provider reached the kernel-maintained physical footprint
+// below before the host watchdog panicked. A soft MLX allocator limit cannot make these safe: MLX
+// documents that one allocation may exceed it, and an in-process monitor can stall with Metal.
+const LTX_Q4_INVENTORY_BYTES: u64 = 20_467_690_460;
+const LTX_Q8_INVENTORY_BYTES: u64 = 29_728_720_716;
+const LTX_BF16_INVENTORY_BYTES: u64 = 47_092_811_992;
+const LTX_Q4_F305_CRASH_FOOTPRINT_BYTES: u64 = 96_970_084_480;
+/// The exact q8 text-encoder + transformer co-staged safetensor arithmetic captured by SC-18808 at
+/// 768x512x97. This is not a historical `phys_footprint` measurement or a complete-load bound: the
+/// canary deliberately reuses the smaller value as a conservative external stop, with separate
+/// host-pressure gates. It must never be reused to admit a campaign row.
+const LTX_CANARY_MAX_FOOTPRINT_BYTES: u64 = 53_347_146_863;
+const LTX_CANARY_MAX_RUNTIME_SECONDS: f64 = 1_800.0;
+const LTX_CANARY_WATCHDOG_PROTOCOL: &str = "sceneworks-memory-watchdog-v1";
+const LTX_PROVIDER_PHASE_PROTOCOL: &str = "sceneworks-provider-phase-v1";
+const LTX_CAMPAIGN_ENTRY_PHASE_PROFILE: &str = "campaign-entry";
+const LTX_BOUNDED_CARRIER_PHASE_PROFILE: &str = "bounded-carrier";
+const LTX_BOUNDED_CAMPAIGN_PHASE_PROFILE: &str = "bounded-campaign-entry";
+const LTX_PROVIDER_PHASE_NAMES: [&str; 10] = [
+    "common_load",
+    "primary_conditioning",
+    "primary_denoise",
+    "primary_decode",
+    "lifecycle_warm_repeat",
+    "lifecycle_cancel",
+    "lifecycle_cancel_recovery",
+    "lifecycle_error",
+    "lifecycle_error_recovery",
+    "cleanup",
+];
+const LTX_BOUNDED_CARRIER_PHASE_NAMES: [&str; 5] = [
+    "common_load",
+    "primary_conditioning",
+    "primary_denoise",
+    "primary_decode",
+    "cleanup",
+];
+const LTX_CANARY_WIDTH: u32 = 256;
+const LTX_CANARY_HEIGHT: u32 = 256;
+const LTX_CANARY_FRAMES: u32 = 9;
+const LTX_CANARY_FPS: u32 = 24;
+const LTX_CANARY_SEED: u64 = 1234;
+const LTX_CANARY_TILE_EDGE: u32 = 192;
+const LTX_CANARY_OVERLAP: u32 = 64;
+const LTX_CANARY_FIXTURE: &str = "ltx-2-3-mlx-q4-256x256-f9-fps24-seed1234-safety-canary";
+const LTX_PRODUCT_CANARY_WIDTH: u32 = 768;
+const LTX_PRODUCT_CANARY_HEIGHT: u32 = 512;
+const LTX_PRODUCT_CANARY_FRAMES: u32 = 97;
+const LTX_PRODUCT_CANARY_FPS: u32 = 24;
+const LTX_PRODUCT_CANARY_FIXTURE: &str =
+    "ltx-2-3-mlx-q4-768x512-f97-fps24-seed1234-product-envelope-canary";
+const LTX_CAMPAIGN_ENTRY_ACTION: &str = "campaign_entry";
+const LTX_CAMPAIGN_ENTRY_IDENTITY: &str = "sc-20191-q4-768x512-f121-fps30-staged-v1";
+const LTX_CAMPAIGN_ENTRY_LOGICAL_CASE_ID: &str = "implan-9b107d4d1ca0d61d4faa";
+const LTX_CAMPAIGN_ENTRY_FIXTURE: &str = "ltx-2-3-mlx-q4-768x512-f121-fps30-seed18946";
+const LTX_CAMPAIGN_ENTRY_WIDTH: u32 = 768;
+const LTX_CAMPAIGN_ENTRY_HEIGHT: u32 = 512;
+const LTX_CAMPAIGN_ENTRY_FRAMES: u32 = 121;
+const LTX_CAMPAIGN_ENTRY_FPS: u32 = 30;
+const LTX_BOUNDED_CARRIER_ACTION: &str = "bounded_carrier_proof";
+const LTX_BOUNDED_CARRIER_IDENTITY: &str = "sc-20254-q4-768x512-f121-fps30-bounded-192-64-v1";
+const LTX_BOUNDED_CARRIER_LOGICAL_CASE_ID: &str =
+    "diagnostic-sc20254-q4-768x512-f121-fps30-bounded-192-64";
+const LTX_BOUNDED_CARRIER_FIXTURE: &str =
+    "ltx-2-3-mlx-q4-768x512-f121-fps30-seed18946-bounded-decode-192-64-proof";
+const LTX_BOUNDED_CAMPAIGN_ACTION: &str = "bounded_campaign_entry";
+const LTX_BOUNDED_CAMPAIGN_IDENTITY: &str =
+    "sc-20318-q4-768x512-f121-fps30-bounded-192-64-authoritative-v1";
+const LTX_BOUNDED_CAMPAIGN_LOGICAL_CASE_ID: &str = "implan-964db61ed3789af6386b";
+const LTX_BOUNDED_CAMPAIGN_FIXTURE: &str =
+    "ltx-2-3-mlx-q4-768x512-f121-fps30-bounded-decode-192-64-seed18946";
+const LTX_BOUNDED_CAMPAIGN_Q8_IDENTITY: &str =
+    "sc-20430-q8-768x512-f121-fps30-bounded-192-64-authoritative-v1";
+const LTX_BOUNDED_CAMPAIGN_Q8_LOGICAL_CASE_ID: &str = "implan-d47640caa0c469f2ee13";
+const LTX_BOUNDED_CAMPAIGN_Q8_FIXTURE: &str =
+    "ltx-2-3-mlx-q8-768x512-f121-fps30-bounded-decode-192-64-seed18946";
+const LTX_BOUNDED_CAMPAIGN_BF16_IDENTITY: &str =
+    "sc-20430-bf16-768x512-f121-fps30-bounded-192-64-authoritative-v1";
+const LTX_BOUNDED_CAMPAIGN_BF16_LOGICAL_CASE_ID: &str = "implan-b3926164bf6bfbee98e1";
+const LTX_BOUNDED_CAMPAIGN_BF16_FIXTURE: &str =
+    "ltx-2-3-mlx-bf16-768x512-f121-fps30-bounded-decode-192-64-seed18946";
+const LTX_CANARY_ARTIFACT_REVISION: &str = "01df27d308466533aa09d251e3aebdcc627d07eb";
+const LTX_CANARY_Q4_INVENTORY_FILES: u64 = 11;
+const LTX_CANARY_Q4_INVENTORY_SHA256: &str =
+    "4e811932e87bb258f642ada790525e36ef2a55959c520e755f1807caf6fa225a";
+const LTX_CANARY_Q8_INVENTORY_FILES: u64 = 11;
+const LTX_CANARY_Q8_INVENTORY_SHA256: &str =
+    "bb0bb7577157a158ca39494837d64cb36ded0380ca7ee0c930fea7311f22a247";
+const LTX_CANARY_BF16_INVENTORY_FILES: u64 = 10;
+const LTX_CANARY_BF16_INVENTORY_SHA256: &str =
+    "006caeaa9a8638b337cdf5a8622ce8535380b18ebaf90b36c3e2d5d15354f2a8";
+const LTX_CANARY_TEXT_ENCODER_INVENTORY_FILES: u64 = 17;
+const LTX_CANARY_TEXT_ENCODER_INVENTORY_BYTES: u64 = 26_427_894_918;
+const LTX_CANARY_TEXT_ENCODER_INVENTORY_SHA256: &str =
+    "abde2d155aa8991747cc2999d40688d29a50261c080c0d51fac20357653928d7";
+// The pinned mlx-gen-ltx `transformer::ONES_CACHE` retains one bf16 unit-weight Array for each
+// AvDiT stream's weightless RMSNorm dimension on the current thread. The exact LTX-2.3 config is
+// video 32 heads x 128 = 4096 and audio 32 x 64 = 2048. These six Ki elements intentionally
+// outlive the dropped generator so production denoise can reuse them; the diagnostic canary
+// accounts for this one named allocation by checked arithmetic, never by a tolerance.
+const LTX_CANARY_ONES_CACHE_IDENTITY: &str = "mlx-gen-ltx-transformer-ones-cache-av-bfloat16-v1";
+const LTX_CANARY_ONES_CACHE_VIDEO_DIMENSION: u64 = 4_096;
+const LTX_CANARY_ONES_CACHE_AUDIO_DIMENSION: u64 = 2_048;
+const BFLOAT16_BYTES_PER_ELEMENT: u64 = 2;
+const LTX_INCIDENT_FORBIDDEN: &str = "incident_forbidden";
+const LTX_ARITHMETIC_UNMEASURABLE: &str = "arithmetic_unmeasurable";
+const LTX_SAFETY_REFUSED_OPEN: &str = "safety_refused_open";
+const LTX_INCIDENT_PREDICTED_DECODE_BYTES: u64 =
+    3_300_000_000 + 40 * (1280 * 704 * 305) + 300 * 384 * 384 * 96;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LtxCanaryProfile {
+    Safety,
+    ProductEnvelope,
+}
+
+impl LtxCanaryProfile {
+    fn action(self) -> &'static str {
+        match self {
+            Self::Safety => "canary",
+            Self::ProductEnvelope => "product_envelope_canary",
+        }
+    }
+
+    fn width(self) -> u32 {
+        match self {
+            Self::Safety => LTX_CANARY_WIDTH,
+            Self::ProductEnvelope => LTX_PRODUCT_CANARY_WIDTH,
+        }
+    }
+
+    fn height(self) -> u32 {
+        match self {
+            Self::Safety => LTX_CANARY_HEIGHT,
+            Self::ProductEnvelope => LTX_PRODUCT_CANARY_HEIGHT,
+        }
+    }
+
+    fn frames(self) -> u32 {
+        match self {
+            Self::Safety => LTX_CANARY_FRAMES,
+            Self::ProductEnvelope => LTX_PRODUCT_CANARY_FRAMES,
+        }
+    }
+
+    fn fps(self) -> u32 {
+        match self {
+            Self::Safety => LTX_CANARY_FPS,
+            Self::ProductEnvelope => LTX_PRODUCT_CANARY_FPS,
+        }
+    }
+
+    fn fixture(self) -> &'static str {
+        match self {
+            Self::Safety => LTX_CANARY_FIXTURE,
+            Self::ProductEnvelope => LTX_PRODUCT_CANARY_FIXTURE,
+        }
+    }
+
+    fn prompt(self) -> &'static str {
+        match self {
+            Self::Safety => "a sunlit pine branch, static camera",
+            Self::ProductEnvelope => {
+                "a slow dolly through a sunlit pine forest, drifting motes of pollen, cinematic"
+            }
+        }
+    }
+
+    fn video_mode(self) -> Option<&'static str> {
+        match self {
+            Self::Safety => Some("no_audio"),
+            Self::ProductEnvelope => None,
+        }
+    }
+
+    fn video_mode_identity(self) -> &'static str {
+        match self {
+            Self::Safety => "no_audio",
+            Self::ProductEnvelope => "default_av",
+        }
+    }
+
+    fn completion_status(self) -> &'static str {
+        match self {
+            Self::Safety => "diagnostic_canary_complete",
+            Self::ProductEnvelope => "diagnostic_product_envelope_canary_complete",
+        }
+    }
+
+    fn identity(self) -> &'static str {
+        match self {
+            Self::Safety => "sc-19741-safety",
+            Self::ProductEnvelope => "sc-20169-product-envelope",
+        }
+    }
+}
+/// LTX's video VAE is x32 spatial and **x8 causal temporal**, so `out_f = 1 + (t_lat - 1) * 8` and
+/// the engine's `validate_request` hard-rejects any `num_frames` that is not `1 + 8k`. Latent
+/// temporal depth — not raw frame count — is the physically motivated regressor for a frames-aware
+/// phase curve (sc-18810), so the arm reports it alongside the raw count.
+const LTX_TEMPORAL_SCALE: u32 = 8;
+/// The four constants below are copies of the `limits` block of the `ltx_2_3` entry in
+/// **`config/manifests/builtin.models.jsonc`**, which is their source of truth.
+///
+/// This crate carries two dependencies on purpose and cannot reach `sceneworks-core`'s JSONC reader
+/// to consult the manifest at test time, so the binding lives on the node side instead: `npm run
+/// check` runs `the MLX LTX arm's manifest constants match the shipped ltx_2_3 limits` in
+/// `scripts/platform-review-contracts.test.mjs`, which parses the manifest, parses these four
+/// declarations out of this file, and re-derives [`LTX_FRAME_ENVELOPE`] from the manifest's own
+/// durations x fps. Edit the manifest limits without editing these and that gate reds (sc-18808
+/// review). If you rename a constant, rename it there too — the gate asserts each match rather than
+/// skipping what it cannot find.
+///
+/// `limits.requiresDimensionsMultipleOf`, which mirrors the engine's
+/// `SIZE_MULTIPLE = 2 * SPATIAL_SCALE` (stage 1 renders at half resolution, so a dimension must
+/// divide by twice the 32x VAE compression).
+const LTX_DIMENSION_MULTIPLE: u32 = 64;
+/// `limits.resolutions`, verbatim.
+const LTX_RESOLUTIONS: [(u32, u32); 5] =
+    [(768, 512), (512, 768), (640, 640), (1280, 704), (704, 1280)];
+/// `limits.durations` and `limits.fps`, verbatim. Together they span the frame envelope below.
+const LTX_DURATIONS_SECONDS: [u32; 6] = [4, 6, 8, 10, 12, 15];
+const LTX_FPS: [u32; 3] = [24, 25, 30];
 const MIB: u64 = 1024 * 1024;
+
+/// Port of `sceneworks_core::video_request::ltx_frame_count` — frames snap to the NEAREST `8k + 1`,
+/// minimum 9, ties to the lower. Duplicated rather than depended on: `sceneworks-core` pulls a
+/// bundled SQLite, an image codec stack and a trash binding into what is otherwise a calibration-only
+/// binary with two dependencies.
+///
+/// Because it is a port and NOT a call, the binding to the shipped ladder is by transcription, and
+/// it takes TWO tests to close: `ltx_frame_ladder_port_matches_the_transcribed_shipped_ladder` here
+/// pins the 18 shipped (duration, fps) pairs against this port, and
+/// `ltx_frame_count_matches_the_sc_18808_calibration_ladder` in
+/// `crates/sceneworks-core/src/video_request.rs` pins the SAME 18 pairs against
+/// `ltx_frame_count` itself. `sceneworks-core` is a workspace default member, so a change to the
+/// shipped ladder reds under a plain `cargo test`; without that half, a drift would silently move
+/// what this arm accepts and neither crate would notice (sc-18808 review).
+const fn ltx_snapped_frame_count(raw_frames: u32) -> u32 {
+    let frame_count = if raw_frames < 9 { 9 } else { raw_frames };
+    let lower = frame_count - ((frame_count - 1) % 8);
+    let upper = lower + 8;
+    if lower < 9 {
+        return upper;
+    }
+    if frame_count - lower <= upper - frame_count {
+        lower
+    } else {
+        upper
+    }
+}
+
+/// The closed frame envelope the declared `limits` can actually produce, derived over the FULL
+/// 18-cell `durations x fps` cross product through the ladder the product itself uses. Derived
+/// rather than written down so the bounds cannot drift away from the arrays above.
+const fn ltx_frame_envelope() -> (u32, u32) {
+    let (mut minimum, mut maximum) = (u32::MAX, 0);
+    let mut duration = 0;
+    while duration < LTX_DURATIONS_SECONDS.len() {
+        let mut fps = 0;
+        while fps < LTX_FPS.len() {
+            let frames = ltx_snapped_frame_count(LTX_DURATIONS_SECONDS[duration] * LTX_FPS[fps]);
+            if frames < minimum {
+                minimum = frames;
+            }
+            if frames > maximum {
+                maximum = frames;
+            }
+            fps += 1;
+        }
+        duration += 1;
+    }
+    (minimum, maximum)
+}
+
+const LTX_FRAME_ENVELOPE: (u32, u32) = ltx_frame_envelope();
 
 fn command(program: &str, args: &[&str]) -> Result<String, String> {
     let output = Command::new(program)
@@ -241,6 +544,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn scoped_generation_preserves_generator_and_finish_failures() {
+        let mut observed = Some(ScopedGenerationFailureKind::Error);
+        let error = settle_scoped_generation(
+            Err(mlx_gen::gen_core::Error::Msg(
+                "generator exploded".to_owned(),
+            )),
+            Err(mlx_gen::gen_core::Error::Msg("finish exploded".to_owned())),
+            &mut observed,
+        )
+        .expect_err("neither terminal failure may be discarded");
+        assert_eq!(
+            error,
+            "generate calibrated request: generator exploded; finish calibrated request: finish exploded"
+        );
+        assert_eq!(observed, Some(ScopedGenerationFailureKind::Finish));
+
+        let mut control = Some(ScopedGenerationFailureKind::Error);
+        let error = settle_scoped_generation(
+            Err(mlx_gen::gen_core::Error::Msg(
+                "generator exploded".to_owned(),
+            )),
+            Ok(()),
+            &mut control,
+        )
+        .expect_err("the generator failure remains terminal when finish succeeds");
+        assert_eq!(error, "generator exploded");
+        assert_eq!(control, Some(ScopedGenerationFailureKind::Error));
+    }
+
+    #[test]
     fn wired_limit_prefers_explicit_bytes() {
         assert_eq!(
             resolve_wired_limit(Some("123"), Some("456"), Some("789"), 999).unwrap(),
@@ -341,6 +674,234 @@ mod tests {
         assert!(predicted_ceiling(overall.allocator_bytes()) >= overall.allocator_bytes());
     }
 
+    #[test]
+    fn prediction_basis_keeps_image_admission_conservative_and_video_resident() {
+        let phase = PhaseMemory {
+            active: 16 * MIB,
+            cache: 15 * MIB,
+        };
+        assert_eq!(
+            IMAGE_PREDICTED_PEAK_BASIS,
+            PredictedPeakBasis::HistoricalImageAllocatorBound
+        );
+        assert_eq!(
+            VIDEO_PREDICTED_PEAK_BASIS,
+            PredictedPeakBasis::ResidentActive
+        );
+        assert_eq!(
+            predicted_phase_ceiling(phase, IMAGE_PREDICTED_PEAK_BASIS),
+            predicted_ceiling(31 * MIB)
+        );
+        assert_eq!(
+            predicted_phase_ceiling(phase, VIDEO_PREDICTED_PEAK_BASIS),
+            predicted_ceiling(16 * MIB)
+        );
+    }
+
+    #[test]
+    fn every_receipt_builder_is_bound_to_its_lane_prediction_wrapper() {
+        let source = include_str!("mlx.rs");
+        let image_receipts = source
+            .lines()
+            .filter(|line| {
+                line.trim_start()
+                    .starts_with("let predicted_peaks = image_predicted_peak_bytes(")
+            })
+            .count();
+        assert_eq!(
+            image_receipts, 6,
+            "all six MLX image receipt builders must use the image policy wrapper"
+        );
+        assert_eq!(
+            source
+                .lines()
+                .filter(|line| {
+                    line.trim_start()
+                        == "video_predicted_peak_bytes(conditioning, denoise, decode).json()"
+                })
+                .count(),
+            1,
+            "the LTX receipt builder must use the video policy wrapper"
+        );
+    }
+
+    /// sc-19115. This is the load-bearing decision test, not merely a count of records with cache.
+    /// It evaluates the same host-reserve currency production uses over every committed MLX image
+    /// cell and proves that changing the image basis would loosen 54 shipped admission outcomes.
+    #[test]
+    fn resident_peak_counterfactual_would_loosen_54_shipped_image_admission_cells() {
+        use sceneworks_core::memory_calibration::{Backend, EvidenceBundle, RequiredNullable};
+
+        fn phase(phase: &sceneworks_core::memory_calibration::Phase) -> PhaseMemory {
+            PhaseMemory {
+                active: phase.active_bytes,
+                cache: phase.reclaimable_bytes,
+            }
+        }
+
+        let evidence: EvidenceBundle = serde_json::from_str(include_str!(
+            "../../../../docs/generated/memory-calibration-evidence.json"
+        ))
+        .expect("parse committed memory evidence");
+        let host_bytes = [24_u64, 32, 48, 64, 96, 128].map(|gib| gib * 1024 * 1024 * 1024);
+        let mut image_records = 0_usize;
+        let mut changed_records = 0_usize;
+        let mut flipped_cells = 0_usize;
+        let mut flips_by_provider = std::collections::BTreeMap::<&str, usize>::new();
+
+        for record in evidence.records.iter().filter(|record| {
+            record.backend == Backend::Mlx && record.target.mode == "text_to_image"
+        }) {
+            image_records += 1;
+            let observed = match &record.observed_memory {
+                RequiredNullable::Value(observed) => observed.full().expect("full image telemetry"),
+                RequiredNullable::Null => panic!("{} has null image telemetry", record.id),
+            };
+            let historical = image_predicted_peak_bytes(
+                phase(&observed.conditioning),
+                phase(&observed.denoise),
+                phase(&observed.decode),
+            )
+            .overall;
+            let resident = video_predicted_peak_bytes(
+                phase(&observed.conditioning),
+                phase(&observed.denoise),
+                phase(&observed.decode),
+            )
+            .overall;
+            let shipped = match &record.predicted_peak_bytes {
+                RequiredNullable::Value(predicted) => predicted.overall(),
+                RequiredNullable::Null => panic!("{} has null prediction", record.id),
+            };
+            assert_eq!(
+                shipped, historical,
+                "{} no longer carries the historical image prediction",
+                record.id
+            );
+            if historical != resident {
+                changed_records += 1;
+            }
+
+            let historical_envelope = record
+                .mlx_admission_envelope()
+                .unwrap_or_else(|| panic!("{} has no production MLX envelope", record.id));
+            let mut counterfactual = record.clone();
+            match &mut counterfactual.predicted_peak_bytes {
+                RequiredNullable::Value(predicted) => {
+                    predicted.full_mut().expect("full image prediction").overall = resident;
+                }
+                RequiredNullable::Null => panic!("{} has null prediction", record.id),
+            }
+            let resident_envelope = counterfactual
+                .mlx_admission_envelope()
+                .expect("counterfactual production MLX envelope");
+            for host in host_bytes {
+                let historical_fits = historical_envelope.fits_scaled_host_bytes(host);
+                let resident_fits = resident_envelope.fits_scaled_host_bytes(host);
+                if historical_fits != resident_fits {
+                    assert!(
+                        !historical_fits && resident_fits,
+                        "the resident counterfactual must only loosen admission"
+                    );
+                    flipped_cells += 1;
+                    *flips_by_provider
+                        .entry(record.target.provider.as_str())
+                        .or_default() += 1;
+                }
+            }
+        }
+
+        assert_eq!(image_records, 69);
+        assert_eq!(changed_records, 62);
+        assert_eq!(flipped_cells, 54);
+        assert_eq!(
+            flips_by_provider,
+            std::collections::BTreeMap::from([
+                ("flux2_dev", 7),
+                ("krea_2_turbo_control", 8),
+                ("qwen_image", 38),
+                ("z_image_turbo", 1),
+            ])
+        );
+    }
+
+    /// sc-18864. The emitted phase object must carry ONE named MLX quantity per field. Before this
+    /// story it carried five keys for two readings: `deviceBytes` and `wiredBytes` were both set to
+    /// `active + cache`, which is how every committed MLX record claimed wired residency of
+    /// 99.7-159.6 GB against a probed 87.0 GB ceiling.
+    ///
+    /// Asserting the key SET is the load-bearing half — an assertion that only checked the three
+    /// surviving values would still pass if the two aliases came back.
+    #[test]
+    fn phase_json_emits_one_named_mlx_quantity_per_field() {
+        let phase = PhaseMemory {
+            active: 35_678_641_896,
+            cache: 106_969_676_964,
+        };
+        let value = phase.json();
+        let object = value.as_object().expect("phase json object");
+        let mut keys = object.keys().map(String::as_str).collect::<Vec<_>>();
+        keys.sort_unstable();
+        assert_eq!(keys, ["activeBytes", "allocatorBytes", "reclaimableBytes"]);
+        assert_eq!(object["activeBytes"], json!(35_678_641_896u64));
+        assert_eq!(object["reclaimableBytes"], json!(106_969_676_964u64));
+        // `allocatorBytes` is DERIVED, and the derivation is the whole content of the field.
+        assert_eq!(object["allocatorBytes"], json!(142_648_318_860u64));
+        assert_eq!(
+            object["allocatorBytes"].as_u64().expect("allocator bytes"),
+            object["activeBytes"].as_u64().expect("active bytes")
+                + object["reclaimableBytes"]
+                    .as_u64()
+                    .expect("reclaimable bytes")
+        );
+    }
+
+    /// sc-18864. `predictedPeakBytes` was hardcoded `null` on the LTX arm, which failed both
+    /// `mlx_admission_envelope` and the worker's `RequiredNullable::Value` seed check. Nothing
+    /// about it is contract-dependent — it is `predicted_ceiling` over the arm's own phases.
+    ///
+    /// The measured q8 LTX numbers below are `imc-2c064567893ea869006e` verbatim, and they are the
+    /// discriminating case: a ceiling taken over `allocator_bytes()` instead of `active` would
+    /// predict 149.8 GB of demand on a 137.4 GB host for a render that completed comfortably.
+    #[test]
+    fn ltx_predicted_peak_is_derived_from_the_resident_peak_not_the_co_existence_bound() {
+        let conditioning = PhaseMemory {
+            active: 35_678_641_896,
+            cache: 4_371_718_590,
+        };
+        let denoise = PhaseMemory {
+            active: 36_831_735_964,
+            cache: 0,
+        };
+        let decode = PhaseMemory {
+            active: 37_931_479_408,
+            cache: 104_716_839_452,
+        };
+        let predicted = ltx_predicted_peak_bytes(conditioning, denoise, decode);
+        assert_eq!(
+            predicted,
+            json!({
+                "conditioning": predicted_ceiling(35_678_641_896),
+                "denoise": predicted_ceiling(36_831_735_964),
+                "decode": predicted_ceiling(37_931_479_408),
+                "overall": predicted_ceiling(37_931_479_408),
+            })
+        );
+        let host_bytes = 137_438_953_472u64;
+        let overall = predicted["overall"].as_u64().expect("predicted overall");
+        assert!(
+            overall < host_bytes,
+            "a resident-peak ceiling must fit the capture host, got {overall}"
+        );
+        let overall_phase = PhaseMemory::overall(&[conditioning, denoise, decode]);
+        assert!(
+            predicted_ceiling(overall_phase.allocator_bytes()) > host_bytes,
+            "the co-existence bound must NOT fit, or this test does not discriminate"
+        );
+        // Monotonicity is what lets the `predictedOverallCeiling` diagnostic agree with the record.
+        assert_eq!(overall, predicted_ceiling(overall_phase.active));
+    }
+
     /// sc-18104: an unimplemented provider must be refused by name at dispatch, not fall through to
     /// the Qwen arm. The regression this guards is silent MISROUTING, so asserting "it errored" is
     /// not enough — the old code errored too, just with a Qwen-shaped message after entering the
@@ -350,7 +911,15 @@ mod tests {
     fn run_refuses_a_provider_the_mlx_adapter_does_not_implement() {
         // `flux2_dev` left this list when sc-18218 landed its arm; `flux2_dev_edit` stays — the
         // contract provider is not a dispatchable lane.
-        for provider in ["flux2_klein_9b", "flux2_dev_edit", "sana"] {
+        // `ltx_2_3` left this class when sc-18808 landed the video arm; `ltx_2_3_distilled` (the
+        // CANDLE LTX engine id) and `ltx_2_3_eros` stay — neither is a dispatchable MLX lane.
+        for provider in [
+            "flux2_klein_9b",
+            "flux2_dev_edit",
+            "sana",
+            "ltx_2_3_distilled",
+            "ltx_2_3_eros",
+        ] {
             let request = json!({ "planned": { "target": { "provider": provider } } });
             let error = run(&request).expect_err("unimplemented provider must not dispatch");
             assert_eq!(
@@ -389,6 +958,8 @@ mod tests {
             "sdxl",
             "krea_2_turbo_control",
             "flux2_dev",
+            // sc-18808: the video arm rides the same dispatch, so it is covered by the same proof.
+            "ltx_2_3",
         ] {
             let request = json!({ "planned": { "target": { "provider": provider } } });
             let error = run(&request)
@@ -404,6 +975,7 @@ mod tests {
         assert_eq!(SDXL_PROVIDER, "sdxl");
         assert_eq!(KREA_PROVIDER, "krea_2_turbo_control");
         assert_eq!(FLUX2_PROVIDER, "flux2_dev");
+        assert_eq!(LTX_PROVIDER, "ltx_2_3");
     }
 
     #[test]
@@ -947,10 +1519,58 @@ fn krea_request(width: u32, height: u32, steps: u32) -> GenerationRequest {
 
 fn scoped_generate(
     generator: &dyn Generator,
-    mut request: GenerationRequest,
+    request: GenerationRequest,
     context: &MemoryRunContext,
     error_phase: Option<MemoryPhase>,
     on_progress: &mut dyn FnMut(Progress),
+) -> Result<GenerationOutput, String> {
+    let mut observed_failure = None;
+    scoped_generate_observed(
+        generator,
+        request,
+        context,
+        error_phase,
+        &mut observed_failure,
+        on_progress,
+    )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScopedGenerationFailureKind {
+    Canceled,
+    Error,
+    Finish,
+}
+
+type AfterConfigurationHook = fn(&mut GenerationRequest) -> Result<(), String>;
+
+fn scoped_generate_observed(
+    generator: &dyn Generator,
+    request: GenerationRequest,
+    context: &MemoryRunContext,
+    error_phase: Option<MemoryPhase>,
+    observed_failure: &mut Option<ScopedGenerationFailureKind>,
+    on_progress: &mut dyn FnMut(Progress),
+) -> Result<GenerationOutput, String> {
+    scoped_generate_observed_after_configuration(
+        generator,
+        request,
+        context,
+        error_phase,
+        observed_failure,
+        on_progress,
+        None,
+    )
+}
+
+fn scoped_generate_observed_after_configuration(
+    generator: &dyn Generator,
+    mut request: GenerationRequest,
+    context: &MemoryRunContext,
+    error_phase: Option<MemoryPhase>,
+    observed_failure: &mut Option<ScopedGenerationFailureKind>,
+    on_progress: &mut dyn FnMut(Progress),
+    after_configuration: Option<AfterConfigurationHook>,
 ) -> Result<GenerationOutput, String> {
     if let MemorySafetyDecision::Reject { reason } = generator.memory_strategy_safety_check(context)
     {
@@ -961,10 +1581,25 @@ fn scoped_generate(
     let mut scope = generator
         .begin_memory_strategy_request(context)
         .map_err(|error| format!("begin calibrated request: {error}"))?
-        .ok_or_else(|| "optimized Krea request did not open a memory scope".to_owned())?;
+        .ok_or_else(|| "optimized request did not open a provider memory scope".to_owned())?;
     scope
         .configure_request(&mut request)
         .map_err(|error| format!("configure calibrated request: {error}"))?;
+    if let Some(after_configuration) = after_configuration {
+        if let Err(error) = after_configuration(&mut request) {
+            *observed_failure = Some(ScopedGenerationFailureKind::Error);
+            let finish = scope.finish(MemoryRunOutcome::Error {
+                message: error.clone(),
+            });
+            return match finish {
+                Ok(()) => Err(error),
+                Err(finish) => {
+                    *observed_failure = Some(ScopedGenerationFailureKind::Finish);
+                    Err(format!("{error}; finish calibrated request: {finish}"))
+                }
+            };
+        }
+    }
     if let Some(phase) = error_phase {
         // The shared gen-core request floor rejects a fault phase that is not paired with an
         // explicit harness authorization, so the pair must be set together through gen-core's own
@@ -1014,20 +1649,54 @@ fn scoped_generate(
     }
     let outcome = match &result {
         Ok(_) => MemoryRunOutcome::Complete,
-        Err(mlx_gen::gen_core::Error::Canceled) => MemoryRunOutcome::Canceled,
-        Err(error) => MemoryRunOutcome::Error {
-            message: error.to_string(),
-        },
+        Err(mlx_gen::gen_core::Error::Canceled) => {
+            *observed_failure = Some(ScopedGenerationFailureKind::Canceled);
+            MemoryRunOutcome::Canceled
+        }
+        Err(error) => {
+            *observed_failure = Some(ScopedGenerationFailureKind::Error);
+            MemoryRunOutcome::Error {
+                message: error.to_string(),
+            }
+        }
     };
     let finish = scope.finish(outcome);
     if let Some(error) = phase_error {
-        finish.map_err(|finish| format!("{error}; finish calibrated request: {finish}"))?;
-        return Err(error);
+        return match finish {
+            Ok(()) => {
+                *observed_failure = Some(ScopedGenerationFailureKind::Error);
+                Err(error)
+            }
+            Err(finish) => {
+                *observed_failure = Some(ScopedGenerationFailureKind::Finish);
+                Err(format!("{error}; finish calibrated request: {finish}"))
+            }
+        };
     }
+    settle_scoped_generation(result, finish, observed_failure)
+}
+
+/// Combine the generator and request-scope terminals without losing either failure. A provider
+/// generation error does not make `finish` advisory: lifecycle certification requires the scope to
+/// close successfully on complete, canceled, and error outcomes alike.
+fn settle_scoped_generation(
+    result: mlx_gen::gen_core::Result<GenerationOutput>,
+    finish: mlx_gen::gen_core::Result<()>,
+    observed_failure: &mut Option<ScopedGenerationFailureKind>,
+) -> Result<GenerationOutput, String> {
     match (result, finish) {
         (Ok(output), Ok(())) => Ok(output),
-        (Err(error), _) => Err(error.to_string()),
-        (Ok(_), Err(error)) => Err(format!("finish calibrated request: {error}")),
+        (Err(error), Ok(())) => Err(error.to_string()),
+        (Err(error), Err(finish)) => {
+            *observed_failure = Some(ScopedGenerationFailureKind::Finish);
+            Err(format!(
+                "generate calibrated request: {error}; finish calibrated request: {finish}"
+            ))
+        }
+        (Ok(_), Err(error)) => {
+            *observed_failure = Some(ScopedGenerationFailureKind::Finish);
+            Err(format!("finish calibrated request: {error}"))
+        }
     }
 }
 
@@ -1042,6 +1711,43 @@ fn one_image(output: GenerationOutput) -> Result<Image, String> {
 struct PhaseMemory {
     active: u64,
     cache: u64,
+}
+
+/// The physical quantity an MLX calibration lane promotes into admission evidence.
+///
+/// Image evidence deliberately preserves its historical componentwise co-existence bound. That
+/// bound adds peak-active-over-window to end-of-phase reclaimable cache, so it is conservative but
+/// not a simultaneous resident measurement. Moving those records to `ResidentActive` would loosen
+/// shipped image admission without a replacement campaign (sc-19115). Video evidence uses the
+/// resident active peak because staged video leaves an enormous elastic cache at phase boundaries;
+/// charging that cache would make successful LTX captures inadmissible on their capture host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PredictedPeakBasis {
+    HistoricalImageAllocatorBound,
+    ResidentActive,
+}
+
+const IMAGE_PREDICTED_PEAK_BASIS: PredictedPeakBasis =
+    PredictedPeakBasis::HistoricalImageAllocatorBound;
+const VIDEO_PREDICTED_PEAK_BASIS: PredictedPeakBasis = PredictedPeakBasis::ResidentActive;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PredictedPhasePeaks {
+    conditioning: u64,
+    denoise: u64,
+    decode: u64,
+    overall: u64,
+}
+
+impl PredictedPhasePeaks {
+    fn json(self) -> Value {
+        json!({
+            "conditioning": self.conditioning,
+            "denoise": self.denoise,
+            "decode": self.decode,
+            "overall": self.overall,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1108,6 +1814,13 @@ impl PhaseMemory {
         }
     }
 
+    /// TWO DIFFERENT INSTANTS, and every consumer of `allocatorBytes` has to know it (sc-18810
+    /// review). `active` is `get_peak_memory()` — the MAXIMUM over the phase window since the last
+    /// `reset_peak_memory`. `cache` is `get_cache_memory()` — the INSTANTANEOUS reading at the
+    /// moment of capture, i.e. the end of the phase. MLX exposes no "cache at the active peak", so
+    /// their sum is an UPPER BOUND on what co-existed, not a simultaneous maximum: during an LTX
+    /// decode the cache is ~0 on entry and grows monotonically to its end-of-phase value, so the
+    /// bound is loosest exactly where it is largest.
     fn capture() -> Self {
         Self {
             active: get_peak_memory() as u64,
@@ -1115,13 +1828,34 @@ impl PhaseMemory {
         }
     }
 
+    /// ONE NAMED MLX QUANTITY PER FIELD, and nothing else (sc-18864).
+    ///
+    /// MLX exposes exactly two per-phase counters, so the record carries exactly two counters plus
+    /// their documented sum. Schema v4 also carried `deviceBytes` and `wiredBytes`, and this
+    /// function set BOTH of them to `active + cache` — the same number as `allocatorBytes`, under
+    /// two names that claim to be different quantities. Neither claim was measurable: MLX has no
+    /// device-residency counter and no wired-residency counter, and Metal's
+    /// `recommendedMaxWorkingSetSize` does not bound `active + cache` either (a completing LTX
+    /// render co-existed 7.46 GiB above it, sc-18810). The consequence was a physically impossible
+    /// record: `wiredBytes` 99.7-159.6 GB against a probed `wiredLimitBytes` of 87.0 GB on every
+    /// committed MLX capture. Schema v5 removes both fields rather than inventing readings for
+    /// them.
+    ///
+    /// - `activeBytes` is [`get_peak_memory`] — the MAXIMUM live-array byte count since the last
+    ///   `reset_peak_memory`, i.e. the phase window. This is the quantity MLX's own
+    ///   [`get_memory_limit`] enforces, and the only one a hardware or wired ceiling may be
+    ///   checked against.
+    /// - `reclaimableBytes` is [`get_cache_memory`] — the allocator's free-buffer cache, read
+    ///   INSTANTANEOUSLY at the phase boundary. MLX releases it under pressure.
+    /// - `allocatorBytes` is their sum, and is an UPPER BOUND ON CO-EXISTENCE, not a simultaneous
+    ///   maximum: it adds a peak-over-window to an instantaneous-at-boundary reading, and MLX
+    ///   exposes no "cache at the active peak". During an LTX decode the cache is ~0 on entry and
+    ///   grows monotonically to its end-of-phase value, so the bound is loosest exactly where it
+    ///   is largest.
     fn json(self) -> Value {
-        let allocator = self.allocator_bytes();
         json!({
             "activeBytes": self.active,
-            "allocatorBytes": allocator,
-            "deviceBytes": allocator,
-            "wiredBytes": allocator,
+            "allocatorBytes": self.allocator_bytes(),
             "reclaimableBytes": self.cache,
         })
     }
@@ -1133,6 +1867,45 @@ fn predicted_ceiling(bytes: u64) -> u64 {
         .saturating_add(64 * MIB - 1)
         .saturating_div(64 * MIB)
         .saturating_mul(64 * MIB)
+}
+
+fn predicted_phase_ceiling(phase: PhaseMemory, basis: PredictedPeakBasis) -> u64 {
+    let bytes = match basis {
+        PredictedPeakBasis::HistoricalImageAllocatorBound => phase.allocator_bytes(),
+        PredictedPeakBasis::ResidentActive => phase.active,
+    };
+    predicted_ceiling(bytes)
+}
+
+fn predicted_phase_peaks(
+    conditioning: PhaseMemory,
+    denoise: PhaseMemory,
+    decode: PhaseMemory,
+    basis: PredictedPeakBasis,
+) -> PredictedPhasePeaks {
+    let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
+    PredictedPhasePeaks {
+        conditioning: predicted_phase_ceiling(conditioning, basis),
+        denoise: predicted_phase_ceiling(denoise, basis),
+        decode: predicted_phase_ceiling(decode, basis),
+        overall: predicted_phase_ceiling(overall, basis),
+    }
+}
+
+fn image_predicted_peak_bytes(
+    conditioning: PhaseMemory,
+    denoise: PhaseMemory,
+    decode: PhaseMemory,
+) -> PredictedPhasePeaks {
+    predicted_phase_peaks(conditioning, denoise, decode, IMAGE_PREDICTED_PEAK_BASIS)
+}
+
+fn video_predicted_peak_bytes(
+    conditioning: PhaseMemory,
+    denoise: PhaseMemory,
+    decode: PhaseMemory,
+) -> PredictedPhasePeaks {
+    predicted_phase_peaks(conditioning, denoise, decode, VIDEO_PREDICTED_PEAK_BASIS)
 }
 
 fn planned_memory_strategy(request: &Value) -> Result<MemoryStrategy, String> {
@@ -1472,7 +2245,8 @@ fn run_z_image_reference_loaded(
         );
     }
     let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
-    let predicted = predicted_ceiling(overall.allocator_bytes());
+    let predicted_peaks = image_predicted_peak_bytes(conditioning, denoise, decode);
+    let predicted = predicted_peaks.overall;
 
     let mut exact = context.clone();
     exact.predicted_peak_bytes = predicted;
@@ -1713,12 +2487,7 @@ fn run_z_image_reference_loaded(
             { "name": "loadability", "result": "passed" },
             { "name": "overlay", "result": "not_applicable", "reason": "the authoritative Z-Image target has no overlay" }
         ],
-        "predictedPeakBytes": {
-            "conditioning": predicted_ceiling(conditioning.allocator_bytes()),
-            "denoise": predicted_ceiling(denoise.allocator_bytes()),
-            "decode": predicted_ceiling(decode.allocator_bytes()),
-            "overall": predicted,
-        },
+        "predictedPeakBytes": predicted_peaks.json(),
         "observedMemory": {
             "conditioning": conditioning.json(),
             "denoise": denoise.json(),
@@ -1777,6 +2546,9 @@ fn run_z_image_reference_loaded(
 }
 
 fn run_z_image_reference(request: &Value) -> Result<Value, String> {
+    // Before the load, not inside `..._loaded`: a non-still target must be refused without paying
+    // for weights, the same ordering every other image arm now has.
+    protocol::validate_still_geometry(request, "MLX Z-Image base calibration")?;
     let load_shape = planned_load_shape(request)?;
     let (repository, revision, generator) = load_z_image_generator(request, load_shape)?;
     run_z_image_reference_loaded(
@@ -1810,6 +2582,12 @@ fn flux2_quality_passes(maximum: f64, mean: f64, rms: f64) -> bool {
     maximum <= FLUX2_MAX_THRESHOLD && mean <= FLUX2_MEAN_THRESHOLD && rms <= FLUX2_RMS_THRESHOLD
 }
 
+/// The LTX-2.3 twin of [`flux2_quality_passes`], over the LTX-named thresholds so an `mlx:ltx_2_3`
+/// receipt's numbers trace to an LTX constant.
+fn ltx_quality_passes(maximum: f64, mean: f64, rms: f64) -> bool {
+    maximum <= LTX_MAX_THRESHOLD && mean <= LTX_MEAN_THRESHOLD && rms <= LTX_RMS_THRESHOLD
+}
+
 /// Defense-in-depth mirror of the provider-mismatch guard `validate_z_image_batch` carries
 /// (sc-18104): `run` dispatches by name today, but this arm hardcodes the FLUX.2-dev contract, so a
 /// future caller must be refused by name here rather than misrouted into that contract.
@@ -1823,7 +2601,7 @@ fn validate_flux2_target(request: &Value) -> Result<(), String> {
             "MLX FLUX.2-dev calibration does not implement provider {provider:?}"
         ));
     }
-    Ok(())
+    protocol::validate_still_geometry(request, "MLX FLUX.2-dev calibration")
 }
 
 /// Bind the fixture to the planned tier AND geometry edge, deriving the seed — the same
@@ -2122,7 +2900,8 @@ fn run_flux2_dev(request: &Value) -> Result<Value, String> {
         );
     }
     let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
-    let predicted = predicted_ceiling(overall.allocator_bytes());
+    let predicted_peaks = image_predicted_peak_bytes(conditioning, denoise, decode);
+    let predicted = predicted_peaks.overall;
     let exact_fit = flux2_admission_context(
         &selection,
         calibration,
@@ -2226,12 +3005,7 @@ fn run_flux2_dev(request: &Value) -> Result<Value, String> {
             { "name": "loadability", "result": "passed" },
             { "name": "overlay", "result": "not_applicable", "reason": "settled below from the declared target" }
         ],
-        "predictedPeakBytes": {
-            "conditioning": predicted_ceiling(conditioning.allocator_bytes()),
-            "denoise": predicted_ceiling(denoise.allocator_bytes()),
-            "decode": predicted_ceiling(decode.allocator_bytes()),
-            "overall": predicted,
-        },
+        "predictedPeakBytes": predicted_peaks.json(),
         "observedMemory": {
             "conditioning": conditioning.json(),
             "denoise": denoise.json(),
@@ -2459,21 +3233,7 @@ fn validate_krea_base_target(request: &Value) -> Result<(), String> {
             "MLX Krea base calibration requires reference-free text_to_image mode, got {mode:?}"
         ));
     }
-    let geometry = target
-        .get("geometry")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "planned.target.geometry must be an object".to_owned())?;
-    for (axis, expected) in [("batch", 1_u64), ("frames", 1_u64)] {
-        let actual = geometry
-            .get(axis)
-            .and_then(Value::as_u64)
-            .ok_or_else(|| format!("planned.target.geometry.{axis} must be an integer"))?;
-        if actual != expected {
-            return Err(format!(
-                "MLX Krea base calibration requires geometry.{axis} == {expected}, got {actual}"
-            ));
-        }
-    }
+    protocol::validate_still_geometry(request, "MLX Krea base calibration")?;
     for field in ["referenceCount", "reference_count"] {
         if let Some(value) = target.get(field) {
             if value.as_u64() != Some(0) {
@@ -2953,7 +3713,8 @@ fn run_krea_base(request: &Value) -> Result<Value, String> {
         );
     }
     let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
-    let predicted = predicted_ceiling(overall.allocator_bytes());
+    let predicted_peaks = image_predicted_peak_bytes(conditioning, denoise, decode);
+    let predicted = predicted_peaks.overall;
 
     let mut exact = context.clone();
     exact.predicted_peak_bytes = predicted;
@@ -3020,12 +3781,7 @@ fn run_krea_base(request: &Value) -> Result<Value, String> {
             { "name": "loadability", "result": "passed" },
             { "name": "overlay", "result": "not_applicable", "reason": "settled below from the declared target" }
         ],
-        "predictedPeakBytes": {
-            "conditioning": predicted_ceiling(conditioning.allocator_bytes()),
-            "denoise": predicted_ceiling(denoise.allocator_bytes()),
-            "decode": predicted_ceiling(decode.allocator_bytes()),
-            "overall": predicted,
-        },
+        "predictedPeakBytes": predicted_peaks.json(),
         "observedMemory": {
             "conditioning": conditioning.json(),
             "denoise": denoise.json(),
@@ -3114,21 +3870,7 @@ fn validate_sdxl_target(request: &Value) -> Result<(), String> {
             "MLX SDXL base calibration requires reference-free text_to_image mode, got {mode:?}"
         ));
     }
-    let geometry = target
-        .get("geometry")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "planned.target.geometry must be an object".to_owned())?;
-    for (axis, expected) in [("batch", 1_u64), ("frames", 1_u64)] {
-        let actual = geometry
-            .get(axis)
-            .and_then(Value::as_u64)
-            .ok_or_else(|| format!("planned.target.geometry.{axis} must be an integer"))?;
-        if actual != expected {
-            return Err(format!(
-                "MLX SDXL base calibration requires geometry.{axis} == {expected}, got {actual}"
-            ));
-        }
-    }
+    protocol::validate_still_geometry(request, "MLX SDXL base calibration")?;
     for field in ["referenceCount", "reference_count"] {
         if let Some(value) = target.get(field) {
             if value.as_u64() != Some(0) {
@@ -3441,7 +4183,8 @@ fn run_sdxl(request: &Value) -> Result<Value, String> {
         return Err("a synchronized SDXL lifecycle phase reported a zero active peak".to_owned());
     }
     let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
-    let predicted = predicted_ceiling(overall.allocator_bytes());
+    let predicted_peaks = image_predicted_peak_bytes(conditioning, denoise, decode);
+    let predicted = predicted_peaks.overall;
 
     let mut exact = context.clone();
     exact.predicted_peak_bytes = predicted;
@@ -3524,12 +4267,7 @@ fn run_sdxl(request: &Value) -> Result<Value, String> {
             { "name": "loadability", "result": "passed" },
             { "name": "overlay", "result": "not_applicable", "reason": "settled below from the declared target" }
         ],
-        "predictedPeakBytes": {
-            "conditioning": predicted_ceiling(conditioning.allocator_bytes()),
-            "denoise": predicted_ceiling(denoise.allocator_bytes()),
-            "decode": predicted_ceiling(decode.allocator_bytes()),
-            "overall": predicted,
-        },
+        "predictedPeakBytes": predicted_peaks.json(),
         "observedMemory": {
             "conditioning": conditioning.json(),
             "denoise": denoise.json(),
@@ -3577,6 +4315,7 @@ fn run_sdxl(request: &Value) -> Result<Value, String> {
 
 fn run_krea_control(request: &Value) -> Result<Value, String> {
     protocol::validate_exact_overlay_target(request, "control:1", KREA_CONTROL_EXECUTION_PATH)?;
+    protocol::validate_still_geometry(request, "MLX Krea pose-control calibration")?;
     let parameters = protocol::strategy_parameters(request)?;
     let strategy = json!({
         "rung": "bounded_decode",
@@ -3873,13 +4612,14 @@ fn run_krea_control(request: &Value) -> Result<Value, String> {
     let denoise = denoise.get();
     let phases = [conditioning, denoise, decode];
     let overall = PhaseMemory::overall(&phases);
-    let predicted_conditioning = predicted_ceiling(conditioning.active + conditioning.cache);
-    let predicted_denoise = predicted_ceiling(denoise.active + denoise.cache);
-    let predicted_decode = predicted_ceiling(decode.active + decode.cache);
+    let predicted_peaks = image_predicted_peak_bytes(conditioning, denoise, decode);
+    let predicted_conditioning = predicted_peaks.conditioning;
+    let predicted_denoise = predicted_peaks.denoise;
+    let predicted_decode = predicted_peaks.decode;
     // The harness defines `overall` as a conservative componentwise high-water envelope: every
     // overall metric must cover the corresponding peak from every physical phase. Predict from that
     // same envelope so exact-fit admission can never sit below the published observed overall.
-    let predicted_overall = predicted_ceiling(overall.allocator_bytes());
+    let predicted_overall = predicted_peaks.overall;
     let mutation_bias = 0.05_f64;
     let mutated_maximum = maximum_error + mutation_bias;
     let mutated_mean = mean_error + mutation_bias;
@@ -4021,6 +4761,7 @@ fn run_qwen_vae_probe(request: &Value) -> Result<Value, String> {
         );
     }
     protocol::validate_plain_overlay_target(request, QWEN_PLAIN_EXECUTION_PATH)?;
+    protocol::validate_still_geometry(request, "MLX Qwen VAE-probe calibration")?;
     let parameters = protocol::strategy_parameters(request)?;
     let strategy = json!({
         "rung": "bounded_decode",
@@ -4278,6 +5019,7 @@ fn run_qwen_provider(request: &Value) -> Result<Value, String> {
         return run_qwen_vae_probe(request);
     }
     protocol::validate_plain_overlay_target(request, QWEN_PROVIDER_EXECUTION_PATH)?;
+    protocol::validate_still_geometry(request, "MLX Qwen base calibration")?;
     let selection = planned_selection(request)?;
     let tier = planned_qwen_tier(request)?;
     let seed = planned_qwen_seed(request, tier)?;
@@ -4393,7 +5135,8 @@ fn run_qwen_provider(request: &Value) -> Result<Value, String> {
     }
     let phases = [conditioning, denoise, decode];
     let overall = PhaseMemory::overall(&phases);
-    let predicted = predicted_ceiling(overall.allocator_bytes());
+    let predicted_peaks = image_predicted_peak_bytes(conditioning, denoise, decode);
+    let predicted = predicted_peaks.overall;
 
     let mut exact = context.clone();
     exact.predicted_peak_bytes = predicted;
@@ -4557,12 +5300,7 @@ fn run_qwen_provider(request: &Value) -> Result<Value, String> {
             { "name": "loadability", "result": "passed" },
             { "name": "overlay", "result": "not_applicable", "reason": "the authoritative Qwen target has no overlay" }
         ],
-        "predictedPeakBytes": {
-            "conditioning": predicted_ceiling(conditioning.allocator_bytes()),
-            "denoise": predicted_ceiling(denoise.allocator_bytes()),
-            "decode": predicted_ceiling(decode.allocator_bytes()),
-            "overall": predicted,
-        },
+        "predictedPeakBytes": predicted_peaks.json(),
         "observedMemory": {
             "conditioning": conditioning.json(),
             "denoise": denoise.json(),
@@ -4616,6 +5354,3790 @@ fn run_qwen_provider(request: &Value) -> Result<Value, String> {
     Ok(fragment)
 }
 
+/// The exact target geometry an `mlx:ltx_2_3` calibration case renders. `fps` is NOT part of it:
+/// `GeometryEnvelope` has no temporal-cadence axis, so the arm binds fps through the fixture name
+/// instead (see [`planned_ltx_capture`]). That gap is real and is reported rather than papered over —
+/// the audio stream's latent length is a function of fps, so two records with identical
+/// `{width, height, batch, frames}` can legitimately differ in peak.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LtxGeometry {
+    width: u32,
+    height: u32,
+    frames: u32,
+    /// `1 + (frames - 1) / 8` — the LTX video VAE's causal temporal depth.
+    latent_frames: u32,
+}
+
+fn ltx_declared_resolutions() -> String {
+    LTX_RESOLUTIONS
+        .iter()
+        .map(|(width, height)| format!("{width}x{height}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// LTX's own geometry envelope, which REPLACES the image arms' `frames == 1` refusal for this arm
+/// alone. Three independent constraints, each from a stated source:
+///
+/// * `limits.resolutions` — the five declared pairs (the catalog contract a real request can name).
+/// * `limits.requiresDimensionsMultipleOf` — 64, mirroring the engine's `SIZE_MULTIPLE`. Redundant
+///   with the pair list today; kept because it is the engine's hard rule and the pair list is not.
+/// * the temporal lattice and envelope — `frames = 1 + 8k` (the engine's `validate_request` hard
+///   reject) inside `[97, 449]`, the closed span the declared `durations x fps` cross product
+///   produces through the shipped LTX frame ladder.
+///
+/// A still geometry (`frames == 1`) is on the lattice but below the envelope floor, so it is refused
+/// here too: this arm may not silently capture a single-frame record for a video model.
+fn validate_ltx_geometry(width: u32, height: u32, frames: u32) -> Result<LtxGeometry, String> {
+    if !LTX_RESOLUTIONS.contains(&(width, height)) {
+        return Err(format!(
+            "MLX LTX-2.3 calibration requires one of the declared limits.resolutions ({}), got {width}x{height}",
+            ltx_declared_resolutions()
+        ));
+    }
+    if width % LTX_DIMENSION_MULTIPLE != 0 || height % LTX_DIMENSION_MULTIPLE != 0 {
+        return Err(format!(
+            "MLX LTX-2.3 calibration requires geometry divisible by {LTX_DIMENSION_MULTIPLE}, got {width}x{height}"
+        ));
+    }
+    if frames % LTX_TEMPORAL_SCALE != 1 {
+        return Err(format!(
+            "MLX LTX-2.3 calibration requires geometry.frames == 1 + {LTX_TEMPORAL_SCALE}k (the LTX \
+             video VAE is {LTX_TEMPORAL_SCALE}x causal in time), got {frames}"
+        ));
+    }
+    let (minimum, maximum) = LTX_FRAME_ENVELOPE;
+    if frames < minimum || frames > maximum {
+        return Err(format!(
+            "MLX LTX-2.3 calibration requires geometry.frames within the declared duration/fps \
+             envelope [{minimum}, {maximum}], got {frames}"
+        ));
+    }
+    Ok(LtxGeometry {
+        width,
+        height,
+        frames,
+        latent_frames: 1 + (frames - 1) / LTX_TEMPORAL_SCALE,
+    })
+}
+
+/// Read the four declared geometry axes. Unlike the image arms this reads `frames` as a real value
+/// rather than asserting it away; `batch` is still pinned to 1 because LTX's descriptor advertises
+/// `max_count: 1` and the arm renders exactly one clip.
+fn ltx_target_geometry(request: &Value) -> Result<LtxGeometry, String> {
+    let geometry = protocol::planned(request)?
+        .pointer("/target/geometry")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "planned.target.geometry must be an object".to_owned())?;
+    let axis = |name: &str| {
+        geometry
+            .get(name)
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| format!("planned.target.geometry.{name} must fit u32"))
+    };
+    let batch = axis("batch")?;
+    if batch != 1 {
+        return Err(format!(
+            "MLX LTX-2.3 calibration requires geometry.batch == 1 (the provider advertises \
+             max_count 1), got {batch}"
+        ));
+    }
+    validate_ltx_geometry(axis("width")?, axis("height")?, axis("frames")?)
+}
+
+/// Defense-in-depth mirror of `validate_flux2_target`, plus the T2V-specific target shape. The
+/// `run` dispatcher routes by provider id today, but this arm hardcodes the LTX contract, so a
+/// foreign caller must be refused BY NAME here rather than misrouted into it.
+fn validate_ltx_target(request: &Value) -> Result<LtxGeometry, String> {
+    let target = protocol::planned(request)?
+        .get("target")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "planned.target must be an object".to_owned())?;
+    let provider = target
+        .get("provider")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
+    if provider != LTX_PROVIDER {
+        return Err(format!(
+            "MLX LTX-2.3 calibration does not implement provider {provider:?}"
+        ));
+    }
+    let model_id = target
+        .get("modelId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
+    if model_id != LTX_PROVIDER {
+        return Err(format!(
+            "MLX LTX-2.3 calibration requires modelId {LTX_PROVIDER:?}, got {model_id:?}"
+        ));
+    }
+    let mode = target
+        .get("mode")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.mode must be a string".to_owned())?;
+    if mode != "text_to_video" {
+        return Err(format!(
+            "MLX LTX-2.3 calibration requires reference-free text_to_video mode, got {mode:?}"
+        ));
+    }
+    for field in ["referenceCount", "reference_count"] {
+        if let Some(value) = target.get(field) {
+            if value.as_u64() != Some(0) {
+                return Err(format!(
+                    "MLX LTX-2.3 calibration requires {field} == 0 when declared"
+                ));
+            }
+        }
+    }
+    for field in ["hasReference", "has_reference"] {
+        if let Some(value) = target.get(field) {
+            if value.as_bool() != Some(false) {
+                return Err(format!(
+                    "MLX LTX-2.3 calibration requires {field} == false when declared"
+                ));
+            }
+        }
+    }
+    ltx_target_geometry(request)
+}
+
+/// Bind the fixture to the planned tier AND the full rendered geometry, and recover the two request
+/// parameters the geometry envelope cannot carry: the output cadence `fps` and the seed. fps rides
+/// here because `GeometryEnvelope` has no temporal-cadence axis and the audio latent length — which
+/// is denoised jointly with the video on every step — is `compute_audio_frames(frames, fps)`.
+fn planned_ltx_capture(
+    request: &Value,
+    tier: &str,
+    geometry: LtxGeometry,
+) -> Result<(u32, u64), String> {
+    let fixture = protocol::planned(request)?
+        .get("fixture")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let prefix = format!(
+        "ltx-2-3-mlx-{tier}-{}x{}-f{}-fps",
+        geometry.width, geometry.height, geometry.frames
+    );
+    let remainder = fixture
+        .strip_prefix(&prefix)
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must start with {prefix:?}"))?;
+    let (fps_and_carrier, seed) = remainder
+        .split_once("-seed")
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must end with -seed<seed>"))?;
+    let fps = fps_and_carrier
+        .strip_suffix("-bounded-decode-192-64")
+        .unwrap_or(fps_and_carrier);
+    let fps = fps
+        .parse::<u32>()
+        .map_err(|error| format!("parse LTX fixture fps {fps:?}: {error}"))?;
+    let seed = seed
+        .parse::<u64>()
+        .map_err(|error| format!("parse LTX fixture seed {seed:?}: {error}"))?;
+    if !LTX_FPS.contains(&fps) {
+        return Err(format!(
+            "planned.fixture declares fps {fps}, which is not one of the declared limits.fps {LTX_FPS:?}"
+        ));
+    }
+    if seed != LTX_SEED {
+        return Err(format!(
+            "planned.fixture seed {seed} does not match the LTX-2.3 calibration seed {LTX_SEED}"
+        ));
+    }
+    Ok((fps, seed))
+}
+
+/// Fail closed before any model path, provider registry, or MLX allocation is touched.
+///
+/// The q4 f305 incident forbids that exact case. It also invalidates the former assumption that a
+/// smaller geometry is safe: every SC-18946 row first loads its complete numeric tier and the same
+/// Gemma stack. q8/bf16 carry strictly larger immutable tier inventories, but there is no proved
+/// relationship from inventory bytes to a safe physical-footprint upper bound. Consequently every
+/// row is refused; only rows supported by incident or monotonic evidence are called unmeasurable,
+/// while the rest remain explicitly safety-refused/open. External polling is defense in depth,
+/// not admission.
+fn validate_ltx_safety_evidence(
+    request: &Value,
+    tier: &str,
+    geometry: LtxGeometry,
+    selection: &MemorySelection,
+) -> Result<(&'static str, u64, u64), String> {
+    let inventory_bytes = match tier {
+        "q4" => LTX_Q4_INVENTORY_BYTES,
+        "q8" => LTX_Q8_INVENTORY_BYTES,
+        "bf16" => LTX_BF16_INVENTORY_BYTES,
+        other => return Err(format!("unsupported SC-18946 safety tier {other:?}")),
+    };
+    let safety = protocol::planned(request)?
+        .get("_measurementSafety")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            "SC-18946 row is missing required _measurementSafety; refusing before model load"
+                .to_owned()
+        })?;
+    let exact_u64 = |field: &str, expected: u64| -> Result<(), String> {
+        let actual = safety.get(field).and_then(Value::as_u64);
+        if actual == Some(expected) {
+            Ok(())
+        } else {
+            Err(format!(
+                "SC-18946 safety field {field} must be {expected}, got {actual:?}; refusing before model load"
+            ))
+        }
+    };
+    let bounded = selection.strategy == MemoryStrategy::BoundedDecode;
+    let incident_carrier = selection.parameters.decode_tile_edge == Some(384)
+        && selection.parameters.decode_overlap == Some(64);
+    let incident = tier == "q4"
+        && bounded
+        && incident_carrier
+        && geometry.width == 1280
+        && geometry.height == 704
+        && geometry.frames == 305;
+    let monotonic_rung2 = tier == "q4"
+        && bounded
+        && incident_carrier
+        && geometry.width == 1280
+        && geometry.height == 704
+        && geometry.frames > 305;
+    let expected_disposition = if incident {
+        LTX_INCIDENT_FORBIDDEN
+    } else if monotonic_rung2 {
+        LTX_ARITHMETIC_UNMEASURABLE
+    } else {
+        LTX_SAFETY_REFUSED_OPEN
+    };
+    if safety.get("disposition").and_then(Value::as_str) != Some(expected_disposition) {
+        return Err(format!(
+            "SC-18946 safety disposition must be {expected_disposition:?}; refusing before model load"
+        ));
+    }
+    exact_u64("tierInventoryBytes", inventory_bytes)?;
+    exact_u64(
+        "incidentCrashFootprintBytes",
+        LTX_Q4_F305_CRASH_FOOTPRINT_BYTES,
+    )?;
+    exact_u64(
+        "incidentPredictedDecodeBytes",
+        LTX_INCIDENT_PREDICTED_DECODE_BYTES,
+    )?;
+    let voxels = u64::from(geometry.width)
+        .saturating_mul(u64::from(geometry.height))
+        .saturating_mul(u64::from(geometry.frames));
+    let predicted_decode_bytes = if bounded {
+        let tile_edge = u64::from(selection.parameters.decode_tile_edge.ok_or_else(|| {
+            "SC-18946 bounded-decode safety row omitted decodeTileEdge".to_owned()
+        })?);
+        3_300_000_000_u64
+            .saturating_add(40_u64.saturating_mul(voxels))
+            .saturating_add(
+                300_u64
+                    .saturating_mul(tile_edge)
+                    .saturating_mul(tile_edge)
+                    .saturating_mul(96),
+            )
+    } else {
+        3_300_000_000_u64.saturating_add(340_u64.saturating_mul(voxels))
+    };
+    exact_u64("predictedDecodeBytes", predicted_decode_bytes)?;
+    let projection = i128::from(LTX_Q4_F305_CRASH_FOOTPRINT_BYTES)
+        + (i128::from(inventory_bytes) - i128::from(LTX_Q4_INVENTORY_BYTES))
+        + (i128::from(predicted_decode_bytes) - i128::from(LTX_INCIDENT_PREDICTED_DECODE_BYTES));
+    let projection = u64::try_from(projection)
+        .map_err(|_| "SC-18946 incident-calibrated projection must fit u64".to_owned())?;
+    exact_u64("incidentCalibratedProjectionBytes", projection)?;
+    Ok((expected_disposition, inventory_bytes, projection))
+}
+
+fn refuse_unsafe_ltx_capture(
+    request: &Value,
+    tier: &str,
+    geometry: LtxGeometry,
+    selection: &MemorySelection,
+) -> Result<(), String> {
+    let (expected_disposition, inventory_bytes, projection) =
+        validate_ltx_safety_evidence(request, tier, geometry, selection)?;
+    Err(format!(
+        "SC-19642 pre-load safety refusal: SC-18946 {tier} is {expected_disposition}; exact tier inventory={inventory_bytes} bytes, incident q4 f305 physical footprint={} bytes, incident-calibrated projection={projection} bytes, and every geometry shares the complete tier plus Gemma load without a proved safe upper bound",
+        LTX_Q4_F305_CRASH_FOOTPRINT_BYTES
+    ))
+}
+
+/// The sole supervised entry into SC-18946. The ordinary `run` action continues through
+/// [`refuse_unsafe_ltx_capture`]; this private action additionally requires the live watchdog
+/// channel and may reach only the first frozen q4 staged row. The runner injects the two private
+/// objects after the canonical harness has constructed the row, so neither object participates in
+/// the campaign logical-case identity.
+fn validate_ltx_campaign_entry(
+    request: &Value,
+    tier: &str,
+    geometry: LtxGeometry,
+    selection: &MemorySelection,
+) -> Result<(), String> {
+    if protocol::action(request)? != LTX_CAMPAIGN_ENTRY_ACTION {
+        return Err("SC-20191 campaign entry action changed".to_owned());
+    }
+    let planned = protocol::planned(request)?;
+    let exact = |pointer: &str, expected: &Value| -> Result<(), String> {
+        let actual = planned.pointer(pointer);
+        if actual == Some(expected) {
+            Ok(())
+        } else {
+            Err(format!(
+                "SC-20191 campaign entry {pointer} must be {expected}, got {actual:?}"
+            ))
+        }
+    };
+    exact("/logicalCaseId", &json!(LTX_CAMPAIGN_ENTRY_LOGICAL_CASE_ID))?;
+    exact("/evidenceScope", &json!("authoritative"))?;
+    exact("/backend", &json!("mlx"))?;
+    exact("/loadShape", &json!("eager_materialization"))?;
+    exact("/target/provider", &json!(LTX_PROVIDER))?;
+    exact("/target/modelId", &json!(LTX_PROVIDER))?;
+    exact("/target/tier", &json!("q4"))?;
+    exact("/target/mode", &json!("text_to_video"))?;
+    exact("/target/overlay", &json!("none"))?;
+    exact("/target/geometry/width", &json!(LTX_CAMPAIGN_ENTRY_WIDTH))?;
+    exact("/target/geometry/height", &json!(LTX_CAMPAIGN_ENTRY_HEIGHT))?;
+    exact("/target/geometry/batch", &json!(1))?;
+    exact("/target/geometry/frames", &json!(LTX_CAMPAIGN_ENTRY_FRAMES))?;
+    exact("/strategy/rung", &json!("staged_residency"))?;
+    exact(
+        "/strategy/engagedRungs",
+        &json!(["resident", "staged_residency"]),
+    )?;
+    exact("/strategy/parameters", &json!({}))?;
+    exact(
+        "/calibrationFingerprint",
+        &json!(LTX_CALIBRATION_FINGERPRINT),
+    )?;
+    exact("/fixture", &json!(LTX_CAMPAIGN_ENTRY_FIXTURE))?;
+    exact("/negative", &json!(false))?;
+    exact("/expectedResult", &json!("passed"))?;
+    exact("/modelLoadPolicy", &json!("fresh_per_case"))?;
+    exact("/modelLoadGroup", &Value::Null)?;
+    exact(
+        "/_watchdog",
+        &json!({ "maxFootprintBytes": LTX_CANARY_MAX_FOOTPRINT_BYTES }),
+    )?;
+    exact(
+        "/_campaignEntry",
+        &json!({
+            "identity": LTX_CAMPAIGN_ENTRY_IDENTITY,
+            "artifact": {
+                "repository": protocol::LTX_REPOSITORY,
+                "revision": LTX_CANARY_ARTIFACT_REVISION,
+                "numericTierInventory": {
+                    "files": LTX_CANARY_Q4_INVENTORY_FILES,
+                    "bytes": LTX_Q4_INVENTORY_BYTES,
+                    "sha256": LTX_CANARY_Q4_INVENTORY_SHA256,
+                },
+                "textEncoderInventory": {
+                    "files": LTX_CANARY_TEXT_ENCODER_INVENTORY_FILES,
+                    "bytes": LTX_CANARY_TEXT_ENCODER_INVENTORY_BYTES,
+                    "sha256": LTX_CANARY_TEXT_ENCODER_INVENTORY_SHA256,
+                },
+            },
+        }),
+    )?;
+    exact(
+        "/_measurementSafety",
+        &json!({
+            "disposition": LTX_SAFETY_REFUSED_OPEN,
+            "tierInventoryBytes": LTX_Q4_INVENTORY_BYTES,
+            "incidentCrashFootprintBytes": LTX_Q4_F305_CRASH_FOOTPRINT_BYTES,
+            "incidentCase": "mlx-ltx-2-3-q4-1280x704-f305-fps30-bounded_decode",
+            "commonLoad": "complete numeric tier plus shared Gemma stack before geometry-specific work",
+            "predictedDecodeBytes": 19_476_906_240_u64,
+            "incidentPredictedDecodeBytes": LTX_INCIDENT_PREDICTED_DECODE_BYTES,
+            "incidentCalibratedProjectionBytes": 97_906_593_920_u64,
+            "projectionAssumptions": [
+                "pinned provider decode cost is the only geometry-varying term used",
+                "immutable tier inventory delta is added byte-for-byte",
+                "incident binding phase is unknown, so the projection is not a physical-footprint bound and cannot admit execution",
+            ],
+            "reason": "incident-calibrated projection is diagnostic only; no proved bound or hard containment admits this row",
+        }),
+    )?;
+    if tier != "q4"
+        || geometry.width != LTX_CAMPAIGN_ENTRY_WIDTH
+        || geometry.height != LTX_CAMPAIGN_ENTRY_HEIGHT
+        || geometry.frames != LTX_CAMPAIGN_ENTRY_FRAMES
+        || selection.strategy != MemoryStrategy::StagedResidency
+        || selection.parameters.decode_tile_edge.is_some()
+        || selection.parameters.decode_overlap.is_some()
+    {
+        return Err("SC-20191 campaign entry resolved a non-canonical tuple or carrier".to_owned());
+    }
+    let (fps, seed) = planned_ltx_capture(request, tier, geometry)?;
+    if fps != LTX_CAMPAIGN_ENTRY_FPS || seed != LTX_SEED {
+        return Err("SC-20191 campaign entry fps or seed changed".to_owned());
+    }
+    let (disposition, _, _) = validate_ltx_safety_evidence(request, tier, geometry, selection)?;
+    if disposition != LTX_SAFETY_REFUSED_OPEN {
+        return Err("SC-20191 campaign entry safety disposition changed".to_owned());
+    }
+    Ok(())
+}
+
+/// A private diagnostic carrier, deliberately outside the frozen SC-18946 plan. It reuses the
+/// campaign containment machinery but cannot inherit the failed staged row's action, fixture,
+/// logical case, or strategy identity.
+fn validate_ltx_bounded_carrier_proof(
+    request: &Value,
+    tier: &str,
+    geometry: LtxGeometry,
+    selection: &MemorySelection,
+) -> Result<(), String> {
+    if protocol::action(request)? != LTX_BOUNDED_CARRIER_ACTION {
+        return Err("SC-20254 bounded-carrier action changed".to_owned());
+    }
+    let planned = protocol::planned(request)?;
+    let exact = |pointer: &str, expected: &Value| -> Result<(), String> {
+        let actual = planned.pointer(pointer);
+        if actual == Some(expected) {
+            Ok(())
+        } else {
+            Err(format!(
+                "SC-20254 bounded carrier {pointer} must be {expected}, got {actual:?}"
+            ))
+        }
+    };
+    exact("/_diagnosticOnly", &json!(true))?;
+    exact(
+        "/logicalCaseId",
+        &json!(LTX_BOUNDED_CARRIER_LOGICAL_CASE_ID),
+    )?;
+    exact("/evidenceScope", &json!("fixture"))?;
+    exact("/backend", &json!("mlx"))?;
+    exact("/loadShape", &json!("eager_materialization"))?;
+    exact("/target/provider", &json!(LTX_PROVIDER))?;
+    exact("/target/modelId", &json!(LTX_PROVIDER))?;
+    exact("/target/tier", &json!("q4"))?;
+    exact("/target/mode", &json!("text_to_video"))?;
+    exact("/target/overlay", &json!("none"))?;
+    exact("/target/geometry/width", &json!(LTX_CAMPAIGN_ENTRY_WIDTH))?;
+    exact("/target/geometry/height", &json!(LTX_CAMPAIGN_ENTRY_HEIGHT))?;
+    exact("/target/geometry/batch", &json!(1))?;
+    exact("/target/geometry/frames", &json!(LTX_CAMPAIGN_ENTRY_FRAMES))?;
+    exact("/strategy/rung", &json!("bounded_decode"))?;
+    exact(
+        "/strategy/engagedRungs",
+        &json!(["resident", "staged_residency", "bounded_decode"]),
+    )?;
+    exact(
+        "/strategy/parameters",
+        &json!({
+            "decodeTileEdge": LTX_CANARY_TILE_EDGE,
+            "decodeOverlap": LTX_CANARY_OVERLAP,
+        }),
+    )?;
+    exact(
+        "/calibrationFingerprint",
+        &json!(LTX_CALIBRATION_FINGERPRINT),
+    )?;
+    exact("/fixture", &json!(LTX_BOUNDED_CARRIER_FIXTURE))?;
+    exact("/negative", &json!(false))?;
+    exact("/expectedResult", &json!("passed"))?;
+    exact("/modelLoadPolicy", &json!("fresh_per_case"))?;
+    exact("/modelLoadGroup", &Value::Null)?;
+    exact(
+        "/_watchdog",
+        &json!({ "maxFootprintBytes": LTX_CANARY_MAX_FOOTPRINT_BYTES }),
+    )?;
+    exact(
+        "/_boundedCarrier",
+        &json!({
+            "identity": LTX_BOUNDED_CARRIER_IDENTITY,
+            "fps": LTX_CAMPAIGN_ENTRY_FPS,
+            "seed": LTX_SEED,
+            "videoMode": "default_av",
+            "artifact": {
+                "repository": protocol::LTX_REPOSITORY,
+                "revision": LTX_CANARY_ARTIFACT_REVISION,
+                "numericTierInventory": {
+                    "files": LTX_CANARY_Q4_INVENTORY_FILES,
+                    "bytes": LTX_Q4_INVENTORY_BYTES,
+                    "sha256": LTX_CANARY_Q4_INVENTORY_SHA256,
+                },
+                "textEncoderInventory": {
+                    "files": LTX_CANARY_TEXT_ENCODER_INVENTORY_FILES,
+                    "bytes": LTX_CANARY_TEXT_ENCODER_INVENTORY_BYTES,
+                    "sha256": LTX_CANARY_TEXT_ENCODER_INVENTORY_SHA256,
+                },
+            },
+        }),
+    )?;
+    if tier != "q4"
+        || geometry.width != LTX_CAMPAIGN_ENTRY_WIDTH
+        || geometry.height != LTX_CAMPAIGN_ENTRY_HEIGHT
+        || geometry.frames != LTX_CAMPAIGN_ENTRY_FRAMES
+        || selection.strategy != MemoryStrategy::BoundedDecode
+        || selection.parameters.decode_tile_edge != Some(LTX_CANARY_TILE_EDGE)
+        || selection.parameters.decode_overlap != Some(LTX_CANARY_OVERLAP)
+    {
+        return Err("SC-20254 bounded carrier resolved a foreign tuple or strategy".to_owned());
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct LtxBoundedCampaignSpec {
+    tier: &'static str,
+    identity: &'static str,
+    logical_case_id: &'static str,
+    fixture: &'static str,
+    inventory_files: u64,
+    inventory_bytes: u64,
+    inventory_sha256: &'static str,
+    projection_bytes: u64,
+    story: &'static str,
+}
+
+fn ltx_bounded_campaign_spec(tier: &str) -> Result<LtxBoundedCampaignSpec, String> {
+    match tier {
+        "q4" => Ok(LtxBoundedCampaignSpec {
+            tier: "q4",
+            identity: LTX_BOUNDED_CAMPAIGN_IDENTITY,
+            logical_case_id: LTX_BOUNDED_CAMPAIGN_LOGICAL_CASE_ID,
+            fixture: LTX_BOUNDED_CAMPAIGN_FIXTURE,
+            inventory_files: LTX_CANARY_Q4_INVENTORY_FILES,
+            inventory_bytes: LTX_Q4_INVENTORY_BYTES,
+            inventory_sha256: LTX_CANARY_Q4_INVENTORY_SHA256,
+            projection_bytes: 84_694_536_320,
+            story: "SC-20318",
+        }),
+        "q8" => Ok(LtxBoundedCampaignSpec {
+            tier: "q8",
+            identity: LTX_BOUNDED_CAMPAIGN_Q8_IDENTITY,
+            logical_case_id: LTX_BOUNDED_CAMPAIGN_Q8_LOGICAL_CASE_ID,
+            fixture: LTX_BOUNDED_CAMPAIGN_Q8_FIXTURE,
+            inventory_files: LTX_CANARY_Q8_INVENTORY_FILES,
+            inventory_bytes: LTX_Q8_INVENTORY_BYTES,
+            inventory_sha256: LTX_CANARY_Q8_INVENTORY_SHA256,
+            projection_bytes: 93_955_566_576,
+            story: "SC-20430",
+        }),
+        "bf16" => Ok(LtxBoundedCampaignSpec {
+            tier: "bf16",
+            identity: LTX_BOUNDED_CAMPAIGN_BF16_IDENTITY,
+            logical_case_id: LTX_BOUNDED_CAMPAIGN_BF16_LOGICAL_CASE_ID,
+            fixture: LTX_BOUNDED_CAMPAIGN_BF16_FIXTURE,
+            inventory_files: LTX_CANARY_BF16_INVENTORY_FILES,
+            inventory_bytes: LTX_BF16_INVENTORY_BYTES,
+            inventory_sha256: LTX_CANARY_BF16_INVENTORY_SHA256,
+            projection_bytes: 111_319_657_852,
+            story: "SC-20430",
+        }),
+        other => Err(format!(
+            "SC-20430 bounded campaign tier {other:?} is not exactly allowlisted"
+        )),
+    }
+}
+
+/// The three exact promotable bounded campaign entries. The ordinary `run` action continues
+/// through the all-row pre-load refusal; the controller may inject this private action only after
+/// the canonical harness has selected one allowlisted row and acquired the contained-execution claim.
+fn validate_ltx_bounded_campaign_entry(
+    request: &Value,
+    tier: &str,
+    geometry: LtxGeometry,
+    selection: &MemorySelection,
+) -> Result<(), String> {
+    let spec = ltx_bounded_campaign_spec(tier)?;
+    if protocol::action(request)? != LTX_BOUNDED_CAMPAIGN_ACTION {
+        return Err(format!("{} bounded campaign action changed", spec.story));
+    }
+    let planned = protocol::planned(request)?;
+    let exact = |pointer: &str, expected: &Value| -> Result<(), String> {
+        let actual = planned.pointer(pointer);
+        if actual == Some(expected) {
+            Ok(())
+        } else {
+            Err(format!(
+                "{} bounded campaign {pointer} must be {expected}, got {actual:?}",
+                spec.story
+            ))
+        }
+    };
+    exact("/logicalCaseId", &json!(spec.logical_case_id))?;
+    exact("/evidenceScope", &json!("authoritative"))?;
+    exact("/backend", &json!("mlx"))?;
+    exact("/loadShape", &json!("eager_materialization"))?;
+    exact("/target/provider", &json!(LTX_PROVIDER))?;
+    exact("/target/modelId", &json!(LTX_PROVIDER))?;
+    exact("/target/tier", &json!(spec.tier))?;
+    exact("/target/mode", &json!("text_to_video"))?;
+    exact("/target/overlay", &json!("none"))?;
+    exact("/target/geometry/width", &json!(LTX_CAMPAIGN_ENTRY_WIDTH))?;
+    exact("/target/geometry/height", &json!(LTX_CAMPAIGN_ENTRY_HEIGHT))?;
+    exact("/target/geometry/batch", &json!(1))?;
+    exact("/target/geometry/frames", &json!(LTX_CAMPAIGN_ENTRY_FRAMES))?;
+    exact("/strategy/rung", &json!("bounded_decode"))?;
+    exact(
+        "/strategy/engagedRungs",
+        &json!(["resident", "staged_residency", "bounded_decode"]),
+    )?;
+    exact(
+        "/strategy/parameters",
+        &json!({
+            "decodeTileEdge": LTX_CANARY_TILE_EDGE,
+            "decodeOverlap": LTX_CANARY_OVERLAP,
+        }),
+    )?;
+    exact(
+        "/calibrationFingerprint",
+        &json!(LTX_CALIBRATION_FINGERPRINT),
+    )?;
+    exact("/fixture", &json!(spec.fixture))?;
+    exact("/negative", &json!(false))?;
+    exact("/expectedResult", &json!("passed"))?;
+    exact("/modelLoadPolicy", &json!("fresh_per_case"))?;
+    exact("/modelLoadGroup", &Value::Null)?;
+    exact(
+        "/_watchdog",
+        &json!({ "maxFootprintBytes": LTX_CANARY_MAX_FOOTPRINT_BYTES }),
+    )?;
+    exact(
+        "/_measurementSafety",
+        &json!({
+            "disposition": LTX_SAFETY_REFUSED_OPEN,
+            "tierInventoryBytes": spec.inventory_bytes,
+            "incidentCrashFootprintBytes": LTX_Q4_F305_CRASH_FOOTPRINT_BYTES,
+            "incidentCase": "mlx-ltx-2-3-q4-1280x704-f305-fps30-bounded_decode",
+            "commonLoad": "complete numeric tier plus shared Gemma stack before geometry-specific work",
+            "predictedDecodeBytes": 6_264_848_640_u64,
+            "incidentPredictedDecodeBytes": LTX_INCIDENT_PREDICTED_DECODE_BYTES,
+            "incidentCalibratedProjectionBytes": spec.projection_bytes,
+            "projectionAssumptions": [
+                "pinned provider decode cost is the only geometry-varying term used",
+                "immutable tier inventory delta is added byte-for-byte",
+                "incident binding phase is unknown, so the projection is not a physical-footprint bound and cannot admit execution",
+            ],
+            "reason": if spec.tier == "q4" {
+                "incident-calibrated projection is diagnostic only; ordinary run remains refused and only the exact privately contained SC-20318 action is admitted"
+            } else {
+                "incident-calibrated projection is diagnostic only; ordinary run remains refused and only the exact privately contained SC-20430 action is admitted"
+            },
+        }),
+    )?;
+    exact(
+        "/_boundedCampaignEntry",
+        &json!({
+            "identity": spec.identity,
+            "fps": LTX_CAMPAIGN_ENTRY_FPS,
+            "seed": LTX_SEED,
+            "videoMode": "default_av",
+            "spatialDecodeTiles": 24,
+            "artifact": {
+                "repository": protocol::LTX_REPOSITORY,
+                "revision": LTX_CANARY_ARTIFACT_REVISION,
+                "numericTierInventory": {
+                    "files": spec.inventory_files,
+                    "bytes": spec.inventory_bytes,
+                    "sha256": spec.inventory_sha256,
+                },
+                "textEncoderInventory": {
+                    "files": LTX_CANARY_TEXT_ENCODER_INVENTORY_FILES,
+                    "bytes": LTX_CANARY_TEXT_ENCODER_INVENTORY_BYTES,
+                    "sha256": LTX_CANARY_TEXT_ENCODER_INVENTORY_SHA256,
+                },
+            },
+        }),
+    )?;
+    if geometry.width != LTX_CAMPAIGN_ENTRY_WIDTH
+        || geometry.height != LTX_CAMPAIGN_ENTRY_HEIGHT
+        || geometry.frames != LTX_CAMPAIGN_ENTRY_FRAMES
+        || selection.strategy != MemoryStrategy::BoundedDecode
+        || selection.parameters.decode_tile_edge != Some(LTX_CANARY_TILE_EDGE)
+        || selection.parameters.decode_overlap != Some(LTX_CANARY_OVERLAP)
+    {
+        return Err(format!(
+            "{} bounded campaign resolved a foreign tuple or strategy",
+            spec.story
+        ));
+    }
+    let (fps, seed) = planned_ltx_capture(request, tier, geometry)?;
+    if fps != LTX_CAMPAIGN_ENTRY_FPS || seed != LTX_SEED {
+        return Err("SC-20318 bounded campaign fps or seed changed".to_owned());
+    }
+    let (disposition, _, _) = validate_ltx_safety_evidence(request, tier, geometry, selection)?;
+    if disposition != LTX_SAFETY_REFUSED_OPEN {
+        return Err("SC-20318 ordinary safety disposition changed".to_owned());
+    }
+    Ok(())
+}
+
+/// The production A/V request. `video_mode` is deliberately left unset so the arm measures the same
+/// path a real job takes (`crates/sceneworks-worker/src/video_jobs/ltx.rs` only sets `"no_audio"`
+/// when the caller asks for it): the audio latents are denoised jointly with the video regardless,
+/// and skipping the audio DECODE would understate the decode phase. `steps` is likewise unset —
+/// LTX's distilled schedule is baked (8 + 3 folded to an 11-step bar), so a step count is not a knob.
+fn ltx_request(geometry: LtxGeometry, fps: u32, seed: u64) -> GenerationRequest {
+    GenerationRequest {
+        prompt: "a slow dolly through a sunlit pine forest, drifting motes of pollen, cinematic"
+            .to_owned(),
+        width: geometry.width,
+        height: geometry.height,
+        count: 1,
+        seed: Some(seed),
+        frames: Some(geometry.frames),
+        fps: Some(fps),
+        ..Default::default()
+    }
+}
+
+fn validate_ltx_bounded_carrier_generation_request(
+    request: &GenerationRequest,
+) -> Result<(), String> {
+    if request.width != LTX_CAMPAIGN_ENTRY_WIDTH
+        || request.height != LTX_CAMPAIGN_ENTRY_HEIGHT
+        || request.count != 1
+        || request.frames != Some(LTX_CAMPAIGN_ENTRY_FRAMES)
+        || request.fps != Some(LTX_CAMPAIGN_ENTRY_FPS)
+        || request.seed != Some(LTX_SEED)
+        || request.video_mode.is_some()
+        || request.memory.is_some()
+    {
+        return Err("SC-20254 constructed a foreign provider generation request".to_owned());
+    }
+    Ok(())
+}
+
+/// One non-promotable diagnostic request. The safety profile is intentionally outside the product
+/// envelope and skips only downstream audio decode. The product-envelope profile is the smallest
+/// shipped four-second geometry and leaves `video_mode` unset so it follows the ordinary full-A/V
+/// provider path. Both force the same bounded-decode carrier without admitting a campaign row.
+fn ltx_canary_generation_request_for(profile: LtxCanaryProfile) -> GenerationRequest {
+    GenerationRequest {
+        prompt: profile.prompt().to_owned(),
+        width: profile.width(),
+        height: profile.height(),
+        count: 1,
+        seed: Some(LTX_CANARY_SEED),
+        frames: Some(profile.frames()),
+        fps: Some(profile.fps()),
+        video_mode: profile.video_mode().map(str::to_owned),
+        memory: Some(GenerationMemory {
+            tile_vae_decode: true,
+            decode_tile_edge: Some(LTX_CANARY_TILE_EDGE),
+            decode_overlap: Some(LTX_CANARY_OVERLAP),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+fn ltx_canary_generation_request() -> GenerationRequest {
+    ltx_canary_generation_request_for(LtxCanaryProfile::Safety)
+}
+
+fn ltx_product_envelope_canary_generation_request() -> GenerationRequest {
+    ltx_canary_generation_request_for(LtxCanaryProfile::ProductEnvelope)
+}
+
+fn ltx_canary_request_for_provider_admission(
+    mut request: GenerationRequest,
+) -> Result<GenerationRequest, String> {
+    let memory = request
+        .memory
+        .as_ref()
+        .ok_or_else(|| "LTX safety canary omitted bounded-decode memory parameters".to_owned())?;
+    if request.width != LTX_CANARY_WIDTH
+        || request.height != LTX_CANARY_HEIGHT
+        || request.count != 1
+        || request.frames != Some(LTX_CANARY_FRAMES)
+        || request.fps != Some(LTX_CANARY_FPS)
+        || request.seed != Some(LTX_CANARY_SEED)
+        || request.video_mode.as_deref() != Some("no_audio")
+        || !memory.tile_vae_decode
+        || memory.decode_tile_edge != Some(LTX_CANARY_TILE_EDGE)
+        || memory.decode_overlap != Some(LTX_CANARY_OVERLAP)
+    {
+        return Err(
+            "LTX no-audio admission bridge is private to the exact safety canary tuple".to_owned(),
+        );
+    }
+    // The pinned provider's production request scope rejects every explicit video-mode override.
+    // Admit/configure the ordinary unconditional A/V denoise with its default, then restore the
+    // strictly smaller no-audio decode request immediately before generation.
+    request.video_mode = None;
+    Ok(request)
+}
+
+fn restore_ltx_canary_no_audio_after_configuration(
+    request: &mut GenerationRequest,
+) -> Result<(), String> {
+    if request.video_mode.is_some() {
+        return Err(
+            "LTX safety canary provider configuration introduced an unexpected video-mode override"
+                .to_owned(),
+        );
+    }
+    request.video_mode = Some("no_audio".to_owned());
+    Ok(())
+}
+
+fn scoped_generate_ltx_no_audio_canary(
+    generator: &dyn Generator,
+    request: GenerationRequest,
+    context: &MemoryRunContext,
+    on_progress: &mut dyn FnMut(Progress),
+) -> Result<GenerationOutput, String> {
+    let request = ltx_canary_request_for_provider_admission(request)?;
+    let mut observed_failure = None;
+    scoped_generate_observed_after_configuration(
+        generator,
+        request,
+        context,
+        None,
+        &mut observed_failure,
+        on_progress,
+        Some(restore_ltx_canary_no_audio_after_configuration),
+    )
+}
+
+/// Resolve and validate the `SCENEWORKS_LTX_*` environment family into a tier-exact load spec.
+///
+/// Two roots under ONE repository: the numeric tier and the `gemma/` co-requisite. The Gemma-3-12B
+/// text encoder is a hard load-time requirement of the pinned provider (`resolve_gemma_dir`,
+/// sc-13664 removed the env/HF-cache fallbacks), so it is threaded through `LoadSpec::text_encoder`
+/// and is snapshot-validated with the same `validate_huggingface_snapshot_root` identity check as
+/// the tier root — a mismatched TE would silently change the measured conditioning peak.
+fn ltx_load_spec(
+    request: &Value,
+    tier: &str,
+    selection: &MemorySelection,
+) -> Result<(String, String, PathBuf, PathBuf, LoadSpec), String> {
+    protocol::validate_plain_overlay_target(request, LTX_PLAIN_EXECUTION_PATH)?;
+    let repository = protocol::required_env("SCENEWORKS_LTX_REPOSITORY")?;
+    let revision = protocol::required_env("SCENEWORKS_LTX_REVISION")?;
+    protocol::validate_artifact_identity(&repository, &revision, protocol::LTX_REPOSITORY)?;
+    let root = std::fs::canonicalize(PathBuf::from(protocol::required_env(
+        "SCENEWORKS_LTX_ROOT",
+    )?))
+    .map_err(|error| format!("canonicalize SCENEWORKS_LTX_ROOT: {error}"))?;
+    protocol::validate_huggingface_snapshot_root(
+        &root,
+        &repository,
+        &revision,
+        tier,
+        protocol::LTX_REPOSITORY,
+    )?;
+    let text_encoder = std::fs::canonicalize(PathBuf::from(protocol::required_env(
+        "SCENEWORKS_LTX_TEXT_ENCODER_ROOT",
+    )?))
+    .map_err(|error| format!("canonicalize SCENEWORKS_LTX_TEXT_ENCODER_ROOT: {error}"))?;
+    protocol::validate_huggingface_snapshot_root(
+        &text_encoder,
+        &repository,
+        &revision,
+        "gemma",
+        protocol::LTX_REPOSITORY,
+    )?;
+    // `LoadShape` is inert for this provider — `mlx-gen-ltx` never reads `spec.load_shape`, because
+    // the two giants are rebuilt inside every `generate` rather than materialized through a block
+    // schedule. Refuse a plan that claims otherwise instead of emitting a receipt whose declared
+    // materialization shape the run did not use (sc-16482: a receipt may only testify to its own run).
+    let mut spec = LoadSpec::new(WeightsSource::Dir(root.clone()))
+        .with_offload_policy(OffloadPolicy::Resident)
+        .with_load_shape(LoadShape::EagerMaterialization);
+    spec.text_encoder = Some(WeightsSource::Dir(text_encoder.clone()));
+    if let Some(quant) = selection.tier.quant {
+        spec = spec.with_quant(quant);
+    }
+    Ok((repository, revision, root, text_encoder, spec))
+}
+
+/// What the engine's OWN decode-tiling selector decides for this exact geometry.
+///
+/// sc-18808 recorded `bounded_decode` as "implemented but not engaged", true at the single
+/// 768x512x97 geometry it captured — and the arm then hardcoded `staged_residency` for every
+/// geometry. That is only safe while the sweep stays small. `budgeted_plan` engages tiling on TWO
+/// independent bounds, and the claim that survives on EVERY host is one-sided — the machine-
+/// independent bound is a CEILING on single-pass frames, not a prediction of where tiling starts:
+///
+/// * the **write bound** — `VaeTiling::LTX.writable_frame_cap(h, w) = i32::MAX / (8 * h * w)`
+///   (`gen-core/src/tiling.rs:167`, `:65`, `full_res_channels: 8`). At the 0.90 MP buckets
+///   (1280x704 / 704x1280) that is **297 output frames**; at the 0.39-0.41 MP buckets it is 682 /
+///   655, above the declared 449-frame envelope maximum. It is a correctness bound, not a memory
+///   one, so it does not move with the host.
+/// * the **memory bound** — single-pass `3.3 GB + 340 B/voxel` against `get_memory_limit() * 0.85`
+///   (`mlx-gen-ltx/src/pipeline.rs:218-256`, `:264-269`). This one DOES move with the host, and it
+///   binds EARLIER on a smaller machine: a CI runner with a fraction of 128 GiB tiles at
+///   768x512 x 97, hundreds of frames below any write cap.
+///
+/// So: **no host can exceed 297 single-pass output frames at 0.90 MP; smaller hosts tile earlier via
+/// the memory bound.** Saying instead that tiling "engages at 298 frames on every host" is falsified
+/// by this repository's own CI.
+///
+/// So asking the selector is the only honest way to know which rung a capture engaged, and a record
+/// that claims `staged_residency` through a tiled decode is a false attestation. This calls the
+/// production entry point rather than re-deriving either bound, so the arm cannot drift from the
+/// engine it is measuring.
+#[derive(Clone, Copy, Debug)]
+struct LtxDecodePlan {
+    tiling: Option<TilingConfig>,
+    writable_frame_cap: i64,
+}
+
+/// The engine's own committed decode cost model (`mlx-gen-ltx/src/pipeline.rs:218-256`), restated
+/// for TEST preconditions only — never to make a production decision. Production always asks
+/// `auto_tiling_budgeted_ltx`, which is the point of `LtxDecodePlan`. Three call sites derived
+/// these numbers inline before; one definition means a mutation of the model moves all of them.
+#[cfg(test)]
+mod ltx_decode_cost {
+    pub(super) const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+    /// `auto_tiling_budgeted_ltx`'s own headroom factor, applied on top of the MLX limit it reads.
+    pub(super) const SAFETY_FACTOR: f64 = 0.85;
+    const FIXED_BYTES: f64 = 3.3e9;
+    const ACCUMULATOR_BYTES_PER_VOXEL: f64 = 40.0;
+    const SINGLE_PASS_BYTES_PER_VOXEL: f64 = 340.0;
+
+    fn voxels(width: u32, height: u32, frames: u32) -> f64 {
+        f64::from(width) * f64::from(height) * f64::from(frames)
+    }
+
+    /// The full-output accumulators, which hold the assembled video and therefore cost the same at
+    /// EVERY tiling. Below this the engine refuses outright; no tile size buys it back.
+    pub(super) fn accumulator_floor_gib(width: u32, height: u32, frames: u32) -> f64 {
+        (FIXED_BYTES + ACCUMULATOR_BYTES_PER_VOXEL * voxels(width, height, frames)) / GIB
+    }
+
+    /// One untiled decode pass.
+    pub(super) fn single_pass_gib(width: u32, height: u32, frames: u32) -> f64 {
+        (FIXED_BYTES + SINGLE_PASS_BYTES_PER_VOXEL * voxels(width, height, frames)) / GIB
+    }
+}
+
+/// The geometry every `run_ltx` test drives (`ltx_request_json(768, 512, 97)`). It is named here
+/// because an injected budget's blast radius reaches it — see `LTX_MEMORY_LIMIT_LOCK`.
+#[cfg(test)]
+const LTX_UNLOCKED_SMOKE_GEOMETRY: (u32, u32, u32) = (768, 512, 97);
+
+/// Serialises every adapter-owned MLX-global memory-limit swap. Production uses it for the one
+/// diagnostic canary; tests use it for injected selector budgets and restoration assertions.
+///
+/// **What it guarantees:** two *lock takers* never overlap. No injected-budget resolve observes
+/// another's budget, and each restore pairs with its own swap.
+///
+/// 🔴 **What it does NOT guarantee:** that no future valid `run_ltx` test can observe an injected
+/// budget. The MLX memory limit is process-GLOBAL, and production decode-plan resolution cannot
+/// take this test-only lock. Cheap malformed-plan tests are deliberately ordered before that
+/// selector and one holds an injected tiling budget while asserting the ordering, but any future
+/// test that reaches physical resolution must either accept the host-dependent result or take this
+/// lock around its own observation. Production `run_ltx` does not mutate the limit and therefore
+/// does not take this lock; the diagnostic canary holds it for its whole process-global swap.
+///
+/// Those tests are safe only because every injected budget leaves `LTX_UNLOCKED_SMOKE_GEOMETRY`'s
+/// full-output accumulators affordable — 4.49 GiB against a lowest safe budget of 6.8 GiB, a 1.51x
+/// margin that nothing used to assert. `LtxInjectedBudget::install` asserts it on **every**
+/// injection, so a new row below the floor fails loudly at its own injection site instead of
+/// turning an unrelated test into an intermittent failure carrying the wrong message. That covers
+/// future `run_ltx` call sites too, which taking the lock at today's four would not.
+static LTX_MEMORY_LIMIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// An injected MLX memory limit, installed for as long as this value lives.
+///
+/// RAII rather than a restore statement because `auto_tiling_budgeted_ltx` can panic: on that path
+/// a trailing `set_memory_limit(previous)` never runs, and the injected limit leaks to every later
+/// test in the process. `unwrap_or_else(PoisonError::into_inner)` then deliberately ignores the
+/// poisoning, so the leak would have had no signal at all.
+#[cfg(test)]
+struct LtxInjectedBudget {
+    previous: usize,
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl LtxInjectedBudget {
+    fn install(budget_gib: f64) -> Self {
+        let (width, height, frames) = LTX_UNLOCKED_SMOKE_GEOMETRY;
+        let floor = ltx_decode_cost::accumulator_floor_gib(width, height, frames);
+        let safe = budget_gib * ltx_decode_cost::SAFETY_FACTOR;
+        assert!(
+            safe > floor,
+            "an injected budget of {budget_gib} GiB leaves {safe:.2} GiB safe, at or below the \
+             {floor:.2} GiB accumulator floor of the {width}x{height} x {frames} smoke geometry. \
+             `run_ltx` reads the process-global MLX limit WITHOUT LTX_MEMORY_LIMIT_LOCK, so a \
+             concurrently running `run_ltx` refusal test would be refused by the engine and fail \
+             carrying the wrong message. Raise the budget, or take this lock around every \
+             `run_ltx` call site."
+        );
+        let guard = LTX_MEMORY_LIMIT_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous =
+            mlx_rs::memory::set_memory_limit((budget_gib * ltx_decode_cost::GIB) as usize);
+        Self {
+            previous,
+            _guard: guard,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for LtxInjectedBudget {
+    fn drop(&mut self) {
+        mlx_rs::memory::set_memory_limit(self.previous);
+    }
+}
+
+/// Process-global MLX limits for the one diagnostic LTX canary.
+///
+/// `set_memory_limit` is soft backpressure, not a sandbox; the external phys-footprint watchdog is
+/// still mandatory. Setting the wired limit as well prevents MLX from pinning more unified memory
+/// than the same evidence-derived ceiling. The device clamp mirrors the worker's production policy:
+/// MLX's untouched memory limit is 1.5x the device wired ceiling, and asking `set_wired_limit` for
+/// more than that ceiling terminates the process.
+struct LtxCanaryLimits {
+    _guard: std::sync::MutexGuard<'static, ()>,
+    previous_memory: usize,
+    previous_wired: usize,
+    wired: usize,
+    restored: bool,
+}
+
+fn ltx_canary_wired_limit(requested: usize, untouched_memory_limit: usize) -> usize {
+    requested.min(untouched_memory_limit / 3 * 2)
+}
+
+impl LtxCanaryLimits {
+    fn install() -> Result<Self, String> {
+        let guard = LTX_MEMORY_LIMIT_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let requested = usize::try_from(LTX_CANARY_MAX_FOOTPRINT_BYTES)
+            .map_err(|_| "LTX canary footprint ceiling does not fit usize".to_owned())?;
+        let untouched_memory_limit = get_memory_limit();
+        let wired = ltx_canary_wired_limit(requested, untouched_memory_limit);
+        if wired == 0 {
+            return Err("LTX canary could not derive a non-zero device wired ceiling".to_owned());
+        }
+        let previous_memory = set_memory_limit(requested);
+        let previous_wired = set_wired_limit(wired);
+        Ok(Self {
+            _guard: guard,
+            previous_memory,
+            previous_wired,
+            wired,
+            restored: false,
+        })
+    }
+
+    fn restore(&mut self) {
+        if self.restored {
+            return;
+        }
+        set_wired_limit(self.previous_wired);
+        set_memory_limit(self.previous_memory);
+        self.restored = true;
+    }
+}
+
+impl Drop for LtxCanaryLimits {
+    fn drop(&mut self) {
+        self.restore();
+    }
+}
+
+impl LtxDecodePlan {
+    #[cfg(test)]
+    fn resolve(geometry: LtxGeometry) -> Result<Self, String> {
+        Self::resolve_against_live_budget(geometry)
+    }
+
+    fn resolve_against_live_budget(geometry: LtxGeometry) -> Result<Self, String> {
+        let (height, width, frames) = Self::i32_geometry(geometry)?;
+        // Argument order mirrors the production call site (`pipeline.rs:168`), which passes
+        // (out_h, out_w, out_f) — NOT the (out_w, out_h, out_f) spelling one of that crate's own
+        // sweep tests uses. At a non-square bucket the two disagree, so this is load-bearing.
+        let tiling = mlx_gen_ltx::pipeline::auto_tiling_budgeted_ltx(height, width, frames)
+            .map_err(|error| Self::budget_refusal(geometry, &error.to_string()))?;
+        Ok(Self {
+            tiling,
+            writable_frame_cap: VaeTiling::LTX.writable_frame_cap(height, width),
+        })
+    }
+
+    /// Resolve the decode path that the provider will physically execute. An explicit bounded
+    /// selection always routes through `decode_tiled`; the ordinary staged carrier leaves the
+    /// provider to its live-budget auto selector, which may still tile on a constrained host.
+    fn resolve_for_selection(
+        selection: &MemorySelection,
+        geometry: LtxGeometry,
+    ) -> Result<Self, String> {
+        if selection.strategy == MemoryStrategy::BoundedDecode {
+            let tile_px = selection.parameters.decode_tile_edge.ok_or_else(|| {
+                "bounded LTX decode is missing its selected spatial tile edge".to_owned()
+            })?;
+            let overlap_px = selection.parameters.decode_overlap.ok_or_else(|| {
+                "bounded LTX decode is missing its selected spatial overlap".to_owned()
+            })?;
+            let (height, width, _) = Self::i32_geometry(geometry)?;
+            return Ok(Self {
+                tiling: Some(TilingConfig {
+                    spatial: Some(SpatialTiling {
+                        tile_px: i32::try_from(tile_px)
+                            .map_err(|_| "LTX decode tile edge must fit i32".to_owned())?,
+                        overlap_px: i32::try_from(overlap_px)
+                            .map_err(|_| "LTX decode overlap must fit i32".to_owned())?,
+                    }),
+                    temporal: None,
+                }),
+                writable_frame_cap: VaeTiling::LTX.writable_frame_cap(height, width),
+            });
+        }
+        Self::resolve_against_live_budget(geometry)
+    }
+
+    /// A campaign row may only attest the strategy it physically executes. In particular, a
+    /// staged/single-pass row on a smaller host must fail closed when the provider auto-tiler
+    /// engages; relabeling that render after the fact would violate the frozen plan selector.
+    fn validate_selected_strategy(self, selection: &MemorySelection) -> Result<(), String> {
+        let requested_tiling = selection.strategy == MemoryStrategy::BoundedDecode;
+        if self.tiling.is_some() != requested_tiling {
+            return Err(format!(
+                "planned LTX strategy {:?} does not match the physical decode path {:?}; this host auto-selected bounded decode, so the staged single-pass row is not capturable here",
+                selection.strategy,
+                self.rung(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn lifecycle_fault_phase(self) -> MemoryPhase {
+        if self.tiling.is_some() {
+            MemoryPhase::Decode
+        } else {
+            MemoryPhase::Denoise
+        }
+    }
+
+    fn tiling_engaged(self) -> bool {
+        self.tiling.is_some()
+    }
+
+    /// The same production selector, resolved against an INJECTED memory budget instead of this
+    /// machine's.
+    ///
+    /// `budget_gib` is the MLX memory limit the selector sees; `auto_tiling_budgeted_ltx` applies
+    /// its own 0.85 safety factor on top, exactly as it does in production. The pinned crate exposes
+    /// no budget-taking entry point (`plan_ltx_tiling` is private), so the budget is injected by
+    /// swapping `mlx_rs::memory::set_memory_limit` around the production call and restoring the
+    /// previous value — the ONE production selector still decides both bounds, rather than this arm
+    /// re-deriving either of them from copied constants.
+    ///
+    /// Test-only, and the reason it exists: `resolve` is host-dependent by construction, so an
+    /// assertion about WHERE tiling engages is otherwise either machine-specific or silently skipped
+    /// on the machine (CI) where it most needs to run.
+    #[cfg(test)]
+    fn resolve_with_budget(geometry: LtxGeometry, budget_gib: f64) -> Result<Self, String> {
+        let (height, width, frames) = Self::i32_geometry(geometry)?;
+        let planned = {
+            // Installed for this call only, and restored on the unwind path as well as the normal
+            // one — `auto_tiling_budgeted_ltx` panicking must not leak the budget to later tests.
+            let _budget = LtxInjectedBudget::install(budget_gib);
+            mlx_gen_ltx::pipeline::auto_tiling_budgeted_ltx(height, width, frames)
+        };
+        Ok(Self {
+            tiling: planned.map_err(|error| Self::budget_refusal(geometry, &error.to_string()))?,
+            writable_frame_cap: VaeTiling::LTX.writable_frame_cap(height, width),
+        })
+    }
+
+    fn i32_geometry(geometry: LtxGeometry) -> Result<(i32, i32, i32), String> {
+        Ok((
+            i32::try_from(geometry.height).map_err(|_| "LTX height must fit i32".to_owned())?,
+            i32::try_from(geometry.width).map_err(|_| "LTX width must fit i32".to_owned())?,
+            i32::try_from(geometry.frames).map_err(|_| "LTX frames must fit i32".to_owned())?,
+        ))
+    }
+
+    fn budget_refusal(geometry: LtxGeometry, error: &str) -> String {
+        format!(
+            "the pinned MLX LTX-2.3 decode budget refuses {}x{} x {} frames before any render: \
+             {error}",
+            geometry.width, geometry.height, geometry.frames
+        )
+    }
+
+    fn rung(self) -> &'static str {
+        if self.tiling.is_some() {
+            "bounded_decode"
+        } else {
+            "staged_residency"
+        }
+    }
+
+    #[cfg(test)]
+    fn engaged_rungs(self) -> Vec<&'static str> {
+        let mut rungs = vec!["resident", "staged_residency"];
+        if self.tiling.is_some() {
+            rungs.push("bounded_decode");
+        }
+        rungs
+    }
+
+    /// The selected spatial tile edge in OUTPUT pixels, or 0 when that axis is not tiled. Reported
+    /// so a rung-2 record says which plan produced its decode peak, not merely that one was chosen.
+    fn spatial_tile_px(self) -> u64 {
+        self.tiling
+            .and_then(|config| config.spatial)
+            .map_or(0, |spatial| u64::from(spatial.tile_px.max(0) as u32))
+    }
+
+    /// The selected temporal tile length in OUTPUT frames, or 0 when that axis is not tiled.
+    #[cfg(test)]
+    fn temporal_tile_frames(self) -> u64 {
+        self.tiling
+            .and_then(|config| config.temporal)
+            .map_or(0, |temporal| u64::from(temporal.tile_frames.max(0) as u32))
+    }
+
+    fn spatial_overlap_px(self) -> u64 {
+        self.tiling
+            .and_then(|config| config.spatial)
+            .map_or(0, |spatial| u64::from(spatial.overlap_px.max(0) as u32))
+    }
+
+    /// Count physical spatial decode tiles from the same shared plan geometry the provider executes.
+    /// A configured tiling object alone is insufficient evidence: a carrier smaller than its tile
+    /// edge can still produce a one-tile plan.
+    fn spatial_tile_count(self, geometry: LtxGeometry) -> Result<u64, String> {
+        let Some(config) = self.tiling else {
+            return Ok(1);
+        };
+        let spatial_scale = u32::try_from(VaeTiling::LTX.spatial_scale)
+            .map_err(|_| "LTX spatial scale must fit u32".to_owned())?;
+        let latent_height = i32::try_from(geometry.height / spatial_scale)
+            .map_err(|_| "LTX latent height must fit i32".to_owned())?;
+        let latent_width = i32::try_from(geometry.width / spatial_scale)
+            .map_err(|_| "LTX latent width must fit i32".to_owned())?;
+        let latent_frames = i32::try_from(geometry.latent_frames)
+            .map_err(|_| "LTX latent frames must fit i32".to_owned())?;
+        let plan = config.plan(VaeTiling::LTX, latent_frames, latent_height, latent_width);
+        [plan.h.len(), plan.w.len()]
+            .into_iter()
+            .try_fold(1_u64, |count, axis| {
+                count
+                    .checked_mul(
+                        u64::try_from(axis)
+                            .map_err(|_| "LTX decode tile-axis count must fit u64".to_owned())?,
+                    )
+                    .ok_or_else(|| "LTX decode tile-count arithmetic overflowed".to_owned())
+            })
+    }
+}
+
+/// Bind the plan to the provider contract's actual engaged composition. SC-19109 made bounded
+/// decode an explicit request-scoped control; the adapter must no longer infer the rung from the
+/// host-dependent automatic selector used by historical SC-18810 captures.
+fn ltx_attested_strategy(
+    request: &Value,
+    selection: &MemorySelection,
+    contract: &mlx_gen::gen_core::MemoryProviderContract,
+) -> Result<Value, String> {
+    attested_strategy(
+        request,
+        selection,
+        &contract.engaged_composition(selection.strategy),
+    )
+}
+
+fn ltx_complete_sweep(request: &Value) -> Result<Value, String> {
+    let mut sweep = protocol::reference_sweep(request, "passed")?;
+    // One exact staged tuple per plan row; the row has no parameter axes, so the singleton case is
+    // the whole exercised domain.
+    sweep["rangeVerified"] = json!(true);
+    Ok(sweep)
+}
+
+/// Unwrap the video output, refusing an image-shaped or audio-shaped return.
+fn video_frames(output: GenerationOutput) -> Result<(Vec<Image>, u32, bool), String> {
+    match output {
+        GenerationOutput::Video { frames, fps, audio } => {
+            if frames.is_empty() {
+                return Err("MLX LTX-2.3 render returned no frames".to_owned());
+            }
+            Ok((frames, fps, audio.is_some()))
+        }
+        GenerationOutput::Images(_) => {
+            Err("MLX LTX-2.3 render returned images, not a video clip".to_owned())
+        }
+        GenerationOutput::Audio(_) => {
+            Err("MLX LTX-2.3 render returned an audio track, not a video clip".to_owned())
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DiagnosticAudioIdentity {
+    samples: u64,
+    sample_rate: u32,
+    channels: u16,
+}
+
+/// Extract a diagnostic clip while retaining enough audio identity to prove the full default-A/V
+/// decoder returned a non-empty track. The samples themselves drop here, before provider cleanup.
+fn diagnostic_video_frames(
+    output: GenerationOutput,
+) -> Result<(Vec<Image>, u32, Option<DiagnosticAudioIdentity>), String> {
+    match output {
+        GenerationOutput::Video { frames, fps, audio } => {
+            if frames.is_empty() {
+                return Err("MLX LTX-2.3 render returned no frames".to_owned());
+            }
+            let audio = audio
+                .map(|track| {
+                    Ok::<_, String>(DiagnosticAudioIdentity {
+                        samples: u64::try_from(track.samples.len()).map_err(|_| {
+                            "LTX diagnostic audio sample count must fit u64".to_owned()
+                        })?,
+                        sample_rate: track.sample_rate,
+                        channels: track.channels,
+                    })
+                })
+                .transpose()?;
+            Ok((frames, fps, audio))
+        }
+        GenerationOutput::Images(_) => {
+            Err("MLX LTX-2.3 render returned images, not a video clip".to_owned())
+        }
+        GenerationOutput::Audio(_) => {
+            Err("MLX LTX-2.3 render returned an audio track, not a video clip".to_owned())
+        }
+    }
+}
+
+fn validate_diagnostic_audio(
+    profile: LtxCanaryProfile,
+    audio: Option<DiagnosticAudioIdentity>,
+) -> Result<(), String> {
+    match (profile, audio) {
+        (LtxCanaryProfile::Safety, None) => Ok(()),
+        (LtxCanaryProfile::ProductEnvelope, Some(audio))
+            if audio.samples > 0 && audio.sample_rate > 0 && audio.channels > 0 =>
+        {
+            Ok(())
+        }
+        _ => Err(format!(
+            "LTX diagnostic canary returned invalid {:?} audio identity {audio:?}",
+            profile
+        )),
+    }
+}
+
+/// Maximum, mean, and root-mean-square absolute error over EVERY frame of two clips, in [0,1]
+/// units. Per-frame aggregation rather than a first-frame spot check: a temporal divergence that
+/// leaves frame 0 identical is exactly the failure a video determinism contract has to catch.
+fn video_max_mean_rms_abs(left: &[Image], right: &[Image]) -> Result<(f64, f64, f64), String> {
+    if left.len() != right.len() {
+        return Err(format!(
+            "video frame-count mismatch: measured={} repeat={}",
+            left.len(),
+            right.len()
+        ));
+    }
+    let mut maximum = 0.0_f64;
+    let mut sum = 0.0_f64;
+    let mut sum_squares = 0.0_f64;
+    let mut samples = 0_usize;
+    for (index, (left, right)) in left.iter().zip(right).enumerate() {
+        if left.width != right.width || left.height != right.height {
+            return Err(format!(
+                "video frame {index} changed dimensions between renders"
+            ));
+        }
+        if left.pixels.len() != right.pixels.len() {
+            return Err(format!(
+                "video frame {index} changed pixel length between renders"
+            ));
+        }
+        for (&left, &right) in left.pixels.iter().zip(&right.pixels) {
+            let difference = (f64::from(left) - f64::from(right)).abs() / 255.0;
+            maximum = maximum.max(difference);
+            sum += difference;
+            sum_squares += difference * difference;
+            samples += 1;
+        }
+    }
+    if samples == 0 {
+        return Err("video comparison had no samples".to_owned());
+    }
+    Ok((
+        maximum,
+        sum / samples as f64,
+        (sum_squares / samples as f64).sqrt(),
+    ))
+}
+
+/// Total bytes of the `.safetensors` shards directly under `directory`, following the HF cache's
+/// blob symlinks. Used to bound the staged-residency claim against the real component footprints
+/// rather than against a comment.
+fn safetensors_bytes(directory: &Path) -> Result<u64, String> {
+    let entries = std::fs::read_dir(directory)
+        .map_err(|error| format!("read {}: {error}", directory.display()))?;
+    let mut total = 0_u64;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("read {}: {error}", directory.display()))?;
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("safetensors") {
+            continue;
+        }
+        let metadata = std::fs::metadata(&path)
+            .map_err(|error| format!("stat {}: {error}", path.display()))?;
+        total = total.saturating_add(metadata.len());
+    }
+    if total == 0 {
+        return Err(format!(
+            "no .safetensors weights under {}",
+            directory.display()
+        ));
+    }
+    Ok(total)
+}
+
+/// Does this run prove sc-10976's load→use→drop actually happened?
+///
+/// sc-18808 asked a different question — `overall_peak < text_encoder + transformer` — and that
+/// question **does not survive the declared envelope**. It infers "the two giants never co-resided"
+/// from an aggregate that ACTIVATIONS dominate at scale, so it is only sound while activations are
+/// small next to the weights. It was calibrated at one geometry, 768x512 x 97 frames, where the peak
+/// (35.56 GB) sat 17.8 GB under the 53.35 GB co-staged bound.
+///
+/// sc-18810 broke it with a real capture: q8 at **704x1280 x 177 frames** peaked at 54,153,098,156
+/// active bytes, 0.8 GB ABOVE that bound, and the arm refused a perfectly good run. The peak was the
+/// **decode** phase, not co-resident weights — this sweep's own measured decode relation
+/// (~2.75 GB + 322 B per output voxel, against the engine's own committed `3.3e9 + 340 B/voxel`
+/// model at `mlx-gen-ltx/src/pipeline.rs:218-228`) predicts 54,108,433,280 for that geometry's
+/// 159,498,240 output voxels, i.e. within 0.08% of what was measured.
+///
+/// The right witness is a PHASE BOUNDARY reading, not a peak, because a boundary reading contains
+/// the resident weights and almost nothing else. `denoise_entry` is sampled at
+/// `Progress::Step { current: 1 }` — after the text encoder is dropped and `clear_cache()`d and
+/// after the AvDiT is built. Across every sc-18810 capture it sits at 20.72-20.80 GB against a
+/// 20.61 GB transformer, flat in geometry over a 3.3x latent-token range. Were the Gemma encoder
+/// still resident it could not be below 53.3 GB.
+///
+/// Two-sided on purpose: the upper bound catches the regression the old check was aiming at, and the
+/// lower bound catches a progress hook that fires BEFORE the transformer materializes, which would
+/// otherwise make the upper bound pass vacuously.
+fn ltx_staging_is_proven(
+    denoise_entry: AllocatorState,
+    costaged_bytes: u64,
+    text_encoder_bytes: u64,
+    transformer_bytes: u64,
+) -> Result<(), String> {
+    if denoise_entry.active >= costaged_bytes {
+        return Err(format!(
+            "LTX-2.3 held {} active bytes entering the first denoise step, at or above the \
+             {costaged_bytes} bytes the staged text encoder ({text_encoder_bytes}) and transformer \
+             ({transformer_bytes}) occupy together — the text encoder was not dropped before the \
+             AvDiT materialized, so the staged-residency claim this record makes is not supported \
+             by the run",
+            denoise_entry.active
+        ));
+    }
+    if denoise_entry.active < transformer_bytes {
+        return Err(format!(
+            "LTX-2.3 held only {} active bytes entering the first denoise step, below the \
+             {transformer_bytes}-byte transformer — the denoise boundary was sampled before the \
+             AvDiT materialized, so the staged-residency bound above it proves nothing",
+            denoise_entry.active
+        ));
+    }
+    Ok(())
+}
+
+/// The eight required scenarios for a gated LTX receipt.
+///
+/// NOT `protocol::not_run_scenarios(blocker)`. That helper marks all eight `not_run`, which would
+/// report loadability as unexecuted — but loadability is the one scenario that has nothing to do
+/// with the missing memory-strategy seam, and it demonstrably RAN: the real tier provider plus its
+/// Gemma co-requisite loaded from the snapshot-validated roots, and every measurement in the
+/// fragment came out of that load. A gated receipt understating what it executed is the same class
+/// of dishonesty as a complete one overstating it. `overlay` is emitted `not_run` here and then
+/// replaced by `settle_plain_overlay_scenario`, which derives the verdict from the declared target
+/// rather than letting this arm assert it.
+/// The LTX arm's `predictedPeakBytes`, derived from its own measured phases (sc-18864).
+///
+/// This was hardcoded `null`, which fails BOTH `EvidenceRecord::mlx_admission_envelope` and the
+/// `RequiredNullable::Value` check in the worker's estimate seeding — so a record could not seed an
+/// estimate even once its status question was resolved. Nothing about the field is
+/// contract-dependent: every other MLX arm in this adapter derives it the same way, from
+/// `predicted_ceiling` over its own phases. The missing `MemoryStrategyContract` blocks the
+/// SCENARIOS (there is no admission check to interrogate), not this arithmetic.
+///
+/// It differs from the image arms in ONE respect, deliberately: the ceiling is taken over each
+/// phase's `active` peak, NOT over `PhaseMemory::allocator_bytes()`. `allocator_bytes` is the
+/// two-instant co-existence bound (see [`PhaseMemory::json`]), and for a staged video capture the
+/// allocator cache reaches 72-106 GB, so a ceiling over it predicts ~150 GB of demand on a 128 GiB
+/// host for a render that completed comfortably. A gate must budget the RESIDENT demand; the cache
+/// is elastic and MLX releases it under pressure.
+///
+/// The image arms are left on their historical `allocator_bytes` input, and the reason is
+/// DIRECTIONAL, not a matter of magnitude. Measured over the 69 MLX image records in
+/// `docs/generated/memory-calibration-evidence.json`, the two definitions are NOT close: 39 of 69
+/// records carry a phase whose `reclaimableBytes` exceeds 6.4 GB (up to 45.62 GB), 60 of 69 diverge
+/// by more than 5%, and the worst phase diverges by 117.7% (`imc-2cd840a85ce33b4f22a9` denoise,
+/// krea-2-turbo, 19.98 GB of cache). Per arm the worst divergences are krea-2-turbo 117.7%,
+/// flux2-dev 105.6%, z-image-turbo 65.2% and qwen-image 14.4% — only the qwen ladder's 6.45 GB
+/// worst-case cache is anywhere near "6.4 GB", and generalising that one arm to the lane was wrong.
+/// The shipped image records consequently over-predict their own measured resident peak by
+/// 1.05x-2.16x (`imc-b6537074420d51413b38` predicts 93.28 GB against a 43.18 GB resident peak).
+///
+/// That over-prediction is why sc-19115 keeps the image input unchanged: a ceiling over the
+/// co-existence bound is CONSERVATIVE — it never under-predicts — while switching to `active`
+/// would LOOSEN shipped admission. [`PredictedPeakBasis`] and its image/video constants are the
+/// single policy declaration both lanes consume. The corpus test
+/// `resident_peak_counterfactual_would_loosen_54_shipped_image_admission_cells` pins the decision
+/// against all 69 committed MLX image records and production's scaled foreign-reserve currency:
+/// 62 record predictions change and 54 host-grid decisions flip from refusal to admission.
+#[cfg(test)]
+fn ltx_predicted_peak_bytes(
+    conditioning: PhaseMemory,
+    denoise: PhaseMemory,
+    decode: PhaseMemory,
+) -> Value {
+    video_predicted_peak_bytes(conditioning, denoise, decode).json()
+}
+
+fn ltx_context(
+    selection: MemorySelection,
+    calibration: &MemoryCalibrationIdentity,
+    fingerprint: &str,
+    geometry: LtxGeometry,
+    total_bytes: u64,
+    predicted_peak_bytes: u64,
+) -> MemoryRunContext {
+    MemoryRunContext {
+        selection,
+        calibration_abi: calibration.abi,
+        calibration_fingerprint: fingerprint.to_owned(),
+        load_shape: calibration.load_shape,
+        mode: MemoryMode::Other("text_to_video".to_owned()),
+        has_reference: false,
+        use_pid: false,
+        has_phases: true,
+        geometry: MemoryGeometry {
+            width: geometry.width,
+            height: geometry.height,
+            batch: 1,
+            frames: geometry.frames,
+            reference_count: 0,
+        },
+        overlay: None,
+        budget: MemoryBudget {
+            total_bytes,
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        },
+        predicted_peak_bytes,
+        cache_state: MemoryCacheState::Cold,
+        evidence_revision: format!("sc-18946@{}", protocol::INFERENCE_PIN),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct LtxLifecycleMetrics {
+    clean_warm_peak: u64,
+    clean_post_cleanup: AllocatorState,
+    maximum_error: f64,
+    mean_error: f64,
+    rms_error: f64,
+    max_fault_post_cleanup: AllocatorState,
+    max_recovery_peak: u64,
+    max_recovery_post_cleanup: AllocatorState,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct LtxLifecycleInput {
+    geometry: LtxGeometry,
+    fps: u32,
+    seed: u64,
+    fault_phase: MemoryPhase,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct LtxBoundedWarmMetrics {
+    conditioning: PhaseMemory,
+    denoise: PhaseMemory,
+    decode: PhaseMemory,
+    maximum_error: f64,
+    mean_error: f64,
+    rms_error: f64,
+    audio: DiagnosticAudioIdentity,
+}
+
+/// The SC-20318 quality minimum: one identical-input warm request scope, with its own synchronized
+/// phase memory. Cancellation/error/recovery deliberately do not run on this contained row.
+fn verify_ltx_bounded_warm_repeat(
+    generator: &dyn Generator,
+    context: &MemoryRunContext,
+    selected: &[Image],
+    input: LtxLifecycleInput,
+) -> Result<LtxBoundedWarmMetrics, String> {
+    clear_cache();
+    reset_peak_memory();
+    let conditioning = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    let denoise = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    let (warm, fps, audio) = diagnostic_video_frames(scoped_generate(
+        generator,
+        ltx_request(input.geometry, input.fps, input.seed),
+        context,
+        None,
+        &mut |progress| match progress {
+            Progress::Step { current: 1, .. } => {
+                conditioning.set(PhaseMemory::capture());
+                reset_peak_memory();
+            }
+            Progress::Decoding => {
+                denoise.set(PhaseMemory::capture());
+                reset_peak_memory();
+            }
+            _ => {}
+        },
+    )?)?;
+    let decode = PhaseMemory::capture();
+    let conditioning = conditioning.get();
+    let denoise = denoise.get();
+    if warm.len() != usize::try_from(input.geometry.frames).unwrap_or(usize::MAX)
+        || fps != input.fps
+        || [conditioning.active, denoise.active, decode.active].contains(&0)
+    {
+        return Err("SC-20318 warm repeat changed output or phase shape".to_owned());
+    }
+    let audio = audio
+        .filter(|value| value.samples > 0 && value.sample_rate > 0 && value.channels == 2)
+        .ok_or_else(|| "SC-20318 warm repeat did not return non-empty stereo audio".to_owned())?;
+    let first = warm
+        .first()
+        .ok_or_else(|| "SC-20318 warm repeat returned no frames".to_owned())?;
+    if first.pixels.is_empty() || first.pixels.iter().all(|pixel| *pixel == first.pixels[0]) {
+        return Err("SC-20318 warm repeat returned a degenerate first frame".to_owned());
+    }
+    let (maximum_error, mean_error, rms_error) = video_max_mean_rms_abs(selected, &warm)?;
+    if !ltx_quality_passes(maximum_error, mean_error, rms_error) {
+        return Err(format!(
+            "SC-20318 warm repeat exceeded the LTX determinism envelope: max={maximum_error:.6}, mean={mean_error:.6}, rms={rms_error:.6}"
+        ));
+    }
+    Ok(LtxBoundedWarmMetrics {
+        conditioning,
+        denoise,
+        decode,
+        maximum_error,
+        mean_error,
+        rms_error,
+        audio,
+    })
+}
+
+/// Execute the provider-owned warm/cancel/error request scope on the exact selected rung. One
+/// cancellation and one injected error target the rung's binding phase, and each is followed by a
+/// deterministic recovery render plus allocator bounds against a clean warm control.
+fn verify_ltx_lifecycle(
+    generator: &dyn Generator,
+    context: &MemoryRunContext,
+    selected: &[Image],
+    input: LtxLifecycleInput,
+    phase_sink: &mut dyn LtxCampaignPhaseSink,
+) -> Result<LtxLifecycleMetrics, String> {
+    let LtxLifecycleInput {
+        geometry,
+        fps,
+        seed,
+        fault_phase,
+    } = input;
+    clear_cache();
+    reset_peak_memory();
+    phase_sink.mark("lifecycle_warm_repeat")?;
+    let (clean_warm, _, _) = video_frames(scoped_generate(
+        generator,
+        ltx_request(geometry, fps, seed),
+        context,
+        None,
+        &mut |_| {},
+    )?)?;
+    let clean_warm_peak = get_peak_memory() as u64;
+    clear_cache();
+    let clean_post_cleanup = AllocatorState::capture_current();
+    let bounds = LifecycleMemoryBounds::from_clean_warm(clean_warm_peak, clean_post_cleanup);
+    let (maximum_error, mean_error, rms_error) = video_max_mean_rms_abs(selected, &clean_warm)?;
+    if !ltx_quality_passes(maximum_error, mean_error, rms_error) {
+        return Err(format!(
+            "LTX-2.3 clean warm control exceeded the determinism envelope: max={maximum_error:.6}, mean={mean_error:.6}, rms={rms_error:.6}"
+        ));
+    }
+    let mut metrics = LtxLifecycleMetrics {
+        clean_warm_peak,
+        clean_post_cleanup,
+        maximum_error,
+        mean_error,
+        rms_error,
+        ..Default::default()
+    };
+    phase_sink.mark("lifecycle_cancel")?;
+    let cancelled = ltx_request(geometry, fps, seed);
+    let cancel_signal = cancelled.cancel.clone();
+    let mut cancel_triggered = false;
+    let mut cancel_failure = None;
+    let cancel_result = scoped_generate_observed(
+        generator,
+        cancelled,
+        context,
+        None,
+        &mut cancel_failure,
+        &mut |progress| {
+            let at_boundary = match fault_phase {
+                MemoryPhase::Denoise => matches!(progress, Progress::Step { current: 1, .. }),
+                MemoryPhase::Decode => matches!(progress, Progress::Decoding),
+                _ => false,
+            };
+            if at_boundary && !cancel_triggered {
+                cancel_triggered = true;
+                cancel_signal.cancel();
+            }
+        },
+    );
+    let cancel_error = match cancel_result {
+        Ok(_) => {
+            return Err(format!(
+                "LTX-2.3 cancellation completed successfully at {fault_phase:?} instead of returning the typed canceled outcome"
+            ));
+        }
+        Err(error) => error,
+    };
+    if !cancel_triggered || cancel_failure != Some(ScopedGenerationFailureKind::Canceled) {
+        return Err(format!(
+            "LTX-2.3 cancellation did not return the typed path at {fault_phase:?}: triggered={cancel_triggered}, failure={cancel_failure:?}, error={cancel_error}"
+        ));
+    }
+    clear_cache();
+    let cancel_cleanup = AllocatorState::capture_current();
+    metrics.max_fault_post_cleanup = cancel_cleanup;
+    if !bounds.allows_retained(cancel_cleanup) {
+        return Err(format!(
+            "LTX-2.3 cancellation retained {cancel_cleanup:?} above clean warm {clean_post_cleanup:?} plus {} bytes",
+            bounds.tolerance_bytes,
+        ));
+    }
+    reset_peak_memory();
+    phase_sink.mark("lifecycle_cancel_recovery")?;
+    let (cancel_recovery, _, _) = video_frames(scoped_generate(
+        generator,
+        ltx_request(geometry, fps, seed),
+        context,
+        None,
+        &mut |_| {},
+    )?)?;
+    let cancel_recovery_peak = get_peak_memory() as u64;
+    metrics.max_recovery_peak = cancel_recovery_peak;
+    if !bounds.allows_warm_peak(cancel_recovery_peak) {
+        return Err(format!(
+            "LTX-2.3 post-cancel recovery peaked at {cancel_recovery_peak}, above clean warm {clean_warm_peak} plus 2%"
+        ));
+    }
+    clear_cache();
+    let cancel_recovery_cleanup = AllocatorState::capture_current();
+    metrics.max_recovery_post_cleanup = cancel_recovery_cleanup;
+    if !bounds.allows_retained(cancel_recovery_cleanup) {
+        return Err(format!(
+            "LTX-2.3 post-cancel recovery retained {cancel_recovery_cleanup:?} above clean warm {clean_post_cleanup:?} plus {} bytes",
+            bounds.tolerance_bytes,
+        ));
+    }
+    let cancel_quality = video_max_mean_rms_abs(selected, &cancel_recovery)?;
+    if !ltx_quality_passes(cancel_quality.0, cancel_quality.1, cancel_quality.2) {
+        return Err("LTX-2.3 cancellation cleanup changed the warm recovery clip".to_owned());
+    }
+
+    phase_sink.mark("lifecycle_error")?;
+    let mut injected_failure = None;
+    let injected_result = scoped_generate_observed(
+        generator,
+        ltx_request(geometry, fps, seed),
+        context,
+        Some(fault_phase),
+        &mut injected_failure,
+        &mut |_| {},
+    );
+    let injected = match injected_result {
+        Ok(_) => {
+            return Err(format!(
+                "LTX-2.3 fault injection completed successfully at {fault_phase:?} instead of returning an error"
+            ));
+        }
+        Err(error) => error,
+    };
+    if injected_failure != Some(ScopedGenerationFailureKind::Error)
+        || !injected.contains("injected memory-strategy calibration error")
+    {
+        return Err(format!(
+            "LTX-2.3 error injection returned the wrong outcome at {fault_phase:?}: failure={injected_failure:?}, error={injected}"
+        ));
+    }
+    clear_cache();
+    let error_cleanup = AllocatorState::capture_current();
+    metrics.max_fault_post_cleanup.active = metrics
+        .max_fault_post_cleanup
+        .active
+        .max(error_cleanup.active);
+    metrics.max_fault_post_cleanup.cache = metrics
+        .max_fault_post_cleanup
+        .cache
+        .max(error_cleanup.cache);
+    if !bounds.allows_retained(error_cleanup) {
+        return Err(format!(
+            "LTX-2.3 injected error retained {error_cleanup:?} above clean warm {clean_post_cleanup:?} plus {} bytes",
+            bounds.tolerance_bytes,
+        ));
+    }
+    reset_peak_memory();
+    phase_sink.mark("lifecycle_error_recovery")?;
+    let (error_recovery, _, _) = video_frames(scoped_generate(
+        generator,
+        ltx_request(geometry, fps, seed),
+        context,
+        None,
+        &mut |_| {},
+    )?)?;
+    let error_recovery_peak = get_peak_memory() as u64;
+    metrics.max_recovery_peak = metrics.max_recovery_peak.max(error_recovery_peak);
+    if !bounds.allows_warm_peak(error_recovery_peak) {
+        return Err(format!(
+            "LTX-2.3 post-error recovery peaked at {error_recovery_peak}, above clean warm {clean_warm_peak} plus 2%"
+        ));
+    }
+    clear_cache();
+    let error_recovery_cleanup = AllocatorState::capture_current();
+    metrics.max_recovery_post_cleanup.active = metrics
+        .max_recovery_post_cleanup
+        .active
+        .max(error_recovery_cleanup.active);
+    metrics.max_recovery_post_cleanup.cache = metrics
+        .max_recovery_post_cleanup
+        .cache
+        .max(error_recovery_cleanup.cache);
+    if !bounds.allows_retained(error_recovery_cleanup) {
+        return Err(format!(
+            "LTX-2.3 post-error recovery retained {error_recovery_cleanup:?} above clean warm {clean_post_cleanup:?} plus {} bytes",
+            bounds.tolerance_bytes,
+        ));
+    }
+    let error_quality = video_max_mean_rms_abs(selected, &error_recovery)?;
+    if !ltx_quality_passes(error_quality.0, error_quality.1, error_quality.2) {
+        return Err("LTX-2.3 error cleanup changed the warm recovery clip".to_owned());
+    }
+    Ok(metrics)
+}
+
+fn validate_ltx_canary_plan_for(
+    request: &Value,
+    profile: LtxCanaryProfile,
+) -> Result<MemorySelection, String> {
+    if protocol::action(request)? != profile.action() {
+        return Err(format!(
+            "LTX diagnostic canary action must be {:?}",
+            profile.action()
+        ));
+    }
+    let planned = protocol::planned(request)?;
+    if planned.get("_diagnosticOnly").and_then(Value::as_bool) != Some(true) {
+        return Err("LTX safety canary requires planned._diagnosticOnly == true".to_owned());
+    }
+    if planned.get("evidenceScope").and_then(Value::as_str) != Some("fixture") {
+        return Err("LTX safety canary requires non-promotable fixture evidenceScope".to_owned());
+    }
+    if planned.get("backend").and_then(Value::as_str) != Some("mlx") {
+        return Err("LTX safety canary requires planned.backend == mlx".to_owned());
+    }
+    let engaged_rungs = planned
+        .pointer("/strategy/engagedRungs")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "LTX safety canary requires strategy.engagedRungs".to_owned())?
+        .iter()
+        .map(Value::as_str)
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| "LTX safety canary strategy.engagedRungs must contain strings".to_owned())?;
+    if engaged_rungs != ["resident", "staged_residency", "bounded_decode"] {
+        return Err(
+            "LTX safety canary requires exact resident/staged_residency/bounded_decode rungs"
+                .to_owned(),
+        );
+    }
+    protocol::validate_plain_overlay_target(request, LTX_PLAIN_EXECUTION_PATH)?;
+    let target = planned
+        .get("target")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "planned.target must be an object".to_owned())?;
+    for field in ["provider", "modelId"] {
+        if target.get(field).and_then(Value::as_str) != Some(LTX_PROVIDER) {
+            return Err(format!(
+                "LTX safety canary target.{field} must be {LTX_PROVIDER:?}"
+            ));
+        }
+    }
+    if target.get("tier").and_then(Value::as_str) != Some("q4")
+        || target.get("mode").and_then(Value::as_str) != Some("text_to_video")
+        || target.get("overlay").and_then(Value::as_str) != Some("none")
+    {
+        return Err("LTX safety canary requires q4 text_to_video with overlay none".to_owned());
+    }
+    let geometry = target
+        .get("geometry")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "planned.target.geometry must be an object".to_owned())?;
+    let exact_geometry = [
+        ("width", u64::from(profile.width())),
+        ("height", u64::from(profile.height())),
+        ("batch", 1),
+        ("frames", u64::from(profile.frames())),
+    ];
+    for (field, expected) in exact_geometry {
+        if geometry.get(field).and_then(Value::as_u64) != Some(expected) {
+            return Err(format!(
+                "LTX safety canary geometry.{field} must be {expected}"
+            ));
+        }
+    }
+    if planned.get("fixture").and_then(Value::as_str) != Some(profile.fixture()) {
+        return Err(format!(
+            "LTX safety canary fixture must be {:?}",
+            profile.fixture()
+        ));
+    }
+    if planned
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        != Some(LTX_CALIBRATION_FINGERPRINT)
+    {
+        return Err("LTX safety canary fingerprint does not match the pinned provider".to_owned());
+    }
+    if planned_load_shape(request)? != LoadShape::EagerMaterialization {
+        return Err("LTX safety canary requires eager_materialization".to_owned());
+    }
+    if planned
+        .pointer("/_watchdog/maxFootprintBytes")
+        .and_then(Value::as_u64)
+        != Some(LTX_CANARY_MAX_FOOTPRINT_BYTES)
+    {
+        return Err(format!(
+            "LTX safety canary watchdog ceiling must be the SC-18808 co-staged bound {LTX_CANARY_MAX_FOOTPRINT_BYTES}"
+        ));
+    }
+    let canary = planned
+        .get("_canary")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "LTX safety canary requires planned._canary".to_owned())?;
+    if canary.get("identity").and_then(Value::as_str) != Some(profile.identity())
+        || canary.get("videoMode").and_then(Value::as_str) != Some(profile.video_mode_identity())
+        || canary.get("fps").and_then(Value::as_u64) != Some(u64::from(profile.fps()))
+        || canary.get("seed").and_then(Value::as_u64) != Some(LTX_CANARY_SEED)
+    {
+        return Err(format!(
+            "LTX safety canary requires identity {:?}, video mode {:?}, fps {}, seed {LTX_CANARY_SEED}",
+            profile.identity(),
+            profile.video_mode_identity(),
+            profile.fps(),
+        ));
+    }
+    let artifact = planned
+        .get("_artifact")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "LTX safety canary requires planned._artifact".to_owned())?;
+    let numeric_inventory = artifact
+        .get("numericTierInventory")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "LTX safety canary requires the numeric-tier inventory".to_owned())?;
+    if artifact.get("repository").and_then(Value::as_str) != Some(protocol::LTX_REPOSITORY)
+        || artifact.get("revision").and_then(Value::as_str) != Some(LTX_CANARY_ARTIFACT_REVISION)
+        || numeric_inventory.get("files").and_then(Value::as_u64)
+            != Some(LTX_CANARY_Q4_INVENTORY_FILES)
+        || numeric_inventory.get("bytes").and_then(Value::as_u64) != Some(LTX_Q4_INVENTORY_BYTES)
+        || numeric_inventory.get("sha256").and_then(Value::as_str)
+            != Some(LTX_CANARY_Q4_INVENTORY_SHA256)
+    {
+        return Err(
+            "LTX safety canary requires the exact immutable q4 artifact inventory".to_owned(),
+        );
+    }
+    let text_encoder = artifact
+        .get("textEncoderInventory")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            "LTX safety canary requires the immutable bundled Gemma inventory".to_owned()
+        })?;
+    if text_encoder.get("files").and_then(Value::as_u64)
+        != Some(LTX_CANARY_TEXT_ENCODER_INVENTORY_FILES)
+        || text_encoder.get("bytes").and_then(Value::as_u64)
+            != Some(LTX_CANARY_TEXT_ENCODER_INVENTORY_BYTES)
+        || text_encoder.get("sha256").and_then(Value::as_str)
+            != Some(LTX_CANARY_TEXT_ENCODER_INVENTORY_SHA256)
+    {
+        return Err(
+            "LTX safety canary requires the exact immutable bundled Gemma inventory".to_owned(),
+        );
+    }
+    let hardware_bytes = request
+        .pointer("/hardware/memoryBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "LTX safety canary hardware.memoryBytes must be an integer".to_owned())?;
+    if hardware_bytes < LTX_CANARY_MAX_FOOTPRINT_BYTES * 2 {
+        return Err(format!(
+            "LTX safety canary host memory {hardware_bytes} must preserve two {LTX_CANARY_MAX_FOOTPRINT_BYTES}-byte stop boundaries"
+        ));
+    }
+    let selection = planned_selection(request)?;
+    if selection.strategy != MemoryStrategy::BoundedDecode
+        || selection.tier.quant != Some(Quant::Q4)
+        || selection.parameters.decode_tile_edge != Some(LTX_CANARY_TILE_EDGE)
+        || selection.parameters.decode_overlap != Some(LTX_CANARY_OVERLAP)
+        || selection.parameters.attention_chunk_size.is_some()
+        || selection.parameters.transformer_window_size.is_some()
+        || selection.parameters.transformer_window_component.is_some()
+    {
+        return Err(format!(
+            "LTX safety canary requires exact bounded_decode q4 {LTX_CANARY_TILE_EDGE}/{LTX_CANARY_OVERLAP} selection"
+        ));
+    }
+    Ok(selection)
+}
+
+#[cfg(test)]
+fn validate_ltx_canary_plan(request: &Value) -> Result<MemorySelection, String> {
+    validate_ltx_canary_plan_for(request, LtxCanaryProfile::Safety)
+}
+
+#[cfg(test)]
+fn validate_ltx_product_envelope_canary_plan(request: &Value) -> Result<MemorySelection, String> {
+    validate_ltx_canary_plan_for(request, LtxCanaryProfile::ProductEnvelope)
+}
+
+#[derive(Debug)]
+struct LtxCanaryWatchdogAttestation {
+    max_footprint_bytes: u64,
+    max_runtime_seconds: f64,
+    host_memory_bytes: u64,
+    min_initial_memory_free_bytes: u64,
+    min_memory_free_bytes: u64,
+    nonce: String,
+    stream: Option<UnixStream>,
+}
+
+struct LtxCanaryWatchdogLease {
+    writer: UnixStream,
+    completion: std::sync::mpsc::Receiver<Result<(), String>>,
+    phase_acknowledgements: std::sync::mpsc::Receiver<Result<(usize, String), String>>,
+    nonce: String,
+    phase_sequence: usize,
+    expected_phases: &'static [&'static str],
+}
+
+trait LtxCampaignPhaseSink {
+    fn mark(&mut self, name: &'static str) -> Result<(), String>;
+}
+
+struct NoLtxCampaignPhases;
+
+impl LtxCampaignPhaseSink for NoLtxCampaignPhases {
+    fn mark(&mut self, _name: &'static str) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+impl LtxCanaryWatchdogAttestation {
+    fn start_lease(&mut self) -> Result<LtxCanaryWatchdogLease, String> {
+        self.start_lease_for(&LTX_PROVIDER_PHASE_NAMES)
+    }
+
+    fn start_lease_for(
+        &mut self,
+        expected_phases: &'static [&'static str],
+    ) -> Result<LtxCanaryWatchdogLease, String> {
+        let stream = self
+            .stream
+            .take()
+            .ok_or_else(|| "LTX safety canary watchdog lease was already consumed".to_owned())?;
+        let mut reader = stream
+            .try_clone()
+            .map_err(|error| format!("clone LTX watchdog lease socket: {error}"))?;
+        reader
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .map_err(|error| format!("configure LTX watchdog lease reader: {error}"))?;
+        let expected = self.nonce.clone();
+        let (sender, completion) = std::sync::mpsc::sync_channel(1);
+        let (phase_sender, phase_acknowledgements) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let result = loop {
+                match read_watchdog_line(&mut reader) {
+                    Ok(line) if line == format!("PING {expected}") => continue,
+                    Ok(line) if line.starts_with(&format!("PHASE_ACK {expected} ")) => {
+                        let fields = line.split_whitespace().collect::<Vec<_>>();
+                        let acknowledgement = if fields.len() == 4 {
+                            fields[2]
+                                .parse::<usize>()
+                                .map(|sequence| (sequence, fields[3].to_owned()))
+                                .map_err(|_| {
+                                    "SC-20216 watchdog returned a malformed phase acknowledgement"
+                                        .to_owned()
+                                })
+                        } else {
+                            Err(
+                                "SC-20216 watchdog returned a malformed phase acknowledgement"
+                                    .to_owned(),
+                            )
+                        };
+                        if phase_sender.send(acknowledgement).is_err() {
+                            break Err(
+                                "SC-20216 phase acknowledgement receiver disappeared".to_owned()
+                            );
+                        }
+                    }
+                    Ok(line) if line == format!("BYE {expected}") => break Ok(()),
+                    Ok(_) => {
+                        break Err(
+                            "LTX safety canary watchdog returned an invalid lease message"
+                                .to_owned(),
+                        )
+                    }
+                    Err(error) => break Err(error),
+                }
+            };
+            if result.is_err() {
+                // Loss of the monitor after GO must terminate the adapter while weights may be
+                // resident. Returning to the unguarded render would repeat the incident class.
+                std::process::abort();
+            }
+            let _ = sender.send(result);
+        });
+        Ok(LtxCanaryWatchdogLease {
+            writer: stream,
+            completion,
+            phase_acknowledgements,
+            nonce: self.nonce.clone(),
+            phase_sequence: 0,
+            expected_phases,
+        })
+    }
+}
+
+impl LtxCanaryWatchdogLease {
+    fn complete(mut self) -> Result<(), String> {
+        if self.phase_sequence != 0 && self.phase_sequence != self.expected_phases.len() {
+            return Err(format!(
+                "SC-20216 provider phase sequence completed at {} of {}",
+                self.phase_sequence,
+                self.expected_phases.len()
+            ));
+        }
+        self.writer
+            .write_all(format!("DONE {}\n", self.nonce).as_bytes())
+            .map_err(|error| format!("complete LTX canary watchdog lease: {error}"))?;
+        self.completion
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|error| {
+                format!("wait for LTX canary watchdog completion release: {error}")
+            })??;
+        Ok(())
+    }
+}
+
+fn wait_for_ltx_phase_acknowledgement(
+    acknowledgements: &std::sync::mpsc::Receiver<Result<(usize, String), String>>,
+    sequence: usize,
+    name: &str,
+    timeout: Duration,
+) -> Result<(), String> {
+    let acknowledged = acknowledgements.recv_timeout(timeout).map_err(|error| {
+        format!("wait for SC-20216 provider phase {name} acknowledgement: {error}")
+    })??;
+    if acknowledged != (sequence, name.to_owned()) {
+        return Err(format!(
+            "SC-20216 watchdog acknowledged a foreign provider phase: expected {sequence} {name}, got {} {}",
+            acknowledged.0, acknowledged.1
+        ));
+    }
+    Ok(())
+}
+
+impl LtxCampaignPhaseSink for LtxCanaryWatchdogLease {
+    fn mark(&mut self, name: &'static str) -> Result<(), String> {
+        let expected = self
+            .expected_phases
+            .get(self.phase_sequence)
+            .ok_or_else(|| {
+                "SC-20216 provider phase sequence exceeded its exact bound".to_owned()
+            })?;
+        if name != *expected {
+            return Err(format!(
+                "SC-20216 provider phase reordered: expected {expected}, got {name}"
+            ));
+        }
+        let sequence = self.phase_sequence + 1;
+        self.writer
+            .write_all(format!("PHASE {} {sequence} {name}\n", self.nonce).as_bytes())
+            .map_err(|error| format!("report SC-20216 provider phase {name}: {error}"))?;
+        wait_for_ltx_phase_acknowledgement(
+            &self.phase_acknowledgements,
+            sequence,
+            name,
+            Duration::from_secs(2),
+        )?;
+        self.phase_sequence = sequence;
+        Ok(())
+    }
+}
+
+fn read_watchdog_line(stream: &mut UnixStream) -> Result<String, String> {
+    let mut payload = Vec::new();
+    for _ in 0..4096 {
+        let mut byte = [0_u8; 1];
+        stream
+            .read_exact(&mut byte)
+            .map_err(|error| format!("read LTX canary watchdog attestation: {error}"))?;
+        if byte[0] == b'\n' {
+            return String::from_utf8(payload)
+                .map_err(|error| format!("LTX canary watchdog attestation is not UTF-8: {error}"));
+        }
+        payload.push(byte[0]);
+    }
+    Err("LTX canary watchdog attestation exceeded 4096 bytes".to_owned())
+}
+
+fn consume_ltx_canary_watchdog_attestation(
+    request: &Value,
+) -> Result<LtxCanaryWatchdogAttestation, String> {
+    let socket_path = std::env::var("SCENEWORKS_MEMORY_WATCHDOG_SOCKET")
+        .map_err(|_| "LTX safety canary requires the live external watchdog channel".to_owned())?;
+    let stream = UnixStream::connect(&socket_path)
+        .map_err(|error| format!("connect to live LTX canary watchdog: {error}"))?;
+    consume_ltx_canary_watchdog_attestation_stream(request, stream)
+}
+
+fn consume_ltx_canary_watchdog_attestation_stream(
+    request: &Value,
+    mut stream: UnixStream,
+) -> Result<LtxCanaryWatchdogAttestation, String> {
+    // The watchdog creates this one-run socket in a private random directory only after its
+    // launch-owned process group is anchored. Direct stdin invocation has no socket and therefore
+    // refuses before installing MLX limits or reading any model path. The monitor does not release
+    // allocation work until the ACK/GO pair completes around a second full telemetry sample.
+    let timeout = Some(Duration::from_secs(1));
+    stream
+        .set_read_timeout(timeout)
+        .map_err(|error| format!("configure LTX watchdog read timeout: {error}"))?;
+    stream
+        .set_write_timeout(timeout)
+        .map_err(|error| format!("configure LTX watchdog write timeout: {error}"))?;
+    let payload: Value = serde_json::from_str(&read_watchdog_line(&mut stream)?)
+        .map_err(|error| format!("parse LTX canary watchdog attestation: {error}"))?;
+    if payload.get("protocol").and_then(Value::as_str) != Some(LTX_CANARY_WATCHDOG_PROTOCOL) {
+        return Err("LTX safety canary watchdog protocol changed".to_owned());
+    }
+    let expected_phase_contract: Option<(&str, &[&str])> =
+        match request.get("action").and_then(Value::as_str) {
+            Some(LTX_CAMPAIGN_ENTRY_ACTION) => {
+                Some((LTX_CAMPAIGN_ENTRY_PHASE_PROFILE, &LTX_PROVIDER_PHASE_NAMES))
+            }
+            Some(LTX_BOUNDED_CARRIER_ACTION) => Some((
+                LTX_BOUNDED_CARRIER_PHASE_PROFILE,
+                &LTX_BOUNDED_CARRIER_PHASE_NAMES,
+            )),
+            Some(LTX_BOUNDED_CAMPAIGN_ACTION) => Some((
+                LTX_BOUNDED_CAMPAIGN_PHASE_PROFILE,
+                &LTX_BOUNDED_CARRIER_PHASE_NAMES,
+            )),
+            _ => None,
+        };
+    let provider_phase_protocol = payload.get("providerPhaseProtocol").and_then(Value::as_str);
+    let provider_phase_profile = payload.get("providerPhaseProfile").and_then(Value::as_str);
+    let provider_phase_names = payload.get("providerPhases");
+    if let Some((expected_profile, expected_names)) = expected_phase_contract {
+        if provider_phase_protocol != Some(LTX_PROVIDER_PHASE_PROTOCOL)
+            || provider_phase_profile != Some(expected_profile)
+            || provider_phase_names != Some(&json!(expected_names))
+        {
+            return Err(
+                "watchdog omitted the exact action-bound authenticated provider phase contract"
+                    .to_owned(),
+            );
+        }
+    } else if provider_phase_protocol.is_some()
+        || provider_phase_profile.is_some()
+        || provider_phase_names.is_some()
+    {
+        return Err(
+            "provider phase telemetry is restricted to exact contained LTX actions".to_owned(),
+        );
+    }
+    let nonce = payload
+        .get("nonce")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "LTX safety canary watchdog attestation omitted nonce".to_owned())?;
+    if nonce.len() != 64 || !nonce.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("LTX safety canary watchdog nonce is not 32-byte hexadecimal".to_owned());
+    }
+    let max_footprint_bytes = payload
+        .get("maxFootprintBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "LTX safety canary watchdog omitted maxFootprintBytes".to_owned())?;
+    let max_runtime_seconds = payload
+        .get("maxRuntimeSeconds")
+        .and_then(Value::as_f64)
+        .ok_or_else(|| "LTX safety canary watchdog omitted maxRuntimeSeconds".to_owned())?;
+    let host_memory_bytes = payload
+        .get("hostMemoryBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "LTX safety canary watchdog omitted hostMemoryBytes".to_owned())?;
+    let min_memory_free_bytes = payload
+        .get("minMemoryFreeBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "LTX safety canary watchdog omitted minMemoryFreeBytes".to_owned())?;
+    let min_initial_memory_free_bytes = payload
+        .get("minInitialMemoryFreeBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "LTX safety canary watchdog omitted minInitialMemoryFreeBytes".to_owned())?;
+    let requested_host_memory = request
+        .pointer("/hardware/memoryBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "LTX safety canary hardware.memoryBytes must be an integer".to_owned())?;
+    let telemetry_resolution = host_memory_bytes.div_ceil(100);
+    if max_footprint_bytes != LTX_CANARY_MAX_FOOTPRINT_BYTES
+        || max_runtime_seconds != LTX_CANARY_MAX_RUNTIME_SECONDS
+        || host_memory_bytes != requested_host_memory
+        || min_initial_memory_free_bytes
+            != 2 * LTX_CANARY_MAX_FOOTPRINT_BYTES + telemetry_resolution
+        || payload.get("minInitialMemoryFreePercent").is_some()
+        || min_memory_free_bytes != LTX_CANARY_MAX_FOOTPRINT_BYTES + telemetry_resolution
+        || payload.get("minSwapFreeBytes").is_some()
+    {
+        return Err(
+            "LTX safety canary watchdog did not attest the exact reviewed bounds".to_owned(),
+        );
+    }
+    stream
+        .write_all(format!("ACK {nonce}\n").as_bytes())
+        .map_err(|error| format!("acknowledge LTX canary watchdog: {error}"))?;
+    if read_watchdog_line(&mut stream)? != format!("GO {nonce}") {
+        return Err("LTX safety canary watchdog did not release allocation work".to_owned());
+    }
+    Ok(LtxCanaryWatchdogAttestation {
+        max_footprint_bytes,
+        max_runtime_seconds,
+        host_memory_bytes,
+        min_initial_memory_free_bytes,
+        min_memory_free_bytes,
+        nonce: nonce.to_owned(),
+        stream: Some(stream),
+    })
+}
+
+/// One deliberately tiny, non-ingestible real-weight probe for the permanent-pin tiled-release
+/// repair. This is not a campaign arm: it executes one render, never the six-render lifecycle
+/// sweep, and emits a status the calibration harness schema rejects.
+fn ltx_canary_ones_cache_bytes() -> Result<u64, String> {
+    LTX_CANARY_ONES_CACHE_VIDEO_DIMENSION
+        .checked_add(LTX_CANARY_ONES_CACHE_AUDIO_DIMENSION)
+        .and_then(|elements| elements.checked_mul(BFLOAT16_BYTES_PER_ELEMENT))
+        .ok_or_else(|| "LTX safety canary ONES_CACHE byte arithmetic overflowed".to_owned())
+}
+
+fn validate_ltx_canary_pre_provider(pre_provider: AllocatorState) -> Result<(), String> {
+    if pre_provider.cache != 0 {
+        return Err(format!(
+            "LTX safety canary preProviderCacheBytes {} did not attest the cleared cache 0",
+            pre_provider.cache
+        ));
+    }
+    Ok(())
+}
+
+fn validate_ltx_canary_cleanup(
+    pre_provider: AllocatorState,
+    post_cleanup: AllocatorState,
+    expected_persistent_active: u64,
+) -> Result<(), String> {
+    let expected_post_active = pre_provider
+        .active
+        .checked_add(expected_persistent_active)
+        .ok_or_else(|| "LTX safety canary cleanup active-byte arithmetic overflowed".to_owned())?;
+    if post_cleanup.active != expected_post_active {
+        return Err(format!(
+            "LTX safety canary postCleanupActiveBytes {} did not equal pre-provider active {} plus intentional persistent active {} = {}",
+            post_cleanup.active,
+            pre_provider.active,
+            expected_persistent_active,
+            expected_post_active
+        ));
+    }
+    if post_cleanup.cache != pre_provider.cache {
+        return Err(format!(
+            "LTX safety canary postCleanupCacheBytes {} did not return to preProviderCacheBytes {}",
+            post_cleanup.cache, pre_provider.cache
+        ));
+    }
+    Ok(())
+}
+
+fn run_ltx_canary_for(request: &Value, profile: LtxCanaryProfile) -> Result<Value, String> {
+    let selection = validate_ltx_canary_plan_for(request, profile)?;
+    let mut watchdog = consume_ltx_canary_watchdog_attestation(request)?;
+    let watchdog_lease = watchdog.start_lease()?;
+    let limits = LtxCanaryLimits::install()?;
+    clear_cache();
+    let pre_provider = AllocatorState::capture_current();
+    validate_ltx_canary_pre_provider(pre_provider)?;
+    let expected_persistent_active = ltx_canary_ones_cache_bytes()?;
+    let geometry = LtxGeometry {
+        width: profile.width(),
+        height: profile.height(),
+        frames: profile.frames(),
+        latent_frames: 1 + (profile.frames() - 1) / LTX_TEMPORAL_SCALE,
+    };
+    let (repository, revision, root, text_encoder_root, spec) =
+        ltx_load_spec(request, "q4", &selection)?;
+    if revision != LTX_CANARY_ARTIFACT_REVISION {
+        return Err(format!(
+            "LTX safety canary artifact revision must be {LTX_CANARY_ARTIFACT_REVISION}, got {revision}"
+        ));
+    }
+    let registry =
+        mlx_gen_ltx::provider_registry().map_err(|error| format!("build LTX registry: {error}"))?;
+    let contract = registry
+        .memory_strategy_contract(LTX_PROVIDER, &spec)
+        .map_err(|error| format!("read {LTX_PROVIDER} memory-strategy contract: {error}"))?
+        .ok_or_else(|| "pinned MLX LTX-2.3 provider has no memory-strategy contract".to_owned())?;
+    contract
+        .validate_selection(&selection)
+        .map_err(|error| format!("pinned LTX-2.3 contract rejected canary selection: {error}"))?;
+    let calibration = contract
+        .calibration
+        .as_ref()
+        .ok_or_else(|| "pinned LTX-2.3 contract has no calibration identity".to_owned())?;
+    if calibration.fingerprint != LTX_CALIBRATION_FINGERPRINT {
+        return Err(format!(
+            "pinned LTX-2.3 contract fingerprint changed: expected {LTX_CALIBRATION_FINGERPRINT}, got {}",
+            calibration.fingerprint
+        ));
+    }
+    let decode_plan = LtxDecodePlan::resolve_for_selection(&selection, geometry)?;
+    decode_plan.validate_selected_strategy(&selection)?;
+    if !decode_plan.tiling_engaged()
+        || decode_plan.spatial_tile_px() != u64::from(LTX_CANARY_TILE_EDGE)
+        || decode_plan.spatial_overlap_px() != u64::from(LTX_CANARY_OVERLAP)
+    {
+        return Err(
+            "LTX safety canary did not resolve the exact multi-tile decode carrier".to_owned(),
+        );
+    }
+    let spatial_decode_tile_count = decode_plan.spatial_tile_count(geometry)?;
+    if spatial_decode_tile_count <= 1 {
+        return Err("LTX safety canary resolved no physical multi-tile decode".to_owned());
+    }
+    let generator = registry
+        .load(LTX_PROVIDER, &spec)
+        .map_err(|error| format!("load real LTX-2.3 q4 canary provider: {error}"))?;
+    if generator.memory_strategy_contract() != Some(&contract) {
+        return Err("loaded LTX-2.3 canary contract differs from the registry contract".to_owned());
+    }
+    let context = ltx_context(
+        selection,
+        calibration,
+        &calibration.fingerprint,
+        geometry,
+        LTX_CANARY_MAX_FOOTPRINT_BYTES,
+        LTX_CANARY_MAX_FOOTPRINT_BYTES,
+    );
+    if !matches!(
+        generator.memory_strategy_safety_check(&context),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err("LTX-2.3 provider rejected the exact canary budget".to_owned());
+    }
+    clear_cache();
+    reset_peak_memory();
+    let mut conditioning = PhaseMemory {
+        active: 0,
+        cache: 0,
+    };
+    let mut denoise = PhaseMemory {
+        active: 0,
+        cache: 0,
+    };
+    let mut observe_progress = |progress| match progress {
+        Progress::Step { current: 1, .. } => {
+            conditioning = PhaseMemory::capture();
+            reset_peak_memory();
+        }
+        Progress::Decoding => {
+            denoise = PhaseMemory::capture();
+            reset_peak_memory();
+        }
+        _ => {}
+    };
+    let generated = match profile {
+        LtxCanaryProfile::Safety => scoped_generate_ltx_no_audio_canary(
+            generator.as_ref(),
+            ltx_canary_generation_request(),
+            &context,
+            &mut observe_progress,
+        ),
+        LtxCanaryProfile::ProductEnvelope => scoped_generate(
+            generator.as_ref(),
+            ltx_product_envelope_canary_generation_request(),
+            &context,
+            None,
+            &mut observe_progress,
+        ),
+    }?;
+    let (frames, fps, audio) = diagnostic_video_frames(generated)?;
+    let decode = PhaseMemory::capture();
+    let expected_audio = profile == LtxCanaryProfile::ProductEnvelope;
+    if frames.len() != profile.frames() as usize || fps != profile.fps() {
+        return Err(format!(
+            "LTX safety canary returned frames={}, fps={fps}, audio={audio:?}",
+            frames.len(),
+        ));
+    }
+    validate_diagnostic_audio(profile, audio)?;
+    let first = frames
+        .first()
+        .ok_or_else(|| "LTX safety canary returned no frames".to_owned())?;
+    if first.pixels.is_empty() || first.pixels.iter().all(|pixel| *pixel == first.pixels[0]) {
+        return Err("LTX safety canary returned a degenerate first frame".to_owned());
+    }
+    let peak_active = [conditioning.active, denoise.active, decode.active]
+        .into_iter()
+        .max()
+        .unwrap_or(0);
+    drop(frames);
+    drop(generator);
+    clear_cache();
+    let cleanup = AllocatorState::capture_current();
+    validate_ltx_canary_cleanup(pre_provider, cleanup, expected_persistent_active)?;
+    let planned_artifact = protocol::planned(request)?
+        .get("_artifact")
+        .cloned()
+        .ok_or_else(|| "LTX safety canary lost planned._artifact".to_owned())?;
+    let mut strategy = ltx_attested_strategy(request, &context.selection, &contract)?;
+    strategy["spatialDecodeTiles"] = json!(spatial_decode_tile_count);
+    watchdog_lease.complete()?;
+    Ok(json!({
+        "status": profile.completion_status(),
+        "canaryIdentity": profile.identity(),
+        "diagnosticOnly": true,
+        "promotable": false,
+        "ingestible": false,
+        "inferenceRevision": protocol::INFERENCE_PIN,
+        "calibrationFingerprint": calibration.fingerprint,
+        "artifact": {
+            "repository": repository,
+            "resolvedRevision": revision,
+            "variant": "q4",
+            "tierRoot": root,
+            "textEncoderRoot": text_encoder_root,
+            "numericTierInventory": planned_artifact["numericTierInventory"],
+            "textEncoderInventory": planned_artifact["textEncoderInventory"],
+        },
+        "target": {
+            "provider": LTX_PROVIDER,
+            "tier": "q4",
+            "geometry": {
+                "width": profile.width(),
+                "height": profile.height(),
+                "frames": profile.frames(),
+                "fps": profile.fps(),
+            },
+            "videoMode": profile.video_mode_identity(),
+            "audio": expected_audio,
+        },
+        "strategy": strategy,
+        "watchdog": {
+            "required": true,
+            "protocol": LTX_CANARY_WATCHDOG_PROTOCOL,
+            "maxFootprintBytes": watchdog.max_footprint_bytes,
+            "maxRuntimeSeconds": watchdog.max_runtime_seconds,
+            "hostMemoryBytes": watchdog.host_memory_bytes,
+            "minInitialMemoryFreeBytes": watchdog.min_initial_memory_free_bytes,
+            "minMemoryFreeBytes": watchdog.min_memory_free_bytes,
+            "source": "conservative-stop-from-sc-18808-q8-costaged-safetensor-arithmetic-not-physical-bound",
+        },
+        "mlxLimits": {
+            "memoryLimitBytes": LTX_CANARY_MAX_FOOTPRINT_BYTES,
+            "wiredLimitBytes": limits.wired,
+        },
+        "observedMemory": {
+            "preProviderActiveBytes": pre_provider.active,
+            "preProviderCacheBytes": pre_provider.cache,
+            "expectedPersistentActive": {
+                "identity": LTX_CANARY_ONES_CACHE_IDENTITY,
+                "videoDimension": LTX_CANARY_ONES_CACHE_VIDEO_DIMENSION,
+                "audioDimension": LTX_CANARY_ONES_CACHE_AUDIO_DIMENSION,
+                "dtype": "bfloat16",
+                "bytesPerElement": BFLOAT16_BYTES_PER_ELEMENT,
+                "bytes": expected_persistent_active,
+            },
+            "conditioning": conditioning.json(),
+            "denoise": denoise.json(),
+            "decode": decode.json(),
+            "peakActiveBytes": peak_active,
+            "postCleanupActiveBytes": cleanup.active,
+            "postCleanupCacheBytes": cleanup.cache,
+        },
+        "output": {
+            "frames": profile.frames(),
+            "fps": profile.fps(),
+            "audio": {
+                "present": audio.is_some(),
+                "samples": audio.map_or(0, |value| value.samples),
+                "sampleRate": audio.map_or(0, |value| value.sample_rate),
+                "channels": audio.map_or(0, |value| value.channels),
+            },
+            "frameTimelineSeconds": f64::from(profile.frames() - 1) / f64::from(profile.fps()),
+            "firstFrameNondegenerate": true,
+        },
+        "capturedAt": protocol::captured_at(),
+    }))
+}
+
+fn run_ltx_canary(request: &Value) -> Result<Value, String> {
+    run_ltx_canary_for(request, LtxCanaryProfile::Safety)
+}
+
+fn run_ltx_product_envelope_canary(request: &Value) -> Result<Value, String> {
+    run_ltx_canary_for(request, LtxCanaryProfile::ProductEnvelope)
+}
+
+/// The `mlx:ltx_2_3` SC-18946 arm. SC-19109 moved strategy ownership into the provider: this path
+/// reads the exact registry contract, proves the loaded generator exposes the same contract, drives
+/// the selected request scope, and executes every runtime-complete admission/lifecycle scenario.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LtxRunAdmission {
+    Ordinary,
+    CampaignEntry,
+    BoundedCampaignEntry,
+}
+
+fn run_ltx_with_admission(
+    request: &Value,
+    admission: LtxRunAdmission,
+    phase_sink: &mut dyn LtxCampaignPhaseSink,
+) -> Result<Value, String> {
+    let geometry = validate_ltx_target(request)?;
+    protocol::validate_plain_overlay_target(request, LTX_PLAIN_EXECUTION_PATH)?;
+    let load_shape = planned_load_shape(request)?;
+    if load_shape != LoadShape::EagerMaterialization {
+        return Err(
+            "the pinned mlx-gen-ltx contract calibrates only eager_materialization; the provider \
+             stages text, transformer and decode phases inside each request rather than exposing a \
+             deferred block loader"
+                .to_owned(),
+        );
+    }
+    let selection = planned_selection(request)?;
+    let tier = planned_qwen_tier(request)?; // shared numeric-tier parser
+    if !matches!(tier, "q4" | "q8" | "bf16") {
+        return Err(format!(
+            "the MLX LTX-2.3 plan supports only the manifest's q4, q8 and bf16 tiers; tier {tier:?} \
+             is not capturable"
+        ));
+    }
+    let (fps, seed) = planned_ltx_capture(request, tier, geometry)?;
+    let planned_fingerprint = protocol::planned(request)?
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    if planned_fingerprint != LTX_CALIBRATION_FINGERPRINT {
+        return Err(format!(
+            "plan/adapter calibration mismatch: plan={planned_fingerprint}, MLX LTX-2.3 arm \
+             implements {LTX_CALIBRATION_FINGERPRINT}"
+        ));
+    }
+    match admission {
+        LtxRunAdmission::Ordinary => {
+            refuse_unsafe_ltx_capture(request, tier, geometry, &selection)?
+        }
+        LtxRunAdmission::CampaignEntry => {
+            validate_ltx_campaign_entry(request, tier, geometry, &selection)?
+        }
+        LtxRunAdmission::BoundedCampaignEntry => {
+            validate_ltx_bounded_campaign_entry(request, tier, geometry, &selection)?
+        }
+    }
+    let (repository, revision, root, text_encoder_root, spec) =
+        ltx_load_spec(request, tier, &selection)?;
+    // Read BEFORE the load so the staging bound below is grounded in the artifact on disk rather
+    // than in an allocator reading that a broken staging would itself corrupt. The staged text
+    // phase is `build_text_encoder`, which materializes the Gemma snapshot AND the tier's
+    // `connector.safetensors` into one `LtxTextEncoder` — so the connector belongs on the TE side of
+    // the bound, not with the resident small components.
+    let component_bytes = |name: &str| {
+        std::fs::metadata(root.join(name))
+            .map_err(|error| format!("stat the {tier} {name}: {error}"))
+            .map(|metadata| metadata.len())
+    };
+    let connector_bytes = component_bytes("connector.safetensors")?;
+    let gemma_bytes = safetensors_bytes(&text_encoder_root)?;
+    let text_encoder_bytes = gemma_bytes.saturating_add(connector_bytes);
+    let transformer_bytes = component_bytes("transformer.safetensors")?;
+    let tier_bytes = safetensors_bytes(&root)?;
+
+    let registry =
+        mlx_gen_ltx::provider_registry().map_err(|error| format!("build LTX registry: {error}"))?;
+    let contract = registry
+        .memory_strategy_contract(LTX_PROVIDER, &spec)
+        .map_err(|error| format!("read {LTX_PROVIDER} memory-strategy contract: {error}"))?
+        .ok_or_else(|| "pinned MLX LTX-2.3 provider has no memory-strategy contract".to_owned())?;
+    contract
+        .validate_selection(&selection)
+        .map_err(|error| format!("pinned LTX-2.3 contract rejected planned selection: {error}"))?;
+    let strategy = ltx_attested_strategy(request, &selection, &contract)?;
+    let calibration = contract
+        .calibration
+        .as_ref()
+        .ok_or_else(|| "pinned LTX-2.3 contract has no calibration identity".to_owned())?;
+    if calibration.fingerprint != LTX_CALIBRATION_FINGERPRINT {
+        return Err(format!(
+            "pinned LTX-2.3 contract fingerprint changed: expected {LTX_CALIBRATION_FINGERPRINT}, got {}",
+            calibration.fingerprint
+        ));
+    }
+    if planned_fingerprint != calibration.fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",
+            calibration.fingerprint
+        ));
+    }
+    // Host-dependent and process-global: resolve only after every cheap target, fixture,
+    // fingerprint, and provider-contract check has passed, so an injected test budget cannot mask
+    // a deterministic malformed-plan error. This remains before generator load or capture.
+    let decode_plan = LtxDecodePlan::resolve_for_selection(&selection, geometry)?;
+    decode_plan.validate_selected_strategy(&selection)?;
+    let spatial_decode_tiles = decode_plan.spatial_tile_count(geometry)?;
+    if admission == LtxRunAdmission::BoundedCampaignEntry
+        && (!decode_plan.tiling_engaged()
+            || decode_plan.spatial_tile_px() != u64::from(LTX_CANARY_TILE_EDGE)
+            || decode_plan.spatial_overlap_px() != u64::from(LTX_CANARY_OVERLAP)
+            || spatial_decode_tiles != 24)
+    {
+        return Err("SC-20318 did not resolve the exact 24-tile 192/64 carrier".to_owned());
+    }
+    let generator = registry
+        .load(LTX_PROVIDER, &spec)
+        .map_err(|error| format!("load real LTX-2.3 {tier} provider: {error}"))?;
+    let loaded_contract = generator
+        .memory_strategy_contract()
+        .ok_or_else(|| "loaded LTX-2.3 generator exposed no memory contract".to_owned())?;
+    if loaded_contract != &contract {
+        return Err(
+            "loaded LTX-2.3 generator contract differs from the registry contract".to_owned(),
+        );
+    }
+    let hardware_bytes = request
+        .pointer("/hardware/memoryBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
+    let context = ltx_context(
+        selection,
+        calibration,
+        &calibration.fingerprint,
+        geometry,
+        hardware_bytes,
+        1,
+    );
+    if !matches!(
+        generator.memory_strategy_safety_check(&context),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err("LTX-2.3 admission rejected a fitting pre-measurement budget".to_owned());
+    }
+    let mut unknown = context.clone();
+    unknown.budget.total_bytes = 0;
+    if !matches!(
+        generator.memory_strategy_safety_check(&unknown),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("LTX-2.3 admission accepted an unknown/zero memory budget".to_owned());
+    }
+    let mut stale = context.clone();
+    stale.calibration_fingerprint = "stale-ltx-2-3-fingerprint".to_owned();
+    if !matches!(
+        generator.memory_strategy_safety_check(&stale),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("LTX-2.3 admission accepted stale calibration evidence".to_owned());
+    }
+
+    let conditioning = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    let denoise = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    // Live allocator readings at the two staging handoffs, distinct from the per-phase PEAKS above.
+    let denoise_entry = Cell::new(AllocatorState::default());
+    let decode_entry = Cell::new(AllocatorState::default());
+    clear_cache();
+    reset_peak_memory();
+    let pre_rung_active = get_active_memory() as u64;
+    let pre_rung_cache = get_cache_memory() as u64;
+    phase_sink.mark("primary_conditioning")?;
+    let (measured, output_fps, audio) = diagnostic_video_frames(scoped_generate(
+        generator.as_ref(),
+        ltx_request(geometry, fps, seed),
+        &context,
+        None,
+        &mut |progress| {
+            match progress {
+                // LTX emits no boundary between the staged text phase and the DiT build, so this
+                // phase legitimately spans BOTH giants' materializations; the staging bound below
+                // is what proves they did not co-reside.
+                Progress::Step { current: 1, .. } => {
+                    if let Err(error) = phase_sink.mark("primary_denoise") {
+                        eprintln!("{error}");
+                        std::process::abort();
+                    }
+                    conditioning.set(PhaseMemory::capture());
+                    denoise_entry.set(AllocatorState::capture_current());
+                    reset_peak_memory();
+                }
+                Progress::Decoding => {
+                    if let Err(error) = phase_sink.mark("primary_decode") {
+                        eprintln!("{error}");
+                        std::process::abort();
+                    }
+                    denoise.set(PhaseMemory::capture());
+                    decode_entry.set(AllocatorState::capture_current());
+                    reset_peak_memory();
+                }
+                _ => {}
+            }
+        },
+    )?)?;
+    let decode = PhaseMemory::capture();
+    let conditioning = conditioning.get();
+    let denoise = denoise.get();
+    let denoise_entry = denoise_entry.get();
+    let decode_entry = decode_entry.get();
+    if [conditioning.active, denoise.active, decode.active].contains(&0) {
+        return Err(
+            "a synchronized LTX-2.3 lifecycle phase reported a zero active peak".to_owned(),
+        );
+    }
+    if measured.len() as u32 != geometry.frames {
+        return Err(format!(
+            "LTX-2.3 rendered {} frames for a {}-frame request",
+            measured.len(),
+            geometry.frames
+        ));
+    }
+    if output_fps != fps {
+        return Err(format!(
+            "LTX-2.3 returned fps {output_fps} for a {fps} fps request"
+        ));
+    }
+    let audio = audio
+        .filter(|audio| audio.samples > 0 && audio.sample_rate > 0 && audio.channels > 0)
+        .ok_or_else(|| {
+            "LTX-2.3 full-A/V campaign render returned no non-empty audio track".to_owned()
+        })?;
+    if admission == LtxRunAdmission::BoundedCampaignEntry && audio.channels != 2 {
+        return Err("SC-20318 selected render did not return stereo audio".to_owned());
+    }
+    let first = measured
+        .first()
+        .ok_or_else(|| "LTX-2.3 campaign render returned no first frame".to_owned())?;
+    if first.pixels.is_empty() || first.pixels.iter().all(|pixel| *pixel == first.pixels[0]) {
+        return Err("LTX-2.3 campaign render returned a degenerate first frame".to_owned());
+    }
+    let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
+
+    // THE STAGED-RESIDENCY PROOF, and the reason the record may claim rung 1 at all.
+    let costaged_bytes = text_encoder_bytes.saturating_add(transformer_bytes);
+    ltx_staging_is_proven(
+        denoise_entry,
+        costaged_bytes,
+        text_encoder_bytes,
+        transformer_bytes,
+    )?;
+    // The second handoff: the DiT is dropped and the cache cleared before the VAE decode, so the
+    // allocator at the decode boundary must hold less than it did entering the denoise.
+    if decode_entry.active >= denoise_entry.active {
+        return Err(format!(
+            "LTX-2.3 held {} active bytes entering decode against {} entering denoise; the \
+             transformer was not released before the VAE decode",
+            decode_entry.active, denoise_entry.active
+        ));
+    }
+
+    let predicted_peaks = video_predicted_peak_bytes(conditioning, denoise, decode);
+    let predicted = predicted_peaks.overall;
+    let mut exact = context.clone();
+    exact.predicted_peak_bytes = predicted;
+    exact.budget.total_bytes = predicted;
+    if !matches!(
+        generator.memory_strategy_safety_check(&exact),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err("LTX-2.3 admission rejected an exact-fit calibrated budget".to_owned());
+    }
+
+    let lifecycle_input = LtxLifecycleInput {
+        geometry,
+        fps,
+        seed,
+        fault_phase: decode_plan.lifecycle_fault_phase(),
+    };
+    let (lifecycle, bounded_warm) = match admission {
+        LtxRunAdmission::CampaignEntry => (
+            verify_ltx_lifecycle(
+                generator.as_ref(),
+                &context,
+                &measured,
+                lifecycle_input,
+                phase_sink,
+            )?,
+            None,
+        ),
+        LtxRunAdmission::BoundedCampaignEntry => {
+            let warm = verify_ltx_bounded_warm_repeat(
+                generator.as_ref(),
+                &context,
+                &measured,
+                lifecycle_input,
+            )?;
+            (
+                LtxLifecycleMetrics {
+                    maximum_error: warm.maximum_error,
+                    mean_error: warm.mean_error,
+                    rms_error: warm.rms_error,
+                    ..Default::default()
+                },
+                Some(warm),
+            )
+        }
+        LtxRunAdmission::Ordinary => {
+            return Err("ordinary SC-18946 execution escaped its pre-load refusal".to_owned())
+        }
+    };
+    let maximum_error = lifecycle.maximum_error;
+    let mean_error = lifecycle.mean_error;
+    let rms_error = lifecycle.rms_error;
+
+    // Runtime-complete keeps the schema's unexecuted mutation slot null. The adapter still proves
+    // falsifiability and records the breach in diagnostics.
+    let mutated = measured
+        .iter()
+        .map(qwen_negative_mutation)
+        .collect::<Vec<_>>();
+    let (mutated_maximum, mutated_mean, mutated_rms) = video_max_mean_rms_abs(&mutated, &measured)?;
+    if ltx_quality_passes(mutated_maximum, mutated_mean, mutated_rms) {
+        return Err("LTX-2.3 output mutation did not breach the determinism envelope".to_owned());
+    }
+
+    let scenarios = if admission == LtxRunAdmission::BoundedCampaignEntry {
+        let blocker = "SC-20318 executes only selected plus warm-repeat parity; cancellation, authorized-error, and recovery renders remain unexecuted";
+        json!([
+            { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
+            { "name": "unknown_budget", "result": "passed", "reason": "the loaded provider contract rejected a zero/unknown budget" },
+            { "name": "stale_evidence", "result": "passed", "reason": "the loaded provider contract rejected a mutated calibration fingerprint" },
+            { "name": "warm_repeat", "result": "passed", "reason": "the selected request scope repeated deterministically within the declared clip-wide envelope" },
+            { "name": "cancel", "result": "not_run", "reason": blocker },
+            { "name": "error", "result": "not_run", "reason": blocker },
+            { "name": "loadability", "result": "passed" },
+            { "name": "overlay", "result": "not_applicable", "reason": "settled below from the declared reference-free target" }
+        ])
+    } else {
+        json!([
+            { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
+            { "name": "unknown_budget", "result": "passed", "reason": "the loaded provider contract rejected a zero/unknown budget" },
+            { "name": "stale_evidence", "result": "passed", "reason": "the loaded provider contract rejected a mutated calibration fingerprint" },
+            { "name": "warm_repeat", "result": "passed", "reason": "the selected request scope repeated deterministically within the declared clip-wide envelope" },
+            { "name": "cancel", "result": "passed", "reason": "typed cancellation at the selected rung boundary cleaned up and recovered within the clean-warm bounds", "cleanupVerified": true, "warmFollowUpPassed": true },
+            { "name": "error", "result": "passed", "reason": "provider fault injection at the selected rung boundary cleaned up and recovered within the clean-warm bounds", "cleanupVerified": true, "warmFollowUpPassed": true },
+            { "name": "loadability", "result": "passed" },
+            { "name": "overlay", "result": "not_applicable", "reason": "settled below from the declared reference-free target" }
+        ])
+    };
+    let mut diagnostic_measurements = vec![
+        ("preRungActiveAfterClear", "bytes", pre_rung_active),
+        ("preRungCacheAfterClear", "bytes", pre_rung_cache),
+        ("conditioningActivePeak", "bytes", conditioning.active),
+        ("denoiseActivePeak", "bytes", denoise.active),
+        ("decodeActivePeak", "bytes", decode.active),
+        (
+            "overallAllocatorEnvelope",
+            "bytes",
+            overall.allocator_bytes(),
+        ),
+        ("predictedOverallCeiling", "bytes", predicted_peaks.overall),
+        ("denoiseEntryActive", "bytes", denoise_entry.active),
+        ("decodeEntryActive", "bytes", decode_entry.active),
+        ("stagedGemmaBytes", "bytes", gemma_bytes),
+        ("stagedConnectorBytes", "bytes", connector_bytes),
+        ("stagedTextEncoderBytes", "bytes", text_encoder_bytes),
+        ("stagedTransformerBytes", "bytes", transformer_bytes),
+        ("costagedGiantsBytes", "bytes", costaged_bytes),
+        ("tierArtifactBytes", "bytes", tier_bytes),
+        ("renderedFrames", "count", u64::from(geometry.frames)),
+        (
+            "latentTemporalDepth",
+            "count",
+            u64::from(geometry.latent_frames),
+        ),
+        (
+            "latentTokens",
+            "count",
+            u64::from(geometry.latent_frames)
+                * u64::from(geometry.width / 32)
+                * u64::from(geometry.height / 32),
+        ),
+        ("outputFps", "count", u64::from(fps)),
+        ("audioTrackDecoded", "count", 1),
+        (
+            "decodeTilingEngaged",
+            "count",
+            u64::from(decode_plan.tiling_engaged()),
+        ),
+        (
+            "decodeWritableFrameCap",
+            "count",
+            decode_plan.writable_frame_cap.max(0) as u64,
+        ),
+        (
+            "decodeTileSpatialPx",
+            "count",
+            decode_plan.spatial_tile_px(),
+        ),
+        (
+            "decodeTileOverlapPx",
+            "count",
+            decode_plan.spatial_overlap_px(),
+        ),
+        ("spatialDecodeTiles", "count", spatial_decode_tiles),
+        ("mlxMemoryLimitBytes", "bytes", get_memory_limit() as u64),
+        (
+            "negativeMutationMaximumErrorPer255",
+            "count",
+            (mutated_maximum * 255.0).round() as u64,
+        ),
+        (
+            "negativeMutationMeanErrorPer255",
+            "count",
+            (mutated_mean * 255.0).round() as u64,
+        ),
+        (
+            "negativeMutationRootMeanSquareErrorPer255",
+            "count",
+            (mutated_rms * 255.0).round() as u64,
+        ),
+    ];
+    if let Some(warm) = bounded_warm {
+        diagnostic_measurements.extend([
+            (
+                "warmConditioningActivePeak",
+                "bytes",
+                warm.conditioning.active,
+            ),
+            ("warmDenoiseActivePeak", "bytes", warm.denoise.active),
+            ("warmDecodeActivePeak", "bytes", warm.decode.active),
+            ("warmOutputAudioSamples", "count", warm.audio.samples),
+            (
+                "warmOutputAudioSampleRate",
+                "hertz",
+                u64::from(warm.audio.sample_rate),
+            ),
+            (
+                "warmOutputAudioChannels",
+                "count",
+                u64::from(warm.audio.channels),
+            ),
+            ("providerRequestScopeRenders", "count", 2),
+        ]);
+    } else {
+        diagnostic_measurements.extend([
+            ("warmRepeatPeak", "bytes", lifecycle.clean_warm_peak),
+            (
+                "warmRepeatPostCleanupActive",
+                "bytes",
+                lifecycle.clean_post_cleanup.active,
+            ),
+            (
+                "warmRepeatPostCleanupCache",
+                "bytes",
+                lifecycle.clean_post_cleanup.cache,
+            ),
+            (
+                "lifecycleMaxFaultPostCleanupActive",
+                "bytes",
+                lifecycle.max_fault_post_cleanup.active,
+            ),
+            (
+                "lifecycleMaxFaultPostCleanupCache",
+                "bytes",
+                lifecycle.max_fault_post_cleanup.cache,
+            ),
+            (
+                "lifecycleMaxRecoveryPeak",
+                "bytes",
+                lifecycle.max_recovery_peak,
+            ),
+            (
+                "lifecycleMaxRecoveryPostCleanupActive",
+                "bytes",
+                lifecycle.max_recovery_post_cleanup.active,
+            ),
+            (
+                "lifecycleMaxRecoveryPostCleanupCache",
+                "bytes",
+                lifecycle.max_recovery_post_cleanup.cache,
+            ),
+        ]);
+    }
+
+    let mut fragment = json!({
+        "status": "runtime_complete",
+        "strategy": strategy,
+        "loadShape": load_shape_key(calibration.load_shape),
+        "artifact": {
+            "repository": repository,
+            "resolvedRevision": revision,
+            "variant": tier,
+        },
+        "sweep": ltx_complete_sweep(request)?,
+        "scenarios": scenarios,
+        "predictedPeakBytes": predicted_peaks.json(),
+        "observedMemory": {
+            "conditioning": conditioning.json(),
+            "denoise": denoise.json(),
+            "decode": decode.json(),
+            "overall": overall.json(),
+        },
+        "quality": {
+            "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier, provider contract and selected request scope; measured clip versus a clean warm repeat, compared over every frame",
+            "identicalInputs": true,
+            "result": "passed",
+            "maximumError": maximum_error,
+            "meanError": mean_error,
+            "rootMeanSquareError": rms_error,
+            "maximumErrorThreshold": LTX_MAX_THRESHOLD,
+            "meanErrorThreshold": LTX_MEAN_THRESHOLD,
+            "rootMeanSquareErrorThreshold": LTX_RMS_THRESHOLD,
+        },
+        "negativeMutation": null,
+        "loadability": {
+            "result": "passed",
+            "resolvedPathFingerprint": format!("{repository}@{revision}:{tier}+gemma"),
+        },
+        "output": {
+            "frames": geometry.frames,
+            "fps": fps,
+            "audio": {
+                "present": true,
+                "samples": audio.samples,
+                "sampleRate": audio.sample_rate,
+                "channels": audio.channels,
+            },
+            "firstFrameNondegenerate": true,
+        },
+        "diagnostics": protocol::diagnostics(
+            "memory-mlx-adapter:ltx-2-3-provider-contract-video",
+            "executed",
+            [],
+            diagnostic_measurements,
+        ),
+        "capturedAt": protocol::captured_at(),
+    });
+    protocol::settle_plain_overlay_scenario(request, &mut fragment, LTX_PLAIN_EXECUTION_PATH)?;
+    Ok(fragment)
+}
+
+fn campaign_entry_diagnostic(fragment: &Value, name: &str) -> Result<u64, String> {
+    fragment
+        .pointer("/diagnostics/measurements")
+        .and_then(Value::as_array)
+        .and_then(|measurements| {
+            measurements
+                .iter()
+                .find(|measurement| measurement.get("name").and_then(Value::as_str) == Some(name))
+        })
+        .and_then(|measurement| measurement.get("value"))
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("contained LTX campaign omitted diagnostic {name}"))
+}
+
+fn validate_ltx_bounded_campaign_fragment(fragment: &Value) -> Result<(), String> {
+    for (name, expected) in [
+        ("renderedFrames", u64::from(LTX_CAMPAIGN_ENTRY_FRAMES)),
+        ("outputFps", u64::from(LTX_CAMPAIGN_ENTRY_FPS)),
+        ("audioTrackDecoded", 1),
+        ("decodeTilingEngaged", 1),
+        ("decodeTileSpatialPx", u64::from(LTX_CANARY_TILE_EDGE)),
+        ("decodeTileOverlapPx", u64::from(LTX_CANARY_OVERLAP)),
+        ("spatialDecodeTiles", 24),
+        ("latentTemporalDepth", 16),
+        ("latentTokens", 6_144),
+        ("warmOutputAudioChannels", 2),
+        ("providerRequestScopeRenders", 2),
+    ] {
+        let actual = campaign_entry_diagnostic(fragment, name)?;
+        if actual != expected {
+            return Err(format!(
+                "SC-20318 bounded campaign diagnostic {name} must be {expected}, got {actual}"
+            ));
+        }
+    }
+    for name in [
+        "warmConditioningActivePeak",
+        "warmDenoiseActivePeak",
+        "warmDecodeActivePeak",
+        "warmOutputAudioSamples",
+        "warmOutputAudioSampleRate",
+    ] {
+        if campaign_entry_diagnostic(fragment, name)? == 0 {
+            return Err(format!(
+                "SC-20318 bounded campaign diagnostic {name} must be positive"
+            ));
+        }
+    }
+    let scenarios = fragment
+        .get("scenarios")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "SC-20318 bounded campaign omitted scenarios".to_owned())?;
+    let result = |name: &str| {
+        scenarios
+            .iter()
+            .find(|scenario| scenario.get("name").and_then(Value::as_str) == Some(name))
+            .and_then(|scenario| scenario.get("result"))
+            .and_then(Value::as_str)
+    };
+    if fragment.pointer("/strategy/rung").and_then(Value::as_str) != Some("bounded_decode")
+        || fragment.pointer("/strategy/engagedRungs")
+            != Some(&json!(["resident", "staged_residency", "bounded_decode"]))
+        || fragment.pointer("/strategy/parameters")
+            != Some(&json!({
+                "decodeTileEdge": LTX_CANARY_TILE_EDGE,
+                "decodeOverlap": LTX_CANARY_OVERLAP,
+            }))
+        || result("warm_repeat") != Some("passed")
+        || result("cancel") != Some("not_run")
+        || result("error") != Some("not_run")
+        || fragment.pointer("/output/frames").and_then(Value::as_u64)
+            != Some(u64::from(LTX_CAMPAIGN_ENTRY_FRAMES))
+        || fragment.pointer("/output/fps").and_then(Value::as_u64)
+            != Some(u64::from(LTX_CAMPAIGN_ENTRY_FPS))
+        || fragment
+            .pointer("/output/audio/present")
+            .and_then(Value::as_bool)
+            != Some(true)
+        || fragment
+            .pointer("/output/audio/samples")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            == 0
+        || fragment
+            .pointer("/output/audio/sampleRate")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            == 0
+        || fragment
+            .pointer("/output/audio/channels")
+            .and_then(Value::as_u64)
+            != Some(2)
+        || fragment
+            .pointer("/output/firstFrameNondegenerate")
+            .and_then(Value::as_bool)
+            != Some(true)
+    {
+        return Err(
+            "SC-20318 bounded campaign response changed its exact canonical carrier".to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_ltx_campaign_entry_fragment(fragment: &Value) -> Result<(), String> {
+    for (name, expected) in [
+        ("renderedFrames", u64::from(LTX_CAMPAIGN_ENTRY_FRAMES)),
+        ("outputFps", u64::from(LTX_CAMPAIGN_ENTRY_FPS)),
+        ("audioTrackDecoded", 1),
+        ("decodeTilingEngaged", 0),
+        ("decodeTileSpatialPx", 0),
+        ("decodeTileOverlapPx", 0),
+        ("latentTemporalDepth", 16),
+        ("latentTokens", 6_144),
+    ] {
+        let actual = campaign_entry_diagnostic(fragment, name)?;
+        if actual != expected {
+            return Err(format!(
+                "SC-20191 campaign entry diagnostic {name} must be {expected}, got {actual}"
+            ));
+        }
+    }
+    if fragment.pointer("/strategy/rung").and_then(Value::as_str) != Some("staged_residency")
+        || fragment.pointer("/strategy/engagedRungs")
+            != Some(&json!(["resident", "staged_residency"]))
+        || fragment.pointer("/strategy/parameters") != Some(&json!({}))
+        || fragment.pointer("/output/frames").and_then(Value::as_u64)
+            != Some(u64::from(LTX_CAMPAIGN_ENTRY_FRAMES))
+        || fragment.pointer("/output/fps").and_then(Value::as_u64)
+            != Some(u64::from(LTX_CAMPAIGN_ENTRY_FPS))
+        || fragment
+            .pointer("/output/audio/present")
+            .and_then(Value::as_bool)
+            != Some(true)
+        || fragment
+            .pointer("/output/audio/samples")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            == 0
+        || fragment
+            .pointer("/output/audio/sampleRate")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            == 0
+        || fragment
+            .pointer("/output/audio/channels")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            == 0
+        || fragment
+            .pointer("/output/firstFrameNondegenerate")
+            .and_then(Value::as_bool)
+            != Some(true)
+    {
+        return Err(
+            "SC-20191 campaign entry response changed the exact untiled full-A/V carrier"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn prevalidate_ltx_campaign_entry(request: &Value) -> Result<(), String> {
+    let geometry = validate_ltx_target(request)?;
+    protocol::validate_plain_overlay_target(request, LTX_PLAIN_EXECUTION_PATH)?;
+    if planned_load_shape(request)? != LoadShape::EagerMaterialization {
+        return Err("SC-20191 campaign entry requires eager materialization".to_owned());
+    }
+    let selection = planned_selection(request)?;
+    let tier = planned_qwen_tier(request)?;
+    let planned_fingerprint = protocol::planned(request)?
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    if planned_fingerprint != LTX_CALIBRATION_FINGERPRINT {
+        return Err("SC-20191 campaign entry calibration fingerprint changed".to_owned());
+    }
+    validate_ltx_campaign_entry(request, tier, geometry, &selection)
+}
+
+fn prevalidate_ltx_bounded_campaign_entry(request: &Value) -> Result<(), String> {
+    let geometry = validate_ltx_target(request)?;
+    protocol::validate_plain_overlay_target(request, LTX_PLAIN_EXECUTION_PATH)?;
+    if planned_load_shape(request)? != LoadShape::EagerMaterialization {
+        return Err("SC-20318 bounded campaign requires eager materialization".to_owned());
+    }
+    let selection = planned_selection(request)?;
+    let tier = planned_qwen_tier(request)?;
+    let planned_fingerprint = protocol::planned(request)?
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    if planned_fingerprint != LTX_CALIBRATION_FINGERPRINT {
+        return Err("SC-20318 bounded campaign calibration fingerprint changed".to_owned());
+    }
+    validate_ltx_bounded_campaign_entry(request, tier, geometry, &selection)
+}
+
+fn prevalidate_ltx_bounded_carrier_proof(
+    request: &Value,
+) -> Result<(LtxGeometry, MemorySelection), String> {
+    let geometry = validate_ltx_target(request)?;
+    protocol::validate_plain_overlay_target(request, LTX_PLAIN_EXECUTION_PATH)?;
+    if planned_load_shape(request)? != LoadShape::EagerMaterialization {
+        return Err("SC-20254 bounded carrier requires eager materialization".to_owned());
+    }
+    let selection = planned_selection(request)?;
+    let tier = planned_qwen_tier(request)?;
+    let planned_fingerprint = protocol::planned(request)?
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    if planned_fingerprint != LTX_CALIBRATION_FINGERPRINT {
+        return Err("SC-20254 bounded-carrier calibration fingerprint changed".to_owned());
+    }
+    validate_ltx_bounded_carrier_proof(request, tier, geometry, &selection)?;
+    let host_memory = request
+        .pointer("/hardware/memoryBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "SC-20254 hardware.memoryBytes must be an integer".to_owned())?;
+    if host_memory < LTX_CANARY_MAX_FOOTPRINT_BYTES * 2 {
+        return Err("SC-20254 host cannot preserve two exact stop boundaries".to_owned());
+    }
+    Ok((geometry, selection))
+}
+
+fn run_ltx_bounded_carrier_proof(request: &Value) -> Result<Value, String> {
+    // The exact private identity is fully checked before the live watchdog handshake, limits,
+    // artifact paths, registry construction, or model allocation.
+    let (geometry, selection) = prevalidate_ltx_bounded_carrier_proof(request)?;
+    let mut watchdog = consume_ltx_canary_watchdog_attestation(request)?;
+    let mut watchdog_lease = watchdog.start_lease_for(&LTX_BOUNDED_CARRIER_PHASE_NAMES)?;
+    watchdog_lease.mark("common_load")?;
+    let limits = LtxCanaryLimits::install()?;
+    clear_cache();
+    let pre_provider = AllocatorState::capture_current();
+    validate_ltx_canary_pre_provider(pre_provider)?;
+    let expected_persistent_active = ltx_canary_ones_cache_bytes()?;
+    let (repository, revision, root, text_encoder_root, spec) =
+        ltx_load_spec(request, "q4", &selection)?;
+    if revision != LTX_CANARY_ARTIFACT_REVISION {
+        return Err(format!(
+            "SC-20254 artifact revision must be {LTX_CANARY_ARTIFACT_REVISION}, got {revision}"
+        ));
+    }
+    let registry =
+        mlx_gen_ltx::provider_registry().map_err(|error| format!("build LTX registry: {error}"))?;
+    let contract = registry
+        .memory_strategy_contract(LTX_PROVIDER, &spec)
+        .map_err(|error| format!("read {LTX_PROVIDER} memory-strategy contract: {error}"))?
+        .ok_or_else(|| "pinned MLX LTX-2.3 provider has no memory-strategy contract".to_owned())?;
+    contract
+        .validate_selection(&selection)
+        .map_err(|error| format!("pinned LTX-2.3 contract rejected bounded carrier: {error}"))?;
+    let calibration = contract
+        .calibration
+        .as_ref()
+        .ok_or_else(|| "pinned LTX-2.3 contract has no calibration identity".to_owned())?;
+    if calibration.fingerprint != LTX_CALIBRATION_FINGERPRINT {
+        return Err("SC-20254 pinned provider calibration identity changed".to_owned());
+    }
+    let decode_plan = LtxDecodePlan::resolve_for_selection(&selection, geometry)?;
+    decode_plan.validate_selected_strategy(&selection)?;
+    let spatial_decode_tile_count = decode_plan.spatial_tile_count(geometry)?;
+    if !decode_plan.tiling_engaged()
+        || decode_plan.spatial_tile_px() != u64::from(LTX_CANARY_TILE_EDGE)
+        || decode_plan.spatial_overlap_px() != u64::from(LTX_CANARY_OVERLAP)
+        || spatial_decode_tile_count != 24
+    {
+        return Err("SC-20254 did not resolve the exact 24-tile 192/64 carrier".to_owned());
+    }
+    let generator = registry
+        .load(LTX_PROVIDER, &spec)
+        .map_err(|error| format!("load real LTX-2.3 q4 bounded carrier: {error}"))?;
+    if generator.memory_strategy_contract() != Some(&contract) {
+        return Err("SC-20254 loaded generator contract differs from registry".to_owned());
+    }
+    let context = ltx_context(
+        selection,
+        calibration,
+        &calibration.fingerprint,
+        geometry,
+        LTX_CANARY_MAX_FOOTPRINT_BYTES,
+        LTX_CANARY_MAX_FOOTPRINT_BYTES,
+    );
+    if !matches!(
+        generator.memory_strategy_safety_check(&context),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err("LTX-2.3 provider rejected the exact SC-20254 budget".to_owned());
+    }
+    clear_cache();
+    reset_peak_memory();
+    let mut conditioning = PhaseMemory {
+        active: 0,
+        cache: 0,
+    };
+    let mut denoise = PhaseMemory {
+        active: 0,
+        cache: 0,
+    };
+    watchdog_lease.mark("primary_conditioning")?;
+    let generation_request = ltx_request(geometry, LTX_CAMPAIGN_ENTRY_FPS, LTX_SEED);
+    validate_ltx_bounded_carrier_generation_request(&generation_request)?;
+    let generated = scoped_generate(
+        generator.as_ref(),
+        generation_request,
+        &context,
+        None,
+        &mut |progress| match progress {
+            Progress::Step { current: 1, .. } => {
+                if let Err(error) = watchdog_lease.mark("primary_denoise") {
+                    eprintln!("{error}");
+                    std::process::abort();
+                }
+                conditioning = PhaseMemory::capture();
+                reset_peak_memory();
+            }
+            Progress::Decoding => {
+                if let Err(error) = watchdog_lease.mark("primary_decode") {
+                    eprintln!("{error}");
+                    std::process::abort();
+                }
+                denoise = PhaseMemory::capture();
+                reset_peak_memory();
+            }
+            _ => {}
+        },
+    )?;
+    let (frames, fps, audio) = diagnostic_video_frames(generated)?;
+    let decode = PhaseMemory::capture();
+    if frames.len() != LTX_CAMPAIGN_ENTRY_FRAMES as usize || fps != LTX_CAMPAIGN_ENTRY_FPS {
+        return Err(format!(
+            "SC-20254 returned frames={}, fps={fps}",
+            frames.len()
+        ));
+    }
+    let audio = audio
+        .filter(|value| value.samples > 0 && value.sample_rate > 0 && value.channels > 0)
+        .ok_or_else(|| "SC-20254 full-A/V render returned no non-empty audio track".to_owned())?;
+    let first = frames
+        .first()
+        .ok_or_else(|| "SC-20254 bounded carrier returned no frames".to_owned())?;
+    if first.pixels.is_empty() || first.pixels.iter().all(|pixel| *pixel == first.pixels[0]) {
+        return Err("SC-20254 bounded carrier returned a degenerate first frame".to_owned());
+    }
+    if [conditioning.active, denoise.active, decode.active].contains(&0) {
+        return Err("SC-20254 synchronized phase reported a zero active peak".to_owned());
+    }
+    let peak_active = [conditioning.active, denoise.active, decode.active]
+        .into_iter()
+        .max()
+        .unwrap_or(0);
+    drop(frames);
+    drop(generator);
+    watchdog_lease.mark("cleanup")?;
+    clear_cache();
+    let post_cleanup = AllocatorState::capture_current();
+    validate_ltx_canary_cleanup(pre_provider, post_cleanup, expected_persistent_active)?;
+    let planned_artifact = protocol::planned(request)?
+        .pointer("/_boundedCarrier/artifact")
+        .cloned()
+        .ok_or_else(|| "SC-20254 lost its exact artifact identity".to_owned())?;
+    let mut strategy = ltx_attested_strategy(request, &context.selection, &contract)?;
+    strategy["spatialDecodeTiles"] = json!(spatial_decode_tile_count);
+    watchdog_lease.complete()?;
+    Ok(json!({
+        "schemaVersion": 1,
+        "recordType": "sceneworks_bounded_carrier_proof_response_v1",
+        "status": "diagnostic_bounded_carrier_complete",
+        "story": "sc-20254",
+        "logicalCaseId": LTX_BOUNDED_CARRIER_LOGICAL_CASE_ID,
+        "fixture": LTX_BOUNDED_CARRIER_FIXTURE,
+        "identity": LTX_BOUNDED_CARRIER_IDENTITY,
+        "diagnosticOnly": true,
+        "promotable": false,
+        "ingestible": false,
+        "inferenceRevision": protocol::INFERENCE_PIN,
+        "calibrationFingerprint": calibration.fingerprint,
+        "artifact": {
+            "repository": repository,
+            "resolvedRevision": revision,
+            "variant": "q4",
+            "tierRoot": root,
+            "textEncoderRoot": text_encoder_root,
+            "numericTierInventory": planned_artifact["numericTierInventory"],
+            "textEncoderInventory": planned_artifact["textEncoderInventory"],
+        },
+        "target": {
+            "provider": LTX_PROVIDER,
+            "tier": "q4",
+            "geometry": {
+                "width": LTX_CAMPAIGN_ENTRY_WIDTH,
+                "height": LTX_CAMPAIGN_ENTRY_HEIGHT,
+                "frames": LTX_CAMPAIGN_ENTRY_FRAMES,
+                "fps": LTX_CAMPAIGN_ENTRY_FPS,
+            },
+            "seed": LTX_SEED,
+            "videoMode": "default_av",
+            "audio": true,
+        },
+        "strategy": strategy,
+        "watchdog": {
+            "required": true,
+            "protocol": LTX_CANARY_WATCHDOG_PROTOCOL,
+            "providerPhaseProtocol": LTX_PROVIDER_PHASE_PROTOCOL,
+            "providerPhaseProfile": LTX_BOUNDED_CARRIER_PHASE_PROFILE,
+            "providerPhases": LTX_BOUNDED_CARRIER_PHASE_NAMES,
+            "maxFootprintBytes": watchdog.max_footprint_bytes,
+            "maxRuntimeSeconds": watchdog.max_runtime_seconds,
+            "hostMemoryBytes": watchdog.host_memory_bytes,
+            "minInitialMemoryFreeBytes": watchdog.min_initial_memory_free_bytes,
+            "minMemoryFreeBytes": watchdog.min_memory_free_bytes,
+        },
+        "mlxLimits": {
+            "memoryLimitBytes": LTX_CANARY_MAX_FOOTPRINT_BYTES,
+            "wiredLimitBytes": limits.wired,
+        },
+        "observedMemory": {
+            "preProviderActiveBytes": pre_provider.active,
+            "preProviderCacheBytes": pre_provider.cache,
+            "expectedPersistentActive": {
+                "identity": LTX_CANARY_ONES_CACHE_IDENTITY,
+                "videoDimension": LTX_CANARY_ONES_CACHE_VIDEO_DIMENSION,
+                "audioDimension": LTX_CANARY_ONES_CACHE_AUDIO_DIMENSION,
+                "dtype": "bfloat16",
+                "bytesPerElement": BFLOAT16_BYTES_PER_ELEMENT,
+                "bytes": expected_persistent_active,
+            },
+            "conditioning": conditioning.json(),
+            "denoise": denoise.json(),
+            "decode": decode.json(),
+            "peakActiveBytes": peak_active,
+            "postCleanupActiveBytes": post_cleanup.active,
+            "postCleanupCacheBytes": post_cleanup.cache,
+        },
+        "output": {
+            "frames": LTX_CAMPAIGN_ENTRY_FRAMES,
+            "fps": LTX_CAMPAIGN_ENTRY_FPS,
+            "audio": {
+                "present": true,
+                "samples": audio.samples,
+                "sampleRate": audio.sample_rate,
+                "channels": audio.channels,
+            },
+            "frameTimelineSeconds": f64::from(LTX_CAMPAIGN_ENTRY_FRAMES - 1)
+                / f64::from(LTX_CAMPAIGN_ENTRY_FPS),
+            "firstFrameNondegenerate": true,
+        },
+        "capturedAt": protocol::captured_at(),
+    }))
+}
+
+fn run_ltx_campaign_entry(request: &Value) -> Result<Value, String> {
+    // Every request identity check precedes the live watchdog handshake, process-global limits,
+    // model-path resolution and provider registry construction.
+    prevalidate_ltx_campaign_entry(request)?;
+    let mut watchdog = consume_ltx_canary_watchdog_attestation(request)?;
+    let mut watchdog_lease = watchdog.start_lease()?;
+    watchdog_lease.mark("common_load")?;
+    let limits = LtxCanaryLimits::install()?;
+    clear_cache();
+    let pre_provider = AllocatorState::capture_current();
+    validate_ltx_canary_pre_provider(pre_provider)?;
+    let expected_persistent_active = ltx_canary_ones_cache_bytes()?;
+    let mut fragment =
+        run_ltx_with_admission(request, LtxRunAdmission::CampaignEntry, &mut watchdog_lease)?;
+    validate_ltx_campaign_entry_fragment(&fragment)?;
+    watchdog_lease.mark("cleanup")?;
+    clear_cache();
+    let post_cleanup = AllocatorState::capture_current();
+    validate_ltx_canary_cleanup(pre_provider, post_cleanup, expected_persistent_active)?;
+    fragment["_campaignEntry"] = json!({
+        "identity": LTX_CAMPAIGN_ENTRY_IDENTITY,
+        "inferenceRevision": protocol::INFERENCE_PIN,
+        "watchdog": {
+            "required": true,
+            "protocol": LTX_CANARY_WATCHDOG_PROTOCOL,
+            "maxFootprintBytes": watchdog.max_footprint_bytes,
+            "maxRuntimeSeconds": watchdog.max_runtime_seconds,
+            "hostMemoryBytes": watchdog.host_memory_bytes,
+            "minInitialMemoryFreeBytes": watchdog.min_initial_memory_free_bytes,
+            "minMemoryFreeBytes": watchdog.min_memory_free_bytes,
+        },
+        "mlxLimits": {
+            "memoryLimitBytes": LTX_CANARY_MAX_FOOTPRINT_BYTES,
+            "wiredLimitBytes": limits.wired,
+        },
+        "cleanup": {
+            "preProviderActiveBytes": pre_provider.active,
+            "preProviderCacheBytes": pre_provider.cache,
+            "expectedPersistentActive": {
+                "identity": LTX_CANARY_ONES_CACHE_IDENTITY,
+                "videoDimension": LTX_CANARY_ONES_CACHE_VIDEO_DIMENSION,
+                "audioDimension": LTX_CANARY_ONES_CACHE_AUDIO_DIMENSION,
+                "dtype": "bfloat16",
+                "bytesPerElement": BFLOAT16_BYTES_PER_ELEMENT,
+                "bytes": expected_persistent_active,
+            },
+            "postCleanupActiveBytes": post_cleanup.active,
+            "postCleanupCacheBytes": post_cleanup.cache,
+        },
+    });
+    watchdog_lease.complete()?;
+    Ok(fragment)
+}
+
+fn run_ltx_bounded_campaign_entry(request: &Value) -> Result<Value, String> {
+    prevalidate_ltx_bounded_campaign_entry(request)?;
+    let tier = protocol::planned(request)?
+        .pointer("/target/tier")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "bounded campaign target tier must be a string".to_owned())?;
+    let bounded_spec = ltx_bounded_campaign_spec(tier)?;
+    let mut watchdog = consume_ltx_canary_watchdog_attestation(request)?;
+    let mut watchdog_lease = watchdog.start_lease_for(&LTX_BOUNDED_CARRIER_PHASE_NAMES)?;
+    watchdog_lease.mark("common_load")?;
+    let limits = LtxCanaryLimits::install()?;
+    clear_cache();
+    let pre_provider = AllocatorState::capture_current();
+    validate_ltx_canary_pre_provider(pre_provider)?;
+    let expected_persistent_active = ltx_canary_ones_cache_bytes()?;
+    let mut fragment = run_ltx_with_admission(
+        request,
+        LtxRunAdmission::BoundedCampaignEntry,
+        &mut watchdog_lease,
+    )?;
+    validate_ltx_bounded_campaign_fragment(&fragment)?;
+    watchdog_lease.mark("cleanup")?;
+    clear_cache();
+    let post_cleanup = AllocatorState::capture_current();
+    validate_ltx_canary_cleanup(pre_provider, post_cleanup, expected_persistent_active)?;
+    fragment["_boundedCampaignEntry"] = json!({
+        "identity": bounded_spec.identity,
+        "inferenceRevision": protocol::INFERENCE_PIN,
+        "watchdog": {
+            "required": true,
+            "protocol": LTX_CANARY_WATCHDOG_PROTOCOL,
+            "providerPhaseProtocol": LTX_PROVIDER_PHASE_PROTOCOL,
+            "providerPhaseProfile": LTX_BOUNDED_CAMPAIGN_PHASE_PROFILE,
+            "providerPhases": LTX_BOUNDED_CARRIER_PHASE_NAMES,
+            "maxFootprintBytes": watchdog.max_footprint_bytes,
+            "maxRuntimeSeconds": watchdog.max_runtime_seconds,
+            "hostMemoryBytes": watchdog.host_memory_bytes,
+            "minInitialMemoryFreeBytes": watchdog.min_initial_memory_free_bytes,
+            "minMemoryFreeBytes": watchdog.min_memory_free_bytes,
+        },
+        "mlxLimits": {
+            "memoryLimitBytes": LTX_CANARY_MAX_FOOTPRINT_BYTES,
+            "wiredLimitBytes": limits.wired,
+        },
+        "cleanup": {
+            "preProviderActiveBytes": pre_provider.active,
+            "preProviderCacheBytes": pre_provider.cache,
+            "expectedPersistentActive": {
+                "identity": LTX_CANARY_ONES_CACHE_IDENTITY,
+                "videoDimension": LTX_CANARY_ONES_CACHE_VIDEO_DIMENSION,
+                "audioDimension": LTX_CANARY_ONES_CACHE_AUDIO_DIMENSION,
+                "dtype": "bfloat16",
+                "bytesPerElement": BFLOAT16_BYTES_PER_ELEMENT,
+                "bytes": expected_persistent_active,
+            },
+            "postCleanupActiveBytes": post_cleanup.active,
+            "postCleanupCacheBytes": post_cleanup.cache,
+        },
+    });
+    watchdog_lease.complete()?;
+    Ok(fragment)
+}
+
+fn run_ltx(request: &Value) -> Result<Value, String> {
+    let mut phases = NoLtxCampaignPhases;
+    run_ltx_with_admission(request, LtxRunAdmission::Ordinary, &mut phases)
+}
+
 fn run(request: &Value) -> Result<Value, String> {
     let provider = protocol::planned(request)?
         .pointer("/target/provider")
@@ -4635,6 +9157,9 @@ fn run(request: &Value) -> Result<Value, String> {
         KREA_PROVIDER => run_krea_control(request),
         QWEN_PROVIDER => run_qwen_provider(request),
         FLUX2_PROVIDER => run_flux2_dev(request),
+        // sc-18808: the first VIDEO arm. Every arm above it refuses `geometry.frames != 1`; this one
+        // validates against LTX's own resolution/temporal envelope instead.
+        LTX_PROVIDER => run_ltx(request),
         other => Err(format!(
             "MLX five-rung calibration does not implement provider {other:?}"
         )),
@@ -4646,6 +9171,11 @@ fn main() {
     let response = match protocol::action(&request).unwrap_or_else(|error| protocol::fail(error)) {
         "probe" => probe(),
         "run" => run(&request),
+        "canary" => run_ltx_canary(&request),
+        "product_envelope_canary" => run_ltx_product_envelope_canary(&request),
+        LTX_CAMPAIGN_ENTRY_ACTION => run_ltx_campaign_entry(&request),
+        LTX_BOUNDED_CARRIER_ACTION => run_ltx_bounded_carrier_proof(&request),
+        LTX_BOUNDED_CAMPAIGN_ACTION => run_ltx_bounded_campaign_entry(&request),
         "assess_batch" => assess_z_image_batch(&request),
         other => Err(format!("unsupported action {other:?}")),
     }
@@ -4759,10 +9289,17 @@ mod flux2_tests {
     use super::*;
     use mlx_gen::gen_core::MemoryStrategySupport;
 
+    /// sc-18808 added the still geometry: `validate_flux2_target` now refuses a non-still target
+    /// alongside a foreign provider, so a request that omits the axis entirely can no longer reach
+    /// the rung gate this module's tests are aiming at.
     fn minimal_request(provider: &str, rung: &str) -> Value {
         json!({
             "planned": {
-                "target": { "provider": provider, "overlay": "none" },
+                "target": {
+                    "provider": provider,
+                    "overlay": "none",
+                    "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 }
+                },
                 "strategy": { "rung": rung, "parameters": {} }
             }
         })
@@ -4915,7 +9452,9 @@ mod flux2_tests {
         assert!((rms - 0.2 / 6.0_f64.sqrt()).abs() < 1e-9);
     }
 
-    fn weights_free_spec(quant: Option<Quant>) -> LoadSpec {
+    /// `pub(super)` so the sibling `ltx_tests` module can pin its own provider's contract
+    /// shape through the SAME weights-free spec these FLUX.2 pins use (sc-18808 review).
+    pub(super) fn weights_free_spec(quant: Option<Quant>) -> LoadSpec {
         let mut spec = LoadSpec::new(WeightsSource::Dir("/nonexistent".into()))
             .with_offload_policy(OffloadPolicy::Resident)
             .with_load_shape(LoadShape::EagerMaterialization);
@@ -5671,6 +10210,2317 @@ mod qwen_evidence_tests {
         .expect_err("exclusive receipt creation must not repair or overwrite tampering");
         assert!(error.contains("already exists with different bytes"));
 
+        std::fs::remove_dir_all(root).ok();
+    }
+}
+
+/// LTX video-arm regression suite. Historical SC-18810 artifacts stay immutable while this suite
+/// follows the permanent provider contract used by SC-18946.
+#[cfg(test)]
+mod ltx_tests {
+    use super::*;
+
+    fn ltx_fixture_contract(quant: Option<Quant>) -> mlx_gen::gen_core::MemoryProviderContract {
+        let registry = mlx_gen_ltx::provider_registry().unwrap();
+        let fixture = registry
+            .memory_contract_fixture_registrations()
+            .find(|fixture| fixture.provider_id == LTX_PROVIDER)
+            .expect("the provider-owned LTX contract fixture");
+        (fixture.contract)(&flux2_tests::weights_free_spec(quant)).unwrap()
+    }
+
+    #[test]
+    fn the_pinned_ltx_provider_fixture_exposes_the_campaign_rungs_and_exact_parameters() {
+        for quant in [Some(Quant::Q8), Some(Quant::Q4), None] {
+            let contract = ltx_fixture_contract(quant);
+            assert_eq!(contract.provider_id, LTX_PROVIDER);
+            assert_eq!(
+                contract.engaged_composition(MemoryStrategy::StagedResidency),
+                [MemoryStrategy::Resident, MemoryStrategy::StagedResidency]
+            );
+            assert_eq!(
+                contract.engaged_composition(MemoryStrategy::BoundedDecode),
+                [
+                    MemoryStrategy::Resident,
+                    MemoryStrategy::StagedResidency,
+                    MemoryStrategy::BoundedDecode,
+                ]
+            );
+            let decode = contract.capability(MemoryStrategy::BoundedDecode).unwrap();
+            assert_eq!(
+                decode.parameters.decode_tile_edges,
+                vec![768, 640, 512, 448, 384, 320, 256, 192]
+            );
+            assert_eq!(decode.parameters.decode_overlaps, vec![64]);
+        }
+    }
+
+    /// A minimal, otherwise-valid LTX target. Every field the arm reads before it touches the
+    /// environment or the weights is present, so a test that mutates exactly one axis is testing
+    /// that axis.
+    fn ltx_request_json(width: u32, height: u32, frames: u32) -> Value {
+        let predicted_decode_bytes =
+            3_300_000_000_u64 + 340 * u64::from(width) * u64::from(height) * u64::from(frames);
+        json!({
+            "planned": {
+                "target": {
+                    "provider": LTX_PROVIDER,
+                    "modelId": LTX_PROVIDER,
+                    "tier": "q8",
+                    "mode": "text_to_video",
+                    "overlay": "none",
+                    "geometry": { "width": width, "height": height, "batch": 1, "frames": frames }
+                },
+                "backend": "mlx",
+                "loadShape": "eager_materialization",
+                "strategy": {
+                    "rung": "staged_residency",
+                    "engagedRungs": ["resident", "staged_residency"],
+                    "parameters": {}
+                },
+                "calibrationFingerprint": LTX_CALIBRATION_FINGERPRINT,
+                "_measurementSafety": {
+                    "disposition": LTX_SAFETY_REFUSED_OPEN,
+                    "tierInventoryBytes": LTX_Q8_INVENTORY_BYTES,
+                    "incidentCrashFootprintBytes": LTX_Q4_F305_CRASH_FOOTPRINT_BYTES,
+                    "predictedDecodeBytes": predicted_decode_bytes,
+                    "incidentPredictedDecodeBytes": LTX_INCIDENT_PREDICTED_DECODE_BYTES,
+                    "incidentCalibratedProjectionBytes": i128::from(LTX_Q4_F305_CRASH_FOOTPRINT_BYTES)
+                        + (i128::from(LTX_Q8_INVENTORY_BYTES) - i128::from(LTX_Q4_INVENTORY_BYTES))
+                        + (i128::from(predicted_decode_bytes)
+                            - i128::from(LTX_INCIDENT_PREDICTED_DECODE_BYTES)),
+                },
+                "fixture": format!("ltx-2-3-mlx-q8-{width}x{height}-f{frames}-fps24-seed{LTX_SEED}")
+            }
+        })
+    }
+
+    fn ltx_canary_request_json() -> Value {
+        json!({
+            "action": "canary",
+            "hardware": { "memoryBytes": 128_u64 * 1024 * 1024 * 1024 },
+            "planned": {
+                "_diagnosticOnly": true,
+                "evidenceScope": "fixture",
+                "target": {
+                    "provider": LTX_PROVIDER,
+                    "modelId": LTX_PROVIDER,
+                    "tier": "q4",
+                    "mode": "text_to_video",
+                    "overlay": "none",
+                    "geometry": {
+                        "width": LTX_CANARY_WIDTH,
+                        "height": LTX_CANARY_HEIGHT,
+                        "batch": 1,
+                        "frames": LTX_CANARY_FRAMES,
+                    },
+                },
+                "backend": "mlx",
+                "loadShape": "eager_materialization",
+                "strategy": {
+                    "rung": "bounded_decode",
+                    "engagedRungs": ["resident", "staged_residency", "bounded_decode"],
+                    "parameters": {
+                        "decodeTileEdge": LTX_CANARY_TILE_EDGE,
+                        "decodeOverlap": LTX_CANARY_OVERLAP,
+                    },
+                },
+                "calibrationFingerprint": LTX_CALIBRATION_FINGERPRINT,
+                "fixture": LTX_CANARY_FIXTURE,
+                "_watchdog": {
+                    "maxFootprintBytes": LTX_CANARY_MAX_FOOTPRINT_BYTES,
+                },
+                "_canary": {
+                    "identity": LtxCanaryProfile::Safety.identity(),
+                    "videoMode": "no_audio",
+                    "fps": LTX_CANARY_FPS,
+                    "seed": LTX_CANARY_SEED,
+                },
+                "_artifact": {
+                    "repository": protocol::LTX_REPOSITORY,
+                    "revision": LTX_CANARY_ARTIFACT_REVISION,
+                    "numericTierInventory": {
+                        "files": LTX_CANARY_Q4_INVENTORY_FILES,
+                        "bytes": LTX_Q4_INVENTORY_BYTES,
+                        "sha256": LTX_CANARY_Q4_INVENTORY_SHA256,
+                    },
+                    "textEncoderInventory": {
+                        "files": LTX_CANARY_TEXT_ENCODER_INVENTORY_FILES,
+                        "bytes": LTX_CANARY_TEXT_ENCODER_INVENTORY_BYTES,
+                        "sha256": LTX_CANARY_TEXT_ENCODER_INVENTORY_SHA256,
+                    },
+                },
+            },
+        })
+    }
+
+    fn ltx_product_envelope_canary_request_json() -> Value {
+        let mut request = ltx_canary_request_json();
+        request["action"] = json!("product_envelope_canary");
+        request["planned"]["target"]["geometry"] = json!({
+            "width": LTX_PRODUCT_CANARY_WIDTH,
+            "height": LTX_PRODUCT_CANARY_HEIGHT,
+            "batch": 1,
+            "frames": LTX_PRODUCT_CANARY_FRAMES,
+        });
+        request["planned"]["fixture"] = json!(LTX_PRODUCT_CANARY_FIXTURE);
+        request["planned"]["_canary"] = json!({
+            "identity": LtxCanaryProfile::ProductEnvelope.identity(),
+            "videoMode": "default_av",
+            "fps": LTX_PRODUCT_CANARY_FPS,
+            "seed": LTX_CANARY_SEED,
+        });
+        request
+    }
+
+    fn ltx_campaign_entry_request_json() -> Value {
+        let mut request = ltx_request_json(
+            LTX_CAMPAIGN_ENTRY_WIDTH,
+            LTX_CAMPAIGN_ENTRY_HEIGHT,
+            LTX_CAMPAIGN_ENTRY_FRAMES,
+        );
+        request["action"] = json!(LTX_CAMPAIGN_ENTRY_ACTION);
+        request["hardware"] = json!({ "memoryBytes": 128_u64 * 1024 * 1024 * 1024 });
+        request["planned"]["logicalCaseId"] = json!(LTX_CAMPAIGN_ENTRY_LOGICAL_CASE_ID);
+        request["planned"]["evidenceScope"] = json!("authoritative");
+        request["planned"]["target"]["tier"] = json!("q4");
+        request["planned"]["fixture"] = json!(LTX_CAMPAIGN_ENTRY_FIXTURE);
+        request["planned"]["negative"] = json!(false);
+        request["planned"]["expectedResult"] = json!("passed");
+        request["planned"]["modelLoadPolicy"] = json!("fresh_per_case");
+        request["planned"]["modelLoadGroup"] = Value::Null;
+        request["planned"]["_watchdog"] =
+            json!({ "maxFootprintBytes": LTX_CANARY_MAX_FOOTPRINT_BYTES });
+        request["planned"]["_campaignEntry"] = json!({
+            "identity": LTX_CAMPAIGN_ENTRY_IDENTITY,
+            "artifact": {
+                "repository": protocol::LTX_REPOSITORY,
+                "revision": LTX_CANARY_ARTIFACT_REVISION,
+                "numericTierInventory": {
+                    "files": LTX_CANARY_Q4_INVENTORY_FILES,
+                    "bytes": LTX_Q4_INVENTORY_BYTES,
+                    "sha256": LTX_CANARY_Q4_INVENTORY_SHA256,
+                },
+                "textEncoderInventory": {
+                    "files": LTX_CANARY_TEXT_ENCODER_INVENTORY_FILES,
+                    "bytes": LTX_CANARY_TEXT_ENCODER_INVENTORY_BYTES,
+                    "sha256": LTX_CANARY_TEXT_ENCODER_INVENTORY_SHA256,
+                },
+            },
+        });
+        request["planned"]["_measurementSafety"] = json!({
+            "disposition": LTX_SAFETY_REFUSED_OPEN,
+            "tierInventoryBytes": LTX_Q4_INVENTORY_BYTES,
+            "incidentCrashFootprintBytes": LTX_Q4_F305_CRASH_FOOTPRINT_BYTES,
+            "incidentCase": "mlx-ltx-2-3-q4-1280x704-f305-fps30-bounded_decode",
+            "commonLoad": "complete numeric tier plus shared Gemma stack before geometry-specific work",
+            "predictedDecodeBytes": 19_476_906_240_u64,
+            "incidentPredictedDecodeBytes": LTX_INCIDENT_PREDICTED_DECODE_BYTES,
+            "incidentCalibratedProjectionBytes": 97_906_593_920_u64,
+            "projectionAssumptions": [
+                "pinned provider decode cost is the only geometry-varying term used",
+                "immutable tier inventory delta is added byte-for-byte",
+                "incident binding phase is unknown, so the projection is not a physical-footprint bound and cannot admit execution",
+            ],
+            "reason": "incident-calibrated projection is diagnostic only; no proved bound or hard containment admits this row",
+        });
+        request
+    }
+
+    fn ltx_bounded_carrier_request_json() -> Value {
+        let mut request = ltx_canary_request_json();
+        request["action"] = json!(LTX_BOUNDED_CARRIER_ACTION);
+        request["planned"]["logicalCaseId"] = json!(LTX_BOUNDED_CARRIER_LOGICAL_CASE_ID);
+        request["planned"]["target"]["geometry"] = json!({
+            "width": LTX_CAMPAIGN_ENTRY_WIDTH,
+            "height": LTX_CAMPAIGN_ENTRY_HEIGHT,
+            "batch": 1,
+            "frames": LTX_CAMPAIGN_ENTRY_FRAMES,
+        });
+        request["planned"]["fixture"] = json!(LTX_BOUNDED_CARRIER_FIXTURE);
+        request["planned"]["negative"] = json!(false);
+        request["planned"]["expectedResult"] = json!("passed");
+        request["planned"]["modelLoadPolicy"] = json!("fresh_per_case");
+        request["planned"]["modelLoadGroup"] = Value::Null;
+        request["planned"]
+            .as_object_mut()
+            .unwrap()
+            .remove("_canary");
+        let artifact = request["planned"]
+            .as_object_mut()
+            .unwrap()
+            .remove("_artifact")
+            .unwrap();
+        request["planned"]["_boundedCarrier"] = json!({
+            "identity": LTX_BOUNDED_CARRIER_IDENTITY,
+            "fps": LTX_CAMPAIGN_ENTRY_FPS,
+            "seed": LTX_SEED,
+            "videoMode": "default_av",
+            "artifact": artifact,
+        });
+        request
+    }
+
+    fn ltx_bounded_campaign_request_json() -> Value {
+        let mut request = ltx_bounded_carrier_request_json();
+        request["action"] = json!(LTX_BOUNDED_CAMPAIGN_ACTION);
+        request["planned"]
+            .as_object_mut()
+            .unwrap()
+            .remove("_diagnosticOnly");
+        request["planned"]["logicalCaseId"] = json!(LTX_BOUNDED_CAMPAIGN_LOGICAL_CASE_ID);
+        request["planned"]["evidenceScope"] = json!("authoritative");
+        request["planned"]["fixture"] = json!(LTX_BOUNDED_CAMPAIGN_FIXTURE);
+        let carrier = request["planned"]
+            .as_object_mut()
+            .unwrap()
+            .remove("_boundedCarrier")
+            .unwrap();
+        request["planned"]["_boundedCampaignEntry"] = json!({
+            "identity": LTX_BOUNDED_CAMPAIGN_IDENTITY,
+            "fps": LTX_CAMPAIGN_ENTRY_FPS,
+            "seed": LTX_SEED,
+            "videoMode": "default_av",
+            "spatialDecodeTiles": 24,
+            "artifact": carrier["artifact"],
+        });
+        request["planned"]["_measurementSafety"] = json!({
+            "disposition": LTX_SAFETY_REFUSED_OPEN,
+            "tierInventoryBytes": LTX_Q4_INVENTORY_BYTES,
+            "incidentCrashFootprintBytes": LTX_Q4_F305_CRASH_FOOTPRINT_BYTES,
+            "incidentCase": "mlx-ltx-2-3-q4-1280x704-f305-fps30-bounded_decode",
+            "commonLoad": "complete numeric tier plus shared Gemma stack before geometry-specific work",
+            "predictedDecodeBytes": 6_264_848_640_u64,
+            "incidentPredictedDecodeBytes": LTX_INCIDENT_PREDICTED_DECODE_BYTES,
+            "incidentCalibratedProjectionBytes": 84_694_536_320_u64,
+            "projectionAssumptions": [
+                "pinned provider decode cost is the only geometry-varying term used",
+                "immutable tier inventory delta is added byte-for-byte",
+                "incident binding phase is unknown, so the projection is not a physical-footprint bound and cannot admit execution",
+            ],
+            "reason": "incident-calibrated projection is diagnostic only; ordinary run remains refused and only the exact privately contained SC-20318 action is admitted",
+        });
+        request
+    }
+
+    fn ltx_bounded_campaign_request_json_for(tier: &str) -> Value {
+        let mut request = ltx_bounded_campaign_request_json();
+        let spec = ltx_bounded_campaign_spec(tier).expect("test tier must be allowlisted");
+        request["planned"]["target"]["tier"] = json!(spec.tier);
+        request["planned"]["logicalCaseId"] = json!(spec.logical_case_id);
+        request["planned"]["fixture"] = json!(spec.fixture);
+        request["planned"]["_boundedCampaignEntry"]["identity"] = json!(spec.identity);
+        request["planned"]["_boundedCampaignEntry"]["artifact"]["numericTierInventory"] = json!({
+            "files": spec.inventory_files,
+            "bytes": spec.inventory_bytes,
+            "sha256": spec.inventory_sha256,
+        });
+        request["planned"]["_measurementSafety"]["tierInventoryBytes"] =
+            json!(spec.inventory_bytes);
+        request["planned"]["_measurementSafety"]["incidentCalibratedProjectionBytes"] =
+            json!(spec.projection_bytes);
+        request["planned"]["_measurementSafety"]["reason"] = json!(if tier == "q4" {
+            "incident-calibrated projection is diagnostic only; ordinary run remains refused and only the exact privately contained SC-20318 action is admitted"
+        } else {
+            "incident-calibrated projection is diagnostic only; ordinary run remains refused and only the exact privately contained SC-20430 action is admitted"
+        });
+        request
+    }
+
+    #[test]
+    fn sc_20318_admits_only_the_exact_two_render_bounded_campaign_row() {
+        let request = ltx_bounded_campaign_request_json();
+        prevalidate_ltx_bounded_campaign_entry(&request)
+            .expect("the exact new bounded campaign row is admissible");
+        let geometry = LtxGeometry {
+            width: LTX_CAMPAIGN_ENTRY_WIDTH,
+            height: LTX_CAMPAIGN_ENTRY_HEIGHT,
+            frames: LTX_CAMPAIGN_ENTRY_FRAMES,
+            latent_frames: 1 + (LTX_CAMPAIGN_ENTRY_FRAMES - 1) / LTX_TEMPORAL_SCALE,
+        };
+        let generation_request = ltx_request(geometry, LTX_CAMPAIGN_ENTRY_FPS, LTX_SEED);
+        validate_ltx_bounded_carrier_generation_request(&generation_request)
+            .expect("both SC-20318 renders use the exact default-A/V request");
+        for mutate in [
+            |value: &mut GenerationRequest| value.seed = Some(LTX_SEED + 1),
+            |value: &mut GenerationRequest| value.fps = Some(LTX_CAMPAIGN_ENTRY_FPS - 1),
+            |value: &mut GenerationRequest| value.video_mode = Some("no_audio".to_owned()),
+        ] {
+            let mut changed = generation_request.clone();
+            mutate(&mut changed);
+            assert!(validate_ltx_bounded_carrier_generation_request(&changed).is_err());
+        }
+        for (pointer, value) in [
+            ("/action", json!("run")),
+            (
+                "/planned/logicalCaseId",
+                json!(LTX_BOUNDED_CARRIER_LOGICAL_CASE_ID),
+            ),
+            ("/planned/fixture", json!(LTX_BOUNDED_CARRIER_FIXTURE)),
+            ("/planned/target/tier", json!("q8")),
+            ("/planned/strategy/parameters/decodeTileEdge", json!(193)),
+            ("/planned/strategy/parameters/decodeOverlap", json!(63)),
+            ("/planned/_boundedCampaignEntry/identity", json!("mutated")),
+            ("/planned/_boundedCampaignEntry/seed", json!(LTX_SEED + 1)),
+            (
+                "/planned/_boundedCampaignEntry/videoMode",
+                json!("no_audio"),
+            ),
+            (
+                "/planned/_boundedCampaignEntry/spatialDecodeTiles",
+                json!(23),
+            ),
+            (
+                "/planned/_measurementSafety/predictedDecodeBytes",
+                json!(6_264_848_639_u64),
+            ),
+            ("/planned/_measurementSafety/incidentCase", json!("mutated")),
+            ("/planned/_measurementSafety/reason", json!("mutated")),
+        ] {
+            let mut mutated = request.clone();
+            *mutated.pointer_mut(pointer).expect("mutation pointer") = value;
+            let error = prevalidate_ltx_bounded_campaign_entry(&mutated)
+                .expect_err("every SC-20318 identity mutation must fail before weights");
+            assert!(
+                error.contains("SC-20318")
+                    || error.contains("SC-20430")
+                    || error.contains("SC-18946"),
+                "{pointer}: {error}"
+            );
+        }
+        let direct = run_ltx_bounded_campaign_entry(&request)
+            .expect_err("private JSON alone cannot bypass the live watchdog");
+        assert!(
+            direct.contains("live external watchdog channel"),
+            "{direct}"
+        );
+
+        let mut ordinary = request.clone();
+        ordinary["action"] = json!("run");
+        ordinary["planned"]
+            .as_object_mut()
+            .unwrap()
+            .remove("_boundedCampaignEntry");
+        let refusal = run_ltx(&ordinary)
+            .expect_err("the new row must remain refused by the ordinary campaign action");
+        assert!(refusal.contains("safety_refused_open"), "{refusal}");
+    }
+
+    #[test]
+    fn sc_20430_exactly_allowlists_q8_and_bf16_bounded_campaign_rows() {
+        for tier in ["q8", "bf16"] {
+            let request = ltx_bounded_campaign_request_json_for(tier);
+            prevalidate_ltx_bounded_campaign_entry(&request)
+                .unwrap_or_else(|error| panic!("exact {tier} bounded entry rejected: {error}"));
+            for (pointer, mutation) in [
+                ("/action", json!("run")),
+                ("/planned/target/tier", json!("q4")),
+                (
+                    "/planned/logicalCaseId",
+                    json!(LTX_BOUNDED_CAMPAIGN_LOGICAL_CASE_ID),
+                ),
+                ("/planned/fixture", json!(LTX_BOUNDED_CAMPAIGN_FIXTURE)),
+                ("/planned/_boundedCampaignEntry/identity", json!("mutated")),
+                (
+                    "/planned/_boundedCampaignEntry/artifact/numericTierInventory/bytes",
+                    json!(LTX_Q4_INVENTORY_BYTES),
+                ),
+                ("/planned/_boundedCampaignEntry/seed", json!(LTX_SEED + 1)),
+                (
+                    "/planned/strategy/parameters/decodeTileEdge",
+                    json!(LTX_CANARY_TILE_EDGE + 1),
+                ),
+            ] {
+                let mut changed = request.clone();
+                *changed.pointer_mut(pointer).expect("mutation pointer") = mutation;
+                assert!(
+                    prevalidate_ltx_bounded_campaign_entry(&changed).is_err(),
+                    "{tier} mutation {pointer} reached model resolution"
+                );
+            }
+            let direct = run_ltx_bounded_campaign_entry(&request)
+                .expect_err("private JSON alone cannot bypass the watchdog");
+            assert!(
+                direct.contains("live external watchdog channel"),
+                "{direct}"
+            );
+            let mut ordinary = request.clone();
+            ordinary["action"] = json!("run");
+            ordinary["planned"]
+                .as_object_mut()
+                .unwrap()
+                .remove("_boundedCampaignEntry");
+            let refusal = run_ltx(&ordinary)
+                .expect_err("the ordinary 73-row action must refuse every new tier");
+            assert!(refusal.contains("safety_refused_open"), "{refusal}");
+        }
+        assert!(ltx_bounded_campaign_spec("fp16").is_err());
+    }
+
+    #[test]
+    fn sc_20254_admits_only_the_exact_single_render_bounded_carrier() {
+        let request = ltx_bounded_carrier_request_json();
+        let (geometry, selection) = prevalidate_ltx_bounded_carrier_proof(&request)
+            .expect("the exact diagnostic bounded carrier is admissible");
+        let decode = LtxDecodePlan::resolve_for_selection(&selection, geometry).unwrap();
+        assert!(decode.tiling_engaged());
+        assert_eq!(decode.spatial_tile_px(), u64::from(LTX_CANARY_TILE_EDGE));
+        assert_eq!(decode.spatial_overlap_px(), u64::from(LTX_CANARY_OVERLAP));
+        assert_eq!(decode.spatial_tile_count(geometry).unwrap(), 24);
+
+        for (pointer, value) in [
+            ("/action", json!(LTX_CAMPAIGN_ENTRY_ACTION)),
+            (
+                "/planned/logicalCaseId",
+                json!(LTX_CAMPAIGN_ENTRY_LOGICAL_CASE_ID),
+            ),
+            ("/planned/fixture", json!(LTX_CAMPAIGN_ENTRY_FIXTURE)),
+            ("/planned/strategy/rung", json!("staged_residency")),
+            (
+                "/planned/strategy/parameters/decodeTileEdge",
+                json!(LTX_CANARY_TILE_EDGE + 1),
+            ),
+            (
+                "/planned/strategy/parameters/decodeOverlap",
+                json!(LTX_CANARY_OVERLAP + 1),
+            ),
+            ("/planned/_boundedCarrier/identity", json!("mutated")),
+            ("/planned/_boundedCarrier/seed", json!(LTX_SEED + 1)),
+            (
+                "/planned/_watchdog/maxFootprintBytes",
+                json!(LTX_CANARY_MAX_FOOTPRINT_BYTES + 1),
+            ),
+        ] {
+            let mut mutated = request.clone();
+            *mutated.pointer_mut(pointer).expect("mutation pointer") = value;
+            let error = prevalidate_ltx_bounded_carrier_proof(&mutated)
+                .expect_err("every bounded-carrier identity mutation must fail closed");
+            assert!(error.contains("SC-20254"), "{pointer}: {error}");
+        }
+
+        let generation_request = ltx_request(geometry, LTX_CAMPAIGN_ENTRY_FPS, LTX_SEED);
+        validate_ltx_bounded_carrier_generation_request(&generation_request)
+            .expect("the exact provider request is bound independently");
+        for mutate in [
+            |value: &mut GenerationRequest| value.seed = Some(LTX_SEED + 1),
+            |value: &mut GenerationRequest| value.fps = Some(LTX_CAMPAIGN_ENTRY_FPS + 1),
+            |value: &mut GenerationRequest| value.frames = Some(LTX_CAMPAIGN_ENTRY_FRAMES - 1),
+            |value: &mut GenerationRequest| value.video_mode = Some("no_audio".to_owned()),
+        ] {
+            let mut mutated = generation_request.clone();
+            mutate(&mut mutated);
+            assert!(validate_ltx_bounded_carrier_generation_request(&mutated).is_err());
+        }
+
+        let direct = run_ltx_bounded_carrier_proof(&request)
+            .expect_err("private JSON alone cannot bypass the live watchdog");
+        assert!(
+            direct.contains("live external watchdog channel"),
+            "{direct}"
+        );
+    }
+
+    #[test]
+    fn sc_20191_admits_only_the_exact_private_campaign_row_before_weight_work() {
+        let request = ltx_campaign_entry_request_json();
+        prevalidate_ltx_campaign_entry(&request).expect("the exact canonical row is admissible");
+
+        for (pointer, value) in [
+            ("/action", json!("run")),
+            ("/planned/logicalCaseId", json!("implan-mutated")),
+            ("/planned/target/tier", json!("q8")),
+            ("/planned/target/geometry/frames", json!(97)),
+            (
+                "/planned/fixture",
+                json!("ltx-2-3-mlx-q4-768x512-f121-fps30-seed1"),
+            ),
+            (
+                "/planned/strategy/parameters",
+                json!({ "decodeTileEdge": 192 }),
+            ),
+            ("/planned/evidenceScope", json!("fixture")),
+            ("/planned/modelLoadPolicy", json!("batch_rungs")),
+            (
+                "/planned/_watchdog/maxFootprintBytes",
+                json!(LTX_CANARY_MAX_FOOTPRINT_BYTES - 1),
+            ),
+            (
+                "/planned/_campaignEntry/identity",
+                json!("sc-20191-mutated"),
+            ),
+            (
+                "/planned/_measurementSafety/predictedDecodeBytes",
+                json!(19_476_906_239_u64),
+            ),
+        ] {
+            let mut mutated = request.clone();
+            *mutated.pointer_mut(pointer).expect("mutation pointer") = value;
+            let error = prevalidate_ltx_campaign_entry(&mutated)
+                .expect_err("every campaign-entry identity mutation must fail closed");
+            assert!(
+                error.contains("SC-20191") || error.contains("SC-18946"),
+                "{pointer}: {error}"
+            );
+        }
+
+        let direct = run_ltx_campaign_entry(&request)
+            .expect_err("canonical JSON alone cannot bypass the live watchdog");
+        assert!(
+            direct.contains("live external watchdog channel"),
+            "{direct}"
+        );
+    }
+
+    #[test]
+    fn sc_20216_phase_channel_is_exact_monotonic_and_action_bound() {
+        let request = ltx_campaign_entry_request_json();
+        let host_memory = request["hardware"]["memoryBytes"].as_u64().unwrap();
+        let nonce = "cd".repeat(32);
+        let base = json!({
+            "protocol": LTX_CANARY_WATCHDOG_PROTOCOL,
+            "nonce": nonce,
+            "maxFootprintBytes": LTX_CANARY_MAX_FOOTPRINT_BYTES,
+            "maxRuntimeSeconds": LTX_CANARY_MAX_RUNTIME_SECONDS,
+            "hostMemoryBytes": host_memory,
+            "minInitialMemoryFreeBytes": 2 * LTX_CANARY_MAX_FOOTPRINT_BYTES + host_memory.div_ceil(100),
+            "minMemoryFreeBytes": LTX_CANARY_MAX_FOOTPRINT_BYTES + host_memory.div_ceil(100),
+        });
+        let (mut missing_watchdog, missing_adapter) = UnixStream::pair().unwrap();
+        let missing_thread = std::thread::spawn(move || {
+            missing_watchdog
+                .write_all(format!("{base}\n").as_bytes())
+                .unwrap();
+        });
+        let error = consume_ltx_canary_watchdog_attestation_stream(&request, missing_adapter)
+            .expect_err("campaign entry must require authenticated phases");
+        missing_thread.join().unwrap();
+        assert!(error.contains("action-bound authenticated provider phase contract"));
+
+        let (adapter, mut watchdog) = UnixStream::pair().unwrap();
+        let mut attestation = LtxCanaryWatchdogAttestation {
+            max_footprint_bytes: LTX_CANARY_MAX_FOOTPRINT_BYTES,
+            max_runtime_seconds: LTX_CANARY_MAX_RUNTIME_SECONDS,
+            host_memory_bytes: host_memory,
+            min_initial_memory_free_bytes: 0,
+            min_memory_free_bytes: 0,
+            nonce: nonce.clone(),
+            stream: Some(adapter),
+        };
+        let lease = attestation.start_lease().unwrap();
+        let (marked_sender, marked_receiver) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let mut lease = lease;
+            let result = lease.mark("common_load");
+            marked_sender.send((lease, result)).unwrap();
+        });
+        assert_eq!(
+            read_watchdog_line(&mut watchdog).unwrap(),
+            format!("PHASE {nonce} 1 common_load")
+        );
+        assert!(matches!(
+            marked_receiver.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        watchdog
+            .write_all(format!("PHASE_ACK {nonce} 1 common_load\n").as_bytes())
+            .unwrap();
+        let (mut lease, result) = marked_receiver.recv().unwrap();
+        result.expect("phase entry remains blocked until the watchdog acknowledges it");
+
+        let remaining_nonce = nonce.clone();
+        let peer = std::thread::spawn(move || {
+            for (index, name) in LTX_PROVIDER_PHASE_NAMES.iter().enumerate().skip(1) {
+                assert_eq!(
+                    read_watchdog_line(&mut watchdog).unwrap(),
+                    format!("PHASE {remaining_nonce} {} {name}", index + 1)
+                );
+                watchdog
+                    .write_all(
+                        format!("PHASE_ACK {remaining_nonce} {} {name}\n", index + 1).as_bytes(),
+                    )
+                    .unwrap();
+            }
+            assert_eq!(
+                read_watchdog_line(&mut watchdog).unwrap(),
+                format!("DONE {remaining_nonce}")
+            );
+            watchdog
+                .write_all(format!("BYE {remaining_nonce}\n").as_bytes())
+                .unwrap();
+        });
+        for name in LTX_PROVIDER_PHASE_NAMES.iter().skip(1) {
+            lease.mark(name).expect("exact next phase");
+        }
+        assert!(lease.mark("cleanup").unwrap_err().contains("exceeded"));
+        lease.complete().unwrap();
+        peer.join().unwrap();
+
+        let (_timeout_sender, timeout_receiver) = std::sync::mpsc::sync_channel(1);
+        assert!(wait_for_ltx_phase_acknowledgement(
+            &timeout_receiver,
+            1,
+            "common_load",
+            Duration::ZERO,
+        )
+        .unwrap_err()
+        .contains("acknowledgement"));
+        let (foreign_sender, foreign_receiver) = std::sync::mpsc::sync_channel(1);
+        foreign_sender
+            .send(Ok((2, "primary_conditioning".to_owned())))
+            .unwrap();
+        assert!(wait_for_ltx_phase_acknowledgement(
+            &foreign_receiver,
+            1,
+            "common_load",
+            Duration::ZERO,
+        )
+        .unwrap_err()
+        .contains("foreign provider phase"));
+
+        let (writer, _reader) = UnixStream::pair().unwrap();
+        let (_sender, completion) = std::sync::mpsc::sync_channel(1);
+        let (_phase_sender, phase_acknowledgements) = std::sync::mpsc::sync_channel(1);
+        let mut reordered = LtxCanaryWatchdogLease {
+            writer,
+            completion,
+            phase_acknowledgements,
+            nonce,
+            phase_sequence: 0,
+            expected_phases: &LTX_PROVIDER_PHASE_NAMES,
+        };
+        assert!(reordered
+            .mark("primary_decode")
+            .unwrap_err()
+            .contains("reordered"));
+    }
+
+    #[test]
+    fn sc_20254_phase_attestation_accepts_only_its_exact_five_phase_socket_contract() {
+        let request = ltx_bounded_carrier_request_json();
+        let host_memory = request["hardware"]["memoryBytes"].as_u64().unwrap();
+        let nonce = "ef".repeat(32);
+        let payload = json!({
+            "protocol": LTX_CANARY_WATCHDOG_PROTOCOL,
+            "nonce": nonce,
+            "maxFootprintBytes": LTX_CANARY_MAX_FOOTPRINT_BYTES,
+            "maxRuntimeSeconds": LTX_CANARY_MAX_RUNTIME_SECONDS,
+            "hostMemoryBytes": host_memory,
+            "minInitialMemoryFreeBytes": 2 * LTX_CANARY_MAX_FOOTPRINT_BYTES + host_memory.div_ceil(100),
+            "minMemoryFreeBytes": LTX_CANARY_MAX_FOOTPRINT_BYTES + host_memory.div_ceil(100),
+            "providerPhaseProtocol": LTX_PROVIDER_PHASE_PROTOCOL,
+            "providerPhaseProfile": LTX_BOUNDED_CARRIER_PHASE_PROFILE,
+            "providerPhases": LTX_BOUNDED_CARRIER_PHASE_NAMES,
+        });
+        let (mut watchdog, adapter) = UnixStream::pair().unwrap();
+        let peer_nonce = nonce.clone();
+        let peer_payload = payload.clone();
+        let peer = std::thread::spawn(move || {
+            watchdog
+                .write_all(format!("{peer_payload}\n").as_bytes())
+                .unwrap();
+            assert_eq!(
+                read_watchdog_line(&mut watchdog).unwrap(),
+                format!("ACK {peer_nonce}")
+            );
+            watchdog
+                .write_all(format!("GO {peer_nonce}\n").as_bytes())
+                .unwrap();
+            for (index, name) in LTX_BOUNDED_CARRIER_PHASE_NAMES.iter().enumerate() {
+                assert_eq!(
+                    read_watchdog_line(&mut watchdog).unwrap(),
+                    format!("PHASE {peer_nonce} {} {name}", index + 1)
+                );
+                watchdog
+                    .write_all(format!("PHASE_ACK {peer_nonce} {} {name}\n", index + 1).as_bytes())
+                    .unwrap();
+            }
+            assert_eq!(
+                read_watchdog_line(&mut watchdog).unwrap(),
+                format!("DONE {peer_nonce}")
+            );
+            watchdog
+                .write_all(format!("BYE {peer_nonce}\n").as_bytes())
+                .unwrap();
+        });
+        let mut attestation =
+            consume_ltx_canary_watchdog_attestation_stream(&request, adapter).unwrap();
+        let mut lease = attestation
+            .start_lease_for(&LTX_BOUNDED_CARRIER_PHASE_NAMES)
+            .unwrap();
+        for name in LTX_BOUNDED_CARRIER_PHASE_NAMES {
+            lease
+                .mark(name)
+                .expect("watchdog must ACK each exact phase");
+        }
+        lease.complete().unwrap();
+        peer.join().unwrap();
+
+        for mutate in [
+            |value: &mut Value| {
+                value["providerPhaseProfile"] = json!(LTX_CAMPAIGN_ENTRY_PHASE_PROFILE);
+            },
+            |value: &mut Value| {
+                value["providerPhases"] = json!(LTX_PROVIDER_PHASE_NAMES);
+            },
+            |value: &mut Value| {
+                value["providerPhases"] = json!([
+                    "primary_conditioning",
+                    "common_load",
+                    "primary_denoise",
+                    "primary_decode",
+                    "cleanup",
+                ]);
+            },
+        ] {
+            let mut mutated = json!({
+                "protocol": LTX_CANARY_WATCHDOG_PROTOCOL,
+                "nonce": nonce,
+                "maxFootprintBytes": LTX_CANARY_MAX_FOOTPRINT_BYTES,
+                "maxRuntimeSeconds": LTX_CANARY_MAX_RUNTIME_SECONDS,
+                "hostMemoryBytes": host_memory,
+                "minInitialMemoryFreeBytes": 2 * LTX_CANARY_MAX_FOOTPRINT_BYTES + host_memory.div_ceil(100),
+                "minMemoryFreeBytes": LTX_CANARY_MAX_FOOTPRINT_BYTES + host_memory.div_ceil(100),
+                "providerPhaseProtocol": LTX_PROVIDER_PHASE_PROTOCOL,
+                "providerPhaseProfile": LTX_BOUNDED_CARRIER_PHASE_PROFILE,
+                "providerPhases": LTX_BOUNDED_CARRIER_PHASE_NAMES,
+            });
+            mutate(&mut mutated);
+            let (mut bad_watchdog, bad_adapter) = UnixStream::pair().unwrap();
+            let bad_peer = std::thread::spawn(move || {
+                bad_watchdog
+                    .write_all(format!("{mutated}\n").as_bytes())
+                    .unwrap();
+            });
+            let error = consume_ltx_canary_watchdog_attestation_stream(&request, bad_adapter)
+                .expect_err("profile, list and order mutations must fail closed");
+            bad_peer.join().unwrap();
+            assert!(
+                error.contains("action-bound authenticated provider phase contract"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn sc_20318_phase_attestation_is_action_bound_to_its_exact_five_phases() {
+        let request = ltx_bounded_campaign_request_json();
+        let host_memory = request["hardware"]["memoryBytes"].as_u64().unwrap();
+        let nonce = "ab".repeat(32);
+        let payload = json!({
+            "protocol": LTX_CANARY_WATCHDOG_PROTOCOL,
+            "nonce": nonce,
+            "maxFootprintBytes": LTX_CANARY_MAX_FOOTPRINT_BYTES,
+            "maxRuntimeSeconds": LTX_CANARY_MAX_RUNTIME_SECONDS,
+            "hostMemoryBytes": host_memory,
+            "minInitialMemoryFreeBytes": 2 * LTX_CANARY_MAX_FOOTPRINT_BYTES + host_memory.div_ceil(100),
+            "minMemoryFreeBytes": LTX_CANARY_MAX_FOOTPRINT_BYTES + host_memory.div_ceil(100),
+            "providerPhaseProtocol": LTX_PROVIDER_PHASE_PROTOCOL,
+            "providerPhaseProfile": LTX_BOUNDED_CAMPAIGN_PHASE_PROFILE,
+            "providerPhases": LTX_BOUNDED_CARRIER_PHASE_NAMES,
+        });
+        let (mut watchdog, adapter) = UnixStream::pair().unwrap();
+        let peer_nonce = nonce.clone();
+        let peer_payload = payload.clone();
+        let peer = std::thread::spawn(move || {
+            watchdog
+                .write_all(format!("{peer_payload}\n").as_bytes())
+                .unwrap();
+            assert_eq!(
+                read_watchdog_line(&mut watchdog).unwrap(),
+                format!("ACK {peer_nonce}")
+            );
+            watchdog
+                .write_all(format!("GO {peer_nonce}\n").as_bytes())
+                .unwrap();
+            for (index, name) in LTX_BOUNDED_CARRIER_PHASE_NAMES.iter().enumerate() {
+                assert_eq!(
+                    read_watchdog_line(&mut watchdog).unwrap(),
+                    format!("PHASE {peer_nonce} {} {name}", index + 1)
+                );
+                watchdog
+                    .write_all(format!("PHASE_ACK {peer_nonce} {} {name}\n", index + 1).as_bytes())
+                    .unwrap();
+            }
+            assert_eq!(
+                read_watchdog_line(&mut watchdog).unwrap(),
+                format!("DONE {peer_nonce}")
+            );
+            watchdog
+                .write_all(format!("BYE {peer_nonce}\n").as_bytes())
+                .unwrap();
+        });
+        let mut attestation =
+            consume_ltx_canary_watchdog_attestation_stream(&request, adapter).unwrap();
+        let mut lease = attestation
+            .start_lease_for(&LTX_BOUNDED_CARRIER_PHASE_NAMES)
+            .unwrap();
+        for name in LTX_BOUNDED_CARRIER_PHASE_NAMES {
+            lease.mark(name).unwrap();
+        }
+        lease.complete().unwrap();
+        peer.join().unwrap();
+
+        for mutate in [
+            |value: &mut Value| {
+                value["providerPhaseProfile"] = json!(LTX_BOUNDED_CARRIER_PHASE_PROFILE)
+            },
+            |value: &mut Value| value["providerPhaseProfile"] = json!("foreign-profile"),
+            |value: &mut Value| value["providerPhases"] = json!(LTX_PROVIDER_PHASE_NAMES),
+            |value: &mut Value| {
+                value["providerPhases"] = json!([
+                    "common_load",
+                    "primary_conditioning",
+                    "primary_denoise",
+                    "primary_decode"
+                ])
+            },
+            |value: &mut Value| {
+                value["providerPhases"] = json!([
+                    "primary_conditioning",
+                    "common_load",
+                    "primary_denoise",
+                    "primary_decode",
+                    "cleanup"
+                ])
+            },
+        ] {
+            let mut changed = payload.clone();
+            mutate(&mut changed);
+            let (mut bad_watchdog, bad_adapter) = UnixStream::pair().unwrap();
+            let bad_peer = std::thread::spawn(move || {
+                bad_watchdog
+                    .write_all(format!("{changed}\n").as_bytes())
+                    .unwrap();
+            });
+            let error = consume_ltx_canary_watchdog_attestation_stream(&request, bad_adapter)
+                .expect_err("SC-20318 phase profile/list/order mutations must fail");
+            bad_peer.join().unwrap();
+            assert!(
+                error.contains("action-bound authenticated provider phase contract"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn sc_20191_requires_the_exact_untiled_full_av_response_carrier() {
+        let diagnostics = |name: &str, value: u64| json!({ "name": name, "value": value });
+        let mut fragment = json!({
+            "strategy": {
+                "rung": "staged_residency",
+                "engagedRungs": ["resident", "staged_residency"],
+                "parameters": {},
+            },
+            "output": {
+                "frames": 121,
+                "fps": 30,
+                "audio": { "present": true, "samples": 1, "sampleRate": 48_000, "channels": 2 },
+                "firstFrameNondegenerate": true,
+            },
+            "diagnostics": { "measurements": [
+                diagnostics("renderedFrames", 121),
+                diagnostics("outputFps", 30),
+                diagnostics("audioTrackDecoded", 1),
+                diagnostics("decodeTilingEngaged", 0),
+                diagnostics("decodeTileSpatialPx", 0),
+                diagnostics("decodeTileOverlapPx", 0),
+                diagnostics("latentTemporalDepth", 16),
+                diagnostics("latentTokens", 6_144),
+            ] },
+        });
+        validate_ltx_campaign_entry_fragment(&fragment).expect("exact carrier");
+        fragment["diagnostics"]["measurements"][3]["value"] = json!(1);
+        let tiled = validate_ltx_campaign_entry_fragment(&fragment)
+            .expect_err("a tiled carrier cannot publish the untiled canonical row");
+        assert!(tiled.contains("decodeTilingEngaged"), "{tiled}");
+    }
+
+    #[test]
+    fn the_ltx_safety_canary_is_an_exact_non_promotable_multi_tile_tuple() {
+        let request = ltx_canary_request_json();
+        let selection = validate_ltx_canary_plan(&request).expect("exact canary tuple");
+        assert_eq!(selection.strategy, MemoryStrategy::BoundedDecode);
+        assert_eq!(selection.tier.quant, Some(Quant::Q4));
+        assert_eq!(
+            selection.parameters.decode_tile_edge,
+            Some(LTX_CANARY_TILE_EDGE)
+        );
+        assert_eq!(
+            selection.parameters.decode_overlap,
+            Some(LTX_CANARY_OVERLAP)
+        );
+        let generated = ltx_canary_generation_request();
+        assert_eq!(generated.prompt, "a sunlit pine branch, static camera");
+        assert_eq!(
+            (generated.width, generated.height, generated.frames),
+            (LTX_CANARY_WIDTH, LTX_CANARY_HEIGHT, Some(LTX_CANARY_FRAMES))
+        );
+        assert_eq!(generated.video_mode.as_deref(), Some("no_audio"));
+        let memory = generated.memory.expect("bounded decode carrier");
+        assert!(memory.tile_vae_decode);
+        assert_eq!(memory.decode_tile_edge, Some(LTX_CANARY_TILE_EDGE));
+        assert_eq!(memory.decode_overlap, Some(LTX_CANARY_OVERLAP));
+
+        let mut admitted =
+            ltx_canary_request_for_provider_admission(ltx_canary_generation_request())
+                .expect("the exact diagnostic tuple may use the private admission bridge");
+        assert_eq!(admitted.video_mode, None);
+        restore_ltx_canary_no_audio_after_configuration(&mut admitted)
+            .expect("no_audio is restored only after provider configuration");
+        assert_eq!(admitted.video_mode.as_deref(), Some("no_audio"));
+
+        let mut production_default = ltx_canary_generation_request();
+        production_default.video_mode = Some("default".to_owned());
+        assert!(ltx_canary_request_for_provider_admission(production_default).is_err());
+        let mut provider_override = ltx_canary_generation_request();
+        provider_override.video_mode = Some("default".to_owned());
+        assert!(restore_ltx_canary_no_audio_after_configuration(&mut provider_override).is_err());
+    }
+
+    #[test]
+    fn the_ltx_product_envelope_canary_is_exact_full_av_and_physically_multi_tile() {
+        let request = ltx_product_envelope_canary_request_json();
+        let selection = validate_ltx_product_envelope_canary_plan(&request)
+            .expect("exact product-envelope canary tuple");
+        assert_eq!(selection.strategy, MemoryStrategy::BoundedDecode);
+        let generated = ltx_product_envelope_canary_generation_request();
+        assert_eq!(
+            (
+                generated.width,
+                generated.height,
+                generated.frames,
+                generated.fps
+            ),
+            (
+                LTX_PRODUCT_CANARY_WIDTH,
+                LTX_PRODUCT_CANARY_HEIGHT,
+                Some(LTX_PRODUCT_CANARY_FRAMES),
+                Some(LTX_PRODUCT_CANARY_FPS),
+            )
+        );
+        assert_eq!(
+            generated.prompt,
+            "a slow dolly through a sunlit pine forest, drifting motes of pollen, cinematic"
+        );
+        assert_eq!(generated.video_mode, None, "default A/V must stay unset");
+        let geometry = LtxGeometry {
+            width: LTX_PRODUCT_CANARY_WIDTH,
+            height: LTX_PRODUCT_CANARY_HEIGHT,
+            frames: LTX_PRODUCT_CANARY_FRAMES,
+            latent_frames: 1 + (LTX_PRODUCT_CANARY_FRAMES - 1) / LTX_TEMPORAL_SCALE,
+        };
+        let decode = LtxDecodePlan::resolve_for_selection(&selection, geometry)
+            .expect("exact bounded decode plan");
+        assert_eq!(decode.spatial_tile_count(geometry).unwrap(), 24);
+        assert!(validate_diagnostic_audio(
+            LtxCanaryProfile::ProductEnvelope,
+            Some(DiagnosticAudioIdentity {
+                samples: 1,
+                sample_rate: 24_000,
+                channels: 2,
+            }),
+        )
+        .is_ok());
+        for audio in [
+            None,
+            Some(DiagnosticAudioIdentity {
+                samples: 0,
+                sample_rate: 24_000,
+                channels: 2,
+            }),
+            Some(DiagnosticAudioIdentity {
+                samples: 1,
+                sample_rate: 0,
+                channels: 2,
+            }),
+            Some(DiagnosticAudioIdentity {
+                samples: 1,
+                sample_rate: 24_000,
+                channels: 0,
+            }),
+        ] {
+            assert!(validate_diagnostic_audio(LtxCanaryProfile::ProductEnvelope, audio).is_err());
+        }
+        assert!(validate_diagnostic_audio(
+            LtxCanaryProfile::Safety,
+            Some(DiagnosticAudioIdentity {
+                samples: 1,
+                sample_rate: 24_000,
+                channels: 2,
+            }),
+        )
+        .is_err());
+        let direct = run_ltx_product_envelope_canary(&request)
+            .expect_err("product-envelope canary must refuse without the external watchdog");
+        assert!(direct.contains("live external watchdog channel"));
+    }
+
+    #[test]
+    fn the_ltx_safety_canary_accounts_for_only_the_exact_av_bfloat16_ones_cache() {
+        let expected = ltx_canary_ones_cache_bytes().expect("checked ONES_CACHE arithmetic");
+        assert_eq!(
+            expected,
+            (LTX_CANARY_ONES_CACHE_VIDEO_DIMENSION + LTX_CANARY_ONES_CACHE_AUDIO_DIMENSION)
+                * BFLOAT16_BYTES_PER_ELEMENT
+        );
+        assert!(validate_ltx_canary_pre_provider(AllocatorState {
+            active: 0,
+            cache: 0,
+        })
+        .is_ok());
+        let pre_provider = AllocatorState {
+            active: 7,
+            cache: 0,
+        };
+        assert!(validate_ltx_canary_cleanup(
+            pre_provider,
+            AllocatorState {
+                active: pre_provider.active + expected,
+                cache: 0,
+            },
+            expected,
+        )
+        .is_ok());
+
+        let low = validate_ltx_canary_cleanup(
+            pre_provider,
+            AllocatorState {
+                active: pre_provider.active + expected - 1,
+                cache: 0,
+            },
+            expected,
+        )
+        .expect_err("one byte below the exact active identity must fail");
+        assert!(low.contains("intentional persistent active"));
+        let high = validate_ltx_canary_cleanup(
+            pre_provider,
+            AllocatorState {
+                active: pre_provider.active + expected + 1,
+                cache: 0,
+            },
+            expected,
+        )
+        .expect_err("one byte above the exact active identity must fail");
+        assert!(high.contains("intentional persistent active"));
+
+        let dirty_pre = validate_ltx_canary_pre_provider(AllocatorState {
+            active: 0,
+            cache: 1,
+        })
+        .expect_err("a non-empty baseline cache must fail");
+        assert!(dirty_pre.contains("preProviderCacheBytes 1"));
+        let dirty_post = validate_ltx_canary_cleanup(
+            pre_provider,
+            AllocatorState {
+                active: pre_provider.active + expected,
+                cache: 1,
+            },
+            expected,
+        )
+        .expect_err("a retained post-cleanup cache byte must fail");
+        assert!(dirty_post.contains("postCleanupCacheBytes 1"));
+
+        let overflow = validate_ltx_canary_cleanup(
+            AllocatorState {
+                active: u64::MAX,
+                cache: 0,
+            },
+            AllocatorState::default(),
+            expected,
+        )
+        .expect_err("pre-provider plus persistent active bytes must not wrap");
+        assert_eq!(
+            overflow,
+            "LTX safety canary cleanup active-byte arithmetic overflowed"
+        );
+    }
+
+    #[test]
+    fn the_ltx_safety_canary_requires_the_live_watchdog_ack_go_channel_before_limits() {
+        let request = ltx_canary_request_json();
+        let host_memory = request["hardware"]["memoryBytes"]
+            .as_u64()
+            .expect("canary host memory");
+        let nonce = "ab".repeat(32);
+        let payload = json!({
+            "protocol": LTX_CANARY_WATCHDOG_PROTOCOL,
+            "nonce": nonce,
+            "maxFootprintBytes": LTX_CANARY_MAX_FOOTPRINT_BYTES,
+            "maxRuntimeSeconds": LTX_CANARY_MAX_RUNTIME_SECONDS,
+            "hostMemoryBytes": host_memory,
+            "minInitialMemoryFreeBytes": 2 * LTX_CANARY_MAX_FOOTPRINT_BYTES + host_memory.div_ceil(100),
+            "minMemoryFreeBytes": LTX_CANARY_MAX_FOOTPRINT_BYTES + host_memory.div_ceil(100),
+        });
+        let (mut watchdog, adapter) = UnixStream::pair().expect("watchdog socket pair");
+        let expected_nonce = nonce.clone();
+        let valid_payload = payload.clone();
+        let watchdog_thread = std::thread::spawn(move || {
+            watchdog
+                .write_all(format!("{valid_payload}\n").as_bytes())
+                .expect("send attestation");
+            assert_eq!(
+                read_watchdog_line(&mut watchdog).expect("adapter ACK"),
+                format!("ACK {expected_nonce}")
+            );
+            watchdog
+                .write_all(format!("GO {expected_nonce}\n").as_bytes())
+                .expect("release canary");
+            watchdog
+                .write_all(format!("PING {expected_nonce}\n").as_bytes())
+                .expect("maintain live watchdog lease");
+            assert_eq!(
+                read_watchdog_line(&mut watchdog).expect("adapter DONE"),
+                format!("DONE {expected_nonce}")
+            );
+            watchdog
+                .write_all(format!("BYE {expected_nonce}\n").as_bytes())
+                .expect("complete canary lease");
+        });
+        let mut attested = consume_ltx_canary_watchdog_attestation_stream(&request, adapter)
+            .expect("exact live watchdog handshake");
+        let lease = attested.start_lease().expect("held watchdog lease");
+        lease.complete().expect("DONE/BYE completion handshake");
+        watchdog_thread.join().expect("watchdog thread");
+        assert_eq!(attested.max_footprint_bytes, LTX_CANARY_MAX_FOOTPRINT_BYTES);
+        assert_eq!(attested.max_runtime_seconds, LTX_CANARY_MAX_RUNTIME_SECONDS);
+        assert!(std::env::var_os("SCENEWORKS_MEMORY_WATCHDOG_SOCKET").is_none());
+        let direct = consume_ltx_canary_watchdog_attestation(&request)
+            .expect_err("direct stdin canary has no live watchdog channel");
+        assert!(direct.contains("live external watchdog channel"));
+        let direct_action = run_ltx_canary(&request)
+            .expect_err("public canary action must refuse without the live watchdog");
+        assert!(direct_action.contains("live external watchdog channel"));
+
+        let mut swap_gated = payload.clone();
+        swap_gated["minSwapFreeBytes"] = json!(1024_u64 * 1024 * 1024);
+        let (mut fake_watchdog, fake_adapter) =
+            UnixStream::pair().expect("swap-gated watchdog socket pair");
+        let fake_thread = std::thread::spawn(move || {
+            fake_watchdog
+                .write_all(format!("{swap_gated}\n").as_bytes())
+                .expect("send swap-gated attestation");
+        });
+        let error = consume_ltx_canary_watchdog_attestation_stream(&request, fake_adapter)
+            .expect_err("an arbitrary swap reserve must not enter the reviewed canary bounds");
+        fake_thread.join().expect("fake watchdog thread");
+        assert!(error.contains("exact reviewed bounds"));
+
+        let mut percent_gated = payload.clone();
+        percent_gated["minInitialMemoryFreePercent"] = json!(70);
+        let (mut fake_watchdog, fake_adapter) =
+            UnixStream::pair().expect("percent-gated watchdog socket pair");
+        let fake_thread = std::thread::spawn(move || {
+            fake_watchdog
+                .write_all(format!("{percent_gated}\n").as_bytes())
+                .expect("send percent-gated attestation");
+        });
+        let error = consume_ltx_canary_watchdog_attestation_stream(&request, fake_adapter)
+            .expect_err("a redundant percentage floor must not enter the reviewed canary bounds");
+        fake_thread.join().expect("fake watchdog thread");
+        assert!(error.contains("exact reviewed bounds"));
+
+        let mut weakened = payload;
+        weakened["minInitialMemoryFreeBytes"] =
+            json!(2 * LTX_CANARY_MAX_FOOTPRINT_BYTES + host_memory.div_ceil(100) - 1);
+        let (mut fake_watchdog, fake_adapter) =
+            UnixStream::pair().expect("weakened watchdog socket pair");
+        let fake_thread = std::thread::spawn(move || {
+            fake_watchdog
+                .write_all(format!("{weakened}\n").as_bytes())
+                .expect("send weakened attestation");
+        });
+        let error = consume_ltx_canary_watchdog_attestation_stream(&request, fake_adapter)
+            .expect_err("weakened runtime floor must not attest");
+        fake_thread.join().expect("fake watchdog thread");
+        assert!(error.contains("exact reviewed bounds"));
+    }
+
+    #[test]
+    fn the_ltx_safety_canary_rejects_every_identity_or_safety_mutation_before_load() {
+        type CanaryMutation = (&'static str, fn(&mut Value));
+        let mutations: [CanaryMutation; 16] = [
+            ("wrong canary identity", |request| {
+                request["planned"]["_canary"]["identity"] = json!("sc-20169-product-envelope")
+            }),
+            ("promotable scope", |request| {
+                request["planned"]["evidenceScope"] = json!("authoritative")
+            }),
+            ("campaign geometry", |request| {
+                request["planned"]["target"]["geometry"]["width"] = json!(768)
+            }),
+            ("single pass", |request| {
+                request["planned"]["strategy"]["rung"] = json!("staged_residency")
+            }),
+            ("wrong backend", |request| {
+                request["planned"]["backend"] = json!("candle")
+            }),
+            ("missing staged rung", |request| {
+                request["planned"]["strategy"]["engagedRungs"] =
+                    json!(["resident", "bounded_decode"])
+            }),
+            ("wrong tile edge", |request| {
+                request["planned"]["strategy"]["parameters"]["decodeTileEdge"] = json!(256)
+            }),
+            ("wrong overlap", |request| {
+                request["planned"]["strategy"]["parameters"]["decodeOverlap"] = json!(32)
+            }),
+            ("audio-enabled variant", |request| {
+                request["planned"]["_canary"]["videoMode"] = json!("default")
+            }),
+            ("ceiling drift", |request| {
+                request["planned"]["_watchdog"]["maxFootprintBytes"] =
+                    json!(LTX_CANARY_MAX_FOOTPRINT_BYTES + 1)
+            }),
+            ("wrong fixture", |request| {
+                request["planned"]["fixture"] = json!("campaign-row")
+            }),
+            ("wrong artifact revision", |request| {
+                request["planned"]["_artifact"]["revision"] = json!("0".repeat(40))
+            }),
+            ("wrong artifact inventory", |request| {
+                request["planned"]["_artifact"]["numericTierInventory"]["sha256"] =
+                    json!("0".repeat(64))
+            }),
+            ("wrong text encoder bytes", |request| {
+                request["planned"]["_artifact"]["textEncoderInventory"]["bytes"] =
+                    json!(LTX_CANARY_TEXT_ENCODER_INVENTORY_BYTES - 1)
+            }),
+            ("wrong text encoder digest", |request| {
+                request["planned"]["_artifact"]["textEncoderInventory"]["sha256"] =
+                    json!("0".repeat(64))
+            }),
+            ("undersized host", |request| {
+                request["hardware"]["memoryBytes"] = json!(LTX_CANARY_MAX_FOOTPRINT_BYTES * 2 - 1)
+            }),
+        ];
+        for (name, mutate) in mutations {
+            let mut request = ltx_canary_request_json();
+            mutate(&mut request);
+            assert!(
+                validate_ltx_canary_plan(&request).is_err(),
+                "{name} must fail before environment/provider/model access"
+            );
+        }
+    }
+
+    #[test]
+    fn the_ltx_product_envelope_canary_rejects_every_tuple_mutation_before_load() {
+        type CanaryMutation = (&'static str, fn(&mut Value));
+        let mutations: [CanaryMutation; 10] = [
+            ("wrong action", |request| {
+                request["action"] = json!("canary")
+            }),
+            ("no audio", |request| {
+                request["planned"]["_canary"]["videoMode"] = json!("no_audio")
+            }),
+            ("wrong width", |request| {
+                request["planned"]["target"]["geometry"]["width"] = json!(512)
+            }),
+            ("wrong height", |request| {
+                request["planned"]["target"]["geometry"]["height"] = json!(768)
+            }),
+            ("wrong frames", |request| {
+                request["planned"]["target"]["geometry"]["frames"] = json!(89)
+            }),
+            ("wrong fps", |request| {
+                request["planned"]["_canary"]["fps"] = json!(30)
+            }),
+            ("wrong carrier", |request| {
+                request["planned"]["strategy"]["parameters"]["decodeTileEdge"] = json!(384)
+            }),
+            ("campaign scope", |request| {
+                request["planned"]["evidenceScope"] = json!("campaign")
+            }),
+            ("watchdog threshold", |request| {
+                request["planned"]["_watchdog"]["maxFootprintBytes"] =
+                    json!(LTX_CANARY_MAX_FOOTPRINT_BYTES - 1)
+            }),
+            ("artifact drift", |request| {
+                request["planned"]["_artifact"]["numericTierInventory"]["sha256"] =
+                    json!("0".repeat(64))
+            }),
+        ];
+        for (name, mutate) in mutations {
+            let mut request = ltx_product_envelope_canary_request_json();
+            mutate(&mut request);
+            assert!(
+                validate_ltx_product_envelope_canary_plan(&request).is_err(),
+                "{name} must fail before environment/provider/model access"
+            );
+        }
+    }
+
+    #[test]
+    fn the_ltx_canary_wired_limit_never_exceeds_the_device_ceiling() {
+        let requested = LTX_CANARY_MAX_FOOTPRINT_BYTES as usize;
+        assert_eq!(ltx_canary_wired_limit(requested, 120), 80);
+        assert_eq!(ltx_canary_wired_limit(40, 120), 40);
+        assert_eq!(ltx_canary_wired_limit(requested, 0), 0);
+    }
+
+    #[test]
+    fn the_ltx_canary_process_global_limits_are_serialized_and_restore_memory() {
+        let previous;
+        {
+            let mut limits = LtxCanaryLimits::install().expect("install exact canary limits");
+            previous = limits.previous_memory;
+            assert_eq!(get_memory_limit(), LTX_CANARY_MAX_FOOTPRINT_BYTES as usize);
+            limits.restore();
+            assert_eq!(get_memory_limit(), previous);
+            let restored_wired = set_wired_limit(limits.wired);
+            set_wired_limit(restored_wired);
+            assert_eq!(restored_wired, limits.previous_wired);
+        }
+        let _restoration_guard = LTX_MEMORY_LIMIT_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(get_memory_limit(), previous);
+    }
+
+    fn set_ltx_request_tier(request: &mut Value, tier: &str, inventory: u64) {
+        request["planned"]["target"]["tier"] = json!(tier);
+        request["planned"]["fixture"] = json!(format!(
+            "ltx-2-3-mlx-{tier}-768x512-f97-fps24-seed{LTX_SEED}"
+        ));
+        request["planned"]["_measurementSafety"]["tierInventoryBytes"] = json!(inventory);
+
+        let predicted_decode_bytes = request["planned"]["_measurementSafety"]
+            ["predictedDecodeBytes"]
+            .as_u64()
+            .expect("fixture predicted decode bytes");
+        request["planned"]["_measurementSafety"]["incidentCalibratedProjectionBytes"] = json!(
+            i128::from(LTX_Q4_F305_CRASH_FOOTPRINT_BYTES)
+                + (i128::from(inventory) - i128::from(LTX_Q4_INVENTORY_BYTES))
+                + (i128::from(predicted_decode_bytes)
+                    - i128::from(LTX_INCIDENT_PREDICTED_DECODE_BYTES))
+        );
+    }
+
+    fn set_ltx_bounded_case(
+        request: &mut Value,
+        tier: &str,
+        inventory: u64,
+        frames: u32,
+        disposition: &str,
+    ) {
+        request["planned"]["target"]["tier"] = json!(tier);
+        request["planned"]["target"]["geometry"] =
+            json!({ "width": 1280, "height": 704, "batch": 1, "frames": frames });
+        request["planned"]["fixture"] = json!(format!(
+            "ltx-2-3-mlx-{tier}-1280x704-f{frames}-fps30-seed{LTX_SEED}"
+        ));
+        request["planned"]["strategy"] = json!({
+            "rung": "bounded_decode",
+            "engagedRungs": ["resident", "staged_residency", "bounded_decode"],
+            "parameters": { "decodeTileEdge": 384, "decodeOverlap": 64 },
+        });
+        let predicted_decode_bytes =
+            3_300_000_000_u64 + 40 * 1280 * 704 * u64::from(frames) + 300 * 384 * 384 * 96;
+        let safety = &mut request["planned"]["_measurementSafety"];
+        safety["disposition"] = json!(disposition);
+        safety["tierInventoryBytes"] = json!(inventory);
+        safety["predictedDecodeBytes"] = json!(predicted_decode_bytes);
+        safety["incidentCalibratedProjectionBytes"] = json!(
+            i128::from(LTX_Q4_F305_CRASH_FOOTPRINT_BYTES)
+                + (i128::from(inventory) - i128::from(LTX_Q4_INVENTORY_BYTES))
+                + (i128::from(predicted_decode_bytes)
+                    - i128::from(LTX_INCIDENT_PREDICTED_DECODE_BYTES))
+        );
+    }
+
+    /// The port of the shipped LTX frame ladder must reproduce these 18 transcribed values, one per
+    /// point the declared limits can reach. These 18 values ARE the envelope, so an unnoticed drift
+    /// would silently widen or narrow what this arm accepts.
+    ///
+    /// This is a TRANSCRIPTION check, not a call into `sceneworks_core::video_request::ltx_frame_count`
+    /// — this crate deliberately does not depend on `sceneworks-core` (see `ltx_snapped_frame_count`).
+    /// The other half of the binding is `ltx_frame_count_matches_the_sc_18808_calibration_ladder` in
+    /// `crates/sceneworks-core/src/video_request.rs`, which pins the same 18 pairs against the shipped
+    /// function in a default member. Keep the two tables identical; changing one alone is the drift
+    /// both exist to catch (sc-18808 review).
+    #[test]
+    fn ltx_frame_ladder_port_matches_the_transcribed_shipped_ladder() {
+        for (duration, fps, expected) in [
+            (4, 24, 97),
+            (4, 25, 97),
+            (4, 30, 121),
+            (6, 24, 145),
+            (6, 25, 153),
+            (6, 30, 177),
+            (8, 24, 193),
+            (8, 25, 201),
+            (8, 30, 241),
+            (10, 24, 241),
+            (10, 25, 249),
+            (10, 30, 297),
+            (12, 24, 289),
+            (12, 25, 297),
+            (12, 30, 361),
+            (15, 24, 361),
+            (15, 25, 377),
+            (15, 30, 449),
+        ] {
+            let frames = ltx_snapped_frame_count(duration * fps);
+            assert_eq!(frames, expected, "{duration}s at {fps}fps");
+            assert_eq!(
+                frames % LTX_TEMPORAL_SCALE,
+                1,
+                "every reachable frame count is on the 1 + 8k lattice"
+            );
+        }
+        // The ladder's own floor, independent of the declared durations.
+        assert_eq!(ltx_snapped_frame_count(0), 9);
+        assert_eq!(ltx_snapped_frame_count(1), 9);
+    }
+
+    /// The envelope is DERIVED from the declared arrays through the ladder above, not written down.
+    #[test]
+    fn ltx_frame_envelope_is_derived_from_the_declared_durations_and_fps() {
+        assert_eq!(LTX_FRAME_ENVELOPE, (97, 449));
+        let (minimum, maximum) = LTX_FRAME_ENVELOPE;
+        assert_eq!(minimum, ltx_snapped_frame_count(4 * 24));
+        assert_eq!(maximum, ltx_snapped_frame_count(15 * 30));
+    }
+
+    #[test]
+    fn the_ltx_arm_accepts_the_declared_video_envelope() {
+        for (width, height) in LTX_RESOLUTIONS {
+            for frames in [LTX_FRAME_ENVELOPE.0, 241, LTX_FRAME_ENVELOPE.1] {
+                let geometry = validate_ltx_geometry(width, height, frames)
+                    .unwrap_or_else(|error| panic!("{width}x{height} f{frames}: {error}"));
+                assert_eq!(geometry.frames, frames);
+                assert_eq!(
+                    geometry.latent_frames,
+                    1 + (frames - 1) / LTX_TEMPORAL_SCALE
+                );
+                assert!(
+                    geometry.latent_frames > 1,
+                    "a video record is multi-latent-frame"
+                );
+            }
+        }
+    }
+
+    /// The negative half of the envelope, mirroring the shape of the pinned image-arm negative test.
+    #[test]
+    fn the_ltx_arm_rejects_out_of_envelope_geometry_with_a_named_reason() {
+        for (width, height, frames, expected) in [
+            // An undeclared resolution, including one that is 64-aligned and would otherwise render.
+            (1024, 1024, 97, "declared limits.resolutions"),
+            (800, 512, 97, "declared limits.resolutions"),
+            // Off the temporal lattice the LTX VAE's 8x causal compression requires.
+            (768, 512, 96, "1 + 8k"),
+            (768, 512, 100, "1 + 8k"),
+            // On the lattice but outside what a declared duration/fps pair can produce.
+            (768, 512, 1, "duration/fps envelope"),
+            (768, 512, 9, "duration/fps envelope"),
+            (768, 512, 457, "duration/fps envelope"),
+        ] {
+            let error = validate_ltx_geometry(width, height, frames)
+                .expect_err("an out-of-envelope LTX geometry must be refused");
+            assert!(
+                error.contains(expected),
+                "{width}x{height} f{frames}: {error}"
+            );
+        }
+    }
+
+    /// A still geometry is on the temporal lattice (`1 % 8 == 1`), so it can only be caught by the
+    /// envelope floor. The video arm must not be able to capture a single-frame record.
+    #[test]
+    fn the_ltx_arm_refuses_a_single_frame_capture() {
+        let error = run_ltx(&ltx_request_json(768, 512, 1))
+            .expect_err("a video arm must not capture a still");
+        assert!(error.contains("duration/fps envelope"), "{error}");
+    }
+
+    #[test]
+    fn the_ltx_arm_refuses_a_foreign_provider_before_environment_or_weight_work() {
+        for provider in ["ltx_2_3_distilled", "ltx_2_3_eros", "wan_2_2", "flux2_dev"] {
+            let mut request = ltx_request_json(768, 512, 97);
+            request["planned"]["target"]["provider"] = json!(provider);
+            let error =
+                run_ltx(&request).expect_err("a foreign provider must not reach the LTX arm");
+            assert_eq!(
+                error,
+                format!("MLX LTX-2.3 calibration does not implement provider {provider:?}")
+            );
+        }
+    }
+
+    #[test]
+    fn the_ltx_arm_fails_closed_on_a_non_t2v_target_before_weight_work() {
+        for (pointer, value, expected) in [
+            (
+                "/planned/target/modelId",
+                json!("ltx_2_3_eros"),
+                "requires modelId",
+            ),
+            (
+                "/planned/target/mode",
+                json!("image_to_video"),
+                "requires reference-free text_to_video mode",
+            ),
+            (
+                "/planned/target/geometry/batch",
+                json!(2),
+                "requires geometry.batch == 1",
+            ),
+            (
+                "/planned/target/overlay",
+                json!("lora"),
+                "refusing rather than recording false overlay coverage",
+            ),
+            // `resident` is unreachable on this provider on EVERY host, so the refusal is
+            // host-independent — but WHICH rung the engine measures instead is not: this geometry
+            // is single-pass on a 128 GiB Mac and tiled on a small CI runner. Assert the
+            // machine-independent half of the message; the rung itself is pinned, at a fixed
+            // budget, by `the_ltx_arm_follows_the_engine_across_the_decode_tiling_boundary`.
+            (
+                "/planned/loadShape",
+                json!("deferred_materialization"),
+                "calibrates only eager_materialization",
+            ),
+            (
+                "/planned/calibrationFingerprint",
+                json!("sc-18808-ltx-2-3-mlx-t2v-staged-capture-v0"),
+                "plan/adapter calibration mismatch",
+            ),
+            (
+                "/planned/fixture",
+                json!("ltx-2-3-mlx-q8-768x512-f97-fps60-seed18808"),
+                "not one of the declared limits.fps",
+            ),
+            (
+                "/planned/fixture",
+                json!("ltx-2-3-mlx-q8-768x512-f193-fps24-seed18808"),
+                "must start with",
+            ),
+            (
+                "/planned/fixture",
+                json!("ltx-2-3-mlx-q8-768x512-f97-fps24-seed42"),
+                "does not match the LTX-2.3 calibration seed",
+            ),
+            (
+                "/planned/target/tier",
+                json!("q2"),
+                "unsupported MLX numeric tier",
+            ),
+        ] {
+            let mut request = ltx_request_json(768, 512, 97);
+            *request.pointer_mut(pointer).unwrap() = value.clone();
+            let error = run_ltx(&request)
+                .expect_err("a non-T2V LTX target must fail before environment or weights");
+            assert!(error.contains(expected), "{pointer}={value}: {error}");
+        }
+    }
+
+    /// Pure request malformations must still fail before environment or weight resolution.
+    #[test]
+    fn the_ltx_arm_refuses_a_malformed_plan_before_it_consults_the_host_budget() {
+        // Force the smoke geometry onto the provider's auto-tiled path. Every mutation below must
+        // still report its own deterministic input error; consulting the live selector first made
+        // this test intermittently report a decode-budget outcome under default-parallel tests.
+        let _constrained_budget = LtxInjectedBudget::install(8.0);
+        for (pointer, value, expected) in [
+            (
+                "/planned/fixture",
+                json!("ltx-2-3-mlx-q8-768x512-f97-fps24-seed42"),
+                "does not match the LTX-2.3 calibration seed",
+            ),
+            (
+                "/planned/calibrationFingerprint",
+                json!("sc-18808-ltx-2-3-mlx-t2v-staged-capture-v0"),
+                "plan/adapter calibration mismatch",
+            ),
+            (
+                "/planned/loadShape",
+                json!("deferred_materialization"),
+                "calibrates only eager_materialization",
+            ),
+            (
+                "/planned/target/tier",
+                json!("q2"),
+                "unsupported MLX numeric tier",
+            ),
+        ] {
+            let mut request = ltx_request_json(768, 512, 97);
+            *request.pointer_mut(pointer).unwrap() = value.clone();
+            let error = run_ltx(&request).expect_err("a malformed LTX plan must be refused");
+            assert!(
+                error.contains(expected),
+                "{pointer}={value} must be refused for the malformation: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_ltx_arm_refuses_a_parameterized_staged_residency_row() {
+        let mut request = ltx_request_json(768, 512, 97);
+        request["planned"]["strategy"]["parameters"] = json!({ "decodeTileEdge": 512 });
+        let selection = planned_selection(&request).unwrap();
+        let error = ltx_fixture_contract(Some(Quant::Q8))
+            .validate_selection(&selection)
+            .expect_err("staged residency has no decode parameter domain");
+        assert!(error.to_string().contains("decode"), "{error}");
+    }
+
+    #[test]
+    fn sc_19642_refuses_every_tier_before_environment_registry_or_weights() {
+        for (tier, inventory) in [
+            ("q4", LTX_Q4_INVENTORY_BYTES),
+            ("q8", LTX_Q8_INVENTORY_BYTES),
+            ("bf16", LTX_BF16_INVENTORY_BYTES),
+        ] {
+            let mut request = ltx_request_json(768, 512, 97);
+            set_ltx_request_tier(&mut request, tier, inventory);
+            let error =
+                run_ltx(&request).expect_err("every current SC-18946 tier must fail closed");
+            assert!(
+                error.contains("SC-19642 pre-load safety refusal"),
+                "{error}"
+            );
+            assert!(error.contains(&format!("inventory={inventory}")), "{error}");
+            assert!(error.contains(LTX_SAFETY_REFUSED_OPEN), "{error}");
+            assert!(
+                !error.contains("SCENEWORKS_LTX_ROOT") && !error.contains("build LTX registry"),
+                "refusal happened after environment or registry work: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn sc_19642_preserves_incident_monotonic_and_open_refusal_terminals() {
+        for (tier, inventory, frames, disposition) in [
+            ("q4", LTX_Q4_INVENTORY_BYTES, 305, LTX_INCIDENT_FORBIDDEN),
+            (
+                "q4",
+                LTX_Q4_INVENTORY_BYTES,
+                449,
+                LTX_ARITHMETIC_UNMEASURABLE,
+            ),
+            ("q8", LTX_Q8_INVENTORY_BYTES, 305, LTX_SAFETY_REFUSED_OPEN),
+            (
+                "bf16",
+                LTX_BF16_INVENTORY_BYTES,
+                449,
+                LTX_SAFETY_REFUSED_OPEN,
+            ),
+        ] {
+            let mut request = ltx_request_json(1280, 704, frames);
+            set_ltx_bounded_case(&mut request, tier, inventory, frames, disposition);
+            let error = run_ltx(&request).expect_err("SC-18946 case must refuse before load");
+            assert!(
+                error.contains("SC-19642 pre-load safety refusal"),
+                "{error}"
+            );
+            assert!(error.contains(disposition), "{error}");
+            assert!(!error.contains("SCENEWORKS_LTX_ROOT"), "{error}");
+        }
+
+        let mut wrong_carrier = ltx_request_json(1280, 704, 449);
+        set_ltx_bounded_case(
+            &mut wrong_carrier,
+            "q4",
+            LTX_Q4_INVENTORY_BYTES,
+            449,
+            LTX_ARITHMETIC_UNMEASURABLE,
+        );
+        wrong_carrier["planned"]["strategy"]["parameters"]["decodeTileEdge"] = json!(256);
+        let error = run_ltx(&wrong_carrier)
+            .expect_err("a different carrier cannot inherit the q4 f449 arithmetic proof");
+        assert!(error.contains(LTX_SAFETY_REFUSED_OPEN), "{error}");
+        assert!(!error.contains("SCENEWORKS_LTX_ROOT"), "{error}");
+    }
+
+    #[test]
+    fn sc_19642_safety_metadata_mutations_fail_closed_before_weight_work() {
+        for (pointer, value, expected) in [
+            (
+                "/planned/_measurementSafety/disposition",
+                json!("capturable"),
+                "safety disposition",
+            ),
+            (
+                "/planned/_measurementSafety/tierInventoryBytes",
+                json!(LTX_Q8_INVENTORY_BYTES - 1),
+                "tierInventoryBytes",
+            ),
+            (
+                "/planned/_measurementSafety/incidentCrashFootprintBytes",
+                json!(LTX_Q4_F305_CRASH_FOOTPRINT_BYTES - 1),
+                "incidentCrashFootprintBytes",
+            ),
+        ] {
+            let mut request = ltx_request_json(768, 512, 97);
+            *request.pointer_mut(pointer).unwrap() = value;
+            let error = run_ltx(&request).expect_err("mutated safety metadata must fail closed");
+            assert!(error.contains(expected), "{pointer}: {error}");
+            assert!(!error.contains("SCENEWORKS_LTX_ROOT"), "{pointer}: {error}");
+        }
+    }
+
+    /// The exact composition the record claims, pinned so a silent widening of `engagedRungs` would
+    /// have to be an explicit edit here.
+    #[test]
+    fn the_ltx_arm_attests_exactly_resident_plus_staged_residency() {
+        let request = ltx_request_json(768, 512, 97);
+        let selection = planned_selection(&request).unwrap();
+        let contract = ltx_fixture_contract(Some(Quant::Q8));
+        contract.validate_selection(&selection).unwrap();
+        let strategy = ltx_attested_strategy(&request, &selection, &contract).unwrap();
+        assert_eq!(strategy["rung"], "staged_residency");
+        assert_eq!(
+            strategy["engagedRungs"],
+            json!(["resident", "staged_residency"])
+        );
+        assert_eq!(strategy["parameters"], json!({}));
+    }
+
+    /// sc-18810: the staged-residency witness must be a PHASE BOUNDARY reading, not a peak. The
+    /// numbers here are the real ones from this story's captures — the first row is the geometry
+    /// that broke sc-18808's `overall_peak < text_encoder + transformer` form.
+    #[test]
+    fn the_staging_proof_survives_a_peak_above_the_costaged_bound() {
+        const TEXT_ENCODER: u64 = 32_733_043_614;
+        const TRANSFORMER: u64 = 20_614_103_249;
+        const COSTAGED: u64 = TEXT_ENCODER + TRANSFORMER; // 53,347,146,863
+        let entering_denoise = |active: u64| AllocatorState { active, cache: 0 };
+
+        // q8 704x1280 x 177: measured overall peak 54,153,098,156 — ABOVE the co-staged bound — while
+        // the denoise boundary held 20.7 GB, i.e. the transformer and nothing else. The peak is the
+        // decode phase's output buffers. This run is valid and must be accepted.
+        assert!(
+            ltx_staging_is_proven(
+                entering_denoise(20_765_156_098),
+                COSTAGED,
+                TEXT_ENCODER,
+                TRANSFORMER
+            )
+            .is_ok(),
+            "a decode-dominated peak above the co-staged bound is not a staging regression"
+        );
+
+        // The regression the check exists for: the text encoder still resident when the AvDiT is up.
+        let regressed = ltx_staging_is_proven(
+            entering_denoise(COSTAGED + 1),
+            COSTAGED,
+            TEXT_ENCODER,
+            TRANSFORMER,
+        )
+        .expect_err("a co-resident text encoder must be refused");
+        assert!(
+            regressed.contains("was not dropped before the AvDiT"),
+            "{regressed}"
+        );
+
+        // The vacuity guard: a boundary sampled before the transformer materializes would make the
+        // upper bound pass while proving nothing.
+        let too_early = ltx_staging_is_proven(
+            entering_denoise(TRANSFORMER - 1),
+            COSTAGED,
+            TEXT_ENCODER,
+            TRANSFORMER,
+        )
+        .expect_err("a boundary sampled before the AvDiT exists must be refused");
+        assert!(too_early.contains("proves nothing"), "{too_early}");
+    }
+
+    /// sc-18810: WHERE rung 2 engages, derived from the engine's own bound rather than from the
+    /// measured decode peak. `writable_frame_cap = i32::MAX / (8 * h * w)` is pure arithmetic over
+    /// `VaeTiling::LTX` and does not move with the host, so it is asserted exactly. The memory bound
+    /// (`3.3 GB + 340 B/voxel` vs `get_memory_limit() * 0.85`) DOES move with the host, which is
+    /// precisely why the boundary is attributed to the write bound and not to a machine.
+    #[test]
+    fn the_ltx_decode_tiling_boundary_is_the_machine_independent_write_bound() {
+        let caps = LTX_RESOLUTIONS.map(|(width, height)| {
+            (
+                (width, height),
+                VaeTiling::LTX.writable_frame_cap(height as i32, width as i32),
+            )
+        });
+        assert_eq!(
+            caps,
+            [
+                ((768, 512), 682),
+                ((512, 768), 682),
+                ((640, 640), 655),
+                ((1280, 704), 297),
+                ((704, 1280), 297),
+            ]
+        );
+        let (_, envelope_maximum) = LTX_FRAME_ENVELOPE;
+        for ((width, height), cap) in caps {
+            // Only the two 0.90 MP buckets can reach their cap inside the declared envelope. The
+            // others cannot tile at ANY declared geometry, on any host, for this reason.
+            let reachable = cap < i64::from(envelope_maximum);
+            assert_eq!(
+                reachable,
+                (width, height) == (1280, 704) || (width, height) == (704, 1280),
+                "{width}x{height} cap {cap} against envelope maximum {envelope_maximum}"
+            );
+        }
+    }
+
+    /// The companion behavioural half: the arm's rung FOLLOWS the engine across that boundary, in
+    /// both directions, **at a FIXED budget so both directions are asserted on every host** — a CI
+    /// runner included. `resolve` budgets against `get_memory_limit()`, so a test that resolved
+    /// against the live host would assert one thing on a 128 GiB Mac and another on a 16 GiB runner;
+    /// guarding it behind "only if the memory bound does not bind" would make it vacuous exactly
+    /// where it runs unattended.
+    #[test]
+    fn the_ltx_arm_follows_the_engine_across_the_decode_tiling_boundary() {
+        // A budget far above any single-pass cost in the declared envelope: 1280x704 x 297 costs
+        // 3.3e9 + 340 * 267,632,640 B = 87.8 GiB single-pass, and the selector's own 0.85 factor
+        // leaves 217.6 GiB here. Whatever tiles under THIS budget tiles for the write bound alone.
+        const UNCONSTRAINED_GIB: f64 = 256.0;
+        // 297 is the cap itself (a declared 10 s x 30 fps cell) and 305 is the next lattice step
+        // above it. Above the cap `budgeted_plan` tiles unconditionally — memory cannot buy it back.
+        let tiled = LtxDecodePlan::resolve_with_budget(
+            validate_ltx_geometry(1280, 704, 305).unwrap(),
+            UNCONSTRAINED_GIB,
+        )
+        .unwrap();
+        assert!(
+            tiled.tiling.is_some(),
+            "305 frames is over the 297 write cap, so no budget keeps it single-pass"
+        );
+        assert_eq!(tiled.rung(), "bounded_decode");
+        assert_eq!(
+            tiled.engaged_rungs(),
+            ["resident", "staged_residency", "bounded_decode"]
+        );
+        assert!(
+            tiled.spatial_tile_px() > 0 || tiled.temporal_tile_frames() > 0,
+            "a selected tiling must name at least one tiled axis"
+        );
+
+        // The other direction, pinned at the same fixed budget: AT the cap and with memory to spare,
+        // the decode stays single-pass. Together with the row above this is the write bound, isolated
+        // from the host.
+        let single = LtxDecodePlan::resolve_with_budget(
+            validate_ltx_geometry(1280, 704, 297).unwrap(),
+            UNCONSTRAINED_GIB,
+        )
+        .unwrap();
+        assert!(
+            single.tiling.is_none(),
+            "at the cap and inside the memory budget the decode must stay single-pass"
+        );
+        assert_eq!(single.rung(), "staged_residency");
+        assert_eq!(single.lifecycle_fault_phase(), MemoryPhase::Denoise);
+        let staged_selection = planned_selection(&ltx_request_json(1280, 704, 297)).unwrap();
+        single
+            .validate_selected_strategy(&staged_selection)
+            .unwrap();
+        // SC-19109 replaces historical host inference with an explicit provider-owned selection:
+        // the same geometry can deliberately request bounded decode with its exact carrier tuple.
+        let mut request = ltx_request_json(1280, 704, 297);
+        request["planned"]["strategy"] = json!({
+            "rung": "bounded_decode",
+            "engagedRungs": ["resident", "staged_residency", "bounded_decode"],
+            "parameters": { "decodeTileEdge": 384, "decodeOverlap": 64 }
+        });
+        let selection = planned_selection(&request).unwrap();
+        let contract = ltx_fixture_contract(Some(Quant::Q8));
+        contract.validate_selection(&selection).unwrap();
+        let attested = ltx_attested_strategy(&request, &selection, &contract).unwrap();
+        assert_eq!(attested, request["planned"]["strategy"]);
+        let explicit = LtxDecodePlan::resolve_for_selection(
+            &selection,
+            validate_ltx_geometry(1280, 704, 297).unwrap(),
+        )
+        .unwrap();
+        explicit.validate_selected_strategy(&selection).unwrap();
+        assert_eq!(explicit.lifecycle_fault_phase(), MemoryPhase::Decode);
+        assert_eq!(explicit.spatial_tile_px(), 384);
+        assert_eq!(explicit.spatial_overlap_px(), 64);
+
+        // The one-sided half of the claim, asserted rather than assumed: the write cap is a CEILING
+        // on single-pass frames, not the place tiling starts. A smaller host tiles the very same
+        // f297 geometry the row above kept single-pass — and 768x512 x 97, which is 585 frames below
+        // its 682 cap and is exactly what a hosted CI runner does to this arm's own smoke geometry.
+        // `slack` is how far each row sits below the write bound: 0 at the cap, 585 at the smoke
+        // geometry. Both tile anyway, which is the point — the write bound is not what forces it.
+        for (width, height, frames, budget_gib, slack) in [
+            (1280u32, 704u32, 297u32, 32.0f64, 0i64),
+            (768, 512, 97, 16.0, 585),
+        ] {
+            // The precondition is DERIVED, not asserted in prose: this budget must actually be below
+            // the engine's own single-pass cost, or the row proves nothing.
+            let single_pass_gib = ltx_decode_cost::single_pass_gib(width, height, frames);
+            assert!(
+                single_pass_gib > budget_gib * ltx_decode_cost::SAFETY_FACTOR,
+                "{width}x{height} f{frames}: {budget_gib} GiB does not constrain a \
+                 {single_pass_gib:.2} GiB single-pass decode, so this row would be vacuous"
+            );
+            let constrained = LtxDecodePlan::resolve_with_budget(
+                validate_ltx_geometry(width, height, frames).unwrap(),
+                budget_gib,
+            )
+            .unwrap();
+            assert!(
+                constrained.tiling.is_some(),
+                "{width}x{height} f{frames} must tile for MEMORY under a {budget_gib} GiB budget"
+            );
+            assert_eq!(constrained.rung(), "bounded_decode");
+            assert_eq!(constrained.lifecycle_fault_phase(), MemoryPhase::Decode);
+            let staged_selection =
+                planned_selection(&ltx_request_json(width, height, frames)).unwrap();
+            let mismatch = constrained
+                .validate_selected_strategy(&staged_selection)
+                .expect_err("an auto-tiled render must not attest a staged single-pass row");
+            assert!(
+                mismatch.contains("auto-selected bounded decode"),
+                "{mismatch}"
+            );
+            // The write bound PERMITTED a single pass here (`f <= cap`) and memory still tiled it.
+            assert_eq!(
+                constrained.writable_frame_cap - i64::from(frames),
+                slack,
+                "{width}x{height} f{frames} must tile with the write bound still permitting a \
+                 single pass (cap {})",
+                constrained.writable_frame_cap
+            );
+        }
+
+        // The third outcome, which CI found and this test did not originally model: below the
+        // full-output ACCUMULATOR floor (`3.3 GB + 40 B/voxel`, 13.05 GiB at the cap geometry) no
+        // tiling helps — the accumulators hold the assembled video — so the engine refuses outright
+        // before any render. A hosted macOS runner lands here at ~6 GiB of safe budget. Pinned at a
+        // fixed budget so the refusal is asserted on every host, not only on a small one.
+        const BELOW_THE_ACCUMULATOR_FLOOR_GIB: f64 = 8.0;
+        let accumulators_gib = ltx_decode_cost::accumulator_floor_gib(1280, 704, 297);
+        assert!(
+            accumulators_gib > BELOW_THE_ACCUMULATOR_FLOOR_GIB * ltx_decode_cost::SAFETY_FACTOR,
+            "this budget must sit below the {accumulators_gib:.2} GiB accumulator floor or the \
+             refusal below would be proving something else"
+        );
+        let refused = LtxDecodePlan::resolve_with_budget(
+            validate_ltx_geometry(1280, 704, 297).unwrap(),
+            BELOW_THE_ACCUMULATOR_FLOOR_GIB,
+        )
+        .expect_err("under the accumulator floor the decode must be refused, not tiled");
+        assert!(refused.contains("just for the output buffers"), "{refused}");
+        assert!(
+            refused.contains("refuses 1280x704 x 297 frames before any render"),
+            "{refused}"
+        );
+    }
+
+    /// The margin the fixed-budget injections above ride on, asserted instead of assumed.
+    ///
+    /// `run_ltx` reads the process-global MLX limit without `LTX_MEMORY_LIMIT_LOCK`, so an
+    /// injected budget below the `run_ltx` smoke geometry's accumulator floor would make the engine
+    /// refuse that geometry and replace the message those refusal tests assert. The lowest budget
+    /// injected today (8 GiB, 6.8 GiB safe) clears the 4.49 GiB floor by 1.51x — a margin that used
+    /// to be load-bearing and unstated.
+    #[test]
+    #[should_panic(expected = "accumulator floor of the 768x512 x 97 smoke geometry")]
+    fn an_injected_budget_below_the_smoke_geometrys_accumulator_floor_is_refused() {
+        // 5.2 GiB leaves 4.42 GiB safe, just under the 4.49 GiB floor. This is exactly the row a
+        // future author would add to probe a smaller host, and it must fail HERE — loudly, at the
+        // injection site — rather than intermittently in an unrelated `run_ltx` refusal test.
+        let _ =
+            LtxDecodePlan::resolve_with_budget(validate_ltx_geometry(768, 512, 97).unwrap(), 5.2);
+    }
+
+    /// The other side of that boundary: the assertion is a FLOOR, not a blanket refusal. 5.3 GiB
+    /// leaves 4.505 GiB safe against the same 4.494 GiB floor the 5.2 GiB row falls through, so the
+    /// two rows bracket it to within 0.1 GiB and neither can pass by being trivially true.
+    #[test]
+    fn an_injected_budget_just_above_the_smoke_geometrys_accumulator_floor_is_accepted() {
+        // Capture the prior limit only after `install` owns the injection lock. Reading it before
+        // the lock is a TOCTOU race: another test may temporarily expose its 32 GiB injection,
+        // restore the real host limit, and then let this test acquire the lock. CI caught exactly
+        // that 32 GiB -> 7.14 GB transition.
+        let budget = LtxInjectedBudget::install(5.3);
+        let previous = budget.previous;
+        drop(budget);
+
+        // Reacquire before observing the process-global limit. An intervening injection is allowed
+        // to run, but must finish and restore `previous` before this assertion reads the value.
+        let _restoration_guard = LTX_MEMORY_LIMIT_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(get_memory_limit(), previous);
+    }
+
+    /// The injected limit is process-global, so failing to restore it leaks into every later test.
+    #[test]
+    fn an_injected_budget_is_restored_on_the_normal_and_the_unwind_path() {
+        let budget = LtxInjectedBudget::install(32.0);
+        let previous = budget.previous;
+        assert_eq!(
+            get_memory_limit(),
+            (32.0 * ltx_decode_cost::GIB) as usize,
+            "the budget must actually be installed while the guard lives"
+        );
+        drop(budget);
+        let restoration_guard = LTX_MEMORY_LIMIT_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(get_memory_limit(), previous, "restored on the normal path");
+        drop(restoration_guard);
+        // The path a trailing `set_memory_limit(previous)` statement misses entirely — and which
+        // `unwrap_or_else(PoisonError::into_inner)` would then hide, because the poisoned lock is
+        // the only signal the leak leaves behind.
+        let unwind_budget = LtxInjectedBudget::install(32.0);
+        let unwind_previous = unwind_budget.previous;
+        let outcome = std::panic::catch_unwind(|| {
+            let _budget = unwind_budget;
+            panic!("the selector blew up mid-plan");
+        });
+        assert!(outcome.is_err(), "the closure must actually have panicked");
+        let _restoration_guard = LTX_MEMORY_LIMIT_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(
+            get_memory_limit(),
+            unwind_previous,
+            "the injected limit leaked past a panic"
+        );
+    }
+
+    /// The live host, stated as its own claim so the fixed-budget test above cannot be mistaken for
+    /// a statement about this machine.
+    ///
+    /// The cap geometry has THREE outcomes, not two, and which one a host gets is a total function
+    /// of its budget. Exactly one arm below fires on any machine, so this is host-adaptive rather
+    /// than host-conditional — nothing is skipped anywhere:
+    ///
+    /// * the full-output accumulators alone (`3.3 GB + 40 B/voxel`) exceed the budget → **refused**
+    ///   before any render. A hosted CI runner lands here: ~13 GB of buffers against a ~6 GB safe
+    ///   budget. Tiling cannot help, because the accumulators hold the assembled video.
+    /// * a single pass (`3.3 GB + 340 B/voxel`) fits → **single-pass**. This Mac lands here.
+    /// * in between → **tiled**, or refused if not even the smallest tile fits.
+    #[test]
+    fn the_ltx_arm_resolves_the_cap_geometry_against_this_hosts_live_budget() {
+        // Read the limit and resolve under the SAME lock `LtxInjectedBudget` swaps under.
+        // MLX's memory limit is process-global: without this, the boundary test's injected budget
+        // can land between the read and the resolve and this comparison reads two different hosts.
+        let guard = LTX_MEMORY_LIMIT_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let budget_gib =
+            get_memory_limit() as f64 / ltx_decode_cost::GIB * ltx_decode_cost::SAFETY_FACTOR;
+        let live = LtxDecodePlan::resolve(validate_ltx_geometry(1280, 704, 297).unwrap());
+        drop(guard);
+        let accumulators_gib = ltx_decode_cost::accumulator_floor_gib(1280, 704, 297);
+        let single_pass_gib = ltx_decode_cost::single_pass_gib(1280, 704, 297);
+        let where_we_are = format!(
+            "accumulators {accumulators_gib:.2} GiB, single-pass {single_pass_gib:.2} GiB, this \
+             host's safe budget {budget_gib:.2} GiB"
+        );
+        if accumulators_gib >= budget_gib {
+            let error = live.expect_err("the accumulators alone do not fit — this must be refused");
+            assert!(
+                error.contains("just for the output buffers"),
+                "{where_we_are}: {error}"
+            );
+        } else if single_pass_gib <= budget_gib {
+            let plan = live.unwrap_or_else(|error| panic!("{where_we_are}: {error}"));
+            assert!(plan.tiling.is_none(), "{where_we_are}");
+            assert_eq!(plan.rung(), "staged_residency");
+        } else {
+            assert!(
+                live.map_or(true, |plan| plan.tiling.is_some()),
+                "{where_we_are}: a decode over budget must not resolve single-pass"
+            );
+        }
+    }
+
+    /// AC3, and the reason the video arm is safe to add: EVERY image arm still refuses a
+    /// multi-frame geometry, before it does environment or weight work. Four of the six never
+    /// validated the axis at all before sc-18808 — they read only width/height and hardcoded
+    /// `frames: 1` into the admission context, so a `frames: 2` plan row would have rendered one
+    /// frame and recorded a geometry it was never asked for.
+    #[test]
+    fn every_image_arm_still_refuses_a_multi_frame_geometry() {
+        type Arm = fn(&Value) -> Result<Value, String>;
+        let arms: [(&str, &str, Arm); 6] = [
+            (
+                KREA_BASE_PROVIDER,
+                "MLX Krea base calibration",
+                run_krea_base,
+            ),
+            (SDXL_PROVIDER, "MLX SDXL base calibration", run_sdxl),
+            (
+                Z_IMAGE_PROVIDER,
+                "MLX Z-Image base calibration",
+                run_z_image_reference,
+            ),
+            (
+                KREA_PROVIDER,
+                "MLX Krea pose-control calibration",
+                run_krea_control,
+            ),
+            (
+                QWEN_PROVIDER,
+                "MLX Qwen base calibration",
+                run_qwen_provider,
+            ),
+            (FLUX2_PROVIDER, "MLX FLUX.2-dev calibration", run_flux2_dev),
+        ];
+        for (provider, label, arm) in arms {
+            for frames in [0_u64, 2, 97] {
+                let request = json!({
+                    "planned": {
+                        "target": {
+                            "provider": provider,
+                            "modelId": provider,
+                            "tier": "q4",
+                            "mode": "text_to_image",
+                            "overlay": if provider == KREA_PROVIDER { "control:1" } else { "none" },
+                            "geometry": { "width": 768, "height": 768, "batch": 1, "frames": frames }
+                        },
+                        "backend": "mlx",
+                        "loadShape": "deferred_materialization",
+                        "strategy": {
+                            "rung": "bounded_decode",
+                            "engagedRungs": ["resident", "bounded_decode"],
+                            "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 }
+                        },
+                        "calibrationFingerprint": "unused",
+                        "fixture": "unused"
+                    }
+                });
+                let error =
+                    arm(&request).expect_err("an image arm must refuse a multi-frame geometry");
+                assert_eq!(
+                    error,
+                    format!("{label} requires geometry.frames == 1, got {frames}"),
+                    "{provider} at frames={frames}"
+                );
+            }
+        }
+    }
+
+    /// And the still geometry itself must still get PAST the guard on every image arm, so the
+    /// refusals above are the frames axis rather than a blanket rejection.
+    #[test]
+    fn the_still_geometry_guard_is_not_a_blanket_refusal() {
+        for label in [
+            "MLX Krea base calibration",
+            "MLX SDXL base calibration",
+            "MLX Z-Image base calibration",
+            "MLX Krea pose-control calibration",
+            "MLX Qwen base calibration",
+            "MLX FLUX.2-dev calibration",
+        ] {
+            let request = json!({
+                "planned": { "target": { "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 } } }
+            });
+            assert!(
+                protocol::validate_still_geometry(&request, label).is_ok(),
+                "{label}"
+            );
+        }
+    }
+
+    /// The video output unwrapper refuses the two shapes an image provider would return, so a
+    /// misrouted still could never be recorded as a clip.
+    #[test]
+    fn the_video_unwrapper_refuses_image_and_audio_shaped_output() {
+        let frame = Image {
+            width: 2,
+            height: 1,
+            pixels: vec![0, 0, 0, 255, 255, 255],
+        };
+        assert!(video_frames(GenerationOutput::Images(vec![frame.clone()]))
+            .unwrap_err()
+            .contains("returned images, not a video clip"));
+        assert!(video_frames(GenerationOutput::Video {
+            frames: Vec::new(),
+            fps: 24,
+            audio: None,
+        })
+        .unwrap_err()
+        .contains("returned no frames"));
+        let (frames, fps, audio) = video_frames(GenerationOutput::Video {
+            frames: vec![frame],
+            fps: 25,
+            audio: None,
+        })
+        .unwrap();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(fps, 25);
+        assert!(!audio);
+    }
+
+    /// The clip comparator is per-frame and mutation-sensitive: a divergence confined to a LATE
+    /// frame must be seen, which a first-frame spot check would miss.
+    #[test]
+    fn the_clip_comparator_sees_a_late_frame_divergence() {
+        let frame = |value: u8| Image {
+            width: 2,
+            height: 2,
+            pixels: vec![value; 12],
+        };
+        let left = vec![frame(10), frame(10), frame(10)];
+        let identical = left.clone();
+        let (maximum, mean, rms) = video_max_mean_rms_abs(&left, &identical).unwrap();
+        assert_eq!((maximum, mean, rms), (0.0, 0.0, 0.0));
+        assert!(ltx_quality_passes(maximum, mean, rms));
+
+        let mut late = left.clone();
+        late[2] = frame(200);
+        let (maximum, mean, rms) = video_max_mean_rms_abs(&left, &late).unwrap();
+        assert!(maximum > LTX_MAX_THRESHOLD, "max={maximum}");
+        assert!(!ltx_quality_passes(maximum, mean, rms));
+
+        assert!(video_max_mean_rms_abs(&left, &left[..2])
+            .unwrap_err()
+            .contains("frame-count mismatch"));
+    }
+
+    #[test]
+    fn the_ltx_runtime_context_binds_the_exact_video_route_and_selection() {
+        let request = ltx_request_json(1280, 704, 305);
+        let selection = planned_selection(&request).unwrap();
+        let contract = ltx_fixture_contract(Some(Quant::Q8));
+        let calibration = contract.calibration.as_ref().unwrap();
+        let context = ltx_context(
+            selection,
+            calibration,
+            &calibration.fingerprint,
+            validate_ltx_geometry(1280, 704, 305).unwrap(),
+            64 * 1024 * 1024 * 1024,
+            1,
+        );
+        assert_eq!(context.mode.as_key(), "text_to_video");
+        assert!(context.has_phases);
+        assert_eq!(context.geometry.frames, 305);
+        assert_eq!(context.selection.strategy, MemoryStrategy::StagedResidency);
+        assert_eq!(
+            context.evidence_revision,
+            format!("sc-18946@{}", protocol::INFERENCE_PIN)
+        );
+    }
+
+    /// The staged-residency bound is a real inequality over real byte counts, not a comment.
+    #[test]
+    fn safetensors_bytes_sums_only_weight_shards_and_fails_closed_when_empty() {
+        let root = std::env::temp_dir().join(format!(
+            "sc-18808-ltx-shards-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(safetensors_bytes(&root)
+            .unwrap_err()
+            .contains("no .safetensors weights"));
+        std::fs::write(root.join("config.json"), b"{}").unwrap();
+        assert!(
+            safetensors_bytes(&root).is_err(),
+            "a config is not a weight shard"
+        );
+        std::fs::write(root.join("model-00001-of-00002.safetensors"), vec![0_u8; 7]).unwrap();
+        std::fs::write(root.join("model-00002-of-00002.safetensors"), vec![0_u8; 5]).unwrap();
+        assert_eq!(safetensors_bytes(&root).unwrap(), 12);
         std::fs::remove_dir_all(root).ok();
     }
 }

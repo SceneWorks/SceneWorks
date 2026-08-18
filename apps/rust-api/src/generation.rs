@@ -784,6 +784,11 @@ pub(crate) async fn create_video_job(
         &job_payload,
         &model_manifest_entry,
     )?;
+    ensure_video_model_available_on_platform(
+        &model_id,
+        &model_manifest_entry,
+        video_job_platform(&state),
+    )?;
     // The model's declared `limits.hardMaxDuration`, enforced at enqueue (sc-12297). It had ten
     // declarations and zero readers, so `validate_video_job`'s blanket `1..=30` was the ONLY
     // ceiling: a raw API/MCP/preset-replay caller could ask mochi_1 (cap 5) for 30s @ 30fps, and
@@ -883,6 +888,27 @@ pub(crate) async fn create_video_job(
     )
     .await?;
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
+}
+
+pub(crate) fn video_job_platform(_state: &AppState) -> &'static str {
+    #[cfg(test)]
+    if let Some(platform) = *_state.video_platform_override.lock() {
+        return platform;
+    }
+    std::env::consts::OS
+}
+
+pub(crate) fn ensure_video_model_available_on_platform(
+    model_id: &str,
+    model_manifest_entry: &Value,
+    platform: &str,
+) -> Result<(), ApiError> {
+    if crate::models::video_model_withdrawn_on_platform(model_id, model_manifest_entry, platform) {
+        return Err(ApiError::bad_request(format!(
+            "Model {model_id} is available only on macOS and cannot create video jobs on {platform}."
+        )));
+    }
+    Ok(())
 }
 
 /// `POST /api/v1/audio/jobs` — the SceneWorks Audio Studio job path (epic 13400 / sc-13404), the

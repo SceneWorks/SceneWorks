@@ -5339,6 +5339,85 @@ async fn cancel_pending_jobs_cancels_every_queued_item_but_not_active_ones() {
 }
 
 #[tokio::test]
+async fn prioritize_jobs_moves_selected_pending_work_ahead_for_the_next_claim() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({
+            "workerId": "worker-priority",
+            "gpuId": "gpu-0",
+            "gpuName": "GPU 0",
+            "capabilities": ["image_detail"],
+            "loadedModels": []
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, first) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "image_detail",
+            "projectId": "project-1",
+            "payload": { "prompt": "first" },
+            "requestedGpu": "auto"
+        }),
+    )
+    .await;
+    let (_, selected) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "image_detail",
+            "projectId": "project-1",
+            "payload": { "prompt": "selected" },
+            "requestedGpu": "auto"
+        }),
+    )
+    .await;
+
+    let selected_id = selected["id"].as_str().expect("selected id");
+    let (status, prioritized) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/prioritize",
+        json!({ "jobIds": [selected_id] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(prioritized["prioritized"], 1);
+    assert_eq!(prioritized["jobs"][0]["id"], selected["id"]);
+    assert!(prioritized["jobs"][0]["queueRank"]
+        .as_i64()
+        .is_some_and(|rank| rank > 0));
+
+    let (status, claimed) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({ "workerId": "worker-priority" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(claimed["job"]["id"], selected["id"]);
+    let (_, first_after) = request(
+        app,
+        "GET",
+        &format!("/api/v1/jobs/{}", first["id"].as_str().expect("first id")),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(first_after["status"], "queued");
+}
+
+#[tokio::test]
 async fn clear_single_job_soft_hides_only_that_terminal_job() {
     // sc-12231 / issue #1556: POST /api/v1/jobs/:id/clear (the per-card ×) drops one
     // terminal job from the queue and leaves its siblings alone.
@@ -7415,6 +7494,179 @@ async fn preset_overridden_video_model_carries_its_own_manifest_entry() {
     assert_eq!(
         entry["limits"]["requiresDimensionsMultipleOf"], 16,
         "wrong dimension floor => silently renders off-bucket geometry (sc-11993)"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn mac_only_video_is_rejected_before_enqueue_on_direct_preset_and_replay_routes() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    let default_video_model = crate::defaults::default_video_model();
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "models": [
+            {
+              "id": "__DEFAULT_VIDEO_MODEL__",
+              "name": "Base LTX",
+              "family": "ltx-video",
+              "type": "video",
+              "adapter": "ltx_video",
+              "capabilities": ["text_to_video"],
+              "downloads": [{ "provider": "huggingface", "repo": "owner/base", "files": ["*.safetensors"], "default": true }],
+              "paths": {}, "defaults": {}, "limits": {}, "ui": { "label": "Base LTX" }
+            },
+            {
+              "id": "ltx_2_3_eros",
+              "name": "LTX Eros",
+              "family": "ltx-video",
+              "type": "video",
+              "macOnly": true,
+              "adapter": "ltx_video",
+              "capabilities": ["text_to_video"],
+              "downloads": [{ "provider": "huggingface", "repo": "owner/eros", "files": ["*.safetensors"], "default": true }],
+              "paths": {}, "defaults": {}, "limits": {}, "ui": { "label": "LTX Eros" }
+            }
+          ]
+        }
+        "#
+        .replace("__DEFAULT_VIDEO_MODEL__", &default_video_model),
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{
+          "schemaVersion": 1,
+          "models": [{
+            "id": "ltx_2_3_eros",
+            "macOnly": false,
+            "downloadable": true,
+            "usable": true
+          }]
+        }"#,
+    )
+    .expect("user override attempt writes");
+    std::fs::write(
+        config_dir.join("builtin.recipe-presets.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "presets": [{
+            "id": "eros_preset",
+            "name": "Eros Preset",
+            "workflow": "text_to_video",
+            "model": "ltx_2_3_eros",
+            "defaults": {},
+            "prompt": { "prefix": "cinematic" }
+          }]
+        }
+        "#,
+    )
+    .expect("builtin presets writes");
+    std::fs::write(
+        config_dir.join("user.recipe-presets.jsonc"),
+        r#"{ "schemaVersion": 1, "presets": [] }"#,
+    )
+    .expect("user presets writes");
+
+    let (app, state) =
+        create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+    *state.video_platform_override.lock() = Some("windows");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Platform Withdrawal Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+
+    for payload in [
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a fox",
+            "model": "ltx_2_3_eros"
+        }),
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a fox",
+            "recipePresetId": "eros_preset"
+        }),
+    ] {
+        let (status, body) = request(app.clone(), "POST", "/api/v1/video/jobs", payload).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("only on macOS"));
+    }
+    let (_, jobs) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert!(jobs.as_array().expect("jobs array").is_empty());
+
+    // Base LTX stays cross-platform, while the same Eros route remains valid on macOS.
+    let (status, base_job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a fox",
+            "model": default_video_model
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{base_job}");
+    *state.video_platform_override.lock() = Some("macos");
+    let (status, eros_job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a fox",
+            "model": "ltx_2_3_eros"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{eros_job}");
+
+    // A legacy Eros job and a model-changing replay are both rejected before a new row is queued.
+    *state.video_platform_override.lock() = Some("linux");
+    for (job_id, payload_changes) in [
+        (eros_job["id"].as_str().unwrap(), json!({})),
+        (
+            base_job["id"].as_str().unwrap(),
+            json!({ "model": "ltx_2_3_eros" }),
+        ),
+    ] {
+        for operation in ["retry", "duplicate"] {
+            let (status, body) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{job_id}/{operation}"),
+                json!({ "payloadChanges": payload_changes }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {body}");
+            assert!(body["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("only on macOS"));
+        }
+    }
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(
+        jobs.as_array().expect("jobs array").len(),
+        2,
+        "only the explicitly valid base and macOS Eros jobs may exist"
     );
 }
 

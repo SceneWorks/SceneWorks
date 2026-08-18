@@ -145,48 +145,6 @@
       ]
     },
     {
-      "modelId": "ltx_2_3_eros",
-      "mode": "extend_clip",
-      "engineIds": [
-        "ltx_2_3_distilled"
-      ]
-    },
-    {
-      "modelId": "ltx_2_3_eros",
-      "mode": "first_last_frame",
-      "engineIds": [
-        "ltx_2_3_distilled"
-      ]
-    },
-    {
-      "modelId": "ltx_2_3_eros",
-      "mode": "image_to_video",
-      "engineIds": [
-        "ltx_2_3_distilled"
-      ]
-    },
-    {
-      "modelId": "ltx_2_3_eros",
-      "mode": "replace_person",
-      "engineIds": [
-        "ltx_2_3_distilled"
-      ]
-    },
-    {
-      "modelId": "ltx_2_3_eros",
-      "mode": "text_to_video",
-      "engineIds": [
-        "ltx_2_3_distilled"
-      ]
-    },
-    {
-      "modelId": "ltx_2_3_eros",
-      "mode": "video_bridge",
-      "engineIds": [
-        "ltx_2_3_distilled"
-      ]
-    },
-    {
       "modelId": "scail2_14b",
       "mode": "animate_character",
       "engineIds": [

@@ -319,6 +319,8 @@ pub struct AppState {
         Arc<Mutex<Option<crate::models::ModelSizeEstimateTestHook>>>,
     #[cfg(test)]
     pub(crate) model_size_estimate_disabled_override: Arc<Mutex<Option<bool>>>,
+    #[cfg(test)]
+    pub(crate) video_platform_override: Arc<Mutex<Option<&'static str>>>,
     /// sc-10452 — memoized family detection for adapters scanned out of the operator's
     /// external model roots, keyed by each file's size + mtime. `lora_catalog` runs on
     /// every job-create; without this, every generation would re-parse every ComfyUI

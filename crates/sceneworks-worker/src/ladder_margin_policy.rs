@@ -105,6 +105,18 @@ pub const CANDLE_ESTIMATE_MARGIN: f64 = 0.04;
 /// the estimate margin, not this rule.
 pub const ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE: bool = true;
 
+/// Ratified exemption for a prediction that evaluates **every phase independently**, adds that
+/// phase's observed maximum fit/held-out absolute residual, and only then takes the maximum over
+/// phases at the request geometry. Such an envelope does not extrapolate from one measured
+/// binding-phase label: whichever phase binds is already represented by its own conservative law.
+///
+/// This exemption is deliberately structural, not provider-wide. It applies only to the fitted
+/// video-curve candidate assembled by `video_admission::fitted_or_floor_phase_peaks`; scalar floors,
+/// single-phase fits, curves without residual bounds, and any prediction that reuses a binding
+/// phase remain governed by [`ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE`]. The ordinary
+/// backend estimate margin remains applied after the max-over-phases envelope.
+pub const RESIDUAL_BOUNDED_MAX_OVER_PHASES_EXEMPT_FROM_BINDING_PHASE_PIN: bool = true;
+
 /// Structural invariants of the policy, enforced at COMPILE TIME (a violating edit fails
 /// `cargo build`, not just a test lane), independent of the current corpus: margins never dip
 /// under their backend's floor, estimates are strictly wider than stale-measured, the
@@ -119,6 +131,7 @@ const _: () = {
     assert!(MLX_STALE_MEASURED_MARGIN >= CANDLE_STALE_MEASURED_MARGIN);
     assert!(MLX_ESTIMATE_MARGIN >= CANDLE_ESTIMATE_MARGIN);
     assert!(ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE);
+    assert!(RESIDUAL_BOUNDED_MAX_OVER_PHASES_EXEMPT_FROM_BINDING_PHASE_PIN);
 };
 
 #[cfg(test)]
