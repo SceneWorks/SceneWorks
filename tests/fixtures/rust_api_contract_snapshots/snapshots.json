@@ -2611,6 +2611,7 @@
         "availability": "missing",
         "configuredLibraryPath": "<runtime-root>/data/cache/huggingface/hub",
         "expectedLibrary": null,
+        "libraryPresent": false,
         "localArtifact": null,
         "requirements": [],
         "schemaVersion": 1
@@ -2682,6 +2683,7 @@
         "availability": "missing",
         "configuredLibraryPath": "<runtime-root>/data/cache/huggingface/hub",
         "expectedLibrary": null,
+        "libraryPresent": false,
         "localArtifact": null,
         "requirements": [],
         "schemaVersion": 1
