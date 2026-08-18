@@ -1309,6 +1309,7 @@
                 "edit_image",
                 "character_image"
               ],
+              "catalogScope": "builtin",
               "defaults": {
                 "height": 1024,
                 "width": 1024
@@ -1431,6 +1432,7 @@
                     "edit_image",
                     "character_image"
                   ],
+                  "catalogScope": "builtin",
                   "defaults": {
                     "height": 1024,
                     "width": 1024
@@ -1568,6 +1570,7 @@
             "edit_image",
             "character_image"
           ],
+          "catalogScope": "builtin",
           "defaults": {
             "height": 1024,
             "width": 1024
@@ -1661,6 +1664,7 @@
                 "image_detail",
                 "character_image"
               ],
+              "catalogScope": "builtin",
               "defaults": {
                 "count": 4,
                 "guidanceScale": 7.0,
@@ -1829,6 +1833,779 @@
                 "memoryStrategyContract": {
                   "abi": 1,
                   "implementations": [
+                    {
+                      "engagedRungs": [
+                        "resident",
+                        "bounded_decode"
+                      ],
+                      "fingerprint": "800d06acf579a36e604f91955fd6a6852ec70bc39701f7a320f1fdd2bf5ff29d",
+                      "modes": [
+                        "text_to_image"
+                      ],
+                      "overlays": [
+                        "none"
+                      ],
+                      "parameterRanges": {
+                        "decodeGeometryPolicies": [
+                          {
+                            "artifact": {
+                              "fingerprint": "SceneWorks/realvisxl-mlx@e40202d63baef826c7df95a639a811698c1178d2:q4",
+                              "repository": "SceneWorks/realvisxl-mlx",
+                              "revision": "e40202d63baef826c7df95a639a811698c1178d2",
+                              "variant": "q4"
+                            },
+                            "backend": "mlx",
+                            "disposition": {
+                              "kind": "admitted"
+                            },
+                            "family": "sdxl",
+                            "fixtures": [
+                              {
+                                "denseOutputSha256": "c174c6301a9b44bc4a5f1c6316f61cee696abf68dd3c56347768400520f509d8",
+                                "observedError": 15,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "5bdcc08bacaf617afb883b3be04a7ea365f4afffaf9985ebb36b030b70601281",
+                                "seed": 7,
+                                "tiledOutputSha256": "43214e39e6b338cc1ef6f94cbcd409b67631cde5a5cd771eed1ee17ce5bb5fff"
+                              },
+                              {
+                                "denseOutputSha256": "2fa3f31a62dc0148b44fce07e7e18b7f0b57529e68a70eabe5424d09b1c3eb45",
+                                "observedError": 33,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "943e2955076ee578d57a1d09b0eac824194127403d63a11efd75bdd307ba98c4",
+                                "seed": 99,
+                                "tiledOutputSha256": "72839e3843a5979d224b4b573b5ec4ba8703def176725970518a5fb0940a66eb"
+                              },
+                              {
+                                "denseOutputSha256": "05b2116218dbc319db1e98c22c39de262c666ac8c93a1efd4559888abf74236c",
+                                "observedError": 26,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "d8bc80944aeb711e01dce0143fe2691a8390aaba97d3172fa369216aae3997e4",
+                                "seed": 1234,
+                                "tiledOutputSha256": "34e76690cdc5df873ace6eba1690ffa5a20a62034c141cf727e59a66bf527946"
+                              },
+                              {
+                                "denseOutputSha256": "53dcfcf894561790694d73793d335ed7c4cdcb39111b65c4a4cfb0f48af9cfc8",
+                                "observedError": 15,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "c1ed83c2ef83dcf10248cde7c2a3893a4edb7a916521ff8c2aad1b4454a96b3e",
+                                "seed": 424242,
+                                "tiledOutputSha256": "813712b9d846fba11c90f1b45bdb6c686ae6be0e4ef2855d35b983f5eec226ae"
+                              },
+                              {
+                                "denseOutputSha256": "bf272f7abfb31d90a6194b0c36e699ae00fbdbd6f07d946c75f4b2327151742f",
+                                "observedError": 21,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "1113598ed75b7079f6095bcfc71ce9e385d45815a8252a897dd6cb23759abe9f",
+                                "seed": 20260805,
+                                "tiledOutputSha256": "548c7b61d74820ed58f4e7dfb273fcfd82fe1ea4ad1e7ff623ff718e8e324026"
+                              }
+                            ],
+                            "geometry": {
+                              "batch": 1,
+                              "frames": 1,
+                              "height": 1344,
+                              "referenceCount": 0,
+                              "width": 768
+                            },
+                            "implementationFingerprint": "aba13e9e6407a15a6666a35e30148d8b1e07e8be80657f05583a63f881dca96f",
+                            "loadShape": "deferred_materialization",
+                            "maximumError": 48,
+                            "metric": "max_abs_rgb_u8",
+                            "mode": "text_to_image",
+                            "overlap": 128,
+                            "overlay": null,
+                            "productionEvidenceSha256": "5ac793fc04418603ff877f18342cbf64973006b425ae16d05f5c3e29e6a3622f",
+                            "qualityAbi": 2,
+                            "resolvedRoute": "realvisxl",
+                            "tier": "q4",
+                            "tileEdge": 640,
+                            "usePid": false
+                          },
+                          {
+                            "artifact": {
+                              "fingerprint": "SceneWorks/realvisxl-mlx@e40202d63baef826c7df95a639a811698c1178d2:q4",
+                              "repository": "SceneWorks/realvisxl-mlx",
+                              "revision": "e40202d63baef826c7df95a639a811698c1178d2",
+                              "variant": "q4"
+                            },
+                            "backend": "mlx",
+                            "disposition": {
+                              "kind": "admitted"
+                            },
+                            "family": "sdxl",
+                            "fixtures": [
+                              {
+                                "denseOutputSha256": "7af7b9afecde0ea7df90935c1ad9e7e1077122fd5dad6afe36873c8b661745a2",
+                                "observedError": 19,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "898c2a5092aff3195a07d3a24517c03152dd5bacd96e25dc3e3038b5cfe0fdc1",
+                                "seed": 7,
+                                "tiledOutputSha256": "49156b57f2a3b433e78cafaace6251751609d5dc1a63f2f0e0b3cd4a57bf7905"
+                              },
+                              {
+                                "denseOutputSha256": "ee14b52371f50af7b495c8985186d7154b7f158849e0f361843e724e4d8862c5",
+                                "observedError": 48,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "6970484a325beffcd0f619898143bcc1e5b5233cba0a27188c5ec3a3fd99233a",
+                                "seed": 99,
+                                "tiledOutputSha256": "980d3b990f52d54d15e386abad60d69386c14f96f106330696a54c08e81824f3"
+                              },
+                              {
+                                "denseOutputSha256": "d5e0fb806e610c9e75c6b937d541700e11c4c83123dca7cd9499160e78731e2a",
+                                "observedError": 10,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "8ab2071f1e3373d04529c61a556822653872adeaed2eb8ff9bd5d1ce43484653",
+                                "seed": 1234,
+                                "tiledOutputSha256": "2fd16c91c0bb6b78c45dc3536d6ec8e53d4c6c082adb682657bf0032b85aad17"
+                              },
+                              {
+                                "denseOutputSha256": "a9d34898dae1842d5f0e3fdc72e695d5b84b9049278dafe0139ad8d2cb799315",
+                                "observedError": 13,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "89a217d2bac39aedc96c44f3d4ee1d944e170d2ce6a0106af5535848a66237e2",
+                                "seed": 424242,
+                                "tiledOutputSha256": "68935f2d07592d8129aa5faa7811d1e6e98b30b6b3da535079c06fc76d698be3"
+                              },
+                              {
+                                "denseOutputSha256": "5c3f054edfad3e2449caf97fa960ec9885482a78dedbdb56ce5b9884b6cc8390",
+                                "observedError": 22,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "29798d3c3e761cc8e35836a9c0eebdd8b785e7d37ea6604cba510a2c5b489a53",
+                                "seed": 20260805,
+                                "tiledOutputSha256": "86de39f2322e5b0a24fef98485b81bb576b10815f6ad382d9322914f3c8b6c4a"
+                              }
+                            ],
+                            "geometry": {
+                              "batch": 1,
+                              "frames": 1,
+                              "height": 1216,
+                              "referenceCount": 0,
+                              "width": 832
+                            },
+                            "implementationFingerprint": "66b7570423564bc57a4e3ac27b1d6100367895c1f6349da51564bfe8913c108d",
+                            "loadShape": "deferred_materialization",
+                            "maximumError": 48,
+                            "metric": "max_abs_rgb_u8",
+                            "mode": "text_to_image",
+                            "overlap": 160,
+                            "overlay": null,
+                            "productionEvidenceSha256": "c5c47de37bf1479e79da9adc9063c31a94ac86914791aa681989e96176860e5a",
+                            "qualityAbi": 2,
+                            "resolvedRoute": "realvisxl",
+                            "tier": "q4",
+                            "tileEdge": 768,
+                            "usePid": false
+                          },
+                          {
+                            "artifact": {
+                              "fingerprint": "SceneWorks/realvisxl-mlx@e40202d63baef826c7df95a639a811698c1178d2:q4",
+                              "repository": "SceneWorks/realvisxl-mlx",
+                              "revision": "e40202d63baef826c7df95a639a811698c1178d2",
+                              "variant": "q4"
+                            },
+                            "backend": "mlx",
+                            "disposition": {
+                              "kind": "admitted"
+                            },
+                            "family": "sdxl",
+                            "fixtures": [
+                              {
+                                "denseOutputSha256": "3f42e5b1be028a8a403373e899d26f66f993eb901ba6926e76a16faed40f8fb7",
+                                "observedError": 14,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "6cca135dfcd8222199c9bf3e085dd928394f674c40c6722a4b02d508188940cf",
+                                "seed": 7,
+                                "tiledOutputSha256": "bc1d9f33efcd4a3980309ada5ef753b085a5b9e947dd0e4419c8f4c4c60790a5"
+                              },
+                              {
+                                "denseOutputSha256": "b0dac0f2969299f8fd5c1e6713ca5cac6168fd71c137c468e1c5dfc1a790ab45",
+                                "observedError": 12,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "4d3f65b1a9f5b13828a4b0541f80b34122d6c1bbbb4653e66581f869ecff153e",
+                                "seed": 99,
+                                "tiledOutputSha256": "711cbce3d389db89adfcc04a1d144538b18f361a588bf616403e7afba3d76dfa"
+                              },
+                              {
+                                "denseOutputSha256": "907d7b6e053ee6d23a2f280b52bb3dfdf82b86b1fd35b34033b013bcec8ca672",
+                                "observedError": 20,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "ed56bf999864b9de9fb8e5d38f7967c57773ea4ddffbe52f7db34cf112102360",
+                                "seed": 1234,
+                                "tiledOutputSha256": "5d8d720647a2bd3c27dc2a7355ea3e7364b947eecdeeb025a10c6b8ca8f1f940"
+                              },
+                              {
+                                "denseOutputSha256": "b8dbf663bd206023e2d45cf9de06c712b2eb5fa8d0736f8966c2dc228686d9f3",
+                                "observedError": 21,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "dced66921b1702aed2414bd7b137aeb8a8a2f2e2aeb82cf0b4d550534bdfd760",
+                                "seed": 424242,
+                                "tiledOutputSha256": "9be04aa27546ebd438764b9e3d9124447b0268ecd1d5bfe4e7cb081b290e6e9e"
+                              },
+                              {
+                                "denseOutputSha256": "90f072bda83b6ec9e883325a24d9543dfda6a4a6df57dfd8db694e4918d0f7db",
+                                "observedError": 23,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "5a530ef54113469f59a454c3bfcaca9be5e6d6956518752b77060b9e82e4fbce",
+                                "seed": 20260805,
+                                "tiledOutputSha256": "ba8c41ac4d4e28d28ef4ef971444f6fa088d776d45b2afcd4f45746b895b07ec"
+                              }
+                            ],
+                            "geometry": {
+                              "batch": 1,
+                              "frames": 1,
+                              "height": 1152,
+                              "referenceCount": 0,
+                              "width": 896
+                            },
+                            "implementationFingerprint": "aba13e9e6407a15a6666a35e30148d8b1e07e8be80657f05583a63f881dca96f",
+                            "loadShape": "deferred_materialization",
+                            "maximumError": 48,
+                            "metric": "max_abs_rgb_u8",
+                            "mode": "text_to_image",
+                            "overlap": 160,
+                            "overlay": null,
+                            "productionEvidenceSha256": "8426b8f7688c9e9e62af5ec2c649e4b14db6776a68660362242d41180be5e3b1",
+                            "qualityAbi": 2,
+                            "resolvedRoute": "realvisxl",
+                            "tier": "q4",
+                            "tileEdge": 768,
+                            "usePid": false
+                          },
+                          {
+                            "artifact": {
+                              "fingerprint": "SceneWorks/realvisxl-mlx@e40202d63baef826c7df95a639a811698c1178d2:q4",
+                              "repository": "SceneWorks/realvisxl-mlx",
+                              "revision": "e40202d63baef826c7df95a639a811698c1178d2",
+                              "variant": "q4"
+                            },
+                            "backend": "mlx",
+                            "disposition": {
+                              "kind": "admitted"
+                            },
+                            "family": "sdxl",
+                            "fixtures": [
+                              {
+                                "denseOutputSha256": "f34f8cd72fd9b85252908b7237854ed2fd02afc3d08d20be94704950263e7ba3",
+                                "observedError": 18,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "831a404302ce9d29a0ff46f3e99369140b48f2de33a4c40d020cacfc5882ed71",
+                                "seed": 7,
+                                "tiledOutputSha256": "149e6088bb730915e01fe4aaeaf7ebad5246cd61bcc91744fdb35168073b3290"
+                              },
+                              {
+                                "denseOutputSha256": "feaf567feb9a8443bb21df9e689f651dcb981820c1152bfc896c021ed8e90825",
+                                "observedError": 33,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "8fa31bfdc205d16d3d2d3f18ea9fb98efd7817193706034794c92e7798d224c2",
+                                "seed": 99,
+                                "tiledOutputSha256": "022e3707ec33da6fa9e08e059068267e62974b93c8e519cfbd0b3aa3fbe1d64f"
+                              },
+                              {
+                                "denseOutputSha256": "dfd66beb72aa23ce5e2b9e12f91723a131db091910990347120b1b8f879a3ead",
+                                "observedError": 13,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "4090ec1eb25b7951866aa4ffb1010286e0273d4f20e4f229a79cb1d8d4008545",
+                                "seed": 1234,
+                                "tiledOutputSha256": "c349df94c781644b0f0c99144fcf46bc5563226902df30c3c6eab1f9b581806f"
+                              },
+                              {
+                                "denseOutputSha256": "d5e6f8ec5040468dea6c4f20f17e748b9ce8edcb763e39d89833ec7dc1e59bb8",
+                                "observedError": 13,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "18739dc2c4b3614fdad5a3b87c275a88c822eb558a671e0859bf86ddb028cfa7",
+                                "seed": 424242,
+                                "tiledOutputSha256": "7cdc1cf82e9f5648fc1b0307de64200b8af892d6218f0818f6e41e16289960fe"
+                              },
+                              {
+                                "denseOutputSha256": "65a72a2f28a413d6880600f2ed937d8f15e674418097186f6f455ed16a9e86f8",
+                                "observedError": 11,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "bd09027cfd18551d9f222297b9d86a142be4131626aa0b4a12b0559cd267d2e9",
+                                "seed": 20260805,
+                                "tiledOutputSha256": "e5555ade13ef34a65f4db210f888b6dd72bd5e6dbd2b8d59f237d68910b853ff"
+                              }
+                            ],
+                            "geometry": {
+                              "batch": 1,
+                              "frames": 1,
+                              "height": 1024,
+                              "referenceCount": 0,
+                              "width": 1024
+                            },
+                            "implementationFingerprint": "aba13e9e6407a15a6666a35e30148d8b1e07e8be80657f05583a63f881dca96f",
+                            "loadShape": "deferred_materialization",
+                            "maximumError": 48,
+                            "metric": "max_abs_rgb_u8",
+                            "mode": "text_to_image",
+                            "overlap": 192,
+                            "overlay": null,
+                            "productionEvidenceSha256": "89cba3170756c98db741353f2eca1d3bbe68383ffafd5bd0a260f8199ce7a4cf",
+                            "qualityAbi": 2,
+                            "resolvedRoute": "realvisxl",
+                            "tier": "q4",
+                            "tileEdge": 896,
+                            "usePid": false
+                          },
+                          {
+                            "artifact": {
+                              "fingerprint": "SceneWorks/realvisxl-mlx@e40202d63baef826c7df95a639a811698c1178d2:q4",
+                              "repository": "SceneWorks/realvisxl-mlx",
+                              "revision": "e40202d63baef826c7df95a639a811698c1178d2",
+                              "variant": "q4"
+                            },
+                            "backend": "mlx",
+                            "disposition": {
+                              "kind": "admitted"
+                            },
+                            "family": "sdxl",
+                            "fixtures": [
+                              {
+                                "denseOutputSha256": "db549febcd95aa3ddfdb722a00cc0cfe273323a16f214bc76f034774659ffbca",
+                                "observedError": 11,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "5103d6821934c06f43d8f5a485fed8b7fad9969f3a306b384dca4008db4f8efa",
+                                "seed": 7,
+                                "tiledOutputSha256": "2bf722e9ba66cfcc515029395ac8e9c278fa2757f2788f38de7f20232ef02052"
+                              },
+                              {
+                                "denseOutputSha256": "3c9b31f7897bbcccf6369e2f4f2f7f87dd877f62f71170936b081a94ed2c365d",
+                                "observedError": 14,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "5f8be164ffedffa95e30a04d710b3fbb00382498e4d0148b6abbc188ccb75ac5",
+                                "seed": 99,
+                                "tiledOutputSha256": "513f0c9f51cc8569f9dacee9bfa8bab37f574202fc4024c41dd23fe608dc6ca1"
+                              },
+                              {
+                                "denseOutputSha256": "a087b77929c28a6322e4ecac43e102d9824b9c0fbc5b2907ff36bfb18a10c7b3",
+                                "observedError": 14,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "df129370738e93215c66b5dc750060aea22d3b789a68db8cee90396fbbfb5371",
+                                "seed": 1234,
+                                "tiledOutputSha256": "4a040a07b53851182f88b953297561ceee1aea9c2b480616e2074084e42cd553"
+                              },
+                              {
+                                "denseOutputSha256": "82e731d75d289bf925f6cadacb87668898034811767db90ea4ea3625b4c7e6f9",
+                                "observedError": 23,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "4e0379b622d2648a1a7e6d5fea92dff7d81962eb08df4a437cfb016455669199",
+                                "seed": 424242,
+                                "tiledOutputSha256": "a35a097f94822a85701843b13c45b81b49d0ac0e589c11c3746b08dcb34a6419"
+                              },
+                              {
+                                "denseOutputSha256": "adcf836a26e75ac71a20df0d63fbe08323a76c5f0fab5e28af7bbe9767c3b329",
+                                "observedError": 13,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "c0bc78468d82ec03ceaa3074869a0d772b0577d13f35f06b4f56e5ce538b2256",
+                                "seed": 20260805,
+                                "tiledOutputSha256": "d25f4d7a8786d592caf3a233ae1367e190097da534304907b384b7bf071ae4aa"
+                              }
+                            ],
+                            "geometry": {
+                              "batch": 1,
+                              "frames": 1,
+                              "height": 896,
+                              "referenceCount": 0,
+                              "width": 1152
+                            },
+                            "implementationFingerprint": "aba13e9e6407a15a6666a35e30148d8b1e07e8be80657f05583a63f881dca96f",
+                            "loadShape": "deferred_materialization",
+                            "maximumError": 48,
+                            "metric": "max_abs_rgb_u8",
+                            "mode": "text_to_image",
+                            "overlap": 160,
+                            "overlay": null,
+                            "productionEvidenceSha256": "42e9cde3d09f17678eae98a9dc1b452ff2d138028ffd0f0581ddb956a27d5600",
+                            "qualityAbi": 2,
+                            "resolvedRoute": "realvisxl",
+                            "tier": "q4",
+                            "tileEdge": 768,
+                            "usePid": false
+                          },
+                          {
+                            "artifact": {
+                              "fingerprint": "SceneWorks/realvisxl-mlx@e40202d63baef826c7df95a639a811698c1178d2:q4",
+                              "repository": "SceneWorks/realvisxl-mlx",
+                              "revision": "e40202d63baef826c7df95a639a811698c1178d2",
+                              "variant": "q4"
+                            },
+                            "backend": "mlx",
+                            "disposition": {
+                              "kind": "admitted"
+                            },
+                            "family": "sdxl",
+                            "fixtures": [
+                              {
+                                "denseOutputSha256": "59f5ff6cf29df5c80f6e12d80cdb2c40ac77e76737e3ae3d68c7337dc33f9c18",
+                                "observedError": 13,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "f7e27867ba9a2bef42f5458c22b469c88baed3666ca56304a52a6763c60fa7dd",
+                                "seed": 7,
+                                "tiledOutputSha256": "b0a7f6c4f5076ef66f56adce1c103ee7e51feda9ee105e996504cdfac09f7114"
+                              },
+                              {
+                                "denseOutputSha256": "c37fb1fa60d7513525d0285e43f84f11da014a301da1c1082da5aabf3282336e",
+                                "observedError": 14,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "f71f4e507f068a39c78fa8c60b006fafc8d43db39281b5c86edf5f25eea5fe1c",
+                                "seed": 99,
+                                "tiledOutputSha256": "b355b287a80691ca7cca909fba249d292d0627b37a810d903499870471205323"
+                              },
+                              {
+                                "denseOutputSha256": "c93b18bba11d63a70d9218f7ff337259605309833d674a4f88bc1c11ce7bba15",
+                                "observedError": 12,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "d456d5799b5696d68794faeb0cfee4a91cf3f33601c3b8521a351b4e6cc36395",
+                                "seed": 1234,
+                                "tiledOutputSha256": "0f32a8f27f0cd9d5f334c62947372c405390b684f7a7f3377bba6fa2df1aac8e"
+                              },
+                              {
+                                "denseOutputSha256": "e8baa4e9caa5c73df8ee3240e38be3e369cce2ba096a88130597db5da9b071c2",
+                                "observedError": 30,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "f288219dd9043be00b96734e8e59dc88bb4c7c11a604d05be4463f55568b0169",
+                                "seed": 424242,
+                                "tiledOutputSha256": "e65e0e6a19912a44e0efb7558757ddcd500ee743205864c39ae0783ef28a5a58"
+                              },
+                              {
+                                "denseOutputSha256": "19e5ca99e6969feb0ab0fab69a3d84995e6addc26ce6e6643b7bb00a31909625",
+                                "observedError": 18,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "8bbe596a4aef8840640f485ac2cfca506bfa7b52adb930689041a4119ff997ec",
+                                "seed": 20260805,
+                                "tiledOutputSha256": "6c5e5d9f5bc97651cdf183f039ba06baadb0f57636c438870804fc8b968f9ceb"
+                              }
+                            ],
+                            "geometry": {
+                              "batch": 1,
+                              "frames": 1,
+                              "height": 832,
+                              "referenceCount": 0,
+                              "width": 1216
+                            },
+                            "implementationFingerprint": "aba13e9e6407a15a6666a35e30148d8b1e07e8be80657f05583a63f881dca96f",
+                            "loadShape": "deferred_materialization",
+                            "maximumError": 48,
+                            "metric": "max_abs_rgb_u8",
+                            "mode": "text_to_image",
+                            "overlap": 160,
+                            "overlay": null,
+                            "productionEvidenceSha256": "9a904f1a0f9a9cb58563fa21aae52b58509d7d97ccbd3a7b570a051fcd3d5a83",
+                            "qualityAbi": 2,
+                            "resolvedRoute": "realvisxl",
+                            "tier": "q4",
+                            "tileEdge": 704,
+                            "usePid": false
+                          },
+                          {
+                            "artifact": {
+                              "fingerprint": "SceneWorks/realvisxl-mlx@e40202d63baef826c7df95a639a811698c1178d2:q4",
+                              "repository": "SceneWorks/realvisxl-mlx",
+                              "revision": "e40202d63baef826c7df95a639a811698c1178d2",
+                              "variant": "q4"
+                            },
+                            "backend": "mlx",
+                            "disposition": {
+                              "kind": "admitted"
+                            },
+                            "family": "sdxl",
+                            "fixtures": [
+                              {
+                                "denseOutputSha256": "493a02e8d3e2c5a9ba1885eecde4136b1a75c85bf65808b6f298c7e6d07133a6",
+                                "observedError": 27,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "63a4b38ae3915a9b68c1cb573b9f5ce980e30fc38dcba14853f4ef390bc79551",
+                                "seed": 7,
+                                "tiledOutputSha256": "2521dab7e8353f7c6229bda9a3eab7a259aeaaa23c34c47b809c09074bd61ab4"
+                              },
+                              {
+                                "denseOutputSha256": "036b57932210ebd710763de741c863c5c577ca4a0e9dc3edd849a573e61852f6",
+                                "observedError": 22,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "c2f9887b031a00dfa3ce1e03959383fa3c674a6d104001d00e5a7cb3b02f8ffd",
+                                "seed": 99,
+                                "tiledOutputSha256": "8a2616210e86a6128dccaa49e3ce3a440639946bbf39ddae35170256cbd9d641"
+                              },
+                              {
+                                "denseOutputSha256": "af0170013b468bc289d511e3edf7f57b0eb57697d1fd2ab81dd26f44cd8e4abb",
+                                "observedError": 15,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "1fa65b2f66f0333b404d8581cbcd4430784805ae234d8323138d9fc1e7ffdb2d",
+                                "seed": 1234,
+                                "tiledOutputSha256": "f69f1cbce0a5d2294e1c57654c238e78d3873ab743f738d7f35b2a3376e03e6e"
+                              },
+                              {
+                                "denseOutputSha256": "6cd87e9fc86327c945c7d453befdd3929a9320abd35c4236553a82f2021c1ecd",
+                                "observedError": 18,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "857602cabf91c210e4a1ec0819f92725b16120d5e49bfab74d5a3943a2c0a181",
+                                "seed": 424242,
+                                "tiledOutputSha256": "bbc13bf025dbfc5f2e6e3080202d2ae7d49e593428754c9286e4c1c27848c26e"
+                              },
+                              {
+                                "denseOutputSha256": "8cd60e24d861a4be74f2d078e1f9de1e08350675e770c44deefd78f5b2ed8aa3",
+                                "observedError": 15,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "ab5d5eecc753f9199d9853bfcfc4166cad27b3d06d62ef8e83443a0d8f303296",
+                                "seed": 20260805,
+                                "tiledOutputSha256": "7ce30e541384cb181a284fd9104aea2de1fde2842c012f7bcf5352682e6d7dac"
+                              }
+                            ],
+                            "geometry": {
+                              "batch": 1,
+                              "frames": 1,
+                              "height": 1280,
+                              "referenceCount": 0,
+                              "width": 1280
+                            },
+                            "implementationFingerprint": "aba13e9e6407a15a6666a35e30148d8b1e07e8be80657f05583a63f881dca96f",
+                            "loadShape": "deferred_materialization",
+                            "maximumError": 48,
+                            "metric": "max_abs_rgb_u8",
+                            "mode": "text_to_image",
+                            "overlap": 240,
+                            "overlay": null,
+                            "productionEvidenceSha256": "380fc9c8cfb459f49e105f186ade98528f2bb575c0df9fbad48988e014e77316",
+                            "qualityAbi": 2,
+                            "resolvedRoute": "realvisxl",
+                            "tier": "q4",
+                            "tileEdge": 1120,
+                            "usePid": false
+                          },
+                          {
+                            "artifact": {
+                              "fingerprint": "SceneWorks/realvisxl-mlx@e40202d63baef826c7df95a639a811698c1178d2:q4",
+                              "repository": "SceneWorks/realvisxl-mlx",
+                              "revision": "e40202d63baef826c7df95a639a811698c1178d2",
+                              "variant": "q4"
+                            },
+                            "backend": "mlx",
+                            "disposition": {
+                              "kind": "admitted"
+                            },
+                            "family": "sdxl",
+                            "fixtures": [
+                              {
+                                "denseOutputSha256": "7793743e1dacd51f1d7f88a13b362d2f646998ebe78b70c21d7944d457fa6a59",
+                                "observedError": 21,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "d1c369f530ef70a0bf9025aeed1526f7ee305d44291cc0ebf9f08827f6cb7ab1",
+                                "seed": 7,
+                                "tiledOutputSha256": "907b0a856d7d7b445d235a23b8abe0665b0a06a2775c0da2baf8657b7f9db97a"
+                              },
+                              {
+                                "denseOutputSha256": "5007c706e67748e0c61f606e05370650a23a12c20614123974d7f34d0dfa78a6",
+                                "observedError": 26,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "48c5bd29fc840be85488b1c9f6c2492ae4ab853f934c1a56ec59f8e20baeb707",
+                                "seed": 99,
+                                "tiledOutputSha256": "8f248bed53e4d48639851e4597f95ee9c3bf4030ccbe43b2f062b4842642b1fa"
+                              },
+                              {
+                                "denseOutputSha256": "75cdef72b7e54ee2322fcfba24ddd13f76c0b27fab098e4d4367d3987b695faf",
+                                "observedError": 14,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "cea15dc886dd6cfbc342ce7a9732abc106b9dbd26d46fe1fc7d45ddf6313d6aa",
+                                "seed": 1234,
+                                "tiledOutputSha256": "52d3b9aaf0f990126049cf51a0aa4f78da64d462d569038a156abff4f385e9d7"
+                              },
+                              {
+                                "denseOutputSha256": "b4c0d4766d7700d9c0ea6a64e46e2b00af005a7a59ccba9758736fc444544606",
+                                "observedError": 17,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "62817ff492967b2c37b6720e33626dad7919ec3f747f635888f57d8f022889a8",
+                                "seed": 424242,
+                                "tiledOutputSha256": "d1e8a81e082d28dcb3f952f9ea8ac0d9070cf34f0cec77233c3e83d0643f3d85"
+                              },
+                              {
+                                "denseOutputSha256": "1597ce3a58e98c067ae27a65e0148977559f0b404444273de09b62192d30d590",
+                                "observedError": 24,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "3002776a2764445751ff3e62796d733f17c0fdb1168d66f0d89c8e87092655c0",
+                                "seed": 20260805,
+                                "tiledOutputSha256": "569ca695a9a0eb46596a842b5adc59f7d8007bc67d5d6f13ca2920729645b326"
+                              }
+                            ],
+                            "geometry": {
+                              "batch": 1,
+                              "frames": 1,
+                              "height": 768,
+                              "referenceCount": 0,
+                              "width": 1344
+                            },
+                            "implementationFingerprint": "aba13e9e6407a15a6666a35e30148d8b1e07e8be80657f05583a63f881dca96f",
+                            "loadShape": "deferred_materialization",
+                            "maximumError": 48,
+                            "metric": "max_abs_rgb_u8",
+                            "mode": "text_to_image",
+                            "overlap": 128,
+                            "overlay": null,
+                            "productionEvidenceSha256": "fcceb180747cd5e4414b1f1cf9f98506ca17f8237b01129995bd416b7b340f6c",
+                            "qualityAbi": 2,
+                            "resolvedRoute": "realvisxl",
+                            "tier": "q4",
+                            "tileEdge": 640,
+                            "usePid": false
+                          },
+                          {
+                            "artifact": {
+                              "fingerprint": "SceneWorks/realvisxl-mlx@e40202d63baef826c7df95a639a811698c1178d2:q4",
+                              "repository": "SceneWorks/realvisxl-mlx",
+                              "revision": "e40202d63baef826c7df95a639a811698c1178d2",
+                              "variant": "q4"
+                            },
+                            "backend": "mlx",
+                            "disposition": {
+                              "kind": "admitted"
+                            },
+                            "family": "sdxl",
+                            "fixtures": [
+                              {
+                                "denseOutputSha256": "bf324ac90948762c9c6778163b08a89587d8bfab205a2880699f7f664dea05b4",
+                                "observedError": 17,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "7facece515d4f233155dfd46e20db07fe15a88479a95a6d828edeb1293eea941",
+                                "seed": 7,
+                                "tiledOutputSha256": "669fdbdec0b68de6ae4eb90b15ac84e5ba48d6a5f90b79033d532888e283d01d"
+                              },
+                              {
+                                "denseOutputSha256": "94387442a58dc486219f3a808ddad8389bd7d6f31c89e43840dfdeb264dd43ba",
+                                "observedError": 14,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "78838f9698ba462a3baef690329377dbf86e00f55bb3feebfa80b9d9134f672b",
+                                "seed": 99,
+                                "tiledOutputSha256": "e743c87bacd947da9d3a66a55c4f1b4fd5e93dc307e2ea770f33c6e6d2191b6e"
+                              },
+                              {
+                                "denseOutputSha256": "f3eaa340546d2bf17bfe0ba71cc1c58f7b26e0a260777ab6cf390c24fdd689f8",
+                                "observedError": 13,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "cc1202aa2c7ba3e9416199cdefecabb0841062e0ea2aed141e831846e0236be9",
+                                "seed": 1234,
+                                "tiledOutputSha256": "ae421e6b6446de90f4b694a14455e8c4a46acae31c0e6975972447fa94112d54"
+                              },
+                              {
+                                "denseOutputSha256": "873e5b2576ac038d95055be93f4d3b66ef7b2676b33e7051b7ded214f54cea90",
+                                "observedError": 13,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "efe96766bd0b9a81a21ba07a65ff4e06563d362e0d386d738415cdb570dce16f",
+                                "seed": 424242,
+                                "tiledOutputSha256": "a201151784720cfc5755063c647ca2b5e3e2843d0e8b552d6453bc0b1e35b950"
+                              },
+                              {
+                                "denseOutputSha256": "0ce58579fd826547147a1df0a3f65ce0511e046de36e7acc8fae1bbc20d0142c",
+                                "observedError": 16,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "a68c0b075fdbe9757f45abd20d5e049587de939501bd3c60a809a16a2e26736c",
+                                "seed": 20260805,
+                                "tiledOutputSha256": "9a519a413c69a3112b26b580864616c52ed720738ec95af2ebb4b504cc0639b4"
+                              }
+                            ],
+                            "geometry": {
+                              "batch": 1,
+                              "frames": 1,
+                              "height": 1536,
+                              "referenceCount": 0,
+                              "width": 1536
+                            },
+                            "implementationFingerprint": "aba13e9e6407a15a6666a35e30148d8b1e07e8be80657f05583a63f881dca96f",
+                            "loadShape": "deferred_materialization",
+                            "maximumError": 48,
+                            "metric": "max_abs_rgb_u8",
+                            "mode": "text_to_image",
+                            "overlap": 288,
+                            "overlay": null,
+                            "productionEvidenceSha256": "0621fdf17d9db54699c0cfa77438b632890fab5de1a0c327bdccd2e4b81563a4",
+                            "qualityAbi": 2,
+                            "resolvedRoute": "realvisxl",
+                            "tier": "q4",
+                            "tileEdge": 1344,
+                            "usePid": false
+                          },
+                          {
+                            "artifact": {
+                              "fingerprint": "SceneWorks/realvisxl-mlx@e40202d63baef826c7df95a639a811698c1178d2:q4",
+                              "repository": "SceneWorks/realvisxl-mlx",
+                              "revision": "e40202d63baef826c7df95a639a811698c1178d2",
+                              "variant": "q4"
+                            },
+                            "backend": "mlx",
+                            "disposition": {
+                              "kind": "admitted"
+                            },
+                            "family": "sdxl",
+                            "fixtures": [
+                              {
+                                "denseOutputSha256": "c18763fe494644ec458d37c307d3a16c94e9da3367c2294cf93a378b7af7269f",
+                                "observedError": 24,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "29595e4585bd4d46a98a6527680c013d9d7f6ad60217f38c1a09bb8959d20305",
+                                "seed": 7,
+                                "tiledOutputSha256": "d88ec2bcedac47173397aefbe9ddd7ebcd52e08492cb62d8711bc0e2d99474b1"
+                              },
+                              {
+                                "denseOutputSha256": "29eaf42cbad90f21c7d02c25ad14b206982f6ed514586d3707b2e0538f3d0e9d",
+                                "observedError": 20,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "806eacd5ffa2b95a26ff64ab4b368ee6d9d92a4b25a3ba5012169778b9ffac03",
+                                "seed": 99,
+                                "tiledOutputSha256": "d3d5107310d8a8bbc7d6f204ac72d928e49c18f9af1bc9de3fea6f082c0256fc"
+                              },
+                              {
+                                "denseOutputSha256": "8e36f4667010128d26ead2164e58840f385c6e65f706a861f20a12e399063ecc",
+                                "observedError": 27,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "282a3315c40a432fd3d9a7637681ddcaaa4ed6b8e6d5d22bc3b793159acbc396",
+                                "seed": 1234,
+                                "tiledOutputSha256": "897ad7adc51dca129bda65fcc8fcfdb690381643a686fc15536de8c625b3d3a8"
+                              },
+                              {
+                                "denseOutputSha256": "539667180356635ae4a0219b453ca9f8e0322d876da8c4f96a48da998e022c3f",
+                                "observedError": 47,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "a9148dd6cadcd78f472bc891cbbb41046a82e590b770aab04691b27902b8d413",
+                                "seed": 424242,
+                                "tiledOutputSha256": "45fe415d88e7f9d3ae8a469bbecdc517f3125f6f35ad94103c2d593cd1d639d7"
+                              },
+                              {
+                                "denseOutputSha256": "7653a578d1d2033063a99987589d770f1d240ce80838538d79eee07ba2908c19",
+                                "observedError": 20,
+                                "productionLatentProvenance": "realvisxl@e40202d63baef826c7df95a639a811698c1178d2 q4 production schedule=30 guidance=7 sampler=euler_ancestral prompt=p9-red-fox-v1",
+                                "productionLatentSha256": "2cadb32aca014d3fb9b666f099d197e720675af4d48943f97605716633b49f46",
+                                "seed": 20260805,
+                                "tiledOutputSha256": "a43d6f45bbf691836d36f5b3932a52db599bc6b7869bc52298c3d39cc00fdc25"
+                              }
+                            ],
+                            "geometry": {
+                              "batch": 1,
+                              "frames": 1,
+                              "height": 2048,
+                              "referenceCount": 0,
+                              "width": 2048
+                            },
+                            "implementationFingerprint": "aba13e9e6407a15a6666a35e30148d8b1e07e8be80657f05583a63f881dca96f",
+                            "loadShape": "deferred_materialization",
+                            "maximumError": 48,
+                            "metric": "max_abs_rgb_u8",
+                            "mode": "text_to_image",
+                            "overlap": 384,
+                            "overlay": null,
+                            "productionEvidenceSha256": "92c87d6eaa4b8f44a0721ff15fba9eab65542e6cf263f8451a00a3ac9541fcf7",
+                            "qualityAbi": 2,
+                            "resolvedRoute": "realvisxl",
+                            "tier": "q4",
+                            "tileEdge": 1792,
+                            "usePid": false
+                          }
+                        ]
+                      },
+                      "parameters": {},
+                      "rung": "bounded_decode",
+                      "source": "inference:crates/media/mlx-gen/mlx-gen-sdxl/src/memory_strategy.rs",
+                      "tiers": [
+                        "q4"
+                      ]
+                    },
                     {
                       "engagedRungs": [
                         "resident",
@@ -2800,6 +3577,7 @@
       "modelManifestEntries": [
         {
           "capabilities": [],
+          "catalogScope": "builtin",
           "defaults": {},
           "downloads": [
             {
@@ -2997,6 +3775,7 @@
       "modelManifestEntries": [
         {
           "capabilities": [],
+          "catalogScope": "builtin",
           "defaults": {},
           "downloads": [
             {
@@ -3042,6 +3821,7 @@
         },
         {
           "capabilities": [],
+          "catalogScope": "builtin",
           "defaults": {},
           "downloads": [
             {
@@ -3231,6 +4011,7 @@
           "video_bridge",
           "replace_person"
         ],
+        "catalogScope": "builtin",
         "defaults": {
           "duration": 6,
           "fps": 25,
