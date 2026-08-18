@@ -36,7 +36,7 @@ use sceneworks_core::model_artifacts::local_preference::{
 use sceneworks_core::model_artifacts::resolved_cache::{ResolvedCacheLease, ResolvedCacheStore};
 use sceneworks_core::model_artifacts::ModelArtifactResolver;
 use serde_json::json;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::Level;
 
 #[derive(Debug)]
@@ -758,6 +758,11 @@ fn payload_model_entries(payload: &JsonObject) -> Vec<&serde_json::Value> {
 /// that may omit the HF artifact contract. They must have no download descriptors at all and
 /// every concrete path they expose must pass the worker's existing app-managed confinement
 /// check. Deliberately per-entry: one valid primary carrier cannot hide an unconfined auxiliary.
+///
+/// "Concrete path" means the fields that really name a location — `modelPath`, `installedPath`,
+/// every value of the `paths` locator map, `source.path`, and each component's `path` — and
+/// nothing else. Provenance fields that merely *describe* where the model came from are not
+/// filesystem inputs and are not confined (sc-20524).
 fn entry_is_provably_non_hf_local(
     entry: &serde_json::Value,
     settings: &Settings,
@@ -775,16 +780,26 @@ fn entry_is_provably_non_hf_local(
             paths.push(path);
         }
     }
-    for object_key in ["paths", "source"] {
-        paths.extend(
-            entry
-                .get(object_key)
-                .and_then(serde_json::Value::as_object)
-                .into_iter()
-                .flat_map(|object| object.values())
-                .filter_map(serde_json::Value::as_str),
-        );
-    }
+    // `paths` is a locator map — every value in it is a place on disk (`{ "model": … }`).
+    paths.extend(
+        entry
+            .get("paths")
+            .and_then(serde_json::Value::as_object)
+            .into_iter()
+            .flat_map(|object| object.values())
+            .filter_map(serde_json::Value::as_str),
+    );
+    // `source`, by contrast, is a PROVENANCE record, and only its `path` names a location:
+    // `provider` is a literal ("local", "huggingface", "url"), `repo` is a repository id or
+    // null, `url` is a URL. sc-20524 — confining every value in this object as a filesystem
+    // path resolved `"local"` against the process cwd and rejected EVERY user-imported model
+    // ("non-HF model source must be inside an app-managed directory") before any loader ran.
+    paths.extend(
+        entry
+            .get("source")
+            .and_then(|source| source.get("path"))
+            .and_then(serde_json::Value::as_str),
+    );
     paths.extend(
         entry
             .get("components")
@@ -798,9 +813,38 @@ fn entry_is_provably_non_hf_local(
         return Ok(false);
     }
     for path in paths {
-        crate::paths::normalize_app_managed_model_path(settings, path, "non-HF model source")?;
+        confine_entry_locator(settings, path)?;
     }
     Ok(true)
+}
+
+/// Confine ONE filesystem locator taken from a manifest entry.
+///
+/// A relative locator is anchored on `settings.data_dir`, never on the process cwd: manifest
+/// locators are written relative to the data dir (the model-import job records
+/// `source.path = "models/imports/<name>"`), and the worker's cwd is an unrelated, unstable
+/// directory that made every such locator fail confinement. This cannot widen the admitted set —
+/// the data dir is already an allowed root, and a `..` walking out of it still resolves outside
+/// every root and is still rejected, which is what keeps a forged "local" entry out.
+fn confine_entry_locator(settings: &Settings, raw: &str) -> WorkerResult<()> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(WorkerError::InvalidPayload(
+            "non-HF model source is required.".to_owned(),
+        ));
+    }
+    let candidate = Path::new(trimmed);
+    let anchored = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        settings.data_dir.join(candidate)
+    };
+    crate::paths::normalize_app_managed_model_path(
+        settings,
+        &anchored.to_string_lossy(),
+        "non-HF model source",
+    )?;
+    Ok(())
 }
 
 fn unavailable(detail: impl Into<String>) -> WorkerError {
@@ -2461,6 +2505,171 @@ mod tests {
             );
             // No downloads AND no paths proves nothing: fail closed.
             assert!(RuntimeSourceGuard::begin(&JobType::ImageGenerate, &bare, &settings).is_err());
+        });
+    }
+
+    /// The FULL shape the model-import job writes (`apps/rust-api/src/models.rs`): an absolute
+    /// `paths.model` install dir PLUS a `source` PROVENANCE block carrying a data-dir-relative
+    /// `path`, a `provider` literal, a `repo` that is null for a file import, and a `url`.
+    fn imported_entry(data_dir: &Path, id: &str) -> Value {
+        let relative = format!("models/imports/{id}");
+        let install = data_dir.join(&relative);
+        std::fs::create_dir_all(&install).unwrap();
+        std::fs::write(install.join("model.safetensors"), b"weights").unwrap();
+        json!({
+            "id": id,
+            "name": id,
+            "type": "image",
+            "family": "krea_2",
+            "downloads": [],
+            "source": {
+                "provider": "local",
+                "repo": Value::Null,
+                "path": relative,
+                "url": "https://example.invalid/kreamania.safetensors",
+            },
+            "files": ["model.safetensors"],
+            "paths": { "model": install },
+        })
+    }
+
+    /// sc-20524 — a `source` block is provenance, not a path set. `provider` ("local"), `repo`
+    /// and `url` are identifiers; only `source.path` names a location, and it is written
+    /// data-dir-relative. Confining every `source` value as a filesystem path resolved `"local"`
+    /// against the process cwd, so EVERY user-imported model failed the pre-loader guard with
+    /// "non-HF model source must be inside an app-managed directory".
+    #[test]
+    fn imported_entry_source_provenance_is_not_confined_as_a_path_set() {
+        let temp = TempDir::new().unwrap();
+        let settings = settings(temp.path().join("data"));
+        let library = temp.path().join("external-hf");
+        let payload = json!({
+            "model": "kreamania_v1",
+            "modelManifestEntry": imported_entry(&settings.data_dir, "kreamania_v1"),
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        with_library(&library, || {
+            RuntimeSourceGuard::begin(&JobType::ImageGenerate, &payload, &settings).unwrap();
+        });
+    }
+
+    /// The whole reported population: every imported KreaMania checkpoint must clear the guard.
+    #[test]
+    fn every_imported_kreamania_checkpoint_clears_the_non_hf_guard() {
+        let temp = TempDir::new().unwrap();
+        let settings = settings(temp.path().join("data"));
+        let library = temp.path().join("external-hf");
+        with_library(&library, || {
+            for id in [
+                "kreamania_v1",
+                "kreamania_v2",
+                "kreamania_v3",
+                "kreamania_v4_int8",
+                "kreamania_v5",
+                "kreamania_v6",
+            ] {
+                let payload = json!({
+                    "model": id,
+                    "modelManifestEntry": imported_entry(&settings.data_dir, id),
+                })
+                .as_object()
+                .unwrap()
+                .clone();
+                RuntimeSourceGuard::begin(&JobType::ImageGenerate, &payload, &settings)
+                    .unwrap_or_else(|error| panic!("{id} must clear the guard: {error}"));
+            }
+        });
+    }
+
+    /// Reading only `source.path` must not become "read nothing": a `source.path` that escapes
+    /// the app-managed roots is still a rejection, and a benign-looking `source` block never
+    /// launders an entry whose real `paths` point outside.
+    #[test]
+    fn source_path_is_still_confined_and_cannot_launder_an_outside_entry() {
+        let temp = TempDir::new().unwrap();
+        let settings = settings(temp.path().join("data"));
+        let library = temp.path().join("external-hf");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("model.safetensors"), b"outside").unwrap();
+        let carrier = |entry: Value| {
+            json!({ "modelManifestEntry": entry })
+                .as_object()
+                .unwrap()
+                .clone()
+        };
+        // `..` out of the data dir through the relative locator.
+        let escaping_relative = carrier(json!({
+            "id": "escaping-relative",
+            "downloads": [],
+            "source": { "provider": "local", "path": "../outside" },
+        }));
+        // An absolute `source.path` outside every root.
+        let escaping_absolute = carrier(json!({
+            "id": "escaping-absolute",
+            "downloads": [],
+            "source": { "provider": "local", "path": outside },
+        }));
+        // Provenance that says "local" while the actual weights live outside.
+        let laundered = carrier(json!({
+            "id": "laundered",
+            "downloads": [],
+            "source": { "provider": "local", "repo": Value::Null, "path": "models/imports/ok" },
+            "paths": { "model": outside },
+        }));
+        with_library(&library, || {
+            for (label, payload) in [
+                ("escaping relative source.path", &escaping_relative),
+                ("absolute outside source.path", &escaping_absolute),
+                ("outside paths.model", &laundered),
+            ] {
+                assert!(
+                    RuntimeSourceGuard::begin(&JobType::ImageGenerate, payload, &settings).is_err(),
+                    "{label} must still be rejected"
+                );
+            }
+        });
+    }
+
+    /// Confinement posture for the two neighbouring classes is unchanged: an HF-backed entry is
+    /// judged by its downloads (its `source` provenance is never confined at all), and an entry
+    /// under a declared external root still passes on its real paths.
+    #[test]
+    fn hf_backed_and_external_root_entries_keep_their_posture() {
+        let temp = TempDir::new().unwrap();
+        let (settings, library, mut payload) = installed_model(&temp);
+        let outside = temp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        // Provenance on an HF-backed entry never reaches the non-HF confinement branch.
+        payload["modelManifestEntry"]["source"] =
+            json!({ "provider": "huggingface", "repo": "guardfx/model", "path": outside });
+        with_library(&library, || {
+            let guard =
+                RuntimeSourceGuard::begin(&JobType::ImageGenerate, &payload, &settings).unwrap();
+            assert_eq!(
+                guard.resolutions()[0].availability,
+                ModelAvailability::ExternalReady
+            );
+        });
+
+        let comfy = temp.path().join("comfy/models/checkpoints");
+        std::fs::create_dir_all(&comfy).unwrap();
+        let mut external = settings;
+        external.external_model_roots = vec![temp.path().join("comfy")];
+        let payload = json!({
+            "modelManifestEntry": {
+                "id": "comfy",
+                "downloads": [],
+                "paths": { "model": comfy },
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        with_library(&library, || {
+            RuntimeSourceGuard::begin(&JobType::ImageGenerate, &payload, &external).unwrap();
         });
     }
 
