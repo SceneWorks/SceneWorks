@@ -310,6 +310,18 @@ pub struct AppState {
     pub(crate) workflow_strip_slots: Arc<Semaphore>,
     // sc-8870 (F-068): per-peer-IP failed-token throttle for the auth oracle.
     pub(crate) auth_throttle: Arc<AuthThrottle>,
+    /// The ONE resolved-model cache session this API process holds (sc-19711).
+    ///
+    /// `ResolvedCacheStore::open` takes a session slot — a `sessions/<id>/` directory plus its own
+    /// exclusive lock file — and the store's design is that a slot belongs to a PROCESS for that
+    /// process's lifetime, with dead processes' slots reclaimed by a later `recover()`. Opening a
+    /// store per HTTP request would therefore leave a fresh, permanently-held slot behind on every
+    /// pin, preview and removal the UI performs, and nothing would clear them until a worker next
+    /// recovered. The handle is created lazily on the first mutating request so that a deployment
+    /// which only ever reads status never materializes the cache root as a side effect.
+    pub(crate) resolved_cache_session: Arc<
+        AsyncMutex<Option<sceneworks_core::model_artifacts::resolved_cache::ResolvedCacheStore>>,
+    >,
     pub(crate) manifest_cache: Arc<Mutex<ManifestCache>>,
     pub(crate) manifest_write_locks: Arc<Mutex<HashMap<PathBuf, Arc<AsyncMutex<()>>>>>,
     /// One generation-keyed install-state snapshot shared by `/models`, recipe

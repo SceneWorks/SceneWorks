@@ -14,9 +14,9 @@ pub use materialization::{
 #[path = "resolved_cache/retention.rs"]
 mod retention;
 pub use retention::{
-    EvictedRecord, EvictionCause, ManualRemovalOutcome, ManualRemovalPreview, ReconciliationReport,
-    ResolvedCacheRetention, RetainedRecord, RetentionCheckpointOutcome, RetentionHold,
-    RetentionReport, SourceLifecycleSelector,
+    EvictedRecord, EvictionCause, ManualRemovalOutcome, ManualRemovalPins, ManualRemovalPreview,
+    ReconciliationReport, ResolvedCacheRetention, RetainedRecord, RetentionCheckpointOutcome,
+    RetentionHold, RetentionReport, SourceLifecycleSelector,
 };
 
 use crate::model_artifacts::{
@@ -169,24 +169,69 @@ fn parse_optional_u64(
     }
 }
 
+/// Whether a healthy store REFUSED a request, or a broken one could not answer it. Carried on the
+/// error itself rather than recovered by matching on its message, so an HTTP surface can answer
+/// 4xx and 5xx correctly without a second, drifting classification built out of string comparisons.
+///
+/// The line is drawn at "is anything actually wrong with the machine":
+///
+/// * [`Request`](Self::Request) — the store is intact and is declining THIS request: a malformed
+///   cache key, an entry it does not hold, or an entry whose own sanctioned state (pinned, leased,
+///   being materialized, being evicted) forbids the operation. Nothing is broken, and the reply
+///   tells the caller what to change.
+/// * [`Internal`](Self::Internal) — the store could not answer at all: IO faults, lock-file
+///   failures, clock failures, damaged journals and unreadable tombstones. Reporting these as
+///   client errors is what sends an operator to fix their request while the real fault sits on the
+///   host, and it hides genuine damage from anything watching 5xx rates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResolvedCacheErrorKind {
+    /// An intact store declining this particular request.
+    Request,
+    /// A store or host that could not answer. Not caused by, and not fixable from, the request.
+    Internal,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ResolvedCacheError(String);
+pub struct ResolvedCacheError {
+    message: String,
+    kind: ResolvedCacheErrorKind,
+}
 
 impl ResolvedCacheError {
+    /// The default construction. Unattributed failures are [`ResolvedCacheErrorKind::Internal`] on
+    /// purpose: a new failure path that nobody classified must not silently start reporting host
+    /// faults as the caller's mistake.
     fn new(message: impl Into<String>) -> Self {
-        Self(message.into())
+        Self {
+            message: message.into(),
+            kind: ResolvedCacheErrorKind::Internal,
+        }
+    }
+
+    /// An intact store declining this request. Used only where nothing is wrong with the store or
+    /// the host — a malformed key, an entry that is not held, or an entry state that forbids the
+    /// operation.
+    fn request(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            kind: ResolvedCacheErrorKind::Request,
+        }
+    }
+
+    pub fn kind(&self) -> ResolvedCacheErrorKind {
+        self.kind
     }
 
     /// True only for the journal read failure that proves the entry retains no recoverable
     /// state — never for a transient, environmental, or fail-closed refusal.
     pub fn is_unrecoverable_metadata(&self) -> bool {
-        self.0 == BOTH_METADATA_SLOTS_CORRUPT
+        self.message == BOTH_METADATA_SLOTS_CORRUPT
     }
 }
 
 impl std::fmt::Display for ResolvedCacheError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.0)
+        formatter.write_str(&self.message)
     }
 }
 
@@ -194,7 +239,7 @@ impl std::error::Error for ResolvedCacheError {}
 
 impl From<std::io::Error> for ResolvedCacheError {
     fn from(error: std::io::Error) -> Self {
-        Self(error.to_string())
+        Self::new(error.to_string())
     }
 }
 
@@ -368,18 +413,28 @@ impl ResolvedCacheStore {
     /// usage. Missing cache roots are an empty cache; unmanaged or invalid roots still fail
     /// closed. This is the catalog/preflight read path (sc-19708): discovery must never stamp
     /// usage or take a session slot.
+    ///
+    /// Read paths use [`EntryListing::Inspect`]: identity, shape, confinement, file presence and
+    /// sizes are still proven, but bundle bytes are not re-hashed. Re-hashing every complete
+    /// bundle here would put gigabytes of I/O behind a catalog GET (and behind any status poll),
+    /// and it would prove nothing a read surface may act on — the runtime load path
+    /// ([`Self::acquire_complete`]) still re-hashes before handing an artifact to a loader.
     pub fn enumerate_existing(
         data_dir: &Path,
     ) -> Result<Vec<ResolvedCacheEntrySummary>, ResolvedCacheError> {
-        match Self::open_read_only(data_dir)? {
-            Some(store) => store.enumerate(),
-            None => Ok(Vec::new()),
-        }
+        Self::open_for_inspection(data_dir)?
+            .map_or_else(|| Ok(Vec::new()), |store| store.list(EntryListing::Inspect))
     }
 
-    /// The read-only inspection handle behind [`Self::enumerate_existing`]: no runtime session, no
-    /// session lock, no usage stamping. `None` when no cache has ever been initialized here.
-    fn open_read_only(data_dir: &Path) -> Result<Option<Self>, ResolvedCacheError> {
+    /// Read-only handle onto an already-initialized cache, or `None` when no cache root exists.
+    /// Never creates the root, never takes a session slot, never writes.
+    ///
+    /// sc-19707 introduced the same handle independently as a private `open_read_only`; the two
+    /// bodies were identical, so they are ONE function here. The public name is kept because the
+    /// API's cache-status surface needs it from outside this crate, and every caller — the
+    /// catalog/preflight read, the status read, and the local-tier scan below — wants exactly the
+    /// same no-session, no-usage, no-write handle.
+    pub fn open_for_inspection(data_dir: &Path) -> Result<Option<Self>, ResolvedCacheError> {
         let root = data_dir.join("models").join("resolved");
         if !root.exists() {
             return Ok(None);
@@ -417,7 +472,7 @@ impl ResolvedCacheStore {
     /// rejection is a torn/absent/unverifiable entry, which is a fallback rather than a report, and
     /// is logged at debug with the reason instead of being swallowed silently.
     pub fn valid_local_artifacts(data_dir: &Path) -> LocalArtifactScan {
-        let store = match Self::open_read_only(data_dir) {
+        let store = match Self::open_for_inspection(data_dir) {
             Ok(Some(store)) => store,
             Ok(None) => return LocalArtifactScan::default(),
             Err(error) => {
@@ -731,7 +786,26 @@ impl ResolvedCacheStore {
         Ok(result)
     }
 
+    /// Full runtime listing: complete entries are re-hashed, and any entry that fails validation
+    /// fails the whole listing. Recovery, staging cleanup and byte accounting depend on that
+    /// strictness, so it is the internal default.
     pub fn enumerate(&self) -> Result<Vec<ResolvedCacheEntrySummary>, ResolvedCacheError> {
+        self.list(EntryListing::Runtime)
+    }
+
+    /// Read-only listing for status/inspection surfaces. Identity, shape, confinement, file
+    /// presence and sizes are still proven; bundle bytes are not re-hashed, and an entry that
+    /// fails validation degrades to [`ResolvedCacheEntryState::Corrupt`] instead of erasing the
+    /// whole listing — a status surface has to be able to *label* the damaged entry rather than
+    /// report an empty cache.
+    pub fn inspect(&self) -> Result<Vec<ResolvedCacheEntrySummary>, ResolvedCacheError> {
+        self.list(EntryListing::Inspect)
+    }
+
+    fn list(
+        &self,
+        listing: EntryListing,
+    ) -> Result<Vec<ResolvedCacheEntrySummary>, ResolvedCacheError> {
         let mut entries = Vec::new();
         for item in std::fs::read_dir(self.inner.root.join("entries"))? {
             let item = item?;
@@ -748,15 +822,26 @@ impl ResolvedCacheStore {
                 .ok_or_else(|| ResolvedCacheError::new("invalid resolved-cache entry name"))?
                 .to_owned();
             let metadata_lock = self.lock_metadata(&digest)?;
+            let corrupt = |digest: &str| ResolvedCacheEntrySummary {
+                cache_key: format!("sha256:{digest}"),
+                state: ResolvedCacheEntryState::Corrupt,
+                metadata: None,
+            };
             let summary = match self.read_metadata_unlocked(&digest) {
                 Ok(JournalRead::Valid { metadata, .. }) => {
-                    if metadata.state == ResolvedCacheEntryState::Complete {
-                        validate_complete_metadata(self, &metadata)?;
-                    }
-                    ResolvedCacheEntrySummary {
-                        cache_key: metadata.cache_key.clone(),
-                        state: metadata.state.clone(),
-                        metadata: Some(*metadata),
+                    let validated = if metadata.state == ResolvedCacheEntryState::Complete {
+                        validate_complete_metadata_inner(self, &metadata, listing.verification())
+                    } else {
+                        Ok(())
+                    };
+                    match validated {
+                        Ok(()) => ResolvedCacheEntrySummary {
+                            cache_key: metadata.cache_key.clone(),
+                            state: metadata.state.clone(),
+                            metadata: Some(*metadata),
+                        },
+                        Err(error) if listing == EntryListing::Runtime => return Err(error),
+                        Err(_) => corrupt(&digest),
                     }
                 }
                 Ok(JournalRead::Evicted { .. }) => ResolvedCacheEntrySummary {
@@ -764,16 +849,7 @@ impl ResolvedCacheStore {
                     state: ResolvedCacheEntryState::Evicting,
                     metadata: None,
                 },
-                Ok(JournalRead::Missing) => ResolvedCacheEntrySummary {
-                    cache_key: format!("sha256:{digest}"),
-                    state: ResolvedCacheEntryState::Corrupt,
-                    metadata: None,
-                },
-                Err(_) => ResolvedCacheEntrySummary {
-                    cache_key: format!("sha256:{digest}"),
-                    state: ResolvedCacheEntryState::Corrupt,
-                    metadata: None,
-                },
+                Ok(JournalRead::Missing) | Err(_) => corrupt(&digest),
             };
             drop(metadata_lock);
             entries.push(summary);
@@ -1053,10 +1129,12 @@ impl ResolvedCacheStore {
     ) -> Result<ResolvedCacheMetadata, ResolvedCacheError> {
         match self.read_metadata_unlocked(digest)? {
             JournalRead::Valid { metadata, .. } => Ok(*metadata),
-            JournalRead::Evicted { .. } => Err(ResolvedCacheError::new(
+            // Both are an intact store declining this request, not a store that broke: a removal
+            // is genuinely in flight for the first, and the second names an entry it does not hold.
+            JournalRead::Evicted { .. } => Err(ResolvedCacheError::request(
                 "cache entry has a pending eviction tombstone",
             )),
-            JournalRead::Missing => Err(ResolvedCacheError::new("cache metadata is missing")),
+            JournalRead::Missing => Err(ResolvedCacheError::request("cache metadata is missing")),
         }
     }
 
@@ -1213,8 +1291,21 @@ impl ResolvedCacheStore {
                 continue;
             }
             had_file = true;
+            // Slot SELECTION is paths-and-sizes only. A journal slot's own integrity is proven by
+            // its checksummed envelope; re-hashing the whole bundle to decide which slot to read
+            // would put the bundle's byte count behind every pin read, every status listing and
+            // every catalog GET, and it would prove nothing a caller may act on — the load path
+            // ([`validate_complete_metadata`]) still re-hashes before an artifact reaches a
+            // runtime, and every write still validates at full strength.
             match read_journal(&path) {
-                Ok(envelope) if validate_metadata_shape(&envelope.metadata, digest).is_ok() => {
+                Ok(envelope)
+                    if validate_metadata_shape_with(
+                        &envelope.metadata,
+                        digest,
+                        ContentVerification::PathsAndSizesOnly,
+                    )
+                    .is_ok() =>
+                {
                     valid.push(envelope)
                 }
                 _ => had_invalid_slot = true,
@@ -1961,14 +2052,29 @@ fn validate_metadata_shape(
     metadata: &ResolvedCacheMetadata,
     digest: &str,
 ) -> Result<(), ResolvedCacheError> {
+    validate_metadata_shape_with(metadata, digest, ContentVerification::RehashEveryFile)
+}
+
+fn validate_metadata_shape_with(
+    metadata: &ResolvedCacheMetadata,
+    digest: &str,
+    verification: ContentVerification,
+) -> Result<(), ResolvedCacheError> {
     let artifact_key = metadata
         .artifact
         .cache_key()
         .map_err(|error| ResolvedCacheError::new(error.to_string()))?;
-    metadata
-        .artifact
-        .validate()
-        .map_err(|error| ResolvedCacheError::new(error.to_string()))?;
+    match verification {
+        ContentVerification::RehashEveryFile => metadata
+            .artifact
+            .validate()
+            .map_err(|error| ResolvedCacheError::new(error.to_string()))?,
+        ContentVerification::PathsAndSizesOnly => {
+            artifact_without_content_hashes(&metadata.artifact)
+                .validate()
+                .map_err(|error| ResolvedCacheError::new(error.to_string()))?
+        }
+    }
     let reservation_shape_is_valid = match metadata.state {
         ResolvedCacheEntryState::Materializing => {
             metadata.reservation_id.is_some()
@@ -2021,6 +2127,23 @@ fn validate_complete_metadata(
     validate_complete_metadata_inner(store, metadata, ContentVerification::RehashEveryFile)
 }
 
+/// How a whole-store listing treats complete entries. `Runtime` is the strict internal listing
+/// (recovery, staging cleanup, byte accounting); `Inspect` is the read-only status listing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EntryListing {
+    Runtime,
+    Inspect,
+}
+
+impl EntryListing {
+    fn verification(self) -> ContentVerification {
+        match self {
+            Self::Runtime => ContentVerification::RehashEveryFile,
+            Self::Inspect => ContentVerification::PathsAndSizesOnly,
+        }
+    }
+}
+
 /// How thoroughly a complete entry's own bundle bytes are re-verified.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ContentVerification {
@@ -2040,7 +2163,7 @@ fn validate_complete_metadata_inner(
     verification: ContentVerification,
 ) -> Result<(), ResolvedCacheError> {
     let digest = cache_key_digest(&metadata.cache_key)?;
-    validate_metadata_shape(metadata, &digest)?;
+    validate_metadata_shape_with(metadata, &digest, verification)?;
     if metadata.state != ResolvedCacheEntryState::Complete
         || metadata.reservation_id.is_some()
         || metadata.reservation_owner.is_some()
@@ -2468,7 +2591,8 @@ fn cache_key_digest(cache_key: &str) -> Result<String, ResolvedCacheError> {
         .strip_prefix("sha256:")
         .filter(|value| is_lower_hex_64(value))
         .ok_or_else(|| {
-            ResolvedCacheError::new("resolved-cache key must be sha256:<64 lower hex>")
+            // The caller's own key is unusable — nothing about the store or the host is wrong.
+            ResolvedCacheError::request("resolved-cache key must be sha256:<64 lower hex>")
         })?;
     Ok(digest.to_owned())
 }

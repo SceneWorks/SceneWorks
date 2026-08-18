@@ -1372,3 +1372,37 @@ fn windows_sharing_violation_keeps_the_eviction_pending_until_it_converges() {
     assert!(!entry_dir(&store, &candidate.cache_key).exists());
     assert_eq!(completed_audit_records(&store).len(), 1);
 }
+
+/// Reads select a journal slot on paths and sizes; the LOAD path still re-hashes (sc-19711).
+///
+/// The split exists because journal reads are on hot, user-facing surfaces — the catalog GET, the
+/// Settings storage status, every pin read — and re-hashing a whole bundle to decide which slot to
+/// read puts the bundle's byte count behind each of them while proving nothing a reader may act
+/// on. Safety is unchanged where it matters: content that no longer matches its recorded hash is
+/// still refused before it can reach a runtime, and every write validates at full strength.
+#[test]
+fn journal_reads_skip_content_hashing_while_the_load_path_still_refuses_altered_bytes() {
+    let scratch = TempDir::new().unwrap();
+    let library = scratch.path().join("library");
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let candidate = flat_candidate(&library, "SceneWorks/m-a", REV_A, "q8", b"0123456789");
+    materialize_complete(&store, &library, &candidate);
+
+    // Same length, different bytes: only a content hash can tell the difference.
+    let bundle_file = entry_dir(&store, &candidate.cache_key)
+        .join("bundle")
+        .join("model.safetensors");
+    std::fs::write(&bundle_file, b"9876543210").unwrap();
+
+    // The read surfaces still see the entry, with its identity intact, so a status view can show
+    // what the cache is holding instead of reporting an empty cache.
+    let inspected = store.inspect().unwrap();
+    assert_eq!(inspected.len(), 1);
+    assert_eq!(inspected[0].cache_key, candidate.cache_key);
+    assert_eq!(inspected[0].state, ResolvedCacheEntryState::Complete);
+    assert!(store.effective_pin(&candidate.cache_key).is_ok());
+
+    // The load path is unmoved: altered bytes are refused before an artifact reaches a runtime.
+    assert!(store.lookup_complete(&candidate.cache_key).is_err());
+    assert!(store.enumerate().is_err());
+}
