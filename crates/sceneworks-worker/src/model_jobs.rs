@@ -3460,10 +3460,15 @@ fn resolve_huggingface_snapshot_dir(data_dir: &Path, repo: &str) -> Option<PathB
         let revision = rev.trim();
         let candidate = snapshots.join(revision);
         if snapshot_has_any_file(&candidate) {
+            // The name is read off disk, so it is resolved as an installed snapshot rather than
+            // admitted as a caller-supplied revision: an install materialized under a mutable name
+            // (the endpoint omitted `X-Repo-Commit`) is still installed. Demanding an immutable
+            // name here returned `None` for it — and, because this arm returns, without even
+            // trying the fallback scan below.
             return resolver
-                .discover_source_snapshot(repo, Some(revision))
-                .ok()
-                .map(|(_, path)| path);
+                .source_library()
+                .discover_installed_snapshot_path(repo, revision)
+                .ok();
         }
     }
     // Fallback: the cached snapshot with the most files, so an empty/partial one never wins over a
@@ -3481,9 +3486,9 @@ fn resolve_huggingface_snapshot_dir(data_dir: &Path, repo: &str) -> Option<PathB
         .and_then(|(_, path)| {
             let revision = path.file_name()?.to_str()?;
             resolver
-                .discover_source_snapshot(repo, Some(revision))
+                .source_library()
+                .discover_installed_snapshot_path(repo, revision)
                 .ok()
-                .map(|(_, path)| path)
         });
     if from_source_library.is_some() {
         return from_source_library;
@@ -6062,6 +6067,55 @@ mod co_requisite_tests {
             resolve_huggingface_snapshot_dir(data_dir.path(), repo).expect("still resolves"),
             populated,
             "a populated refs/main must resolve to exactly that snapshot"
+        );
+    }
+
+    /// A snapshot directory whose name is not a 40-hex commit is still an installed snapshot.
+    ///
+    /// Routing discovery through the typed artifact seam (sc-19704) started admitting the on-disk
+    /// directory name as if it were a caller-supplied revision, so `ArtifactSourceLibrary`'s
+    /// immutability rule applied to it and every such snapshot resolved to `None` — the model read
+    /// as not installed, silently, on every lane. This is reachable in production:
+    /// `downloads::download_snapshot_into_cache` falls back to
+    /// `commit.unwrap_or_else(|| revision.to_owned())`, so an endpoint that omits `X-Repo-Commit`
+    /// materializes a complete install under `snapshots/main`.
+    ///
+    /// Both arms are asserted because the `refs/main` arm *returns*: when it rejected the name it
+    /// did not fall through to the scan, so a repository with a valid `refs/main` resolved to
+    /// nothing even though the populated snapshot was sitting right there.
+    #[test]
+    fn snapshot_resolution_accepts_a_snapshot_named_by_a_mutable_revision() {
+        let _env = isolate_hf_cache();
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        let repo = "SceneWorks/krea-2-raw-mlx";
+        let repo_dir =
+            huggingface_repo_cache_path(data_dir.path(), repo).expect("repo cache path resolves");
+        let snapshot = repo_dir.join("snapshots").join("main");
+        std::fs::create_dir_all(snapshot.join("q8/transformer")).expect("snapshot tree");
+        std::fs::write(
+            snapshot.join("q8/transformer/diffusion_pytorch_model.safetensors"),
+            b"real",
+        )
+        .expect("write weight");
+
+        // The scan arm: no `refs/main` at all, exactly like the seeded turnkey fixtures the candle
+        // image lanes resolve against.
+        assert_eq!(
+            resolve_huggingface_snapshot_dir(data_dir.path(), repo)
+                .expect("a populated snapshot exists, so resolution must succeed"),
+            snapshot,
+            "a snapshot directory named by a mutable revision is still installed"
+        );
+
+        // The `refs/main` fast-path arm, which is what a real mirror-endpoint install looks like:
+        // the pointer and the snapshot directory both carry the mutable name.
+        std::fs::create_dir_all(repo_dir.join("refs")).expect("create refs");
+        std::fs::write(repo_dir.join("refs").join("main"), "main").expect("write refs/main");
+        assert_eq!(
+            resolve_huggingface_snapshot_dir(data_dir.path(), repo)
+                .expect("refs/main names a populated snapshot, so resolution must succeed"),
+            snapshot,
+            "a refs/main naming a populated mutable snapshot must resolve to exactly that snapshot"
         );
     }
 

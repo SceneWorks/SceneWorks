@@ -930,6 +930,51 @@ impl ArtifactSourceLibrary {
         ))
     }
 
+    /// Resolve an installed snapshot **directory** by the name it already carries on disk.
+    ///
+    /// This is discovery over the local library, not admission of caller input, and the two have
+    /// different contracts. [`Self::discover_snapshot`] mints a pinned [`ArtifactIdentity`], so it
+    /// must reject a mutable revision — a payload that asks for `main` may not be answered with
+    /// whatever `main` happens to mean today. A name read out of `refs/*` or a `snapshots/`
+    /// directory entry is not such a request: it is a fact about what is installed, and the
+    /// caller wants the path, not an identity.
+    ///
+    /// Demanding an immutable name here would make a real, fully materialized install
+    /// **invisible**: [`crate::hf_home`]'s downloader names the snapshot `snapshots/<revision>`
+    /// whenever the endpoint omits `X-Repo-Commit` (`downloads.rs`, the mirror/proxy case), so
+    /// such a repository would silently read as not-installed on every lane.
+    ///
+    /// Confinement is still enforced — the name must be exactly one normal path component, the
+    /// property `safe_join` provided before this seam existed. An immutable name is delegated to
+    /// [`Self::discover_snapshot`] unchanged, so the leased local-tier redirect (sc-19707) keeps
+    /// serving every snapshot that can actually be covered by a bundle; bundles are keyed on a
+    /// pinned identity, so a mutable name has none to match by construction.
+    pub fn discover_installed_snapshot_path(
+        &self,
+        repository: &str,
+        revision: &str,
+    ) -> Result<PathBuf, ArtifactContractError> {
+        if validate_immutable_revision(revision).is_ok() {
+            return self
+                .discover_snapshot(repository, Some(revision))
+                .map(|(_, path)| path);
+        }
+        let repo_root = self.repository_root(repository)?;
+        validate_relative_path(Path::new(revision), "artifact source snapshot name")?;
+        if Path::new(revision).components().count() != 1 {
+            return Err(ArtifactContractError(format!(
+                "artifact source snapshot name {revision:?} is not a single confined component"
+            )));
+        }
+        let snapshot = repo_root.join("snapshots").join(revision);
+        if !snapshot.is_dir() {
+            return Err(ArtifactContractError(format!(
+                "source snapshot {repository}@{revision} is not installed"
+            )));
+        }
+        Ok(snapshot)
+    }
+
     pub fn discover_snapshot_reference(
         &self,
         repository: &str,
@@ -1740,6 +1785,72 @@ mod tests {
         assert_eq!(snapshot, repo.join("snapshots").join(REV));
         assert!(library
             .discover_snapshot("SceneWorks/model", Some("main"))
+            .is_err());
+    }
+
+    /// Discovery over the local library resolves an installed snapshot by the name it carries ON
+    /// DISK, including a mutable one — the identity-minting entry point above must keep rejecting
+    /// that same name as a *request*.
+    ///
+    /// The two contracts got conflated when snapshot discovery was routed through the typed seam,
+    /// which made every snapshot directory not named by a 40-hex commit resolve to nothing. The
+    /// downloader materializes `snapshots/<revision>` whenever the endpoint omits `X-Repo-Commit`,
+    /// so that silently un-installed a genuinely complete model.
+    #[test]
+    fn installed_snapshot_discovery_accepts_a_mutable_on_disk_name() {
+        let root = tempfile::tempdir().unwrap();
+        let library = ArtifactSourceLibrary::new(root.path()).unwrap();
+        let repo = library.repository_root("SceneWorks/model").unwrap();
+        let mutable = repo.join("snapshots").join("main");
+        std::fs::create_dir_all(&mutable).unwrap();
+        std::fs::write(mutable.join("model.safetensors"), b"model").unwrap();
+
+        assert_eq!(
+            library
+                .discover_installed_snapshot_path("SceneWorks/model", "main")
+                .unwrap(),
+            mutable,
+        );
+        // …while the same name as a caller-supplied revision stays rejected: this widens discovery,
+        // not admission.
+        assert!(library
+            .discover_snapshot("SceneWorks/model", Some("main"))
+            .is_err());
+
+        // Not only ref-shaped names: the seeded turnkey fixtures the candle image lanes resolve
+        // against are named `installed` / `installed-revision`, and they are what the narrowing
+        // actually un-installed.
+        let seeded = repo.join("snapshots").join("installed-revision");
+        std::fs::create_dir_all(seeded.join("q4")).unwrap();
+        assert_eq!(
+            library
+                .discover_installed_snapshot_path("SceneWorks/model", "installed-revision")
+                .unwrap(),
+            seeded,
+        );
+
+        // An immutable name still goes through the identity-minting path.
+        let pinned = repo.join("snapshots").join(REV);
+        std::fs::create_dir_all(&pinned).unwrap();
+        assert_eq!(
+            library
+                .discover_installed_snapshot_path("SceneWorks/model", REV)
+                .unwrap(),
+            pinned,
+        );
+
+        // Confinement survives: a traversing or multi-component name is refused rather than joined,
+        // and an uninstalled name resolves to nothing.
+        for name in ["..", "../escape", "a/b", "sub/main"] {
+            assert!(
+                library
+                    .discover_installed_snapshot_path("SceneWorks/model", name)
+                    .is_err(),
+                "{name:?} must not resolve to a snapshot directory"
+            );
+        }
+        assert!(library
+            .discover_installed_snapshot_path("SceneWorks/model", "absent")
             .is_err());
     }
 
