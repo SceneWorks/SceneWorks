@@ -4388,9 +4388,18 @@ fn exact_rename_side_cache_health(
             missing_files: Vec::new(),
         });
     }
-    let snapshot = repo_root.join("snapshots").join(rename.revision);
+    // Through the typed source-library seam rather than raw joins (sc-19711's artifact inventory
+    // forbids the API constructing a model root directly; `crates/sceneworks-worker/src/model_jobs.rs`
+    // is the one classified infrastructure surface allowed to). `repo_root` came from
+    // `huggingface_repo_cache_path`, i.e. this same library, so the seam accepts it; `.root()` is the
+    // very `huggingface_hub_cache_dir(data_dir)` this used to pass, unchanged.
+    let library = sceneworks_core::hf_home::model_source_library(data_dir);
+    let snapshot = library
+        .snapshots_root_from_repository_root(&repo_root)
+        .ok()?
+        .join(rename.revision);
     if sceneworks_core::hf_repo_renames::validate_exact_huggingface_repo_rename_snapshot(
-        &huggingface_hub_cache_dir(data_dir),
+        library.root(),
         &repo_root,
         &snapshot,
         rename,

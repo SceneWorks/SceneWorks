@@ -155,16 +155,21 @@ test("the committed evidence grades the real catalog clean", async () => {
 // THE sc-18924 REGRESSION TEST. The recorded fixture is timeless only if every manifest claim
 // names an immutable tree. Before this story, 11 real keys used a moving default branch and could
 // stay falsely green after upstream changed because nothing forced a re-record.
-test("all 95 real download keys are pinned to immutable lowercase commit SHAs", async () => {
+//
+// 95 -> 96 on the sc-19703 sync: sc-19708 declared `instantid_face_stack`
+// (`SceneWorks/instantid-mlx`, the SCRFD + ArcFace pair), which landed on the epic branch while
+// this gate landed on main, so neither PR could see the other. The census is a shape assertion —
+// it moves whenever the catalog gains or loses a repo@revision key, together with a re-record.
+test("all 96 real download keys are pinned to immutable lowercase commit SHAs", async () => {
   const { claims, evidence } = await realInputs();
   const immutableRevision = /^[0-9a-f]{40}$/u;
   const keys = new Set(claims.map((claim) => claimKey(claim.repo, claim.revision)));
 
-  assert.equal(keys.size, 95, "update the 95/95 disclosure when the real key census changes");
+  assert.equal(keys.size, 96, "update the 96/96 disclosure when the real key census changes");
   assert.equal(
     evidence.repos.length,
-    95,
-    "the evidence census must stay aligned with the 95/95 disclosure",
+    96,
+    "the evidence census must stay aligned with the 96/96 disclosure",
   );
   for (const claim of claims) {
     assert.match(
