@@ -1,7 +1,7 @@
 {
   "_comment": "Per-provider inference compile-closure digests (sc-17774). Calibration currency compares a record's captured closureDigest against the entry here for the SAME provider, so a change to one model's code path can no longer demote another's. Regenerate on every inference pin bump: node scripts/inference-closure-digest.mjs --repo <inference> --write. Derivation, and what this unit deliberately does NOT see, are documented in scripts/inference-closure-digest.mjs.",
   "digestVersion": "inference-closure-digest v3",
-  "inferenceRevision": "bb3b314500b02bbb41431aa6beb5e03e4c0738f8",
+  "inferenceRevision": "2d762d3312ac96c4feda8f89e35ee967e7700751",
   "providers": {
     "candle:flux1_dev": {
       "crate": "crates/media/candle-gen/candle-gen-flux",
@@ -110,7 +110,7 @@
     },
     "mlx:flux2_dev": {
       "crate": "crates/media/mlx-gen/mlx-gen-flux2",
-      "digest": "f609e40ac1a17368804c269d4f9e712a80725deba4cc9901aa0f1e883df3f307",
+      "digest": "4b3bfc5723685f9a11a04ec2549ac23b44ea0f1effa386b8406dce8dc7526ef5",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -124,7 +124,7 @@
     },
     "mlx:krea_2_turbo": {
       "crate": "crates/media/mlx-gen/mlx-gen-krea",
-      "digest": "3d7d40df80f1af6aa7a79de9ebcd70f98f24b7c5890b88633e3a1410feb23831",
+      "digest": "2c728e8a6921dc8265b63dbf70f5f97d889a1be19388aa91049b2ef9a489ccf2",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -141,7 +141,7 @@
     },
     "mlx:krea_2_turbo_control": {
       "crate": "crates/media/mlx-gen/mlx-gen-krea",
-      "digest": "78f9d887cb7115bc535753ba9365a8a9bf26b35666cb6f8592c35df35db6a603",
+      "digest": "eaa65b21cd3071a3c5b804a20b229a236f5eea5894cdfb0f8cfca129c011139c",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -170,7 +170,7 @@
     },
     "mlx:qwen_image": {
       "crate": "crates/media/mlx-gen/mlx-gen-qwen-image",
-      "digest": "46e610d94640bfee272b202189f4c046fcc6cb5d285eaca9525fbcb8467799c4",
+      "digest": "8c4f4c0284342ce0369a5b0efbea5dbc78218e7093dff93d2ee99bd84fad00ea",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -184,7 +184,7 @@
     },
     "mlx:sdxl": {
       "crate": "crates/media/mlx-gen/mlx-gen-sdxl",
-      "digest": "0e73cf3850929705fa72bc20a502216d056ee6394972216a30bbd5ec2723c530",
+      "digest": "d6657bd5c876c713e553a5d0189a92d1534d2a1ff65ae29eac9f8a9a33dbffdb",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -209,7 +209,7 @@
     },
     "mlx:z_image_turbo": {
       "crate": "crates/media/mlx-gen/mlx-gen-z-image",
-      "digest": "ede89092a3095a50731e3f76584143da8071468f940e1613fbb30c82aa76b0bb",
+      "digest": "20b441bc2ec0bba656a70a10c1e101e9bcaea3eab19600fcf5f482eb0abf00bc",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -222,7 +222,7 @@
     },
     "mlx:z_image_turbo_control": {
       "crate": "crates/media/mlx-gen/mlx-gen-z-image",
-      "digest": "b34f66aa29743083cde5526bad57f97725775bd4a6ba88e7f4c8f1eb7d6bbda7",
+      "digest": "819ac76d823bbd8bfc62f7df7549b1852eb76f597ba218a68cb70e0b36041615",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
