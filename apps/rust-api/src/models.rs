@@ -1062,7 +1062,7 @@ pub(crate) async fn create_model_convert_job(
 /// Distinct source repositories a model owns. Co-requisite downloads are excluded: they are
 /// shared dependencies rather than this model's own source, and resolved-cache entries are
 /// selected by *primary* provenance.
-fn owned_source_repositories(model: &Value) -> Vec<String> {
+pub(crate) fn owned_source_repositories(model: &Value) -> Vec<String> {
     let mut repositories = model
         .get("downloads")
         .and_then(Value::as_array)
@@ -2293,7 +2293,7 @@ mod runtime_text_encoder_option_tests {
     }
 }
 
-async fn model_catalog_snapshot(state: &AppState) -> Result<Arc<Vec<Value>>, ApiError> {
+pub(crate) async fn model_catalog_snapshot(state: &AppState) -> Result<Arc<Vec<Value>>, ApiError> {
     {
         let cache_state = state.model_catalog_cache.state.lock();
         if let Some((snapshot_generation, snapshot)) = cache_state.snapshot.as_ref() {

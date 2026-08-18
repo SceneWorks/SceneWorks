@@ -192,6 +192,12 @@ mod manifest;
 // The single model-source seam every job-creation path calls (sc-19708): generic carrier
 // attachment + typed external-library availability preflight, all data-driven.
 mod model_sources;
+// Read + control surface for the app-owned resolved-model hot cache (sc-19711): status for the
+// Settings storage card, and the per-model keep/remove operations the Model Manager drives.
+mod model_cache;
+use model_cache::{
+    get_model_cache, preview_model_cache_removal, remove_model_cache_entry, set_model_cache_pin,
+};
 use manifest::{
     acquire_manifest_file_lock, load_manifest_entries, manifest_write_lock, merge_entries_by_id,
     merge_object, mutate_manifest_entries, remove_catalog_manifest_entry, write_manifest_atomic,
@@ -1753,6 +1759,15 @@ fn create_app_with_state_mode(
             post(create_model_import_job)
                 .layer(DefaultBodyLimit::max(MAX_MODEL_MULTIPART_BODY_BYTES)),
         )
+        // Resolved-model hot cache (sc-19711). The GET is UI-polled, so it is deliberately one
+        // cheap write-free listing; the three POSTs are single deliberate user actions.
+        .route("/api/v1/model-cache", get(get_model_cache))
+        .route(
+            "/api/v1/model-cache/removal-preview",
+            post(preview_model_cache_removal),
+        )
+        .route("/api/v1/model-cache/remove", post(remove_model_cache_entry))
+        .route("/api/v1/model-cache/pin", post(set_model_cache_pin))
         .route("/api/v1/control-overlays", get(list_control_overlays))
         .route("/api/v1/styles", get(list_styles))
         .route("/api/v1/loras", get(list_loras))
