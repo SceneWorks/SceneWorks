@@ -414,7 +414,9 @@ describe("SettingsScreen local model copies card (sc-19711)", () => {
     await render();
     expect(toggle().getAttribute("role")).toBe("switch");
     expect(toggle().getAttribute("aria-checked")).toBe("true");
-    shellSettings = { dataDir: "/data", resolvedCache: policy({ enabled: false }) };
+    expect(toggle().getAttribute("aria-label")).toBe(
+      "Keep a working copy of models from external libraries",
+    );
   });
 
   it("announces the commit status in a polite live region", async () => {
