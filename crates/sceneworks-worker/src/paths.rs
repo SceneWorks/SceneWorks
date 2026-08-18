@@ -195,7 +195,14 @@ pub(crate) fn normalize_app_managed_model_path(
     // Canonicalize the input and allow either the lexical or canonical form of each
     // root, so a symlink/`..` can't slip past the confinement check (sc-8877 / F-075),
     // matching `normalize_app_managed_lora_path` (same roots).
+    // The shared helper carries every root (data dir, HF cache, declared external roots — both
+    // lexical and canonical forms); the source library binding below feeds the sc-19707 leased
+    // redirect.
     let roots = allowed_model_roots(settings)?;
+    let source_library = sceneworks_core::model_artifacts::ArtifactSourceLibrary::new(
+        huggingface_hub_cache_dir(&settings.data_dir),
+    )
+    .expect("the configured Hugging Face source-library root is nonempty");
     // Additionally admit the operator's external model roots (epic 10451 / sc-10668). Phase 1
     // widened only the LoRA lane; Phase 2 reads an external ComfyUI **base** model's component
     // files (DiT / text-encoder / VAE) in place from the configured tree, so those paths must
@@ -203,8 +210,34 @@ pub(crate) fn normalize_app_managed_model_path(
     // roots come only from the process env (never a payload — a LAN caller, epic 4484, cannot
     // widen the allow-list), and the list is empty by default and on macOS, so confinement is
     // unchanged for every install that has not opted in. Both lexical + canonical forms are added.
-    let path = normalize_existing_or_absolute(Path::new(raw_path))?;
-    ensure_path_under(path, &roots, label)
+    let confined =
+        sceneworks_core::model_artifacts::confine_artifact_path(Path::new(raw_path), &roots)
+            .map_err(|_| {
+                WorkerError::InvalidPayload(format!(
+                    "{label} must be inside an app-managed directory."
+                ))
+            })?;
+    // sc-19707: a model directory the API already resolved to a concrete source-library path
+    // (training base models, captioners, analyzers) is served from the leased app-owned bundle
+    // when one covers that exact snapshot. Purely a read redirect inside the app data dir, applied
+    // only while a runtime lease is active and only when the bundle really holds the path — with
+    // no lease this is inert and the authoritative source path is returned unchanged.
+    Ok(prefer_leased_local_path(&source_library, confined))
+}
+
+/// Redirect one already-confined source-library path into the leased app-owned bundle that holds
+/// it (sc-19707). Inert without an active runtime lease, and inert for any path the bundle does not
+/// hold, so the authoritative source path is what survives in every other case. Shared by the model
+/// and adapter confinement seams so neither can drift into serving a different tier than the other.
+fn prefer_leased_local_path(
+    source_library: &sceneworks_core::model_artifacts::ArtifactSourceLibrary,
+    confined: PathBuf,
+) -> PathBuf {
+    sceneworks_core::model_artifacts::local_preference::redirect_source_library_path(
+        source_library.root(),
+        &confined,
+    )
+    .unwrap_or(confined)
 }
 
 /// Confine a payload-supplied model **file** while retaining the lexical, extension-bearing path the
@@ -332,16 +365,32 @@ pub(crate) fn normalize_app_managed_lora_path(
     settings: &Settings,
     path: &Path,
 ) -> WorkerResult<PathBuf> {
+    // The shared helper carries every root (both forms of the data dir, HF cache, and declared
+    // external roots); the source library binding feeds the sc-19707 leased redirect below.
     let roots = allowed_model_roots(settings)?;
+    let source_library = sceneworks_core::model_artifacts::ArtifactSourceLibrary::new(
+        huggingface_hub_cache_dir(&settings.data_dir),
+    )
+    .expect("the configured Hugging Face source-library root is nonempty");
     // Both the lexical and canonical form of each external root, matching the posture
     // above: `resolved` is canonical, and a canonical path never `starts_with` a
     // lexical root when the two differ (a symlinked or `..`-bearing root, macOS
     // `/var` -> `/private/var`). A root that cannot be canonicalized (unmounted drive)
     // contributes its lexical form only, and simply never matches.
     let normalized = normalize_absolute_path(path)?;
-    let resolved = normalize_existing_or_absolute(&normalized)?;
-    let confined = ensure_path_under(resolved, &roots, "LoRA path")?;
-    Ok(loadable_confined_lora_path(&normalized, confined))
+    let confined = sceneworks_core::model_artifacts::confine_artifact_path(&normalized, &roots)
+        .map_err(|_| {
+            WorkerError::InvalidPayload(
+                "LoRA path must be inside an app-managed directory.".to_owned(),
+            )
+        })?;
+    // The loadable (extension-bearing) form first: an HF-cached adapter confines to its
+    // extensionless `blobs/<sha>` target, and only the snapshot-shaped form can be matched against
+    // a leased bundle — which stores real files, so the redirected path keeps its extension.
+    Ok(prefer_leased_local_path(
+        &source_library,
+        loadable_confined_lora_path(&normalized, confined),
+    ))
 }
 
 /// Return a *loadable* form of a confined adapter path (sc-11649). mlx-rs's safetensors

@@ -14,7 +14,8 @@
       "source": {
         "provider": "huggingface",
         "repo": "Lightricks/LTX-2.3-22b-IC-LoRA-Union-Control",
-        "file": "ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors"
+        "file": "ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors",
+        "revision": "b4d1c4d8c9e544e9bbbd6811bb4363708b6093ff"
       }
     },
     {
@@ -29,7 +30,8 @@
       "source": {
         "provider": "huggingface",
         "repo": "Lightricks/LTX-2.3-22b-IC-LoRA-Motion-Track-Control",
-        "file": "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5.safetensors"
+        "file": "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5.safetensors",
+        "revision": "572bb9c9a1ba3d8e8724cce69783ffc2422386db"
       }
     },
     {
@@ -43,11 +45,30 @@
       "defaultWeight": 0.8,
       "source": {
         "provider": "huggingface",
-        "repo": "Lightricks/LTX-2.3-22b-IC-LoRA-HDR",
-        "file": "ltx-2.3-22b-ic-lora-hdr-0.9.safetensors"
+        // sc-18923: the official repository requires a per-account marketing/contact-information
+        // consent and returns 401 to an unauthenticated install. SceneWorks redistributes the exact,
+        // unmodified HDR weights under the same LTX-2 Community License; the pinned rehost also
+        // carries the complete frozen agreement, attribution, provenance, and the upstream companion
+        // scene embedding. The primary LoRA remains the only requested file because the current
+        // SceneWorks runtime does not consume that embedding.
+        "repo": "SceneWorks/ltx-2.3-ic-loras",
+        "file": "ltx-2.3-22b-ic-lora-hdr-0.9.safetensors",
+        "revision": "ca287bbae91f939481b3b36764d1e8b2cfb6160b"
       }
     },
     {
+      // sc-18917: upstream renamed BOTH the repo (LTX-2.3-22b-IC-LoRA-LipDub -> …-DubIt) and the
+      // weight file (…-lipdub-0.9 -> …-dubit-0.9). The old repo name still answers 200 through HF's
+      // 307 rename redirect, so the listing looked healthy while the declared FILE matched nothing
+      // — the worker's sc-12288 zero-file check turned that into a failed download for anyone who
+      // selected it. `revision` is pinned here (and was not before) because an unrevisioned entry
+      // reads a moving default branch, which is exactly how the rename went unnoticed; the
+      // remaining unrevisioned keys are sc-18924's scope, not this entry's.
+      //
+      // `id` and `name` deliberately keep the LipDub spelling: `id` is the stable catalog key the
+      // picker, job payloads, compatibility checks and the on-disk install probe all key on, so
+      // renaming it would orphan saved selections and installed weights for no functional gain,
+      // and "LipDub" names what the adapter DOES. DubIt is upstream's product branding.
       "id": "ltx_2_3_ic_lipdub",
       "name": "LTX-2.3 IC-LoRA LipDub",
       "family": "ltx-video",
@@ -58,8 +79,11 @@
       "defaultWeight": 0.8,
       "source": {
         "provider": "huggingface",
-        "repo": "Lightricks/LTX-2.3-22b-IC-LoRA-LipDub",
-        "file": "ltx-2.3-22b-ic-lora-lipdub-0.9.safetensors"
+        // sc-18923: same immutable public rehost and license/provenance posture as the HDR sibling.
+        // The stable catalog id intentionally remains `lipdub`; only the source channel changed.
+        "repo": "SceneWorks/ltx-2.3-ic-loras",
+        "file": "ltx-2.3-22b-ic-lora-dubit-0.9.safetensors",
+        "revision": "ca287bbae91f939481b3b36764d1e8b2cfb6160b"
       }
     },
     {
@@ -76,7 +100,8 @@
       "source": {
         "provider": "huggingface",
         "repo": "SceneWorks/scail2-dpo-lora",
-        "file": "scail2-dpo-lora.safetensors"
+        "file": "scail2-dpo-lora.safetensors",
+        "revision": "15c2060c7604e18c33a9220402123ad440643d20"
       }
     },
     {
@@ -99,7 +124,8 @@
       "source": {
         "provider": "huggingface",
         "repo": "lightx2v/Wan2.1-I2V-14B-480P-StepDistill-CfgDistill-Lightx2v",
-        "file": "loras/Wan21_I2V_14B_lightx2v_cfg_step_distill_lora_rank64.safetensors"
+        "file": "loras/Wan21_I2V_14B_lightx2v_cfg_step_distill_lora_rank64.safetensors",
+        "revision": "fef288b326f4fed6d2983b9800c35363da31fcfe"
       }
     },
     {
@@ -130,7 +156,8 @@
       "source": {
         "provider": "huggingface",
         "repo": "conradlocke/krea2-identity-edit",
-        "file": "krea2_identity_edit_v1_2.safetensors"
+        "file": "krea2_identity_edit_v1_2.safetensors",
+        "revision": "89e9e7a09ee2e5c9331e952063d79b1b8a703280"
       }
     },
     {

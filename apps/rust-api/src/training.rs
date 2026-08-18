@@ -531,7 +531,7 @@ pub(crate) async fn create_training_dataset_caption_job(
     let captioner = payload.captioner;
     let model_name_or_path = payload.model_name_or_path;
     let requested_gpu = payload.requested_gpu;
-    let job_payload = match json!({
+    let mut job_payload = match json!({
         "provider": "training",
         "kind": "training_caption",
         "captioner": captioner,
@@ -547,6 +547,12 @@ pub(crate) async fn create_training_dataset_caption_job(
         Value::Object(map) => map,
         _ => return Err(ApiError::internal("caption job payload must be an object")),
     };
+    crate::model_sources::ensure_runtime_model_sources(
+        &state,
+        &JobType::TrainingCaption,
+        &mut job_payload,
+    )
+    .await?;
     let job = store_call(state.clone(), move |store, _timeout| {
         store.create_job(CreateJob {
             job_type: JobType::TrainingCaption,
@@ -668,7 +674,7 @@ pub(crate) async fn create_training_dataset_parquet_import_job(
         .nth(3)
         .ok_or_else(|| ApiError::internal("training dataset root has an invalid layout"))?
         .to_path_buf();
-    let job_payload = match json!({
+    let mut job_payload = match json!({
         "provider": "training",
         "kind": "dataset_parquet_import",
         "projectId": project_id.clone(),
@@ -693,6 +699,12 @@ pub(crate) async fn create_training_dataset_parquet_import_job(
             ))
         }
     };
+    crate::model_sources::ensure_runtime_model_sources(
+        &state,
+        &JobType::DatasetParquetImport,
+        &mut job_payload,
+    )
+    .await?;
     let job = store_call(state.clone(), move |store, _timeout| {
         store.create_job(CreateJob {
             job_type: JobType::DatasetParquetImport,
@@ -858,7 +870,7 @@ pub(crate) async fn create_training_dataset_analysis_job(
     let embedder = payload.embedder;
     let model_name_or_path = payload.model_name_or_path;
     let requested_gpu = payload.requested_gpu;
-    let job_payload = match json!({
+    let mut job_payload = match json!({
         "provider": "training",
         "kind": "dataset_analysis",
         "embedder": embedder,
@@ -876,6 +888,12 @@ pub(crate) async fn create_training_dataset_analysis_job(
             ))
         }
     };
+    crate::model_sources::ensure_runtime_model_sources(
+        &state,
+        &JobType::DatasetAnalysis,
+        &mut job_payload,
+    )
+    .await?;
     let job = store_call(state.clone(), move |store, _timeout| {
         store.create_job(CreateJob {
             job_type: JobType::DatasetAnalysis,
@@ -954,7 +972,7 @@ pub(crate) async fn create_training_dataset_face_analysis_job(
         ));
     }
     let requested_gpu = payload.requested_gpu;
-    let job_payload = match json!({
+    let mut job_payload = match json!({
         "provider": "training",
         "kind": "dataset_face_analysis",
         "projectId": project_id.clone(),
@@ -970,6 +988,12 @@ pub(crate) async fn create_training_dataset_face_analysis_job(
             ))
         }
     };
+    crate::model_sources::ensure_runtime_model_sources(
+        &state,
+        &JobType::DatasetFaceAnalysis,
+        &mut job_payload,
+    )
+    .await?;
     let job = store_call(state.clone(), move |store, _timeout| {
         store.create_job(CreateJob {
             job_type: JobType::DatasetFaceAnalysis,
@@ -1131,7 +1155,7 @@ pub(crate) async fn create_training_dataset_upscale_job(
     }
     let factor = payload.factor;
     let requested_gpu = payload.requested_gpu;
-    let job_payload = match json!({
+    let mut job_payload = match json!({
         "provider": "training",
         "kind": "dataset_upscale",
         "factor": factor,
@@ -1149,6 +1173,12 @@ pub(crate) async fn create_training_dataset_upscale_job(
             ))
         }
     };
+    crate::model_sources::ensure_runtime_model_sources(
+        &state,
+        &JobType::DatasetUpscale,
+        &mut job_payload,
+    )
+    .await?;
     let job = store_call(state.clone(), move |store, _timeout| {
         store.create_job(CreateJob {
             job_type: JobType::DatasetUpscale,
@@ -1813,16 +1843,30 @@ pub(crate) async fn create_training_job(
     job_payload.insert("outputName".to_owned(), Value::String(output_name));
     job_payload.insert("plan".to_owned(), plan_value);
     job_payload.insert("manifestEntry".to_owned(), manifest_entry);
+    // Route-owned DATA for the model-source seam: a real training run loads this base model, so
+    // it must carry the same typed identity as generation. The seam resolves and preflights it.
+    job_payload.insert(
+        "baseModel".to_owned(),
+        Value::String(target.base_model.clone()),
+    );
+
+    let training_job_type = if is_control {
+        JobType::ControlTraining
+    } else {
+        JobType::LoraTrain
+    };
+    crate::model_sources::ensure_runtime_model_sources(
+        &state,
+        &training_job_type,
+        &mut job_payload,
+    )
+    .await?;
 
     let job = store_call(state.clone(), move |store, _timeout| {
         store.create_job_with_id(
             job_id,
             CreateJob {
-                job_type: if is_control {
-                    JobType::ControlTraining
-                } else {
-                    JobType::LoraTrain
-                },
+                job_type: training_job_type,
                 project_id: Some(project_id),
                 project_name: Some(project_name),
                 payload: job_payload,

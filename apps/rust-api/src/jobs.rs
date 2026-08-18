@@ -99,6 +99,12 @@ pub(crate) async fn create_job(
     }
     validate_raw_job_payload(&state, &payload.job_type, &payload.payload)?;
     canonicalize_image_model_payload(&state, &payload.job_type, &mut payload.payload).await?;
+    crate::model_sources::ensure_runtime_model_sources(
+        &state,
+        &payload.job_type,
+        &mut payload.payload,
+    )
+    .await?;
     let job = store_call(state.clone(), move |store, _timeout| {
         store.create_job(CreateJob {
             job_type: payload.job_type,
@@ -592,6 +598,28 @@ async fn validate_and_canonicalize_merged_generation_payload(
     }
     let canonical_model_entry =
         canonicalize_image_model_payload(state, &job_type, &mut merged).await?;
+    if matches!(
+        job_type,
+        JobType::VideoGenerate
+            | JobType::VideoExtend
+            | JobType::VideoBridge
+            | JobType::PersonReplace
+    ) {
+        let model_id = merged
+            .get("model")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ApiError::bad_request("model must be a string"))?;
+        // A retry/duplicate can replace `model`, so re-resolve the authoritative entry instead of
+        // trusting the original job's modelManifestEntry. This is the replay counterpart to the
+        // typed `/video/jobs` pre-enqueue platform gate.
+        let model_manifest_entry = resolve_model_manifest_entry(state, model_id).await?;
+        crate::generation::ensure_video_model_available_on_platform(
+            model_id,
+            &model_manifest_entry,
+            crate::generation::video_job_platform(state),
+        )?;
+        merged.insert("modelManifestEntry".to_owned(), model_manifest_entry);
+    }
     if matches!(job_type, JobType::ImageGenerate | JobType::ImageEdit) {
         if let Some(advanced) = merged.get("advanced").and_then(Value::as_object) {
             validate_image_pose_count(advanced)?;
@@ -997,6 +1025,50 @@ pub(crate) async fn cancel_pending_jobs(
     Ok(Json(CancelPendingJobsResponse {
         canceled: jobs.len(),
         jobs: public_job_snapshots(jobs),
+        extra: Default::default(),
+    }))
+}
+
+/// Move selected not-yet-started jobs to the front of the worker queue. The store applies the
+/// change under the same immediate transaction used for claims, so a worker either claims a job
+/// first (and it is ignored here) or observes its new rank — there is no preemption race. Prompt
+/// refinement uses the same rank mechanism automatically when it is created.
+pub(crate) async fn prioritize_jobs(
+    State(state): State<AppState>,
+    ApiJson(payload): ApiJson<PrioritizeJobsRequest>,
+) -> Result<Json<PrioritizeJobsResponse>, ApiError> {
+    const MAX_PRIORITY_SELECTION: usize = 500;
+    if payload.job_ids.is_empty() {
+        return Err(ApiError::bad_request("Select at least one queued job"));
+    }
+    if payload.job_ids.len() > MAX_PRIORITY_SELECTION {
+        return Err(ApiError::bad_request(format!(
+            "At most {MAX_PRIORITY_SELECTION} jobs can be prioritized at once"
+        )));
+    }
+
+    let job_ids = payload
+        .job_ids
+        .into_iter()
+        .filter(|job_id| !job_id.trim().is_empty())
+        .collect::<Vec<_>>();
+    if job_ids.is_empty() {
+        return Err(ApiError::bad_request("Select at least one queued job"));
+    }
+
+    let jobs = store_call(state.clone(), move |store, _timeout| {
+        store.prioritize_jobs(&job_ids)
+    })
+    .await?;
+    for job in &jobs {
+        publish(&state, "job.updated", job);
+    }
+    if !jobs.is_empty() {
+        publish_queue(&state).await?;
+    }
+    Ok(Json(PrioritizeJobsResponse {
+        prioritized: jobs.len(),
+        jobs,
         extra: Default::default(),
     }))
 }

@@ -308,10 +308,15 @@
       "type": "object",
       "required": ["fixedGb", "perMpxGb"],
       "additionalProperties": false,
-      "description": "Conservative phase VRAM curve in GiB (legacy field suffix Gb): fixedGb + perMpxGb * output megapixels. NVIDIA budgets are sourced from nvidia-smi MiB and divided by 1024.",
+      "description": "Conservative phase VRAM curve in GiB (legacy field suffix Gb): fixedGb + perMpxGb * output megapixels + perMpxFrameGb * output megapixels * output frames. NVIDIA budgets are sourced from nvidia-smi MiB and divided by 1024. The temporal term is OPTIONAL and absent on every image-lane curve, where it is read as zero and the evaluation reduces bit-for-bit to the two-coefficient area form (sc-18812).",
       "properties": {
         "fixedGb": { "type": "number", "minimum": 0 },
-        "perMpxGb": { "type": "number", "minimum": 0 }
+        "perMpxGb": { "type": "number", "minimum": 0 },
+        "perMpxFrameGb": {
+          "type": "number",
+          "minimum": 0,
+          "description": "sc-18812 / sc-18810. Temporal CROSS coefficient: GiB per (output megapixel x output frame). Chosen over an additive per-frame term by measurement, not by tidiness - and NOT because it wins everywhere. On the held-out q8 LTX split (`docs/generated/ltx-temporal-form-fit-sc-18810.json`) the cross form's worst absolute residual is 0.0185 GiB on decode, 0.1741 on denoise and 0.4438 on text - a 0.019-0.44 GiB per-phase band, against the additive `perFrameGb`'s 6.5722 / 2.6848 / 0.3445. So cross is 355x better on decode and 15.4x better on denoise, and 1.29x WORSE on text. Adopting it anyway is the right call for three reasons. (1) The two phases it wins are the ones that bind at scale and carry the temporal response at all; text is nearly flat in frames, which is why all five candidate forms land within 0.164 GiB of each other there (0.3015 to 0.4650) while decode spreads over 22.6. (2) Cross strictly CONTAINS the constrained candidates built on its own regressors - `area_only` is cross with the cross column deleted, `output_voxels` is cross with the area column deleted - so neither can be refitted to beat it, and its in-sample RMSE is at or below both on all three phases. (3) The 0.0993 GiB it loses text by is smaller than that phase's own measured replicate floor of 0.1095 GiB, i.e. inside the noise of the number it lost by, and text's floor is the largest of the three by orders of magnitude (denoise 0.00027 GiB, decode 0). The term belongs on EACH PHASE curve and never on the aggregate: the admission peak is already a `max` over the text/denoise/decode curves (`vram_gate.rs#KreaTurboPhasePeaks::peak_gb`), and a max of linear pieces is not itself linear - every candidate form misses the aggregate by >= 10.26 GiB (~94x the measured noise floor), which is more than 23x the adopted form's WORST per-phase residual and more than 550x its decode one. Absent means zero, which is why admitting this key is additive: it does not move any curve that omits it. Fps is deliberately NOT an axis - at a fixed {768x512, 241} a 25% audio-latent change between fps 30 and 24 left conditioning identical to the byte, decode within 400 B, and denoise +0.075%. Per-tier coefficients need no migration: `phaseCurvesByTier` already instantiates a separate curve object per tier, so a tier whose temporal response differs simply carries its own value here."
+        }
       }
     },
     "memoryEngagedComposition": {
@@ -427,6 +432,11 @@
         "tier": { "enum": ["q4", "q8", "bf16"] },
         "width": { "type": "integer", "minimum": 1 },
         "height": { "type": "integer", "minimum": 1 },
+        "frames": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "sc-18812. Output frame count this record was captured at. OPTIONAL, and absent is read as 1, which is why every existing image record needs no edit. It exists because `memoryCharacterization` keys a measured geometry as `WxHxfF` above one frame: without this property an evidence record supporting a TEMPORAL curve could not state its frame count, and would be characterized as a one-frame design point nobody measured - a fabricated contribution to the design-matrix rank, which is strictly worse than the axis-collapse sc-18812 fixed. `test_temporal_curve_tiers_declare_frames_on_their_evidence_records` makes absence a hard error on any tier whose phase curves carry `perMpxFrameGb`, so the one-frame default can only ever apply to a genuinely non-temporal curve."
+        },
         "capturedAt": { "type": "string", "format": "date-time" },
         "harnessVersion": { "type": "string", "minLength": 1 },
         "sourceStory": { "type": "string", "pattern": "^sc-[0-9]+$" },
@@ -646,6 +656,11 @@
           "minimum": 1,
           "description": "Largest output pixel count covered by real rung measurements and output-parity validation. The worker must not extrapolate the constrained ladder beyond it."
         },
+        "maxMeasuredVoxels": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "sc-18812. Temporal analogue of `maxMeasuredPixels`: the largest output VOXEL count (output pixels x output frames) covered by real measurements. OPTIONAL, and absent is read as `maxMeasuredPixels x 1`, so an image-lane fit that omits it refuses exactly the multi-frame requests it never measured. VOXELS rather than a frame count, for two independent reasons. (1) It is the regressor `perMpxFrameGb` actually multiplies, so it bounds the extrapolation of the term it governs. (2) The tiling discontinuity is itself a constant-voxel surface, not a frame count: `VaeTiling::writable_frame_cap` is `i32::MAX / (full_res_channels * out_h * out_w)`, i.e. `out_voxels <= i32::MAX / full_res_channels` - 268,435,455 output voxels for LTX's 8 full-res channels, which is the 297 output frames quoted at 0.90 MP and 682 at 0.39 MP. A scalar frame bound would therefore admit a small-area request and refuse an identically-priced large-area one. Extrapolating past this bound is not merely unvalidated, it is KNOWN WRONG: single-pass decode climbs to ~94.3 GB at the cap and tiled decode drops it to ~63.8 GB on a 128 GiB host, and no affine curve represents that step. The cap is only ONE-SIDED machine-independent - no host exceeds it single-pass, but a smaller host tiles EARLIER via the memory bound, and tiled cost RISES with host memory because the selector keeps the largest tile that fits."
+        },
         "phaseCurvesByTier": {
           "type": "object",
           "minProperties": 1,
@@ -720,6 +735,10 @@
           "autoDownload": { "type": "boolean" },
           "macOnly": { "type": "boolean" },
           "gated": { "type": "boolean" },
+          "componentOnly": {
+            "type": "boolean",
+            "description": "Installable component bundle loaded by owning routes (e.g. the InstantID face stack); never a routable `model` of any job. The capability matrix keys non-routability on this declaration."
+          },
           "credentialHost": { "type": "string" },
           "licenseUrl": { "type": "string", "format": "uri" },
           "nonCommercial": { "type": "boolean" },
@@ -1546,6 +1565,14 @@
                     "properties": { "coRequisite": { "const": true } },
                     "required": ["coRequisite"]
                   }
+                },
+                {
+                  "$comment": "SC-18902: cleanupWithModel opts an exclusive dependency into cleanup-only tombstone deletion, so it is valid only on a coRequisite row.",
+                  "if": { "required": ["cleanupWithModel"] },
+                  "then": {
+                    "properties": { "coRequisite": { "const": true } },
+                    "required": ["coRequisite"]
+                  }
                 }
               ],
               "properties": {
@@ -1584,6 +1611,10 @@
                 "coRequisite": {
                   "type": "boolean",
                   "description": "Marks this entry as a FETCH-ALL dependency installed IN ADDITION TO the primary download, not a pick-one alternate (contrast `variant` tiers and `platforms` OS alternates). Installing the model queues the primary plus every co-requisite for the current OS. A hard dependency (the default) gates install state; a soft dependency leaves the primary usable and surfaces updateAvailable. Co-requisites are never chosen as the primary/default and are excluded from quant-tier enumeration. A co-requisite may be shared by several models, so deleting one model does NOT remove it. See sc-9696, sc-13079, epic 7840."
+                },
+                "cleanupWithModel": {
+                  "type": "boolean",
+                  "description": "Marks an exclusive co-requisite whose repository may be reclaimed with a cleanup-only parent-model tombstone after that product is withdrawn on a platform. Valid only with coRequisite: true; shared dependencies must omit it."
                 },
                 "required": {
                   "enum": ["hard", "soft"],

@@ -152,6 +152,30 @@
       ]
     },
     {
+      "id": "ltx-2.3-ic-loras",
+      "models": [],
+      "name": "LTX-2.3 IC-LoRA HDR and LipDub",
+      "publisher": "Lightricks Ltd. (redistributed unmodified by SceneWorks)",
+      "license": "LTX-2 Community License",
+      "homepage": "https://huggingface.co/SceneWorks/ltx-2.3-ic-loras",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "usage": "LTX-2.3 HDR and LipDub/DubIt IC-LoRA adapters downloaded on first use from the immutable public SceneWorks/ltx-2.3-ic-loras rehost. The rehost contains the exact unmodified upstream HDR adapter, its companion scene embedding, and the LipDub/DubIt adapter; SceneWorks currently downloads the two adapters and does not consume the scene embedding. These derivatives remain subject to the complete LTX-2 Community License, including its use restrictions and paid-license requirement for entities at or above its annual-revenue threshold.",
+      "documents": [
+        {
+          "label": "LTX-2 Community License",
+          "key": "ltx-2.3-license"
+        },
+        {
+          "label": "SceneWorks redistribution notice and immutable provenance",
+          "key": "ltx-2.3-ic-loras-notice"
+        }
+      ]
+    },
+    {
       "id": "kokoro-82m",
       "models": [
         "kokoro_82m"
@@ -422,7 +446,7 @@
         "windows",
         "linux"
       ],
-      "usage": "Video→audio (Foley) model — RESEARCH / NON-COMMERCIAL USE ONLY. SceneWorks downloads on first use a five-checkpoint assembly across three repos: the MM-DiT / mel-VAE / in-repo BigVGAN weights (hkchengrex/MMAudio — CC-BY-NC-4.0, © Sony Research Inc.) with a bundled MIT Synchformer encoder (© V. Iashin), the DFN5B-CLIP conditioner (apple/DFN5B-CLIP-ViT-H-14-384 — Apple ML Research Model License, research-only), and the 44.1 kHz tier's external NVIDIA BigVGAN v2 vocoder (nvidia/bigvgan_v2_44khz_128band_512x — MIT). The EFFECTIVE license is the intersection (strictest) of these: research / non-commercial only, gated by the Apple ML Research license. SceneWorks is non-commercial, so the weights are usable, but this restriction is recorded and surfaced here — a legal read is warranted before any commercial use.",
+      "usage": "Video→audio (Foley) model — RESEARCH / NON-COMMERCIAL USE ONLY. SceneWorks downloads on first use a five-checkpoint assembly across three repos: the MM-DiT / mel-VAE / in-repo BigVGAN weights (hkchengrex/MMAudio — CC-BY-NC-4.0, © Sony Research Inc.) with a bundled MIT Synchformer encoder (© V. Iashin), the 378px DFN5B-CLIP conditioner (apple/DFN5B-CLIP-ViT-H-14-378 — Apple ML Research Model License, research-only), and the 44.1 kHz tier's external NVIDIA BigVGAN v2 vocoder (nvidia/bigvgan_v2_44khz_128band_512x — MIT). The EFFECTIVE license is the intersection (strictest) of these: research / non-commercial only, gated by the Apple ML Research license. SceneWorks is non-commercial, so the weights are usable, but this restriction is recorded and surfaced here — a legal read is warranted before any commercial use.",
       "documents": [
         {
           "label": "Creative Commons BY-NC 4.0 (MMAudio MM-DiT / VAE / BigVGAN weights)",
@@ -1247,6 +1271,23 @@
         {
           "label": "Apache License 2.0",
           "key": "dwpose-apache"
+        }
+      ]
+    },
+    {
+      "id": "insightface",
+      "models": [
+        "instantid_face_stack"
+      ],
+      "name": "InsightFace face analysis models (SCRFD + ArcFace)",
+      "publisher": "InsightFace (deepinsight)",
+      "license": "Non-commercial research only (model weights); MIT (code)",
+      "homepage": "https://github.com/deepinsight/insightface",
+      "usage": "SCRFD face detector (scrfd_10g) and ArcFace recognition embedder (arcface_iresnet100) behind dataset face analysis, face-likeness comparison, keypoint extraction, structured catalog analysis and the identity lanes' likeness staging; staged from the SceneWorks/instantid-mlx safetensors conversion. InsightFace publishes no standalone weights license: per the verbatim upstream README terms reproduced in the notice, the CODE is MIT but models trained on InsightFace's annotated data — including SCRFD and ArcFace — are available for NON-COMMERCIAL RESEARCH PURPOSES ONLY, and conversion does not change the governing terms. Commercial use requires a separate license from the InsightFace team.",
+      "documents": [
+        {
+          "label": "InsightFace Model License Notice (verbatim upstream terms)",
+          "key": "insightface-model-notice"
         }
       ]
     }

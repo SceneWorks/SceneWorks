@@ -8,12 +8,12 @@
     "dev": "docker compose up --build",
     "stack:up": "docker compose up --build",
     "stack:down": "docker compose down",
-    "check": "node --test scripts/check-source-control-bytes.test.mjs scripts/check-tier-integrity.test.mjs scripts/validate-runpod-proxy.test.mjs scripts/docker-smoke-relevance.test.mjs scripts/merge-group-relevance.test.mjs scripts/generate-memory-matrix.test.mjs scripts/memory-contract-reconciliation.test.mjs scripts/inference-closure-digest.test.mjs scripts/backfill-closure-digests.test.mjs scripts/memory-calibration-harness.test.mjs scripts/hash-artifact-inventory.test.mjs scripts/platform-review-contracts.test.mjs scripts/lib/jsonc.test.mjs scripts/lib/source-revision.test.mjs scripts/lib/action-pins.test.mjs scripts/lib/rust-cache-bin.test.mjs scripts/lib/onnxruntime-pins.test.mjs scripts/scan-inference-provenance.test.mjs scripts/audit-hf-cache-liveness.test.mjs scripts/derive-ladder-margins.test.mjs scripts/stale-lane-report.test.mjs scripts/check-docker-api-runtime.test.mjs scripts/test-list-coverage.test.mjs scripts/check-evidence-corpus.test.mjs scripts/check-license-coverage.test.mjs scripts/report-staleness.test.mjs scripts/manifest-memory-declarations.test.mjs",
+    "check": "node --test scripts/check-source-control-bytes.test.mjs scripts/check-tier-integrity.test.mjs scripts/validate-runpod-proxy.test.mjs scripts/docker-smoke-relevance.test.mjs scripts/merge-group-relevance.test.mjs scripts/generate-memory-matrix.test.mjs scripts/generate-ltx-sc18946-plan.test.mjs scripts/memory-contract-reconciliation.test.mjs scripts/inference-closure-digest.test.mjs scripts/backfill-closure-digests.test.mjs scripts/memory-calibration-harness.test.mjs scripts/memory-calibration-watchdog.test.mjs scripts/run-ltx-safety-canary.test.mjs scripts/fit-ltx-temporal-form.test.mjs scripts/hash-artifact-inventory.test.mjs scripts/platform-review-contracts.test.mjs scripts/lib/jsonc.test.mjs scripts/lib/source-revision.test.mjs scripts/lib/action-pins.test.mjs scripts/lib/rust-cache-bin.test.mjs scripts/lib/onnxruntime-pins.test.mjs scripts/scan-inference-provenance.test.mjs scripts/audit-hf-cache-liveness.test.mjs scripts/derive-ladder-margins.test.mjs scripts/stale-lane-report.test.mjs scripts/check-docker-api-runtime.test.mjs scripts/test-list-coverage.test.mjs scripts/check-evidence-corpus.test.mjs scripts/check-license-coverage.test.mjs scripts/report-staleness.test.mjs scripts/check-download-patterns.test.mjs scripts/manifest-memory-declarations.test.mjs",
     "check:evidence-corpus": "node scripts/check-evidence-corpus.mjs --self-test && node scripts/check-evidence-corpus.mjs",
     "generate:memory-matrix": "node scripts/generate-memory-matrix.mjs",
     "generate:manifest-memory-declarations": "node scripts/generate-manifest-memory-declarations.mjs",
     "check:memory-matrix": "node scripts/generate-memory-matrix.mjs --check",
-    "check:memory-calibration": "node scripts/memory-calibration-harness.mjs check --input docs/generated/memory-calibration-evidence.json",
+    "check:memory-calibration": "node scripts/memory-calibration-harness.mjs check --input docs/generated/memory-calibration-evidence.json && node scripts/memory-calibration-harness.mjs check --input docs/generated/ltx-mlx-video-sc-18808.json && node scripts/memory-calibration-harness.mjs check --input docs/generated/ltx-mlx-geometry-sweep-sc-18810.json && node scripts/memory-calibration-harness.mjs check --input docs/generated/qwen-candle-five-rung-sc-15817.json",
     "report:stale-lanes": "node scripts/stale-lane-report.mjs",
     "check:rust-derived-docs": "npm run check:memory-matrix && npm run check:tier-integrity",
     "generate:tier-integrity": "node scripts/check-tier-integrity.mjs",
@@ -24,6 +24,8 @@
     "check:license-coverage": "node scripts/check-license-coverage.mjs",
     "report:staleness": "node scripts/report-staleness.mjs",
     "check:download-patterns": "node scripts/check-download-patterns.mjs",
+    "check:download-patterns:offline": "node scripts/check-download-patterns.mjs --self-test && node scripts/check-download-patterns.mjs --check",
+    "record:download-patterns": "node scripts/check-download-patterns.mjs --write",
     "hooks:install": "git config core.hooksPath scripts/git-hooks",
     "check:docker:rust-api:self-test": "node --test scripts/check-docker-api-runtime.test.mjs",
     "check:docker:rust-api": "node scripts/check-docker-api-runtime.mjs",
@@ -55,7 +57,8 @@
     "tauri:build": "npm --prefix apps/desktop run build",
     "release": "node scripts/release.mjs",
     "version": "node scripts/sync-version.mjs && git add Cargo.toml Cargo.lock apps/desktop/tauri.conf.json apps/desktop/package.json apps/desktop/package-lock.json apps/web/package.json apps/web/package-lock.json",
-    "report:memory-contract-reconciliation": "node scripts/report-memory-contract-reconciliation.mjs"
+    "report:memory-contract-reconciliation": "node scripts/report-memory-contract-reconciliation.mjs",
+    "check:ltx-temporal-fit": "node scripts/fit-ltx-temporal-form.mjs --check"
   },
   "engines": {
     "node": ">=20"

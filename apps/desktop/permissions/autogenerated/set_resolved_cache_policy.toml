@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-resolved-cache-policy"
+description = "Enables the set_resolved_cache_policy command without any pre-configured scope."
+commands.allow = ["set_resolved_cache_policy"]
+
+[[permission]]
+identifier = "deny-set-resolved-cache-policy"
+description = "Denies the set_resolved_cache_policy command without any pre-configured scope."
+commands.deny = ["set_resolved_cache_policy"]

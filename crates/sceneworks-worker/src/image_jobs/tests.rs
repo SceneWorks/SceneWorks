@@ -16192,10 +16192,13 @@ fn turnkey_resolution_prefers_pinned_tier_over_stale_main_but_override_uses_main
 
     let override_repo = "example/custom-boogu";
     let override_cache = hub.join("models--example--custom-boogu");
+    let override_revision = "0123456789abcdef0123456789abcdef01234567";
     std::fs::create_dir_all(override_cache.join("refs")).unwrap();
-    std::fs::write(override_cache.join("refs/main"), "override-main").unwrap();
+    std::fs::write(override_cache.join("refs/main"), override_revision).unwrap();
     let override_file = override_cache
-        .join("snapshots/override-main/base-q4/transformer")
+        .join("snapshots")
+        .join(override_revision)
+        .join("base-q4/transformer")
         .join("diffusion_pytorch_model.safetensors");
     std::fs::create_dir_all(override_file.parent().unwrap()).unwrap();
     std::fs::write(override_file, b"override").unwrap();
@@ -16206,7 +16209,12 @@ fn turnkey_resolution_prefers_pinned_tier_over_stale_main_but_override_uses_main
     }));
     assert_eq!(
         resolve_weights_dir(&override_request, &settings).unwrap(),
-        Some(override_cache.join("snapshots/override-main/base-q4"))
+        Some(
+            override_cache
+                .join("snapshots")
+                .join(override_revision)
+                .join("base-q4")
+        )
     );
 }
 
@@ -16530,10 +16538,11 @@ fn resolve_krea_control_base_descends_turnkey_root_into_tier_with_tokenizer() {
     // Seed a `SceneWorks/krea-2-turbo-mlx` HF snapshot with a packed q8 tier (transformer + tokenizer) and
     // NOTHING loadable at the root — the exact turnkey shape that triggered the bug.
     let repo = "SceneWorks/krea-2-turbo-mlx";
+    let revision = "0123456789abcdef0123456789abcdef01234567";
     let snapshot = hub
         .join("models--SceneWorks--krea-2-turbo-mlx")
         .join("snapshots")
-        .join("rev0");
+        .join(revision);
     let q8 = snapshot.join("q8");
     std::fs::create_dir_all(q8.join("transformer")).unwrap();
     std::fs::write(
@@ -16549,7 +16558,7 @@ fn resolve_krea_control_base_descends_turnkey_root_into_tier_with_tokenizer() {
         .join("models--SceneWorks--krea-2-turbo-mlx")
         .join("refs");
     std::fs::create_dir_all(&refs).unwrap();
-    std::fs::write(refs.join("main"), b"rev0").unwrap();
+    std::fs::write(refs.join("main"), revision).unwrap();
 
     let mut settings = Settings::from_env();
     settings.data_dir = dir.path().to_path_buf();
@@ -16917,16 +16926,17 @@ fn resolve_krea_imported_base_tier_requires_installed_base() {
     // Base absent → loud typed error.
     assert_install_base_error("absent base");
 
+    let revision = "0123456789abcdef0123456789abcdef01234567";
     let snapshot = hub
         .join("models--SceneWorks--krea-2-turbo-mlx")
         .join("snapshots")
-        .join("rev0");
+        .join(revision);
     let bf16 = snapshot.join("bf16");
     let refs = hub
         .join("models--SceneWorks--krea-2-turbo-mlx")
         .join("refs");
     std::fs::create_dir_all(&refs).unwrap();
-    std::fs::write(refs.join("main"), b"rev0").unwrap();
+    std::fs::write(refs.join("main"), revision).unwrap();
 
     // TORN base: the arch config lands but the component dirs exist EMPTY (an interrupted download). The
     // old existence-only gate passed this and then failed deep in the load; the tightened gate rejects

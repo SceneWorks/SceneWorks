@@ -141,9 +141,129 @@ pub(crate) fn offline_settings() -> crate::Settings {
     }
 }
 
+/// Install a process-global `tracing` subscriber whose only job is to keep callsite `Interest`
+/// honest while a test captures events through a scoped (`with_default`) subscriber. Call it at the
+/// top of every test that captures `tracing` output with `tracing::subscriber::with_default`.
+///
+/// Why (2026-08-17, `tracing_records_*` full-suite flake): `tracing-core` (0.1.36) caches
+/// per-callsite `Interest` on the FIRST hit of each callsite anywhere in the process. While the
+/// dispatcher registry has only ever held one dispatcher, that first-hit interest is computed from
+/// the *registering thread's* current default dispatcher — not from the registry
+/// (`Rebuilder::JustOne` in `tracing-core`'s `callsite.rs`). This test binary runs its tests on
+/// many threads, almost all subscriber-less, so while one test holds the process' only scoped
+/// subscriber, a concurrent test that first-hits a shared callsite (e.g. `select_strategy`'s
+/// admission events, which dozens of subscriber-less selector tests also drive) caches
+/// `Interest::never` from its NONE dispatcher — and every later hit of that callsite, including
+/// the capturing test's own, is dropped before any subscriber is consulted. Observed as a capture
+/// test failing under full-suite load with an INFO event missing while a later WARN event from the
+/// same body was captured; which capture test fails moves run to run with the first-hit race.
+///
+/// A registered global default closes both holes at once: `dispatcher::get_default` on a
+/// subscriber-less thread now resolves to this floor — whose `register_callsite` answers
+/// `Interest::sometimes()`, deferring every event to its thread's own dispatcher — and the floor's
+/// presence in the registry means the single-dispatcher fast path no longer applies while one
+/// scoped capture is live. `enabled()` is `false`, so the floor itself never records anything and
+/// subscriber-less threads stay silent exactly as before.
+///
+/// Idempotent. If a real global default won the slot first (`fmt().try_init()` in the ignored
+/// smokes), the install fails harmlessly — any registered global whose interest is not `never`
+/// for the captured level provides the same guarantee.
+pub(crate) fn install_tracing_interest_floor() {
+    struct InterestFloor;
+    impl tracing::Subscriber for InterestFloor {
+        fn register_callsite(
+            &self,
+            _: &'static tracing::Metadata<'static>,
+        ) -> tracing::subscriber::Interest {
+            tracing::subscriber::Interest::sometimes()
+        }
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            false
+        }
+        // Unreachable while `enabled` is `false`; a well-formed Id is still required.
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, _: &tracing::Event<'_>) {}
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+    // `set_global_default` registers a dispatcher (and rebuilds the interest cache) even when it
+    // loses the install race, so gate on `Once` rather than calling it unconditionally.
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        let _ = tracing::subscriber::set_global_default(InterestFloor);
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The floor's load-bearing property, end to end: a subscriber-less thread that first-hits a
+    /// callsite while a scoped capture subscriber is live must not cache `Interest::never` for it.
+    /// Without the floor the loss is deterministic here — the bare thread's registration evaluates
+    /// its NONE dispatcher via the single-dispatcher fast path, the shared callsite caches
+    /// `never`, and the capture below misses its own event (the exact shape of the 2026-08-17
+    /// `tracing_records_*` full-suite failures). Gut [`install_tracing_interest_floor`]'s
+    /// `register_callsite` — or drop the install — and this goes red.
+    #[test]
+    fn a_scoped_capture_survives_a_subscriberless_first_hit_of_its_callsite() {
+        // ONE function so both threads hit the SAME macro callsite — two `info!` literals would
+        // be two independent callsites and prove nothing.
+        fn sentinel() {
+            tracing::info!("interest-floor sentinel");
+        }
+
+        install_tracing_interest_floor();
+
+        #[derive(Clone, Default)]
+        struct Capture(std::sync::Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let capture = Capture::default();
+        let writer = capture.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .without_time()
+            .finish();
+        // The scoped subscriber must be live ACROSS the bare-thread hit, matching the victim
+        // shape: its registration is also what raises the process max level so the bare thread's
+        // event reaches callsite registration at all.
+        tracing::subscriber::with_default(subscriber, || {
+            std::thread::spawn(sentinel)
+                .join()
+                .expect("bare emitter thread");
+            sentinel();
+        });
+        let output = String::from_utf8(
+            capture
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone(),
+        )
+        .expect("fmt output is utf-8");
+        assert!(
+            output.contains("interest-floor sentinel"),
+            "a subscriber-less thread's first hit poisoned the callsite: {output:?}"
+        );
+    }
 
     /// [`offline_settings`] must move every network field OFF its real default. The `assert_ne`s are
     /// the load-bearing half: asserting only `== OFFLINE_URL` would still pass if someone

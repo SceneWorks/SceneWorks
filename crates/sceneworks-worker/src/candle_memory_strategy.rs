@@ -440,9 +440,7 @@ fn verified_candidates(
             harness_version: record.harness_version.clone(),
             predicted_peak_bytes: predicted.overall(),
             observed_peak_bytes: match &record.observed_memory {
-                RequiredNullable::Value(observed) => {
-                    Some(observed.overall_device_or_active_bytes())
-                }
+                RequiredNullable::Value(observed) => Some(observed.overall_non_reclaimable_bytes()),
                 RequiredNullable::Null => None,
             },
             parity: if record.quality.maximum_error_threshold == Some(0.0)

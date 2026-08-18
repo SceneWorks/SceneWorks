@@ -494,13 +494,17 @@ test("the lane oracle reads the routing tables, not the manifest's per-backend b
   );
   assert.ok(lanes.get("instantid_realvisxl")?.has("mlx"));
 
+  // FALSE NEGATIVE 3: SCAIL-2's Candle engine is deliberately outside the generic Candle-video
+  // columns and is unioned by `video_model_has_candle_video_route` through a direct model-id slice.
+  assert.deepEqual(
+    [...(lanes.get("scail2_14b") ?? [])].sort(),
+    ["candle", "mlx"],
+    "the oracle must follow CANDLE_SCAIL2_VIDEO_MODELS even though VIDEO_MODEL_CAPS.candle is false",
+  );
+
   // And the oracle must still say NO where there is genuinely no lane — otherwise "resolves both for
   // everything" would satisfy every assertion above without discriminating anything.
-  assert.deepEqual(
-    [...(lanes.get("scail2_14b") ?? [])],
-    ["mlx"],
-    "scail2_14b has neither candle_routed nor a bespoke candle route, so the oracle must not invent one",
-  );
+  assert.deepEqual([...(lanes.get("krea_realtime_14b") ?? [])], ["mlx"]);
 });
 
 test("mlx.rs contributes no bespoke lane — and this fails if it ever does", async () => {

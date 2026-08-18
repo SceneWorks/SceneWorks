@@ -62,9 +62,16 @@ test("the analysis is unchanged — every rule still detects its mutation", () =
   assert.match(output, /self-test PASS/);
 });
 
-test("a clean tree reports coverage and exits 0", () => {
+// The default run is REPORT-ONLY, and this test must not quietly re-impose the gate that
+// sc-19751/sc-19758 deliberately dismantled. It used to assert `[license-coverage] OK` and the
+// ABSENCE of the report banner — but any finding at all makes the script print the report banner
+// instead of OK, so those two assertions turned every finding into a hard `npm run check` failure
+// in the parity-scaffold job. That is exactly the gate the teardown removed, reintroduced through
+// the back door of a test. All the default run owes anyone is: it ran, it said something, and it
+// did not fail the build. `--strict` above is the deliberate lever for the compliance pass, and the
+// pin-skew test above still proves findings are reported rather than hidden.
+test("the default run reports and never fails the build, findings or not", () => {
   const { status, output } = runChecker();
   assert.equal(status, 0, output);
-  assert.match(output, /\[license-coverage\] OK/);
-  assert.doesNotMatch(output, /REPORT — not enforced/);
+  assert.match(output, /\[license-coverage\]/);
 });

@@ -138,6 +138,20 @@ export const ESTIMATE_WIDENING_MULTIPLIER = 2;
  */
 export const ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE = true;
 
+/**
+ * Ratified structural exemption from the binding-phase constraint above. A prediction may cross
+ * phases only when it evaluates EVERY phase independently, adds that phase's maximum fit/held-out
+ * absolute residual, and THEN takes the maximum over phases at the request geometry. It therefore
+ * does not carry a measured binding-phase label forward: whichever phase binds has its own
+ * conservative law. The ordinary backend estimate margin still applies after that envelope.
+ *
+ * This is not a provider-wide exemption. Scalar floors, single-phase fits, curves without residual
+ * bounds, and predictions that reuse a measured binding phase remain governed by
+ * ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE. The Rust mirror names the sole runtime
+ * construction ratified by this decision.
+ */
+export const RESIDUAL_BOUNDED_MAX_OVER_PHASES_EXEMPT_FROM_BINDING_PHASE_PIN = true;
+
 /** Pairwise spreads above this are accounting flips (see header), excluded and counted. */
 export const ACCOUNTING_DISCONTINUITY_THRESHOLD = 0.5;
 

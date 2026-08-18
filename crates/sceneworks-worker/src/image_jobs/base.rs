@@ -3233,6 +3233,9 @@ mod mage_artifact_certification_tests {
 
     #[test]
     fn mage_certification_binds_backbone_and_every_required_component() {
+        // The pinned-snapshot resolver consults the process-global HF cache env before
+        // `settings.data_dir`. Hold the crate-wide env lock and clear those overrides so a
+        // concurrent cache-resolution test cannot redirect this fixture mid-certification.
         let _env = crate::test_env::EnvVars::set(&[
             ("HF_HUB_CACHE", ""),
             ("HUGGINGFACE_HUB_CACHE", ""),

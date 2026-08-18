@@ -362,27 +362,27 @@ describe("finiteNumberOrUndefined", () => {
 });
 
 describe("loraWeight", () => {
-  it("defaults a generic LoRA to 0.8", () => {
-    expect(loraWeight({ id: "sdxl_style", family: "sdxl" })).toBe(0.8);
-    expect(loraWeight(null)).toBe(0.8);
+  it("defaults every LoRA to 1.0 regardless of family", () => {
+    // ONE default, no per-family table — krea-2 used to be special-cased (1.5, then 1.0) and
+    // deliberately no longer is. Covers each family-bearing shape extractFamilies() reads.
+    expect(loraWeight({ id: "sdxl_style", family: "sdxl" })).toBe(1.0);
+    expect(loraWeight({ id: "k", family: "krea_2" })).toBe(1.0);
+    expect(loraWeight({ id: "k", compatibility: { families: ["krea_2"] } })).toBe(1.0);
+    expect(loraWeight({ id: "w", families: ["wan-video"] })).toBe(1.0);
+    expect(loraWeight({ id: "f" })).toBe(1.0);
+    expect(loraWeight(null)).toBe(1.0);
   });
 
-  it("defaults a krea-2-family LoRA higher (1.5) for the distilled-Turbo attenuation (sc-7932)", () => {
-    // The family token is normalized (krea_2 -> krea-2), and the bump applies via any of the
-    // family-bearing shapes extractFamilies() reads.
-    expect(loraWeight({ id: "k", family: "krea_2" })).toBe(1.5);
-    expect(loraWeight({ id: "k", compatibility: { families: ["krea_2"] } })).toBe(1.5);
-  });
-
-  it("lets an explicit weight win over the krea-2 family default", () => {
-    expect(loraWeight({ id: "k", family: "krea_2", defaultWeight: 1.0 })).toBe(1.0);
+  it("lets an explicit weight win over the default", () => {
+    expect(loraWeight({ id: "k", family: "krea_2", defaultWeight: 1.3 })).toBe(1.3);
     expect(loraWeight({ id: "k", family: "krea_2", weight: 0.7 })).toBe(0.7);
     expect(loraWeight({ id: "k", family: "krea_2" }, { weight: 2.0 })).toBe(2.0);
+    expect(loraWeight({ id: "g", family: "sdxl", defaultWeight: 0.6 })).toBe(0.6);
   });
 
-  it("falls back to the family default when an explicit value is non-finite", () => {
-    expect(loraWeight({ id: "k", family: "krea_2", defaultWeight: "nope" })).toBe(1.5);
-    expect(loraWeight({ id: "g", family: "sdxl", defaultWeight: "nope" })).toBe(0.8);
+  it("falls back to the default when an explicit value is non-finite", () => {
+    expect(loraWeight({ id: "k", family: "krea_2", defaultWeight: "nope" })).toBe(1.0);
+    expect(loraWeight({ id: "g", family: "sdxl", defaultWeight: "nope" })).toBe(1.0);
   });
 });
 

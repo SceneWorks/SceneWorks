@@ -7,6 +7,67 @@ use super::{bernini::*, krea_realtime::*, ltx::*, mochi::*, scail2::*, svd::*, v
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use super::{bernini::*, ltx::*, mochi::*, scail2::*, svd::*, wan::*};
 
+/// Admission must see the exact temporal chunk already resolved onto the engine input. Re-reading
+/// the sparse payload or dropping this field would turn the real 25-frame/chunk-8 SVD execution
+/// into a fictional 25-frame VAE invocation.
+#[test]
+fn video_admission_captures_the_resolved_decode_chunk_from_the_engine_input() {
+    const WAN: &str = include_str!("wan.rs");
+    let capture = WAN
+        .split_once("let admission_geometry = (")
+        .expect("shared video funnel captures its admission geometry")
+        .1
+        .split_once(");")
+        .expect("admission geometry tuple closes")
+        .0;
+    assert!(
+        capture.contains("input.decode_chunk_size"),
+        "the admission shape must capture the provider-resolved decode chunk: {capture}"
+    );
+
+    let inputs = WAN
+        .split_once("crate::video_admission::VideoAdmissionInputs {")
+        .expect("shared video funnel invokes admission")
+        .1
+        .split_once("},")
+        .expect("admission inputs close")
+        .0;
+    assert!(
+        inputs.contains("decode_chunk_size: admission_geometry.3"),
+        "the captured chunk must reach VideoAdmissionInputs: {inputs}"
+    );
+}
+
+/// Closure currency must use the resolved provider id, not the catalog alias. On macOS the Wan
+/// 5B route therefore resolves the lane key `mlx:wan2_2_ti2v_5b`; the generated closure catalog is
+/// stamped only after the final inference head is frozen.
+#[cfg(target_os = "macos")]
+#[test]
+fn video_admission_closure_currency_uses_lane_and_resolved_provider() {
+    const WAN: &str = include_str!("wan.rs");
+    let lookup = WAN
+        .split_once("let admission_closure_digest =")
+        .expect("shared video funnel resolves closure currency")
+        .1
+        .split_once(";")
+        .expect("closure lookup statement closes")
+        .0;
+    assert!(
+        lookup.contains("packaged_closure_digest(")
+            && lookup.contains("crate::video_admission::LANE.as_key()")
+            && lookup.contains("input.engine_id"),
+        "closure lookup must key the active lane and resolved provider: {lookup}"
+    );
+    assert_eq!(
+        format!(
+            "{}:{}",
+            crate::video_admission::LANE.as_key(),
+            "wan2_2_ti2v_5b"
+        ),
+        "mlx:wan2_2_ti2v_5b"
+    );
+}
+
 #[test]
 fn video_jobs_remains_split_into_real_engine_modules() {
     const PARENT: &str = include_str!("mod.rs");
@@ -114,6 +175,521 @@ fn video_jobs_remains_split_into_real_engine_modules() {
                 );
             }
         }
+    }
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VideoLifecycleBehavior {
+    Success,
+    SafetyReject,
+    ConfigureError,
+    Canceled,
+    GenerateError,
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[derive(Default, Debug)]
+struct VideoLifecycleRecord {
+    safety_checks: usize,
+    begin_calls: usize,
+    configure_calls: usize,
+    generate_calls: usize,
+    generated_memory: Vec<Option<gen_core::GenerationMemory>>,
+    finishes: Vec<gen_core::MemoryRunOutcome>,
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+struct VideoLifecycleScope {
+    record: std::sync::Arc<std::sync::Mutex<VideoLifecycleRecord>>,
+    configure_error: bool,
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+impl gen_core::MemoryRequestScope for VideoLifecycleScope {
+    fn configure_request(&mut self, request: &mut GenerationRequest) -> gen_core::Result<()> {
+        let mut record = self.record.lock().unwrap();
+        record.configure_calls += 1;
+        record.generated_memory.push(request.memory);
+        if self.configure_error {
+            Err(gen_core::Error::Unsupported(
+                "fixture configure failure".to_owned(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn enter_phase(&mut self, _phase: gen_core::MemoryPhase) -> gen_core::Result<()> {
+        Ok(())
+    }
+
+    fn leave_phase(&mut self, _phase: gen_core::MemoryPhase) -> gen_core::Result<()> {
+        Ok(())
+    }
+
+    fn configure_decode(
+        &mut self,
+        _tile_edge: u32,
+        _overlap: u32,
+        _geometry: gen_core::MemoryGeometry,
+    ) -> gen_core::Result<()> {
+        Ok(())
+    }
+
+    fn configure_attention(&mut self, _chunk_size: u32) -> gen_core::Result<()> {
+        Ok(())
+    }
+
+    fn materialize_transformer_window(
+        &mut self,
+        _first_block: u32,
+        _block_count: u32,
+    ) -> gen_core::Result<()> {
+        Ok(())
+    }
+
+    fn finish(&mut self, outcome: gen_core::MemoryRunOutcome) -> gen_core::Result<()> {
+        self.record.lock().unwrap().finishes.push(outcome);
+        Ok(())
+    }
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+struct VideoLifecycleGenerator {
+    descriptor: gen_core::ModelDescriptor,
+    behavior: VideoLifecycleBehavior,
+    record: std::sync::Arc<std::sync::Mutex<VideoLifecycleRecord>>,
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+impl VideoLifecycleGenerator {
+    fn new(behavior: VideoLifecycleBehavior) -> Self {
+        Self {
+            descriptor: gen_core::ModelDescriptor {
+                id: "video_lifecycle_fixture",
+                family: "ltx",
+                backend: "mlx",
+                modality: gen_core::Modality::Video,
+                capabilities: Default::default(),
+                required_components: &[],
+                control_kinds: None,
+                encoder_contract: None,
+                denoiser_output_latent_space: None,
+            },
+            behavior,
+            record: Default::default(),
+        }
+    }
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+impl Generator for VideoLifecycleGenerator {
+    fn descriptor(&self) -> &gen_core::ModelDescriptor {
+        &self.descriptor
+    }
+
+    fn validate(&self, _request: &GenerationRequest) -> gen_core::Result<()> {
+        Ok(())
+    }
+
+    fn memory_strategy_safety_check(
+        &self,
+        _context: &gen_core::MemoryRunContext,
+    ) -> gen_core::MemorySafetyDecision {
+        self.record.lock().unwrap().safety_checks += 1;
+        if self.behavior == VideoLifecycleBehavior::SafetyReject {
+            gen_core::MemorySafetyDecision::Reject {
+                reason: "fixture safety rejection".to_owned(),
+            }
+        } else {
+            gen_core::MemorySafetyDecision::Accept
+        }
+    }
+
+    fn begin_memory_strategy_request(
+        &self,
+        _context: &gen_core::MemoryRunContext,
+    ) -> gen_core::Result<Option<Box<dyn gen_core::MemoryRequestScope + '_>>> {
+        self.record.lock().unwrap().begin_calls += 1;
+        Ok(Some(Box::new(VideoLifecycleScope {
+            record: self.record.clone(),
+            configure_error: self.behavior == VideoLifecycleBehavior::ConfigureError,
+        })))
+    }
+
+    fn generate(
+        &self,
+        request: &GenerationRequest,
+        _on_progress: &mut dyn FnMut(Progress),
+    ) -> gen_core::Result<GenerationOutput> {
+        {
+            let mut record = self.record.lock().unwrap();
+            record.generate_calls += 1;
+            record.generated_memory.push(request.memory);
+        }
+        match self.behavior {
+            VideoLifecycleBehavior::Canceled => Err(gen_core::Error::Canceled),
+            VideoLifecycleBehavior::GenerateError => Err(gen_core::Error::Unsupported(
+                "fixture generation failure".to_owned(),
+            )),
+            VideoLifecycleBehavior::Success
+            | VideoLifecycleBehavior::ConfigureError
+            | VideoLifecycleBehavior::SafetyReject => Ok(GenerationOutput::Video {
+                frames: vec![gen_core::Image {
+                    width: 1,
+                    height: 1,
+                    pixels: vec![0, 0, 0],
+                }],
+                fps: request.fps.unwrap_or(24),
+                audio: None,
+            }),
+        }
+    }
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn video_lifecycle_context(strategy: gen_core::MemoryStrategy) -> gen_core::MemoryRunContext {
+    gen_core::MemoryRunContext {
+        selection: gen_core::MemorySelection {
+            strategy,
+            parameters: if strategy == gen_core::MemoryStrategy::BoundedDecode {
+                gen_core::MemoryStrategyParameters {
+                    decode_tile_edge: Some(256),
+                    decode_overlap: Some(32),
+                    ..Default::default()
+                }
+            } else {
+                Default::default()
+            },
+            tier: gen_core::MemoryNumericTier {
+                precision: gen_core::Precision::Bf16,
+                quant: Some(gen_core::Quant::Q8),
+                component_precision_floors: &[],
+            },
+        },
+        // Fixture selections stand in for fitted/floor video syntheses, which never claim
+        // Calibrated authority (see video_admission's context construction).
+        optimization_authority: if strategy.is_optimized() {
+            gen_core::MemoryOptimizationAuthority::Estimated
+        } else {
+            gen_core::MemoryOptimizationAuthority::Resident
+        },
+        calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
+        calibration_fingerprint: "video-lifecycle-fixture-v1".to_owned(),
+        load_shape: gen_core::LoadShape::EagerMaterialization,
+        mode: gen_core::MemoryMode::Other("text_to_video".to_owned()),
+        has_reference: false,
+        use_pid: false,
+        has_phases: false,
+        geometry: gen_core::MemoryGeometry {
+            width: 768,
+            height: 512,
+            batch: 1,
+            frames: 121,
+            reference_count: 0,
+        },
+        overlay: None,
+        budget: gen_core::MemoryBudget {
+            total_bytes: 64 * 1024 * 1024 * 1024,
+            committed_bytes: 20 * 1024 * 1024 * 1024,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 2 * 1024 * 1024 * 1024,
+        },
+        predicted_peak_bytes: 18 * 1024 * 1024 * 1024,
+        cache_state: gen_core::MemoryCacheState::Warm,
+        evidence_revision: "fixture-evidence".to_owned(),
+    }
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn video_lifecycle_input(strategy: gen_core::MemoryStrategy) -> VideoGenInput {
+    let memory =
+        (strategy != gen_core::MemoryStrategy::Resident).then(|| gen_core::GenerationMemory {
+            tile_vae_decode: strategy == gen_core::MemoryStrategy::BoundedDecode,
+            decode_tile_edge: (strategy == gen_core::MemoryStrategy::BoundedDecode).then_some(256),
+            decode_overlap: (strategy == gen_core::MemoryStrategy::BoundedDecode).then_some(32),
+            ..Default::default()
+        });
+    VideoGenInput {
+        engine_id: "video_lifecycle_fixture",
+        prompt: "fixture".to_owned(),
+        width: 768,
+        height: 512,
+        frames: 121,
+        fps: 24,
+        memory,
+        memory_context: Some(video_lifecycle_context(strategy)),
+        ..VideoGenInput::default()
+    }
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn video_lifecycle_safety_rejection_prevents_begin_and_generate() {
+    let generator = VideoLifecycleGenerator::new(VideoLifecycleBehavior::SafetyReject);
+    let result = run_loaded_video_generation(
+        &generator,
+        video_lifecycle_input(gen_core::MemoryStrategy::StagedResidency),
+        &CancelFlag::new(),
+        &mut |_| {},
+    );
+    assert!(result.is_err());
+    let record = generator.record.lock().unwrap();
+    assert_eq!(record.safety_checks, 1);
+    assert_eq!(record.begin_calls, 0);
+    assert_eq!(record.configure_calls, 0);
+    assert_eq!(record.generate_calls, 0);
+    assert!(record.finishes.is_empty());
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn legacy_video_without_context_bypasses_memory_safety_and_generates() {
+    let generator = VideoLifecycleGenerator::new(VideoLifecycleBehavior::SafetyReject);
+    let mut input = video_lifecycle_input(gen_core::MemoryStrategy::Resident);
+    input.memory_context = None;
+    run_loaded_video_generation(&generator, input, &CancelFlag::new(), &mut |_| {})
+        .expect("an unsupported/no-contract route keeps the legacy direct-generate path");
+    let record = generator.record.lock().unwrap();
+    assert_eq!(record.safety_checks, 0);
+    assert_eq!(record.begin_calls, 0);
+    assert_eq!(record.configure_calls, 0);
+    assert_eq!(record.generate_calls, 1);
+    assert!(record.finishes.is_empty());
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn video_lifecycle_finishes_once_for_success_cancel_error_and_configuration_failure() {
+    for (behavior, expected_finish, expected_generate) in [
+        (
+            VideoLifecycleBehavior::Success,
+            gen_core::MemoryRunOutcome::Complete,
+            1,
+        ),
+        (
+            VideoLifecycleBehavior::Canceled,
+            gen_core::MemoryRunOutcome::Canceled,
+            1,
+        ),
+        (
+            VideoLifecycleBehavior::GenerateError,
+            gen_core::MemoryRunOutcome::Error {
+                message: "unsupported: fixture generation failure".to_owned(),
+            },
+            1,
+        ),
+        (
+            VideoLifecycleBehavior::ConfigureError,
+            gen_core::MemoryRunOutcome::Error {
+                message: "unsupported: fixture configure failure".to_owned(),
+            },
+            0,
+        ),
+    ] {
+        let generator = VideoLifecycleGenerator::new(behavior);
+        let result = run_loaded_video_generation(
+            &generator,
+            video_lifecycle_input(gen_core::MemoryStrategy::BoundedDecode),
+            &CancelFlag::new(),
+            &mut |_| {},
+        );
+        assert_eq!(result.is_ok(), behavior == VideoLifecycleBehavior::Success);
+        let record = generator.record.lock().unwrap();
+        assert_eq!(record.safety_checks, 1, "{behavior:?}");
+        assert_eq!(record.begin_calls, 1, "{behavior:?}");
+        assert_eq!(record.configure_calls, 1, "{behavior:?}");
+        assert_eq!(record.generate_calls, expected_generate, "{behavior:?}");
+        assert_eq!(record.finishes, vec![expected_finish], "{behavior:?}");
+        assert_eq!(
+            record.generated_memory[0].unwrap().decode_tile_edge,
+            Some(256)
+        );
+        assert_eq!(record.generated_memory[0].unwrap().decode_overlap, Some(32));
+    }
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn resident_video_context_runs_the_handshake_without_overriding_provider_defaults() {
+    let generator = VideoLifecycleGenerator::new(VideoLifecycleBehavior::Success);
+    run_loaded_video_generation(
+        &generator,
+        video_lifecycle_input(gen_core::MemoryStrategy::Resident),
+        &CancelFlag::new(),
+        &mut |_| {},
+    )
+    .expect("resident request");
+    let record = generator.record.lock().unwrap();
+    assert_eq!(record.safety_checks, 1);
+    assert_eq!(record.begin_calls, 1);
+    assert_eq!(record.configure_calls, 1);
+    assert_eq!(record.generate_calls, 1);
+    assert_eq!(record.generated_memory, vec![None, None]);
+    assert_eq!(record.finishes, vec![gen_core::MemoryRunOutcome::Complete]);
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn production_admission_handoff_drives_provider_safety_and_lifecycle() {
+    let generator = VideoLifecycleGenerator::new(VideoLifecycleBehavior::Success);
+    let mut input = video_lifecycle_input(gen_core::MemoryStrategy::Resident);
+    input.memory = None;
+    input.memory_context = None;
+    let selected_memory = gen_core::GenerationMemory {
+        tile_vae_decode: true,
+        decode_tile_edge: Some(256),
+        decode_overlap: Some(32),
+        ..Default::default()
+    };
+    apply_video_admission_outcome(
+        &mut input,
+        crate::video_admission::VideoAdmissionOutcome {
+            memory: Some(selected_memory),
+            context: Some(video_lifecycle_context(
+                gen_core::MemoryStrategy::BoundedDecode,
+            )),
+            refusal: None,
+        },
+    )
+    .expect("selected admission reaches the loaded input");
+    run_loaded_video_generation(&generator, input, &CancelFlag::new(), &mut |_| {})
+        .expect("production handoff generates");
+    let record = generator.record.lock().unwrap();
+    assert_eq!(record.safety_checks, 1);
+    assert_eq!(record.begin_calls, 1);
+    assert_eq!(record.configure_calls, 1);
+    assert_eq!(record.generate_calls, 1);
+    assert_eq!(
+        record.generated_memory,
+        vec![Some(selected_memory), Some(selected_memory)]
+    );
+    assert_eq!(record.finishes, vec![gen_core::MemoryRunOutcome::Complete]);
+}
+
+#[test]
+fn production_callback_retains_request_state_and_the_tested_admission_handoff() {
+    const SOURCE: &str = include_str!("wan.rs");
+    let funnel = SOURCE
+        .split_once("pub(super) async fn generate_video_using(")
+        .and_then(|(_, rest)| rest.split_once("// Bind the blocking generation task"))
+        .map(|(body, _)| body)
+        .expect("generate_video_using production callback region remains identifiable");
+    assert!(
+        funnel.contains("with_cached_generator_for_request_using("),
+        "the production funnel must use the request-aware cache callback that supplies cold/warm, \
+         load policy, external baseline, and fixed provider-resident delta"
+    );
+    assert!(
+        funnel.contains("with_uncached_generator("),
+        "the in-place Candle load must use the uncached request-aware callback that captures its \
+         own cold-load provider-resident delta"
+    );
+    assert!(
+        !funnel.contains("MemoryCacheState::Cold,\n                                OffloadPolicy::Sequential,\n                                0,\n                                0,"),
+        "the uncached Candle load may not forge a zero-byte provider attribution"
+    );
+    assert!(
+        funnel.contains("apply_video_admission_outcome(&mut input, outcome)?;"),
+        "the production callback must pass both selected memory and lifecycle context through the \
+         same handoff exercised by production_admission_handoff_drives_provider_safety_and_lifecycle"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn calibrated_video_memory_surface_is_exact_t2v_only() {
+    let mut input = VideoGenInput {
+        fps: 24,
+        ..VideoGenInput::default()
+    };
+    assert!(calibrated_video_memory_surface(&input, "text_to_video"));
+    assert!(calibrated_video_memory_surface(
+        &VideoGenInput {
+            fps: 30,
+            ..VideoGenInput::default()
+        },
+        "text_to_video"
+    ));
+
+    assert!(!calibrated_video_memory_surface(&input, "image_to_video"));
+    input.conditioning.push(Conditioning::Reference {
+        image: gen_core::Image {
+            width: 1,
+            height: 1,
+            pixels: vec![0, 0, 0],
+        },
+        strength: None,
+    });
+    assert!(!calibrated_video_memory_surface(&input, "text_to_video"));
+    input.conditioning.clear();
+    input.enhance_prompt = true;
+    assert!(!calibrated_video_memory_surface(&input, "text_to_video"));
+    input.enhance_prompt = false;
+    input.use_uncensored_enhancer = true;
+    assert!(!calibrated_video_memory_surface(&input, "text_to_video"));
+    input.use_uncensored_enhancer = false;
+    input.uncensored_enhancer_dir = Some(PathBuf::from("/fixture/enhancer"));
+    assert!(!calibrated_video_memory_surface(&input, "text_to_video"));
+    input.uncensored_enhancer_dir = None;
+    input.adapters.push(AdapterSpec {
+        path: PathBuf::from("/fixture/adapter.safetensors"),
+        scale: 1.0,
+        kind: gen_core::AdapterKind::Lora,
+        pass_scales: None,
+        moe_expert: None,
+    });
+    assert!(!calibrated_video_memory_surface(&input, "text_to_video"));
+    input.adapters.clear();
+    input.video_mode = Some("no_audio".to_owned());
+    assert!(!calibrated_video_memory_surface(&input, "text_to_video"));
+    input.video_mode = None;
+    for fps in [0, 1, 23, 31, 60] {
+        input.fps = fps;
+        assert!(!calibrated_video_memory_surface(&input, "text_to_video"));
     }
 }
 
@@ -305,9 +881,9 @@ fn both_candle_scail2_arms_attach_the_atomic_cold_load_plan() {
         wan.contains("Some(admission) => {")
             && wan.contains("let cold_load_cancel = cancel.clone();")
             && wan.contains(
-                "with_cached_generator_using_cold_admission(\n                            engine_id,\n                            spec,\n                            \"video load failed\",\n                            cold_load_cancel,"
+                "with_cached_generator_for_request_using_cold_admission(\n                            engine_id,\n                            spec,\n                            \"video load failed\",\n                            cold_load_cancel,"
             ),
-        "the shared video path must bind SCAIL admission and the same request cancel flag at the generator-cache seam"
+        "the shared video path must bind SCAIL admission, request accounting, and the same cancel flag at the generator-cache seam"
     );
     let cache = include_str!("../generator_cache.rs");
     assert!(
@@ -694,8 +1270,10 @@ fn mochi_receipts_are_atomic_across_tier_and_shared_corequisite() {
     let hub = data.path().join("hub");
     let _env = crate::test_env::EnvVars::set(&[("HF_HUB_CACHE", hub.to_str().unwrap())]);
     let repo_cache = hub.join("models--SceneWorks--mochi-1-mlx");
-    let installed = repo_cache.join("snapshots/installed");
-    let newer = repo_cache.join("snapshots/newer");
+    let installed_revision = "1111111111111111111111111111111111111111";
+    let newer_revision = "2222222222222222222222222222222222222222";
+    let installed = repo_cache.join("snapshots").join(installed_revision);
+    let newer = repo_cache.join("snapshots").join(newer_revision);
     for root in [&installed, &newer] {
         std::fs::create_dir_all(root.join("q4/transformer")).unwrap();
         std::fs::write(root.join("q4/transformer/model.safetensors"), b"x").unwrap();
@@ -706,7 +1284,7 @@ fn mochi_receipts_are_atomic_across_tier_and_shared_corequisite() {
         }
     }
     std::fs::create_dir_all(repo_cache.join("refs")).unwrap();
-    std::fs::write(repo_cache.join("refs/main"), b"newer").unwrap();
+    std::fs::write(repo_cache.join("refs/main"), newer_revision).unwrap();
     let marker = data
         .path()
         .join("models")
@@ -733,12 +1311,12 @@ fn mochi_receipts_are_atomic_across_tier_and_shared_corequisite() {
     };
     let request = mochi_request(json!({ "mlxQuantize": 4 }));
 
-    write_receipts("installed", "installed");
+    write_receipts(installed_revision, installed_revision);
     assert_eq!(
         resolve_mochi_model_dir(&settings, &request).unwrap(),
         installed.join("q4")
     );
-    write_receipts("installed", "newer");
+    write_receipts(installed_revision, newer_revision);
     assert_ne!(
         resolve_mochi_model_dir(&settings, &request).unwrap(),
         installed.join("q4")
@@ -1559,7 +2137,7 @@ fn every_candle_video_model_maps_to_a_gated_or_recorded_exempt_engine() {
 
     // The EXEMPT engines (sc-12344's recorded reason: their on-disk bytes are not their loaded set,
     // so a byte-derived floor would wall-reject working cards — see `vram_gate::wan_weight_components`).
-    for model in ["ltx_2_3", "ltx_2_3_eros", "svd"] {
+    for model in ["ltx_2_3", "svd"] {
         let engine_id = candle_video_engine_id(model).expect("a candle video engine");
         assert_eq!(
             crate::vram_gate::wan_weight_bytes(engine_id, root),
@@ -1567,6 +2145,11 @@ fn every_candle_video_model_maps_to_a_gated_or_recorded_exempt_engine() {
             "{model} → {engine_id} is exempt by decision; gating it on a dir sum would over-count"
         );
     }
+    assert_eq!(
+        candle_video_engine_id("ltx_2_3_eros"),
+        None,
+        "SC-18902 removed Eros from the Candle universe; it is not a fit-gate exemption"
+    );
 
     // Mochi rides its own frame-dependent gate (sc-12306), never this one.
     assert_eq!(
@@ -3382,6 +3965,9 @@ fn krea_realtime_coverage_uses_engine_reports_not_header_predictions() {
     );
     assert_eq!(stamped[0].get("totalKeys").and_then(Value::as_u64), Some(2));
 
+    // Concurrent subscriber-less tests can first-hit this warn's callsite and cache
+    // `Interest::never`, silently emptying this capture (see test_env).
+    crate::test_env::install_tracing_interest_floor();
     let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let subscriber = tracing_subscriber::fmt()
         .json()
@@ -4912,7 +5498,8 @@ fn video_route_replace_person_dispatches_by_model() {
 fn candle_video_route_gates_on_backend_flag_then_mode() {
     let mut settings = Settings::from_env();
 
-    // Candle disabled (default) → always the stub, regardless of model/mode.
+    // Candle disabled (default) → supported models stub, but Eros remains a terminal refusal so a
+    // direct/replayed legacy job can never manufacture procedural success.
     settings.backend_candle_enabled = false;
     let scail2_replace = request(json!({
         "projectId": "p", "model": "scail2_14b", "mode": "replace_person",
@@ -4921,9 +5508,50 @@ fn candle_video_route_gates_on_backend_flag_then_mode() {
         resolve_candle_video_route(&scail2_replace, &settings),
         CandleVideoRoute::Stub,
     );
+    let disabled_eros = request(json!({
+        "projectId": "p", "model": "ltx_2_3_eros", "mode": "text_to_video",
+    }));
+    assert_eq!(
+        resolve_candle_video_route(&disabled_eros, &settings),
+        CandleVideoRoute::UnsupportedEros,
+    );
 
     // Enabled: each native replacement family keeps its exact provider.
     settings.backend_candle_enabled = true;
+    // sc-18902: a replayed Eros job gets a terminal worker-side refusal before every mode arm. It
+    // must never fall through to procedural Stub output or borrow the Wan-VACE replace/extend lane.
+    for mode in [
+        "text_to_video",
+        "image_to_video",
+        "first_last_frame",
+        "replace_person",
+        "extend_clip",
+        "video_bridge",
+    ] {
+        let eros = request(json!({
+            "projectId": "p", "model": "ltx_2_3_eros", "mode": mode,
+        }));
+        assert_eq!(
+            resolve_candle_video_route(&eros, &settings),
+            CandleVideoRoute::UnsupportedEros,
+            "Eros {mode} must fail loudly rather than reach a real or stub Candle route",
+        );
+        assert!(
+            runtime_descriptor_engine_ids("ltx_2_3_eros", mode).is_empty(),
+            "Eros {mode} must not advertise a Candle runtime descriptor",
+        );
+    }
+    let error = reject_unsupported_candle_video_route(CandleVideoRoute::UnsupportedEros)
+        .expect_err("the execution seam must reject the unsupported Eros route");
+    match error {
+        WorkerError::InvalidPayload(message) => {
+            assert!(message.contains("not supported on Candle/CUDA"));
+            assert!(message.contains("Apple Silicon MLX"));
+            assert!(message.contains("base LTX-2.3"));
+        }
+        other => panic!("Eros rejection must remain a typed invalid-payload error, got {other:?}"),
+    }
+    assert!(reject_unsupported_candle_video_route(CandleVideoRoute::Stub).is_ok());
     assert_eq!(
         resolve_candle_video_route(&scail2_replace, &settings),
         CandleVideoRoute::ReplacePersonScail2(scail2_engine_id("scail2_14b").unwrap()),
@@ -4935,20 +5563,18 @@ fn candle_video_route_gates_on_backend_flag_then_mode() {
         resolve_candle_video_route(&vace_fun, &settings),
         CandleVideoRoute::ReplacePersonWanVaceFun,
     );
-    for model in ["ltx_2_3", "ltx_2_3_eros"] {
-        for mode in ["replace_person", "extend_clip", "video_bridge"] {
-            let native = request(json!({ "projectId": "p", "model": model, "mode": mode }));
-            assert_eq!(
-                resolve_candle_video_route(&native, &settings),
-                CandleVideoRoute::CandleVideo,
-                "{model} {mode} must stay on the native LTX provider",
-            );
-            assert_eq!(
-                runtime_descriptor_engine_ids(model, mode),
-                vec!["ltx_2_3_distilled"],
-                "runtime facts must report the same native LTX engine",
-            );
-        }
+    for mode in ["replace_person", "extend_clip", "video_bridge"] {
+        let native = request(json!({ "projectId": "p", "model": "ltx_2_3", "mode": mode }));
+        assert_eq!(
+            resolve_candle_video_route(&native, &settings),
+            CandleVideoRoute::CandleVideo,
+            "base LTX {mode} must stay on the native LTX provider",
+        );
+        assert_eq!(
+            runtime_descriptor_engine_ids("ltx_2_3", mode),
+            vec!["ltx_2_3_distilled"],
+            "runtime facts must report the same native LTX engine",
+        );
     }
     assert_eq!(
         runtime_descriptor_engine_ids("wan_2_2_vace_fun_14b", "replace_person"),
@@ -5177,6 +5803,18 @@ fn family_prefers_manifest_then_infers_from_model() {
         "modelManifestEntry": { "family": "ltx-custom" }
     }));
     assert_eq!(resolve_family(&manifest), "ltx-custom");
+    assert_eq!(
+        resolve_catalog_video_family(&manifest.model, &manifest.model_manifest_entry),
+        resolve_family(&manifest),
+        "admission and asset planning must use the exact same custom-family policy"
+    );
+    let ltx = request(json!({ "projectId": "p", "model": "ltx_2_3" }));
+    assert_eq!(resolve_family(&ltx), "ltx-video");
+    assert_eq!(
+        resolve_catalog_video_family(&ltx.model, &ltx.model_manifest_entry),
+        resolve_family(&ltx),
+        "admission and asset planning must use the exact same LTX fallback"
+    );
     let wan = request(json!({ "projectId": "p", "model": "wan_2_2_t2v_14b" }));
     assert_eq!(resolve_family(&wan), "wan-video");
     let other = request(json!({ "projectId": "p", "model": "mystery" }));
@@ -7291,7 +7929,7 @@ fn write_fake_wan_lightning(data_dir: &Path, engine_id: &str) -> (PathBuf, PathB
         .join("hub")
         .join("models--lightx2v--Wan2.2-Lightning")
         .join("snapshots")
-        .join("deadbeef")
+        .join("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
         .join(subdir);
     std::fs::create_dir_all(&base).unwrap();
     let high = base.join("high_noise_model.safetensors");
@@ -9300,14 +9938,22 @@ fn ltx_gemma_override_path_requires_complete_dir() {
 
 /// `resolve_ltx_eros_gemma_dir`: a complete `models/mlx/gemma` sibling of the eros checkpoint wins;
 /// an incomplete/absent sibling with no bundle snapshot → `None` (provider surfaces the clear
-/// "set LTX_GEMMA_DIR" error). Skipped when an operator `$LTX_GEMMA_DIR` is set (the override path
-/// returns `None` by design, exercised by [`resolve_bundled_ltx_gemma_dir`]'s own coverage).
+/// "set LTX_GEMMA_DIR" error). The override path returning `None` by design is exercised by
+/// [`ltx_gemma_override_path_requires_complete_dir`].
 #[cfg(target_os = "macos")]
 #[test]
 fn resolve_ltx_eros_gemma_prefers_local_sibling() {
-    if std::env::var_os("LTX_GEMMA_DIR").is_some() {
-        return;
-    }
+    // The resolver reads `$LTX_GEMMA_DIR` and the HF cache env chain BEFORE `data_dir`, so pin all
+    // of them removed under the crate env lock. The prior `if $LTX_GEMMA_DIR is set { return }`
+    // guard read the env WITHOUT the lock — under full-suite load, a concurrent
+    // `ltx_with_hermetic_cache` test's pinned `HF_HUB_CACHE` (whose fixture hub holds a COMPLETE
+    // bundle gemma) made the first `is_none()` assert observe `Some` (2026-08-17 flake).
+    let _env = crate::test_env::EnvVars::set(&[
+        ("LTX_GEMMA_DIR", ""),
+        ("HF_HUB_CACHE", ""),
+        ("HUGGINGFACE_HUB_CACHE", ""),
+        ("HF_HOME", ""),
+    ]);
     let data_guard = tempfile::Builder::new()
         .prefix("sw_eros_gemma_")
         .tempdir()
@@ -9335,6 +9981,72 @@ fn resolve_ltx_eros_gemma_prefers_local_sibling() {
     // An incomplete sibling does not win (falls through to the absent bundle → None).
     std::fs::remove_file(gemma.join("model-00001-of-00002.safetensors")).unwrap();
     assert!(resolve_ltx_eros_gemma_dir(&settings, &eros).is_none());
+}
+
+/// sc-18809: the eros gemma RESOLVER's bundle fallback must share ONE predicate with its probe.
+/// Widening `ensure_ltx_bundle_gemma_present` to the cross-revision `bundled_ltx_gemma_dir` scan while
+/// this resolver kept a single-snapshot `huggingface_snapshot_dir(..).join("gemma")` check left the
+/// probe STRICTLY MORE PERMISSIVE than the resolver — an inversion that is fatal exactly here: the
+/// probe reports gemma present and skips the fetch, then the resolver returns `None`, and the eros job
+/// dead-ends on the provider's required-`LoadSpec::text_encoder` error instead of self-healing by
+/// fetching as it did before this story.
+///
+/// The fixture moves the split-revision hub's `gemma/` onto the BUMPED snapshot, so the snapshot
+/// `resolve_huggingface_snapshot_dir` selects (pre-bump, q4 7 + q8 7 = 14 files) has no `gemma/` at
+/// all while the sibling (bf16 7 + gemma 5 = 12) holds the only complete one. Under the single-snapshot
+/// form this resolves `None`; under the shared predicate it reaches the sibling revision.
+#[cfg(target_os = "macos")]
+#[test]
+fn resolve_ltx_eros_gemma_reaches_a_sibling_revision() {
+    let hub_guard = ltx_split_revision_hub("eros_gemma");
+    let hub = hub_guard.path();
+    let snapshots = hub
+        .join(format!(
+            "models--{}",
+            sceneworks_core::hf_home::safe_repo_dir_name(LTX_BUNDLE_REPO).expect("slug")
+        ))
+        .join("snapshots");
+    let pre_bump = snapshots.join("254989c3ca7ee691187647f350b112c0c448789d");
+    let bumped = snapshots.join(LTX_BUNDLE_REVISION);
+    // Move gemma OFF the most-files snapshot onto the sibling: the selected snapshot keeps 14 files
+    // (q4 + q8) against the sibling's 12 (bf16 + gemma), so the SELECTION is unchanged and the only
+    // complete `gemma/` is one revision over.
+    std::fs::rename(pre_bump.join("gemma"), bumped.join("gemma")).unwrap();
+
+    let data_guard = tempfile::Builder::new()
+        .prefix("sw_eros_gemma_sibling_")
+        .tempdir()
+        .expect("temp dir");
+    let eros = data_guard
+        .path()
+        .join("models")
+        .join("mlx")
+        .join("ltx_2_3_eros");
+    std::fs::create_dir_all(&eros).unwrap();
+    let settings = Settings {
+        data_dir: data_guard.path().to_path_buf(),
+        ..offline_settings()
+    };
+
+    let (selected, resolved) = ltx_with_hermetic_cache(hub, || {
+        (
+            crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, LTX_BUNDLE_REPO),
+            resolve_ltx_eros_gemma_dir(&settings, &eros),
+        )
+    });
+    assert_eq!(
+        selected.as_deref(),
+        Some(pre_bump.as_path()),
+        "fixture premise: the most-files heuristic must still select the gemma-LESS snapshot, or \
+         this test stops discriminating"
+    );
+    assert_eq!(
+        resolved.as_deref(),
+        Some(bumped.join("gemma").as_path()),
+        "the eros resolver must see the gemma its own probe already sees — a single-snapshot bundle \
+         fallback returns `None` here while `ensure_ltx_bundle_gemma_present` reports it present, so \
+         the job dead-ends on the required-`LoadSpec::text_encoder` error"
+    );
 }
 
 /// sc-8827 (F-025): the LTX Gemma-encoder dir rides `LoadSpec::text_encoder` (via
@@ -10204,7 +10916,7 @@ fn write_fake_hf_lora(data_dir: &Path, repo: &str, file: &str) -> PathBuf {
     let snapshot = fake_hf_hub_dir(data_dir)
         .join(format!("models--{}", repo.replace('/', "--")))
         .join("snapshots")
-        .join("deadbeef");
+        .join("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
     std::fs::create_dir_all(&snapshot).unwrap();
     let path = snapshot.join(file);
     write_lora_fixture(&path, None);
@@ -10927,19 +11639,16 @@ mod candle_video_label_tests {
         assert_eq!(candle_video_engine_id("ltx_2_3"), Some("ltx_2_3_distilled"));
         // SVD maps to the candle `svd_xt` engine (sc-5493).
         assert_eq!(candle_video_engine_id("svd"), Some("svd_xt"));
-        // eros now shares the one candle LTX-2.3 engine with the base (sc-5495 wired the eros
-        // dense checkpoint through `ltx_2_3_distilled`; they differ only in `candle_video_repo`).
-        assert_eq!(
-            candle_video_engine_id("ltx_2_3_eros"),
-            Some("ltx_2_3_distilled")
-        );
-        assert!(is_candle_video_engine("ltx_2_3_eros"));
+        // sc-18902: exact-head Candle/CUDA acceptance rendered unresolved noise from Eros's
+        // undistilled dense checkpoint. Until Candle has a complete validated distill recipe it
+        // must not resolve an engine id or advertise this model.
+        assert_eq!(candle_video_engine_id("ltx_2_3_eros"), None);
+        assert!(!is_candle_video_engine("ltx_2_3_eros"));
         for model in [
             "wan_2_2",
             "wan_2_2_t2v_14b",
             "wan_2_2_i2v_14b",
             "ltx_2_3",
-            "ltx_2_3_eros",
             "svd",
         ] {
             assert!(is_candle_video_engine(model), "{model}");

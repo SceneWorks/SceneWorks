@@ -7,39 +7,44 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
-async function fileSha256(file) {
+async function fileSha256(file, signal) {
   // Read every byte even when a Hugging Face snapshot symlink points at a 64-hex blob name. The
   // name is useful cache metadata, but trusting it would let a corrupted or replaced same-size blob
   // retain the old inventory receipt.
   const hash = createHash("sha256");
-  for await (const chunk of createReadStream(file)) hash.update(chunk);
+  signal?.throwIfAborted();
+  for await (const chunk of createReadStream(file, { signal })) {
+    hash.update(chunk);
+    signal?.throwIfAborted();
+  }
   return hash.digest("hex");
 }
 
-async function inventoryFiles(root, relative = "") {
+async function inventoryFiles(root, relative = "", signal) {
+  signal?.throwIfAborted();
   const directory = path.join(root, relative);
   const entries = await readdir(directory, { withFileTypes: true });
   const files = [];
   for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
     const child = path.join(relative, entry.name);
     if (entry.isDirectory()) {
-      files.push(...await inventoryFiles(root, child));
+      files.push(...await inventoryFiles(root, child, signal));
     } else if (entry.isFile() || entry.isSymbolicLink()) {
       const absolute = path.join(root, child);
       const resolved = await stat(absolute);
       files.push({
         path: child.split(path.sep).join("/"),
         bytes: resolved.size,
-        sha256: await fileSha256(absolute),
+        sha256: await fileSha256(absolute, signal),
       });
     }
   }
   return files;
 }
 
-export async function hashArtifactInventory(root) {
+export async function hashArtifactInventory(root, { signal } = {}) {
   const absolute = path.resolve(root);
-  const files = await inventoryFiles(absolute);
+  const files = await inventoryFiles(absolute, "", signal);
   if (files.length === 0) throw new Error(`artifact inventory is empty: ${absolute}`);
   const bytes = files.reduce((total, file) => total + file.bytes, 0);
   const hash = createHash("sha256");

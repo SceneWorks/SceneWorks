@@ -83,6 +83,9 @@ fn main() {
             settings::choose_folder,
             settings::set_data_dir,
             settings::choose_data_dir,
+            // Relocating an unavailable model library (sc-19709).
+            settings::set_model_library,
+            settings::restart_app,
             settings::reveal_in_os,
             // Save an asset to a user-chosen destination + resolve an asset's
             // project-relative path to its absolute on-disk path (sc-8726).
@@ -96,6 +99,7 @@ fn main() {
             settings::get_gpu_info,
             // GPU memory cap (epic 7819).
             settings::set_gpu_memory_limit,
+            settings::set_resolved_cache_policy,
             // Live MLX memory telemetry for the Settings readout (epic 7819, sc-7825).
             settings::get_gpu_telemetry,
             // LAN remote access (epic 4484, stories 4/5).

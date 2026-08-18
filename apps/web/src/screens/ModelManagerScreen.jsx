@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { WorkPanel } from "../components/WorkPanel.jsx";
 import { WAN_MOE_PAIRED_LORA_MODEL_IDS, terminalStatuses } from "../constants.js";
@@ -14,6 +14,23 @@ import {
 import { useAppContext } from "../context/AppContext.js";
 import { DEFAULT_MAC_CAPABILITIES, macModelBlock } from "../macGating.js";
 import { appConfirm } from "../appConfirm.jsx";
+import { formatBytes } from "../formatting.js";
+import {
+  availabilityBadge,
+  cacheEligibilityBadge,
+  canHoldLocalCopy,
+  describeEntryState,
+  describeMissingLocalCopy,
+  describeRemovalPreview,
+  entriesForModel,
+  fetchModelCache,
+  isTransitionalEntry,
+  previewCacheRemoval,
+  removalIsAllowed,
+  removeCacheEntry,
+  setCacheEntryPin,
+} from "../modelCache.js";
+import { useCacheConvergence } from "../hooks/useCacheConvergence.js";
 import { KeywordTagEditor } from "../components/KeywordTagEditor.jsx";
 import { useHostMemory } from "../hooks/useHostMemory.js";
 import { hostMemoryGbForBackend } from "../hostMemory.js";
@@ -720,6 +737,17 @@ export function ModelManagerScreen() {
   const [modelFileInputKey, setModelFileInputKey] = useState(0);
   const [deletingItem, setDeletingItem] = useState("");
   const [deleteMessage, setDeleteMessage] = useState({ tone: "neutral", text: "" });
+  // Resolved-model hot cache (epic 19703, sc-19711). ONE status read backs every card's local-copy
+  // block: on mount, after each keep/remove, and — only while the store is still working on an
+  // entry — on a bounded cadence, so a copy in flight visibly converges instead of freezing at
+  // whatever state the screen happened to open on. A settled cache costs exactly the one mount
+  // read it always did, which is what keeps the per-row cost sc-19708 removed from coming back.
+  const [modelCache, setModelCache] = useState(null);
+  // Cache key of the entry whose keep/remove request is in flight, so its buttons disable.
+  const [cacheBusyKey, setCacheBusyKey] = useState("");
+  // Why the local-copy controls are absent, when they are. Held apart from `deleteMessage` so an
+  // action outcome cannot clobber a standing explanation, and vice versa.
+  const [cacheError, setCacheError] = useState("");
   // Tabbed interface (epic 10309): the active tab, the tab to restore when a search
   // clears, and the persistent search query. Every model now renders as an always-open
   // card, so the old per-row expand state is gone. Tabs: image | video | utility | lora,
@@ -880,6 +908,90 @@ export function ModelManagerScreen() {
       setPendingUpdate(next);
     }
   }, [jobs, pendingUpdate, createModelConvertJob]);
+
+  // One resolved-cache status read for the whole screen. A failure leaves `modelCache` null, which
+  // renders no local-copy blocks at all — never an empty-but-confident "no local copies". The
+  // reason is kept separately so the screen can say ONCE why the controls are missing: the failure
+  // is global, so repeating it on every model card would be noise, and staying silent would leave
+  // the user to guess whether they have no local copies or no answer.
+  const refreshModelCache = useCallback(async () => {
+    try {
+      const snapshot = await fetchModelCache();
+      setModelCache(snapshot);
+      // A 200 can still carry `error`: the store exists but could not be listed.
+      setCacheError(snapshot?.error ? String(snapshot.error) : "");
+    } catch (error) {
+      setModelCache(null);
+      setCacheError(String(error?.message ?? error));
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshModelCache();
+  }, [refreshModelCache]);
+
+  // Bounded convergence refresh. It runs ONLY while the snapshot actually holds an entry the store
+  // is still moving (queued, copying, being removed) and stops the moment every entry is terminal,
+  // so an all-settled cache is read exactly once. `stalled` is the honest end of the bound: still
+  // in flight, but nothing is re-reading any more, which the card has to say rather than leave a
+  // "checking…" line that has quietly stopped meaning anything.
+  const { stalled: cacheConvergenceStalled } = useCacheConvergence(modelCache, refreshModelCache);
+
+  // "Keep locally" / "Allow automatic removal" — the artifact pin. Re-reads the authoritative
+  // status afterwards rather than optimistically flipping the row: the UI must not claim a state
+  // the store hasn't committed.
+  async function toggleKeepLocalCopy(entry) {
+    setCacheBusyKey(entry.cacheKey);
+    try {
+      await setCacheEntryPin(entry.cacheKey, !entry.pinned);
+      await refreshModelCache();
+      setDeleteMessage({
+        tone: "neutral",
+        text: entry.pinned
+          ? "This local copy can now be removed automatically when space is needed."
+          : "This local copy will be kept until you allow automatic removal.",
+      });
+    } catch (error) {
+      setDeleteMessage({ tone: "error", text: String(error?.message ?? error) });
+    } finally {
+      setCacheBusyKey("");
+    }
+  }
+
+  // "Remove local copy". The preview is fetched FIRST and the confirm is built entirely from it —
+  // measured bytes, the typed pin answer (including "can't determine"), and any refusal reason —
+  // so the dialog can never promise a removal the store would then refuse. A blocked preview is
+  // reported and the destructive path is not offered at all.
+  async function removeLocalCopy(model, entry) {
+    setCacheBusyKey(entry.cacheKey);
+    try {
+      const preview = await previewCacheRemoval(entry.cacheKey);
+      const lines = describeRemovalPreview(preview);
+      if (!removalIsAllowed(preview)) {
+        setDeleteMessage({ tone: "error", text: lines.join(" ") });
+        return;
+      }
+      const proceed = await appConfirm({
+        title: `Remove the local copy of ${model.name}?`,
+        message: lines.join(" "),
+        confirmLabel: "Remove local copy",
+        tone: "danger",
+      });
+      if (!proceed) return;
+      const outcome = await removeCacheEntry(entry.cacheKey);
+      await refreshModelCache();
+      setDeleteMessage({
+        tone: "neutral",
+        text: outcome.sourceUnavailableWarning
+          ? `Removed the local copy and freed ${formatBytes(outcome.reclaimedBytes)}. ${model.name} stays unusable until its model library is reconnected.`
+          : `Removed the local copy and freed ${formatBytes(outcome.reclaimedBytes)}.`,
+      });
+    } catch (error) {
+      setDeleteMessage({ tone: "error", text: String(error?.message ?? error) });
+    } finally {
+      setCacheBusyKey("");
+    }
+  }
 
   // First half of the "Update" flow: re-download the newer source, then track its job so the effect
   // above can auto-convert once it lands. Reuses the existing download + convert endpoints.
@@ -1164,9 +1276,10 @@ export function ModelManagerScreen() {
     const downloadJobs = downloadJobsFor(model);
     const downloadJob = downloadJobs.find((job) => !terminalStatuses.has(job.status));
     const installed = model.installState === "installed";
+    const cleanupOnly = model.platformCleanupOnly === true;
     const incomplete = model.cacheState === "incomplete" || model.repairAvailable;
     const missingRequiredFiles = Array.isArray(model.missingRequiredFiles) ? model.missingRequiredFiles : [];
-    const localDownloadJob = installed ? null : downloadJobs.find((job) => job.status !== "completed");
+    const localDownloadJob = cleanupOnly || installed ? null : downloadJobs.find((job) => job.status !== "completed");
     const failedDownload = localDownloadJob && terminalStatuses.has(localDownloadJob.status);
     const downloadSize = downloadSizeText(model);
     const unassociated = !model.family;
@@ -1181,7 +1294,7 @@ export function ModelManagerScreen() {
     // MLX (macOS) variant: only present when the catalog computed mlxConversionState.
     // Conversion state is a platform capability supplied by the API, not a memory measurement.
     // Keep that control surface intact while guarding the MLX memory block by the active lane.
-    const mlxState = model.mlxConversionState;
+    const mlxState = cleanupOnly ? null : model.mlxConversionState;
     const mlxMinGb = memoryBackend === "mlx" ? blanketFloorGb(model, "mlx") : null;
     const mlxEnoughMemory = unifiedMemoryGb == null || mlxMinGb == null || unifiedMemoryGb >= mlxMinGb;
     const convertJobs = convertJobsFor(model);
@@ -1205,6 +1318,23 @@ export function ModelManagerScreen() {
     // neutral for missing.
     const statusClass = incomplete ? "status-badge warning" : installed ? "status-badge installed" : "status-badge";
     const statusText = incomplete ? "incomplete" : installed ? "installed" : "missing";
+    // Where this model's files actually resolve from, straight off the typed judgement the one
+    // shared resolver produced (sc-19708). NEVER re-derived here from paths or error text — that
+    // discipline is the whole reason a second, drifting availability opinion can't exist.
+    const availability = availabilityBadge(model);
+    // How much of this model a local copy could ever serve, straight off the backend's typed
+    // `cacheEligibility` (sc-19712 F-5). Null for a fully cacheable model and for a row with no
+    // external requirement closure; a badge whenever the local-copy affordance would over-promise.
+    const cacheCoverage = cacheEligibilityBadge(model);
+    // Local copies of THIS model, joined by the backend.
+    const localCopies = entriesForModel(modelCache, model.id);
+    // The block renders ONLY when the cache state is actually known. `modelCache` is null when the
+    // status read failed outright, and a returned snapshot carries `error` when the store exists
+    // but could not be listed — in both cases the entry list is empty for want of an answer, not
+    // because there are no copies. Gating on `cacheKnown` is what stops "No local copy yet." from
+    // being rendered as a confident claim over a read that never succeeded.
+    const cacheKnown = Boolean(modelCache) && !modelCache.error;
+    const showLocalCopySection = cacheKnown && (localCopies.length > 0 || canHoldLocalCopy(model));
     return (
       <article className={model.recommended ? "model-card recommended" : "model-card"} key={model.id}>
         <div className="model-card-head">
@@ -1214,6 +1344,22 @@ export function ModelManagerScreen() {
           </span>
           <span className="model-card-status">
             <span className={statusClass}>{statusText}</span>
+            {availability ? (
+              <span
+                className={availability.tone ? `status-badge ${availability.tone}` : "status-badge"}
+                title={availability.title}
+              >
+                {availability.text}
+              </span>
+            ) : null}
+            {cacheCoverage ? (
+              <span
+                className={cacheCoverage.tone ? `status-badge ${cacheCoverage.tone}` : "status-badge"}
+                title={cacheCoverage.title}
+              >
+                {cacheCoverage.text}
+              </span>
+            ) : null}
             {model.updateAvailable ? <span className="status-badge warning">update available</span> : null}
             {unassociated ? (
               <span className="status-badge warning" title="Set this model's family in user.models.jsonc before using it for generation.">
@@ -1247,7 +1393,7 @@ export function ModelManagerScreen() {
             ))}
           </ul>
         ) : null}
-        {gated && !installed ? (
+        {!cleanupOnly && gated && !installed ? (
           <GatedModelNotice
             host={model.credentialHost}
             repoUrl={gatedRepoUrl(model) ?? model.licenseUrl ?? null}
@@ -1264,7 +1410,12 @@ export function ModelManagerScreen() {
             {missingRequiredFiles.length ? `: ${missingRequiredFiles.slice(0, 3).join(", ")}${missingRequiredFiles.length > 3 ? "..." : ""}` : ""}.
           </p>
         ) : null}
-        {localDownloadJob ? (
+        {cleanupOnly ? (
+          <p className="inline-warning">
+            This model is no longer available on this platform. Delete it to reclaim its existing local files.
+          </p>
+        ) : null}
+        {!cleanupOnly && localDownloadJob ? (
           <WorkerProgressCard
             job={localDownloadJob}
             onCancel={onCancelJob}
@@ -1273,7 +1424,7 @@ export function ModelManagerScreen() {
             onOpenQueue={onOpenQueue}
           />
         ) : null}
-        {mlxState ? (
+        {!cleanupOnly && mlxState ? (
           <div className="mlx-status">
             <div className="mlx-status-badges">
               <span className="status-badge">MLX</span>
@@ -1334,7 +1485,7 @@ export function ModelManagerScreen() {
             ) : null}
           </div>
         ) : null}
-        {hasTierMatrix ? (
+        {!cleanupOnly && hasTierMatrix ? (
           <ModelTierDownloadPanel
             model={model}
             unifiedMemoryGb={unifiedMemoryGb}
@@ -1348,20 +1499,99 @@ export function ModelManagerScreen() {
         ) : null}
         {/* Convert-at-install models (mlxTiers) have no download panel; surface their installed
             tiers with a per-tier delete so unused convert outputs can be reclaimed (sc-12025). */}
-        {!hasTierMatrix ? (
+        {!cleanupOnly && !hasTierMatrix ? (
           <ConvertedTierList
             model={model}
             onDeleteVariant={deleteModelVariant}
             deletingItem={deletingItem}
           />
         ) : null}
-        {model.updateAvailable && !mlxState ? (
+        {/* Local copies of this model in the resolved-model cache (sc-19711). Separate from the
+            download/install job surface above on purpose: promoting or reclaiming a local copy is
+            not an install, and conflating them would make "removed" read as "uninstalled". */}
+        {showLocalCopySection ? (
+          <div className="model-local-copy">
+            <div className="model-local-copy-head">
+              <span className="status-badge">Local copy</span>
+              {model.modelAvailability === "installed_external_unavailable" && !localCopies.length ? (
+                <span className="status-badge warning">library disconnected</span>
+              ) : null}
+              {/* Convergence is visible, and it is honest about having stopped. While the store is
+                  still working the screen re-reads on its own; once the bounded refresh gives up it
+                  says so, and "Check again" remains the way to re-read at any point. */}
+              {localCopies.some(isTransitionalEntry) ? (
+                <>
+                  <span className="model-local-copy-progress">
+                    {cacheConvergenceStalled
+                      ? "Still in progress — SceneWorks has stopped checking automatically."
+                      : "Checking for changes…"}
+                  </span>
+                  <button onClick={refreshModelCache} type="button">
+                    Check again
+                  </button>
+                </>
+              ) : null}
+            </div>
+            {localCopies.length === 0 ? (
+              // The empty state must not promise a copy the cache can never serve: for a model the
+              // backend excluded (soft co-requisites, or a requirement with no recorded revision)
+              // this says so instead (sc-19712 F-5). The block itself stays VISIBLE — the exclusion
+              // is the thing the user has to be able to see.
+              <p>{describeMissingLocalCopy(model)}</p>
+            ) : (
+              <ul className="model-local-copy-list">
+                {localCopies.map((entry) => {
+                  const busy = cacheBusyKey === entry.cacheKey;
+                  const ready = entry.state === "complete";
+                  // What this state means, in words, straight off the store's typed value — with a
+                  // remedy attached for the states nothing resolves on its own.
+                  const stateNote = describeEntryState(entry);
+                  return (
+                    <li className="model-local-copy-entry" key={entry.cacheKey}>
+                      <span className="model-local-copy-text">
+                        <span>
+                          {entry.tier ? `${tierLabel(entry.tier)} · ` : ""}
+                          {formatBytes(entry.bytes)}
+                        </span>
+                        <small className={stateNote.failure ? "model-local-copy-failure" : undefined}>
+                          {stateNote.text}
+                        </small>
+                      </span>
+                      <span className="model-local-copy-actions">
+                        <button
+                          disabled={busy || !ready}
+                          onClick={() => toggleKeepLocalCopy(entry)}
+                          type="button"
+                        >
+                          {entry.pinned ? "Allow automatic removal" : "Keep locally"}
+                        </button>
+                        <button
+                          className="danger-action"
+                          disabled={busy}
+                          onClick={() => removeLocalCopy(model, entry)}
+                          type="button"
+                        >
+                          {busy ? "Working…" : "Remove local copy"}
+                        </button>
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+            <p>
+              Removing a local copy never uninstalls the model — the original files in the model
+              library are untouched.
+            </p>
+          </div>
+        ) : null}
+        {!cleanupOnly && model.updateAvailable && !mlxState ? (
           <p className="inline-warning">A newer model download is available; the installed version remains usable.</p>
         ) : null}
         <div className="model-card-footer">
           <span className="model-card-size">{downloadSize}</span>
           <div className="model-card-footer-actions">
-            {hasTierMatrix ? (
+            {cleanupOnly ? null : hasTierMatrix ? (
               // A quant-matrix model installs its tiers from the panel above. Keep only a Fix
               // affordance here for an incomplete cache or soft co-requisite update; otherwise
               // there's no single-tier button. The default-tier job fetches every co-requisite.
@@ -1945,7 +2175,26 @@ export function ModelManagerScreen() {
         {isModelTab ? renderRecommendedPicks(effectiveTab) : null}
       </WorkPanel>
 
-      {deleteMessage.text ? <p className={deleteMessage.tone === "success" ? "inline-success" : "inline-warning"}>{deleteMessage.text}</p> : null}
+      {/* Live region so a delete / local-copy outcome is announced, not only painted — the
+          keep/remove buttons sit far down a long card and their result lands up here. */}
+      {deleteMessage.text ? (
+        <p
+          aria-live="polite"
+          className={deleteMessage.tone === "success" ? "inline-success" : "inline-warning"}
+          role="status"
+        >
+          {deleteMessage.text}
+        </p>
+      ) : null}
+
+      {/* Stated once for the whole screen, because the read that failed was one read for the whole
+          screen. Says what is unavailable and why, without implying anything about what is or is
+          not cached — that is precisely what could not be determined. */}
+      {cacheError ? (
+        <p className="inline-warning">
+          Local model copies can’t be shown right now, so their controls are hidden: {cacheError}
+        </p>
+      ) : null}
 
       {isModelTab ? renderModelTabPanel(effectiveTab) : null}
       {isSearchTab ? renderSearchTabPanel() : null}

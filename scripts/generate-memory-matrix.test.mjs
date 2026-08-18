@@ -9,6 +9,7 @@ import {
   SOURCE_PATHS,
   activeCalibrationPlan,
   assertCellOwnershipIsBackendScoped,
+  assertCharacterizationIsConsistent,
   assertCalibrationPlanTargetsResolvedCoordinates,
   assertMlxStagedCoverageIsStructurallyConsistent,
   assertCellInventoryMatchesCatalog,
@@ -19,6 +20,7 @@ import {
   backendScopes,
   buildMatrix,
   buildStoryBackendScope,
+  catalogFamilyBackends,
   isImplemented,
   isPublishableCell,
   plannedCellIds,
@@ -27,6 +29,18 @@ import {
   RUNG4_REQUEST_PEAKS,
   familyGroup,
   familyStory,
+  parseVideoEngineIds,
+  parseVideoRoutes,
+  assertOwnershipRegistriesAreDisjoint,
+  assertUnroutedEntriesAreDeclared,
+  assertVideoOwnership,
+  assertRung4SurveyCoversEveryFamily,
+  PENDING_RUNG4_SURVEYS,
+  UNION_ONLY_MLX_ROUTES,
+  UNROUTED_CATALOG_ENTRIES,
+  VIDEO_FAMILY_STORIES,
+  measuredGeometryKey,
+  memoryCharacterization,
   mlxRequiredHostBytes,
   observedPeakBytes,
   modelStory,
@@ -48,7 +62,8 @@ async function memoryContractSource(name) {
 }
 
 test("control provider resolution uses one exact declaration and rejects ambiguity", () => {
-  const route = { engine: "z_image" };
+  // Real routes carry sc-18815's per-backend `engineFor`; the scalar stays for the alias checks.
+  const route = { engine: "z_image", engineFor: () => "z_image" };
   const legacy = { id: "z_image", candle: {} };
   assert.equal(providerFor(legacy, "candle", "control", route), "z_image");
 
@@ -239,8 +254,10 @@ test("a comment-only manifest edit produces no generated matrix change", async (
 
 test("runtime-only CUDA telemetry surfaces its measured active-byte peak", () => {
   assert.equal(observedPeakBytes({ observedMemory: { overall: { activeBytes: 1234 } } }), 1234);
+  // sc-18864: full phase telemetry publishes the allocator bound, which is what `deviceBytes`
+  // carried before it was removed, so every published cell keeps its value.
   assert.equal(
-    observedPeakBytes({ observedMemory: { overall: { activeBytes: 1234, deviceBytes: 5678 } } }),
+    observedPeakBytes({ observedMemory: { overall: { activeBytes: 1234, allocatorBytes: 5678 } } }),
     5678,
   );
   assert.equal(observedPeakBytes({ observedMemory: { overall: {} } }), null);
@@ -314,6 +331,16 @@ test("the fingerprint covers every declared source, and the artifact publishes t
     "routingCatalog",
     "routingMlx",
     "rung4Survey",
+    // sc-18815: the video lane's route resolvers. Each `*_engine_id` function is where a video
+    // model-id -> provider-id mapping actually lives, so the fingerprint watches them for the same
+    // reason it watches `engines.rs#MODEL_TABLE` on the image side.
+    "videoRouteBernini",
+    "videoRouteCandle",
+    "videoRouteKreaRealtime",
+    "videoRouteLtx",
+    "videoRouteScail2",
+    "videoRouteSvd",
+    "videoRouteWan",
     "vramGate",
   ]);
   assert.deepEqual(Object.keys(RUST_SOURCE_PATHS).sort(), [
@@ -326,6 +353,13 @@ test("the fingerprint covers every declared source, and the artifact publishes t
     "routingCandle",
     "routingCatalog",
     "routingMlx",
+    "videoRouteBernini",
+    "videoRouteCandle",
+    "videoRouteKreaRealtime",
+    "videoRouteLtx",
+    "videoRouteScail2",
+    "videoRouteSvd",
+    "videoRouteWan",
     "vramGate",
   ]);
 
@@ -424,7 +458,7 @@ test("provenance is stamped once on the document, never per row", async () => {
   // sc-16268: the per-row copy was one constant repeated ~7,360 times, which turned every
   // fingerprint rotation into a ~14,700-line rewrite of a file that can only be regenerated.
   const matrix = await buildMatrix({ publish: false });
-  assert.equal(matrix.schemaVersion, 7);
+  assert.equal(matrix.schemaVersion, 8);
   assert.match(matrix.generatedFrom.sceneWorksRevision, /^source-tree:[0-9a-f]{64}$/);
   assert.ok(matrix.cells.length > 1000);
   assert.equal(
@@ -450,7 +484,7 @@ test("catalog-relative inventory guard rejects whole-scope loss without freezing
       cellFilter: (cell) => cell.backend !== "candle" || cell.modelId === "instantid_realvisxl",
       sourceOverrides: {
         calibrationEvidence: JSON.stringify({
-          schemaVersion: 4,
+          schemaVersion: 5,
           harnessVersion: "sceneworks-memory-v5",
           records: [],
         }),
@@ -917,7 +951,36 @@ test("FLUX.2-dev MLX exposes only the captured q4/q8 T2I Resident cells and keep
           cell.evidence.currentEnvironmentVerification.length === 0 &&
           cell.evidence.historicalVerification.length === 2,
       ),
-    "the exact 768 and 1024 captures must remain visible but cannot survive SC-18311's closure change as current",
+    "the exact 768 and 1024 captures must remain attributable but historical after the shared gen-core closure moved",
+  );
+
+  // Promotion is tested against a mechanically re-stamped fixture. The checked-in physical
+  // captures are deliberately never re-stamped when inference source changes: doing so would turn
+  // provenance into an assertion instead of evidence.
+  const onCurrentClosure = await buildMatrix({
+    publish: false,
+    sourceOverrides: {
+      calibrationEvidence: await currentEvidenceFixture({
+        select: (record) =>
+          record.target.provider === "flux2_dev" &&
+          record.calibrationFingerprint === "sc-18218-flux2-dev-t2i-resident-evidence-v1",
+      }),
+      manifest: await currentManifestCalibrationFixture({
+        select: (binding) => binding.provider === "flux2_dev",
+      }),
+    },
+  });
+  const currentCells = onCurrentClosure.cells.filter(
+    (cell) => cell.modelId === "flux2_dev" && cell.backend === "mlx" && cell.state !== "Missing",
+  );
+  assert.ok(
+    currentCells.every(
+      (cell) =>
+        cell.state === "Runtime verified" &&
+        cell.calibrationFingerprint === "sc-18218-flux2-dev-t2i-resident-evidence-v1" &&
+        cell.evidence.currentEnvironmentVerification.length === 2,
+    ),
+    "each admitted cell must be backed by its exact 768 and 1024 current captures",
   );
 });
 
@@ -1039,8 +1102,8 @@ test("MLX generated evidence derives the same exact static host boundary as runt
     predictedPeakBytes: { overall: 5 * 1024 ** 3 },
     observedMemory: {
       overall: {
-        wiredBytes: 4 * 1024 ** 3,
-        reclaimableBytes: 1 * 1024 ** 3,
+        // sc-18864: the non-reclaimable residency, formerly recovered as wired - reclaimable.
+        activeBytes: 3 * 1024 ** 3,
       },
     },
   };
@@ -1059,10 +1122,7 @@ test("MLX generated evidence derives the same exact static host boundary as runt
       },
       predictedPeakBytes: { overall: 46_305_116_160 },
       observedMemory: {
-        overall: {
-          wiredBytes: 44_056_333_980,
-          reclaimableBytes: 3_852_363_372,
-        },
+        overall: { activeBytes: 40_203_970_608 },
       },
     }),
     73_113_341_306,
@@ -1088,7 +1148,7 @@ test("MLX generated evidence derives the same exact static host boundary as runt
   assert.equal(
     mlxRequiredHostBytes({
       ...record,
-      observedMemory: { overall: { wiredBytes: 9 * 1024 ** 3, reclaimableBytes: 0 } },
+      observedMemory: { overall: { activeBytes: 9 * 1024 ** 3 } },
     }),
     11 * 1024 ** 3,
     "observed non-reclaimable wired peak wins when it exceeds prediction",
@@ -1126,6 +1186,11 @@ test("backend scopes follow real routing even when manifest tuning blocks are ab
   assert.deepEqual(backendScopes(byId.get("anima_base"), lanes), ["mlx", "candle"]);
   assert.deepEqual(
     backendScopes({ id: "scail2_14b" }, lanes),
+    ["mlx", "candle"],
+    "the bespoke Candle SCAIL-2 route is part of the canonical backend predicate",
+  );
+  assert.deepEqual(
+    backendScopes({ id: "krea_realtime_14b" }, lanes),
     ["mlx"],
     "the routing oracle must not collapse to both lanes for every model",
   );
@@ -1588,8 +1653,171 @@ test("every advertised family/backend has a rung-4 verdict, and it reaches its c
   const surveyed = new Set(
     matrix.rung4SurveyRows.map((row) => `${row.familyStory}:${row.backend}`),
   );
-  assert.deepEqual([...surveyed].sort(), [...advertised].sort());
-  assert.equal(matrix.summary.rung4Survey.surveyedFamilyBackends, advertised.size);
+  // sc-18815: surveyed + pending PARTITION what the catalog advertises. Neither half may be a
+  // superset and nothing may fall between them — a family that is in the universe, has no verdict
+  // and is not declared pending is exactly the silent hole this assertion exists to catch, and the
+  // generator throws on it. Asserting `surveyed == advertised` outright is no longer possible
+  // without freezing the epic's ordering, but asserting the partition is stronger than either half.
+  const pending = new Set(
+    matrix.summary.rung4Survey.pendingFamilyBackends.map((row) => `${row.family}:${row.backend}`),
+  );
+  assert.deepEqual([...new Set([...surveyed, ...pending])].sort(), [...advertised].sort());
+  assert.equal(surveyed.size + pending.size, advertised.size, "no pair may be both surveyed and pending");
+  assert.equal(matrix.summary.rung4Survey.surveyedFamilyBackends, surveyed.size);
+
+  // Every pending pair's cells say so, and every surveyed pair's cells say the opposite. Without
+  // this the discriminator could be published as a constant and still satisfy the partition above.
+  for (const cell of rung4) {
+    const key = `${familyGroup(cell.modelId)}:${cell.backend}`;
+    assert.equal(cell.rung4Survey.surveyed, surveyed.has(key), `${cell.id}: surveyed flag disagrees with the rows`);
+    if (!cell.rung4Survey.surveyed) {
+      assert.equal(cell.state, "Missing", `${cell.id}: an unsurveyed family may make no rung-4 claim`);
+      assert.equal(cell.rung4Survey.requestPeak, "unsurveyed");
+      assert.equal(cell.rung4Survey.structuralApplicability, null);
+      assert.equal(cell.rung4Survey.implementation, null);
+      assert.ok(Number.isInteger(cell.rung4Survey.pendingSurveyStory));
+    }
+  }
+});
+
+test("video surveys distinguish an unrouted backend from five Missing rungs (sc-18828)", async () => {
+  const survey = await surveyFixture();
+  assert.deepEqual(Object.keys(survey.families["krea-realtime"].backends), ["mlx"]);
+  assert.equal(survey.families["krea-realtime"].unroutedBackends.candle.owningStory, 18828);
+
+  const undeclared = structuredClone(survey);
+  delete undeclared.families["krea-realtime"].unroutedBackends;
+  await assert.rejects(
+    buildMatrix({ publish: false, sourceOverrides: { rung4Survey: JSON.stringify(undeclared) } }),
+    /family krea-realtime has no candle route — declare it in unroutedBackends/,
+  );
+
+  const stale = structuredClone(survey);
+  stale.families.scail2.unroutedBackends = {
+    candle: structuredClone(survey.families["krea-realtime"].unroutedBackends.candle),
+  };
+  await assert.rejects(
+    buildMatrix({ publish: false, sourceOverrides: { rung4Survey: JSON.stringify(stale) } }),
+    /SCAIL-2 unrouted candle: the same backend has both a routed verdict and an unrouted declaration/,
+  );
+
+  const wrongOwner = structuredClone(survey);
+  wrongOwner.families["krea-realtime"].unroutedBackends.candle.owningStory = 18826;
+  await assert.rejects(
+    buildMatrix({ publish: false, sourceOverrides: { rung4Survey: JSON.stringify(wrongOwner) } }),
+    /owningStory sc-18826 is not family krea-realtime's owner sc-18828/,
+  );
+});
+
+test("Bernini's shared provider relationship adds video truth without changing a published image cell (sc-18827)", async () => {
+  const survey = await surveyFixture();
+  assert.deepEqual(survey.families["15528"].modalityRelationship.entries, {
+    image: ["bernini_image"],
+    video: ["bernini"],
+  });
+
+  const beforeSurvey = structuredClone(survey);
+  const previousMlxVerdict = beforeSurvey.families["15528"].backends.mlx;
+  previousMlxVerdict.implementation = "none";
+  delete previousMlxVerdict.implementedEntries;
+  delete previousMlxVerdict.implementedOverlays;
+  delete previousMlxVerdict.strategyParameters;
+  const [before, after] = await Promise.all([
+    buildMatrix({ sourceOverrides: { rung4Survey: JSON.stringify(beforeSurvey) } }),
+    buildMatrix(),
+  ]);
+  assert.deepEqual(
+    after.cells.filter((cell) => cell.modelId === "bernini_image"),
+    before.cells.filter((cell) => cell.modelId === "bernini_image"),
+    "SC-18827 may reconcile the shared provider row, but it may not move a published image cell",
+  );
+
+  const wrongModality = structuredClone(survey);
+  wrongModality.families["15528"].modalityRelationship.entries.video = ["bernini_image"];
+  await assert.rejects(
+    buildMatrix({ publish: false, sourceOverrides: { rung4Survey: JSON.stringify(wrongModality) } }),
+    /says bernini_image is video, but the admitted catalog does not/,
+  );
+
+  const missingVideo = structuredClone(survey);
+  delete missingVideo.families["15528"].modalityRelationship.entries.video;
+  await assert.rejects(
+    buildMatrix({ publish: false, sourceOverrides: { rung4Survey: JSON.stringify(missingVideo) } }),
+    /entries must name at least one image and one video catalog id/,
+  );
+});
+
+test("video staged-residency findings preserve selectable versus unconditional truth", async () => {
+  const survey = await surveyFixture();
+  const findings = (family, backend) =>
+    survey.families[family].backends[backend].findings.join("\n");
+  assert.match(
+    findings("15528", "mlx"),
+    /corrected SC-18816 descriptor tuple is `supports_sequential_offload = false`, `unconditionally_engages_staged_residency = true`/,
+  );
+  assert.match(findings("scail2", "mlx"), /corrected tuple is `\(false, true\)`/);
+  assert.match(findings("krea-realtime", "mlx"), /corrected tuple is `\(false, true\)`/);
+  assert.match(
+    findings("wan-video", "mlx"),
+    /`\(supports_sequential_offload, unconditionally_engages_staged_residency\) = \(true, true\)`/,
+  );
+});
+
+test("every video survey assertion is pinned to source lines", async () => {
+  const survey = await surveyFixture();
+  const sources = [];
+  for (const family of ["15528", "wan-video", "scail2", "krea-realtime", "svd"]) {
+    const entry = survey.families[family];
+    for (const verdict of Object.values(entry.backends ?? {})) {
+      for (const section of ["structural", "evidence"]) {
+        sources.push(...(verdict[section] ?? []).map((item) => item.source));
+      }
+    }
+    for (const declaration of Object.values(entry.unroutedBackends ?? {})) {
+      sources.push(...declaration.evidence.map((item) => item.source));
+    }
+    sources.push(...(entry.modalityRelationship?.evidence ?? []).map((item) => item.source));
+  }
+  assert.ok(sources.length > 0);
+  for (const source of sources) {
+    assert.match(source, /:\d/, `${source}: video survey evidence must cite exact source lines`);
+  }
+});
+
+test("SVD is partial on both lanes because its U-Net contains 16 paired nested stacks (sc-18828)", async () => {
+  const survey = await surveyFixture();
+  for (const backend of ["mlx", "candle"]) {
+    const verdict = survey.families.svd.backends[backend];
+    assert.equal(verdict.structuralApplicability, "partial", `${backend}: not Structurally N/A`);
+    assert.equal(verdict.implementation, "none", `${backend}: no block-window path is wired`);
+    assert.deepEqual(
+      verdict.blockStacks.map(({ blocks, windowable }) => ({ blocks, windowable })),
+      [
+        { blocks: "16 × 1 BasicBlock", windowable: true },
+        { blocks: "16 × 1 TemporalBlock", windowable: true },
+        { blocks: "4 down + 1 mid + 4 up stages", windowable: false },
+      ],
+      `${backend}: inventory must retain both nested transformer stacks and the non-windowable trunk`,
+    );
+    assert.ok(
+      verdict.structural.some((item) => /3 × 2 \+ 1 \+ 3 × 3 = 16/.test(item.reason)),
+      `${backend}: the 16-module count must be source-derived`,
+    );
+  }
+
+  const matrix = await buildMatrix({ publish: false });
+  const rows = matrix.rung4SurveyRows.filter((row) => row.familyStory === "svd");
+  assert.deepEqual(rows.map((row) => row.backend).sort(), ["candle", "mlx"]);
+  assert.ok(rows.every((row) => row.structuralApplicability === "partial"));
+  assert.ok(rows.every((row) => row.implementation === "none"));
+
+  const cells = matrix.cells.filter(
+    (cell) => cell.modelId === "svd" && cell.rung === "bounded_transformer_residency",
+  );
+  assert.equal(cells.length, 4, "two lanes × two overlay coordinates must be resolved");
+  assert.ok(cells.every((cell) => cell.state === "Missing"));
+  assert.ok(cells.every((cell) => cell.rung4Survey.structuralApplicability === "partial"));
+  assert.ok(cells.every((cell) => cell.rung4Survey.implementation === "none"));
 });
 
 test("the two rung-4 findings stay separate: structural applicability never implies the peak moved", async () => {
@@ -2165,10 +2393,13 @@ test("overlay incompatibility is a provider fact, applied where evidenced and no
   // Krea is a windowable 28-block trunk however its adapters are installed.
   assert.ok(na.every((cell) => cell.rung4Survey.overlayIncompatible === true));
   assert.ok(na.every((cell) => cell.rung4Survey.structuralApplicability === "partial"));
-  assert.equal(
-    matrix.cells.filter((cell) => cell.rung4Survey?.structuralApplicability === "none").length,
-    0,
-    "no family in the catalog is architecturally inapplicable, so no cell may publish `none`",
+  const structurallyInapplicable = matrix.cells.filter(
+    (cell) => cell.rung4Survey?.structuralApplicability === "none",
+  );
+  assert.deepEqual(
+    structurallyInapplicable,
+    [],
+    "no surveyed family is architecturally inapplicable; per-provider overlay exemptions remain separate",
   );
 
   // The contrast that makes this a provider fact rather than a rung fact: MLX Z-Image replays
@@ -2340,13 +2571,29 @@ test("the survey vocabulary, the generator's enums and the published schema agre
 
   // Both places the schema constrains these values must go through the SAME definition. A second
   // inline copy is what the test above cannot see drifting.
+  // sc-18815 wrapped the CELL verdict's three fields in a `oneOf` so an unsurveyed family can
+  // publish nulls and `unsurveyed`. The shared definition still has to be the only source of the
+  // real vocabulary in both places, so resolve through the wrapper rather than dropping the check —
+  // an inline enum copy hiding inside a `oneOf` is exactly the drift this test exists to catch.
+  const refsOf = (schemaNode) =>
+    (schemaNode.$ref ? [schemaNode.$ref] : (schemaNode.oneOf ?? []).map((branch) => branch.$ref)).filter(Boolean);
   for (const properties of [
     schema.$defs.rung4SurveyVerdict.properties,
     schema.properties.rung4SurveyRows.items.properties,
   ]) {
-    assert.equal(properties.structuralApplicability.$ref, "#/$defs/rung4StructuralApplicability");
-    assert.equal(properties.implementation.$ref, "#/$defs/rung4Implementation");
-    assert.equal(properties.requestPeak.$ref, "#/$defs/rung4RequestPeak");
+    assert.ok(refsOf(properties.structuralApplicability).includes("#/$defs/rung4StructuralApplicability"));
+    assert.ok(refsOf(properties.implementation).includes("#/$defs/rung4Implementation"));
+    assert.ok(refsOf(properties.requestPeak).includes("#/$defs/rung4RequestPeak"));
+    // No branch may inline its own enum: that is how a fourth value would appear in the artifact
+    // while the three constants above still agreed with each other.
+    for (const field of ["structuralApplicability", "implementation", "requestPeak"]) {
+      for (const branch of properties[field].oneOf ?? []) {
+        assert.ok(
+          branch.$ref || branch.type === "null" || typeof branch.const === "string",
+          `${field}: a oneOf branch must be the shared $ref, null, or a named const — not an inline enum`,
+        );
+      }
+    }
   }
 
   // The survey file documents the same vocabulary. Compared as SETS: the documentation order is
@@ -2460,6 +2707,96 @@ test("a survey verdict that reaches no cell is rejected, not silently carried", 
   };
   await assert.rejects(
     buildMatrix({ publish: false, sourceOverrides: { rung4Survey: JSON.stringify(survey) } }),
+    /the verdict reaches no cell/,
+  );
+});
+
+test("a verdict may run ahead of the model universe, but no further than the routing catalog (sc-18813)", async () => {
+  // The two-state coverage check cannot express the ORDER epic 18803 chose. Admitting video to the
+  // model universe (sc-18815) destructures a survey verdict for every rung-4 cell it creates, so the
+  // verdict has to exist by then; landing the verdict first — sc-18813, so the survey is reviewable
+  // on its own — hits the survey -> catalog arm, because the universe is still image-only. That is
+  // not a structural circle: sc-18815 could have gone first had it carried the verdict too, and once
+  // `ltx_2_3` is in `advertised` the strict arm covers it with no gate change at all. The third
+  // state buys the slicing. So a verdict is allowed to run AHEAD of admission — bounded by what the
+  // routing catalog actually routes, and by nothing else.
+  const [manifestBody, routingCatalog, routingCandle, routingMlx] = await Promise.all([
+    readFile(new URL("../config/manifests/builtin.models.jsonc", import.meta.url), "utf8"),
+    readFile(
+      new URL("../crates/sceneworks-core/src/jobs_store/routing/catalog.rs", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../crates/sceneworks-core/src/jobs_store/routing/candle.rs", import.meta.url),
+      "utf8",
+    ),
+    readFile(new URL("../crates/sceneworks-core/src/jobs_store/routing/mlx.rs", import.meta.url), "utf8"),
+  ]);
+  const manifestModels = JSON.parse(stripJsoncComments(manifestBody)).models;
+  const routed = catalogFamilyBackends(
+    manifestModels,
+    routedLanes({ routingCatalog, routingCandle, routingMlx }),
+  );
+
+  // The LTX family remains routed on both lanes through base `ltx_2_3`; Eros contributes only MLX.
+  // Family-level survey verdicts are therefore still inside both real routing fences.
+  assert.ok(routed.has("ltx-video:mlx"));
+  assert.ok(routed.has("ltx-video:candle"));
+  // A lane the catalog does not route is NOT.
+  assert.ok(!routed.has("ltx-video:cuda"));
+  // That line alone does not pin the ORACLE, only the gate's existence: `routedLanes` emits nothing
+  // but "mlx" and "candle", so `:cuda` is absent under EVERY implementation — including one that
+  // ignored the routing map and admitted any lane of any group `familyGroup` knows. Nor does real
+  // data discriminate, because no shipped family group is routed on exactly one lane. A synthetic
+  // routing map is the only case that separates the two: `ltx_2_3` routes mlx, `ltx_2_3_eros` routes
+  // nothing, so a fence that CONSULTS the map admits mlx and refuses candle, while a fence that
+  // assumed "every lane" admits both.
+  const synthetic = catalogFamilyBackends(manifestModels, new Map([["ltx_2_3", new Set(["mlx"])]]));
+  assert.ok(synthetic.has("ltx-video:mlx"), "the routed lane is admitted");
+  assert.ok(
+    !synthetic.has("ltx-video:candle"),
+    "the fence is the routing oracle, not the family key: an unrouted lane of a routed family stays out",
+  );
+
+  // sc-18815 landed, so the fence SELF-CLEARED for ltx-video exactly as its doc comment promised:
+  // the family is in `advertised` now, the strict arm covers it, and the verdict reaches real cells.
+  // Pinned as a state change rather than deleted — "the third state is temporary" is a claim, and
+  // this is where it is checked.
+  const survey = await surveyFixture();
+  assert.ok(survey.families["ltx-video"], "the shipped survey carries the ltx-video verdict");
+  const matrix = await buildMatrix({ publish: false });
+  const advertised = new Set(
+    matrix.models.flatMap((model) =>
+      model.backends.map((backend) => `${familyGroup(model.id)}:${backend}`),
+    ),
+  );
+  assert.ok(advertised.has("ltx-video:mlx") && advertised.has("ltx-video:candle"));
+  assert.deepEqual(
+    matrix.rung4SurveyRows.filter((row) => row.familyStory === "ltx-video").map((row) => row.backend).sort(),
+    ["candle", "mlx"],
+  );
+  assert.ok(matrix.cells.some((cell) => cell.modelId === "ltx_2_3"));
+  assert.equal(matrix.summary.rung4Survey.surveyedFamilyBackends, matrix.rung4SurveyRows.length);
+
+  // And a group the catalog maps nothing to is still rejected, so the third state is a fence rather
+  // than a hole. `familyGroup` throws on an unknown id, which is what keeps the fence closed.
+  const orphan = await surveyFixture();
+  orphan.families["99999"] = {
+    name: "fixture: a family the catalog knows nothing about",
+    backends: {
+      mlx: {
+        structuralApplicability: "partial",
+        implementation: "none",
+        summary: "fixture",
+        blockStacks: [],
+        evidence: [{ source: "fixture", reason: "fixture" }],
+        requestPeak: { finding: "unmeasured", reason: "fixture" },
+        findings: [],
+      },
+    },
+  };
+  await assert.rejects(
+    buildMatrix({ publish: false, sourceOverrides: { rung4Survey: JSON.stringify(orphan) } }),
     /the verdict reaches no cell/,
   );
 });
@@ -3333,21 +3670,46 @@ test("the elision is counted, never silent (sc-18099)", async () => {
     assert.ok(model.axes[row.backend].rungs.includes(row.rung));
   }
 
-  // `mlxStagedStaticCoverage` is a claim about all 53 entries and must not shrink to the published
-  // sample. Recomputed here from the census with the generator's own implementation predicate.
+  // `mlxStagedStaticCoverage` is a claim about all 53 IMAGE entries and must not shrink to the
+  // published sample — nor (sc-18815) grow by absorbing the video lane. The video `bernini` entry
+  // shares the `bernini` engine with the already-counted `bernini_image`, so a modality-blind
+  // recount reads 39/53 for a lane that gained nothing; the two censuses are kept apart here for the
+  // same reason the generator keeps them apart.
+  const imageIds = new Set(
+    matrix.models.filter((model) => model.modality === "image").map((model) => model.id),
+  );
   const stagedFromCensus = new Set(
     matrix.coverage
-      .filter((row) => row.backend === "mlx" && row.rung === "staged_residency" && row.implemented > 0)
+      .filter(
+        (row) =>
+          row.backend === "mlx" &&
+          row.rung === "staged_residency" &&
+          row.implemented > 0 &&
+          imageIds.has(row.modelId),
+      )
       .map((row) => row.modelId),
   );
   assert.equal(stagedFromCensus.size, matrix.summary.mlxStagedStaticCoverage);
+  assert.equal(
+    matrix.coverage.filter(
+      (row) =>
+        row.backend === "mlx" &&
+        row.rung === "staged_residency" &&
+        row.implemented > 0 &&
+        !imageIds.has(row.modelId),
+    ).length,
+    matrix.summary.videoMlxStagedStaticCoverage,
+  );
   assert.equal(
     stagedFromCensus.size,
     new Set(
       resolved.cells
         .filter(
           (cell) =>
-            cell.backend === "mlx" && cell.rung === "staged_residency" && isImplemented(cell.state),
+            cell.backend === "mlx" &&
+            cell.rung === "staged_residency" &&
+            isImplemented(cell.state) &&
+            imageIds.has(cell.modelId),
         )
         .map((cell) => cell.modelId),
     ).size,
@@ -3825,4 +4187,737 @@ test("a bespoke route claiming the generic staged ladder still reds", () => {
       `a bespoke route claiming the ${overlay} overlay must red`,
     );
   }
+});
+
+// ---------------------------------------------------------------------------------------------
+// sc-18815 — the modality-aware model universe.
+// ---------------------------------------------------------------------------------------------
+
+test("the universe is modality-aware, and every video entry is IN it (sc-18815)", async () => {
+  // The defect this replaces: `manifest.models.filter((m) => m.type === "image")`. Video entries
+  // were not reported as `Missing` — they were outside the universe, so the matrix read as complete
+  // while covering one modality. The fix has to be checked as REACH, not as a filter edit: every
+  // video entry in the shipped manifest resolves a route, a family, an owner and a cell population.
+  const manifestBody = await readFile(
+    new URL("../config/manifests/builtin.models.jsonc", import.meta.url),
+    "utf8",
+  );
+  const manifestVideo = JSON.parse(stripJsoncComments(manifestBody))
+    .models.filter((model) => model.type === "video")
+    .map((model) => model.id)
+    .sort();
+  assert.equal(manifestVideo.length, 10);
+
+  const matrix = await buildMatrix({ publish: false });
+  const inMatrix = matrix.models.filter((model) => model.modality === "video").map((model) => model.id);
+  assert.deepEqual(inMatrix.sort(), manifestVideo, "every manifest video entry is in the universe");
+  assert.equal(matrix.models.filter((model) => model.modality === "image").length, 53);
+  assert.equal(matrix.summary.catalogEntries, matrix.models.length);
+  assert.deepEqual(matrix.summary.catalogEntriesByModality, { image: 53, video: 10 });
+
+  // Cells exist for every routed video lane, on every rung — the "per-rung coverage rows" the story
+  // asks for — and their states are the ordinary vocabulary, not a video-specific one.
+  const videoCells = matrix.cells.filter((cell) => inMatrix.includes(cell.modelId));
+  assert.ok(videoCells.length > 1000);
+  for (const model of matrix.models.filter((entry) => entry.modality === "video")) {
+    for (const backend of model.backends) {
+      for (const rung of ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"]) {
+        assert.ok(
+          videoCells.some(
+            (cell) => cell.modelId === model.id && cell.backend === backend && cell.rung === rung,
+          ),
+          `${model.id}:${backend}:${rung}: no cell`,
+        );
+      }
+    }
+  }
+  assert.ok(
+    videoCells.some((cell) => cell.state === "Missing"),
+    "an unmeasured video coordinate must report Missing rather than vanish",
+  );
+  assert.ok(videoCells.some((cell) => isImplemented(cell.state)));
+});
+
+test("video providers are per BACKEND, derived from the worker's own route resolvers (sc-18815)", async () => {
+  // LTX is `ltx_2_3` on MLX and `ltx_2_3_distilled` on candle. A single scalar route would be wrong
+  // on one backend, and a wrong provider is not cosmetic — it is the key calibration evidence, the
+  // calibration plan and the per-provider closure digests all bind on. `mlx:ltx_2_3` is the exact
+  // key sc-18808 committed to `config/inference-provider-closures.json`.
+  const matrix = await buildMatrix({ publish: false });
+  const ltx = matrix.models.find((model) => model.id === "ltx_2_3");
+  assert.deepEqual(ltx.resolvedRoutes, { mlx: "ltx_2_3", candle: "ltx_2_3_distilled" });
+  const eros = matrix.models.find((model) => model.id === "ltx_2_3_eros");
+  assert.deepEqual(
+    eros.resolvedRoutes,
+    { mlx: "ltx_2_3" },
+    "sc-18902: Eros keeps its validated MLX recipe and must not regain the failed Candle route",
+  );
+  const providers = new Set(
+    matrix.cells
+      .filter((cell) => cell.modelId === "ltx_2_3")
+      .map((cell) => `${cell.backend}:${cell.provider}`),
+  );
+  assert.deepEqual([...providers].sort(), ["candle:ltx_2_3_distilled", "mlx:ltx_2_3"]);
+
+  const closures = JSON.parse(
+    await readFile(new URL("../config/inference-provider-closures.json", import.meta.url), "utf8"),
+  );
+  assert.ok(
+    closures.providers["mlx:ltx_2_3"],
+    "the provider a cell binds on must be the one the closure table already names",
+  );
+});
+
+test("a video route parser handles every form the worker spells, consts included (sc-18815)", () => {
+  // Three syntactic forms and a const-spelled one, because all four ship. A parser that silently
+  // skipped a form would drop a whole family from the universe and read as "the worker does not
+  // route it" — the same silent absence, one layer down. Synthetic input: real data cannot show a
+  // parser missing a form it does not contain.
+  const matchForm = `
+fn candle_video_engine_id(model: &str) -> Option<&'static str> {
+    match model {
+        "wan_2_2" => Some("wan2_2_ti2v_5b"),
+        "ltx_2_3" | "ltx_2_3_eros" => Some("ltx_2_3_distilled"),
+        _ => None,
+    }
+}
+`;
+  assert.deepEqual(
+    [...parseVideoEngineIds(matchForm, "candle_video_engine_id")].sort(),
+    [
+      ["ltx_2_3", "ltx_2_3_distilled"],
+      ["ltx_2_3_eros", "ltx_2_3_distilled"],
+      ["wan_2_2", "wan2_2_ti2v_5b"],
+    ],
+  );
+
+  const eqForm = `fn svd_engine_id(model: &str) -> Option<&'static str> {
+    (model == "svd").then_some("svd_xt")
+}
+`;
+  assert.deepEqual([...parseVideoEngineIds(eqForm, "svd_engine_id")], [["svd", "svd_xt"]]);
+
+  const matchesForm = `fn ltx_engine_id(model: &str) -> Option<&'static str> {
+    matches!(model, "ltx_2_3" | "ltx_2_3_eros").then_some("ltx_2_3")
+}
+`;
+  assert.deepEqual(
+    [...parseVideoEngineIds(matchesForm, "ltx_engine_id")].sort(),
+    [["ltx_2_3", "ltx_2_3"], ["ltx_2_3_eros", "ltx_2_3"]],
+  );
+
+  // `krea_realtime_engine_id` is spelled ENTIRELY in consts. A literal-only parser returns an empty
+  // map for it, which is why the empty map is a throw rather than a family quietly disappearing.
+  const constForm = `pub(super) const KREA_REALTIME_MODEL_ID: &str = "krea_realtime_14b";
+fn krea_realtime_engine_id(model: &str) -> Option<&'static str> {
+    (model == KREA_REALTIME_MODEL_ID).then_some(KREA_REALTIME_MODEL_ID)
+}
+`;
+  assert.deepEqual(
+    [...parseVideoEngineIds(constForm, "krea_realtime_engine_id")],
+    [["krea_realtime_14b", "krea_realtime_14b"]],
+  );
+
+  // Fails closed on a rename and on a body that yields nothing.
+  assert.throws(() => parseVideoEngineIds(eqForm, "renamed_engine_id"), /could not locate/);
+  assert.throws(
+    () => parseVideoEngineIds(`fn empty_engine_id(model: &str) -> Option<&'static str> {\n    None\n}\n`, "empty_engine_id"),
+    /declared no model -> engine arm/,
+  );
+  // And on a const it cannot resolve, rather than inventing an id.
+  assert.throws(
+    () =>
+      parseVideoEngineIds(
+        `fn x_engine_id(model: &str) -> Option<&'static str> {\n    (model == MISSING_CONST).then_some("x")\n}\n`,
+        "x_engine_id",
+      ),
+    /resolves to no &str const/,
+  );
+});
+
+test("the two worker declarations of a video route must agree (sc-18815)", async () => {
+  // `engines.rs#video_engine_ids` and the per-family `*_engine_id` functions are independent
+  // declarations of the same fact. The generator consults BOTH, so one of them drifting is a
+  // generation failure rather than a provider silently swapped underneath a cell's evidence.
+  const bodies = Object.fromEntries(
+    await Promise.all(
+      Object.entries(SOURCE_PATHS).map(async ([name, relative]) => [
+        name,
+        await readFile(new URL(`../${relative}`, import.meta.url), "utf8"),
+      ]),
+    ),
+  );
+  const routes = parseVideoRoutes(bodies);
+  assert.equal(routes.get("ltx_2_3").mlx, "ltx_2_3");
+  assert.equal(routes.get("bernini").candle, "bernini", "candle routes Bernini off the model id");
+
+  const drifted = {
+    ...bodies,
+    videoRouteSvd: bodies.videoRouteSvd.replace('.then_some("svd_xt")', '.then_some("svd_xt_v2")'),
+  };
+  assert.throws(
+    () => parseVideoRoutes(drifted),
+    /video route svd:mlx resolves to provider svd_xt_v2.*video route declarations disagree/s,
+  );
+});
+
+test("a routed backend with no *_engine_id arm fails HERE, naming the resolver (sc-18815)", async () => {
+  // The review mutation. Deleting `ltx_2_3` from `ltx_engine_id`'s arm used to let generation SUCCEED:
+  // `resolvedRoutes.mlx` went `null`, the scalar fell back to `video.mlx ?? video.candle`, and all 180
+  // MLX cells were stamped `ltx_2_3_distilled` — CANDLE's provider on an MLX cell, which is the exact
+  // substitution this resolver exists to prevent. The only thing that noticed was JSON-schema
+  // validation two lanes downstream, reporting `None is not of type 'string'` and naming neither the
+  // resolver nor the cause. It has to fail at the resolver, with the owing function named.
+  const ltx = await readFile(new URL(`../${SOURCE_PATHS.videoRouteLtx}`, import.meta.url), "utf8");
+  const withoutMlxArm = ltx.replace(
+    'matches!(model, "ltx_2_3" | "ltx_2_3_eros")',
+    'matches!(model, "ltx_2_3_eros")',
+  );
+  assert.notEqual(withoutMlxArm, ltx, "the mutation must actually change ltx.rs");
+
+  await assert.rejects(
+    () => buildMatrix({ publish: false, sourceOverrides: { videoRouteLtx: withoutMlxArm } }),
+    /ltx_2_3: the routing catalog routes mlx, but no mlx provider resolved — expected an arm in ltx_engine_id/,
+  );
+
+  // The named resolver is per BACKEND, not one generic complaint: the same entry losing its candle
+  // arm must point at `candle_video_engine_id` instead.
+  const candle = await readFile(new URL(`../${SOURCE_PATHS.videoRouteCandle}`, import.meta.url), "utf8");
+  const withoutCandleArm = candle.replace(
+    '"ltx_2_3" => Some("ltx_2_3_distilled")',
+    '"ltx_2_3_missing" => Some("ltx_2_3_distilled")',
+  );
+  assert.notEqual(withoutCandleArm, candle, "the mutation must actually change candle.rs");
+  await assert.rejects(
+    () => buildMatrix({ publish: false, sourceOverrides: { videoRouteCandle: withoutCandleArm } }),
+    /ltx_2_3: the routing catalog routes candle, but no candle provider resolved — expected an arm in candle_video_engine_id/,
+  );
+});
+
+test("the union-only MLX fallback is an allowlist, not a shape (sc-18815)", async () => {
+  // `engines.rs#video_engine_ids` is the ONLY source for `wan_2_2_vace_fun_14b` (its MLX dispatch is
+  // the native VACE arm, which carries no id string). The fallback was written for that one entry but
+  // keyed on `declared.length === 1`, which is a SHAPE thousands of ids can satisfy — and `mochi_1`
+  // demonstrably took it, acquiring an MLX provider derived from `mochi.rs`, a file this generator
+  // neither reads nor fingerprints. Inert (mochi has no manifest entry) but it downgraded the
+  // "two independent declarations must agree" invariant to single-source for whoever hit it.
+  const bodies = Object.fromEntries(
+    await Promise.all(
+      Object.entries(SOURCE_PATHS).map(async ([name, relative]) => [
+        name,
+        await readFile(new URL(`../${relative}`, import.meta.url), "utf8"),
+      ]),
+    ),
+  );
+  assert.deepEqual([...UNION_ONLY_MLX_ROUTES], ["wan_2_2_vace_fun_14b"]);
+
+  const routes = parseVideoRoutes(bodies);
+  assert.equal(routes.get("wan_2_2_vace_fun_14b").mlx, "wan2_2_vace_fun_14b");
+  // `mochi_1` has a candle arm and no MLX one. Its MLX route must stay absent rather than be
+  // synthesised from the union alone.
+  assert.deepEqual(routes.get("mochi_1"), { candle: "mochi_1" });
+
+  // The allowlist is load-bearing in BOTH directions: empty it and VACE loses the only source it
+  // has, widen it and mochi acquires the single-source route the guard exists to withhold.
+  assert.equal(parseVideoRoutes(bodies, new Set()).get("wan_2_2_vace_fun_14b"), undefined);
+  assert.equal(
+    parseVideoRoutes(bodies, new Set([...UNION_ONLY_MLX_ROUTES, "mochi_1"])).get("mochi_1").mlx,
+    "mochi_1",
+  );
+});
+
+test("the two ownership registries are disjoint, in the silent direction too (sc-18815)", () => {
+  // `familyStory` consults `VIDEO_FAMILY_STORIES` FIRST. An IMAGE group added to the video registry
+  // reds most of this suite; a VIDEO name added to the image registry is silent dead code nothing
+  // else catches, so that direction needs its own assertion.
+  assertOwnershipRegistriesAreDisjoint();
+  assert.throws(
+    () =>
+      assertOwnershipRegistriesAreDisjoint(
+        { ...FAMILY_STORIES, svd: { mlx: 1, candle: 2 } },
+        VIDEO_FAMILY_STORIES,
+      ),
+    /family group svd is declared in BOTH FAMILY_STORIES and VIDEO_FAMILY_STORIES/,
+  );
+});
+
+test("the VACE-Fun routing defect is closed and the wholly-unrouted guard stays fail-closed (sc-18826)", async () => {
+  // The manifest and engine were always real. SC-18826 adds the missing MLX-only VideoModelCaps row,
+  // so the old temporary exception must disappear and the route must now produce coordinates.
+  const matrix = await buildMatrix({ publish: false });
+  assert.deepEqual(matrix.summary.unroutedEntries, []);
+  assert.deepEqual([...UNROUTED_CATALOG_ENTRIES], []);
+  const vace = matrix.models.find((model) => model.id === "wan_2_2_vace_fun_14b");
+  assert.deepEqual(vace.backends, ["mlx"]);
+  assert.ok(Object.keys(vace.axes).length > 0);
+  assert.ok(matrix.cells.some((cell) => cell.modelId === vace.id));
+
+  // A NEW unrouted entry cannot appear undeclared...
+  assert.throws(
+    () =>
+      assertUnroutedEntriesAreDeclared(
+        [...matrix.models, { id: "brand_new_entry", backends: [] }],
+        UNROUTED_CATALOG_ENTRIES,
+      ),
+    /brand_new_entry: the routing catalog routes it on no backend/,
+  );
+  // ...and a synthetic declaration cannot outlive the defect it explains.
+  assert.throws(
+    () =>
+      assertUnroutedEntriesAreDeclared(
+        matrix.models,
+        new Map([
+          [
+            "wan_2_2_vace_fun_14b",
+            { reason: "fixture: stale declaration", owningStory: 18826 },
+          ],
+        ]),
+      ),
+    /declared unrouted .* but the catalog now routes mlx/,
+  );
+});
+
+test("mochi_1 is routed but deliberately outside the universe (sc-18815)", async () => {
+  // The inverse defect: a `VIDEO_MODEL_CAPS` row and a worker route with NO manifest entry. Mochi is
+  // frozen with no weights lane and epic 18803 lists it out of scope, so it must NOT be admitted —
+  // and the reason has to be the MANIFEST, not a coincidence of some other filter that a later
+  // change could remove. Pinned from both sides.
+  const [manifestBody, routingCatalog, routingCandle, routingMlx] = await Promise.all([
+    readFile(new URL("../config/manifests/builtin.models.jsonc", import.meta.url), "utf8"),
+    readFile(new URL("../crates/sceneworks-core/src/jobs_store/routing/catalog.rs", import.meta.url), "utf8"),
+    readFile(new URL("../crates/sceneworks-core/src/jobs_store/routing/candle.rs", import.meta.url), "utf8"),
+    readFile(new URL("../crates/sceneworks-core/src/jobs_store/routing/mlx.rs", import.meta.url), "utf8"),
+  ]);
+  const routed = routedLanes({ routingCatalog, routingCandle, routingMlx });
+  assert.ok(routed.get("mochi_1")?.size, "mochi is routed, so its absence is not a routing accident");
+  assert.ok(
+    !JSON.parse(stripJsoncComments(manifestBody)).models.some((model) => model.id === "mochi_1"),
+    "mochi has no manifest entry — that is what keeps it out",
+  );
+
+  const matrix = await buildMatrix({ publish: false });
+  assert.ok(!matrix.models.some((model) => model.id === "mochi_1"));
+  assert.ok(!matrix.cells.some((cell) => cell.modelId === "mochi_1"));
+  assert.ok(!matrix.summary.unroutedEntries.some((entry) => entry.id === "mochi_1"));
+});
+
+test("video cells name no per-entry story, and their family owner is the real one (sc-18815)", async () => {
+  // Epic 18803 filed no per-(entry, backend) video stories — measurement is a runbook (epic 18093) —
+  // so an integer in `owningModelStory` would name a story that cannot close the cell. That is
+  // SC-15812's defect reached from the other direction, so it is checked with the same force.
+  const matrix = await buildMatrix({ publish: false });
+  const video = matrix.models.filter((model) => model.modality === "video");
+  assert.ok(video.length === 10);
+  for (const model of video) {
+    for (const backend of model.backends) {
+      assert.equal(model.owningModelStories[backend], null);
+      assert.equal(model.owningFamilyStories[backend], familyStory(model.id, backend));
+    }
+  }
+  // `bernini` is NOT in `VIDEO_FAMILY_STORIES`: same engine and same block stack as `bernini_image`,
+  // so it stays in image family 15528 and takes that family's per-backend owners. Anything else
+  // would survey one architecture twice and count the family twice.
+  //
+  // Both spellings, because the group key and the model id are different strings and only one of them
+  // is the shape a mistaken entry would take. `familyGroup("bernini")` is `15528`, so the group-key
+  // assertion alone is near-vacuous — it never fires on the actual error, which is someone adding a
+  // literal `bernini:` row alongside the other video family NAMES (sc-18815 review).
+  assert.ok(!Object.hasOwn(VIDEO_FAMILY_STORIES, "bernini"));
+  assert.ok(!Object.hasOwn(VIDEO_FAMILY_STORIES, familyGroup("bernini")));
+  assert.equal(familyGroup("bernini"), familyGroup("bernini_image"));
+  const bernini = matrix.models.find((model) => model.id === "bernini");
+  assert.deepEqual(bernini.owningFamilyStories, FAMILY_STORIES[15528]);
+
+  // A fabricated per-entry owner is rejected...
+  assert.throws(
+    () =>
+      assertVideoOwnership(
+        matrix.models.map((model) =>
+          model.id === "ltx_2_3"
+            ? { ...model, owningModelStories: { ...model.owningModelStories, mlx: 18813 } }
+            : model,
+        ),
+      ),
+    /ltx_2_3:mlx: video entries carry no per-entry ownership story/,
+  );
+  // ...and so is a family owner that is not this family's.
+  assert.throws(
+    () =>
+      assertVideoOwnership(
+        matrix.models.map((model) =>
+          model.id === "ltx_2_3"
+            ? { ...model, owningFamilyStories: { ...model.owningFamilyStories, mlx: 18826 } }
+            : model,
+        ),
+      ),
+    /owningFamilyStory SC-18826 is not family ltx-video's mlx owner SC-18813/,
+  );
+});
+
+test("the video survey debt is closed while its fail-closed lifecycle remains enforced", async () => {
+  const matrix = await buildMatrix({ publish: false });
+  const pending = matrix.summary.rung4Survey.pendingFamilyBackends;
+  assert.deepEqual(pending, []);
+  assert.deepEqual([...PENDING_RUNG4_SURVEYS], []);
+  for (const family of ["wan-video", "scail2", "krea-realtime", "svd"]) {
+    assert.ok(
+      matrix.rung4SurveyRows.some((row) => row.familyStory === family),
+      `${family} must now have a real survey row`,
+    );
+  }
+  const unsurveyedCells = matrix.cells.filter(
+    (cell) => cell.rung === "bounded_transformer_residency" && cell.rung4Survey.surveyed === false,
+  );
+  assert.deepEqual(unsurveyedCells, []);
+
+  // The mechanism stays checked even though the current debt set is empty.
+  assert.throws(
+    () =>
+      assertRung4SurveyCoversEveryFamily(
+        new Map(),
+        [{ id: "wan_2_2", backends: ["mlx"] }],
+        { pendingSurveys: new Map() },
+      ),
+    /family wan-video has no mlx rung-4 survey verdict/,
+  );
+  // A pending row for a family the catalog advertises nowhere is a leftover, not a licence.
+  assert.throws(
+    () =>
+      assertRung4SurveyCoversEveryFamily(new Map(), [], {
+        pendingSurveys: new Map([["wan-video", 18826]]),
+      }),
+    /the catalog advertises no entry in that family — remove the pending row/,
+  );
+  // And it expires the moment the verdict lands, so sc-18826 cannot leave it behind.
+  assert.throws(
+    () =>
+      assertRung4SurveyCoversEveryFamily(
+        new Map([["wan-video:mlx", { structuralApplicability: "full" }]]),
+        [{ id: "wan_2_2", backends: ["mlx"] }],
+        { pendingSurveys: new Map([["wan-video", 18826]]) },
+      ),
+    /now carries a verdict for every advertised backend, so its pending row \(sc-18826\) is stale/,
+  );
+});
+
+test("admitting video leaves the image lane's guards at full strength (sc-18815)", async () => {
+  // The video lane is checked DIFFERENTLY, not less. Three ways the image guards could have been
+  // widened instead of partitioned, each one a real regression, each one still rejected.
+  const matrix = await buildMatrix({ publish: false });
+  const scope = buildStoryBackendScope();
+  const modalityByModelId = new Map(matrix.models.map((model) => [model.id, model.modality]));
+
+  // 1. An image cell may still not carry a null owner, even though video cells do.
+  const imageCell = matrix.cells.find((cell) => modalityByModelId.get(cell.modelId) === "image");
+  assert.throws(
+    () =>
+      assertCellOwnershipIsBackendScoped(
+        [{ ...imageCell, owningModelStory: null }],
+        scope,
+        modalityByModelId,
+      ),
+    /owningModelStory is null, not an ownership story id/,
+  );
+  // 2. An image cell may still not name a sibling's same-backend story.
+  assert.throws(
+    () =>
+      assertCellOwnershipIsBackendScoped(
+        [{ ...imageCell, owningModelStory: MODEL_STORIES.pulid_flux_dev[imageCell.backend] }],
+        scope,
+        modalityByModelId,
+      ),
+    /a cell credited to another entry's story/,
+  );
+  // 3. Twin coverage still holds over the image families — the video exclusion is by MODALITY, so
+  // dropping an image family's candle twin is still rejected.
+  assert.throws(
+    () => assertTwinCoverage(matrix.models, MODEL_STORIES, { ...FAMILY_STORIES, 15516: { mlx: 15516 } }),
+    /family SC-15516: owns dual models but has no Candle twin/,
+  );
+});
+
+test("a video cell's geometry envelope carries its temporal axis (sc-18815)", async () => {
+  // Publishing only the spatial half would claim the envelope is fully described while omitting the
+  // axis a video peak actually scales on. These are the catalog's DECLARED limits and nothing more —
+  // how the phase CURVE represents time is sc-18810/sc-18812's to measure and decide.
+  const matrix = await buildMatrix({ publish: false });
+  const temporal = ["defaultDuration", "durations", "hardMaxDuration", "defaultFps", "fps"];
+  const video = matrix.cells.filter((cell) => cell.modelId === "ltx_2_3");
+  assert.ok(video.length > 0);
+  for (const cell of video) {
+    for (const key of temporal) {
+      assert.ok(key in cell.geometryEnvelope, `${cell.id}: geometryEnvelope omits ${key}`);
+    }
+    assert.deepEqual(cell.geometryEnvelope.durations, [4, 6, 8, 10, 12, 15]);
+    assert.deepEqual(cell.geometryEnvelope.fps, [24, 25, 30]);
+  }
+  // And no IMAGE envelope gains one: image entries declare none of these keys, so an empty array or
+  // a null appearing there would be the generator inventing an axis the catalog never declared.
+  const imageIds = new Set(
+    matrix.models.filter((model) => model.modality === "image").map((model) => model.id),
+  );
+  for (const cell of matrix.cells.filter((entry) => imageIds.has(entry.modelId))) {
+    for (const key of temporal) {
+      assert.ok(!(key in cell.geometryEnvelope), `${cell.id}: image envelope gained ${key}`);
+    }
+  }
+});
+
+// ── sc-18812: the temporal axis reaches the characterization ───────────────────────────────────
+
+test("the measured-geometry key carries frames, and only above one (sc-18812)", () => {
+  // The `WxH` form has to survive verbatim: it is what all 208 published cells already carry, and
+  // the migration claim is that admitting a temporal axis moves none of them.
+  assert.equal(measuredGeometryKey({ width: 1024, height: 1024, frames: 1 }), "1024x1024");
+  assert.equal(measuredGeometryKey({ width: 768, height: 768, frames: 0 }), "768x768");
+  assert.equal(measuredGeometryKey({ width: 768, height: 512, frames: 241 }), "768x512xf241");
+});
+
+test("frames DISTINGUISH two measured geometries rather than collapsing (sc-18812)", () => {
+  // The seam this story was written against: two records that differ only temporally used to key
+  // to one `768x512` string, so a cell with real temporal coverage reported `point`.
+  const characterization = memoryCharacterization(["768x512xf121", "768x512xf241"]);
+  assert.deepEqual(characterization.measuredGeometries, ["768x512xf121", "768x512xf241"]);
+});
+
+test("temporal geometries at ONE area cannot determine the curve (sc-18812)", () => {
+  // Three points, three frame counts, and still singular: with one area the `mpx` and `mpx*frames`
+  // columns are proportional. sc-18810 established this the expensive way — crossing two areas is
+  // what makes the candidate forms identifiable at all — so counting geometries is the wrong test.
+  const characterization = memoryCharacterization([
+    "768x512xf121",
+    "768x512xf241",
+    "768x512xf361",
+  ]);
+  assert.equal(characterization.status, "point");
+  assert.equal(characterization.coveredPixelBound, null);
+  assert.equal(characterization.coveredFrameBound, null);
+});
+
+test("two areas crossed with two frame counts ARE determinable (sc-18812)", () => {
+  const characterization = memoryCharacterization([
+    "768x512xf121",
+    "768x512xf241",
+    "1280x704xf121",
+  ]);
+  assert.equal(characterization.status, "fitted");
+  assert.equal(characterization.coveredPixelBound, 1280 * 704);
+  assert.equal(characterization.coveredFrameBound, 241);
+});
+
+test("`coveredFrameBound` appears only where a temporal geometry does (sc-18812)", () => {
+  // Mirrors `geometryEnvelope`'s durations/fps convention. An image cell that gained a null
+  // temporal bound would be the generator inventing an axis its records never carried.
+  assert.ok(!("coveredFrameBound" in memoryCharacterization(["768x768", "1024x1024"])));
+  assert.ok(!("coveredFrameBound" in memoryCharacterization([])));
+  assert.ok("coveredFrameBound" in memoryCharacterization(["768x512xf121", "1280x704xf241"]));
+});
+
+test("two resolutions of ONE area do not determine the image curve either (sc-18812)", () => {
+  // A latent defect the rank rule fixes on the way past: `768x512` and `512x768` are two distinct
+  // geometry strings carrying one area, and counting called that `fitted`. It publishes no cell
+  // today — verified by the regenerated artifact being byte-identical — but it would have been the
+  // first thing a portrait/landscape video sweep hit.
+  assert.equal(memoryCharacterization(["768x512", "512x768"]).status, "point");
+  assert.equal(memoryCharacterization(["768x512", "512x768"]).coveredPixelBound, null);
+  assert.equal(memoryCharacterization(["768x512", "1280x704"]).status, "fitted");
+});
+
+test("admitting the temporal axis moves no published image cell (sc-18812)", async () => {
+  // The migration guard, over the REAL published population rather than a fixture. Every shipped
+  // cell must still key its geometries in the two-number form and carry no temporal bound.
+  const matrix = await buildMatrix({ publish: false });
+  let measured = 0;
+  for (const cell of matrix.cells) {
+    assert.ok(
+      !("coveredFrameBound" in cell.memoryCharacterization),
+      `${cell.id}: an image cell gained a temporal bound`,
+    );
+    for (const geometry of cell.memoryCharacterization.measuredGeometries) {
+      assert.match(geometry, /^[1-9][0-9]*x[1-9][0-9]*$/, `${cell.id}: ${geometry}`);
+      measured += 1;
+    }
+  }
+  assert.ok(measured > 0, "the guard must have graded real measured geometries");
+});
+
+// ── sc-18812 review pass: the DECLARED form, and evidence that can state its frames ────────────
+
+/** The builtin manifest, parsed, ready to be mutated and fed back through `sourceOverrides`. */
+async function parsedBuiltinManifest() {
+  return JSON.parse(
+    stripJsoncComments(
+      await readFile(new URL("../config/manifests/builtin.models.jsonc", import.meta.url), "utf8"),
+    ),
+  );
+}
+
+const KREA_Q8_THREE_STAGE = "krea_2_turbo:krea_2_turbo:candle:q8:text_to_image:none:staged_residency";
+// `resident` is the control: it is the one rung with NO entry in `phaseCurvesByTier`, so it shares
+// every evidence record with the cell above and differs only in the declared curve form.
+const KREA_Q8_RESIDENT = "krea_2_turbo:krea_2_turbo:candle:q8:text_to_image:none:resident";
+
+const cellById = (matrix, id) => {
+  const cell = matrix.cells.find((candidate) => candidate.id === id);
+  assert.ok(cell, `${id} must exist for this test to mean anything`);
+  return cell;
+};
+
+test("the coefficient count comes from the DECLARED curve, not from what was measured (sc-18812)", () => {
+  // Two areas, one frame each. Against the two-coefficient image form that is a determinable
+  // curve; against a declared three-coefficient form it is two points short of one, and calling it
+  // `fitted` would publish a temporal coefficient nobody measured.
+  const geometries = ["768x768", "1024x1024"];
+  const image = memoryCharacterization(geometries);
+  assert.equal(image.status, "fitted");
+  assert.equal(image.coveredPixelBound, 1024 * 1024);
+  assert.ok(!("coveredFrameBound" in image));
+
+  const declaredTemporal = memoryCharacterization(geometries, { declaresTemporalCurve: true });
+  assert.equal(declaredTemporal.status, "point");
+  assert.equal(declaredTemporal.coveredPixelBound, null);
+  assert.equal(declaredTemporal.coveredFrameBound, null);
+
+  // ...and the flag can only ever ADD the axis. Multi-frame measurements are temporal whatever the
+  // flag says, so an unset flag cannot smuggle a video cell back onto the two-coefficient rule.
+  assert.equal(
+    memoryCharacterization(["768x512xf121", "768x512xf241", "1280x704xf121"], {
+      declaresTemporalCurve: false,
+    }).status,
+    "fitted",
+  );
+  assert.equal(memoryCharacterization(["768x768"], { declaresTemporalCurve: true }).status, "point");
+  assert.equal(
+    memoryCharacterization([], { declaresTemporalCurve: true }).status,
+    "unmeasured",
+    "a declared temporal curve with no measurements is still unmeasured, not point",
+  );
+});
+
+test("a declared temporal curve regrades its own cell against three coefficients (sc-18812)", async () => {
+  const baseline = await buildMatrix({ publish: false });
+  assert.equal(cellById(baseline, KREA_Q8_THREE_STAGE).memoryCharacterization.status, "fitted");
+
+  const manifest = await parsedBuiltinManifest();
+  const krea = manifest.models.find((model) => model.id === "krea_2_turbo");
+  krea.candle.turboFit.phaseCurvesByTier.q8.threeStage.decode.perMpxFrameGb = 0.2998482076533136;
+  const changed = await buildMatrix({
+    publish: false,
+    sourceOverrides: { manifest: JSON.stringify(manifest) },
+  });
+
+  // The cell whose curve gained the term: same two measured geometries, now one short of the rank
+  // its own form needs.
+  const declared = cellById(changed, KREA_Q8_THREE_STAGE).memoryCharacterization;
+  assert.deepEqual(declared.measuredGeometries, ["1024x1024", "768x768"]);
+  assert.equal(declared.status, "point");
+  assert.equal(declared.coveredPixelBound, null);
+  assert.equal(declared.coveredFrameBound, null);
+
+  // The control, on the SAME evidence: no declared temporal term, so nothing about it moves.
+  assert.deepEqual(
+    cellById(changed, KREA_Q8_RESIDENT).memoryCharacterization,
+    cellById(baseline, KREA_Q8_RESIDENT).memoryCharacterization,
+  );
+  assert.equal(cellById(changed, KREA_Q8_RESIDENT).memoryCharacterization.status, "fitted");
+});
+
+test("an evidence record can state its frame count, and it reaches characterization (sc-18812)", async () => {
+  const baseline = await buildMatrix({ publish: false });
+  assert.deepEqual(cellById(baseline, KREA_Q8_THREE_STAGE).memoryCharacterization.measuredGeometries, [
+    "1024x1024",
+    "768x768",
+  ]);
+
+  const manifest = await parsedBuiltinManifest();
+  const krea = manifest.models.find((model) => model.id === "krea_2_turbo");
+  const record = krea.candle.turboFit.evidenceRecords.find(
+    (candidate) => candidate.tier === "q8" && candidate.width === 768,
+  );
+  assert.ok(record, "fixture needs a q8 768x768 evidence record");
+  record.frames = 241;
+  const changed = await buildMatrix({
+    publish: false,
+    sourceOverrides: { manifest: JSON.stringify(manifest) },
+  });
+
+  // The point of the fix: `historicalVerification` no longer hand-builds `WxH`, so a record that
+  // declares frames is characterized at the geometry it was actually captured at rather than as a
+  // one-frame design point that was never measured.
+  const characterization = cellById(changed, KREA_Q8_THREE_STAGE).memoryCharacterization;
+  assert.deepEqual(characterization.measuredGeometries, ["1024x1024", "768x768xf241"]);
+  assert.equal(characterization.status, "point");
+  assert.equal(characterization.coveredFrameBound, null);
+  // The evidence row itself carries the frames too — a consumer reading the row must see the same
+  // geometry the characterization was computed from.
+  const row = cellById(changed, KREA_Q8_THREE_STAGE).evidence.historicalVerification.find(
+    (candidate) => candidate.geometry.startsWith("768x768"),
+  );
+  assert.equal(row.geometry, "768x768xf241");
+
+  // Untouched tiers are untouched: q4 shares the code path and moves only if its own records do.
+  assert.deepEqual(
+    cellById(changed, "krea_2_turbo:krea_2_turbo:candle:q4:text_to_image:none:staged_residency")
+      .memoryCharacterization.measuredGeometries,
+    ["1024x1024", "768x768"],
+  );
+});
+
+test("`fitted` may not be published on fewer geometries than the form has coefficients (sc-18812)", () => {
+  // The validator's guard, exercised on a forged cell rather than by trusting that
+  // `memoryCharacterization` never emits one. The two are deliberately independent: this is what
+  // would catch a rank bug that answered `fitted` on too few points.
+  const forged = (characterization) => ({
+    id: "forged:cell",
+    state: "Implemented/unverified",
+    memoryCharacterization: characterization,
+  });
+  assert.throws(
+    () =>
+      assertCharacterizationIsConsistent(
+        forged({
+          status: "fitted",
+          measuredGeometries: ["1024x1024", "768x768"],
+          coveredPixelBound: 1024 * 1024,
+          coveredFrameBound: 241,
+        }),
+      ),
+    /fitted on 2 measured geometries, but its curve has 3 coefficients/,
+  );
+  // The SAME cell without the temporal marker is a legitimate two-coefficient fit and passes, so
+  // the rejection above is attributable to the coefficient count and not to the forging.
+  assert.doesNotThrow(() =>
+    assertCharacterizationIsConsistent(
+      forged({
+        status: "fitted",
+        measuredGeometries: ["1024x1024", "768x768"],
+        coveredPixelBound: 1024 * 1024,
+      }),
+    ),
+  );
+  // Three geometries satisfy the three-coefficient floor, so the guard is a floor and not a blanket
+  // refusal of temporal cells.
+  assert.doesNotThrow(() =>
+    assertCharacterizationIsConsistent(
+      forged({
+        status: "fitted",
+        measuredGeometries: ["1024x1024", "768x512xf121", "768x512xf241"],
+        coveredPixelBound: 1024 * 1024,
+        coveredFrameBound: 241,
+      }),
+    ),
+  );
+  // And the temporal bound obeys the same "null unless fitted" rule the pixel bound does.
+  assert.throws(
+    () =>
+      assertCharacterizationIsConsistent(
+        forged({
+          status: "point",
+          measuredGeometries: ["768x512xf121", "768x512xf241"],
+          coveredPixelBound: null,
+          coveredFrameBound: 241,
+        }),
+      ),
+    /coveredFrameBound is only meaningful on a fitted curve/,
+  );
 });

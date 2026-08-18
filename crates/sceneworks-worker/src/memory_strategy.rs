@@ -308,7 +308,7 @@ const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 /// Evidence stores an integer byte ceiling. Admission converts that canonical value (after any
 /// stale-margin widening, which happens in integer bytes) to GiB exactly once; callers cannot
 /// submit a second floating-point estimate with a lower coefficient.
-fn peak_bytes_to_gb(peak_bytes: u64) -> f64 {
+pub(crate) fn peak_bytes_to_gb(peak_bytes: u64) -> f64 {
     peak_bytes as f64 / BYTES_PER_GIB
 }
 
@@ -347,7 +347,7 @@ const fn stale_measured_margin(backend: MemoryBackend) -> f64 {
 
 /// The estimate margin for one backend (sc-18094 derivation, consumed here by sc-18096). Same
 /// exhaustive-match rationale as [`stale_measured_margin`].
-const fn estimate_margin(backend: MemoryBackend) -> f64 {
+pub(crate) const fn estimate_margin(backend: MemoryBackend) -> f64 {
     match backend {
         MemoryBackend::Candle => CANDLE_ESTIMATE_MARGIN,
         MemoryBackend::Mlx => MLX_ESTIMATE_MARGIN,
@@ -358,7 +358,7 @@ const fn estimate_margin(backend: MemoryBackend) -> f64 {
 /// (sc-18095/sc-18096). The widening happens in integer bytes with a ceil, so the admitted ceiling
 /// is never under the exact `peak * (1 + margin)` product and the GiB conversion stays a single
 /// downstream step.
-fn widened_peak_bytes(peak_bytes: u64, margin: f64) -> u64 {
+pub(crate) fn widened_peak_bytes(peak_bytes: u64, margin: f64) -> u64 {
     (peak_bytes as f64 * (1.0 + margin))
         .ceil()
         .clamp(0.0, u64::MAX as f64) as u64
@@ -2653,6 +2653,10 @@ mod tests {
     fn tracing_records_stale_admission_and_the_widened_peak() {
         use std::io::Write;
 
+        // Concurrent subscriber-less tests also drive these callsites; without the floor their
+        // first hit can cache `Interest::never` and silently empty this capture (see test_env).
+        crate::test_env::install_tracing_interest_floor();
+
         #[derive(Clone, Default)]
         struct Capture(Arc<Mutex<Vec<u8>>>);
         impl Write for Capture {
@@ -2981,6 +2985,10 @@ mod tests {
     #[test]
     fn tracing_records_estimate_admission_with_its_basis_and_the_widened_peak() {
         use std::io::Write;
+
+        // Concurrent subscriber-less tests also drive these callsites; without the floor their
+        // first hit can cache `Interest::never` and silently empty this capture (see test_env).
+        crate::test_env::install_tracing_interest_floor();
 
         #[derive(Clone, Default)]
         struct Capture(Arc<Mutex<Vec<u8>>>);

@@ -1,5 +1,9 @@
 use super::*;
 
+// Keep the behavior-preserving legacy root helper available to this module while all production
+// consumers enter through `model_source_library`; taking the function item constructs no root.
+const _: fn(&FsPath) -> PathBuf = huggingface_hub_cache_dir;
+
 use sceneworks_core::base_weights::{
     detect_base_weight_file, import_detection_supported, imported_model_primary_weight_file,
     BaseWeightDetection, ComponentRole,
@@ -45,11 +49,42 @@ pub(crate) struct ModelCatalogCache {
 struct ModelCatalogCacheState {
     generation: u64,
     snapshot: Option<(u64, Arc<Vec<Value>>)>,
+    /// Last observed resolved-cache publish key. `None` until the first observation, which is why
+    /// the first reading never counts as a change — an API that has not looked yet has nothing to
+    /// have gone stale against.
+    local_tier_key: Option<u64>,
 }
 
 impl ModelCatalogCache {
     pub(crate) fn invalidate(&self) {
         let mut state = self.state.lock();
+        state.generation = state.generation.wrapping_add(1);
+        state.snapshot = None;
+    }
+
+    /// Invalidates the snapshot when the resolved cache's published set has moved since the last
+    /// catalog read (sc-19712 F-4).
+    ///
+    /// Every other invalidation site is a mutation this process performed, but promotions are
+    /// published by the **worker**, in another process, so no in-process signal exists. Without
+    /// this the catalog kept serving a model's pre-promotion availability indefinitely — and
+    /// `modelLibraryUnavailable()` keys the Model Manager's blocked state on exactly that field,
+    /// so a model that had just completed a job with the drive unplugged was still presented as
+    /// needing the drive reconnected.
+    ///
+    /// A key check, not a timer: a TTL would leave the same wrong answer up for its whole window
+    /// and rebuild pointlessly for the rest of time. The key only moves when a bundle is published
+    /// or withdrawn, so a rebuild happens once per real change and never on a load.
+    pub(crate) fn note_local_tier_key(&self, key: u64) {
+        let mut state = self.state.lock();
+        if state.local_tier_key == Some(key) {
+            return;
+        }
+        let first_observation = state.local_tier_key.is_none();
+        state.local_tier_key = Some(key);
+        if first_observation {
+            return;
+        }
         state.generation = state.generation.wrapping_add(1);
         state.snapshot = None;
     }
@@ -480,8 +515,10 @@ pub(crate) async fn create_model_download_job(
         .ok_or_else(|| ApiError {
             status: StatusCode::NOT_FOUND,
             detail: "Model not found".to_owned(),
+            context: None,
             code: None,
         })?;
+    ensure_model_downloadable(&model)?;
     // Tier selection (sc-8508): an explicit `variant` installs that quant tier's download entry; an
     // absent variant installs the default tier (back-compat). A variant the model doesn't advertise
     // is a 400 rather than a silent wrong-tier install.
@@ -539,6 +576,9 @@ pub(crate) async fn create_model_download_job(
     for co_requisite in
         model_co_requisite_downloads_for_variant(&model, selected_variant.as_deref())
     {
+        if co_requisite_satisfied_by_exact_legacy_rename(&state.settings.data_dir, &co_requisite) {
+            continue;
+        }
         let co_payload = build_model_download_job_payload(
             &model,
             &model_id,
@@ -569,6 +609,25 @@ pub(crate) async fn create_model_download_job(
     )
     .await?;
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
+}
+
+fn ensure_model_downloadable(model: &Value) -> Result<(), ApiError> {
+    ensure_model_not_cleanup_only(model)?;
+    if model.get("downloadable").and_then(Value::as_bool) == Some(false) {
+        return Err(ApiError::bad_request(
+            "This model is not available for download.",
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_model_not_cleanup_only(model: &Value) -> Result<(), ApiError> {
+    if model.get("platformCleanupOnly").and_then(Value::as_bool) == Some(true) {
+        return Err(ApiError::bad_request(
+            "This model is retained only so its existing local files can be removed. No download, conversion, or generation route is available on this platform.",
+        ));
+    }
+    Ok(())
 }
 
 /// Build the worker `ModelDownload` job payload for one `download` entry of `model`. Factored out
@@ -952,8 +1011,10 @@ pub(crate) async fn create_model_convert_job(
         .ok_or_else(|| ApiError {
             status: StatusCode::NOT_FOUND,
             detail: "Model not found".to_owned(),
+            context: None,
             code: None,
         })?;
+    ensure_model_not_cleanup_only(&model)?;
     let mlx = model
         .get("mlx")
         .and_then(Value::as_object)
@@ -1058,6 +1119,95 @@ pub(crate) async fn create_model_convert_job(
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
+/// Distinct source repositories a model owns. Co-requisite downloads are excluded: they are
+/// shared dependencies rather than this model's own source, and resolved-cache entries are
+/// selected by *primary* provenance.
+pub(crate) fn owned_source_repositories(model: &Value) -> Vec<String> {
+    let mut repositories = model
+        .get("downloads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|entry| !is_co_requisite_download(entry))
+        .filter_map(|entry| entry.get("repo").and_then(Value::as_str))
+        .filter(|repo| !repo.trim().is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    repositories.sort();
+    repositories.dedup();
+    repositories
+}
+
+/// Reconciles the resolved-model hot cache with a source that has just been deleted (sc-19710).
+///
+/// Without this, entries whose authoritative source is gone can never be reclaimed: automatic
+/// retention refuses to evict an artifact it cannot re-verify as a second copy, so an orphaned
+/// entry would be held `SourceUnverified` forever — exactly the stranded state the epic forbids.
+///
+/// Reconciliation failures never fail the delete, whose files are already removed; they are logged
+/// and returned as warnings so the orphan is surfaced rather than silently stranded.
+async fn reconcile_deleted_source(
+    state: &AppState,
+    selectors: Vec<sceneworks_core::model_artifacts::resolved_cache::SourceLifecycleSelector>,
+) -> Vec<String> {
+    use sceneworks_core::model_artifacts::resolved_cache::ResolvedCacheStore;
+
+    if selectors.is_empty() {
+        return Vec::new();
+    }
+    let data_dir = state.settings.data_dir.clone();
+    // Reconcile whenever a managed store exists, even if the policy was since disabled: entries
+    // materialized while it was enabled must still be reconciled rather than orphaned. Never
+    // create the store as a side effect of a delete.
+    if !data_dir.join("models").join("resolved").exists() {
+        return Vec::new();
+    }
+    let now = sceneworks_core::time::now_unix_seconds().max(0) as u64;
+    let outcome = tokio::task::spawn_blocking(move || {
+        let store = ResolvedCacheStore::open(&data_dir)?;
+        let mut warnings = Vec::new();
+        for selector in selectors {
+            let report = store.reconcile_removed_source(&selector, now)?;
+            for deferred in report.deferred {
+                warnings.push(format!(
+                    "A cached copy of {} is still in use and will be reclaimed after it is released.",
+                    selector.repository
+                ));
+                tracing::info!(
+                    repository = %selector.repository,
+                    cache_key = %deferred.cache_key,
+                    hold = %deferred.hold,
+                    "resolved-cache reconciliation deferred an in-use entry"
+                );
+            }
+            for stranded in report.unmatched_unreadable {
+                warnings.push(format!(
+                    "A damaged resolved-cache entry ({stranded}) could not be matched to {} and was left in place.",
+                    selector.repository
+                ));
+            }
+        }
+        Ok::<_, sceneworks_core::model_artifacts::resolved_cache::ResolvedCacheError>(warnings)
+    })
+    .await;
+    match outcome {
+        Ok(Ok(warnings)) => warnings,
+        Ok(Err(error)) => {
+            tracing::warn!(error = %error, "resolved-cache reconciliation failed after a source delete");
+            vec![format!(
+                "Cached copies of this model could not be reconciled and may still occupy disk: {error}"
+            )]
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "resolved-cache reconciliation task failed");
+            vec![
+                "Cached copies of this model could not be reconciled and may still occupy disk."
+                    .to_owned(),
+            ]
+        }
+    }
+}
+
 pub(crate) async fn delete_model(
     State(state): State<AppState>,
     Path(model_id): Path<String>,
@@ -1074,6 +1224,7 @@ pub(crate) async fn delete_model(
         .ok_or_else(|| ApiError {
             status: StatusCode::NOT_FOUND,
             detail: "Model not found".to_owned(),
+            context: None,
             code: None,
         })?;
     let manifest_path = state
@@ -1090,7 +1241,9 @@ pub(crate) async fn delete_model(
     let cleanup_source = manifest_entry.as_ref().unwrap_or(&model);
     let allowed_roots = vec![
         state.settings.data_dir.join("models"),
-        huggingface_hub_cache_dir(&state.settings.data_dir),
+        sceneworks_core::hf_home::model_source_library(&state.settings.data_dir)
+            .root()
+            .to_owned(),
     ];
     let removal = match remove_owned_artifacts(
         model_artifact_paths(cleanup_source, &state.settings.data_dir),
@@ -1137,8 +1290,25 @@ pub(crate) async fn delete_model(
             "Built-in model catalog entries are read-only unless local files are installed",
         ));
     }
-    let warnings =
+    let mut warnings =
         catalog_delete_warnings(&state, "model", &model_id, None, Some(&catalogs)).await?;
+    // The source is gone; reclaim (or surface) every resolved-cache entry that depended on it.
+    warnings.extend(
+        reconcile_deleted_source(
+            &state,
+            owned_source_repositories(cleanup_source)
+                .into_iter()
+                .map(|repository| {
+                    sceneworks_core::model_artifacts::resolved_cache::SourceLifecycleSelector {
+                        repository,
+                        revision: None,
+                        tier: None,
+                    }
+                })
+                .collect(),
+        )
+        .await,
+    );
     let policy = if removed_entry.is_some() {
         "Removed the model registry entry and SceneWorks-owned local model files."
     } else {
@@ -1180,10 +1350,16 @@ pub(crate) async fn delete_model_variant(
         .ok_or_else(|| ApiError {
             status: StatusCode::NOT_FOUND,
             detail: "Model not found".to_owned(),
+            context: None,
             code: None,
         })?;
     let data_dir = &state.settings.data_dir;
-    let allowed_roots = vec![data_dir.join("models"), huggingface_hub_cache_dir(data_dir)];
+    let allowed_roots = vec![
+        data_dir.join("models"),
+        sceneworks_core::hf_home::model_source_library(data_dir)
+            .root()
+            .to_owned(),
+    ];
     // A tier lives in one of two storage shapes. Download-matrix models (`hasVariantMatrix`) keep the
     // tier as a `files`-filtered slice of a shared HF cache repo (sc-12024); convert-at-install
     // models (Anima) keep it as a real `<converted>/<tier>/` dir emitted by one convert job
@@ -1270,10 +1446,27 @@ pub(crate) async fn delete_model_variant(
             "Tier '{variant}' is not installed"
         )));
     }
+    // A single-tier delete only orphans resolved-cache entries built from that tier; entries for
+    // the model's other tiers stay valid, so the selector is scoped by tier.
+    let cache_warnings = reconcile_deleted_source(
+        &state,
+        owned_source_repositories(&model)
+            .into_iter()
+            .map(|repository| {
+                sceneworks_core::model_artifacts::resolved_cache::SourceLifecycleSelector {
+                    repository,
+                    revision: None,
+                    tier: Some(variant.clone()),
+                }
+            })
+            .collect(),
+    )
+    .await;
     Ok(Json(json!({
         "id": model_id,
         "variant": variant,
         "kind": "model-variant",
+        "warnings": cache_warnings,
         // Permanent delete: no OS trash, no undo (sc-12088).
         "trashed": false,
         // A tier delete NEVER removes the registry entry: the model stays in the catalog so the
@@ -1467,7 +1660,18 @@ async fn remove_empty_dirs(dir: &FsPath) {
 /// subtrees, and — when no payload remains (no blobs, no snapshot files) — the whole repo cache
 /// dir, so a fully-drained repo doesn't linger as a bare `refs/` skeleton. Best-effort.
 async fn prune_empty_repo_cache(repo_cache: &FsPath) {
-    remove_empty_dirs(&repo_cache.join("snapshots")).await;
+    let Some(source_root) = repo_cache.parent() else {
+        return;
+    };
+    let Ok(source_library) =
+        sceneworks_core::model_artifacts::ArtifactSourceLibrary::new(source_root)
+    else {
+        return;
+    };
+    let Ok(snapshots_root) = source_library.snapshots_root_from_repository_root(repo_cache) else {
+        return;
+    };
+    remove_empty_dirs(&snapshots_root).await;
     remove_empty_dirs(&repo_cache.join("blobs")).await;
     let has_blobs = std::fs::read_dir(repo_cache.join("blobs"))
         .map(|mut entries| entries.next().is_some())
@@ -1995,7 +2199,10 @@ pub(crate) fn max_model_upload_bytes() -> usize {
 /// byte-accurate download size — so an unreachable huggingface.co can't stall
 /// those paths (sc-4169).
 pub(crate) async fn model_catalog(state: &AppState) -> Result<Vec<Value>, ApiError> {
-    Ok(model_catalog_snapshot(state).await?.as_ref().clone())
+    let mut models = model_catalog_snapshot(state).await?.as_ref().clone();
+    crate::model_sources::refresh_live_external_availability(&state.settings.data_dir, &mut models)
+        .await?;
+    Ok(models)
 }
 
 /// Catalog with live Hugging Face download-size estimates (negative-cached on
@@ -2010,6 +2217,8 @@ pub(crate) async fn model_catalog_sized(state: &AppState) -> Result<Vec<Value>, 
     let (size_estimates, snapshot) = tokio::join!(size_estimates, snapshot);
     let size_estimates = size_estimates?;
     let mut models = snapshot?.as_ref().clone();
+    crate::model_sources::refresh_live_external_availability(&state.settings.data_dir, &mut models)
+        .await?;
     let selection_catalog = models.clone();
     for model in &mut models {
         let context = model_download_context(model)?;
@@ -2184,7 +2393,9 @@ mod runtime_text_encoder_option_tests {
             "TheCluster/amoral-gemma-3-12B-v2-mlx-4bit",
         )
         .unwrap();
-        let snapshot = repo.join("snapshots").join("test-revision");
+        let snapshot = repo
+            .join("snapshots")
+            .join("0123456789abcdef0123456789abcdef01234567");
         std::fs::create_dir_all(&snapshot).unwrap();
         std::fs::write(
             snapshot.join("config.json"),
@@ -2215,7 +2426,11 @@ mod runtime_text_encoder_option_tests {
     }
 }
 
-async fn model_catalog_snapshot(state: &AppState) -> Result<Arc<Vec<Value>>, ApiError> {
+pub(crate) async fn model_catalog_snapshot(state: &AppState) -> Result<Arc<Vec<Value>>, ApiError> {
+    // Before trusting the cached snapshot, check whether the resolved cache's published set moved
+    // under us — the worker publishes promotions in another process, so this is the only signal
+    // the API gets (sc-19712 F-4). It is a handful of stats, cheap enough to pay per read.
+    crate::model_sources::note_local_tier_freshness(state);
     {
         let cache_state = state.model_catalog_cache.state.lock();
         if let Some((snapshot_generation, snapshot)) = cache_state.snapshot.as_ref() {
@@ -2447,11 +2662,29 @@ fn backfill_current_receipt(
             }
             let resolved = snapshot_files(&snapshot).into_iter()
                 .filter(|file| allow_pattern_matches(file, &files)).collect::<Vec<_>>();
+            // Record WHICH snapshot these files were read from (sc-19712 F-5). A revision-less
+            // receipt makes its whole repository unserveable from the resolved cache — there is no
+            // pair to compare coverage against — so a backfilled install silently dropped out of
+            // the local tier while still being promotable, occupying cache bytes it could never be
+            // served from. The revision is not unknowable here: the snapshot directory selected
+            // just above IS `.../snapshots/<revision>`, and `resolvedFiles` were read from it. Only
+            // a genuinely immutable 40-hex name is recorded; anything else is omitted rather than
+            // written as a revision the source tier could not re-resolve. The worker's
+            // `establish_receipt_tree_stamp` already patches receipts this same way.
+            let snapshot_revision = snapshot
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| {
+                    sceneworks_core::model_artifacts::validate_immutable_revision(name).is_ok()
+                })
+                .map(|name| Value::String(name.to_owned()))
+                .unwrap_or(Value::Null);
             (!resolved.is_empty()).then(|| json!({
                 "schemaVersion": 2, "repo": repo,
                 "modelId": model.get("id").cloned().unwrap_or(Value::Null),
                 "variant": entry.get("variant").cloned().unwrap_or_else(|| Value::String("default".to_owned())),
                 "manifestFiles": files, "resolvedFiles": resolved, "backfilled": true,
+                "snapshotRevision": snapshot_revision,
             }))
         }).collect::<Vec<_>>();
     if receipts.is_empty() {
@@ -2773,6 +3006,491 @@ mod download_receipt_tests {
             .find(|entry| entry.get("id").and_then(Value::as_str) == Some(model_id))
             .cloned()
             .unwrap_or_else(|| panic!("builtin entry {model_id} present"))
+    }
+
+    fn seed_manifest_download(data_dir: &FsPath, download: &Value) {
+        let repo = download.get("repo").and_then(Value::as_str).unwrap();
+        let revision = download.get("revision").and_then(Value::as_str).unwrap();
+        let snapshot = huggingface_repo_cache_path(data_dir, repo)
+            .unwrap()
+            .join("snapshots")
+            .join(revision);
+        for file in string_array_field(download, "files") {
+            let path = snapshot.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"legacy Eros weights").unwrap();
+        }
+    }
+
+    fn seed_manifest_downloads(data_dir: &FsPath, model: &Value, include_co_requisites: bool) {
+        for download in model
+            .get("downloads")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|download| include_co_requisites || !is_co_requisite_download(download))
+        {
+            seed_manifest_download(data_dir, download);
+        }
+    }
+
+    /// A platformCleanupOnly tombstone has its `variants` projection stripped by
+    /// `apply_model_catalog_entry`, yet the snapshot pipeline still runs size enrichment on it.
+    /// The refresh must no-op for tombstones while staying a hard error for real entries —
+    /// this exact mismatch 500'd the whole catalog for machines holding legacy Eros weights.
+    /// (Platform-neutral twin of the seeded-cache Eros tests below, which cannot run on Windows:
+    /// their setup writes the literal `gemma/*` manifest pattern as a filename.)
+    #[test]
+    fn size_refresh_tolerates_a_cleanup_tombstone_without_variants() {
+        let mut tombstone = json!({
+            "id": "ltx_2_3_eros",
+            "platformCleanupOnly": true,
+        });
+        refresh_variant_download_sizes(&mut tombstone)
+            .expect("tombstone size refresh must be a no-op");
+        assert!(
+            tombstone.get("variants").is_none(),
+            "tombstone refresh must not invent a variants projection"
+        );
+
+        let mut real_entry = json!({ "id": "ltx_2_3" });
+        assert!(
+            refresh_variant_download_sizes(&mut real_entry).is_err(),
+            "a non-tombstone entry without a variants array is still a contract violation"
+        );
+    }
+
+    /// SC-18902: Eros is a real MLX product route, but its exact-head Candle/CUDA capture was
+    /// unusable. Pin the complete catalog projection so a future edit cannot restore the 46.8 GB
+    /// Windows/Linux offer merely by changing one of the three required download rows.
+    #[test]
+    fn ltx_eros_catalog_is_macos_only_and_not_downloadable_off_macos() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let base = builtin_models_entry("ltx_2_3");
+        assert_ne!(
+            base.get("macOnly").and_then(Value::as_bool),
+            Some(true),
+            "base LTX-2.3 must remain cross-platform"
+        );
+        for os in ["windows", "linux"] {
+            let mut candle_base = base.clone();
+            retain_downloads_for_os(&mut candle_base, os);
+            assert!(
+                model_download_context(&candle_base)
+                    .expect("valid base LTX catalog entry")
+                    .is_some(),
+                "{os}: base LTX-2.3 remains downloadable"
+            );
+        }
+
+        let entry = builtin_models_entry("ltx_2_3_eros");
+        assert_eq!(entry.get("macOnly").and_then(Value::as_bool), Some(true));
+
+        let mut false_override = entry.clone();
+        let object = false_override.as_object_mut().unwrap();
+        object.insert("macOnly".to_owned(), Value::Bool(false));
+        object.insert("type".to_owned(), Value::String("image".to_owned()));
+        object.insert("downloadable".to_owned(), Value::Bool(true));
+        let mut absent_override = entry.clone();
+        let object = absent_override.as_object_mut().unwrap();
+        object.remove("macOnly");
+        object.insert("downloadable".to_owned(), Value::Bool(true));
+        object.insert("usable".to_owned(), Value::Bool(true));
+        for override_attempt in [false_override, absent_override] {
+            let mut overridden_projection = vec![override_attempt];
+            retain_models_for_os(&mut overridden_projection, "windows", temp.path()).unwrap();
+            assert!(
+                overridden_projection.is_empty(),
+                "user platform/download fields cannot restore the withdrawn Eros product"
+            );
+        }
+
+        let mut macos = entry.clone();
+        retain_downloads_for_os(&mut macos, "macos");
+        let macos_downloads = macos
+            .get("downloads")
+            .and_then(Value::as_array)
+            .expect("macOS Eros downloads");
+        assert_eq!(
+            macos_downloads
+                .iter()
+                .filter_map(|download| download.get("repo").and_then(Value::as_str))
+                .collect::<Vec<_>>(),
+            vec![
+                "SceneWorks/ltx-2.3-mlx",
+                "TenStrip/LTX2.3-10Eros",
+                "TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments",
+            ],
+            "macOS retains the shared Gemma bundle, Eros checkpoint, and cond_safe adapter"
+        );
+        let macos_context = model_download_context(&macos)
+            .expect("valid Eros download context")
+            .expect("macOS Eros remains downloadable");
+        let macos_state = install_state_for(Some(macos_context), &macos, temp.path());
+        assert!(macos_state.downloadable);
+        let mut macos_projection = vec![base.clone(), entry.clone()];
+        retain_models_for_os(&mut macos_projection, "macos", temp.path()).unwrap();
+        assert_eq!(
+            macos_projection
+                .iter()
+                .filter_map(|model| model.get("id").and_then(Value::as_str))
+                .collect::<Vec<_>>(),
+            vec!["ltx_2_3", "ltx_2_3_eros"],
+            "macOS catalog and Model Manager retain both LTX products"
+        );
+
+        for os in ["windows", "linux"] {
+            let mut candle = entry.clone();
+            retain_downloads_for_os(&mut candle, os);
+            assert_eq!(
+                candle
+                    .get("downloads")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|download| download.get("repo").and_then(Value::as_str))
+                    .collect::<Vec<_>>(),
+                vec!["SceneWorks/ltx-2.3-mlx"],
+                "{os}: platform filtering retains only the shared Gemma bundle, never the Eros checkpoint or adapter"
+            );
+            assert!(
+                model_download_context(&candle)
+                    .expect("valid filtered catalog entry")
+                    .is_none(),
+                "{os}: Eros must have no canonical download"
+            );
+            let state = install_state_for(None, &candle, temp.path());
+            assert!(!state.downloadable, "{os}: Eros must not be downloadable");
+            assert!(
+                !state.installed,
+                "{os}: filtered remote files must not resurrect a picker row"
+            );
+            let mut projection = vec![base.clone(), entry.clone()];
+            retain_models_for_os(&mut projection, os, temp.path()).unwrap();
+            assert_eq!(
+                projection
+                    .iter()
+                    .filter_map(|model| model.get("id").and_then(Value::as_str))
+                    .collect::<Vec<_>>(),
+                vec!["ltx_2_3"],
+                "{os}: Model Manager/catalog must omit Eros and preserve base LTX-2.3"
+            );
+        }
+    }
+
+    /// A previously shipped Windows/Linux install remains visible only as a cleanup tombstone. The
+    /// tombstone cannot generate, download, repair, or update, but DELETE can reclaim both the dense
+    /// checkpoint and its Eros-exclusive cond_safe adapter; once removed, the row disappears.
+    #[tokio::test(flavor = "current_thread")]
+    async fn ltx_eros_legacy_install_is_cleanup_only_and_reclaimable_off_macos() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let entry = builtin_models_entry("ltx_2_3_eros");
+        seed_manifest_downloads(data_dir, &entry, true);
+
+        let mut projection = vec![entry.clone()];
+        retain_models_for_os(&mut projection, "windows", data_dir).unwrap();
+        assert_eq!(
+            projection.len(),
+            1,
+            "an installed legacy Eros row is retained"
+        );
+        assert_eq!(
+            projection[0]
+                .get("platformCleanupOnly")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+
+        let context = model_download_context(&projection[0])
+            .unwrap()
+            .expect("cleanup tombstone retains its original artifact context");
+        // No resolved-cache artifacts (sc-19708's availability seam): a platform tombstone is
+        // judged from its own on-disk install, not from an external library's local copies.
+        let projected = apply_model_catalog_entry(
+            projection.pop().unwrap(),
+            Some(context),
+            data_dir,
+            &std::collections::HashSet::new(),
+            &std::collections::HashSet::new(),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            projected.get("installState").and_then(Value::as_str),
+            Some("installed")
+        );
+        assert_eq!(
+            projected.get("usable").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            projected.get("downloadable").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            projected.get("repairAvailable").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            projected.get("updateAvailable").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            projected.get("removable").and_then(Value::as_bool),
+            Some(true)
+        );
+        let refusal = ensure_model_downloadable(&projected)
+            .expect_err("a cleanup tombstone must reject direct download API calls");
+        assert!(refusal.detail.contains("retained only"));
+        let refusal = ensure_model_not_cleanup_only(&projected)
+            .expect_err("a cleanup tombstone must reject direct conversion API calls");
+        assert!(refusal.detail.contains("conversion"));
+        assert_eq!(
+            projected.get("hasVariantMatrix").and_then(Value::as_bool),
+            Some(false)
+        );
+        for field in [
+            "variants",
+            "mlxConversionState",
+            "mlxInstallState",
+            "mlxTiers",
+            "mlxTierStates",
+        ] {
+            assert!(
+                projected.get(field).is_none(),
+                "cleanup projection leaked {field}"
+            );
+        }
+
+        // The snapshot pipeline runs size enrichment on every retained row AFTER the tombstone
+        // strip. It must tolerate the stripped projection — a hard error here 500s the entire
+        // catalog for any machine still holding legacy Eros weights in its HF cache.
+        let mut enriched = projected.clone();
+        let context = model_download_context(&enriched).unwrap();
+        apply_model_catalog_size_fields(&mut enriched, context.as_ref(), None)
+            .expect("size enrichment tolerates a cleanup tombstone");
+        assert!(
+            enriched.get("variants").is_none(),
+            "size enrichment must not resurrect the variants projection on a tombstone"
+        );
+
+        let primary_repo = "TenStrip/LTX2.3-10Eros";
+        let adapter_repo = "TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments";
+        let primary_cache = huggingface_repo_cache_path(data_dir, primary_repo).unwrap();
+        let adapter_cache = huggingface_repo_cache_path(data_dir, adapter_repo).unwrap();
+        let cleanup_paths = model_artifact_paths(&projected, data_dir);
+        assert!(cleanup_paths.contains(&primary_cache));
+        assert!(cleanup_paths.contains(&adapter_cache));
+
+        let allowed_roots = vec![data_dir.join("models"), huggingface_hub_cache_dir(data_dir)];
+        let removal = crate::remove_owned_artifacts(cleanup_paths, &allowed_roots, true)
+            .await
+            .expect("cleanup-only Eros delete succeeds");
+        assert!(!removal.removed_paths.is_empty());
+        assert!(!primary_cache.exists(), "primary Eros cache is reclaimed");
+        assert!(
+            !adapter_cache.exists(),
+            "exclusive cond_safe cache is reclaimed"
+        );
+
+        let mut after_delete = vec![entry.clone()];
+        retain_models_for_os(&mut after_delete, "windows", data_dir).unwrap();
+        assert!(
+            after_delete.is_empty(),
+            "the cleanup tombstone disappears after deletion"
+        );
+
+        // A partial legacy install also needs the delete affordance, but never a repair/download.
+        seed_manifest_downloads(data_dir, &entry, false);
+        let mut partial = vec![entry];
+        retain_models_for_os(&mut partial, "linux", data_dir).unwrap();
+        assert_eq!(
+            partial.len(),
+            1,
+            "a partial legacy install remains reclaimable"
+        );
+        let context = model_download_context(&partial[0]).unwrap();
+        let partial = apply_model_catalog_entry(
+            partial.pop().unwrap(),
+            context,
+            data_dir,
+            &std::collections::HashSet::new(),
+            &std::collections::HashSet::new(),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            partial.get("cacheState").and_then(Value::as_str),
+            Some("incomplete")
+        );
+        assert_eq!(
+            partial.get("repairAvailable").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            partial.get("downloadable").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            partial.get("removable").and_then(Value::as_bool),
+            Some(true)
+        );
+        let partial_primary_cache = huggingface_repo_cache_path(data_dir, primary_repo).unwrap();
+        assert!(partial_primary_cache.exists());
+        let removal = crate::remove_owned_artifacts(
+            model_artifact_paths(&partial, data_dir),
+            &allowed_roots,
+            true,
+        )
+        .await
+        .expect("partial cleanup-only Eros delete succeeds");
+        assert!(!removal.removed_paths.is_empty());
+        assert!(
+            !partial_primary_cache.exists(),
+            "partial primary Eros cache is reclaimed"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ltx_eros_corequisite_only_partial_is_cleanup_only_and_reclaimable_off_macos() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let entry = builtin_models_entry("ltx_2_3_eros");
+        let adapter = entry
+            .get("downloads")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .find(|download| {
+                download.get("cleanupWithModel").and_then(Value::as_bool) == Some(true)
+            })
+            .unwrap();
+        seed_manifest_download(data_dir, adapter);
+
+        let adapter_repo = adapter.get("repo").and_then(Value::as_str).unwrap();
+        let adapter_cache = huggingface_repo_cache_path(data_dir, adapter_repo).unwrap();
+        let mut projection = vec![entry];
+        retain_models_for_os(&mut projection, "windows", data_dir).unwrap();
+        assert_eq!(
+            projection.len(),
+            1,
+            "a co-requisite-only partial is retained"
+        );
+        let context = model_download_context(&projection[0]).unwrap();
+        let projected = apply_model_catalog_entry(
+            projection.pop().unwrap(),
+            context,
+            data_dir,
+            &std::collections::HashSet::new(),
+            &std::collections::HashSet::new(),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            projected.get("cacheState").and_then(Value::as_str),
+            Some("incomplete")
+        );
+        assert_eq!(
+            projected.get("removable").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            projected.get("downloadable").and_then(Value::as_bool),
+            Some(false)
+        );
+
+        let allowed_roots = vec![data_dir.join("models"), huggingface_hub_cache_dir(data_dir)];
+        let removal = crate::remove_owned_artifacts(
+            model_artifact_paths(&projected, data_dir),
+            &allowed_roots,
+            true,
+        )
+        .await
+        .expect("co-requisite-only partial delete succeeds");
+        assert!(!removal.removed_paths.is_empty());
+        assert!(!adapter_cache.exists(), "orphan adapter cache is reclaimed");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ltx_eros_mixed_trash_failure_retains_a_retryable_cleanup_tombstone() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let entry = builtin_models_entry("ltx_2_3_eros");
+        seed_manifest_downloads(data_dir, &entry, true);
+
+        let primary_cache =
+            huggingface_repo_cache_path(data_dir, "TenStrip/LTX2.3-10Eros").unwrap();
+        let adapter_cache =
+            huggingface_repo_cache_path(data_dir, "TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments")
+                .unwrap();
+        let mut projection = vec![entry.clone()];
+        retain_models_for_os(&mut projection, "linux", data_dir).unwrap();
+        let cleanup_model = projection.pop().unwrap();
+        let allowed_roots = vec![data_dir.join("models"), huggingface_hub_cache_dir(data_dir)];
+        let _trash = crate::test_trash_outcomes([
+            (primary_cache.clone(), true),
+            (adapter_cache.clone(), false),
+        ]);
+        let removal = crate::remove_owned_artifacts(
+            model_artifact_paths(&cleanup_model, data_dir),
+            &allowed_roots,
+            false,
+        )
+        .await
+        .expect("mixed OS-trash outcome is recoverable");
+        assert!(removal
+            .removed_paths
+            .iter()
+            .any(|path| path == &primary_cache.display().to_string()));
+        assert!(removal
+            .trash_failed_paths
+            .iter()
+            .any(|path| path == &adapter_cache.display().to_string()));
+        assert!(!primary_cache.exists());
+        assert!(adapter_cache.exists());
+
+        let mut retry_projection = vec![entry.clone()];
+        retain_models_for_os(&mut retry_projection, "linux", data_dir).unwrap();
+        assert_eq!(
+            retry_projection.len(),
+            1,
+            "adapter residue must keep the permanent-delete retry resolvable"
+        );
+        let context = model_download_context(&retry_projection[0]).unwrap();
+        let retry_model = apply_model_catalog_entry(
+            retry_projection.pop().unwrap(),
+            context,
+            data_dir,
+            &std::collections::HashSet::new(),
+            &std::collections::HashSet::new(),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            retry_model.get("cacheState").and_then(Value::as_str),
+            Some("incomplete")
+        );
+        let retry = crate::remove_owned_artifacts(
+            model_artifact_paths(&retry_model, data_dir),
+            &allowed_roots,
+            true,
+        )
+        .await
+        .expect("permanent retry reclaims the retained adapter");
+        assert!(!retry.removed_paths.is_empty());
+        assert!(!adapter_cache.exists());
+
+        let mut after_retry = vec![entry];
+        retain_models_for_os(&mut after_retry, "linux", data_dir).unwrap();
+        assert!(
+            after_retry.is_empty(),
+            "tombstone disappears after retry succeeds"
+        );
     }
 
     #[test]
@@ -3268,6 +3986,50 @@ mod download_receipt_tests {
                 "{model_id}: nothing is missing once every component is staged, got {:?}",
                 installed.missing_required_files
             );
+
+            // Existing installs predate the upstream repo rename and keep the exact immutable CLIP
+            // snapshot under the legacy cache namespace. The catalog must continue to call those
+            // installs ready instead of offering a repair that would fetch the same ~3.95 GB blob
+            // again; the worker uses the same validator-proven plain source and hard-links the
+            // canonical namespace cache-only when the filesystem supports it.
+            let rename = sceneworks_core::hf_repo_renames::MMAUDIO_DFN5B_CLIP_RENAME;
+            let clip = co_requisites
+                .iter()
+                .find(|download| {
+                    download.get("repo").and_then(Value::as_str) == Some(rename.current_repo)
+                })
+                .expect("live MMAudio manifest has the canonical CLIP component");
+            let clip_revision = clip.get("revision").and_then(Value::as_str).unwrap();
+            let clip_files = string_array_field(clip, "files");
+            std::fs::remove_dir_all(
+                huggingface_repo_cache_path(data_dir, rename.current_repo).unwrap(),
+            )
+            .unwrap();
+            let legacy_repo = huggingface_repo_cache_path(data_dir, rename.legacy_repo).unwrap();
+            let legacy_snapshot = legacy_repo.join("snapshots").join(clip_revision);
+            for file in &clip_files {
+                let path = legacy_snapshot.join(file);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::symlink;
+
+                    let blob = legacy_repo.join("blobs").join("clip-blob");
+                    std::fs::create_dir_all(blob.parent().unwrap()).unwrap();
+                    std::fs::write(&blob, b"existing cached weights").unwrap();
+                    symlink(&blob, &path).unwrap();
+                }
+                #[cfg(not(unix))]
+                std::fs::write(path, b"existing cached weights").unwrap();
+            }
+
+            let legacy_installed =
+                install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
+            assert!(
+                legacy_installed.installed,
+                "{model_id}: the exact legacy CLIP snapshot remains a complete offline install"
+            );
+            assert!(legacy_installed.missing_required_files.is_empty());
         }
     }
 
@@ -3646,16 +4408,7 @@ fn install_state_for(
                     .iter()
                     .filter(|download| co_requisite_variant(download).as_deref() == Some(tier))
                     .all(|download| {
-                        download
-                            .get("repo")
-                            .and_then(Value::as_str)
-                            .and_then(|repo| huggingface_repo_cache_path(data_dir, repo))
-                            .map(|path| {
-                                huggingface_cache_health(
-                                    &path,
-                                    &string_array_field(download, "files"),
-                                )
-                            })
+                        co_requisite_cache_health(data_dir, download)
                             .is_some_and(|health| health.installed)
                     })
             });
@@ -3681,9 +4434,7 @@ fn install_state_for(
             let Some(repo) = co_requisite.get("repo").and_then(Value::as_str) else {
                 continue;
             };
-            let files = string_array_field(&co_requisite, "files");
-            let health = huggingface_repo_cache_path(data_dir, repo)
-                .map(|path| huggingface_cache_health(&path, &files));
+            let health = co_requisite_cache_health(data_dir, &co_requisite);
             if health.as_ref().is_some_and(|health| health.installed) {
                 continue;
             }
@@ -3732,6 +4483,105 @@ fn install_state_for(
             missing_required_files: Vec::new(),
             update_available: false,
         }
+    }
+}
+
+/// Resolve install-state health for a hard/soft co-requisite, including exact cache-only aliases
+/// for upstream repository renames. This deliberately does not mutate the cache while serving the
+/// catalog. It lets an existing immutable legacy snapshot remain usable/installed; the worker's
+/// load-time resolver then consumes the same validated plain source and hard-links the canonical
+/// cache namespace from those local bytes when possible.
+fn co_requisite_cache_health(
+    data_dir: &FsPath,
+    download: &Value,
+) -> Option<HuggingFaceCacheHealth> {
+    let repo = download.get("repo").and_then(Value::as_str)?;
+    let files = string_array_field(download, "files");
+    let exact_rename = download
+        .get("revision")
+        .and_then(Value::as_str)
+        .and_then(|revision| {
+            sceneworks_core::hf_repo_renames::exact_huggingface_repo_rename(repo, revision, &files)
+        });
+    let current = match exact_rename {
+        Some(rename) => {
+            exact_rename_side_cache_health(data_dir, rename.current_repo, rename, &files)
+        }
+        None => huggingface_repo_cache_path(data_dir, repo)
+            .map(|path| huggingface_cache_health(&path, &files)),
+    };
+    if current.as_ref().is_some_and(|health| health.installed) {
+        return current;
+    }
+
+    let exact_legacy = exact_rename.and_then(|rename| {
+        exact_rename_side_cache_health(data_dir, rename.legacy_repo, rename, &files)
+    });
+
+    match (current, exact_legacy) {
+        (_, Some(legacy)) if legacy.installed => Some(legacy),
+        (Some(current), _) if current.incomplete => Some(current),
+        (_, Some(legacy)) if legacy.incomplete => Some(legacy),
+        (current, legacy) => current.or(legacy),
+    }
+}
+
+fn co_requisite_satisfied_by_exact_legacy_rename(data_dir: &FsPath, download: &Value) -> bool {
+    let Some(repo) = download.get("repo").and_then(Value::as_str) else {
+        return false;
+    };
+    let Some(revision) = download.get("revision").and_then(Value::as_str) else {
+        return false;
+    };
+    let files = string_array_field(download, "files");
+    let Some(rename) =
+        sceneworks_core::hf_repo_renames::exact_huggingface_repo_rename(repo, revision, &files)
+    else {
+        return false;
+    };
+    exact_rename_side_cache_health(data_dir, rename.legacy_repo, rename, &files)
+        .is_some_and(|health| health.installed)
+}
+
+/// Evaluate an exact legacy alias with the same canonical-source confinement used by the worker's
+/// load-time relink. A readable symlink is not sufficient: if it escapes the legacy repository
+/// cache, treating it as installed would suppress the canonical repair download even though the
+/// worker must reject it.
+fn exact_rename_side_cache_health(
+    data_dir: &FsPath,
+    repo: &str,
+    rename: &sceneworks_core::hf_repo_renames::HuggingFaceRepoRename,
+    files: &[String],
+) -> Option<HuggingFaceCacheHealth> {
+    let repo_root = huggingface_repo_cache_path(data_dir, repo)?;
+    if !huggingface_repo_cache_exists(&repo_root) {
+        return Some(HuggingFaceCacheHealth {
+            installed: false,
+            incomplete: false,
+            missing_files: Vec::new(),
+        });
+    }
+    // Through the typed source-library seam rather than raw joins (sc-19711's artifact inventory
+    // forbids the API constructing a model root directly; `crates/sceneworks-worker/src/model_jobs.rs`
+    // is the one classified infrastructure surface allowed to). `repo_root` came from
+    // `huggingface_repo_cache_path`, i.e. this same library, so the seam accepts it; `.root()` is the
+    // very `huggingface_hub_cache_dir(data_dir)` this used to pass, unchanged.
+    let library = sceneworks_core::hf_home::model_source_library(data_dir);
+    let snapshot = library
+        .snapshots_root_from_repository_root(&repo_root)
+        .ok()?
+        .join(rename.revision);
+    if sceneworks_core::hf_repo_renames::validate_exact_huggingface_repo_rename_snapshot(
+        library.root(),
+        &repo_root,
+        &snapshot,
+        rename,
+    )
+    .is_some()
+    {
+        Some(HuggingFaceCacheHealth::installed())
+    } else {
+        Some(HuggingFaceCacheHealth::missing(files.to_vec()))
     }
 }
 
@@ -4064,6 +4914,12 @@ fn apply_variant_fields(object: &mut JsonObject, data_dir: &FsPath) {
 }
 
 fn refresh_variant_download_sizes(model: &mut Value) -> Result<(), ApiError> {
+    // A platformCleanupOnly tombstone strips the whole variants projection in
+    // `apply_model_catalog_entry` — the missing array is its contract, not corruption, and there
+    // is nothing to refresh. Keep the strict array guard below for every real catalog entry.
+    if model.get("platformCleanupOnly").and_then(Value::as_bool) == Some(true) {
+        return Ok(());
+    }
     // `apply_variant_fields` runs in the blocking install-state sweep while live HF estimation runs
     // concurrently. Refresh only the already-built response fields after both complete: rebuilding
     // variants here would repeat filesystem probes serially and undo the intended overlap.
@@ -4904,13 +5760,81 @@ fn apply_model_catalog_entry(
     data_dir: &FsPath,
     user_model_ids: &std::collections::HashSet<String>,
     builtin_model_ids: &std::collections::HashSet<String>,
+    local_artifacts: &[sceneworks_core::model_artifacts::ResolvedModelArtifact],
 ) -> Result<Value, ApiError> {
     #[cfg(test)]
     test_delay_catalog_probe(&model);
     let state = install_state_for(download_context, &model, data_dir);
+    // sc-19708: the typed availability judgement for this entry's default selected closure on
+    // this host, through the ONE shared resolver. Catalog nuances layered on top of it:
+    // an install living in an app-owned path is local-ready regardless of the library, and an
+    // installed-but-incomplete cache stays `incomplete` rather than `missing`.
+    let availability_resolution =
+        crate::model_sources::availability_for_entry(data_dir, &model, None, local_artifacts);
+    // sc-19712 F-5: what a local copy of this entry could EVER cover, which is a different question
+    // from where it resolves from today. A model with soft co-requisites or a revision-less
+    // requirement showed the identical "local copy" affordance as a fully cacheable one, so the
+    // badge promised protection from a disconnect that the cache cannot actually deliver.
+    let cache_eligibility =
+        crate::model_sources::cache_eligibility_for_entry(data_dir, &model, None);
+    use sceneworks_core::model_artifacts::external_library::ModelAvailability;
+    let managed_models = data_dir.join("models");
+    let installed_in_app_owned_path = state.installed
+        && state
+            .installed_path
+            .as_deref()
+            .map(FsPath::new)
+            .is_some_and(|path| path.starts_with(&managed_models));
+    let (availability, availability_resolution) = if installed_in_app_owned_path
+        && !matches!(
+            availability_resolution.availability,
+            ModelAvailability::LocalReady
+        ) {
+        (ModelAvailability::LocalReady, None)
+    } else if availability_resolution.availability == ModelAvailability::Missing
+        && state.cache_incomplete
+    {
+        (ModelAvailability::Incomplete, Some(availability_resolution))
+    } else {
+        (
+            availability_resolution.availability.clone(),
+            Some(availability_resolution),
+        )
+    };
+    let platform_cleanup_only =
+        model.get("platformCleanupOnly").and_then(Value::as_bool) == Some(true);
+    let cleanup_residue_only = platform_cleanup_only
+        && !state.installed
+        && cleanup_with_model_artifact_paths(&model, data_dir)
+            .iter()
+            .any(|path| std::fs::symlink_metadata(path).is_ok());
     let object = model
         .as_object_mut()
         .ok_or_else(|| ApiError::internal("Model manifest entry must be an object"))?;
+    object.insert(
+        "modelAvailability".to_owned(),
+        serde_json::to_value(&availability).map_err(|error| {
+            ApiError::internal(format!("serialize model availability: {error}"))
+        })?,
+    );
+    object.insert(
+        "modelResolution".to_owned(),
+        availability_resolution
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|error| ApiError::internal(format!("serialize model resolution: {error}")))?
+            .unwrap_or(Value::Null),
+    );
+    object.insert(
+        "cacheEligibility".to_owned(),
+        cache_eligibility
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|error| ApiError::internal(format!("serialize cache eligibility: {error}")))?
+            .unwrap_or(Value::Null),
+    );
     let model_id = object.get("id").and_then(Value::as_str).unwrap_or_default();
     // Ownership and routing authority are deliberately separate. A user overlay on a builtin is
     // removable (deleting it restores builtin defaults), but it cannot reclassify that protected id
@@ -4929,7 +5853,10 @@ fn apply_model_catalog_entry(
         ),
     );
     stamp_legacy_import_source_shape(object, data_dir, !builtin_routing_authority);
-    object.insert("downloadable".to_owned(), Value::Bool(state.downloadable));
+    object.insert(
+        "downloadable".to_owned(),
+        Value::Bool(state.downloadable && !platform_cleanup_only),
+    );
     object.insert(
         "installState".to_owned(),
         Value::String(
@@ -4944,7 +5871,7 @@ fn apply_model_catalog_entry(
     object.insert(
         "cacheState".to_owned(),
         Value::String(
-            if state.cache_incomplete {
+            if state.cache_incomplete || cleanup_residue_only {
                 "incomplete"
             } else if state.installed {
                 "complete"
@@ -4966,11 +5893,11 @@ fn apply_model_catalog_entry(
     );
     object.insert(
         "repairAvailable".to_owned(),
-        Value::Bool(state.downloadable && state.cache_incomplete),
+        Value::Bool(state.downloadable && state.cache_incomplete && !platform_cleanup_only),
     );
     object.insert(
         "updateAvailable".to_owned(),
-        Value::Bool(state.update_available),
+        Value::Bool(state.update_available && !platform_cleanup_only),
     );
     object.insert(
         "installedPath".to_owned(),
@@ -4981,8 +5908,12 @@ fn apply_model_catalog_entry(
     );
     object.insert(
         "removable".to_owned(),
-        Value::Bool(user_managed || state.installed),
+        Value::Bool(user_managed || state.installed || platform_cleanup_only),
     );
+    if platform_cleanup_only {
+        object.insert("usable".to_owned(), Value::Bool(false));
+        object.insert("recommended".to_owned(), Value::Bool(false));
+    }
     // Per-variant install tracking (sc-8508, epic 8506): one entry per declared quant tier,
     // each with its own installed flag + path + size + footprint. A single-variant model
     // still emits exactly one "default" variant, so the array is a superset of the
@@ -5002,6 +5933,17 @@ fn apply_model_catalog_entry(
     sceneworks_core::preview_support::apply_to_model_entry(object);
     sceneworks_core::decoder_support::apply_to_model_entry(object);
     apply_decoder_availability(object, data_dir);
+    if platform_cleanup_only {
+        // The tombstone exists only to expose whole-model Delete. Strip every tier/conversion
+        // action projection even though the preserved manifest metadata is still needed by the
+        // deletion resolver to locate old files.
+        object.insert("hasVariantMatrix".to_owned(), Value::Bool(false));
+        object.remove("variants");
+        object.remove("mlxConversionState");
+        object.remove("mlxInstallState");
+        object.remove("mlxTiers");
+        object.remove("mlxTierStates");
+    }
     Ok(model)
 }
 
@@ -5178,10 +6120,14 @@ fn pinned_component_download_installed(download: &Value, data_dir: &FsPath) -> b
     if files.is_empty() {
         return false;
     }
-    let Some(repo_cache) = huggingface_repo_cache_path(data_dir, repo) else {
+    // Through the typed source-library resolver, not a hand-built `snapshots/<rev>` root — the
+    // model-path inventory audit (sc-19703) forbids direct root construction on this file.
+    let resolver = sceneworks_core::model_artifacts::ModelArtifactResolver::new(
+        sceneworks_core::hf_home::model_source_library(data_dir),
+    );
+    let Ok((_, snapshot)) = resolver.discover_source_snapshot(repo, Some(revision)) else {
         return false;
     };
-    let snapshot = repo_cache.join("snapshots").join(revision);
     files
         .iter()
         .all(|pattern| snapshot_contains_pattern(&snapshot, pattern))
@@ -5431,14 +6377,25 @@ mod model_size_concurrency_tests {
         // carrying both ONNX graphs, no `platforms` scoping — the pose lane runs on macOS and on
         // the off-Mac candle lane — so every OS gains exactly one: macOS 86 → 87, windows/linux
         // 83 → 84.
-        // Still far below `MODEL_SIZE_CACHE_LIMIT` (256), which is what this guard protects.
+        //
         // SCAIL-2 bf16 is now the shared cross-backend package, so Windows and Linux
-        // each gain its exact pinned download context while macOS keeps the same one.
+        // each gain its exact pinned download context while macOS keeps the same one: macOS 87,
+        // windows/linux 85.
         // sc-18481 retired AuraSR from the installable catalog because every production backend
         // rejects its dead `engine:aura-sr` route. Its unscoped download row had contributed one
         // context on every OS, so removing it reduces macOS 87 → 86 and windows/linux 85 → 84.
+        // SC-18902 then removed Eros's failed Candle route and platform-scoped both of its download
+        // rows to macOS. Its primary context therefore leaves Windows/Linux: 84 → 83, while macOS
+        // remains 86. Base LTX-2.3 stays cross-platform and continues to contribute on every OS.
+        //
+        // sc-19708 declared `instantid_face_stack`: the SCRFD + ArcFace pair the face-analysis
+        // and identity lanes stage from `SceneWorks/instantid-mlx`, now a catalog entry so those
+        // routes carry a typed model-source identity. One download row, no `platforms` scoping
+        // (the pair loads on macOS and the off-Mac candle lane alike), so every OS gains exactly
+        // one: macOS 86 → 87, windows/linux 83 → 84.
+        // Still far below `MODEL_SIZE_CACHE_LIMIT` (256), which is what this guard protects.
         for (os, expected_distinct_contexts) in
-            [("macos", 86_usize), ("windows", 84), ("linux", 84)]
+            [("macos", 87_usize), ("windows", 84), ("linux", 84)]
         {
             let mut keys = std::collections::HashSet::new();
             for mut model in manifest["models"]
@@ -5581,13 +6538,16 @@ async fn load_model_catalog_inputs(
         .filter_map(|model| model.get("id").and_then(Value::as_str).map(str::to_owned))
         .collect::<std::collections::HashSet<_>>();
     let mut models = merge_entries_by_id(builtin, user);
+    retain_models_for_os(&mut models, std::env::consts::OS, &state.settings.data_dir)?;
     // Resolve per-platform download sources before computing install state/size: some video models
     // carry both a native MLX-convert checkpoint (macOS) and a diffusers/torch checkpoint
     // (Windows/Linux). Keep only the entries applicable to this OS so the download job, status,
     // size, and the frontend all agree on the right repo (sc-3240).
     for model in &mut models {
         inherit_provider_decoder_downloads(model, &decoder_providers);
-        retain_downloads_for_os(model, std::env::consts::OS);
+        if model.get("platformCleanupOnly").and_then(Value::as_bool) != Some(true) {
+            retain_downloads_for_os(model, std::env::consts::OS);
+        }
     }
     let download_contexts = models
         .iter()
@@ -5610,10 +6570,13 @@ async fn build_model_catalog_snapshot(state: &AppState) -> Result<Vec<Value>, Ap
     crate::test_note_model_catalog_build();
     let (models, download_contexts, user_model_ids, builtin_model_ids) =
         load_model_catalog_inputs(state).await?;
+    let builtin_model_ids = Arc::new(builtin_model_ids);
 
     let data_dir = Arc::new(state.settings.data_dir.clone());
     let user_model_ids = Arc::new(user_model_ids);
-    let builtin_model_ids = Arc::new(builtin_model_ids);
+    // App-owned resolved-local artifacts, enumerated ONCE per snapshot build (read-only: no
+    // session, no usage refresh) so every entry's availability can detect local-ready coverage.
+    let local_artifacts = Arc::new(crate::model_sources::local_resolved_artifacts(state));
     let work_items = models
         .into_iter()
         .zip(download_contexts.clone())
@@ -5622,6 +6585,7 @@ async fn build_model_catalog_snapshot(state: &AppState) -> Result<Vec<Value>, Ap
     let data_dir_for_sweep = data_dir.clone();
     let user_model_ids_for_sweep = user_model_ids.clone();
     let builtin_model_ids_for_sweep = builtin_model_ids.clone();
+    let local_artifacts_for_sweep = local_artifacts.clone();
 
     // sc-14530: each model's install-state resolution is independent but may spend seconds
     // waiting on network-volume metadata. Dispatch bounded blocking tasks per primary-repo group
@@ -5637,6 +6601,7 @@ async fn build_model_catalog_snapshot(state: &AppState) -> Result<Vec<Value>, Ap
                     &data_dir_for_sweep,
                     &user_model_ids_for_sweep,
                     &builtin_model_ids_for_sweep,
+                    &local_artifacts_for_sweep,
                 )
             })
             .collect::<Result<Vec<_>, _>>()
@@ -5734,7 +6699,7 @@ pub(crate) async fn resolve_model_manifest_entry(
     };
     let builtin_entry = find(&builtin);
     let user_entry = find(&user);
-    let catalog_scope = if builtin_entry.is_some() {
+    let mut catalog_scope = if builtin_entry.is_some() {
         Some("builtin")
     } else if user_entry.is_some() {
         Some("user")
@@ -5742,6 +6707,18 @@ pub(crate) async fn resolve_model_manifest_entry(
         None
     };
     let mut entry = merge_model_manifest_entry(builtin_entry, user_entry);
+    if entry.as_object().map_or(true, JsonObject::is_empty) {
+        // The model-source seam (sc-19708) resolves fixed utility models (upscalers, detectors,
+        // the face stack) for job admission even when the configured manifest directory is
+        // missing or trimmed — the compiled-in builtin manifest is the complete fallback so a
+        // stripped config dir cannot silently strip typed model-source coverage.
+        if let Some(embedded) = embedded_builtin_catalog_entry(|candidate| {
+            candidate.get("id").and_then(Value::as_str) == Some(model_id)
+        })? {
+            entry = embedded;
+            catalog_scope = Some("builtin");
+        }
+    }
     inherit_provider_decoder_downloads(&mut entry, &builtin);
     if let (Some(scope), Some(object)) = (catalog_scope, entry.as_object_mut()) {
         // The merged worker-facing entry must carry the same routing authority as `/models`.
@@ -5757,6 +6734,26 @@ pub(crate) async fn resolve_model_manifest_entry(
         sceneworks_core::decoder_support::apply_to_model_entry(object);
         apply_decoder_availability(object, &state.settings.data_dir);
     }
+    Ok(entry)
+}
+
+/// The compiled-in builtin model manifest, used as the last-resort catalog authority when the
+/// on-disk manifest directory does not carry an entry. Kept complete and cross-platform: the
+/// caller derives per-platform closures from it, so filtering here would let a macOS API omit
+/// Candle-only co-requisites from a Windows/Linux worker carrier.
+pub(crate) fn embedded_builtin_catalog_entry(
+    predicate: impl Fn(&Value) -> bool,
+) -> Result<Option<Value>, ApiError> {
+    let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
+    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+        .map_err(|error| ApiError::internal(format!("embedded model manifest invalid: {error}")))?;
+    let entry = manifest
+        .get("models")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|entry| predicate(entry))
+        .cloned();
     Ok(entry)
 }
 
@@ -5840,47 +6837,73 @@ pub(crate) fn merge_model_manifest_entry(builtin: Option<Value>, user: Option<Va
 /// (sc-3240, Wan2.2) — so filtering here makes the download job, install status, size, and the
 /// frontend's `downloads[0]` all resolve to the right per-platform repo from one seam. No-op unless
 /// at least one entry is platform-tagged, so single-repo models are untouched.
-pub(crate) fn retain_downloads_for_os(model: &mut Value, os: &str) {
-    let Some(downloads) = model.get_mut("downloads").and_then(Value::as_array_mut) else {
-        return;
-    };
-    if !downloads
-        .iter()
-        .any(|entry| entry.get("platforms").is_some())
-    {
-        return;
-    }
-    downloads.retain(
-        |entry| match entry.get("platforms").and_then(Value::as_array) {
-            Some(platforms) => platforms.iter().any(|p| p.as_str() == Some(os)),
-            None => true,
-        },
-    );
-}
+///
+/// sc-19708: the manifest-shape predicates below now live in
+/// `sceneworks_core::model_artifacts::artifact_selection` because the availability seam (API
+/// preflight AND the worker's pre-loader guard) selects the same closures. These re-exports keep
+/// the API's install/display call sites on the identical definitions so they cannot drift.
+pub(crate) use sceneworks_core::model_artifacts::artifact_selection::retain_downloads_for_os;
 
-pub(crate) fn model_download(model: &Value) -> Option<Value> {
-    let downloads = model.get("downloads")?.as_array()?;
-    let mut fallback = None;
-    for download in downloads {
-        // Co-requisites (sc-9696) install alongside the primary, never AS it — skip them when
-        // choosing the canonical entry for size/install-path/download.
-        if !is_supported_model_download(download) || is_co_requisite_download(download) {
+pub(crate) use sceneworks_core::model_artifacts::artifact_selection::model_download;
+
+/// Remove whole video products that have no route on `os`. This is intentionally narrower than the
+/// legacy image-model `macOnly` label: only video entries use it as a catalog-withdrawal contract.
+fn retain_models_for_os(
+    models: &mut Vec<Value>,
+    os: &str,
+    data_dir: &FsPath,
+) -> Result<(), ApiError> {
+    if os == "macos" {
+        return Ok(());
+    }
+    let mut retained = Vec::with_capacity(models.len());
+    for mut model in std::mem::take(models) {
+        let model_id = model.get("id").and_then(Value::as_str).unwrap_or_default();
+        let withdrawn_video = video_model_withdrawn_on_platform(model_id, &model, os);
+        if !withdrawn_video {
+            retained.push(model);
             continue;
         }
-        fallback.get_or_insert(download);
-        if download.get("default").and_then(Value::as_bool) == Some(true) {
-            return Some(download.clone());
+
+        // Previously shipped off-Mac routes may already occupy substantial disk. Keep a catalog
+        // tombstone only when the old artifact is installed or partial so Model Manager and DELETE
+        // can reclaim it; a fresh machine sees no row at all. Preserve its original downloads on
+        // the tombstone solely to resolve install state and owned cleanup paths.
+        let context = model_download_context(&model)?;
+        let state = install_state_for(context, &model, data_dir);
+        let cleanup_residue = cleanup_with_model_artifact_paths(&model, data_dir)
+            .iter()
+            .any(|path| std::fs::symlink_metadata(path).is_ok());
+        if state.installed || state.cache_incomplete || cleanup_residue {
+            let object = model
+                .as_object_mut()
+                .ok_or_else(|| ApiError::internal("Model manifest entry must be an object"))?;
+            object.insert("platformCleanupOnly".to_owned(), Value::Bool(true));
+            retained.push(model);
         }
     }
-    fallback.cloned()
+    *models = retained;
+    Ok(())
+}
+
+/// Product withdrawals are authoritative by stable model id, not by a user-overridable manifest
+/// presentation flag. `macOnly` remains the generic platform annotation, while this policy keeps a
+/// same-id user manifest from restoring a product whose off-Mac runtime was explicitly removed.
+pub(crate) fn video_model_withdrawn_on_platform(
+    model_id: &str,
+    model_manifest_entry: &Value,
+    platform: &str,
+) -> bool {
+    platform != "macos"
+        && (matches!(model_id, "ltx_2_3_eros")
+            || (model_manifest_entry.get("type").and_then(Value::as_str) == Some("video")
+                && model_manifest_entry.get("macOnly").and_then(Value::as_bool) == Some(true)))
 }
 
 /// True when a download entry is a co-requisite dependency (sc-9696): fetched ALONGSIDE the primary
 /// download rather than as a pick-one alternate, and gating the entry's install state. See the
 /// manifest schema `downloads[].coRequisite`.
-pub(crate) fn is_co_requisite_download(download: &Value) -> bool {
-    download.get("coRequisite").and_then(Value::as_bool) == Some(true)
-}
+pub(crate) use sceneworks_core::model_artifacts::artifact_selection::is_co_requisite_download;
 
 /// The co-requisite download entries for `model` (sc-9696) — the dependencies that must install
 /// alongside the primary (e.g. the PiD decoder's shared gemma-2-2b-it caption encoder). The catalog
@@ -5894,74 +6917,10 @@ pub(crate) fn is_co_requisite_download(download: &Value) -> bool {
 /// that are themselves per-tier: they exist as `q4`/`q8`/`bf16` subtrees of one components mirror,
 /// and only the one matching the selected tier should be fetched, sized, or gated on. Keying that on
 /// the presence of `variant` keeps every existing co-requisite on exactly its current path.
-pub(crate) fn co_requisite_variant(download: &Value) -> Option<String> {
-    download
-        .get("variant")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_ascii_lowercase)
-}
-
-/// The co-requisite downloads that apply to `variant` (sc-14980).
-///
-/// Tier-agnostic rows (no `variant`) always apply. A tier-scoped row applies only to its own tier;
-/// when no tier is in scope, every tier-scoped row is returned so callers that genuinely aggregate
-/// across tiers still see them all.
-pub(crate) fn model_co_requisite_downloads_for_variant(
-    model: &Value,
-    variant: Option<&str>,
-) -> Vec<Value> {
-    let wanted = variant.map(|value| value.trim().to_ascii_lowercase());
-    model_co_requisite_downloads(model)
-        .into_iter()
-        .filter(
-            |download| match (co_requisite_variant(download), wanted.as_deref()) {
-                (None, _) => true,
-                (Some(_), None) => true,
-                (Some(row), Some(wanted)) => row == wanted,
-            },
-        )
-        .collect()
-}
-
-pub(crate) fn model_co_requisite_downloads(model: &Value) -> Vec<Value> {
-    model
-        .get("downloads")
-        .and_then(Value::as_array)
-        .map(|downloads| {
-            downloads
-                .iter()
-                .filter(|download| {
-                    is_co_requisite_download(download) && is_supported_model_download(download)
-                })
-                .cloned()
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// Select a specific quant tier's download entry for a quant-matrix model (sc-8508). Returns the
-/// supported `downloads` entry whose `variant` matches `variant` (case-insensitive). `None` when the
-/// model declares no such tier — the caller surfaces a 400 rather than silently installing the wrong
-/// tier. A `None` `variant` argument means "the default tier" and is handled by [`model_download`].
-pub(crate) fn model_download_for_variant(model: &Value, variant: &str) -> Option<Value> {
-    let downloads = model.get("downloads")?.as_array()?;
-    let wanted = variant.trim().to_ascii_lowercase();
-    downloads
-        .iter()
-        .find(|download| {
-            is_supported_model_download(download)
-                && !is_co_requisite_download(download)
-                && download
-                    .get("variant")
-                    .and_then(Value::as_str)
-                    .map(|value| value.trim().to_ascii_lowercase())
-                    .as_deref()
-                    == Some(wanted.as_str())
-        })
-        .cloned()
-}
+pub(crate) use sceneworks_core::model_artifacts::artifact_selection::{
+    co_requisite_variant, model_co_requisite_downloads, model_co_requisite_downloads_for_variant,
+    model_download_for_variant,
+};
 
 /// Best-effort credential host for a gated model when the manifest entry doesn't
 /// set `credentialHost` explicitly: an explicit per-download `credentialHost`,
@@ -5994,13 +6953,7 @@ fn derive_credential_host(model: &serde_json::Map<String, Value>) -> Option<Stri
     None
 }
 
-pub(crate) fn is_supported_model_download(download: &Value) -> bool {
-    download.get("provider").and_then(Value::as_str) == Some("huggingface")
-        && download
-            .get("repo")
-            .and_then(Value::as_str)
-            .is_some_and(|repo| !repo.is_empty())
-}
+pub(crate) use sceneworks_core::model_artifacts::artifact_selection::is_supported_model_download;
 
 pub(crate) fn model_download_context(model: &Value) -> Result<Option<DownloadContext>, ApiError> {
     let Some(download) = model_download(model) else {
@@ -6712,7 +7665,11 @@ pub(crate) fn model_artifact_paths(model: &Value, data_dir: &FsPath) -> Vec<Path
     if let Some(path) = model_manifest_installed_path(model, data_dir) {
         paths.push(path);
     }
-    if let Some(repo) = model_download(model).and_then(|download| {
+    let cleanup_downloads = model_download(model).into_iter().collect::<Vec<_>>();
+    if model.get("platformCleanupOnly").and_then(Value::as_bool) == Some(true) {
+        paths.extend(cleanup_with_model_artifact_paths(model, data_dir));
+    }
+    for repo in cleanup_downloads.into_iter().filter_map(|download| {
         download
             .get("repo")
             .and_then(Value::as_str)
@@ -6737,6 +7694,24 @@ pub(crate) fn model_artifact_paths(model: &Value, data_dir: &FsPath) -> Vec<Path
         } else {
             data_dir.join(path)
         });
+    }
+    unique_paths(paths)
+}
+
+fn cleanup_with_model_artifact_paths(model: &Value, data_dir: &FsPath) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for repo in model
+        .get("downloads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|download| download.get("cleanupWithModel").and_then(Value::as_bool) == Some(true))
+        .filter_map(|download| download.get("repo").and_then(Value::as_str))
+    {
+        paths.push(data_dir.join("models").join(safe_download_dir(repo)));
+        if let Some(cache_path) = huggingface_repo_cache_path(data_dir, repo) {
+            paths.push(cache_path);
+        }
     }
     unique_paths(paths)
 }

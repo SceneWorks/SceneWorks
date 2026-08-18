@@ -510,7 +510,8 @@ where
                   _cache_state,
                   _loaded_policy,
                   warm_policy: crate::execution_planner::WarmPolicyProposal,
-                  _external_committed_bytes| {
+                  _external_committed_bytes,
+                  _provider_resident_bytes| {
                 warm_policy.decline(
                     crate::execution_planner::ServedAsIsReason::RouteHasNoRequestScopedMemory,
                 );
@@ -580,7 +581,8 @@ where
                   cache_state,
                   loaded_policy,
                   warm_policy,
-                  external_committed_bytes| {
+                  external_committed_bytes,
+                  _provider_resident_bytes| {
                 emit_load_event(
                     "image_pipeline_load_complete",
                     &job_id,

@@ -11,6 +11,7 @@ import {
   ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE,
   ESTIMATE_WIDENING_MULTIPLIER,
   MLX_HARD_FLOOR,
+  RESIDUAL_BOUNDED_MAX_OVER_PHASES_EXEMPT_FROM_BINDING_PHASE_PIN,
   VARIANCE_SAFETY_MULTIPLIER,
   analyzeBackend,
   deriveBackendMargins,
@@ -21,6 +22,7 @@ import {
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const RUST_POLICY_PATH = path.join(ROOT, "crates", "sceneworks-worker", "src", "ladder_margin_policy.rs");
 const SCRIPT_POLICY_PATH = path.join(ROOT, "scripts", "derive-ladder-margins.mjs");
+const RUNBOOK_PATH = path.join(ROOT, "docs", "calibration-runbook.md");
 
 /** The JSDoc block that ends immediately above `index` (whitespace-tolerant). */
 function docCommentAbove(source, index) {
@@ -175,6 +177,67 @@ test("the estimate-admission binding-phase constraint is pinned on both sides an
   const fullyWidenedCanBind = Math.max(MLX_HARD_FLOOR, canBind.spread * 2) * 2;
   assert.equal((fullyWidenedCanBind * 100).toFixed(2), "68.55", "fully widened spread matches the docs");
   assert.ok(fullyWidenedCanBind > derived.mlx.margins.estimateMargin, "constraint is load-bearing");
+});
+
+// SC-18829's fitted video curve is the narrow, ratified exception to the measured-binding-phase
+// pin: every phase is independently fit and residual-bounded before the request-geometry max. Pin
+// that exact construction on both sides, and pin the evidence verdict that it does not authorize a
+// margin reduction. Otherwise a future scalar/provider-wide bypass could reuse the same boolean.
+test("the residual-bounded max-over-phases exemption is structural and keeps margins unchanged", async () => {
+  assert.equal(RESIDUAL_BOUNDED_MAX_OVER_PHASES_EXEMPT_FROM_BINDING_PHASE_PIN, true);
+
+  const [rustSource, scriptSource, runbook, derived] = await Promise.all([
+    readFile(RUST_POLICY_PATH, "utf8"),
+    readFile(SCRIPT_POLICY_PATH, "utf8"),
+    readFile(RUNBOOK_PATH, "utf8"),
+    loadEvidenceRecords(ROOT).then(deriveMargins),
+  ]);
+  const rustMatch = rustSource.match(
+    /pub const RESIDUAL_BOUNDED_MAX_OVER_PHASES_EXEMPT_FROM_BINDING_PHASE_PIN: bool = (true|false);/,
+  );
+  assert.ok(rustMatch, "rust exemption constant exists");
+  assert.equal(
+    rustMatch[1] === "true",
+    RESIDUAL_BOUNDED_MAX_OVER_PHASES_EXEMPT_FROM_BINDING_PHASE_PIN,
+  );
+  const scriptMatch = scriptSource.match(
+    /export const RESIDUAL_BOUNDED_MAX_OVER_PHASES_EXEMPT_FROM_BINDING_PHASE_PIN = (true|false);/,
+  );
+  assert.ok(scriptMatch, "script exemption constant exists");
+
+  const rustDocLines = [];
+  for (const line of rustSource.slice(0, rustMatch.index).split("\n").reverse()) {
+    if (line.trim() === "") continue;
+    if (!line.trim().startsWith("///")) break;
+    rustDocLines.push(line);
+  }
+  const docs = [
+    ["rust", rustDocLines.reverse().join("\n")],
+    ["script", docCommentAbove(scriptSource, scriptMatch.index)],
+  ];
+  for (const [name, doc] of docs) {
+    const prose = doc
+      .replace(/^\s*(?:\/\/\/|\/\*\*?|\*\/|\*)\s?/gm, " ")
+      .replace(/\s+/g, " ");
+    assert.ok(/every phase independently/i.test(prose), `${name} doc requires independent phases`);
+    assert.ok(/maximum fit\/held-out absolute residual/i.test(prose), `${name} doc requires residual bounds`);
+    assert.ok(/maximum over phases/i.test(prose), `${name} doc requires max after residuals`);
+    assert.ok(/ordinary backend estimate margin/i.test(prose), `${name} doc retains the normal margin`);
+    assert.ok(/not provider-wide|not a provider-wide/i.test(prose), `${name} doc rejects a provider-wide bypass`);
+  }
+
+  // SC-18829's claim is NON-REDUCTION: the video ratification may not shrink the image-lane
+  // margins. The exact MLX value is owned by the sc-18094 derivation pin above (0.5040734… on the
+  // merged 89-record corpus) — re-pinning it here would just freeze the corpus twice.
+  assert.ok(
+    derived.mlx.margins.estimateMargin >= 0.10,
+    "ratification does not reduce MLX margin",
+  );
+  assert.equal(derived.candle.margins.estimateMargin, 0.04, "ratification does not reduce candle margin");
+  assert.match(runbook, /Admission-margin verdict \(SC-18829\): keep the ratified constants unchanged/);
+  assert.match(runbook, /largest\s+adopted q8 `cross` residual is 0\.4438 GiB/);
+  assert.match(runbook, /10% MLX estimate margin/);
+  assert.match(runbook, /Candle has no\s+promoted temporal curve yet/);
 });
 
 // Mutation-proofs the VARIANCE path: with a synthetic repeat pair whose doubled spread exceeds

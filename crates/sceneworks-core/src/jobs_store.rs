@@ -31,6 +31,13 @@ pub(crate) use routing::candle::*;
 pub(crate) use routing::catalog::image_family_is_mlx_routed;
 #[cfg(test)]
 pub(crate) use routing::catalog::*;
+// The video memory gate (`crate::video_request`, sc-18814) reads its per-family backend surface
+// from the catalog in every build, not only under `cfg(test)`, so these two escape the test-gated
+// glob above by name.
+#[cfg(not(test))]
+pub(crate) use routing::catalog::{
+    video_model_has_candle_video_route, video_model_is_mlx_video_routed,
+};
 pub(crate) use routing::gaps::*;
 pub(crate) use routing::mlx::*;
 
@@ -464,6 +471,7 @@ impl JobsStore {
               id text primary key,
               type text not null,
               status text not null,
+              queue_rank integer not null default 0,
               project_id text,
               project_name text,
               payload_json text not null,
@@ -514,6 +522,23 @@ impl JobsStore {
             ",
         )?;
         ensure_column(&transaction, "workers", "utilization_json", "text")?;
+        // Durable worker-queue priority. Zero is the normal FIFO lane; positive ranks are
+        // assigned monotonically whenever a job jumps to the front. Prompt-refinement jobs get a
+        // rank automatically at creation, while the Queue screen can rank any still-pending jobs
+        // explicitly. The claim query reads this column before its existing GPU-affinity
+        // optimizations, so priority survives restarts and never preempts work already in flight.
+        ensure_column(
+            &transaction,
+            "jobs",
+            "queue_rank",
+            "integer not null default 0",
+        )?;
+        transaction.execute_batch(
+            "
+            create index if not exists idx_jobs_status_queue_rank_created
+              on jobs(status, queue_rank desc, created_at);
+            ",
+        )?;
         // sc-16260: why an `unhealthy` worker withdrew its capabilities — the host-side remedy,
         // so the Queue screen can explain a stalled queue instead of leaving an operator to read
         // container logs. Nullable and absent on every healthy worker.
@@ -1347,6 +1372,66 @@ impl JobsStore {
         Ok(canceled)
     }
 
+    /// Move selected not-yet-started jobs to the front of the worker queue.
+    ///
+    /// Ranks are monotonic rather than a boolean priority flag: every invocation really does
+    /// "jump to top" relative to earlier automatic or manual promotions. The selected jobs keep
+    /// their current scheduling order as a group. Active and terminal jobs are ignored under the
+    /// same transaction, so a stale Queue-screen selection can never interrupt worker-owned work.
+    pub fn prioritize_jobs(&self, job_ids: &[String]) -> JobsStoreResult<Vec<JobSnapshot>> {
+        if job_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let ids_json = dumps(job_ids)?;
+        let pending = pending_statuses_sql();
+        let mut statement = transaction.prepare(&format!(
+            "
+            select * from jobs
+             where id in (select distinct value from json_each(?1))
+               and status in ({pending})
+             order by queue_rank desc, created_at asc, id asc
+            "
+        ))?;
+        let selected = collect_jobs(statement.query_map(params![ids_json], row_to_job)?)?;
+        drop(statement);
+        if selected.is_empty() {
+            transaction.commit()?;
+            return Ok(Vec::new());
+        }
+
+        let current_max =
+            transaction.query_row("select coalesce(max(queue_rank), 0) from jobs", [], |row| {
+                row.get::<_, i64>(0)
+            })?;
+        let now = utc_now();
+        let selected_count = i64::try_from(selected.len()).unwrap_or(i64::MAX);
+        for (index, job) in selected.iter().enumerate() {
+            let offset = selected_count.saturating_sub(i64::try_from(index).unwrap_or(i64::MAX));
+            let queue_rank = current_max.saturating_add(offset);
+            transaction.execute(
+                &format!(
+                    "update jobs
+                        set queue_rank = ?1,
+                            updated_at = ?2
+                      where id = ?3 and status in ({pending})"
+                ),
+                params![queue_rank, now, job.id],
+            )?;
+        }
+
+        let prioritized_ids = selected
+            .iter()
+            .map(|job| job.id.clone())
+            .collect::<Vec<_>>();
+        let prioritized = self.jobs_by_ids(&transaction, &prioritized_ids)?;
+        transaction.commit()?;
+        Ok(prioritized)
+    }
+
     pub fn retry_job(&self, job_id: &str, request: RetryJob) -> JobsStoreResult<JobSnapshot> {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
@@ -2141,7 +2226,7 @@ impl JobsStore {
              where status = 'queued'
                and (type in ({list}) or requested_gpu = 'auto' or requested_gpu = ?1)
                and (?2 = 0 or type in ({list}))
-             order by created_at asc
+             order by queue_rank desc, created_at asc
             ",
             list = non_gpu_job_types_sql()
         ))?;
@@ -2742,13 +2827,20 @@ impl JobsStore {
             "pending_caption" => "Preparing the prompt before dispatch.",
             _ => "Waiting for an available worker.",
         };
+        let automatically_prioritized = job_type_automatically_jumps_queue(&request.job_type);
         connection.execute(
             "
             insert into jobs (
-              id, type, status, project_id, project_name, payload_json, result_json,
+              id, type, status, queue_rank, project_id, project_name, payload_json, result_json,
               requested_gpu, progress, stage, message, attempts, source_job_id,
               duplicate_of_job_id, created_at, updated_at
-            ) values (?1, ?2, ?12, ?3, ?4, ?5, '{}', ?6, 0, ?12, ?7, ?8, ?9, ?10, ?11, ?11)
+            ) values (
+              ?1, ?2, ?12,
+              case when ?13 != 0
+                   then (select coalesce(max(queue_rank), 0) + 1 from jobs)
+                   else 0 end,
+              ?3, ?4, ?5, '{}', ?6, 0, ?12, ?7, ?8, ?9, ?10, ?11, ?11
+            )
             ",
             params![
                 job_id,
@@ -2763,6 +2855,7 @@ impl JobsStore {
                 request.duplicate_of_job_id,
                 now,
                 initial_status,
+                i64::from(automatically_prioritized),
             ],
         )?;
         self.get_job_on_connection(connection, &job_id)
@@ -2919,8 +3012,10 @@ fn row_to_job(row: &Row<'_>) -> rusqlite::Result<JobSnapshot> {
     let payload = loads_object(row.get::<_, Option<String>>("payload_json")?.as_deref());
     let title = derive_job_title(&job_type, &payload);
     let revision = row.get::<_, i64>("revision").unwrap_or_default().max(0);
+    let queue_rank = row.get::<_, i64>("queue_rank").unwrap_or_default().max(0);
     let mut extra = ExtraFields::default();
     extra.insert("revision".to_owned(), Value::from(revision));
+    extra.insert("queueRank".to_owned(), Value::from(queue_rank));
     Ok(JobSnapshot {
         id: row.get("id")?,
         job_type,
@@ -4078,6 +4173,15 @@ fn choose_claimable_job(rows: Vec<JobSnapshot>, worker: &WorkerSnapshot) -> Opti
         .filter(|job| worker_supports_job(worker, job))
         .collect::<Vec<_>>();
     let first = compatible.first()?;
+    // The SQL input is ordered by durable queue rank first. Restrict the existing explicit-GPU /
+    // warm-model optimization to that highest compatible tier so affinity can optimize peers but
+    // can never leapfrog an automatically or manually prioritized job.
+    let highest_rank = job_queue_rank(first);
+    let compatible = compatible
+        .into_iter()
+        .take_while(|job| job_queue_rank(job) == highest_rank)
+        .collect::<Vec<_>>();
+    let first = compatible.first()?;
     if is_non_gpu_job_type(first.job_type.as_str()) || first.requested_gpu != "auto" {
         return compatible.into_iter().next();
     }
@@ -4093,6 +4197,14 @@ fn choose_claimable_job(rows: Vec<JobSnapshot>, worker: &WorkerSnapshot) -> Opti
         .find(|job| job_matches_loaded_model(job, worker))
         .cloned()
         .or_else(|| compatible.into_iter().next())
+}
+
+fn job_queue_rank(job: &JobSnapshot) -> i64 {
+    job.extra
+        .get("queueRank")
+        .and_then(Value::as_i64)
+        .unwrap_or_default()
+        .max(0)
 }
 
 fn job_matches_loaded_model(job: &JobSnapshot, worker: &WorkerSnapshot) -> bool {
@@ -4140,6 +4252,13 @@ fn normalize_requested_gpu(value: &str) -> String {
     } else {
         trimmed.to_owned()
     }
+}
+
+/// Queue policy for short, latency-sensitive work that should run before the normal FIFO lane.
+/// Keeping it as a typed predicate makes adding another automatic priority job an explicit review
+/// of the job inventory instead of scattering string comparisons through SQL and API handlers.
+fn job_type_automatically_jumps_queue(job_type: &JobType) -> bool {
+    matches!(job_type, JobType::PromptRefine)
 }
 
 // Keep GPU-required job types in sync with the native worker dispatch

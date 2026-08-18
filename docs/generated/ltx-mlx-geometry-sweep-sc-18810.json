@@ -1,0 +1,4154 @@
+{
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [
+    {
+      "artifact": {
+        "repository": "SceneWorks/ltx-2.3-mlx",
+        "resolvedRevision": "01df27d308466533aa09d251e3aebdcc627d07eb",
+        "variant": "q8"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "capturedAt": "2026-08-12T10:50:56Z",
+      "diagnostics": {
+        "adapter": "memory-mlx-adapter:ltx-2-3-staged-video",
+        "blockers": [
+          "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "preRungActiveAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "preRungCacheAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "conditioningActivePeak",
+            "unit": "bytes",
+            "value": 35678641896
+          },
+          {
+            "name": "denoiseActivePeak",
+            "unit": "bytes",
+            "value": 36831735964
+          },
+          {
+            "name": "decodeActivePeak",
+            "unit": "bytes",
+            "value": 37931479408
+          },
+          {
+            "name": "overallAllocatorEnvelope",
+            "unit": "bytes",
+            "value": 142648318860
+          },
+          {
+            "name": "predictedOverallCeiling",
+            "unit": "bytes",
+            "value": 39862665216
+          },
+          {
+            "name": "denoiseEntryActive",
+            "unit": "bytes",
+            "value": 20762700802
+          },
+          {
+            "name": "decodeEntryActive",
+            "unit": "bytes",
+            "value": 1029565992
+          },
+          {
+            "name": "stagedGemmaBytes",
+            "unit": "bytes",
+            "value": 26388550536
+          },
+          {
+            "name": "stagedConnectorBytes",
+            "unit": "bytes",
+            "value": 6344493078
+          },
+          {
+            "name": "stagedTextEncoderBytes",
+            "unit": "bytes",
+            "value": 32733043614
+          },
+          {
+            "name": "stagedTransformerBytes",
+            "unit": "bytes",
+            "value": 20614103249
+          },
+          {
+            "name": "costagedGiantsBytes",
+            "unit": "bytes",
+            "value": 53347146863
+          },
+          {
+            "name": "tierArtifactBytes",
+            "unit": "bytes",
+            "value": 29728713314
+          },
+          {
+            "name": "warmRepeatPeak",
+            "unit": "bytes",
+            "value": 39594184658
+          },
+          {
+            "name": "warmRepeatPostCleanupActive",
+            "unit": "bytes",
+            "value": 3268122852
+          },
+          {
+            "name": "warmRepeatPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "renderedFrames",
+            "unit": "count",
+            "value": 121
+          },
+          {
+            "name": "latentTemporalDepth",
+            "unit": "count",
+            "value": 16
+          },
+          {
+            "name": "latentTokens",
+            "unit": "count",
+            "value": 14080
+          },
+          {
+            "name": "outputFps",
+            "unit": "count",
+            "value": 30
+          },
+          {
+            "name": "audioTrackDecoded",
+            "unit": "count",
+            "value": 1
+          },
+          {
+            "name": "decodeTilingEngaged",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "decodeWritableFrameCap",
+            "unit": "count",
+            "value": 297
+          },
+          {
+            "name": "decodeTileSpatialPx",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "decodeTileFrames",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "mlxMemoryLimitBytes",
+            "unit": "bytes",
+            "value": 130567005798
+          },
+          {
+            "name": "negativeMutationMaximumErrorPer255",
+            "unit": "count",
+            "value": 192
+          },
+          {
+            "name": "negativeMutationMeanErrorPer255",
+            "unit": "count",
+            "value": 99
+          },
+          {
+            "name": "negativeMutationRootMeanSquareErrorPer255",
+            "unit": "count",
+            "value": 115
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "ltx-2-3-mlx-q8-1280x704-f121-fps30-seed18808",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.5.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-2c064567893ea869006e",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/ltx-2.3-mlx@01df27d308466533aa09d251e3aebdcc627d07eb:q8+gemma",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-4c88eae64cc1bfc3992e",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 35678641896,
+          "allocatorBytes": 40050360486,
+          "reclaimableBytes": 4371718590
+        },
+        "decode": {
+          "activeBytes": 37931479408,
+          "allocatorBytes": 142648318860,
+          "reclaimableBytes": 104716839452
+        },
+        "denoise": {
+          "activeBytes": 36831735964,
+          "allocatorBytes": 36831735964,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 37931479408,
+          "allocatorBytes": 142648318860,
+          "reclaimableBytes": 104716839452
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 37513854976,
+        "decode": 39862665216,
+        "denoise": 38721814528,
+        "overall": 39862665216
+      },
+      "quality": {
+        "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier and loaded provider; cold measured clip versus a warm unscoped repeat, compared over every frame",
+        "identicalInputs": true,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0.011764705882352941,
+        "meanError": 0,
+        "meanErrorThreshold": 0.00392156862745098,
+        "result": "passed",
+        "rootMeanSquareError": 0,
+        "rootMeanSquareErrorThreshold": 0.0058823529411764705
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3",
+          "dirty": false,
+          "revision": "b965641e388f4db646e4c60ab3f75219737e2cc8"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:acbf5da17129d904271698488eb6e47deaf2756ee60e49024eb4fbbbc430d20a",
+          "revision": "817cf55097a69163632684cfbf3be667747ff256"
+        }
+      },
+      "scenarios": [
+        {
+          "name": "exact_fit",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the MLX LTX-2.3 base-only text-to-video path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "gated",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency"
+        ],
+        "parameters": {},
+        "rung": "staged_residency"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 121,
+          "height": 704,
+          "width": 1280
+        },
+        "mode": "text_to_video",
+        "modelId": "ltx_2_3",
+        "overlay": "none",
+        "provider": "ltx_2_3",
+        "tier": "q8"
+      }
+    },
+    {
+      "artifact": {
+        "repository": "SceneWorks/ltx-2.3-mlx",
+        "resolvedRevision": "01df27d308466533aa09d251e3aebdcc627d07eb",
+        "variant": "q8"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "capturedAt": "2026-08-12T12:05:06Z",
+      "diagnostics": {
+        "adapter": "memory-mlx-adapter:ltx-2-3-staged-video",
+        "blockers": [
+          "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "preRungActiveAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "preRungCacheAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "conditioningActivePeak",
+            "unit": "bytes",
+            "value": 36326061806
+          },
+          {
+            "name": "denoiseActivePeak",
+            "unit": "bytes",
+            "value": 39681242940
+          },
+          {
+            "name": "decodeActivePeak",
+            "unit": "bytes",
+            "value": 44883604052
+          },
+          {
+            "name": "overallAllocatorEnvelope",
+            "unit": "bytes",
+            "value": 149658685528
+          },
+          {
+            "name": "predictedOverallCeiling",
+            "unit": "bytes",
+            "value": 47177531392
+          },
+          {
+            "name": "denoiseEntryActive",
+            "unit": "bytes",
+            "value": 20753132962
+          },
+          {
+            "name": "decodeEntryActive",
+            "unit": "bytes",
+            "value": 1031204552
+          },
+          {
+            "name": "stagedGemmaBytes",
+            "unit": "bytes",
+            "value": 26388550536
+          },
+          {
+            "name": "stagedConnectorBytes",
+            "unit": "bytes",
+            "value": 6344493078
+          },
+          {
+            "name": "stagedTextEncoderBytes",
+            "unit": "bytes",
+            "value": 32733043614
+          },
+          {
+            "name": "stagedTransformerBytes",
+            "unit": "bytes",
+            "value": 20614103249
+          },
+          {
+            "name": "costagedGiantsBytes",
+            "unit": "bytes",
+            "value": 53347146863
+          },
+          {
+            "name": "tierArtifactBytes",
+            "unit": "bytes",
+            "value": 29728713314
+          },
+          {
+            "name": "warmRepeatPeak",
+            "unit": "bytes",
+            "value": 45528740944
+          },
+          {
+            "name": "warmRepeatPostCleanupActive",
+            "unit": "bytes",
+            "value": 3372167368
+          },
+          {
+            "name": "warmRepeatPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "renderedFrames",
+            "unit": "count",
+            "value": 145
+          },
+          {
+            "name": "latentTemporalDepth",
+            "unit": "count",
+            "value": 19
+          },
+          {
+            "name": "latentTokens",
+            "unit": "count",
+            "value": 16720
+          },
+          {
+            "name": "outputFps",
+            "unit": "count",
+            "value": 30
+          },
+          {
+            "name": "audioTrackDecoded",
+            "unit": "count",
+            "value": 1
+          },
+          {
+            "name": "decodeTilingEngaged",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "decodeWritableFrameCap",
+            "unit": "count",
+            "value": 297
+          },
+          {
+            "name": "decodeTileSpatialPx",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "decodeTileFrames",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "mlxMemoryLimitBytes",
+            "unit": "bytes",
+            "value": 130567005798
+          },
+          {
+            "name": "negativeMutationMaximumErrorPer255",
+            "unit": "count",
+            "value": 192
+          },
+          {
+            "name": "negativeMutationMeanErrorPer255",
+            "unit": "count",
+            "value": 88
+          },
+          {
+            "name": "negativeMutationRootMeanSquareErrorPer255",
+            "unit": "count",
+            "value": 101
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "ltx-2-3-mlx-q8-1280x704-f145-fps30-seed18808",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.5.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-3b8b84711b810ff12c89",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/ltx-2.3-mlx@01df27d308466533aa09d251e3aebdcc627d07eb:q8+gemma",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-3976b56880c920cf30d8",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 36326061806,
+          "allocatorBytes": 41546419784,
+          "reclaimableBytes": 5220357978
+        },
+        "decode": {
+          "activeBytes": 44883604052,
+          "allocatorBytes": 149658685528,
+          "reclaimableBytes": 104775081476
+        },
+        "denoise": {
+          "activeBytes": 39681242940,
+          "allocatorBytes": 39681242940,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 44883604052,
+          "allocatorBytes": 149658685528,
+          "reclaimableBytes": 104775081476
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 38184943616,
+        "decode": 47177531392,
+        "denoise": 41674604544,
+        "overall": 47177531392
+      },
+      "quality": {
+        "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier and loaded provider; cold measured clip versus a warm unscoped repeat, compared over every frame",
+        "identicalInputs": true,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0.011764705882352941,
+        "meanError": 0,
+        "meanErrorThreshold": 0.00392156862745098,
+        "result": "passed",
+        "rootMeanSquareError": 0,
+        "rootMeanSquareErrorThreshold": 0.0058823529411764705
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3",
+          "dirty": false,
+          "revision": "b965641e388f4db646e4c60ab3f75219737e2cc8"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:acbf5da17129d904271698488eb6e47deaf2756ee60e49024eb4fbbbc430d20a",
+          "revision": "c30c497489d0a7b0404e9baa42e3aabc6e852192"
+        }
+      },
+      "scenarios": [
+        {
+          "name": "exact_fit",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the MLX LTX-2.3 base-only text-to-video path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "gated",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency"
+        ],
+        "parameters": {},
+        "rung": "staged_residency"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 145,
+          "height": 704,
+          "width": 1280
+        },
+        "mode": "text_to_video",
+        "modelId": "ltx_2_3",
+        "overlay": "none",
+        "provider": "ltx_2_3",
+        "tier": "q8"
+      }
+    },
+    {
+      "artifact": {
+        "repository": "SceneWorks/ltx-2.3-mlx",
+        "resolvedRevision": "01df27d308466533aa09d251e3aebdcc627d07eb",
+        "variant": "q8"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "capturedAt": "2026-08-12T10:58:11Z",
+      "diagnostics": {
+        "adapter": "memory-mlx-adapter:ltx-2-3-staged-video",
+        "blockers": [
+          "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "preRungActiveAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "preRungCacheAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "conditioningActivePeak",
+            "unit": "bytes",
+            "value": 35678641896
+          },
+          {
+            "name": "denoiseActivePeak",
+            "unit": "bytes",
+            "value": 40789577860
+          },
+          {
+            "name": "decodeActivePeak",
+            "unit": "bytes",
+            "value": 48458873744
+          },
+          {
+            "name": "overallAllocatorEnvelope",
+            "unit": "bytes",
+            "value": 153325602360
+          },
+          {
+            "name": "predictedOverallCeiling",
+            "unit": "bytes",
+            "value": 50935627776
+          },
+          {
+            "name": "denoiseEntryActive",
+            "unit": "bytes",
+            "value": 20797383618
+          },
+          {
+            "name": "decodeEntryActive",
+            "unit": "bytes",
+            "value": 1031878096
+          },
+          {
+            "name": "stagedGemmaBytes",
+            "unit": "bytes",
+            "value": 26388550536
+          },
+          {
+            "name": "stagedConnectorBytes",
+            "unit": "bytes",
+            "value": 6344493078
+          },
+          {
+            "name": "stagedTextEncoderBytes",
+            "unit": "bytes",
+            "value": 32733043614
+          },
+          {
+            "name": "stagedTransformerBytes",
+            "unit": "bytes",
+            "value": 20614103249
+          },
+          {
+            "name": "costagedGiantsBytes",
+            "unit": "bytes",
+            "value": 53347146863
+          },
+          {
+            "name": "tierArtifactBytes",
+            "unit": "bytes",
+            "value": 29728713314
+          },
+          {
+            "name": "warmRepeatPeak",
+            "unit": "bytes",
+            "value": 49104245720
+          },
+          {
+            "name": "warmRepeatPostCleanupActive",
+            "unit": "bytes",
+            "value": 3268250072
+          },
+          {
+            "name": "warmRepeatPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "renderedFrames",
+            "unit": "count",
+            "value": 361
+          },
+          {
+            "name": "latentTemporalDepth",
+            "unit": "count",
+            "value": 46
+          },
+          {
+            "name": "latentTokens",
+            "unit": "count",
+            "value": 17664
+          },
+          {
+            "name": "outputFps",
+            "unit": "count",
+            "value": 30
+          },
+          {
+            "name": "audioTrackDecoded",
+            "unit": "count",
+            "value": 1
+          },
+          {
+            "name": "decodeTilingEngaged",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "decodeWritableFrameCap",
+            "unit": "count",
+            "value": 682
+          },
+          {
+            "name": "decodeTileSpatialPx",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "decodeTileFrames",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "mlxMemoryLimitBytes",
+            "unit": "bytes",
+            "value": 130567005798
+          },
+          {
+            "name": "negativeMutationMaximumErrorPer255",
+            "unit": "count",
+            "value": 192
+          },
+          {
+            "name": "negativeMutationMeanErrorPer255",
+            "unit": "count",
+            "value": 76
+          },
+          {
+            "name": "negativeMutationRootMeanSquareErrorPer255",
+            "unit": "count",
+            "value": 85
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "ltx-2-3-mlx-q8-512x768-f361-fps30-seed18808",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.5.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-4502c367ad50b19be74f",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/ltx-2.3-mlx@01df27d308466533aa09d251e3aebdcc627d07eb:q8+gemma",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-e4abedc59278e21d058d",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 35678641896,
+          "allocatorBytes": 41143402398,
+          "reclaimableBytes": 5464760502
+        },
+        "decode": {
+          "activeBytes": 48458873744,
+          "allocatorBytes": 153325602360,
+          "reclaimableBytes": 104866728616
+        },
+        "denoise": {
+          "activeBytes": 40789577860,
+          "allocatorBytes": 40789577860,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 48458873744,
+          "allocatorBytes": 153325602360,
+          "reclaimableBytes": 104866728616
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 37513854976,
+        "decode": 50935627776,
+        "denoise": 42882564096,
+        "overall": 50935627776
+      },
+      "quality": {
+        "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier and loaded provider; cold measured clip versus a warm unscoped repeat, compared over every frame",
+        "identicalInputs": true,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0.011764705882352941,
+        "meanError": 0,
+        "meanErrorThreshold": 0.00392156862745098,
+        "result": "passed",
+        "rootMeanSquareError": 0,
+        "rootMeanSquareErrorThreshold": 0.0058823529411764705
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3",
+          "dirty": false,
+          "revision": "b965641e388f4db646e4c60ab3f75219737e2cc8"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:acbf5da17129d904271698488eb6e47deaf2756ee60e49024eb4fbbbc430d20a",
+          "revision": "817cf55097a69163632684cfbf3be667747ff256"
+        }
+      },
+      "scenarios": [
+        {
+          "name": "exact_fit",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the MLX LTX-2.3 base-only text-to-video path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "gated",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency"
+        ],
+        "parameters": {},
+        "rung": "staged_residency"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 361,
+          "height": 768,
+          "width": 512
+        },
+        "mode": "text_to_video",
+        "modelId": "ltx_2_3",
+        "overlay": "none",
+        "provider": "ltx_2_3",
+        "tier": "q8"
+      }
+    },
+    {
+      "artifact": {
+        "repository": "SceneWorks/ltx-2.3-mlx",
+        "resolvedRevision": "01df27d308466533aa09d251e3aebdcc627d07eb",
+        "variant": "q8"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "capturedAt": "2026-08-12T11:19:37Z",
+      "diagnostics": {
+        "adapter": "memory-mlx-adapter:ltx-2-3-staged-video",
+        "blockers": [
+          "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "preRungActiveAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "preRungCacheAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "conditioningActivePeak",
+            "unit": "bytes",
+            "value": 35678641896
+          },
+          {
+            "name": "denoiseActivePeak",
+            "unit": "bytes",
+            "value": 43473686612
+          },
+          {
+            "name": "decodeActivePeak",
+            "unit": "bytes",
+            "value": 54153098156
+          },
+          {
+            "name": "overallAllocatorEnvelope",
+            "unit": "bytes",
+            "value": 159636259044
+          },
+          {
+            "name": "predictedOverallCeiling",
+            "unit": "bytes",
+            "value": 56908316672
+          },
+          {
+            "name": "denoiseEntryActive",
+            "unit": "bytes",
+            "value": 20816035834
+          },
+          {
+            "name": "decodeEntryActive",
+            "unit": "bytes",
+            "value": 1033383840
+          },
+          {
+            "name": "stagedGemmaBytes",
+            "unit": "bytes",
+            "value": 26388550536
+          },
+          {
+            "name": "stagedConnectorBytes",
+            "unit": "bytes",
+            "value": 6344493078
+          },
+          {
+            "name": "stagedTextEncoderBytes",
+            "unit": "bytes",
+            "value": 32733043614
+          },
+          {
+            "name": "stagedTransformerBytes",
+            "unit": "bytes",
+            "value": 20614103249
+          },
+          {
+            "name": "costagedGiantsBytes",
+            "unit": "bytes",
+            "value": 53347146863
+          },
+          {
+            "name": "tierArtifactBytes",
+            "unit": "bytes",
+            "value": 29728713314
+          },
+          {
+            "name": "warmRepeatPeak",
+            "unit": "bytes",
+            "value": 54798202696
+          },
+          {
+            "name": "warmRepeatPostCleanupActive",
+            "unit": "bytes",
+            "value": 3267981880
+          },
+          {
+            "name": "warmRepeatPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "renderedFrames",
+            "unit": "count",
+            "value": 177
+          },
+          {
+            "name": "latentTemporalDepth",
+            "unit": "count",
+            "value": 23
+          },
+          {
+            "name": "latentTokens",
+            "unit": "count",
+            "value": 20240
+          },
+          {
+            "name": "outputFps",
+            "unit": "count",
+            "value": 30
+          },
+          {
+            "name": "audioTrackDecoded",
+            "unit": "count",
+            "value": 1
+          },
+          {
+            "name": "decodeTilingEngaged",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "decodeWritableFrameCap",
+            "unit": "count",
+            "value": 297
+          },
+          {
+            "name": "decodeTileSpatialPx",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "decodeTileFrames",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "mlxMemoryLimitBytes",
+            "unit": "bytes",
+            "value": 130567005798
+          },
+          {
+            "name": "negativeMutationMaximumErrorPer255",
+            "unit": "count",
+            "value": 192
+          },
+          {
+            "name": "negativeMutationMeanErrorPer255",
+            "unit": "count",
+            "value": 96
+          },
+          {
+            "name": "negativeMutationRootMeanSquareErrorPer255",
+            "unit": "count",
+            "value": 111
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "ltx-2-3-mlx-q8-704x1280-f177-fps30-seed18808",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.5.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-5aff3e74b46b30fb797c",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/ltx-2.3-mlx@01df27d308466533aa09d251e3aebdcc627d07eb:q8+gemma",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-1157be385587e60d0eb4",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 35678641896,
+          "allocatorBytes": 41858403034,
+          "reclaimableBytes": 6179761138
+        },
+        "decode": {
+          "activeBytes": 54153098156,
+          "allocatorBytes": 159636259044,
+          "reclaimableBytes": 105483160888
+        },
+        "denoise": {
+          "activeBytes": 43473686612,
+          "allocatorBytes": 43473686612,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 54153098156,
+          "allocatorBytes": 159636259044,
+          "reclaimableBytes": 105483160888
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 37513854976,
+        "decode": 56908316672,
+        "denoise": 45701136384,
+        "overall": 56908316672
+      },
+      "quality": {
+        "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier and loaded provider; cold measured clip versus a warm unscoped repeat, compared over every frame",
+        "identicalInputs": true,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0.011764705882352941,
+        "meanError": 0,
+        "meanErrorThreshold": 0.00392156862745098,
+        "result": "passed",
+        "rootMeanSquareError": 0,
+        "rootMeanSquareErrorThreshold": 0.0058823529411764705
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3",
+          "dirty": false,
+          "revision": "b965641e388f4db646e4c60ab3f75219737e2cc8"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:acbf5da17129d904271698488eb6e47deaf2756ee60e49024eb4fbbbc430d20a",
+          "revision": "41e8151fb317ff6d9099a9afc96bbc6a5e60c82b"
+        }
+      },
+      "scenarios": [
+        {
+          "name": "exact_fit",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the MLX LTX-2.3 base-only text-to-video path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "gated",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency"
+        ],
+        "parameters": {},
+        "rung": "staged_residency"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 177,
+          "height": 1280,
+          "width": 704
+        },
+        "mode": "text_to_video",
+        "modelId": "ltx_2_3",
+        "overlay": "none",
+        "provider": "ltx_2_3",
+        "tier": "q8"
+      }
+    },
+    {
+      "artifact": {
+        "repository": "SceneWorks/ltx-2.3-mlx",
+        "resolvedRevision": "01df27d308466533aa09d251e3aebdcc627d07eb",
+        "variant": "q8"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "capturedAt": "2026-08-12T08:40:54Z",
+      "diagnostics": {
+        "adapter": "memory-mlx-adapter:ltx-2-3-staged-video",
+        "blockers": [
+          "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "preRungActiveAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "preRungCacheAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "conditioningActivePeak",
+            "unit": "bytes",
+            "value": 35678641896
+          },
+          {
+            "name": "denoiseActivePeak",
+            "unit": "bytes",
+            "value": 34769704268
+          },
+          {
+            "name": "decodeActivePeak",
+            "unit": "bytes",
+            "value": 33264924644
+          },
+          {
+            "name": "overallAllocatorEnvelope",
+            "unit": "bytes",
+            "value": 141805639652
+          },
+          {
+            "name": "predictedOverallCeiling",
+            "unit": "bytes",
+            "value": 37513854976
+          },
+          {
+            "name": "denoiseEntryActive",
+            "unit": "bytes",
+            "value": 20748479282
+          },
+          {
+            "name": "decodeEntryActive",
+            "unit": "bytes",
+            "value": 1028354776
+          },
+          {
+            "name": "stagedGemmaBytes",
+            "unit": "bytes",
+            "value": 26388550536
+          },
+          {
+            "name": "stagedConnectorBytes",
+            "unit": "bytes",
+            "value": 6344493078
+          },
+          {
+            "name": "stagedTextEncoderBytes",
+            "unit": "bytes",
+            "value": 32733043614
+          },
+          {
+            "name": "stagedTransformerBytes",
+            "unit": "bytes",
+            "value": 20614103249
+          },
+          {
+            "name": "costagedGiantsBytes",
+            "unit": "bytes",
+            "value": 53347146863
+          },
+          {
+            "name": "tierArtifactBytes",
+            "unit": "bytes",
+            "value": 29728713314
+          },
+          {
+            "name": "warmRepeatPeak",
+            "unit": "bytes",
+            "value": 39594256978
+          },
+          {
+            "name": "warmRepeatPostCleanupActive",
+            "unit": "bytes",
+            "value": 3268195172
+          },
+          {
+            "name": "warmRepeatPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "renderedFrames",
+            "unit": "count",
+            "value": 241
+          },
+          {
+            "name": "latentTemporalDepth",
+            "unit": "count",
+            "value": 31
+          },
+          {
+            "name": "latentTokens",
+            "unit": "count",
+            "value": 11904
+          },
+          {
+            "name": "outputFps",
+            "unit": "count",
+            "value": 24
+          },
+          {
+            "name": "audioTrackDecoded",
+            "unit": "count",
+            "value": 1
+          },
+          {
+            "name": "decodeTilingEngaged",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "decodeWritableFrameCap",
+            "unit": "count",
+            "value": 682
+          },
+          {
+            "name": "decodeTileSpatialPx",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "decodeTileFrames",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "mlxMemoryLimitBytes",
+            "unit": "bytes",
+            "value": 130567005798
+          },
+          {
+            "name": "negativeMutationMaximumErrorPer255",
+            "unit": "count",
+            "value": 192
+          },
+          {
+            "name": "negativeMutationMeanErrorPer255",
+            "unit": "count",
+            "value": 75
+          },
+          {
+            "name": "negativeMutationRootMeanSquareErrorPer255",
+            "unit": "count",
+            "value": 83
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.5.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-60f463ae74a2d3cd7fc5",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/ltx-2.3-mlx@01df27d308466533aa09d251e3aebdcc627d07eb:q8+gemma",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-2b60fd6c33dff5608f67",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 35678641896,
+          "allocatorBytes": 39497775898,
+          "reclaimableBytes": 3819134002
+        },
+        "decode": {
+          "activeBytes": 33264924644,
+          "allocatorBytes": 139391922400,
+          "reclaimableBytes": 106126997756
+        },
+        "denoise": {
+          "activeBytes": 34769704268,
+          "allocatorBytes": 34769704268,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 35678641896,
+          "allocatorBytes": 141805639652,
+          "reclaimableBytes": 106126997756
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 37513854976,
+        "decode": 34963718144,
+        "denoise": 36574330880,
+        "overall": 37513854976
+      },
+      "quality": {
+        "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier and loaded provider; cold measured clip versus a warm unscoped repeat, compared over every frame",
+        "identicalInputs": true,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0.011764705882352941,
+        "meanError": 0,
+        "meanErrorThreshold": 0.00392156862745098,
+        "result": "passed",
+        "rootMeanSquareError": 0,
+        "rootMeanSquareErrorThreshold": 0.0058823529411764705
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3",
+          "dirty": false,
+          "revision": "b965641e388f4db646e4c60ab3f75219737e2cc8"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:ab6a83611a22fb59f42b152718be7b30777be731311f906814e0b225002c6771",
+          "revision": "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+        }
+      },
+      "scenarios": [
+        {
+          "name": "exact_fit",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the MLX LTX-2.3 base-only text-to-video path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "gated",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency"
+        ],
+        "parameters": {},
+        "rung": "staged_residency"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 241,
+          "height": 512,
+          "width": 768
+        },
+        "mode": "text_to_video",
+        "modelId": "ltx_2_3",
+        "overlay": "none",
+        "provider": "ltx_2_3",
+        "tier": "q8"
+      }
+    },
+    {
+      "artifact": {
+        "repository": "SceneWorks/ltx-2.3-mlx",
+        "resolvedRevision": "01df27d308466533aa09d251e3aebdcc627d07eb",
+        "variant": "q8"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "capturedAt": "2026-08-12T11:09:33Z",
+      "diagnostics": {
+        "adapter": "memory-mlx-adapter:ltx-2-3-staged-video",
+        "blockers": [
+          "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "preRungActiveAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "preRungCacheAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "conditioningActivePeak",
+            "unit": "bytes",
+            "value": 35678641896
+          },
+          {
+            "name": "denoiseActivePeak",
+            "unit": "bytes",
+            "value": 28508626012
+          },
+          {
+            "name": "decodeActivePeak",
+            "unit": "bytes",
+            "value": 18070892912
+          },
+          {
+            "name": "overallAllocatorEnvelope",
+            "unit": "bytes",
+            "value": 108435979136
+          },
+          {
+            "name": "predictedOverallCeiling",
+            "unit": "bytes",
+            "value": 37513854976
+          },
+          {
+            "name": "denoiseEntryActive",
+            "unit": "bytes",
+            "value": 20721194954
+          },
+          {
+            "name": "decodeEntryActive",
+            "unit": "bytes",
+            "value": 1024749096
+          },
+          {
+            "name": "stagedGemmaBytes",
+            "unit": "bytes",
+            "value": 26388550536
+          },
+          {
+            "name": "stagedConnectorBytes",
+            "unit": "bytes",
+            "value": 6344493078
+          },
+          {
+            "name": "stagedTextEncoderBytes",
+            "unit": "bytes",
+            "value": 32733043614
+          },
+          {
+            "name": "stagedTransformerBytes",
+            "unit": "bytes",
+            "value": 20614103249
+          },
+          {
+            "name": "costagedGiantsBytes",
+            "unit": "bytes",
+            "value": 53347146863
+          },
+          {
+            "name": "tierArtifactBytes",
+            "unit": "bytes",
+            "value": 29728713314
+          },
+          {
+            "name": "warmRepeatPeak",
+            "unit": "bytes",
+            "value": 39594186234
+          },
+          {
+            "name": "warmRepeatPostCleanupActive",
+            "unit": "bytes",
+            "value": 3268124428
+          },
+          {
+            "name": "warmRepeatPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "renderedFrames",
+            "unit": "count",
+            "value": 121
+          },
+          {
+            "name": "latentTemporalDepth",
+            "unit": "count",
+            "value": 16
+          },
+          {
+            "name": "latentTokens",
+            "unit": "count",
+            "value": 6144
+          },
+          {
+            "name": "outputFps",
+            "unit": "count",
+            "value": 30
+          },
+          {
+            "name": "audioTrackDecoded",
+            "unit": "count",
+            "value": 1
+          },
+          {
+            "name": "decodeTilingEngaged",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "decodeWritableFrameCap",
+            "unit": "count",
+            "value": 682
+          },
+          {
+            "name": "decodeTileSpatialPx",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "decodeTileFrames",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "mlxMemoryLimitBytes",
+            "unit": "bytes",
+            "value": 130567005798
+          },
+          {
+            "name": "negativeMutationMaximumErrorPer255",
+            "unit": "count",
+            "value": 192
+          },
+          {
+            "name": "negativeMutationMeanErrorPer255",
+            "unit": "count",
+            "value": 92
+          },
+          {
+            "name": "negativeMutationRootMeanSquareErrorPer255",
+            "unit": "count",
+            "value": 106
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.5.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-624c0e5c472b3ba92c78",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/ltx-2.3-mlx@01df27d308466533aa09d251e3aebdcc627d07eb:q8+gemma",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-4eaa2bdcac85ce702e0a",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 35678641896,
+          "allocatorBytes": 37816337636,
+          "reclaimableBytes": 2137695740
+        },
+        "decode": {
+          "activeBytes": 18070892912,
+          "allocatorBytes": 90828230152,
+          "reclaimableBytes": 72757337240
+        },
+        "denoise": {
+          "activeBytes": 28508626012,
+          "allocatorBytes": 28508626012,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 35678641896,
+          "allocatorBytes": 108435979136,
+          "reclaimableBytes": 72757337240
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 37513854976,
+        "decode": 18991808512,
+        "denoise": 29997662208,
+        "overall": 37513854976
+      },
+      "quality": {
+        "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier and loaded provider; cold measured clip versus a warm unscoped repeat, compared over every frame",
+        "identicalInputs": true,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0.011764705882352941,
+        "meanError": 0,
+        "meanErrorThreshold": 0.00392156862745098,
+        "result": "passed",
+        "rootMeanSquareError": 0,
+        "rootMeanSquareErrorThreshold": 0.0058823529411764705
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3",
+          "dirty": false,
+          "revision": "b965641e388f4db646e4c60ab3f75219737e2cc8"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:acbf5da17129d904271698488eb6e47deaf2756ee60e49024eb4fbbbc430d20a",
+          "revision": "41e8151fb317ff6d9099a9afc96bbc6a5e60c82b"
+        }
+      },
+      "scenarios": [
+        {
+          "name": "exact_fit",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the MLX LTX-2.3 base-only text-to-video path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "gated",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency"
+        ],
+        "parameters": {},
+        "rung": "staged_residency"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 121,
+          "height": 512,
+          "width": 768
+        },
+        "mode": "text_to_video",
+        "modelId": "ltx_2_3",
+        "overlay": "none",
+        "provider": "ltx_2_3",
+        "tier": "q8"
+      }
+    },
+    {
+      "artifact": {
+        "repository": "SceneWorks/ltx-2.3-mlx",
+        "resolvedRevision": "01df27d308466533aa09d251e3aebdcc627d07eb",
+        "variant": "q8"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "capturedAt": "2026-08-12T10:37:25Z",
+      "diagnostics": {
+        "adapter": "memory-mlx-adapter:ltx-2-3-staged-video",
+        "blockers": [
+          "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "preRungActiveAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "preRungCacheAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "conditioningActivePeak",
+            "unit": "bytes",
+            "value": 35678641896
+          },
+          {
+            "name": "denoiseActivePeak",
+            "unit": "bytes",
+            "value": 31765738324
+          },
+          {
+            "name": "decodeActivePeak",
+            "unit": "bytes",
+            "value": 26094597036
+          },
+          {
+            "name": "overallAllocatorEnvelope",
+            "unit": "bytes",
+            "value": 133569523592
+          },
+          {
+            "name": "predictedOverallCeiling",
+            "unit": "bytes",
+            "value": 37513854976
+          },
+          {
+            "name": "denoiseEntryActive",
+            "unit": "bytes",
+            "value": 20765156098
+          },
+          {
+            "name": "decodeEntryActive",
+            "unit": "bytes",
+            "value": 1026666400
+          },
+          {
+            "name": "stagedGemmaBytes",
+            "unit": "bytes",
+            "value": 26388550536
+          },
+          {
+            "name": "stagedConnectorBytes",
+            "unit": "bytes",
+            "value": 6344493078
+          },
+          {
+            "name": "stagedTextEncoderBytes",
+            "unit": "bytes",
+            "value": 32733043614
+          },
+          {
+            "name": "stagedTransformerBytes",
+            "unit": "bytes",
+            "value": 20614103249
+          },
+          {
+            "name": "costagedGiantsBytes",
+            "unit": "bytes",
+            "value": 53347146863
+          },
+          {
+            "name": "tierArtifactBytes",
+            "unit": "bytes",
+            "value": 29728713314
+          },
+          {
+            "name": "warmRepeatPeak",
+            "unit": "bytes",
+            "value": 39594127642
+          },
+          {
+            "name": "warmRepeatPostCleanupActive",
+            "unit": "bytes",
+            "value": 3268065836
+          },
+          {
+            "name": "warmRepeatPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "renderedFrames",
+            "unit": "count",
+            "value": 177
+          },
+          {
+            "name": "latentTemporalDepth",
+            "unit": "count",
+            "value": 23
+          },
+          {
+            "name": "latentTokens",
+            "unit": "count",
+            "value": 9200
+          },
+          {
+            "name": "outputFps",
+            "unit": "count",
+            "value": 30
+          },
+          {
+            "name": "audioTrackDecoded",
+            "unit": "count",
+            "value": 1
+          },
+          {
+            "name": "decodeTilingEngaged",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "decodeWritableFrameCap",
+            "unit": "count",
+            "value": 655
+          },
+          {
+            "name": "decodeTileSpatialPx",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "decodeTileFrames",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "mlxMemoryLimitBytes",
+            "unit": "bytes",
+            "value": 130567005798
+          },
+          {
+            "name": "negativeMutationMaximumErrorPer255",
+            "unit": "count",
+            "value": 192
+          },
+          {
+            "name": "negativeMutationMeanErrorPer255",
+            "unit": "count",
+            "value": 68
+          },
+          {
+            "name": "negativeMutationRootMeanSquareErrorPer255",
+            "unit": "count",
+            "value": 72
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.5.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-7defacb76cdfeaa95e92",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/ltx-2.3-mlx@01df27d308466533aa09d251e3aebdcc627d07eb:q8+gemma",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-d6bad29b1814600f58a4",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 35678641896,
+          "allocatorBytes": 38638922458,
+          "reclaimableBytes": 2960280562
+        },
+        "decode": {
+          "activeBytes": 26094597036,
+          "allocatorBytes": 123985478732,
+          "reclaimableBytes": 97890881696
+        },
+        "denoise": {
+          "activeBytes": 31765738324,
+          "allocatorBytes": 31765738324,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 35678641896,
+          "allocatorBytes": 133569523592,
+          "reclaimableBytes": 97890881696
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 37513854976,
+        "decode": 27447525376,
+        "denoise": 33420214272,
+        "overall": 37513854976
+      },
+      "quality": {
+        "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier and loaded provider; cold measured clip versus a warm unscoped repeat, compared over every frame",
+        "identicalInputs": true,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0.011764705882352941,
+        "meanError": 0,
+        "meanErrorThreshold": 0.00392156862745098,
+        "result": "passed",
+        "rootMeanSquareError": 0,
+        "rootMeanSquareErrorThreshold": 0.0058823529411764705
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3",
+          "dirty": false,
+          "revision": "b965641e388f4db646e4c60ab3f75219737e2cc8"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:acbf5da17129d904271698488eb6e47deaf2756ee60e49024eb4fbbbc430d20a",
+          "revision": "817cf55097a69163632684cfbf3be667747ff256"
+        }
+      },
+      "scenarios": [
+        {
+          "name": "exact_fit",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the MLX LTX-2.3 base-only text-to-video path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "gated",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency"
+        ],
+        "parameters": {},
+        "rung": "staged_residency"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 177,
+          "height": 640,
+          "width": 640
+        },
+        "mode": "text_to_video",
+        "modelId": "ltx_2_3",
+        "overlay": "none",
+        "provider": "ltx_2_3",
+        "tier": "q8"
+      }
+    },
+    {
+      "artifact": {
+        "repository": "SceneWorks/ltx-2.3-mlx",
+        "resolvedRevision": "01df27d308466533aa09d251e3aebdcc627d07eb",
+        "variant": "q8"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "capturedAt": "2026-08-12T10:34:17Z",
+      "diagnostics": {
+        "adapter": "memory-mlx-adapter:ltx-2-3-staged-video",
+        "blockers": [
+          "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "preRungActiveAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "preRungCacheAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "conditioningActivePeak",
+            "unit": "bytes",
+            "value": 35561029352
+          },
+          {
+            "name": "denoiseActivePeak",
+            "unit": "bytes",
+            "value": 28508438876
+          },
+          {
+            "name": "decodeActivePeak",
+            "unit": "bytes",
+            "value": 18070892912
+          },
+          {
+            "name": "overallAllocatorEnvelope",
+            "unit": "bytes",
+            "value": 108722010384
+          },
+          {
+            "name": "predictedOverallCeiling",
+            "unit": "bytes",
+            "value": 37379637248
+          },
+          {
+            "name": "denoiseEntryActive",
+            "unit": "bytes",
+            "value": 20721007818
+          },
+          {
+            "name": "decodeEntryActive",
+            "unit": "bytes",
+            "value": 1024749096
+          },
+          {
+            "name": "stagedGemmaBytes",
+            "unit": "bytes",
+            "value": 26388550536
+          },
+          {
+            "name": "stagedConnectorBytes",
+            "unit": "bytes",
+            "value": 6344493078
+          },
+          {
+            "name": "stagedTextEncoderBytes",
+            "unit": "bytes",
+            "value": 32733043614
+          },
+          {
+            "name": "stagedTransformerBytes",
+            "unit": "bytes",
+            "value": 20614103249
+          },
+          {
+            "name": "costagedGiantsBytes",
+            "unit": "bytes",
+            "value": 53347146863
+          },
+          {
+            "name": "tierArtifactBytes",
+            "unit": "bytes",
+            "value": 29728713314
+          },
+          {
+            "name": "warmRepeatPeak",
+            "unit": "bytes",
+            "value": 39594185278
+          },
+          {
+            "name": "warmRepeatPostCleanupActive",
+            "unit": "bytes",
+            "value": 3268123472
+          },
+          {
+            "name": "warmRepeatPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "renderedFrames",
+            "unit": "count",
+            "value": 121
+          },
+          {
+            "name": "latentTemporalDepth",
+            "unit": "count",
+            "value": 16
+          },
+          {
+            "name": "latentTokens",
+            "unit": "count",
+            "value": 6144
+          },
+          {
+            "name": "outputFps",
+            "unit": "count",
+            "value": 30
+          },
+          {
+            "name": "audioTrackDecoded",
+            "unit": "count",
+            "value": 1
+          },
+          {
+            "name": "decodeTilingEngaged",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "decodeWritableFrameCap",
+            "unit": "count",
+            "value": 682
+          },
+          {
+            "name": "decodeTileSpatialPx",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "decodeTileFrames",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "mlxMemoryLimitBytes",
+            "unit": "bytes",
+            "value": 130567005798
+          },
+          {
+            "name": "negativeMutationMaximumErrorPer255",
+            "unit": "count",
+            "value": 192
+          },
+          {
+            "name": "negativeMutationMeanErrorPer255",
+            "unit": "count",
+            "value": 92
+          },
+          {
+            "name": "negativeMutationRootMeanSquareErrorPer255",
+            "unit": "count",
+            "value": 106
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.5.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-9af21f4be28530a6e5b0",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/ltx-2.3-mlx@01df27d308466533aa09d251e3aebdcc627d07eb:q8+gemma",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-4eaa2bdcac85ce702e0a",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 35561029352,
+          "allocatorBytes": 37561730462,
+          "reclaimableBytes": 2000701110
+        },
+        "decode": {
+          "activeBytes": 18070892912,
+          "allocatorBytes": 91231873944,
+          "reclaimableBytes": 73160981032
+        },
+        "denoise": {
+          "activeBytes": 28508438876,
+          "allocatorBytes": 28508438876,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 35561029352,
+          "allocatorBytes": 108722010384,
+          "reclaimableBytes": 73160981032
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 37379637248,
+        "decode": 18991808512,
+        "denoise": 29997662208,
+        "overall": 37379637248
+      },
+      "quality": {
+        "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier and loaded provider; cold measured clip versus a warm unscoped repeat, compared over every frame",
+        "identicalInputs": true,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0.011764705882352941,
+        "meanError": 0,
+        "meanErrorThreshold": 0.00392156862745098,
+        "result": "passed",
+        "rootMeanSquareError": 0,
+        "rootMeanSquareErrorThreshold": 0.0058823529411764705
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3",
+          "dirty": false,
+          "revision": "b965641e388f4db646e4c60ab3f75219737e2cc8"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:acbf5da17129d904271698488eb6e47deaf2756ee60e49024eb4fbbbc430d20a",
+          "revision": "817cf55097a69163632684cfbf3be667747ff256"
+        }
+      },
+      "scenarios": [
+        {
+          "name": "exact_fit",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the MLX LTX-2.3 base-only text-to-video path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "gated",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency"
+        ],
+        "parameters": {},
+        "rung": "staged_residency"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 121,
+          "height": 512,
+          "width": 768
+        },
+        "mode": "text_to_video",
+        "modelId": "ltx_2_3",
+        "overlay": "none",
+        "provider": "ltx_2_3",
+        "tier": "q8"
+      }
+    },
+    {
+      "artifact": {
+        "repository": "SceneWorks/ltx-2.3-mlx",
+        "resolvedRevision": "01df27d308466533aa09d251e3aebdcc627d07eb",
+        "variant": "q8"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "capturedAt": "2026-08-12T08:36:17Z",
+      "diagnostics": {
+        "adapter": "memory-mlx-adapter:ltx-2-3-staged-video",
+        "blockers": [
+          "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "preRungActiveAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "preRungCacheAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "conditioningActivePeak",
+            "unit": "bytes",
+            "value": 35678641896
+          },
+          {
+            "name": "denoiseActivePeak",
+            "unit": "bytes",
+            "value": 34743682492
+          },
+          {
+            "name": "decodeActivePeak",
+            "unit": "bytes",
+            "value": 33264924244
+          },
+          {
+            "name": "overallAllocatorEnvelope",
+            "unit": "bytes",
+            "value": 141866060324
+          },
+          {
+            "name": "predictedOverallCeiling",
+            "unit": "bytes",
+            "value": 37513854976
+          },
+          {
+            "name": "denoiseEntryActive",
+            "unit": "bytes",
+            "value": 20747348002
+          },
+          {
+            "name": "decodeEntryActive",
+            "unit": "bytes",
+            "value": 1028354376
+          },
+          {
+            "name": "stagedGemmaBytes",
+            "unit": "bytes",
+            "value": 26388550536
+          },
+          {
+            "name": "stagedConnectorBytes",
+            "unit": "bytes",
+            "value": 6344493078
+          },
+          {
+            "name": "stagedTextEncoderBytes",
+            "unit": "bytes",
+            "value": 32733043614
+          },
+          {
+            "name": "stagedTransformerBytes",
+            "unit": "bytes",
+            "value": 20614103249
+          },
+          {
+            "name": "costagedGiantsBytes",
+            "unit": "bytes",
+            "value": 53347146863
+          },
+          {
+            "name": "tierArtifactBytes",
+            "unit": "bytes",
+            "value": 29728713314
+          },
+          {
+            "name": "warmRepeatPeak",
+            "unit": "bytes",
+            "value": 39594442866
+          },
+          {
+            "name": "warmRepeatPostCleanupActive",
+            "unit": "bytes",
+            "value": 3268381060
+          },
+          {
+            "name": "warmRepeatPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "renderedFrames",
+            "unit": "count",
+            "value": 241
+          },
+          {
+            "name": "latentTemporalDepth",
+            "unit": "count",
+            "value": 31
+          },
+          {
+            "name": "latentTokens",
+            "unit": "count",
+            "value": 11904
+          },
+          {
+            "name": "outputFps",
+            "unit": "count",
+            "value": 30
+          },
+          {
+            "name": "audioTrackDecoded",
+            "unit": "count",
+            "value": 1
+          },
+          {
+            "name": "decodeTilingEngaged",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "decodeWritableFrameCap",
+            "unit": "count",
+            "value": 682
+          },
+          {
+            "name": "decodeTileSpatialPx",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "decodeTileFrames",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "mlxMemoryLimitBytes",
+            "unit": "bytes",
+            "value": 130567005798
+          },
+          {
+            "name": "negativeMutationMaximumErrorPer255",
+            "unit": "count",
+            "value": 192
+          },
+          {
+            "name": "negativeMutationMeanErrorPer255",
+            "unit": "count",
+            "value": 76
+          },
+          {
+            "name": "negativeMutationRootMeanSquareErrorPer255",
+            "unit": "count",
+            "value": 85
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.5.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-c74655ab0699898fb6b7",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/ltx-2.3-mlx@01df27d308466533aa09d251e3aebdcc627d07eb:q8+gemma",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-895d869ccc308f5cabb6",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 35678641896,
+          "allocatorBytes": 39469064970,
+          "reclaimableBytes": 3790423074
+        },
+        "decode": {
+          "activeBytes": 33264924244,
+          "allocatorBytes": 139452342672,
+          "reclaimableBytes": 106187418428
+        },
+        "denoise": {
+          "activeBytes": 34743682492,
+          "allocatorBytes": 34743682492,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 35678641896,
+          "allocatorBytes": 141866060324,
+          "reclaimableBytes": 106187418428
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 37513854976,
+        "decode": 34963718144,
+        "denoise": 36507222016,
+        "overall": 37513854976
+      },
+      "quality": {
+        "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier and loaded provider; cold measured clip versus a warm unscoped repeat, compared over every frame",
+        "identicalInputs": true,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0.011764705882352941,
+        "meanError": 0,
+        "meanErrorThreshold": 0.00392156862745098,
+        "result": "passed",
+        "rootMeanSquareError": 0,
+        "rootMeanSquareErrorThreshold": 0.0058823529411764705
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3",
+          "dirty": false,
+          "revision": "b965641e388f4db646e4c60ab3f75219737e2cc8"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:ab6a83611a22fb59f42b152718be7b30777be731311f906814e0b225002c6771",
+          "revision": "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+        }
+      },
+      "scenarios": [
+        {
+          "name": "exact_fit",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the MLX LTX-2.3 base-only text-to-video path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "gated",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency"
+        ],
+        "parameters": {},
+        "rung": "staged_residency"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 241,
+          "height": 512,
+          "width": 768
+        },
+        "mode": "text_to_video",
+        "modelId": "ltx_2_3",
+        "overlay": "none",
+        "provider": "ltx_2_3",
+        "tier": "q8"
+      }
+    },
+    {
+      "artifact": {
+        "repository": "SceneWorks/ltx-2.3-mlx",
+        "resolvedRevision": "01df27d308466533aa09d251e3aebdcc627d07eb",
+        "variant": "q8"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "capturedAt": "2026-08-12T10:41:59Z",
+      "diagnostics": {
+        "adapter": "memory-mlx-adapter:ltx-2-3-staged-video",
+        "blockers": [
+          "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "preRungActiveAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "preRungCacheAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "conditioningActivePeak",
+            "unit": "bytes",
+            "value": 35678641896
+          },
+          {
+            "name": "denoiseActivePeak",
+            "unit": "bytes",
+            "value": 34743677820
+          },
+          {
+            "name": "decodeActivePeak",
+            "unit": "bytes",
+            "value": 33264924244
+          },
+          {
+            "name": "overallAllocatorEnvelope",
+            "unit": "bytes",
+            "value": 141878975284
+          },
+          {
+            "name": "predictedOverallCeiling",
+            "unit": "bytes",
+            "value": 37513854976
+          },
+          {
+            "name": "denoiseEntryActive",
+            "unit": "bytes",
+            "value": 20747343330
+          },
+          {
+            "name": "decodeEntryActive",
+            "unit": "bytes",
+            "value": 1028354376
+          },
+          {
+            "name": "stagedGemmaBytes",
+            "unit": "bytes",
+            "value": 26388550536
+          },
+          {
+            "name": "stagedConnectorBytes",
+            "unit": "bytes",
+            "value": 6344493078
+          },
+          {
+            "name": "stagedTextEncoderBytes",
+            "unit": "bytes",
+            "value": 32733043614
+          },
+          {
+            "name": "stagedTransformerBytes",
+            "unit": "bytes",
+            "value": 20614103249
+          },
+          {
+            "name": "costagedGiantsBytes",
+            "unit": "bytes",
+            "value": 53347146863
+          },
+          {
+            "name": "tierArtifactBytes",
+            "unit": "bytes",
+            "value": 29728713314
+          },
+          {
+            "name": "warmRepeatPeak",
+            "unit": "bytes",
+            "value": 39594431734
+          },
+          {
+            "name": "warmRepeatPostCleanupActive",
+            "unit": "bytes",
+            "value": 3268369928
+          },
+          {
+            "name": "warmRepeatPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "renderedFrames",
+            "unit": "count",
+            "value": 241
+          },
+          {
+            "name": "latentTemporalDepth",
+            "unit": "count",
+            "value": 31
+          },
+          {
+            "name": "latentTokens",
+            "unit": "count",
+            "value": 11904
+          },
+          {
+            "name": "outputFps",
+            "unit": "count",
+            "value": 30
+          },
+          {
+            "name": "audioTrackDecoded",
+            "unit": "count",
+            "value": 1
+          },
+          {
+            "name": "decodeTilingEngaged",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "decodeWritableFrameCap",
+            "unit": "count",
+            "value": 682
+          },
+          {
+            "name": "decodeTileSpatialPx",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "decodeTileFrames",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "mlxMemoryLimitBytes",
+            "unit": "bytes",
+            "value": 130567005798
+          },
+          {
+            "name": "negativeMutationMaximumErrorPer255",
+            "unit": "count",
+            "value": 192
+          },
+          {
+            "name": "negativeMutationMeanErrorPer255",
+            "unit": "count",
+            "value": 76
+          },
+          {
+            "name": "negativeMutationRootMeanSquareErrorPer255",
+            "unit": "count",
+            "value": 85
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.5.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-c7bf2b2ff37d73d6d1a1",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/ltx-2.3-mlx@01df27d308466533aa09d251e3aebdcc627d07eb:q8+gemma",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-895d869ccc308f5cabb6",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 35678641896,
+          "allocatorBytes": 39495122758,
+          "reclaimableBytes": 3816480862
+        },
+        "decode": {
+          "activeBytes": 33264924244,
+          "allocatorBytes": 139465257632,
+          "reclaimableBytes": 106200333388
+        },
+        "denoise": {
+          "activeBytes": 34743677820,
+          "allocatorBytes": 34743677820,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 35678641896,
+          "allocatorBytes": 141878975284,
+          "reclaimableBytes": 106200333388
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 37513854976,
+        "decode": 34963718144,
+        "denoise": 36507222016,
+        "overall": 37513854976
+      },
+      "quality": {
+        "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier and loaded provider; cold measured clip versus a warm unscoped repeat, compared over every frame",
+        "identicalInputs": true,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0.011764705882352941,
+        "meanError": 0,
+        "meanErrorThreshold": 0.00392156862745098,
+        "result": "passed",
+        "rootMeanSquareError": 0,
+        "rootMeanSquareErrorThreshold": 0.0058823529411764705
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3",
+          "dirty": false,
+          "revision": "b965641e388f4db646e4c60ab3f75219737e2cc8"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:acbf5da17129d904271698488eb6e47deaf2756ee60e49024eb4fbbbc430d20a",
+          "revision": "817cf55097a69163632684cfbf3be667747ff256"
+        }
+      },
+      "scenarios": [
+        {
+          "name": "exact_fit",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the MLX LTX-2.3 base-only text-to-video path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "gated",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency"
+        ],
+        "parameters": {},
+        "rung": "staged_residency"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 241,
+          "height": 512,
+          "width": 768
+        },
+        "mode": "text_to_video",
+        "modelId": "ltx_2_3",
+        "overlay": "none",
+        "provider": "ltx_2_3",
+        "tier": "q8"
+      }
+    },
+    {
+      "artifact": {
+        "repository": "SceneWorks/ltx-2.3-mlx",
+        "resolvedRevision": "01df27d308466533aa09d251e3aebdcc627d07eb",
+        "variant": "q8"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "capturedAt": "2026-08-12T08:31:49Z",
+      "diagnostics": {
+        "adapter": "memory-mlx-adapter:ltx-2-3-staged-video",
+        "blockers": [
+          "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "preRungActiveAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "preRungCacheAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "conditioningActivePeak",
+            "unit": "bytes",
+            "value": 35678641896
+          },
+          {
+            "name": "denoiseActivePeak",
+            "unit": "bytes",
+            "value": 31765755988
+          },
+          {
+            "name": "decodeActivePeak",
+            "unit": "bytes",
+            "value": 26094597036
+          },
+          {
+            "name": "overallAllocatorEnvelope",
+            "unit": "bytes",
+            "value": 133045181412
+          },
+          {
+            "name": "predictedOverallCeiling",
+            "unit": "bytes",
+            "value": 37513854976
+          },
+          {
+            "name": "denoiseEntryActive",
+            "unit": "bytes",
+            "value": 20765173762
+          },
+          {
+            "name": "decodeEntryActive",
+            "unit": "bytes",
+            "value": 1026666400
+          },
+          {
+            "name": "stagedGemmaBytes",
+            "unit": "bytes",
+            "value": 26388550536
+          },
+          {
+            "name": "stagedConnectorBytes",
+            "unit": "bytes",
+            "value": 6344493078
+          },
+          {
+            "name": "stagedTextEncoderBytes",
+            "unit": "bytes",
+            "value": 32733043614
+          },
+          {
+            "name": "stagedTransformerBytes",
+            "unit": "bytes",
+            "value": 20614103249
+          },
+          {
+            "name": "costagedGiantsBytes",
+            "unit": "bytes",
+            "value": 53347146863
+          },
+          {
+            "name": "tierArtifactBytes",
+            "unit": "bytes",
+            "value": 29728713314
+          },
+          {
+            "name": "warmRepeatPeak",
+            "unit": "bytes",
+            "value": 39594128122
+          },
+          {
+            "name": "warmRepeatPostCleanupActive",
+            "unit": "bytes",
+            "value": 3268066316
+          },
+          {
+            "name": "warmRepeatPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "renderedFrames",
+            "unit": "count",
+            "value": 177
+          },
+          {
+            "name": "latentTemporalDepth",
+            "unit": "count",
+            "value": 23
+          },
+          {
+            "name": "latentTokens",
+            "unit": "count",
+            "value": 9200
+          },
+          {
+            "name": "outputFps",
+            "unit": "count",
+            "value": 30
+          },
+          {
+            "name": "audioTrackDecoded",
+            "unit": "count",
+            "value": 1
+          },
+          {
+            "name": "decodeTilingEngaged",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "decodeWritableFrameCap",
+            "unit": "count",
+            "value": 655
+          },
+          {
+            "name": "decodeTileSpatialPx",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "decodeTileFrames",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "mlxMemoryLimitBytes",
+            "unit": "bytes",
+            "value": 130567005798
+          },
+          {
+            "name": "negativeMutationMaximumErrorPer255",
+            "unit": "count",
+            "value": 192
+          },
+          {
+            "name": "negativeMutationMeanErrorPer255",
+            "unit": "count",
+            "value": 68
+          },
+          {
+            "name": "negativeMutationRootMeanSquareErrorPer255",
+            "unit": "count",
+            "value": 72
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.5.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-ed4386179ee8edd3776b",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/ltx-2.3-mlx@01df27d308466533aa09d251e3aebdcc627d07eb:q8+gemma",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-d6bad29b1814600f58a4",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 35678641896,
+          "allocatorBytes": 38638922458,
+          "reclaimableBytes": 2960280562
+        },
+        "decode": {
+          "activeBytes": 26094597036,
+          "allocatorBytes": 123461136552,
+          "reclaimableBytes": 97366539516
+        },
+        "denoise": {
+          "activeBytes": 31765755988,
+          "allocatorBytes": 31765755988,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 35678641896,
+          "allocatorBytes": 133045181412,
+          "reclaimableBytes": 97366539516
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 37513854976,
+        "decode": 27447525376,
+        "denoise": 33420214272,
+        "overall": 37513854976
+      },
+      "quality": {
+        "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier and loaded provider; cold measured clip versus a warm unscoped repeat, compared over every frame",
+        "identicalInputs": true,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0.011764705882352941,
+        "meanError": 0,
+        "meanErrorThreshold": 0.00392156862745098,
+        "result": "passed",
+        "rootMeanSquareError": 0,
+        "rootMeanSquareErrorThreshold": 0.0058823529411764705
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3",
+          "dirty": false,
+          "revision": "b965641e388f4db646e4c60ab3f75219737e2cc8"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:ab6a83611a22fb59f42b152718be7b30777be731311f906814e0b225002c6771",
+          "revision": "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+        }
+      },
+      "scenarios": [
+        {
+          "name": "exact_fit",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the MLX LTX-2.3 base-only text-to-video path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "gated",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency"
+        ],
+        "parameters": {},
+        "rung": "staged_residency"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 177,
+          "height": 640,
+          "width": 640
+        },
+        "mode": "text_to_video",
+        "modelId": "ltx_2_3",
+        "overlay": "none",
+        "provider": "ltx_2_3",
+        "tier": "q8"
+      }
+    },
+    {
+      "artifact": {
+        "repository": "SceneWorks/ltx-2.3-mlx",
+        "resolvedRevision": "01df27d308466533aa09d251e3aebdcc627d07eb",
+        "variant": "q8"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "capturedAt": "2026-08-12T10:45:55Z",
+      "diagnostics": {
+        "adapter": "memory-mlx-adapter:ltx-2-3-staged-video",
+        "blockers": [
+          "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "preRungActiveAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "preRungCacheAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "conditioningActivePeak",
+            "unit": "bytes",
+            "value": 35678641896
+          },
+          {
+            "name": "denoiseActivePeak",
+            "unit": "bytes",
+            "value": 34769752780
+          },
+          {
+            "name": "decodeActivePeak",
+            "unit": "bytes",
+            "value": 33264924644
+          },
+          {
+            "name": "overallAllocatorEnvelope",
+            "unit": "bytes",
+            "value": 141365948256
+          },
+          {
+            "name": "predictedOverallCeiling",
+            "unit": "bytes",
+            "value": 37513854976
+          },
+          {
+            "name": "denoiseEntryActive",
+            "unit": "bytes",
+            "value": 20748527794
+          },
+          {
+            "name": "decodeEntryActive",
+            "unit": "bytes",
+            "value": 1028354776
+          },
+          {
+            "name": "stagedGemmaBytes",
+            "unit": "bytes",
+            "value": 26388550536
+          },
+          {
+            "name": "stagedConnectorBytes",
+            "unit": "bytes",
+            "value": 6344493078
+          },
+          {
+            "name": "stagedTextEncoderBytes",
+            "unit": "bytes",
+            "value": 32733043614
+          },
+          {
+            "name": "stagedTransformerBytes",
+            "unit": "bytes",
+            "value": 20614103249
+          },
+          {
+            "name": "costagedGiantsBytes",
+            "unit": "bytes",
+            "value": 53347146863
+          },
+          {
+            "name": "tierArtifactBytes",
+            "unit": "bytes",
+            "value": 29728713314
+          },
+          {
+            "name": "warmRepeatPeak",
+            "unit": "bytes",
+            "value": 39594254278
+          },
+          {
+            "name": "warmRepeatPostCleanupActive",
+            "unit": "bytes",
+            "value": 3268192472
+          },
+          {
+            "name": "warmRepeatPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "renderedFrames",
+            "unit": "count",
+            "value": 241
+          },
+          {
+            "name": "latentTemporalDepth",
+            "unit": "count",
+            "value": 31
+          },
+          {
+            "name": "latentTokens",
+            "unit": "count",
+            "value": 11904
+          },
+          {
+            "name": "outputFps",
+            "unit": "count",
+            "value": 24
+          },
+          {
+            "name": "audioTrackDecoded",
+            "unit": "count",
+            "value": 1
+          },
+          {
+            "name": "decodeTilingEngaged",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "decodeWritableFrameCap",
+            "unit": "count",
+            "value": 682
+          },
+          {
+            "name": "decodeTileSpatialPx",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "decodeTileFrames",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "mlxMemoryLimitBytes",
+            "unit": "bytes",
+            "value": 130567005798
+          },
+          {
+            "name": "negativeMutationMaximumErrorPer255",
+            "unit": "count",
+            "value": 192
+          },
+          {
+            "name": "negativeMutationMeanErrorPer255",
+            "unit": "count",
+            "value": 75
+          },
+          {
+            "name": "negativeMutationRootMeanSquareErrorPer255",
+            "unit": "count",
+            "value": 83
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.5.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-f3ef6ea4a4033293f99f",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/ltx-2.3-mlx@01df27d308466533aa09d251e3aebdcc627d07eb:q8+gemma",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-2b60fd6c33dff5608f67",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 35678641896,
+          "allocatorBytes": 39497762710,
+          "reclaimableBytes": 3819120814
+        },
+        "decode": {
+          "activeBytes": 33264924644,
+          "allocatorBytes": 138952231004,
+          "reclaimableBytes": 105687306360
+        },
+        "denoise": {
+          "activeBytes": 34769752780,
+          "allocatorBytes": 34769752780,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 35678641896,
+          "allocatorBytes": 141365948256,
+          "reclaimableBytes": 105687306360
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 37513854976,
+        "decode": 34963718144,
+        "denoise": 36574330880,
+        "overall": 37513854976
+      },
+      "quality": {
+        "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier and loaded provider; cold measured clip versus a warm unscoped repeat, compared over every frame",
+        "identicalInputs": true,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0.011764705882352941,
+        "meanError": 0,
+        "meanErrorThreshold": 0.00392156862745098,
+        "result": "passed",
+        "rootMeanSquareError": 0,
+        "rootMeanSquareErrorThreshold": 0.0058823529411764705
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3",
+          "dirty": false,
+          "revision": "b965641e388f4db646e4c60ab3f75219737e2cc8"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:acbf5da17129d904271698488eb6e47deaf2756ee60e49024eb4fbbbc430d20a",
+          "revision": "817cf55097a69163632684cfbf3be667747ff256"
+        }
+      },
+      "scenarios": [
+        {
+          "name": "exact_fit",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the MLX LTX-2.3 base-only text-to-video path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "gated",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency"
+        ],
+        "parameters": {},
+        "rung": "staged_residency"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 241,
+          "height": 512,
+          "width": 768
+        },
+        "mode": "text_to_video",
+        "modelId": "ltx_2_3",
+        "overlay": "none",
+        "provider": "ltx_2_3",
+        "tier": "q8"
+      }
+    },
+    {
+      "artifact": {
+        "repository": "SceneWorks/ltx-2.3-mlx",
+        "resolvedRevision": "01df27d308466533aa09d251e3aebdcc627d07eb",
+        "variant": "q8"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "capturedAt": "2026-08-12T08:28:21Z",
+      "diagnostics": {
+        "adapter": "memory-mlx-adapter:ltx-2-3-staged-video",
+        "blockers": [
+          "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "preRungActiveAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "preRungCacheAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "conditioningActivePeak",
+            "unit": "bytes",
+            "value": 35573730024
+          },
+          {
+            "name": "denoiseActivePeak",
+            "unit": "bytes",
+            "value": 28508335644
+          },
+          {
+            "name": "decodeActivePeak",
+            "unit": "bytes",
+            "value": 18070892912
+          },
+          {
+            "name": "overallAllocatorEnvelope",
+            "unit": "bytes",
+            "value": 108489758764
+          },
+          {
+            "name": "predictedOverallCeiling",
+            "unit": "bytes",
+            "value": 37379637248
+          },
+          {
+            "name": "denoiseEntryActive",
+            "unit": "bytes",
+            "value": 20772936098
+          },
+          {
+            "name": "decodeEntryActive",
+            "unit": "bytes",
+            "value": 1024749096
+          },
+          {
+            "name": "stagedGemmaBytes",
+            "unit": "bytes",
+            "value": 26388550536
+          },
+          {
+            "name": "stagedConnectorBytes",
+            "unit": "bytes",
+            "value": 6344493078
+          },
+          {
+            "name": "stagedTextEncoderBytes",
+            "unit": "bytes",
+            "value": 32733043614
+          },
+          {
+            "name": "stagedTransformerBytes",
+            "unit": "bytes",
+            "value": 20614103249
+          },
+          {
+            "name": "costagedGiantsBytes",
+            "unit": "bytes",
+            "value": 53347146863
+          },
+          {
+            "name": "tierArtifactBytes",
+            "unit": "bytes",
+            "value": 29728713314
+          },
+          {
+            "name": "warmRepeatPeak",
+            "unit": "bytes",
+            "value": 39594178334
+          },
+          {
+            "name": "warmRepeatPostCleanupActive",
+            "unit": "bytes",
+            "value": 3268116528
+          },
+          {
+            "name": "warmRepeatPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "renderedFrames",
+            "unit": "count",
+            "value": 121
+          },
+          {
+            "name": "latentTemporalDepth",
+            "unit": "count",
+            "value": 16
+          },
+          {
+            "name": "latentTokens",
+            "unit": "count",
+            "value": 6144
+          },
+          {
+            "name": "outputFps",
+            "unit": "count",
+            "value": 30
+          },
+          {
+            "name": "audioTrackDecoded",
+            "unit": "count",
+            "value": 1
+          },
+          {
+            "name": "decodeTilingEngaged",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "decodeWritableFrameCap",
+            "unit": "count",
+            "value": 682
+          },
+          {
+            "name": "decodeTileSpatialPx",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "decodeTileFrames",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "mlxMemoryLimitBytes",
+            "unit": "bytes",
+            "value": 130567005798
+          },
+          {
+            "name": "negativeMutationMaximumErrorPer255",
+            "unit": "count",
+            "value": 192
+          },
+          {
+            "name": "negativeMutationMeanErrorPer255",
+            "unit": "count",
+            "value": 92
+          },
+          {
+            "name": "negativeMutationRootMeanSquareErrorPer255",
+            "unit": "count",
+            "value": 106
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.5.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-f6e97ce0817a6f697d1d",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/ltx-2.3-mlx@01df27d308466533aa09d251e3aebdcc627d07eb:q8+gemma",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-4eaa2bdcac85ce702e0a",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 35573730024,
+          "allocatorBytes": 37533267398,
+          "reclaimableBytes": 1959537374
+        },
+        "decode": {
+          "activeBytes": 18070892912,
+          "allocatorBytes": 90986921652,
+          "reclaimableBytes": 72916028740
+        },
+        "denoise": {
+          "activeBytes": 28508335644,
+          "allocatorBytes": 28508335644,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 35573730024,
+          "allocatorBytes": 108489758764,
+          "reclaimableBytes": 72916028740
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 37379637248,
+        "decode": 18991808512,
+        "denoise": 29997662208,
+        "overall": 37379637248
+      },
+      "quality": {
+        "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier and loaded provider; cold measured clip versus a warm unscoped repeat, compared over every frame",
+        "identicalInputs": true,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0.011764705882352941,
+        "meanError": 0,
+        "meanErrorThreshold": 0.00392156862745098,
+        "result": "passed",
+        "rootMeanSquareError": 0,
+        "rootMeanSquareErrorThreshold": 0.0058823529411764705
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3",
+          "dirty": false,
+          "revision": "b965641e388f4db646e4c60ab3f75219737e2cc8"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:ab6a83611a22fb59f42b152718be7b30777be731311f906814e0b225002c6771",
+          "revision": "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+        }
+      },
+      "scenarios": [
+        {
+          "name": "exact_fit",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "the pinned mlx-gen-ltx crate registers no MemoryStrategyContract at all, so it exposes no admission check, no calibration identity and no request scope: the exact_fit, unknown_budget, stale_evidence, warm_repeat, cancel and error scenarios have no seam to run against and this receipt stays gated. Real-weight memory, the staged-residency bound, warm repeat determinism and its negative mutation are attested in observedMemory, quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the MLX LTX-2.3 base-only text-to-video path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "gated",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency"
+        ],
+        "parameters": {},
+        "rung": "staged_residency"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 121,
+          "height": 512,
+          "width": 768
+        },
+        "mode": "text_to_video",
+        "modelId": "ltx_2_3",
+        "overlay": "none",
+        "provider": "ltx_2_3",
+        "tier": "q8"
+      }
+    }
+  ],
+  "schemaVersion": 5,
+  "sourceSessions": []
+}
