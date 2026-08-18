@@ -191,11 +191,15 @@ fn valid_local_artifacts_offers_only_loadable_published_entries() {
     let source = scratch.path().join("source");
     let data = scratch.path().join("data");
     std::fs::create_dir(&source).unwrap();
-    assert!(ResolvedCacheStore::valid_local_artifacts(&data).is_empty());
+    assert!(ResolvedCacheStore::valid_local_artifacts(&data)
+        .artifacts
+        .is_empty());
 
     let store = ResolvedCacheStore::open(&data).unwrap();
     // An uninitialized-but-open cache offers nothing.
-    assert!(ResolvedCacheStore::valid_local_artifacts(&data).is_empty());
+    assert!(ResolvedCacheStore::valid_local_artifacts(&data)
+        .artifacts
+        .is_empty());
 
     // An entry still materializing is never a candidate: its bytes are not published yet.
     let in_flight = hub_layout_candidate(&source, REVISION_B);
@@ -203,9 +207,13 @@ fn valid_local_artifacts_offers_only_loadable_published_entries() {
         ReservationOutcome::Acquired(reservation) => reservation,
         _ => panic!("fixture reservation must acquire"),
     };
-    assert!(ResolvedCacheStore::valid_local_artifacts(&data).is_empty());
+    assert!(ResolvedCacheStore::valid_local_artifacts(&data)
+        .artifacts
+        .is_empty());
     drop(reservation);
-    assert!(ResolvedCacheStore::valid_local_artifacts(&data).is_empty());
+    assert!(ResolvedCacheStore::valid_local_artifacts(&data)
+        .artifacts
+        .is_empty());
 
     // A published hub-layout bundle IS a candidate.
     let candidate = hub_layout_candidate(&source, REVISION_A);
@@ -223,10 +231,13 @@ fn valid_local_artifacts_offers_only_loadable_published_entries() {
         other => panic!("fixture bundle was not published: {other:?}"),
     };
     let offered = ResolvedCacheStore::valid_local_artifacts(&data);
-    assert_eq!(offered, vec![published.artifact.clone()]);
+    assert_eq!(offered.artifacts, vec![published.artifact.clone()]);
+    assert!(offered.rejections.is_empty());
 
     // A published bundle stored in any other layout cannot be handed to the shared snapshot
-    // resolvers, so it is not offered even though the store considers it complete.
+    // resolvers, so it is not offered even though the store considers it complete — and it is
+    // REPORTED as an unsupported shape rather than dropped, so the guard can name it. Dropping it
+    // here is what made the local-tier-unsupported class unreachable for the case it names.
     let legacy = source_candidate(&scratch.path().join("legacy-source"), REVISION_B);
     match materializer
         .materialize(
@@ -240,9 +251,16 @@ fn valid_local_artifacts_offers_only_loadable_published_entries() {
         MaterializationOutcome::Published(_) => {}
         other => panic!("legacy fixture was not published: {other:?}"),
     }
-    assert_eq!(
-        ResolvedCacheStore::valid_local_artifacts(&data),
-        vec![published.artifact]
+    let scanned = ResolvedCacheStore::valid_local_artifacts(&data);
+    assert_eq!(scanned.artifacts, vec![published.artifact]);
+    assert_eq!(scanned.rejections.len(), 1, "{:?}", scanned.rejections);
+    assert_eq!(scanned.rejections[0].revision, REVISION_B);
+    assert!(
+        scanned.rejections[0]
+            .reason
+            .contains("source-library layout"),
+        "{}",
+        scanned.rejections[0].reason
     );
 }
 

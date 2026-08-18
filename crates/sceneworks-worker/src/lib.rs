@@ -1772,11 +1772,28 @@ async fn run_utility_job(
     let result = with_shutdown_flag(shutdown.clone(), async {
         // sc-19708: the ONE pre-loader guard. Typed model-source admission happens here for every
         // job type, before any handler runs; handlers never carry availability or cache policy.
-        let source_guard = external_library_runtime::RuntimeSourceGuard::begin(
-            &job.job_type,
-            &job.payload,
-            settings,
-        )
+        //
+        // sc-19707: run it on the BLOCKING pool. The guard walks the resolved-cache journal, stats
+        // whole closures, and — when it leases a local bundle — takes the entry's shared artifact
+        // lock through the blocking `FileExt::lock_shared`. An evictor holding that lock
+        // exclusively would otherwise stall this runtime worker thread, not just this job.
+        let guard_job_type = job.job_type.clone();
+        let guard_payload = job.payload.clone();
+        let guard_settings = settings.clone();
+        let source_guard = tokio::task::spawn_blocking(move || {
+            external_library_runtime::RuntimeSourceGuard::begin(
+                &guard_job_type,
+                &guard_payload,
+                &guard_settings,
+            )
+        })
+        .await
+        .map_err(|error| {
+            (
+                "Model source unavailable.",
+                WorkerError::Io(std::io::Error::other(error.to_string())),
+            )
+        })?
         .map_err(|error| ("Model source unavailable.", error))?;
         let dispatch_result = match job.job_type {
             JobType::Placeholder => run_placeholder_job(api, settings, &job, &shutdown)

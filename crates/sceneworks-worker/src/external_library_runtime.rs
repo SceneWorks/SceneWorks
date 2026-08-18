@@ -27,22 +27,32 @@ use sceneworks_core::model_artifacts::artifact_selection::{
     requested_runtime_variant, selected_requirements_for_model,
 };
 use sceneworks_core::model_artifacts::external_library::{
-    resolve_model_availability, ExternalSourceSession, ModelAvailability, ModelResolution,
+    resolve_model_availability, ExternalArtifactRequirement, ExternalSourceSession,
+    ModelAvailability, ModelResolution,
 };
-use sceneworks_core::model_artifacts::local_preference::ActiveLocalArtifacts;
+use sceneworks_core::model_artifacts::local_preference::{
+    ActiveLocalArtifacts, LocalArtifactOverlayEntry,
+};
 use sceneworks_core::model_artifacts::resolved_cache::{ResolvedCacheLease, ResolvedCacheStore};
-use sceneworks_core::model_artifacts::{ModelArtifactResolver, ResolvedModelArtifact};
+use sceneworks_core::model_artifacts::ModelArtifactResolver;
 use serde_json::json;
+use std::path::PathBuf;
 use tracing::Level;
 
 #[derive(Debug)]
 pub(crate) struct RuntimeSourceGuard {
     resolutions: Vec<ModelResolution>,
     sessions: Vec<ExternalSourceSession>,
-    /// The process-wide local-tier preference scopes, one per locally served artifact. Declared
-    /// BEFORE the leases so field drop order stops serving local paths first and only then
-    /// releases the leases protecting those bytes — the reverse of acquisition.
-    local_scopes: Vec<ActiveLocalArtifacts>,
+    /// The ONE process-wide local-tier preference scope for this job, holding exactly the
+    /// `(repository, revision)` pairs the guard selected. Declared BEFORE the leases so field drop
+    /// order stops serving local paths first and only then releases the leases protecting those
+    /// bytes — the reverse of acquisition.
+    ///
+    /// One scope rather than one per model is load-bearing, not tidiness: the coverage decision is
+    /// made across the WHOLE job, so a per-model scope could install a bundle for one model that a
+    /// sibling model must not be served from, and installing them one at a time leaves a narrower
+    /// bundle serving the process while a later model falls back.
+    local_scope: Option<ActiveLocalArtifacts>,
     /// Cross-process cache leases (one per locally served artifact) held for the whole job. Each
     /// holds the entry's shared artifact lock, so an evictor taking that lock exclusively — even
     /// non-blockingly, and even when it re-verifies under the lock — cannot remove bytes a load is
@@ -92,10 +102,26 @@ impl RuntimeSourceGuard {
         // disabled or uninitialized, and — by construction of the provider — never containing an
         // entry that is torn, unverifiable, or in a shape the runtime cannot serve, so a partial
         // local copy can only ever move the load back to the source tier.
-        let local_artifacts = local_resolved_artifacts(settings);
-        let mut resolutions = Vec::new();
-        let mut cache_leases = Vec::new();
-        let mut local_scopes = Vec::new();
+        let local_scan = local_resolved_artifacts(settings);
+        // A bundle whose SHAPE the local tier cannot serve is the one rejection class a user can
+        // act on, so it is named here rather than dropped at the scan.
+        for rejection in &local_scan.rejections {
+            emit_event_value(
+                Level::WARN,
+                json!({
+                    "event": "resolved_cache_local_tier_unsupported",
+                    "cacheKey": rejection.cache_key,
+                    "repository": rejection.repository,
+                    "revision": rejection.revision,
+                    "reason": rejection.reason,
+                }),
+            );
+        }
+        let local_artifacts = local_scan.artifacts;
+        // PASS 1 — resolve every model entry WITH local candidates, keeping the selected closure
+        // beside each resolution. Nothing is leased and nothing is served yet: which pairs may be
+        // served at all cannot be known until every entry in the job has been resolved.
+        let mut plans: Vec<EntryPlan> = Vec::new();
         for entry in &model_entries {
             let has_hf_downloads = entry
                 .get("downloads")
@@ -129,38 +155,31 @@ impl RuntimeSourceGuard {
                 requested_variant.as_deref(),
                 &settings.data_dir,
             );
-            let mut resolution = resolve_model_availability(
+            let resolution = resolve_model_availability(
                 &settings.data_dir,
                 &configured_library,
                 &selected.requirements,
                 selected.receipt_backed,
                 &local_artifacts,
             );
-            // Local preference is only real once the artifact is LEASED and actually reachable
-            // through the shared snapshot resolvers. Anything that prevents either — a vanished or
-            // concurrently evicted entry, a bundle another scope already serves — falls the whole
-            // model back to the authoritative source tier by RE-RESOLVING without local
-            // candidates, so the fallback keeps every typed disconnect/incomplete guarantee
-            // instead of proceeding on a promise the runtime cannot keep.
-            if resolution.availability == ModelAvailability::LocalReady {
-                match admit_local_artifact(settings, resolution.local_artifact.as_ref()) {
-                    Some((lease, scope)) => {
-                        cache_leases.push(lease);
-                        local_scopes.push(scope);
-                    }
-                    None => {
-                        resolution = resolve_model_availability(
-                            &settings.data_dir,
-                            &configured_library,
-                            &selected.requirements,
-                            selected.receipt_backed,
-                            &[],
-                        );
-                    }
-                }
-            }
-            if !resolutions.contains(&resolution) {
-                resolutions.push(resolution);
+            plans.push(EntryPlan {
+                requirements: selected.requirements,
+                receipt_backed: selected.receipt_backed,
+                resolution,
+            });
+        }
+
+        // PASSES 2 and 3 — decide which `(repository, revision)` pairs the whole job may serve
+        // locally, take the leases behind exactly those, and re-resolve every model that did not
+        // get its ENTIRE closure served. This is the only layer that can see every model a job
+        // loads, and therefore the only layer that can answer the coverage question at all.
+        let (local_scope, cache_leases) =
+            select_local_tier(settings, &configured_library, &mut plans);
+
+        let mut resolutions: Vec<ModelResolution> = Vec::new();
+        for plan in plans {
+            if !resolutions.contains(&plan.resolution) {
+                resolutions.push(plan.resolution);
             }
         }
 
@@ -219,7 +238,7 @@ impl RuntimeSourceGuard {
         Ok(Self {
             resolutions,
             sessions,
-            local_scopes,
+            local_scope,
             cache_leases,
         })
     }
@@ -228,7 +247,7 @@ impl RuntimeSourceGuard {
         Self {
             resolutions: Vec::new(),
             sessions: Vec::new(),
-            local_scopes: Vec::new(),
+            local_scope: None,
             cache_leases: Vec::new(),
         }
     }
@@ -240,7 +259,7 @@ impl RuntimeSourceGuard {
                 .map_err(|error| WorkerError::Io(std::io::Error::other(error.to_string())))?;
         }
         // Stop serving local paths before the leases protecting them are released.
-        self.local_scopes.clear();
+        self.local_scope = None;
         for lease in self.cache_leases.drain(..) {
             // The promotion boundary for an artifact that just served a real load. Its own
             // entry is already published, so this only records the successful use.
@@ -289,26 +308,284 @@ impl RuntimeSourceGuard {
     }
 }
 
-/// Every VALID app-owned resolved artifact on this host, or nothing when the resolved cache is
-/// switched off. Read-only: enumeration never creates a cache session and never stamps usage, so
-/// judging availability cannot look like using a model.
-fn local_resolved_artifacts(settings: &Settings) -> Vec<ResolvedModelArtifact> {
+/// One model entry's pass-1 outcome: the resolution, plus the SELECTED closure that produced it.
+///
+/// The closure is kept here and never re-read off the resolution, because
+/// `ModelResolution::local_ready` deliberately carries `requirements: Vec::new()` — a local-ready
+/// resolution names an artifact, not a source-library closure. Coverage and the pass-3 fallback
+/// both need the real requirement list, so losing it to the resolution would make every
+/// locally-resolved model look like it required nothing at all.
+struct EntryPlan {
+    requirements: Vec<ExternalArtifactRequirement>,
+    receipt_backed: bool,
+    resolution: ModelResolution,
+}
+
+/// Every VALID app-owned resolved artifact on this host, plus the entries rejected for a shape the
+/// local tier cannot serve. Empty when the resolved cache is switched off. Read-only: enumeration
+/// never creates a cache session and never stamps usage, so judging availability cannot look like
+/// using a model.
+fn local_resolved_artifacts(
+    settings: &Settings,
+) -> sceneworks_core::model_artifacts::resolved_cache::LocalArtifactScan {
     if !settings.resolved_cache_policy().enabled {
-        return Vec::new();
+        return Default::default();
     }
     ResolvedCacheStore::valid_local_artifacts(&settings.data_dir)
 }
 
-/// Take the runtime lease on one locally resolved artifact and start serving it, or `None` when it
-/// cannot be served after all (concurrently evicted, no longer complete, or a scope for the same
-/// snapshot is already active). Both halves are acquired together so a scope can never outlive the
-/// lease that protects the bytes behind it.
-fn admit_local_artifact(
+/// Decide the job's local tier, take the leases behind it, and install the one preference scope.
+///
+/// # The rule
+///
+/// > A `(repository, revision)` pair is served locally **iff** one leased bundle holds a SUPERSET
+/// > of the union of file requirements every model entry in this job needs from that pair.
+/// > Otherwise the pair is served to NOBODY and every model needing it re-resolves against the
+/// > authoritative source tier.
+///
+/// # Why it has to be here
+///
+/// The preference seam is directory-level: it answers `(repository, revision)` with a snapshot
+/// path, and once that path is out it cannot re-ask "does this bundle hold what THIS caller
+/// needs". So the question must be settled before any path is handed out, by the only layer that
+/// can see every model the job will load — this one. A per-model decision is precisely the defect:
+/// a job carrying `owner/matrix` q4 (bundled) and q8 (not bundled) would admit q4, install the
+/// overlay for `owner/matrix@REV`, and then resolve the q8 load into the q4 bundle root, which has
+/// no `q8/` subtree at all.
+///
+/// # The deliberate consequence
+///
+/// In that same q4+q8 job the q4 model ALSO falls back to the source tier, because the union for
+/// the shared pair includes q8's files and no bundle covers it. That is the correct conservative
+/// answer, not a gap to engineer around: partial service of a pair is exactly what cannot be made
+/// safe at a directory-level seam.
+///
+/// A requirement carrying `revision: None` (a legacy receipt with no recorded snapshot) makes the
+/// WHOLE repository unserveable — there is no pair to compare coverage against, so no bundle can
+/// be shown to hold what that requirement needs.
+fn select_local_tier(
     settings: &Settings,
-    artifact: Option<&ResolvedModelArtifact>,
-) -> Option<(ResolvedCacheLease, ActiveLocalArtifacts)> {
-    let artifact = artifact?;
-    let cache_key = artifact.cache_key().ok()?;
+    configured_library: &std::path::Path,
+    plans: &mut [EntryPlan],
+) -> (Option<ActiveLocalArtifacts>, Vec<ResolvedCacheLease>) {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let re_resolve_to_source = |plans: &mut [EntryPlan]| {
+        for plan in plans.iter_mut() {
+            if plan.resolution.availability == ModelAvailability::LocalReady {
+                plan.resolution = resolve_model_availability(
+                    &settings.data_dir,
+                    configured_library,
+                    &plan.requirements,
+                    plan.receipt_backed,
+                    &[],
+                );
+            }
+        }
+    };
+
+    if !plans
+        .iter()
+        .any(|plan| plan.resolution.availability == ModelAvailability::LocalReady)
+    {
+        return (None, Vec::new());
+    }
+
+    // PASS 2a — the union of file requirements per pair, across ALL resolutions, local AND
+    // non-local. The non-local sibling is what poisons a pair: it is a model that will read this
+    // very snapshot from the source tier, so a bundle that does not hold its files cannot be
+    // allowed to answer for the pair at all.
+    let mut required: BTreeMap<(String, String), BTreeSet<PathBuf>> = BTreeMap::new();
+    let mut unserveable_repositories: BTreeSet<String> = BTreeSet::new();
+    for plan in plans.iter() {
+        for requirement in &plan.requirements {
+            let Some(revision) = requirement.revision.as_ref() else {
+                unserveable_repositories.insert(requirement.repository.clone());
+                continue;
+            };
+            required
+                .entry((requirement.repository.clone(), revision.clone()))
+                .or_default()
+                .extend(requirement.files.iter().cloned());
+        }
+    }
+
+    // PASS 2b — candidate entries, read from the SCANNED artifacts. NOTHING is leased yet, and
+    // that is deliberate: `acquire_complete` stamps `last_used_at` and takes the entry's shared
+    // artifact lock through the BLOCKING `FileExt::lock_shared`. Leasing a candidate that coverage
+    // then rejects would both mark an entry this job never reads as recently used — skewing
+    // retention's LRU against the entries that really served — and stall the whole guard behind an
+    // evictor holding a lock on a bundle no load here will ever touch.
+    let mut candidates: Vec<(String, LocalArtifactOverlayEntry)> = Vec::new();
+    // cache key -> repository, the only thing the lease needs from the artifact.
+    let mut candidate_repositories: BTreeMap<String, String> = BTreeMap::new();
+    for plan in plans.iter() {
+        if plan.resolution.availability != ModelAvailability::LocalReady {
+            continue;
+        }
+        let Some(artifact) = plan.resolution.local_artifact.as_ref() else {
+            continue;
+        };
+        let Ok(cache_key) = artifact.cache_key() else {
+            continue;
+        };
+        if candidate_repositories.contains_key(&cache_key) {
+            continue;
+        }
+        match sceneworks_core::model_artifacts::local_preference::overlay_entries_for_artifact(
+            artifact,
+        ) {
+            Ok(entries) => {
+                candidate_repositories
+                    .insert(cache_key.clone(), artifact.identity.repository.clone());
+                candidates.extend(entries.into_iter().map(|entry| (cache_key.clone(), entry)));
+            }
+            Err(error) => {
+                // The scan already reports this class, so reaching it here means the artifact the
+                // resolver chose differs from what the scan offered. Named the same way either way.
+                emit_event_value(
+                    Level::WARN,
+                    json!({
+                        "event": "resolved_cache_local_tier_unsupported",
+                        "cacheKey": cache_key,
+                        "repository": artifact.identity.repository,
+                        "revision": artifact.identity.revision,
+                        "reason": error.to_string(),
+                    }),
+                );
+            }
+        }
+    }
+
+    // PASS 2c — tentatively select at most one serving entry per pair, and only on full coverage.
+    let mut tentative: Vec<(String, LocalArtifactOverlayEntry)> = Vec::new();
+    for ((repository, revision), files) in &required {
+        if unserveable_repositories.contains(repository) {
+            continue;
+        }
+        let files: Vec<PathBuf> = files.iter().cloned().collect();
+        let Some((cache_key, entry)) = candidates.iter().find(|(_, entry)| {
+            entry.repository == *repository
+                && entry.revision == *revision
+                && sceneworks_core::model_artifacts::local_preference::entry_covers(entry, &files)
+        }) else {
+            continue;
+        };
+        tentative.push((cache_key.clone(), entry.clone()));
+    }
+
+    // PASS 2d — lease EXACTLY the winners, and re-prove every selection against the LEASED copy.
+    // The lease re-reads and re-validates the published entry under its shared artifact lock, so a
+    // selection that no longer matches that copy was made against a stale scan; its pair is dropped
+    // (the models needing it fall back in pass 3) rather than served on stale evidence.
+    let mut leases: Vec<ResolvedCacheLease> = Vec::new();
+    let mut selected_entries: Vec<LocalArtifactOverlayEntry> = Vec::new();
+    let mut served_pairs: BTreeSet<(String, String)> = BTreeSet::new();
+    let winners: BTreeSet<String> = tentative.iter().map(|(key, _)| key.clone()).collect();
+    for cache_key in &winners {
+        let Some(repository) = candidate_repositories.get(cache_key) else {
+            continue;
+        };
+        let Some(lease) = lease_local_artifact(settings, cache_key, repository) else {
+            continue;
+        };
+        let Ok(leased) =
+            sceneworks_core::model_artifacts::local_preference::overlay_entries_for_artifact(
+                lease.artifact(),
+            )
+        else {
+            continue;
+        };
+        let mut serves_a_pair = false;
+        for (_, entry) in tentative.iter().filter(|(key, _)| key == cache_key) {
+            // IDENTICAL, not merely present: the coverage decision was made about this exact
+            // snapshot root and file set, and anything else is a different bundle.
+            if !leased.contains(entry) {
+                continue;
+            }
+            served_pairs.insert((entry.repository.clone(), entry.revision.clone()));
+            selected_entries.push(entry.clone());
+            serves_a_pair = true;
+        }
+        if serves_a_pair {
+            leases.push(lease);
+        }
+    }
+
+    // PASS 3 — a model stays LocalReady only if EVERY pair in its closure was selected. Any other
+    // model re-resolves against the source tier, keeping every typed disconnect/incomplete
+    // guarantee instead of proceeding on a promise the runtime cannot keep.
+    for plan in plans.iter_mut() {
+        if plan.resolution.availability != ModelAvailability::LocalReady {
+            continue;
+        }
+        let fully_served = plan.requirements.iter().all(|requirement| {
+            requirement.revision.as_ref().is_some_and(|revision| {
+                served_pairs.contains(&(requirement.repository.clone(), revision.clone()))
+            })
+        });
+        if fully_served {
+            continue;
+        }
+        emit_event_value(
+            Level::INFO,
+            json!({
+                "event": "resolved_cache_local_tier_not_selected",
+                "repository": plan
+                    .requirements
+                    .iter()
+                    .find(|requirement| requirement.is_primary)
+                    .map(|requirement| requirement.repository.clone())
+                    .unwrap_or_default(),
+                "reason": "no leased bundle covers every file this job needs from one of the \
+                           model's (repository, revision) pairs",
+            }),
+        );
+        plan.resolution = resolve_model_availability(
+            &settings.data_dir,
+            configured_library,
+            &plan.requirements,
+            plan.receipt_backed,
+            &[],
+        );
+    }
+
+    if selected_entries.is_empty() {
+        return (None, Vec::new());
+    }
+    // ONE scope holding EXACTLY the selected entries. A pair in it is serveable to every consumer
+    // in the process by construction, including a model that fell back above for a DIFFERENT pair
+    // — the union that admitted this pair already covered that model's needs from it.
+    match sceneworks_core::model_artifacts::local_preference::prefer_local_snapshots(
+        selected_entries,
+    ) {
+        Ok(scope) => (Some(scope), leases),
+        Err(error) => {
+            // FAIL CLOSED, and actually close: nothing is installed, every lease is dropped, and
+            // every locally resolved model goes back to the source tier. Installing a partial
+            // scope here is the exact defect this function exists to prevent.
+            emit_event_value(
+                Level::WARN,
+                json!({
+                    "event": "resolved_cache_local_tier_not_selected",
+                    "reason": error.to_string(),
+                }),
+            );
+            re_resolve_to_source(plans);
+            (None, Vec::new())
+        }
+    }
+}
+
+/// Take the runtime lease on one locally resolved artifact, or `None` when it cannot be leased
+/// after all (concurrently evicted, no longer complete). The lease is what keeps the bytes behind a
+/// served path from being evicted mid-load, so it is always acquired BEFORE the scope that serves
+/// those bytes is installed.
+fn lease_local_artifact(
+    settings: &Settings,
+    cache_key: &str,
+    repository: &str,
+) -> Option<ResolvedCacheLease> {
     let store = cache_store(settings)?;
     let resolver = ModelArtifactResolver::new(sceneworks_core::hf_home::model_source_library(
         &settings.data_dir,
@@ -317,28 +594,10 @@ fn admit_local_artifact(
     // published entry under it, then stamps usage. An evictor that reaches the entry first holds
     // the exclusive lock, so this waits; an evictor that arrives afterwards finds the lock held
     // and must leave the entry alone.
-    let lease = store
-        .acquire_complete(&cache_key, &resolver, &artifact.identity.repository)
+    store
+        .acquire_complete(cache_key, &resolver, repository)
         .ok()
-        .flatten()?;
-    match sceneworks_core::model_artifacts::local_preference::prefer_local_artifacts(
-        std::slice::from_ref(lease.artifact()),
-    ) {
-        Ok(scope) => Some((lease, scope)),
-        Err(error) => {
-            emit_event_value(
-                Level::WARN,
-                json!({
-                    "event": "resolved_cache_local_tier_unsupported",
-                    "cacheKey": cache_key,
-                    "repository": artifact.identity.repository,
-                    "revision": artifact.identity.revision,
-                    "reason": error.to_string(),
-                }),
-            );
-            None
-        }
-    }
+        .flatten()
 }
 
 /// One long-lived cache session per data directory. Opening a session takes a durable session lock
@@ -613,10 +872,26 @@ mod tests {
         (settings(data), library, payload)
     }
 
+    /// Serialize every test that installs a local-tier preference scope. The scope is PROCESS-WIDE
+    /// by design (model paths resolve on engine threads far below the job task), so two of these
+    /// bodies running concurrently would read each other's overlay.
+    ///
+    /// `.cargo/config.toml` currently forces `RUST_TEST_THREADS=1`, which means a green run WITHOUT
+    /// this mutex proves nothing about the shared state these tests actually depend on — it only
+    /// proves the harness happened to serialize them. The mutex makes the dependency real and
+    /// keeps these tests honest if that setting ever changes.
+    fn overlay_guard() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Pin the configured source library AND switch the resolved cache on for the body. Under
     /// test `Settings::resolved_cache_policy` reads the same environment `Settings::from_env`
     /// would have read, so this is exactly the production "user enabled the cache" state.
     fn with_local_cache<T>(library: &Path, body: impl FnOnce() -> T) -> T {
+        let _serialized = overlay_guard();
         crate::test_env::temp_env_vars(
             &[
                 ("HF_HUB_CACHE", library.to_str().expect("utf-8 temp path")),
@@ -640,7 +915,35 @@ mod tests {
         variant: &str,
         files: &[&str],
     ) -> sceneworks_core::model_artifacts::ResolvedModelArtifact {
-        use sceneworks_core::model_artifacts::local_preference::hub_cache_member_destination;
+        let destination =
+            sceneworks_core::model_artifacts::local_preference::hub_cache_member_destination(
+                repository,
+                revision,
+                Path::new(""),
+            )
+            .unwrap();
+        publish_bundle_at(
+            data_dir,
+            library,
+            repository,
+            revision,
+            variant,
+            files,
+            destination,
+        )
+    }
+
+    /// `publish_bundle`, but with the bundle-relative member destination chosen by the caller — the
+    /// one property that decides whether the published bundle is a shape the local tier can serve.
+    fn publish_bundle_at(
+        data_dir: &Path,
+        library: &Path,
+        repository: &str,
+        revision: &str,
+        variant: &str,
+        files: &[&str],
+        destination: PathBuf,
+    ) -> sceneworks_core::model_artifacts::ResolvedModelArtifact {
         use sceneworks_core::model_artifacts::resolved_cache::{
             MaterializationCancellation, MaterializationOutcome, ResolvedCacheMaterializer,
         };
@@ -656,7 +959,7 @@ mod tests {
             source: identity.clone(),
             tier: Some(variant.to_owned()),
             source_subpath: PathBuf::new(),
-            destination: hub_cache_member_destination(repository, revision, Path::new("")).unwrap(),
+            destination,
             files: files
                 .iter()
                 .map(|file| ArtifactFile::new(*file).unwrap())
@@ -1060,7 +1363,7 @@ mod tests {
         };
         with_local_cache(&library, || {
             // Only the q4 tier is published locally.
-            publish_bundle(
+            let q4_bundle = publish_bundle(
                 &settings.data_dir,
                 &library,
                 "owner/matrix",
@@ -1068,14 +1371,17 @@ mod tests {
                 "q4",
                 &["q4/model.safetensors"],
             );
+            let q4_root = q4_bundle.location.root().to_path_buf();
             let guard =
                 RuntimeSourceGuard::begin(&JobType::ImageGenerate, &payload("q4"), &settings)
                     .unwrap();
             assert_eq!(
                 guard.resolutions()[0].availability,
-                ModelAvailability::LocalReady
+                ModelAvailability::LocalReady,
+                "control: the q4 selection IS served by the q4 bundle"
             );
             drop(guard);
+
             // The q8 selection must NOT be served by the q4 bundle even though both share one
             // repository and one immutable revision.
             let guard =
@@ -1085,11 +1391,28 @@ mod tests {
                 guard.resolutions()[0].availability,
                 ModelAvailability::ExternalReady
             );
+            // AND — the assertion this test used to skip by calling `drop(guard)` first — the PATH
+            // layer must agree. Availability said "source tier"; the bug lived one layer down,
+            // where the process-wide overlay would still redirect `owner/matrix@REV_A` into the q4
+            // bundle root, which holds no `q8/` subtree at all. With the guard STILL HELD:
+            let loaded =
+                crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, "owner/matrix")
+                    .expect("source snapshot");
+            assert!(
+                loaded.starts_with(&library),
+                "the q8 load must read the source library, not the q4 bundle: {}",
+                loaded.display()
+            );
+            assert!(!loaded.starts_with(&q4_root), "{}", loaded.display());
+            assert!(
+                loaded.join("q8/model.safetensors").is_file(),
+                "and the path it was handed must actually hold the q8 weights"
+            );
             drop(guard);
 
             // A bundle of another revision of the same model is likewise not this model.
             seed_snapshot(&library, "owner/other", REV_B, "model.safetensors");
-            publish_bundle(
+            let other_bundle = publish_bundle(
                 &settings.data_dir,
                 &library,
                 "owner/other",
@@ -1113,6 +1436,344 @@ mod tests {
                 guard.resolutions()[0].availability,
                 ModelAvailability::LocalReady,
                 "a bundle of a different revision must never satisfy a pinned request"
+            );
+            // Path layer, guard still held: the REV_B bundle must not answer for a REV_A request.
+            assert!(crate::model_jobs::huggingface_pinned_snapshot_dir(
+                &settings.data_dir,
+                "owner/other",
+                REV_A
+            )
+            .is_none_or(|path| !path.starts_with(other_bundle.location.root())));
+            drop(guard);
+        });
+    }
+
+    /// The DELIBERATE consequence of deciding coverage across the whole job: when a job carries
+    /// both the q4 and the q8 selection of one model and only q4 is bundled, the q4 model ALSO
+    /// falls back to the source tier.
+    ///
+    /// That is the correct conservative answer, not a gap. The two selections share one
+    /// `(repository, revision)` pair, and the preference seam is directory-level: it answers that
+    /// pair with ONE snapshot path and can never re-ask "which of you is asking" afterwards. Since
+    /// no bundle holds the union of both selections' files, the pair is served to NOBODY. Serving
+    /// q4 alone is exactly the defect — it would put the q8 load inside the q4 bundle root.
+    #[test]
+    fn a_pair_one_sibling_selection_does_not_cover_is_served_to_neither() {
+        let temp = TempDir::new().unwrap();
+        let data = temp.path().join("data");
+        let library = temp.path().join("external-hf");
+        seed_snapshot(&library, "owner/matrix", REV_A, "q4/model.safetensors");
+        seed_snapshot(&library, "owner/matrix", REV_A, "q8/model.safetensors");
+        write_receipts(
+            &data,
+            "owner/matrix",
+            json!([
+                { "repo": "owner/matrix", "modelId": "q4model", "variant": "q4",
+                  "resolvedFiles": ["q4/model.safetensors"], "snapshotRevision": REV_A },
+                { "repo": "owner/matrix", "modelId": "q8model", "variant": "q8",
+                  "resolvedFiles": ["q8/model.safetensors"], "snapshotRevision": REV_A }
+            ]),
+        );
+        let settings = settings(data);
+        let entry = |id: &str, variant: &str, glob: &str| {
+            json!({
+                "id": id,
+                "downloads": [{ "provider": "huggingface", "repo": "owner/matrix",
+                                "variant": variant, "default": true, "files": [glob] }]
+            })
+        };
+        // ONE job carrying BOTH selections of the same repository+revision.
+        let payload = json!({
+            "modelManifestEntry": entry("q4model", "q4", "q4/*"),
+            "modelManifestEntries": [entry("q8model", "q8", "q8/*")]
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        with_local_cache(&library, || {
+            let q4_bundle = publish_bundle(
+                &settings.data_dir,
+                &library,
+                "owner/matrix",
+                REV_A,
+                "q4",
+                &["q4/model.safetensors"],
+            );
+            let q4_root = q4_bundle.location.root().to_path_buf();
+
+            // Control: ALONE, the q4 selection is served from the bundle. This is what makes the
+            // assertion below about the union rather than about the bundle being unusable.
+            let alone = json!({ "modelManifestEntry": entry("q4model", "q4", "q4/*") })
+                .as_object()
+                .unwrap()
+                .clone();
+            let guard =
+                RuntimeSourceGuard::begin(&JobType::ImageGenerate, &alone, &settings).unwrap();
+            assert_eq!(
+                guard.resolutions()[0].availability,
+                ModelAvailability::LocalReady,
+                "control: the q4 selection alone IS served locally"
+            );
+            drop(guard);
+
+            let guard =
+                RuntimeSourceGuard::begin(&JobType::ImageGenerate, &payload, &settings).unwrap();
+            assert_eq!(guard.resolutions().len(), 2);
+            assert!(
+                guard
+                    .resolutions()
+                    .iter()
+                    .all(|resolution| resolution.availability != ModelAvailability::LocalReady),
+                "neither selection may be served when no bundle covers their shared pair: {:?}",
+                guard
+                    .resolutions()
+                    .iter()
+                    .map(|resolution| &resolution.availability)
+                    .collect::<Vec<_>>()
+            );
+            // The load-bearing half, at the path layer with the guard held: NOTHING resolves into
+            // the q4 bundle, so the q8 load cannot land in a root that has no `q8/` subtree.
+            let loaded =
+                crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, "owner/matrix")
+                    .expect("source snapshot");
+            assert!(!loaded.starts_with(&q4_root), "{}", loaded.display());
+            assert!(loaded.starts_with(&library), "{}", loaded.display());
+            assert!(loaded.join("q4/model.safetensors").is_file());
+            assert!(loaded.join("q8/model.safetensors").is_file());
+        });
+    }
+
+    /// Run `body` with `tracing` captured and return everything it emitted.
+    fn captured_events<T>(body: impl FnOnce() -> T) -> (T, String) {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+
+        // Concurrent subscriber-less tests also drive these callsites; without the floor their
+        // first hit can cache `Interest::never` and silently empty this capture (see test_env).
+        crate::test_env::install_tracing_interest_floor();
+
+        #[derive(Clone, Default)]
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl Write for Capture {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let capture = Capture::default();
+        let writer = capture.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .without_time()
+            .finish();
+        let value = tracing::subscriber::with_default(subscriber, body);
+        let logged = String::from_utf8_lossy(
+            &capture
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
+        .into_owned();
+        (value, logged)
+    }
+
+    /// A published, verified bundle whose LAYOUT the shared snapshot resolvers cannot be handed is
+    /// reported as the local-tier-unsupported class and the model stays on the source tier.
+    ///
+    /// This class was previously unreachable for exactly the case it names: the scan dropped
+    /// layout-unsupported entries with a bare `continue` before the guard ever saw them, so nothing
+    /// could emit it. The event is what tells a user their local copy will never serve.
+    #[test]
+    fn an_unsupported_bundle_shape_is_reported_and_the_model_stays_on_the_source_tier() {
+        let temp = TempDir::new().unwrap();
+        let (settings, library, payload) = installed_model(&temp);
+        with_local_cache(&library, || {
+            // Published and complete, but stored FLAT rather than in the source-library layout.
+            publish_bundle_at(
+                &settings.data_dir,
+                &library,
+                "owner/model",
+                REV_A,
+                "default",
+                &["model.safetensors"],
+                PathBuf::new(),
+            );
+
+            let (guard, logged) = captured_events(|| {
+                RuntimeSourceGuard::begin(&JobType::ImageGenerate, &payload, &settings).unwrap()
+            });
+
+            assert!(
+                logged.contains("resolved_cache_local_tier_unsupported"),
+                "the unsupported shape must be reported: {logged}"
+            );
+            assert!(
+                logged.contains("source-library layout"),
+                "and it must name WHY: {logged}"
+            );
+            assert_eq!(
+                guard.resolutions()[0].availability,
+                ModelAvailability::ExternalReady,
+                "an unsupported shape must never serve the load"
+            );
+            let loaded =
+                crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, "owner/model")
+                    .expect("source snapshot");
+            assert!(loaded.starts_with(&library), "{}", loaded.display());
+        });
+    }
+
+    /// "Where did this load's weights come from" is answered once per job, before any loader runs,
+    /// for BOTH tiers — and the coverage refusal is reported as its OWN class rather than borrowing
+    /// the unsupported-shape label, which describes a different fault entirely.
+    #[test]
+    fn the_serving_tier_is_reported_for_every_admitted_model() {
+        let temp = TempDir::new().unwrap();
+        let data = temp.path().join("data");
+        let library = temp.path().join("external-hf");
+        for repo in ["owner/bundled", "owner/external"] {
+            seed_snapshot(&library, repo, REV_A, "model.safetensors");
+            write_receipts(
+                &data,
+                repo,
+                json!([{ "repo": repo, "modelId": repo,
+                         "resolvedFiles": ["model.safetensors"], "snapshotRevision": REV_A }]),
+            );
+        }
+        let settings = settings(data);
+        let entry = |repo: &str| {
+            json!({
+                "id": repo,
+                "downloads": [{ "provider": "huggingface", "repo": repo, "revision": REV_A,
+                                "files": ["model.safetensors"] }]
+            })
+        };
+        let payload = json!({
+            "modelManifestEntry": entry("owner/bundled"),
+            "modelManifestEntries": [entry("owner/external")]
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        with_local_cache(&library, || {
+            // Only ONE of the two models is bundled locally, so one job reports both tiers. They
+            // are different repositories, so neither poisons the other's pair.
+            publish_bundle(
+                &settings.data_dir,
+                &library,
+                "owner/bundled",
+                REV_A,
+                "default",
+                &["model.safetensors"],
+            );
+
+            let (guard, logged) = captured_events(|| {
+                RuntimeSourceGuard::begin(&JobType::ImageGenerate, &payload, &settings).unwrap()
+            });
+
+            assert!(
+                logged.contains("model_source_tier_selected"),
+                "every admitted model must report its tier: {logged}"
+            );
+            assert!(
+                logged.contains("resolved_local"),
+                "the bundled model must report the app-owned tier: {logged}"
+            );
+            assert!(
+                logged.contains("source_library"),
+                "the unbundled model must report the source tier: {logged}"
+            );
+            assert!(
+                logged.contains("owner/bundled") && logged.contains("owner/external"),
+                "each report must name its repository: {logged}"
+            );
+            // The unsupported-shape class describes a bundle that cannot be served at all; nothing
+            // here is unsupported, so borrowing that label would be a lie.
+            assert!(
+                !logged.contains("resolved_cache_local_tier_unsupported"),
+                "an ordinary source-tier model is not an unsupported shape: {logged}"
+            );
+
+            let tiers: Vec<_> = guard
+                .resolutions()
+                .iter()
+                .map(|resolution| resolution.availability.clone())
+                .collect();
+            assert!(tiers.contains(&ModelAvailability::LocalReady), "{tiers:?}");
+            assert!(
+                tiers.contains(&ModelAvailability::ExternalReady),
+                "{tiers:?}"
+            );
+            guard.finish_success().unwrap();
+        });
+    }
+
+    /// A coverage refusal is reported as its own class. It is not an unsupported shape — the bundle
+    /// is perfectly well-formed; it simply does not hold everything THIS job needs from the pair.
+    #[test]
+    fn a_coverage_refusal_is_reported_as_its_own_class_not_as_an_unsupported_shape() {
+        let temp = TempDir::new().unwrap();
+        let data = temp.path().join("data");
+        let library = temp.path().join("external-hf");
+        seed_snapshot(&library, "owner/matrix", REV_A, "q4/model.safetensors");
+        seed_snapshot(&library, "owner/matrix", REV_A, "q8/model.safetensors");
+        write_receipts(
+            &data,
+            "owner/matrix",
+            json!([
+                { "repo": "owner/matrix", "modelId": "q4model", "variant": "q4",
+                  "resolvedFiles": ["q4/model.safetensors"], "snapshotRevision": REV_A },
+                { "repo": "owner/matrix", "modelId": "q8model", "variant": "q8",
+                  "resolvedFiles": ["q8/model.safetensors"], "snapshotRevision": REV_A }
+            ]),
+        );
+        let settings = settings(data);
+        let entry = |id: &str, variant: &str, glob: &str| {
+            json!({
+                "id": id,
+                "downloads": [{ "provider": "huggingface", "repo": "owner/matrix",
+                                "variant": variant, "default": true, "files": [glob] }]
+            })
+        };
+        let payload = json!({
+            "modelManifestEntry": entry("q4model", "q4", "q4/*"),
+            "modelManifestEntries": [entry("q8model", "q8", "q8/*")]
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        with_local_cache(&library, || {
+            publish_bundle(
+                &settings.data_dir,
+                &library,
+                "owner/matrix",
+                REV_A,
+                "q4",
+                &["q4/model.safetensors"],
+            );
+            let (_guard, logged) = captured_events(|| {
+                RuntimeSourceGuard::begin(&JobType::ImageGenerate, &payload, &settings).unwrap()
+            });
+            assert!(
+                logged.contains("resolved_cache_local_tier_not_selected"),
+                "the coverage refusal must be reported: {logged}"
+            );
+            assert!(
+                !logged.contains("resolved_cache_local_tier_unsupported"),
+                "a well-formed bundle that merely does not cover the job is NOT an unsupported \
+                 shape: {logged}"
             );
         });
     }

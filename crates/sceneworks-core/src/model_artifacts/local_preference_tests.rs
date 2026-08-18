@@ -18,6 +18,13 @@ fn overlay_guard() -> MutexGuard<'static, ()> {
         .unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Install a scope over one artifact's own snapshots. Production makes this decision at the WORKER
+/// GUARD across the whole job (see `select_local_tier`); at this layer the entries are simply the
+/// artifact's own, which is what every single-artifact case below means.
+fn prefer(artifact: &ResolvedModelArtifact) -> Result<ActiveLocalArtifacts, ArtifactContractError> {
+    prefer_local_snapshots(overlay_entries_for_artifact(artifact)?)
+}
+
 fn member(
     role: ArtifactMemberRole,
     component_id: Option<&str>,
@@ -175,7 +182,7 @@ fn an_active_scope_serves_every_member_and_drop_restores_the_source_tier() {
         primary_source
     );
 
-    let scope = prefer_local_artifacts(std::slice::from_ref(&artifact)).unwrap();
+    let scope = prefer(&artifact).unwrap();
     let (_, primary) = configured
         .discover_snapshot("owner/model", Some(PRIMARY_REV))
         .unwrap();
@@ -231,7 +238,7 @@ fn a_superseded_revision_is_served_from_the_source_tier() {
     let artifact = bundle(&temp.path().join("bundle"));
     let configured = ArtifactSourceLibrary::new_preferring_local(&library_root).unwrap();
 
-    let _scope = prefer_local_artifacts(std::slice::from_ref(&artifact)).unwrap();
+    let _scope = prefer(&artifact).unwrap();
     // Explicit pin at the newer revision: the bundle holds a different commit and must not answer.
     assert_eq!(
         configured
@@ -258,7 +265,7 @@ fn a_disconnected_library_falls_back_to_the_unique_leased_revision() {
     let configured = ArtifactSourceLibrary::new_preferring_local(&library_root).unwrap();
 
     assert!(configured.discover_snapshot("owner/model", None).is_err());
-    let scope = prefer_local_artifacts(std::slice::from_ref(&artifact)).unwrap();
+    let scope = prefer(&artifact).unwrap();
     let (identity, snapshot) = configured.discover_snapshot("owner/model", None).unwrap();
     assert_eq!(identity.revision, PRIMARY_REV);
     assert!(snapshot.join("q4/model.safetensors").is_file());
@@ -281,7 +288,7 @@ fn a_vanished_bundle_directory_is_never_answered_with() {
     );
     let artifact = bundle(&temp.path().join("bundle"));
     let configured = ArtifactSourceLibrary::new_preferring_local(&library_root).unwrap();
-    let _scope = prefer_local_artifacts(std::slice::from_ref(&artifact)).unwrap();
+    let _scope = prefer(&artifact).unwrap();
 
     std::fs::remove_dir_all(artifact.location.root()).unwrap();
     assert!(local_snapshot("owner/model", PRIMARY_REV).is_none());
@@ -295,47 +302,87 @@ fn a_vanished_bundle_directory_is_never_answered_with() {
     );
 }
 
-/// Two models sharing one component snapshot is normal — the shared encoder is materialized into
-/// both bundles. The second installation adopts the bundle already serving that snapshot instead
-/// of failing, so a job carrying both models keeps BOTH on the local tier.
+/// Two scopes may legitimately serve ONE shared component snapshot (a text encoder both models
+/// need). Ownership is REFCOUNTED, not single-owner: the first scope to drop must not un-serve a
+/// snapshot the second is still reading.
 #[test]
-fn a_second_bundle_adopts_the_snapshot_already_being_served() {
+fn a_shared_snapshot_stays_served_until_the_last_scope_drops() {
     let _serialized = overlay_guard();
     let temp = tempfile::tempdir().unwrap();
-    let first = bundle(&temp.path().join("bundle-a"));
-    let second = bundle(&temp.path().join("bundle-b"));
+    let artifact = bundle(&temp.path().join("bundle-a"));
+    let encoder_snapshot = artifact
+        .location
+        .root()
+        .join(format!("models--owner--encoder/snapshots/{COMPONENT_REV}"));
 
-    // One call carrying both, and two separate scopes, both succeed and serve the first bundle.
-    let together = prefer_local_artifacts(&[first.clone(), second.clone()]).unwrap();
+    let first = prefer(&artifact).unwrap();
+    let second = prefer(&artifact).unwrap();
     assert_eq!(
         local_snapshot("owner/encoder", COMPONENT_REV).unwrap(),
-        first
-            .location
-            .root()
-            .join(format!("models--owner--encoder/snapshots/{COMPONENT_REV}"))
+        encoder_snapshot
     );
-    drop(together);
 
-    let scope = prefer_local_artifacts(std::slice::from_ref(&first)).unwrap();
-    let adopted = prefer_local_artifacts(std::slice::from_ref(&second)).unwrap();
-    assert!(adopted.is_empty(), "the second scope installed nothing new");
-    drop(adopted);
-    drop(scope);
+    // The first holder leaves. A single-owner model would stop serving here and hand the second
+    // holder's still-running load a source path mid-flight.
+    drop(first);
+    assert_eq!(
+        local_snapshot("owner/encoder", COMPONENT_REV).unwrap(),
+        encoder_snapshot,
+        "a shared snapshot must stay served while another scope still holds it"
+    );
+
+    drop(second);
+    assert!(local_snapshot("owner/encoder", COMPONENT_REV).is_none());
     assert!(local_snapshot("owner/model", PRIMARY_REV).is_none());
 }
 
-/// A bundle whose file set for the shared snapshot is NARROWER than what the next artifact needs
-/// must not be adopted: that is how a load would be handed an incomplete snapshot. The second
-/// artifact fails to install and its caller keeps it on the source tier.
+/// The subset primitive the guard's coverage rule is built on. A pair may only be served by a
+/// bundle holding a SUPERSET of what is needed from it.
+#[test]
+fn entry_covers_is_a_strict_superset_test() {
+    let temp = tempfile::tempdir().unwrap();
+    let artifact = bundle(&temp.path().join("bundle"));
+    let entries = overlay_entries_for_artifact(&artifact).unwrap();
+    let encoder = entries
+        .iter()
+        .find(|entry| entry.repository == "owner/encoder")
+        .unwrap();
+
+    assert!(entry_covers(encoder, &[]));
+    assert!(entry_covers(
+        encoder,
+        &[PathBuf::from("encoder.safetensors")]
+    ));
+    assert!(!entry_covers(
+        encoder,
+        &[
+            PathBuf::from("encoder.safetensors"),
+            PathBuf::from("encoder.extra.safetensors"),
+        ]
+    ));
+    assert!(!entry_covers(encoder, &[PathBuf::from("absent.bin")]));
+}
+
+/// A SECOND bundle claiming a pair that a live scope is already serving is refused outright, and —
+/// the part that matters — the path layer keeps answering with the bundle that was already
+/// serving. Silently preferring one of two bundles for a pair is exactly how a load gets handed a
+/// snapshot verified for a different selection.
+///
+/// This test previously called `drop(scope)` BEFORE its assertion, which meant it never asked its
+/// own question: with no scope live, `local_snapshot` returns `None` whether or not the refused
+/// bundle was installed. The assertion below is made with the scope STILL HELD, at the path layer,
+/// which is where the defect lived.
 #[test]
 fn a_narrower_serving_bundle_is_never_adopted() {
     let _serialized = overlay_guard();
     let temp = tempfile::tempdir().unwrap();
     let narrow_root = temp.path().join("bundle-narrow");
     let mut narrow = bundle(&narrow_root);
-    let wide = bundle(&temp.path().join("bundle-wide"));
+    let wide_root = temp.path().join("bundle-wide");
+    let wide = bundle(&wide_root);
 
-    // The narrow bundle holds only ONE of the encoder's two files.
+    // The narrow bundle needs a second encoder file that the serving bundle does not hold, so the
+    // serving bundle is NARROWER than what this claim would require of the shared snapshot.
     let mut members = narrow.closure.members.clone();
     let encoder = members
         .iter_mut()
@@ -346,12 +393,18 @@ fn a_narrower_serving_bundle_is_never_adopted() {
         .push(ArtifactFile::new("encoder.extra.safetensors").unwrap());
     narrow.closure = ResolvedBundleClosure::new(members).unwrap();
 
-    let scope = prefer_local_artifacts(std::slice::from_ref(&wide)).unwrap();
-    let error = prefer_local_artifacts(std::slice::from_ref(&narrow)).unwrap_err();
-    assert!(
-        error.to_string().contains("does not hold every file"),
-        "{error}"
-    );
+    let scope = prefer(&wide).unwrap();
+    let error = prefer(&narrow).unwrap_err();
+    assert!(error.to_string().contains("already claims"), "{error}");
+
+    // WITH THE SCOPE STILL HELD: every consumer of the shared pair still reads the bundle that was
+    // serving, and nothing reads the refused one.
+    let served = local_snapshot("owner/encoder", COMPONENT_REV).unwrap();
+    assert!(served.starts_with(&wide_root), "{}", served.display());
+    assert!(!served.starts_with(&narrow_root), "{}", served.display());
+    let primary = local_snapshot("owner/model", PRIMARY_REV).unwrap();
+    assert!(primary.starts_with(&wide_root), "{}", primary.display());
+
     drop(scope);
     assert!(local_snapshot("owner/encoder", COMPONENT_REV).is_none());
 }
@@ -371,7 +424,7 @@ fn a_resolved_source_path_is_redirected_only_when_the_bundle_holds_it() {
         "q4/model.safetensors",
     );
     let artifact = bundle(&temp.path().join("bundle"));
-    let _scope = prefer_local_artifacts(std::slice::from_ref(&artifact)).unwrap();
+    let _scope = prefer(&artifact).unwrap();
 
     let redirected = redirect_source_library_path(&library_root, &source.join("q4")).unwrap();
     assert!(redirected.join("model.safetensors").is_file());

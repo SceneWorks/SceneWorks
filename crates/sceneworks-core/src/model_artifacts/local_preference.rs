@@ -14,9 +14,11 @@
 //! - Only the worker's pre-loader guard installs a preference scope, and only for artifacts it
 //!   holds a runtime lease on, so an artifact can never be evicted while a load reads it.
 //! - The scope is process-wide because model paths are resolved on engine threads and blocking
-//!   pools far below the async job task; the worker claim loop runs one job at a time. A second
-//!   installation covering a snapshot already being served adopts the serving bundle when it holds
-//!   every file needed, and otherwise fails closed (see [`prefer_local_artifacts`]).
+//!   pools far below the async job task; the worker claim loop runs one job at a time. Which
+//!   `(repository, revision)` pairs may be served at all is decided by the GUARD — the only layer
+//!   that can see every model a job will load — and handed here already decided (see
+//!   [`prefer_local_snapshots`]); a directory-level seam cannot re-ask "does this bundle hold what
+//!   THIS caller needs" once it has answered with a path.
 //! - Preference is keyed on the exact `(repository, immutable revision)` pair. A superseded
 //!   revision therefore never matches, and a bundle is never consulted for a revision it does not
 //!   contain — the source tier keeps serving those.
@@ -196,11 +198,7 @@ impl Drop for ActiveLocalArtifacts {
     fn drop(&mut self) {
         let mut active = lock_active();
         for entry in self.entries.iter() {
-            let Some(index) = active
-                .entries
-                .iter()
-                .position(|held| &held.entry == entry)
-            else {
+            let Some(index) = active.entries.iter().position(|held| &held.entry == entry) else {
                 continue;
             };
             if active.entries[index].holders > 1 {
@@ -286,12 +284,12 @@ pub fn local_snapshot(repository: &str, revision: &str) -> Option<PathBuf> {
     lock_active()
         .entries
         .iter()
-        .find(|entry| {
-            entry.repository == repository
-                && entry.revision == revision
-                && entry.snapshot_root.is_dir()
+        .find(|held| {
+            held.entry.repository == repository
+                && held.entry.revision == revision
+                && held.entry.snapshot_root.is_dir()
         })
-        .map(|entry| entry.snapshot_root.clone())
+        .map(|held| held.entry.snapshot_root.clone())
 }
 
 /// The leased local snapshot for `repository` when EXACTLY ONE revision of it is active. Used only
@@ -303,12 +301,15 @@ pub fn unique_local_snapshot(repository: &str) -> Option<(String, PathBuf)> {
     let mut matches = active
         .entries
         .iter()
-        .filter(|entry| entry.repository == repository && entry.snapshot_root.is_dir());
+        .filter(|held| held.entry.repository == repository && held.entry.snapshot_root.is_dir());
     let first = matches.next()?;
     if matches.next().is_some() {
         return None;
     }
-    Some((first.revision.clone(), first.snapshot_root.clone()))
+    Some((
+        first.entry.revision.clone(),
+        first.entry.snapshot_root.clone(),
+    ))
 }
 
 /// Rewrite an already-confined path that points into the configured source library so it reads
@@ -321,7 +322,8 @@ pub fn unique_local_snapshot(repository: &str) -> Option<(String, PathBuf)> {
 /// authoritative source path.
 pub fn redirect_source_library_path(source_library_root: &Path, path: &Path) -> Option<PathBuf> {
     let active = lock_active();
-    for entry in &active.entries {
+    for held in &active.entries {
+        let entry = &held.entry;
         let Ok(safe) = safe_repository_dir(&entry.repository) else {
             continue;
         };

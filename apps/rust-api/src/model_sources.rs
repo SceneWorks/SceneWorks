@@ -316,9 +316,13 @@ pub(crate) fn local_resolved_artifacts(state: &AppState) -> Vec<ResolvedModelArt
     if !state.settings.resolved_cache.enabled {
         return Vec::new();
     }
+    // Rejections are the worker guard's to report: it is the layer that emits the runtime's
+    // model-source observability, and the catalog would otherwise re-announce the same entry on
+    // every listing.
     sceneworks_core::model_artifacts::resolved_cache::ResolvedCacheStore::valid_local_artifacts(
         &state.settings.data_dir,
     )
+    .artifacts
 }
 
 /// The one availability judgement for a manifest entry on this host: exact selected closure
