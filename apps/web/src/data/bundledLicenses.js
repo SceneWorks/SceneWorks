@@ -23,6 +23,15 @@ import wanT2vA14bApache from "../../../desktop/licenses/wan2.2-t2v-a14b/Apache-2
 import ltxLicense from "../../../desktop/licenses/ltx-2.3/LTX-2-Community-License.txt?raw";
 import ltxGemma from "../../../desktop/licenses/ltx-2.3/Gemma-Terms.txt?raw";
 import ltx23IcLorasNotice from "../../../desktop/licenses/ltx-2.3-ic-loras/NOTICE.txt?raw";
+// LTX-2.5 (sc-18785, epic 18755): a DIFFERENT, later LTX-2.x Community License
+// (License date: August 11, 2026, vs 2.3's January 5, 2026 text — see the
+// ltx-2.5/NOTICE.txt diff) plus a Gemma-4-12B text encoder. Gemma 4 itself is
+// Apache-2.0 (not the restrictive Gemma Terms of Use that govern 2.3's Gemma
+// 3), with the separate Gemma Prohibited Use Policy still applying on top.
+import ltx25License from "../../../desktop/licenses/ltx-2.5/LTX-2-Community-License.txt?raw";
+import ltx25GemmaApache from "../../../desktop/licenses/ltx-2.5/Apache-2.0.txt?raw";
+import ltx25GemmaProhibitedUse from "../../../desktop/licenses/ltx-2.5/Gemma-Prohibited-Use-Policy.txt?raw";
+import ltx25Notice from "../../../desktop/licenses/ltx-2.5/NOTICE.txt?raw";
 // Audio model weights (epic 13400, sc-13402). All permissive (Apache-2.0 / MIT) —
 // downloaded on first use from the upstream Hugging Face repos and run natively
 // (Candle) on every platform.
@@ -133,6 +142,10 @@ const DOCUMENT_TEXT = {
   "ltx-2.3-license": ltxLicense,
   "ltx-2.3-gemma": ltxGemma,
   "ltx-2.3-ic-loras-notice": ltx23IcLorasNotice,
+  "ltx-2.5-license": ltx25License,
+  "ltx-2.5-gemma-apache": ltx25GemmaApache,
+  "ltx-2.5-gemma-prohibited-use": ltx25GemmaProhibitedUse,
+  "ltx-2.5-notice": ltx25Notice,
   "kokoro-82m-apache": kokoroApache,
   "moss-soundeffect-v2-apache": mossApache,
   "acestep-v15-turbo-mit": acestepMit,
