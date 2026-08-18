@@ -8,13 +8,14 @@ Source: https://ai.google.dev/gemma/prohibited_use_policy
 
 This policy applies to "Gemma" (the set of machine learning language models,
 trained model weights and parameters Google publishes under the Gemma
-program, including the Gemma-4-12B text encoder bundled with LTX-2.5) and to
-"Model Derivatives" of it. It applies regardless of which license governs a
-given Gemma release — Google states it applies to every model listed in its
-Gemma model catalog, and continues to apply to Gemma 4 even though Gemma 4
-itself is licensed under the Apache License 2.0 rather than Google's earlier,
-more restrictive Gemma Terms of Use (see Apache-2.0.txt in this directory,
-and the accompanying NOTICE.txt for why that distinction matters for LTX-2.5).
+program) and to "Model Derivatives" of it. The policy text itself is
+undated-per-release and generic — it does not name a specific Gemma version
+or scope itself to a particular license. SceneWorks conservatively applies
+it to the bundled Gemma-4-12B text encoder as well: it continues to sit
+alongside Gemma 4 in Google's own documentation even though Gemma 4 is
+licensed under the Apache License 2.0 rather than Google's earlier, more
+restrictive Gemma Terms of Use (see Apache-2.0.txt in this directory, and
+the accompanying NOTICE.txt for why that distinction matters for LTX-2.5).
 
 You may not use nor allow others to use Gemma or Model Derivatives to:
 
@@ -42,22 +43,22 @@ You may not use nor allow others to use Gemma or Model Derivatives to:
        - Attempts to override or circumvent safety filters or intentionally
          drive Gemma or Model Derivatives to act in a manner that
          contravenes this Gemma Prohibited Use Policy.
+       - Generation of content that may harm or promote the harm of
+         individuals or a group, such as: generating content that promotes
+         or encourages hatred; facilitating methods of harassment or
+         bullying to intimidate, abuse, or insult others; generating content
+         that facilitates, promotes, or incites violence; generating content
+         that facilitates, promotes, or encourages self harm; generating
+         personally identifying information for distribution or other
+         harms; tracking or monitoring people without their consent;
+         generating content that may have unfair or adverse impacts on
+         people, particularly impacts related to sensitive or protected
+         characteristics; or generating, gathering, processing, or inferring
+         sensitive personal or private information about individuals
+         without obtaining all rights, authorizations, and consents
+         required by applicable laws.
 
-  3. Generate content that may harm or promote the harm of individuals or a
-     group, such as: generating content that promotes or encourages hatred;
-     facilitating methods of harassment or bullying to intimidate, abuse, or
-     insult others; generating content that facilitates, promotes, or
-     incites violence; generating content that facilitates, promotes, or
-     encourages self harm; generating personally identifying information for
-     distribution or other harms; tracking or monitoring people without
-     their consent; generating content that may have unfair or adverse
-     impacts on people, particularly impacts related to sensitive or
-     protected characteristics; or generating, gathering, processing, or
-     inferring sensitive personal or private information about individuals
-     without obtaining all rights, authorizations, and consents required by
-     applicable laws.
-
-  4. Generate and distribute content intended to misinform, misrepresent or
+  3. Generate and distribute content intended to misinform, misrepresent or
      mislead, including: misrepresentation of the provenance of generated
      content by claiming content was created by a human, or represent
      generated content as original works, in order to deceive; generation of
@@ -73,7 +74,7 @@ You may not use nor allow others to use Gemma or Model Derivatives to:
      but not limited to, financial, legal, medical/health, or related
      professional practices.
 
-  5. Generate sexually explicit content, including content created for the
+  4. Generate sexually explicit content, including content created for the
      purposes of pornography or sexual gratification (e.g. sexual chatbots).
      Note that this does not include content created for scientific,
      educational, documentary, or artistic purposes.
