@@ -634,8 +634,18 @@ impl ResolvedCacheStore {
     }
 
     /// Classifies one entry for the retention pass. Complete, unpinned, unleased entries become
-    /// candidates; everything else is retained with a reason. Locks are dropped after
-    /// classification — `evict_candidate` re-verifies everything under fresh locks.
+    /// candidates; everything else is retained with a reason. No lock is carried out of here —
+    /// `evict_candidate` re-verifies everything under fresh locks.
+    ///
+    /// The exclusive metadata lock is scoped to the journal READ, and classification then runs
+    /// unlocked on the value that read returned (sc-19712 F-2). `GET /api/v1/model-cache` takes
+    /// the same per-entry lock, and the web UI polls it every 3 s; holding the lock across
+    /// classification blocked that endpoint for the whole sweep — measured at over 40 s with no
+    /// response, against 0.0038 s idle. Classification is advisory in any case: the entry's
+    /// protections are all re-proven inside [`Self::evict_candidate`] under fresh locks, which
+    /// rejects anything whose journal generation, state, pin, activity or source moved in
+    /// between, so a classification taken against a slightly older read cannot remove an entry
+    /// that has since become protected.
     fn scan_entry(
         &self,
         digest: &str,
@@ -643,11 +653,30 @@ impl ResolvedCacheStore {
         candidates: &mut Vec<EvictionCandidate>,
     ) -> Result<(), ResolvedCacheError> {
         let entry = self.inner.root.join("entries").join(digest);
-        let _metadata_lock = self.lock_metadata(digest)?;
-        match self.read_metadata_unlocked(digest) {
+        let journal = {
+            let _metadata_lock = self.lock_metadata(digest)?;
+            self.read_metadata_unlocked(digest)
+        };
+        #[cfg(test)]
+        run_scan_classification_observer();
+        match journal {
             Ok(JournalRead::Valid { metadata, .. }) => match metadata.state {
                 ResolvedCacheEntryState::Complete => {
-                    if let Err(error) = validate_complete_metadata(self, &metadata) {
+                    // Paths and sizes only (sc-19712 F-2). The full re-hash this replaced ran once
+                    // per complete entry on every 600 s checkpoint, scaled with total cache bytes
+                    // rather than with anything having changed, and took ≈ 20 min on a 5.57 GB
+                    // cache — longer than its own interval, which starves promotion and delays
+                    // worker shutdown. It bought exactly one thing the cheap mode does not: a
+                    // `RecoveryCandidate` label for a right-sized but content-altered bundle.
+                    // That label is a *report*, not a safety property — such an entry is refused
+                    // at the load boundary by `acquire_complete` regardless — and eviction safety
+                    // is untouched: `evict_candidate` still proves the source is a complete second
+                    // copy, by re-hashing every source file, before anything is removed.
+                    if let Err(error) = validate_complete_metadata_inner(
+                        self,
+                        &metadata,
+                        ContentVerification::PathsAndSizesOnly,
+                    ) {
                         report.retained.push(RetainedRecord {
                             cache_key: metadata.cache_key.clone(),
                             bytes: entry_bytes(&entry, &metadata),
@@ -704,8 +733,8 @@ impl ResolvedCacheStore {
                 }
             },
             Ok(JournalRead::Evicted { marker }) => {
-                // Finish a previously interrupted eviction; contention just defers it.
-                drop(_metadata_lock);
+                // Finish a previously interrupted eviction; contention just defers it. The
+                // metadata lock is already released by the scoped read above.
                 match self.try_finish_pending_eviction(digest) {
                     Ok(Some(finished)) => report.evicted.push(EvictedRecord {
                         cache_key: finished.cache_key,
@@ -1068,6 +1097,32 @@ fn set_source_hash_observer(observer: impl FnOnce() + 'static) {
 #[cfg(test)]
 fn run_source_hash_observer() {
     SOURCE_HASH_OBSERVER.with(|slot| {
+        if let Some(observer) = slot.borrow_mut().take() {
+            observer();
+        }
+    });
+}
+
+#[cfg(test)]
+thread_local! {
+    static SCAN_CLASSIFICATION_OBSERVER: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs once at the point the retention scan classifies an entry — after its journal has been read
+/// and the metadata lock released, while the rest of the classification is still to come. A test
+/// observes from here which locks are held, because this is exactly the window in which the status
+/// endpoint used to be blocked for the whole sweep (sc-19712 F-2).
+#[cfg(test)]
+fn set_scan_classification_observer(observer: impl FnOnce() + 'static) {
+    SCAN_CLASSIFICATION_OBSERVER.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(observer));
+    });
+}
+
+#[cfg(test)]
+fn run_scan_classification_observer() {
+    SCAN_CLASSIFICATION_OBSERVER.with(|slot| {
         if let Some(observer) = slot.borrow_mut().take() {
             observer();
         }

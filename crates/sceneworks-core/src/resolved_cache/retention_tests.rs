@@ -1373,6 +1373,113 @@ fn windows_sharing_violation_keeps_the_eviction_pending_until_it_converges() {
     assert_eq!(completed_audit_records(&store).len(), 1);
 }
 
+/// The retention scan must not hold an entry's exclusive metadata lock across classification
+/// (sc-19712 F-2).
+///
+/// `GET /api/v1/model-cache` reaches `ResolvedCacheStore::inspect`, which takes the same per-entry
+/// metadata lock, and the web UI polls that endpoint every 3 s. While the scan classified under the
+/// lock — with a full content re-hash inside it — the status endpoint had no response at 40 s on a
+/// 5.57 GB cache, against 0.0038 s idle, and the sweep recurs every 600 s for the life of the
+/// process. This observes, from inside the classification itself, that every entry's metadata lock
+/// is free at that moment, so a concurrent status read cannot be parked behind the sweep.
+///
+/// Classification is safe to take unlocked because it is advisory: `evict_candidate` re-proves the
+/// journal generation, state, pin, activity and source under fresh locks before anything is
+/// removed. The eviction here proves the sweep still does its job with the lock released.
+#[test]
+fn the_retention_scan_classifies_without_holding_the_lock_that_blocks_status_reads() {
+    let scratch = TempDir::new().unwrap();
+    let library = scratch.path().join("library");
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let candidate_a = flat_candidate(&library, "SceneWorks/m-a", REV_A, "q8", b"0123456789");
+    let candidate_b = flat_candidate(&library, "SceneWorks/m-b", REV_A, "q8", b"0123456789");
+    materialize_complete(&store, &library, &candidate_a);
+    materialize_complete(&store, &library, &candidate_b);
+    stamp_activity(&store, &candidate_a.cache_key, Some(1_000), 500);
+    stamp_activity(&store, &candidate_b.cache_key, Some(1_000), 500);
+
+    let lock_paths = [&candidate_a, &candidate_b]
+        .into_iter()
+        .map(|candidate| {
+            let digest = cache_key_digest(&candidate.cache_key).unwrap();
+            store
+                .root()
+                .join("locks")
+                .join(format!("{digest}.metadata.lock"))
+        })
+        .collect::<Vec<_>>();
+
+    let observed = Arc::new(AtomicBool::new(false));
+    let seen = Arc::new(AtomicBool::new(false));
+    let probe = {
+        let observed = Arc::clone(&observed);
+        let seen = Arc::clone(&seen);
+        let lock_paths = lock_paths.clone();
+        move || {
+            seen.store(true, Ordering::SeqCst);
+            observed.store(
+                lock_paths.iter().all(|path| {
+                    let handle = open_lock_file(path).unwrap();
+                    FileExt::try_lock_exclusive(&handle).is_ok()
+                }),
+                Ordering::SeqCst,
+            );
+        }
+    };
+    set_scan_classification_observer(probe);
+
+    let report = store.enforce_retention(&policy(1, 1), FAR_FUTURE).unwrap();
+    assert!(seen.load(Ordering::SeqCst), "the observer must have run");
+    assert!(
+        observed.load(Ordering::SeqCst),
+        "no entry's metadata lock may be held while the sweep classifies, or the UI-polled cache \
+         status endpoint blocks for the whole sweep"
+    );
+    assert!(
+        !report.evicted.is_empty(),
+        "the sweep must still evict with the lock released"
+    );
+}
+
+/// The sweep's scan phase judges on paths and sizes, not by re-hashing the cache (sc-19712 F-2).
+///
+/// The re-hash it replaced ran once per complete entry every 600 s, scaled with total cache bytes
+/// rather than with change, and took ≈ 20 min on a 5.57 GB cache — longer than its own interval,
+/// which starves promotion and blocks worker shutdown. The one thing it uniquely produced was a
+/// `RecoveryCandidate` *label* for a right-sized but content-altered bundle. That label is a
+/// report, not a protection: such a bundle is refused at the load boundary regardless, and removal
+/// is still gated on proving the source holds a complete second copy — which this eviction does.
+#[test]
+fn the_retention_scan_judges_on_paths_and_sizes_rather_than_rehashing_the_cache() {
+    let scratch = TempDir::new().unwrap();
+    let library = scratch.path().join("library");
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let candidate = flat_candidate(&library, "SceneWorks/m-a", REV_A, "q8", b"0123456789");
+    materialize_complete(&store, &library, &candidate);
+    stamp_activity(&store, &candidate.cache_key, Some(1_000), 500);
+
+    // Same length, different bytes: visible only to a content hash.
+    let bundle_file = entry_dir(&store, &candidate.cache_key)
+        .join("bundle")
+        .join("model.safetensors");
+    std::fs::write(&bundle_file, b"9876543210").unwrap();
+
+    let report = store.enforce_retention(&policy(1, 1), FAR_FUTURE).unwrap();
+    assert!(
+        !report
+            .retained
+            .iter()
+            .any(|record| record.hold == RetentionHold::RecoveryCandidate),
+        "the sweep must not re-hash the cache to classify: {:?}",
+        report.retained
+    );
+    assert_eq!(
+        report.evicted.len(),
+        1,
+        "the source is a proven complete second copy, so the entry is reclaimable: {report:?}"
+    );
+}
+
 /// Reads select a journal slot on paths and sizes; the LOAD path still re-hashes (sc-19711).
 ///
 /// The split exists because journal reads are on hot, user-facing surfaces — the catalog GET, the

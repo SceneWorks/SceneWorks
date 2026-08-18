@@ -46,11 +46,42 @@ pub(crate) struct ModelCatalogCache {
 struct ModelCatalogCacheState {
     generation: u64,
     snapshot: Option<(u64, Arc<Vec<Value>>)>,
+    /// Last observed resolved-cache publish key. `None` until the first observation, which is why
+    /// the first reading never counts as a change — an API that has not looked yet has nothing to
+    /// have gone stale against.
+    local_tier_key: Option<u64>,
 }
 
 impl ModelCatalogCache {
     pub(crate) fn invalidate(&self) {
         let mut state = self.state.lock();
+        state.generation = state.generation.wrapping_add(1);
+        state.snapshot = None;
+    }
+
+    /// Invalidates the snapshot when the resolved cache's published set has moved since the last
+    /// catalog read (sc-19712 F-4).
+    ///
+    /// Every other invalidation site is a mutation this process performed, but promotions are
+    /// published by the **worker**, in another process, so no in-process signal exists. Without
+    /// this the catalog kept serving a model's pre-promotion availability indefinitely — and
+    /// `modelLibraryUnavailable()` keys the Model Manager's blocked state on exactly that field,
+    /// so a model that had just completed a job with the drive unplugged was still presented as
+    /// needing the drive reconnected.
+    ///
+    /// A key check, not a timer: a TTL would leave the same wrong answer up for its whole window
+    /// and rebuild pointlessly for the rest of time. The key only moves when a bundle is published
+    /// or withdrawn, so a rebuild happens once per real change and never on a load.
+    pub(crate) fn note_local_tier_key(&self, key: u64) {
+        let mut state = self.state.lock();
+        if state.local_tier_key == Some(key) {
+            return;
+        }
+        let first_observation = state.local_tier_key.is_none();
+        state.local_tier_key = Some(key);
+        if first_observation {
+            return;
+        }
         state.generation = state.generation.wrapping_add(1);
         state.snapshot = None;
     }
@@ -2298,6 +2329,10 @@ mod runtime_text_encoder_option_tests {
 }
 
 pub(crate) async fn model_catalog_snapshot(state: &AppState) -> Result<Arc<Vec<Value>>, ApiError> {
+    // Before trusting the cached snapshot, check whether the resolved cache's published set moved
+    // under us — the worker publishes promotions in another process, so this is the only signal
+    // the API gets (sc-19712 F-4). It is a handful of stats, cheap enough to pay per read.
+    crate::model_sources::note_local_tier_freshness(state);
     {
         let cache_state = state.model_catalog_cache.state.lock();
         if let Some((snapshot_generation, snapshot)) = cache_state.snapshot.as_ref() {
@@ -2529,11 +2564,29 @@ fn backfill_current_receipt(
             }
             let resolved = snapshot_files(&snapshot).into_iter()
                 .filter(|file| allow_pattern_matches(file, &files)).collect::<Vec<_>>();
+            // Record WHICH snapshot these files were read from (sc-19712 F-5). A revision-less
+            // receipt makes its whole repository unserveable from the resolved cache — there is no
+            // pair to compare coverage against — so a backfilled install silently dropped out of
+            // the local tier while still being promotable, occupying cache bytes it could never be
+            // served from. The revision is not unknowable here: the snapshot directory selected
+            // just above IS `.../snapshots/<revision>`, and `resolvedFiles` were read from it. Only
+            // a genuinely immutable 40-hex name is recorded; anything else is omitted rather than
+            // written as a revision the source tier could not re-resolve. The worker's
+            // `establish_receipt_tree_stamp` already patches receipts this same way.
+            let snapshot_revision = snapshot
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| {
+                    sceneworks_core::model_artifacts::validate_immutable_revision(name).is_ok()
+                })
+                .map(|name| Value::String(name.to_owned()))
+                .unwrap_or(Value::Null);
             (!resolved.is_empty()).then(|| json!({
                 "schemaVersion": 2, "repo": repo,
                 "modelId": model.get("id").cloned().unwrap_or(Value::Null),
                 "variant": entry.get("variant").cloned().unwrap_or_else(|| Value::String("default".to_owned())),
                 "manifestFiles": files, "resolvedFiles": resolved, "backfilled": true,
+                "snapshotRevision": snapshot_revision,
             }))
         }).collect::<Vec<_>>();
     if receipts.is_empty() {
@@ -4597,6 +4650,12 @@ fn apply_model_catalog_entry(
     // installed-but-incomplete cache stays `incomplete` rather than `missing`.
     let availability_resolution =
         crate::model_sources::availability_for_entry(data_dir, &model, None, local_artifacts);
+    // sc-19712 F-5: what a local copy of this entry could EVER cover, which is a different question
+    // from where it resolves from today. A model with soft co-requisites or a revision-less
+    // requirement showed the identical "local copy" affordance as a fully cacheable one, so the
+    // badge promised protection from a disconnect that the cache cannot actually deliver.
+    let cache_eligibility =
+        crate::model_sources::cache_eligibility_for_entry(data_dir, &model, None);
     use sceneworks_core::model_artifacts::external_library::ModelAvailability;
     let managed_models = data_dir.join("models");
     let installed_in_app_owned_path = state.installed
@@ -4637,6 +4696,15 @@ fn apply_model_catalog_entry(
             .map(serde_json::to_value)
             .transpose()
             .map_err(|error| ApiError::internal(format!("serialize model resolution: {error}")))?
+            .unwrap_or(Value::Null),
+    );
+    object.insert(
+        "cacheEligibility".to_owned(),
+        cache_eligibility
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|error| ApiError::internal(format!("serialize cache eligibility: {error}")))?
             .unwrap_or(Value::Null),
     );
     let model_id = object.get("id").and_then(Value::as_str).unwrap_or_default();

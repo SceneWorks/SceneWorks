@@ -99,6 +99,94 @@ fn stale_cleanup_directory_swap_never_follows_an_external_symlink() {
     std::fs::remove_file(staging).unwrap();
 }
 
+/// The local-tier scan validates on paths and sizes; the LEASE still re-hashes (sc-19712 F-3).
+///
+/// The scan is read work on two hot surfaces — the API's per-submission preflight and its catalog
+/// build, and the worker's pre-loader guard. Re-hashing there made the cost of *asking* what the
+/// cache holds proportional to the whole cache, so populating the cache made every job submission
+/// slower than the load the cache exists to save (measured: 929.6 s for one 5.57 GB bundle).
+///
+/// A same-length byte alteration is the one thing only a content hash can see, so it separates the
+/// two modes exactly: the scan must still offer the entry, and `acquire_complete` must still refuse
+/// it. Both halves are load-bearing — the first pins the scan onto the cheap mode, the second pins
+/// the boundary that makes the cheap mode safe.
+#[test]
+fn the_local_tier_scan_skips_content_hashing_while_the_lease_boundary_still_refuses_altered_bytes()
+{
+    let scratch = TempDir::new().unwrap();
+    let source = scratch.path().join("source");
+    let data = scratch.path().join("data");
+    std::fs::create_dir(&source).unwrap();
+    let store = ResolvedCacheStore::open(&data).unwrap();
+    let candidate = hub_layout_candidate(&source, REVISION_A);
+    let materializer = ResolvedCacheMaterializer::new(store.clone());
+    let published = match materializer
+        .materialize(
+            &candidate,
+            &source,
+            "fixture:model",
+            &MaterializationCancellation::default(),
+        )
+        .unwrap()
+    {
+        MaterializationOutcome::Published(metadata) => *metadata,
+        other => panic!("fixture bundle was not published: {other:?}"),
+    };
+    assert_eq!(
+        ResolvedCacheStore::valid_local_artifacts(&data).artifacts,
+        vec![published.artifact.clone()],
+        "the published entry must be offered before it is tampered with"
+    );
+
+    // Same length, different bytes. Sizes and paths still match the recorded closure, so only a
+    // content re-hash can tell the difference.
+    let bundle_file = store
+        .bundle_path(&candidate.cache_key)
+        .unwrap()
+        .join(&published.artifact.closure.members[0].destination)
+        .join("weights.bin");
+    assert_eq!(std::fs::read(&bundle_file).unwrap(), b"model-weights");
+    std::fs::write(&bundle_file, b"MODEL-WEIGHTS").unwrap();
+
+    // The SCAN does not notice, and must not: this is the cheap mode, and paying for the hash here
+    // is what F-3 measured.
+    let scanned = ResolvedCacheStore::valid_local_artifacts(&data);
+    assert_eq!(
+        scanned.artifacts,
+        vec![published.artifact],
+        "the local-tier scan must judge on paths and sizes, not by re-hashing every bundle"
+    );
+    assert!(scanned.rejections.is_empty());
+
+    // The LEASE does notice. This is what makes the cheap scan safe: the altered bundle is refused
+    // before any bytes reach a runtime, and the caller falls back to the source tier.
+    let registry = ActiveArtifactLeaseRegistry::default();
+    let resolver = resolver(&source, registry.clone());
+    assert!(
+        store
+            .acquire_complete(&candidate.cache_key, &resolver, "runtime:image:model")
+            .is_err(),
+        "the load boundary must re-hash and refuse altered bytes"
+    );
+    assert_eq!(registry.active_lease_count(&candidate.cache_key), 0);
+    // The refusal has to come from the check BEFORE the lease is issued, not from the usage stamp
+    // that follows it. The stamp also validates at full strength, so it would mask a downgraded
+    // boundary while leaking the session record the lease had already written — this asserts the
+    // side-effect-free refusal that isolates the boundary check itself.
+    let session_records = std::fs::read_dir(store.root().join("sessions").join(store.session_id()))
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+                .count()
+        })
+        .unwrap_or(0);
+    assert_eq!(
+        session_records, 0,
+        "the lease boundary must refuse altered bytes before it writes a session record"
+    );
+}
+
 #[cfg(windows)]
 #[test]
 fn stale_cleanup_directory_swap_never_follows_an_external_junction() {

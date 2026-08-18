@@ -359,3 +359,297 @@ async fn relocating_to_the_moved_library_adopts_it_and_names_the_home_to_persist
         .as_str()
         .is_some_and(|root| Path::new(root) == relocated_home.join("hub")));
 }
+
+/// Write a one-model manifest whose single download row is spelled out by the caller, so a test can
+/// vary exactly the declaration under test (a pinned revision, an optional co-requisite) without
+/// inheriting [`single_model_manifest`]'s fixed shape.
+fn manifest_with_downloads(config_dir: &Path, id: &str, downloads: Value) {
+    std::fs::create_dir_all(config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        serde_json::to_vec(&json!({
+            "schemaVersion": 1,
+            "models": [{
+                "id": id,
+                "name": id,
+                "type": "image",
+                "family": "test",
+                "downloads": downloads,
+            }],
+        }))
+        .expect("manifest serializes"),
+    )
+    .expect("builtin models writes");
+    for file in [
+        "user.models.jsonc",
+        "builtin.loras.jsonc",
+        "user.loras.jsonc",
+        "builtin.recipe-presets.jsonc",
+        "user.recipe-presets.jsonc",
+    ] {
+        let key = if file.contains("preset") {
+            "presets"
+        } else if file.contains("lora") {
+            "loras"
+        } else {
+            "models"
+        };
+        std::fs::write(
+            config_dir.join(file),
+            format!(r#"{{ "schemaVersion": 1, "{key}": [] }}"#),
+        )
+        .expect("empty manifest writes");
+    }
+}
+
+/// A model whose declared closure is fully pinned reports that its local copy would cover it, and
+/// one that also declares an OPTIONAL co-requisite reports that the copy would cover only part
+/// (sc-19712 F-5).
+///
+/// Soft co-requisites are dropped by every requirement closure the shared selection builds, so they
+/// are never promoted and never served locally — while the primary is. Nothing said so: the model
+/// carried the same "local copy" affordance as a fully cacheable one, and a request needing the
+/// optional component would still fail with the library unplugged.
+#[tokio::test]
+async fn an_optional_co_requisite_is_reported_as_partial_local_copy_coverage() {
+    async fn coverage_for(downloads: Value) -> Value {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let _env = isolate_hf_cache();
+        let settings = test_settings(&temp_dir);
+        manifest_with_downloads(
+            &settings.config_dir.join("manifests"),
+            "coverage_model",
+            downloads,
+        );
+        std::fs::create_dir_all(&settings.data_dir).expect("data dir creates");
+        let app = create_app(settings).expect("app creates");
+        let (status, body) = request(app, "GET", "/api/v1/models", Value::Null).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        body[0]["cacheEligibility"].clone()
+    }
+
+    let primary = json!({
+        "provider": "huggingface",
+        "repo": "owner/model",
+        "revision": REVISION,
+        "files": ["model.safetensors"],
+    });
+    let full = coverage_for(json!([primary])).await;
+    assert_eq!(
+        full["coverage"], "full",
+        "a fully pinned closure can be held locally in its entirety: {full}"
+    );
+    assert_eq!(full["reason"], Value::Null);
+
+    let partial = coverage_for(json!([
+        primary,
+        {
+            "provider": "huggingface",
+            "repo": "owner/optional-component",
+            "revision": REVISION,
+            "files": ["component.safetensors"],
+            "coRequisite": true,
+            "required": "soft",
+        }
+    ]))
+    .await;
+    assert_eq!(
+        partial["coverage"], "partial",
+        "an optional component never enters the cache, so the copy cannot cover the model: {partial}"
+    );
+    assert_eq!(partial["reason"], "optional_components_excluded");
+    assert!(
+        partial["detail"]
+            .as_str()
+            .is_some_and(|detail| !detail.is_empty()),
+        "the exclusion names itself for the UI: {partial}"
+    );
+}
+
+/// Receipt backfill must record WHICH snapshot it read, or the model it just described drops out of
+/// the local tier entirely (sc-19712 F-5).
+///
+/// On first catalog build the API backfills a receipt for every installed model that lacks one. A
+/// receipt with no `snapshotRevision` makes its whole repository unserveable from the resolved
+/// cache — there is no pair to compare coverage against — while promotion can still build the
+/// bundle, so the model occupies cache bytes it will never be served from and the user sees no
+/// explanation. The revision is not unknowable here: the snapshot directory the backfill selected
+/// IS `.../snapshots/<revision>`, and it read `resolvedFiles` out of that very directory.
+#[tokio::test]
+async fn receipt_backfill_records_the_snapshot_it_read_so_the_model_stays_in_the_local_tier() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let _env = isolate_hf_cache();
+    let settings = test_settings(&temp_dir);
+    let data_dir = settings.data_dir.clone();
+    // Deliberately UNPINNED in the manifest: with no declared revision the receipt is the only
+    // thing that can supply one, which is exactly the situation backfill exists for.
+    manifest_with_downloads(
+        &settings.config_dir.join("manifests"),
+        "backfilled",
+        json!([{
+            "provider": "huggingface",
+            "repo": "owner/model",
+            "files": ["model.safetensors"],
+        }]),
+    );
+    std::fs::create_dir_all(&data_dir).expect("data dir creates");
+    seed_snapshot(&isolated_hub(&data_dir), "owner/model");
+    let app = create_app(settings).expect("app creates");
+
+    let (status, body) = request(app, "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let receipt_path = data_dir
+        .join("models")
+        .join(
+            sceneworks_core::model_artifacts::artifact_selection::safe_download_dir("owner/model"),
+        )
+        .join(".sceneworks-download-complete.json");
+    let receipt: Value = serde_json::from_slice(
+        &std::fs::read(&receipt_path).expect("the catalog build backfills a receipt"),
+    )
+    .expect("receipt parses");
+    assert_eq!(
+        receipt["receipts"][0]["snapshotRevision"], REVISION,
+        "the backfilled receipt must name the snapshot its resolvedFiles came from: {receipt}"
+    );
+    assert_eq!(receipt["receipts"][0]["backfilled"], true);
+
+    assert_eq!(
+        body[0]["cacheEligibility"]["coverage"], "full",
+        "a backfilled install must stay eligible for the local tier rather than being silently \
+         excluded from it: {body}"
+    );
+}
+
+/// Publish a resolved-cache bundle for `repository` @ [`REVISION`] the way a worker promotion does:
+/// hub-layout members mirroring the source library, materialized through the real store.
+fn promote_from_library(data_dir: &Path, repository: &str) {
+    use sceneworks_core::model_artifacts::resolved_cache::{
+        MaterializationCancellation, MaterializationOutcome, ResolvedCacheMaterializer,
+        ResolvedCacheStore,
+    };
+    use sceneworks_core::model_artifacts::{
+        ArtifactAvailability, ArtifactCompleteness, ArtifactFile, ArtifactIdentity,
+        ArtifactLocation, ArtifactMemberRole, ArtifactProvenance, ArtifactSourceLibrary,
+        PromotionCandidate, ResolvedBundleClosure, ResolvedBundleMember, ResolvedModelArtifact,
+        MODEL_ARTIFACT_CONTRACT_VERSION,
+    };
+
+    let library = isolated_hub(data_dir);
+    let snapshot = ArtifactSourceLibrary::new(&library)
+        .expect("library root")
+        .repository_root(repository)
+        .expect("repository root")
+        .join("snapshots")
+        .join(REVISION);
+    let identity = ArtifactIdentity::pinned(repository, REVISION, "default").expect("identity");
+    let destination =
+        sceneworks_core::model_artifacts::local_preference::hub_cache_member_destination(
+            repository,
+            REVISION,
+            Path::new(""),
+        )
+        .expect("hub destination");
+    let closure = ResolvedBundleClosure::new(vec![ResolvedBundleMember {
+        role: ArtifactMemberRole::Primary,
+        component_id: None,
+        source: identity.clone(),
+        tier: None,
+        source_subpath: PathBuf::new(),
+        destination,
+        files: vec![ArtifactFile::new("model.safetensors").expect("file")],
+    }])
+    .expect("closure");
+    let artifact = ResolvedModelArtifact {
+        schema_version: MODEL_ARTIFACT_CONTRACT_VERSION,
+        identity: identity.clone(),
+        location: ArtifactLocation::SourceLibrary { root: snapshot },
+        closure,
+        provenance: ArtifactProvenance {
+            identity,
+            fixed_artifact_tier: None,
+        },
+        completeness: ArtifactCompleteness::Complete,
+        availability: ArtifactAvailability::Available,
+    };
+    let candidate = PromotionCandidate {
+        cache_key: artifact.cache_key().expect("cache key"),
+        artifact,
+    };
+    let store = ResolvedCacheStore::open(data_dir).expect("store opens");
+    match ResolvedCacheMaterializer::new(store)
+        .materialize(
+            &candidate,
+            &library,
+            "test:relocatable",
+            &MaterializationCancellation::default(),
+        )
+        .expect("materialization runs")
+    {
+        MaterializationOutcome::Published(_) => {}
+        other => panic!("the promotion must publish, got {other:?}"),
+    }
+}
+
+/// A promotion published by the WORKER must reach catalog availability without an API restart
+/// (sc-19712 F-4).
+///
+/// This is the epic's promise inverted. The worker publishes bundles; the API answers `/models`
+/// from a snapshot invalidated only by the API's own mutations, so nothing crossed the process
+/// boundary. A model promoted so it would survive an unplugged drive kept reading
+/// `installed_external_unavailable` — the field `modelLibraryUnavailable()` keys the Model
+/// Manager's blocked state on — and was withheld behind a "reconnect the library" prompt while it
+/// demonstrably ran offline from its local copy.
+///
+/// The order below is the one that reproduces it: warm the catalog while connected, promote,
+/// disconnect, read again. Without a cross-process signal the second read replays the warm
+/// snapshot, whose `external_ready` row the live re-probe then flips to unavailable — the exact
+/// wrong answer observed live.
+#[tokio::test]
+async fn a_worker_published_promotion_reaches_catalog_availability_without_a_restart() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let _env = isolate_hf_cache();
+    let mut settings = test_settings(&temp_dir);
+    settings.resolved_cache.enabled = true;
+    let data_dir = settings.data_dir.clone();
+    single_model_manifest(
+        &settings.config_dir.join("manifests"),
+        "relocatable",
+        "owner/model",
+    );
+    std::fs::create_dir_all(&data_dir).expect("data dir creates");
+    let hub = isolated_hub(&data_dir);
+    seed_snapshot(&hub, "owner/model");
+    write_receipt(&data_dir, "owner/model");
+    ExternalLibraryBindingStore::new(&data_dir)
+        .expect("binding store")
+        .bind_or_probe_validated(&hub, &[requirement("owner/model")])
+        .expect("library binds while connected");
+    let app = create_app(settings).expect("app creates");
+
+    // Warm the catalog cache while the library is connected and nothing is promoted yet.
+    let (status, body) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body[0]["modelAvailability"], "external_ready",
+        "baseline: served from the connected library, no local copy: {body}"
+    );
+
+    // What the worker does after a job completes, in its own process.
+    promote_from_library(&data_dir, "owner/model");
+    // Unplug the drive.
+    std::fs::rename(&hub, data_dir.join("detached-library")).expect("library detaches");
+
+    let (status, body) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body[0]["modelAvailability"], "local_ready",
+        "a model promoted to survive an unplugged drive must not be presented as needing it \
+         reconnected: {body}"
+    );
+    assert_eq!(
+        body[0]["modelResolution"]["localArtifact"]["identity"]["revision"], REVISION,
+        "the row must name the local copy it resolved: {body}"
+    );
+}

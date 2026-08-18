@@ -297,6 +297,96 @@ describe("ModelManagerScreen local model copies (sc-19711)", () => {
     expect(section()).toBeNull();
   });
 
+  // ---- local-copy coverage (sc-19712 F-5) ----------------------------------------
+
+  // A model installed on the external library whose closure the cache can only partly serve
+  // (`required: "soft"` co-requisites — the real `qwen_image` / `acestep_v15_turbo` case).
+  const partialEligibility = {
+    schemaVersion: 1,
+    coverage: "partial",
+    reason: "optional_components_excluded",
+    detail:
+      "Optional components of this model are never copied locally, so a request that needs one still reads from the model library.",
+  };
+  // A requirement with no recorded snapshot revision makes the WHOLE repository unserveable from
+  // the local tier (the real `SceneWorks/qwen-image-mlx` install).
+  const noneEligibility = {
+    schemaVersion: 1,
+    coverage: "none",
+    reason: "unpinned_revision",
+    detail:
+      "No snapshot revision was recorded for SceneWorks/qwen-image-mlx, so no local copy of this model can be used and it will always load from the model library.",
+  };
+
+  it("badges a model whose local copy could only ever cover part of it", async () => {
+    status = cacheStatus([]);
+    await render([externalModel({ cacheEligibility: partialEligibility })]);
+    expect(badgeTexts()).toContain("partial local copy");
+  });
+
+  it("badges a model that can never be served from a local copy", async () => {
+    status = cacheStatus([]);
+    await render([externalModel({ cacheEligibility: noneEligibility })]);
+    expect(badgeTexts()).toContain("no local copy possible");
+    // The backend's own sentence is the tooltip — the screen states no second reason of its own.
+    const badge = [...container.querySelectorAll(".model-card-status .status-badge")].find(
+      (node) => node.textContent.trim() === "no local copy possible",
+    );
+    expect(badge.getAttribute("title")).toContain("No snapshot revision was recorded");
+  });
+
+  // A fully cacheable model, and a row the backend judged "not applicable" (no external
+  // requirement closure at all), must carry no caveat badge.
+  it("badges no caveat for full coverage or an absent judgement", async () => {
+    status = cacheStatus([]);
+    await render([
+      externalModel({ cacheEligibility: { schemaVersion: 1, coverage: "full", reason: null, detail: null } }),
+    ]);
+    expect(badgeTexts()).not.toContain("partial local copy");
+    expect(badgeTexts()).not.toContain("no local copy possible");
+    await render([externalModel({ cacheEligibility: null })]);
+    expect(badgeTexts()).not.toContain("no local copy possible");
+    expect(badgeTexts()).not.toContain("unknown local-copy coverage");
+  });
+
+  it("labels an unrecognized coverage rather than reading as fully cacheable", async () => {
+    status = cacheStatus([]);
+    await render([externalModel({ cacheEligibility: { schemaVersion: 2, coverage: "mostly" } })]);
+    expect(badgeTexts()).toContain("unknown local-copy coverage");
+  });
+
+  // The defect, at the surface the user actually reads: the empty state used to promise SceneWorks
+  // would make a local copy for a model that can never have one. The block must STAY VISIBLE — the
+  // exclusion is the point — and the sentence must state the exclusion with its reason.
+  it("stops promising a local copy in the empty state for a model that can never have one", async () => {
+    status = cacheStatus([]);
+    await render([externalModel({ cacheEligibility: noneEligibility })]);
+    const text = section().textContent;
+    expect(text).not.toContain("SceneWorks makes one the next time it loads this model");
+    expect(text).toContain("can’t be given a local copy");
+    expect(text).toContain("No snapshot revision was recorded");
+  });
+
+  it("says the empty-state copy would cover only part of a partially cacheable model", async () => {
+    status = cacheStatus([]);
+    await render([externalModel({ cacheEligibility: partialEligibility })]);
+    const text = section().textContent;
+    expect(text).not.toContain("SceneWorks makes one the next time it loads this model");
+    expect(text).toContain("would cover only part of it");
+    expect(text).toContain("Optional components of this model are never copied locally");
+  });
+
+  // The unchanged case, pinned so the exclusion copy can't quietly take over every model.
+  it("keeps the original empty-state promise for a fully cacheable model", async () => {
+    status = cacheStatus([]);
+    await render([
+      externalModel({ cacheEligibility: { schemaVersion: 1, coverage: "full", reason: null, detail: null } }),
+    ]);
+    expect(section().textContent).toContain(
+      "SceneWorks makes one the next time it loads this model",
+    );
+  });
+
   // A FAILED status read must render nothing rather than an empty-but-confident "no local copies":
   // the screen genuinely does not know, and saying "none" would be a fabricated answer.
   it("renders no local-copy block when the status read failed", async () => {
