@@ -1,0 +1,9 @@
+BEGIN mlx-ltx-2-3-q8-768x512-f121-fps30 tier=q8 free=72GiB 08:26:28
+OK mlx-ltx-2-3-q8-768x512-f121-fps30 113s
+BEGIN mlx-ltx-2-3-q8-640x640-f177-fps30 tier=q8 free=69GiB 08:28:21
+OK mlx-ltx-2-3-q8-640x640-f177-fps30 208s
+BEGIN mlx-ltx-2-3-q8-768x512-f241-fps30 tier=q8 free=69GiB 08:31:49
+OK mlx-ltx-2-3-q8-768x512-f241-fps30 268s
+BEGIN mlx-ltx-2-3-q8-768x512-f241-fps24 tier=q8 free=57GiB 08:36:17
+OK mlx-ltx-2-3-q8-768x512-f241-fps24 277s
+BEGIN mlx-ltx-2-3-q8-1280x704-f121-fps30 tier=q8 free=57GiB 08:40:54

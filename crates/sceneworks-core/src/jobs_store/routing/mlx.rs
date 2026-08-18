@@ -816,7 +816,7 @@ pub(crate) fn video_mode_is_mlx_eligible(model: &str, mode: &str) -> bool {
     }
     // VACE-Fun is a shipped, dedicated dual-expert replacement engine. It must not fall into the
     // generic Wan text/image generation arm: the worker dispatches only `replace_person` to
-    // `wan2_2_vace_fun_14b`, and explicitly refuses the model off-Mac.
+    // `wan2_2_vace_fun_14b`.
     if model == "wan_2_2_vace_fun_14b" {
         return mode == "replace_person";
     }

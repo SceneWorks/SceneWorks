@@ -145,10 +145,12 @@ Treat each story as a small PR even though its base is an epic branch.
    ```
 
 9. Merge through the feature branch's required checks. Neither repository has a
-   merge queue; `feature/*` requires the branch to be up to date with its base
-   (`strict: true`), so merge the feature head in and let the checks re-run
-   rather than waiting for a queue to do it for you. Verify the remote merge
-   rather than treating a green check as completion.
+   merge queue, and both `feature/*` rulesets are non-strict. Base advancement
+   alone therefore does not require a rebase or make a previously green story
+   PR ineligible to merge. Reconcile current base state whenever it can affect
+   the story or its generated artifacts, and require fresh exact-head checks
+   after any resulting branch update. Verify the remote merge rather than
+   treating a green check as completion.
 10. Validate the acceptance criteria against the new combined feature head.
 11. Add a Shortcut closeout comment containing the PR, merge commit, tests,
     runtime evidence, limitations, and tracked follow-ups.
@@ -300,7 +302,7 @@ publish a release.
 
 ## CI and repository configuration
 
-### Current state verified on 2026-08-11
+### Current state verified on 2026-08-15
 
 #### Gate teardown (2026-08-15/16) — read before regenerating anything
 
@@ -360,12 +362,18 @@ identical.
 | up-to-date required on `main` | no (`strict: false`) | no (`strict: false`) |
 | `feature/*` base policy | 20638194 | 20638200 |
 | queue on `feature/*` | **none** | **none** |
-| `feature/*` up-to-date | yes (`strict: true`) | yes (`strict: true`) |
+| `feature/*` up-to-date | no (`strict: false`) | no (`strict: false`) |
 | deletion guard | 20638197 | 20638201 |
 
 Both `main` rulesets carry `deletion`, `non_fast_forward`, `pull_request`, and
 required status checks. Both `feature/*` base policies carry `non_fast_forward`,
-`pull_request`, and required status checks at `strict: true`.
+`pull_request`, and required status checks at `strict: false`.
+
+Feature protection is ruleset-managed. A request to the legacy direct branch
+protection endpoint for a concrete feature branch can therefore return HTTP 404
+even while the wildcard rulesets are active. Inspect the repository rulesets
+and their effective `feature/*` match instead of treating that 404 as proof that
+the branch is unprotected.
 
 The deliberate remaining differences are policy, not structure: SceneWorks
 requires code-owner review and allows merge/squash/rebase; inference requires no
@@ -529,9 +537,11 @@ At minimum:
 
 Do not add duplicate `push: feature/*` builds merely because the branches are
 new. With no queue in either repository, the integration verdict is the
-required-check run on the PR head itself, and `strict: true` on `feature/*`
-guarantees that head contains the current base. Add post-merge feature pushes
-only when they prove a separate property.
+required-check run on the exact PR head itself. Because `feature/*` is
+non-strict, that verdict does not prove the head contains a base commit that
+advanced later. Reconcile the live base when its changes can affect the story,
+but do not rebase solely to satisfy an up-to-date policy that no longer exists.
+Add post-merge feature pushes only when they prove a separate property.
 
 #### 3. Decide the privileged runtime policy
 
@@ -561,8 +571,9 @@ epic that requires real-weight evidence cannot close on a compile-only lane.
 After adding the inference ruleset:
 
 - prove that a story PR to `feature/*` produces `CI gate`;
-- prove that an out-of-date story PR is blocked until its base is merged in and
-  `CI gate` re-runs (`strict: true`, no queue);
+- prove that base advancement alone does not block an otherwise mergeable story
+  PR (`strict: false`, no queue), while any explicit branch update produces a
+  fresh exact-head `CI gate` verdict;
 - prove that a SceneWorks PR can fetch an exact commit reachable only from the
   active private inference feature branch;
 - prove that `bump-inference.mjs` regenerates and validates all pin-derived
@@ -598,10 +609,13 @@ feature branches and exercise all of the following:
    runtime evidence.
 5. An inference story PR produces `CI gate`, merges, and can be pinned by the
    SceneWorks feature branch.
-6. A story PR whose base has moved is blocked as out-of-date (`strict: true` on
-   `feature/*`) in both repositories, and merges once the base is merged in and
-   the required checks re-run. With no queue validating a speculative commit,
-   this is the only integration verdict.
+6. A story PR whose base has moved remains eligible under `strict: false` in
+   both repositories. Verify that base advancement alone does not force a
+   rebase, and that deliberately updating the story branch triggers required
+   checks on the new exact head. With no queue validating a speculative merge
+   commit, those checks attest only the exact PR head; they are the required
+   merge verdict, not evidence that the head was tested with a base that
+   advanced later.
 7. Creating a feature ref succeeds directly under the two wildcard layers, in
    both repositories, with no queue ruleset staged.
 8. Direct and force pushes to feature branches fail.

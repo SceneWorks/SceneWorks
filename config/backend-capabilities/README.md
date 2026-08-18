@@ -39,7 +39,8 @@ specialist epic whose contract governs that cell where applicable. Candle-only c
 with `preservedCandleOnly: true` rather than normalized away.
 
 `exceptions.json` records the seven sequencing decisions that Michael Trefry approved on 2026-08-14
-for the 47 residual MLX-only cells, with the direct approval preserved in Shortcut activity 19457.
+for the original 47 residual MLX-only cells, with the direct approval preserved in Shortcut activity
+19457, plus four product-decision records for the 13 Eros cells withdrawn from Candle by SC-18902.
 Schema v2 keeps the capability-axis `category` separate from `decisionType`. Exceptions must
 classify the decision as `technical_blocker`, `licensing_blocker`, `hardware_floor`,
 `sequencing_choice`, or `product_decision`; provide non-empty evidence; name an approver and authority

@@ -31,6 +31,8 @@
 use std::path::Path;
 use std::sync::OnceLock;
 
+#[cfg(test)]
+use gen_core::StagedResidencyAvailability;
 use gen_core::{
     GenerationMemory, LoadSpec, MemoryBackendRealization, MemoryBudget, MemoryCacheState,
     MemoryConformanceState, MemoryEvidence, MemoryEvidenceDimensions, MemoryEvidenceKey,
@@ -610,7 +612,7 @@ fn active_component_floors(
     }
 }
 
-fn plan_tier_key(tier: MemoryNumericTier) -> &'static str {
+pub(crate) fn plan_tier_key(tier: MemoryNumericTier) -> &'static str {
     match tier.quant {
         Some(gen_core::Quant::Q4) => "q4",
         Some(gen_core::Quant::Q8) => "q8",
@@ -640,7 +642,7 @@ enum LegacyAdmissionReason {
 }
 
 /// Sentinel for routes that carry no calibration record, so no closure can be current against them.
-const UNCALIBRATED_CLOSURE: &str = "uncalibrated";
+pub(crate) const UNCALIBRATED_CLOSURE: &str = "uncalibrated";
 
 /// Resolves the LIVE compile-closure digest for one `(backend, provider)` lane (sc-17774).
 ///
@@ -832,7 +834,7 @@ fn request_mode(mode: &str) -> (MemoryMode, &'static str) {
 /// default it expresses is defeasible — a rung the provider does not implement is not engaged, so a
 /// provider publishing a verified cheaper composition no longer has its unimplemented rung's knob
 /// switched on underneath it.
-fn memory_for_selection(
+pub(crate) fn memory_for_selection(
     contract: &MemoryProviderContract,
     selection: MemorySelection,
 ) -> GenerationMemory {
@@ -1474,9 +1476,13 @@ fn binding_phase(conditioning: u64, denoise: u64, decode: u64) -> EstimatePhase 
 /// conformance, no observed peak, parity not run — the record claims exactly what an estimate can
 /// claim and nothing more. The selector's estimate-scoped eligibility wrap (sc-18096,
 /// `memory_strategy::candidate_exclusion`) is what admits it.
+/// `backend` is a parameter rather than a constant because sc-18814 routes the VIDEO lane through
+/// this same shape on both backends; every image caller here passes [`MemoryBackend::Mlx`], which
+/// is what the field was hardcoded to before.
 #[allow(clippy::too_many_arguments)]
-fn estimate_evidence(
+pub(crate) fn estimate_evidence(
     contract: &MemoryProviderContract,
+    backend: gen_core::MemoryBackend,
     tier: MemoryNumericTier,
     mode: &str,
     overlay: Option<&str>,
@@ -1488,7 +1494,7 @@ fn estimate_evidence(
     MemoryEvidence {
         key: MemoryEvidenceKey {
             resolved_route: contract.provider_id.clone(),
-            backend: gen_core::MemoryBackend::Mlx,
+            backend,
             tier,
             load_shape: contract.load_shape,
             mode: memory_mode_from_mode_key(mode),
@@ -1534,7 +1540,7 @@ fn estimate_evidence(
 ///   promising an unmeasured saving.
 /// * Auxiliary components (control branches, adapter stacks, …) stay resident unless the contract
 ///   itself declares them `bounded_by` a rung the composition engages.
-fn estimate_floor_weights_bytes(
+pub(crate) fn estimate_floor_weights_bytes(
     contract: &MemoryProviderContract,
     engaged: &[MemoryStrategy],
 ) -> u64 {
@@ -1568,7 +1574,7 @@ fn estimate_floor_weights_bytes(
 /// far below the floor's unreduced headroom charge as the provider allows. `None` when a required
 /// knob has no declared range: such a selection cannot be validated, so no candidate is
 /// synthesized for the rung.
-fn estimate_floor_parameters(
+pub(crate) fn estimate_floor_parameters(
     contract: &MemoryProviderContract,
     engaged: &[MemoryStrategy],
 ) -> Option<gen_core::MemoryStrategyParameters> {
@@ -1741,6 +1747,7 @@ fn synthesize_estimate_ladder(
                     selection,
                     evidence: estimate_evidence(
                         contract,
+                        gen_core::MemoryBackend::Mlx,
                         plan.tier,
                         mode_key,
                         overlay,
@@ -1783,6 +1790,7 @@ fn synthesize_estimate_ladder(
             selection,
             evidence: estimate_evidence(
                 contract,
+                gen_core::MemoryBackend::Mlx,
                 plan.tier,
                 mode_key,
                 overlay,
@@ -2670,7 +2678,7 @@ fn evaluate_request_with_budget_using_bundle(
 }
 
 #[cfg(target_os = "macos")]
-fn live_request_budget(engine_id: &str) -> WorkerResult<MemoryBudget> {
+pub(crate) fn live_request_budget(engine_id: &str) -> WorkerResult<MemoryBudget> {
     // Reclaim only allocator-cache buffers from prior geometries; live arrays (the cached weights)
     // remain committed. This makes A→B→A independent of B's freed scratch without reloading A.
     mlx_rs::memory::clear_cache();
@@ -2771,6 +2779,26 @@ pub(crate) fn engine_supports_sequential(engine_id: &str) -> bool {
         .generators()
         .find(|reg| (reg.descriptor)().id == engine_id)
         .is_some_and(|reg| (reg.descriptor)().capabilities.supports_sequential_offload)
+}
+
+/// Whether `engine_id` physically stages heavyweight phases, either because the provider exposes
+/// the selectable [`OffloadPolicy::Sequential`] control or because it does so unconditionally.
+///
+/// This is static descriptor truth for publication and capability reporting. Load-time selection
+/// must continue to use [`engine_supports_sequential`]: an unconditional-only provider does not
+/// consume `OffloadPolicy::Sequential`, so treating this broader predicate as authorization to set
+/// that control would turn an accurate declaration into a no-op request.
+#[cfg(test)]
+pub(crate) fn engine_engages_staged_residency(engine_id: &str) -> bool {
+    crate::inference_runtime::media()
+        .generators()
+        .find(|reg| (reg.descriptor)().id == engine_id)
+        .is_some_and(|reg| {
+            (reg.descriptor)()
+                .capabilities
+                .staged_residency_availability()
+                != StagedResidencyAvailability::Absent
+        })
 }
 
 /// Emulate a smaller Mac: force the total-unified-memory budget (GB). Set e.g.
@@ -2908,6 +2936,120 @@ use crate::fit_gate::BYTES_PER_GIB;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct MlxMemoryBudget {
     pub total_gb: f64,
+}
+
+/// The numeric tier a `LoadSpec` loads, exactly as [`MlxRequestPlan::for_spec_and_manifest`]
+/// derives it (sc-18814 factored it out so the video gate cannot drift into a second derivation).
+/// The manifest-driven `fixed_artifact_tier` override is deliberately NOT applied here: a video
+/// route carries no calibration binding to resolve one from.
+pub(crate) fn spec_numeric_tier(engine_id: &str, spec: &LoadSpec) -> MemoryNumericTier {
+    MemoryNumericTier {
+        precision: spec.precision,
+        quant: spec.quantize,
+        component_precision_floors: active_component_floors(
+            declared_component_floors(engine_id),
+            spec.quantize,
+        ),
+    }
+}
+
+/// Resolve the numeric tier that the loaded video checkpoint actually carries.
+///
+/// Provider-owned resolution runs first for video loaders that carry their tier outside
+/// `LoadSpec.quantize` (currently Wan TI2V-5B). LTX then resolves its immutable `split_model.json`.
+/// An explicit assertion that disagrees with the checkpoint fails closed before selection.
+pub(crate) fn resolved_video_numeric_tier(
+    engine_id: &str,
+    spec: &LoadSpec,
+) -> WorkerResult<MemoryNumericTier> {
+    // Provider-owned load-exact video tiers win whenever the selected runtime exposes one. MLX Wan
+    // TI2V-5B reads its immutable packed config/header surface and also carries the Q4 text-encoder
+    // Q8 floor; deriving from `LoadSpec.quantize` here would misprice the normal prepacked load,
+    // whose request-side quant hint is deliberately `None`.
+    #[cfg(target_os = "macos")]
+    if let Some(tier) =
+        runtime_macos::resolved_video_memory_numeric_tier(engine_id, spec).map_err(|error| {
+            WorkerError::InvalidPayload(format!(
+                "{engine_id} admission cannot resolve the provider-owned numeric tier: {error}"
+            ))
+        })?
+    {
+        return Ok(tier);
+    }
+    if engine_id != "ltx_2_3" {
+        return Ok(spec_numeric_tier(engine_id, spec));
+    }
+    let root = match &spec.weights {
+        WeightsSource::Dir(path) => path,
+        WeightsSource::File(path) => {
+            return Err(WorkerError::InvalidPayload(format!(
+                "ltx_2_3 admission expected a model directory, got {}",
+                path.display()
+            )));
+        }
+    };
+    let manifest_path = root.join("split_model.json");
+    let resolved_quant = if manifest_path.exists() {
+        let raw = std::fs::read_to_string(&manifest_path).map_err(|error| {
+            WorkerError::InvalidPayload(format!(
+                "ltx_2_3 admission cannot read {}: {error}",
+                manifest_path.display()
+            ))
+        })?;
+        let value: Value = serde_json::from_str(&raw).map_err(|error| {
+            WorkerError::InvalidPayload(format!(
+                "ltx_2_3 admission cannot parse {}: {error}",
+                manifest_path.display()
+            ))
+        })?;
+        if value
+            .get("quantized")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            match value
+                .get("quantization_bits")
+                .and_then(Value::as_i64)
+                .unwrap_or(4)
+            {
+                4 => Some(gen_core::Quant::Q4),
+                8 => Some(gen_core::Quant::Q8),
+                bits => {
+                    return Err(WorkerError::InvalidPayload(format!(
+                        "ltx_2_3 admission refuses unsupported packed checkpoint tier q{bits} in {}",
+                        manifest_path.display()
+                    )));
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    if spec.quantize != resolved_quant && spec.quantize.is_some() {
+        return Err(WorkerError::InvalidPayload(format!(
+            "ltx_2_3 admission quant assertion {:?} disagrees with checkpoint tier {:?} in {}",
+            spec.quantize,
+            resolved_quant,
+            manifest_path.display()
+        )));
+    }
+    Ok(MemoryNumericTier {
+        precision: spec.precision,
+        quant: resolved_quant,
+        component_precision_floors: active_component_floors(
+            declared_component_floors(engine_id),
+            resolved_quant,
+        ),
+    })
+}
+
+/// The activation-headroom allowance this load already charges — the same
+/// [`HeadroomAllowance`] the load-time residency gate uses (sc-18814 exposes it so the video gate
+/// reuses that number instead of inventing one).
+pub(crate) fn spec_headroom_bytes(engine_id: &str, spec: &LoadSpec) -> u64 {
+    gib_to_bytes(spec_component_bytes(engine_id, spec).2.total_gb)
 }
 
 /// Read the small-Mac cap from the environment. `Some(gb)` only for a positive number.
@@ -4059,6 +4201,55 @@ pub fn full_finetune_memory_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ltx_video_tier_is_checkpoint_bound_when_the_load_assertion_is_absent() {
+        let fixture = tempfile::tempdir().expect("ltx split fixture");
+        let spec = || LoadSpec::new(WeightsSource::Dir(fixture.path().to_owned()));
+
+        let dense = resolved_video_numeric_tier("ltx_2_3", &spec()).expect("absent manifest");
+        assert_eq!(dense.quant, None);
+
+        for (bits, expected) in [(4, gen_core::Quant::Q4), (8, gen_core::Quant::Q8)] {
+            std::fs::write(
+                fixture.path().join("split_model.json"),
+                serde_json::json!({ "quantized": true, "quantization_bits": bits }).to_string(),
+            )
+            .unwrap();
+            let tier = resolved_video_numeric_tier("ltx_2_3", &spec())
+                .unwrap_or_else(|error| panic!("q{bits} checkpoint resolves: {error}"));
+            assert_eq!(tier.quant, Some(expected));
+        }
+
+        std::fs::write(
+            fixture.path().join("split_model.json"),
+            r#"{"quantized":false,"quantization_bits":8}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            resolved_video_numeric_tier("ltx_2_3", &spec())
+                .unwrap()
+                .quant,
+            None,
+            "quantized:false is a dense bf16 checkpoint even when a stale bits field remains"
+        );
+    }
+
+    #[test]
+    fn ltx_video_tier_assertion_mismatch_fails_closed() {
+        let fixture = tempfile::tempdir().expect("ltx split fixture");
+        std::fs::write(
+            fixture.path().join("split_model.json"),
+            r#"{"quantized":true,"quantization_bits":8}"#,
+        )
+        .unwrap();
+        let asserted_q4 = LoadSpec::new(WeightsSource::Dir(fixture.path().to_owned()))
+            .with_quant(gen_core::Quant::Q4);
+        let error = resolved_video_numeric_tier("ltx_2_3", &asserted_q4)
+            .expect_err("a q4 assertion may not price a q8 checkpoint")
+            .to_string();
+        assert!(error.contains("disagrees"));
+    }
 
     /// sc-18237: every shipped Qwen binding must describe a load shape the production route can
     /// execute. Native Qwen is deliberately deferred under both Resident and Sequential policies;
@@ -7652,9 +7843,13 @@ mod tests {
             .evidence
             .clone();
         assert_eq!(evidence.predicted_peak_bytes, gib_to_bytes(5.0));
+        // sc-18864: 3 GiB is the fixture's NON-RECLAIMABLE residency (`activeBytes`). It read 4 GiB
+        // when the envelope recovered it as `wiredBytes - reclaimableBytes`, and `wiredBytes` was a
+        // copy of the two-instant allocator bound. Still distinct from the 5 GiB prediction, so the
+        // assertion below still discriminates observed telemetry from the predicted maximum.
         assert_eq!(
             evidence.observed_peak_bytes,
-            Some(gib_to_bytes(4.0)),
+            Some(gib_to_bytes(3.0)),
             "observed telemetry remains the measured counter rather than the predicted maximum"
         );
         let evaluated = evaluate_request_with_budget_using_bundle(
@@ -10231,8 +10426,6 @@ mod tests {
                 .expect("fixture has full phase telemetry");
             observed.overall.active_bytes = gib_to_bytes(3.0);
             observed.overall.allocator_bytes = gib_to_bytes(3.0);
-            observed.overall.device_bytes = gib_to_bytes(3.0);
-            observed.overall.wired_bytes = gib_to_bytes(3.0);
             observed.overall.reclaimable_bytes = 0;
         }
         bundle.records.push(transformer_record);
@@ -11971,7 +12164,7 @@ mod tests {
                 "{id}: earlier-wired family must stay sequential-capable"
             );
         }
-        // The sc-10840 Phase-1 fan-out families are AUTO-covered by the capability query with no
+        // The sc-10840 selectable Phase-1 fan-out families are AUTO-covered by the capability query with no
         // allowlist edit here — the whole point of deriving from the descriptor bit. A newly-wired
         // engine (e.g. `sd3_5_large`) is sequential-capable the moment its provider advertises the bit.
         for id in [
@@ -12023,6 +12216,76 @@ mod tests {
         // nothing and Sequential would be a no-op that OOMs. This proves the query reads the descriptor
         // BIT, not mere registry membership.
         assert!(!engine_supports_sequential("sensenova_u1_8b"));
+    }
+
+    /// Static ladder publication needs the broader descriptor fact: a provider may physically
+    /// stage every request without exposing a selectable Sequential control (SC-18816). This list
+    /// deliberately contains both selectable and unconditional providers. The memory-matrix
+    /// generator parses this exact positive sweep, while runtime load selection remains pinned to
+    /// `engine_supports_sequential` above.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn engine_engages_staged_residency_is_derived_from_the_registered_capability() {
+        for id in [
+            "sdxl",
+            "z_image",
+            "z_image_control",
+            "z_image_turbo",
+            "z_image_turbo_control",
+            "qwen_image",
+            "qwen_image_edit",
+            "qwen_image_control",
+            "lens",
+            "lens_turbo",
+            "krea_2_turbo",
+            "krea_2_raw",
+            "krea_2_edit",
+            "krea_2_turbo_edit",
+            "krea_2_turbo_control",
+            "sd3_5_large",
+            "sd3_5_large_turbo",
+            "sd3_5_medium",
+            "sana_1600m",
+            "sana_sprint_1600m",
+            "flux1_schnell",
+            "flux1_dev",
+            "flux1_dev_control",
+            "flux2_klein_9b",
+            "flux2_klein_9b_edit",
+            "flux2_klein_9b_kv_edit",
+            "flux2_dev",
+            "flux2_dev_control",
+            "flux2_dev_edit",
+            "chroma1_base",
+            "chroma1_flash",
+            "chroma1_hd",
+            "ideogram_4",
+            "ideogram_4_turbo",
+            "kolors",
+            "anima_base",
+            "anima_aesthetic",
+            "anima_turbo",
+            "boogu_image",
+            "boogu_image_turbo",
+            "boogu_image_edit",
+            "bernini",
+            "bernini_renderer",
+            "krea_realtime_14b",
+            "ltx_2_3",
+            "scail2_14b",
+            "wan2_2_i2v_14b",
+            "wan2_2_t2v_14b",
+            "wan2_2_ti2v_5b",
+            "wan2_2_vace_fun_14b",
+            "wan_vace",
+        ] {
+            assert!(
+                engine_engages_staged_residency(id),
+                "{id}: registered staged-residency declaration must remain visible to the ladder"
+            );
+        }
+        assert!(!engine_engages_staged_residency("sensenova_u1_8b"));
+        assert!(!engine_engages_staged_residency("no_such_engine_xyz"));
     }
 
     /// An id with no registered generator is never sequential-capable (the safe default: never select a

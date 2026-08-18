@@ -1539,6 +1539,32 @@ describe("ModelManagerScreen model & LoRA delete confirms (sc-12068)", () => {
   const modelDeleteButton = () =>
     [...container.querySelectorAll(".model-card .danger-action")].find((button) => button.textContent === "Delete");
 
+  it("renders complete and partial cleanup tombstones as delete-only cards", async () => {
+    for (const [installState, cacheState] of [
+      ["installed", "complete"],
+      ["missing", "incomplete"],
+    ]) {
+      await render({
+        models: [{
+          id: "ltx_2_3_eros",
+          name: "LTX-2.3 10Eros",
+          type: "video",
+          family: "ltx-video",
+          installState,
+          cacheState,
+          platformCleanupOnly: true,
+          downloadable: false,
+          removable: true,
+        }],
+      });
+      await selectTab(container, "Video Models");
+      const card = container.querySelector(".model-card");
+      expect(card?.textContent).toContain("no longer available on this platform");
+      expect(modelDeleteButton()).toBeTruthy();
+      expect([...card.querySelectorAll("button")].map((button) => button.textContent)).toEqual(["Delete"]);
+    }
+  });
+
   it("confirms a model delete via appConfirm (danger) and removes it when accepted", async () => {
     appConfirmMock.mockReset();
     appConfirmMock.mockResolvedValue(true);

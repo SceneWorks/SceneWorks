@@ -436,6 +436,28 @@ async fn validate_and_canonicalize_merged_generation_payload(
         validate_raw_job_payload(state, &job_type, &merged)?;
     }
     canonicalize_image_model_payload(state, &job_type, &mut merged).await?;
+    if matches!(
+        job_type,
+        JobType::VideoGenerate
+            | JobType::VideoExtend
+            | JobType::VideoBridge
+            | JobType::PersonReplace
+    ) {
+        let model_id = merged
+            .get("model")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ApiError::bad_request("model must be a string"))?;
+        // A retry/duplicate can replace `model`, so re-resolve the authoritative entry instead of
+        // trusting the original job's modelManifestEntry. This is the replay counterpart to the
+        // typed `/video/jobs` pre-enqueue platform gate.
+        let model_manifest_entry = resolve_model_manifest_entry(state, model_id).await?;
+        crate::generation::ensure_video_model_available_on_platform(
+            model_id,
+            &model_manifest_entry,
+            crate::generation::video_job_platform(state),
+        )?;
+        merged.insert("modelManifestEntry".to_owned(), model_manifest_entry);
+    }
     if matches!(job_type, JobType::ImageGenerate | JobType::ImageEdit) {
         if let Some(advanced) = merged.get("advanced").and_then(Value::as_object) {
             validate_image_pose_count(advanced)?;
