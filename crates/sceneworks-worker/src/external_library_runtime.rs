@@ -1544,6 +1544,132 @@ mod tests {
         });
     }
 
+    /// A requirement whose receipt carries NO `snapshotRevision` makes the WHOLE repository
+    /// unserveable, not merely that one requirement.
+    ///
+    /// A legacy receipt yields `revision: None` (`artifact_selection.rs` maps a missing
+    /// `snapshotRevision` straight through), and there is then no pair to compare coverage against
+    /// — no bundle can be *shown* to hold what that requirement needs. Leaving the pinned sibling
+    /// served anyway is not safe: the unpinned model re-resolves to the source tier, and its
+    /// unpinned load walks `refs/main` into the overlay, which would hand it a bundle whose file
+    /// set was never in the union.
+    #[test]
+    fn a_requirement_with_no_recorded_revision_makes_its_whole_repository_unserveable() {
+        let temp = TempDir::new().unwrap();
+        let data = temp.path().join("data");
+        let library = temp.path().join("external-hf");
+        seed_snapshot(&library, "owner/shared", REV_A, "pinned.safetensors");
+        seed_snapshot(&library, "owner/shared", REV_A, "legacy.safetensors");
+        // `refs/main` is what an unpinned resolve reads — the walk that would reach the overlay.
+        let repo_root = library.join("models--owner--shared");
+        std::fs::create_dir_all(repo_root.join("refs")).unwrap();
+        std::fs::write(repo_root.join("refs").join("main"), REV_A).unwrap();
+
+        let pinned_receipt = json!({ "repo": "owner/shared", "modelId": "pinned",
+                                     "resolvedFiles": ["pinned.safetensors"],
+                                     "snapshotRevision": REV_A });
+        // The legacy receipt: same repository, NO `snapshotRevision`.
+        let legacy_receipt = json!({ "repo": "owner/shared", "modelId": "legacy",
+                                     "resolvedFiles": ["legacy.safetensors"] });
+        let pinned_entry = json!({
+            "id": "pinned",
+            "downloads": [{ "provider": "huggingface", "repo": "owner/shared",
+                            "revision": REV_A, "files": ["pinned.safetensors"] }]
+        });
+        // The legacy carrier declares NO revision, so nothing overrides its receipt's `None` with a
+        // declared-exact pin — this is what makes `revision: None` actually reach the guard.
+        let legacy_entry = json!({
+            "id": "legacy",
+            "downloads": [{ "provider": "huggingface", "repo": "owner/shared",
+                            "files": ["legacy.safetensors"] }]
+        });
+
+        // Control: the pinned selection ALONE is served locally. Without this the assertion below
+        // could pass merely because the bundle was unusable.
+        write_receipts(&data, "owner/shared", json!([pinned_receipt.clone()]));
+        let settings = settings(data.clone());
+        let alone = json!({ "modelManifestEntry": pinned_entry.clone() })
+            .as_object()
+            .unwrap()
+            .clone();
+        with_local_cache(&library, || {
+            publish_bundle(
+                &settings.data_dir,
+                &library,
+                "owner/shared",
+                REV_A,
+                "default",
+                &["pinned.safetensors"],
+            );
+            let guard =
+                RuntimeSourceGuard::begin(&JobType::ImageGenerate, &alone, &settings).unwrap();
+            assert_eq!(
+                guard.resolutions()[0].availability,
+                ModelAvailability::LocalReady,
+                "control: the pinned selection alone IS served locally"
+            );
+            drop(guard);
+        });
+
+        // Now add the legacy carrier on the SAME repository.
+        write_receipts(
+            &data,
+            "owner/shared",
+            json!([pinned_receipt, legacy_receipt]),
+        );
+        let payload = json!({
+            "modelManifestEntry": pinned_entry,
+            "modelManifestEntries": [legacy_entry]
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        with_local_cache(&library, || {
+            let bundle_root = {
+                let scan = sceneworks_core::model_artifacts::resolved_cache::ResolvedCacheStore::valid_local_artifacts(
+                    &settings.data_dir,
+                );
+                scan.artifacts[0].location.root().to_path_buf()
+            };
+            let guard =
+                RuntimeSourceGuard::begin(&JobType::ImageGenerate, &payload, &settings).unwrap();
+            assert!(
+                guard
+                    .resolutions()
+                    .iter()
+                    .all(|resolution| resolution.availability != ModelAvailability::LocalReady),
+                "an unrevisioned requirement poisons the whole repository: {:?}",
+                guard
+                    .resolutions()
+                    .iter()
+                    .map(|resolution| &resolution.availability)
+                    .collect::<Vec<_>>()
+            );
+            // The load-bearing half, at the PATH layer with the guard held: neither the pinned nor
+            // the unpinned resolve may reach the bundle.
+            let pinned = crate::model_jobs::huggingface_pinned_snapshot_dir(
+                &settings.data_dir,
+                "owner/shared",
+                REV_A,
+            )
+            .expect("source snapshot");
+            assert!(!pinned.starts_with(&bundle_root), "{}", pinned.display());
+            assert!(pinned.starts_with(&library), "{}", pinned.display());
+            // The unpinned walk (`refs/main`) is the one the poison exists to stop.
+            let unpinned =
+                crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, "owner/shared")
+                    .expect("source snapshot");
+            assert!(
+                !unpinned.starts_with(&bundle_root),
+                "an unpinned load must never walk refs/main into a bundle whose files were never \
+                 in the union: {}",
+                unpinned.display()
+            );
+            assert!(unpinned.join("legacy.safetensors").is_file());
+        });
+    }
+
     /// Run `body` with `tracing` captured and return everything it emitted.
     fn captured_events<T>(body: impl FnOnce() -> T) -> (T, String) {
         use std::io::Write;

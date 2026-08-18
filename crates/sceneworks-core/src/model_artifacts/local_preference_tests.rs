@@ -409,6 +409,82 @@ fn a_narrower_serving_bundle_is_never_adopted() {
     assert!(local_snapshot("owner/encoder", COMPONENT_REV).is_none());
 }
 
+/// The honest bound on a PROCESS-WIDE scope, pinned.
+///
+/// In the desktop deployment the utility worker runs inside the API process, so an API read path
+/// resolving through the same prefer-local library can observe a scope a job installed. For a file
+/// OUTSIDE that job's union the leased bundle does not hold it, so such a reader sees it as ABSENT
+/// while the scope is live — a transient false-absent that self-heals when the job ends.
+///
+/// What must NEVER happen is wrong bytes: no reader may be handed a different file's content under
+/// the name it asked for. That is the property this test exists for, and it is what makes the
+/// transient absent tolerable rather than a correctness hole.
+#[test]
+fn an_out_of_union_reader_sees_absent_never_the_wrong_bytes() {
+    let _serialized = overlay_guard();
+    let temp = tempfile::tempdir().unwrap();
+    let library_root = temp.path().join("external-hf");
+    let source = seed_source(
+        &library_root,
+        "owner/model",
+        PRIMARY_REV,
+        "q4/model.safetensors",
+    );
+    // A SECOND file the source library holds and the bundle does not — with distinguishable bytes,
+    // so "wrong bytes" would be detectable rather than merely improbable.
+    std::fs::write(source.join("q4/out-of-union.safetensors"), b"OUT-OF-UNION").unwrap();
+    let artifact = bundle(&temp.path().join("bundle"));
+    let configured = ArtifactSourceLibrary::new_preferring_local(&library_root).unwrap();
+
+    // Before the scope: the out-of-union reader reads its real file.
+    let before = configured
+        .discover_snapshot("owner/model", Some(PRIMARY_REV))
+        .unwrap()
+        .1;
+    assert_eq!(
+        std::fs::read(before.join("q4/out-of-union.safetensors")).unwrap(),
+        b"OUT-OF-UNION"
+    );
+
+    let scope = prefer(&artifact).unwrap();
+    let served = configured
+        .discover_snapshot("owner/model", Some(PRIMARY_REV))
+        .unwrap()
+        .1;
+    assert!(served.starts_with(artifact.location.root()));
+    // In-union: present, and the RIGHT bytes.
+    assert_eq!(
+        std::fs::read(served.join("q4/model.safetensors")).unwrap(),
+        b"weights"
+    );
+    // Out-of-union: ABSENT. This is the transient false-absent the bound admits...
+    assert!(
+        !served.join("q4/out-of-union.safetensors").exists(),
+        "the bundle does not hold this file, so it reads as absent while the scope is live"
+    );
+    // ...and NOT wrong bytes: nothing in the bundle answers to that name at all.
+    assert!(std::fs::read(served.join("q4/out-of-union.safetensors")).is_err());
+    // The already-resolved-path reader likewise keeps its AUTHORITATIVE source path rather than
+    // being rewritten into a bundle that does not hold the file.
+    assert!(redirect_source_library_path(
+        &library_root,
+        &source.join("q4/out-of-union.safetensors")
+    )
+    .is_none());
+
+    // Self-heals the moment the job's scope drops.
+    drop(scope);
+    let after = configured
+        .discover_snapshot("owner/model", Some(PRIMARY_REV))
+        .unwrap()
+        .1;
+    assert_eq!(after, before);
+    assert_eq!(
+        std::fs::read(after.join("q4/out-of-union.safetensors")).unwrap(),
+        b"OUT-OF-UNION"
+    );
+}
+
 /// A model directory that was resolved to a concrete source path before the load (training base
 /// models, captioners, analyzers) is redirected into the leased bundle — and only when the bundle
 /// really holds that file.

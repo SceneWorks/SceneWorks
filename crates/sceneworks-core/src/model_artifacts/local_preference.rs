@@ -14,11 +14,23 @@
 //! - Only the worker's pre-loader guard installs a preference scope, and only for artifacts it
 //!   holds a runtime lease on, so an artifact can never be evicted while a load reads it.
 //! - The scope is process-wide because model paths are resolved on engine threads and blocking
-//!   pools far below the async job task; the worker claim loop runs one job at a time. Which
-//!   `(repository, revision)` pairs may be served at all is decided by the GUARD — the only layer
-//!   that can see every model a job will load — and handed here already decided (see
-//!   [`prefer_local_snapshots`]); a directory-level seam cannot re-ask "does this bundle hold what
-//!   THIS caller needs" once it has answered with a path.
+//!   pools far below the async job task. Which `(repository, revision)` pairs may be served at all
+//!   is decided by the GUARD — the only layer that can see every model a job will load — and handed
+//!   here already decided (see [`prefer_local_snapshots`]); a directory-level seam cannot re-ask
+//!   "does this bundle hold what THIS caller needs" once it has answered with a path.
+//! - **The bound on "process-wide", stated honestly.** The worker claim loop runs one job at a
+//!   time, so no two JOBS overlap. That is not the whole story: in the desktop deployment the
+//!   utility worker runs INSIDE the API process (`spawn_inprocess_utility_worker`), so an API read
+//!   path resolving through the same prefer-local
+//!   [`crate::hf_home::model_source_library`] can observe a scope a job installed. For a file
+//!   OUTSIDE that job's union the leased bundle does not hold it, and such a reader sees it as
+//!   ABSENT while the scope is live. The bound is therefore: a concurrent same-process reader may
+//!   get a transient **false absent** that self-heals when the job ends — and never WRONG BYTES,
+//!   because a served path only ever names an already-verified bundle and an out-of-union name
+//!   simply does not exist inside it. Pinned by
+//!   `an_out_of_union_reader_sees_absent_never_the_wrong_bytes`. Narrowing this further means
+//!   giving API read paths a non-preferring library, which is a change across every
+//!   `model_source_library` caller rather than a local one.
 //! - Preference is keyed on the exact `(repository, immutable revision)` pair. A superseded
 //!   revision therefore never matches, and a bundle is never consulted for a revision it does not
 //!   contain — the source tier keeps serving those.
