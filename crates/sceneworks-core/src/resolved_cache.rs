@@ -1095,8 +1095,21 @@ impl ResolvedCacheStore {
                 continue;
             }
             had_file = true;
+            // Slot SELECTION is paths-and-sizes only. A journal slot's own integrity is proven by
+            // its checksummed envelope; re-hashing the whole bundle to decide which slot to read
+            // would put the bundle's byte count behind every pin read, every status listing and
+            // every catalog GET, and it would prove nothing a caller may act on — the load path
+            // ([`validate_complete_metadata`]) still re-hashes before an artifact reaches a
+            // runtime, and every write still validates at full strength.
             match read_journal(&path) {
-                Ok(envelope) if validate_metadata_shape(&envelope.metadata, digest).is_ok() => {
+                Ok(envelope)
+                    if validate_metadata_shape_with(
+                        &envelope.metadata,
+                        digest,
+                        ContentVerification::PathsAndSizesOnly,
+                    )
+                    .is_ok() =>
+                {
                     valid.push(envelope)
                 }
                 _ => had_invalid_slot = true,
@@ -1842,14 +1855,29 @@ fn validate_metadata_shape(
     metadata: &ResolvedCacheMetadata,
     digest: &str,
 ) -> Result<(), ResolvedCacheError> {
+    validate_metadata_shape_with(metadata, digest, ContentVerification::RehashEveryFile)
+}
+
+fn validate_metadata_shape_with(
+    metadata: &ResolvedCacheMetadata,
+    digest: &str,
+    verification: ContentVerification,
+) -> Result<(), ResolvedCacheError> {
     let artifact_key = metadata
         .artifact
         .cache_key()
         .map_err(|error| ResolvedCacheError::new(error.to_string()))?;
-    metadata
-        .artifact
-        .validate()
-        .map_err(|error| ResolvedCacheError::new(error.to_string()))?;
+    match verification {
+        ContentVerification::RehashEveryFile => metadata
+            .artifact
+            .validate()
+            .map_err(|error| ResolvedCacheError::new(error.to_string()))?,
+        ContentVerification::PathsAndSizesOnly => {
+            artifact_without_content_hashes(&metadata.artifact)
+                .validate()
+                .map_err(|error| ResolvedCacheError::new(error.to_string()))?
+        }
+    }
     let reservation_shape_is_valid = match metadata.state {
         ResolvedCacheEntryState::Materializing => {
             metadata.reservation_id.is_some()
@@ -1938,7 +1966,7 @@ fn validate_complete_metadata_inner(
     verification: ContentVerification,
 ) -> Result<(), ResolvedCacheError> {
     let digest = cache_key_digest(&metadata.cache_key)?;
-    validate_metadata_shape(metadata, &digest)?;
+    validate_metadata_shape_with(metadata, &digest, verification)?;
     if metadata.state != ResolvedCacheEntryState::Complete
         || metadata.reservation_id.is_some()
         || metadata.reservation_owner.is_some()

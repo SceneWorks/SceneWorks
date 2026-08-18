@@ -111,7 +111,11 @@ pub(crate) struct CachePinRequest {
 /// The typed pin answer, preserved. `Unknown` carries no `known` object at all, so a client that
 /// forgets to branch renders nothing rather than rendering "no pins".
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase", tag = "kind")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
 pub(crate) enum CachePinsDto {
     Known {
         artifact_pinned: bool,
@@ -220,7 +224,10 @@ fn entry_dto(
     CacheEntryDto {
         cache_key,
         state,
-        model_ids: owners.get(&identity.repository).cloned().unwrap_or_default(),
+        model_ids: owners
+            .get(&identity.repository)
+            .cloned()
+            .unwrap_or_default(),
         repository: Some(identity.repository.clone()),
         revision: Some(identity.revision.clone()),
         variant: Some(identity.variant.clone()),
@@ -322,12 +329,13 @@ pub(crate) async fn preview_model_cache_removal(
     Json(request): Json<CacheKeyRequest>,
 ) -> Result<Json<RemovalPreviewDto>, ApiError> {
     let store = open_mutable(&state).await?;
-    let preview = tokio::task::spawn_blocking(move || store.manual_removal_preview(&request.cache_key))
-        .await
-        .map_err(|error| {
-            ApiError::internal(format!("resolved-cache preview task failed: {error}"))
-        })?
-        .map_err(cache_error)?;
+    let preview =
+        tokio::task::spawn_blocking(move || store.manual_removal_preview(&request.cache_key))
+            .await
+            .map_err(|error| {
+                ApiError::internal(format!("resolved-cache preview task failed: {error}"))
+            })?
+            .map_err(cache_error)?;
     Ok(Json(RemovalPreviewDto {
         cache_key: preview.cache_key,
         state: preview.state,
@@ -346,7 +354,9 @@ pub(crate) async fn remove_model_cache_entry(
     let now = sceneworks_core::time::now_unix_seconds().max(0) as u64;
     let outcome = tokio::task::spawn_blocking(move || store.remove_entry(&request.cache_key, now))
         .await
-        .map_err(|error| ApiError::internal(format!("resolved-cache removal task failed: {error}")))?
+        .map_err(|error| {
+            ApiError::internal(format!("resolved-cache removal task failed: {error}"))
+        })?
         .map_err(cache_error)?;
     Ok(Json(RemovalOutcomeDto {
         cache_key: outcome.cache_key,
@@ -363,11 +373,12 @@ pub(crate) async fn set_model_cache_pin(
     Json(request): Json<CachePinRequest>,
 ) -> Result<Json<CacheEntryDto>, ApiError> {
     let store = open_mutable(&state).await?;
-    let metadata =
-        tokio::task::spawn_blocking(move || store.set_artifact_pin(&request.cache_key, request.pinned))
-            .await
-            .map_err(|error| ApiError::internal(format!("resolved-cache pin task failed: {error}")))?
-            .map_err(cache_error)?;
+    let metadata = tokio::task::spawn_blocking(move || {
+        store.set_artifact_pin(&request.cache_key, request.pinned)
+    })
+    .await
+    .map_err(|error| ApiError::internal(format!("resolved-cache pin task failed: {error}")))?
+    .map_err(cache_error)?;
     let owners = repository_owners(&state).await;
     Ok(Json(entry_dto(
         ResolvedCacheEntrySummary {

@@ -195,9 +195,6 @@ mod model_sources;
 // Read + control surface for the app-owned resolved-model hot cache (sc-19711): status for the
 // Settings storage card, and the per-model keep/remove operations the Model Manager drives.
 mod model_cache;
-use model_cache::{
-    get_model_cache, preview_model_cache_removal, remove_model_cache_entry, set_model_cache_pin,
-};
 use manifest::{
     acquire_manifest_file_lock, load_manifest_entries, manifest_write_lock, merge_entries_by_id,
     merge_object, mutate_manifest_entries, remove_catalog_manifest_entry, write_manifest_atomic,
@@ -205,6 +202,9 @@ use manifest::{
 };
 #[cfg(test)]
 use manifest::{strip_jsonc_comments, API_MANAGED_MANIFEST_HEADER};
+use model_cache::{
+    get_model_cache, preview_model_cache_removal, remove_model_cache_entry, set_model_cache_pin,
+};
 mod models;
 use models::{
     create_model_convert_job, create_model_download_job, create_model_import_job, delete_model,
