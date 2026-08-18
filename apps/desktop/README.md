@@ -353,9 +353,9 @@ installed and simply goes back to loading from the drive.
 
 ### Limits worth knowing
 
-- A few models keep an **optional** extra component (currently Qwen-Image, Qwen-Image-Edit and
-  ACE-Step v1.5 Turbo) that is *not* copied locally. The model itself still works while the drive
-  is disconnected; a generation that needs that optional component does not.
+- Two models keep an **optional** extra component (currently Qwen-Image and ACE-Step v1.5 Turbo)
+  that is *not* copied locally. The model itself still works while the drive is disconnected; a
+  generation that needs that optional component does not.
 - A model whose download was recorded without an exact revision cannot be served from a local copy
   and always loads from the library.
 - LoRAs and control overlays are not part of this feature; they always load from the library.

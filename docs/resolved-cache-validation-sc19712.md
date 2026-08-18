@@ -293,7 +293,7 @@ a `resolved_cache_local_tier_not_selected` event.
 
 Scale, measured against the **real** install rather than this campaign's synthetic one — 85
 receipts under `~/SceneWorks/data/models`, of which exactly **one** is revision-less:
-`SceneWorks/qwen-image-mlx`. That single model is also one of the three soft-co-requisite models
+`SceneWorks/qwen-image-mlx`. That single model is also one of the two soft-co-requisite models
 below, so `qwen_image` is excluded from the local tier on both counts. The backfill path is rare in
 practice; it is not theoretical.
 
@@ -365,13 +365,13 @@ and exactly one provider (`huggingface`, 298/298 rows).
 | Hard co-requisite, multi-repo, `componentId`/`subdir` | `mage_flow_edit_base` → `SceneWorks/Mage-Flow-Components-mlx` | **yes**, as `ArtifactMemberRole::CoRequisite` | `a_multi_repository_closure_becomes_one_source_library_shaped_bundle` (`promotion_tests.rs:69`) |
 | Platform-restricted rows | `lens` (macOS-only) | **yes** — filtered to the worker's own OS by `retain_downloads_for_os` (`artifact_selection.rs:71-87`) | by construction |
 | Sibling quant tiers | `q4`/`q8`/`bf16` | **yes**, as distinct members; never unioned | `sibling_tiers_of_one_repository_stay_distinct_members` (`promotion_tests.rs:171`) |
-| **Soft co-requisite** (`required: "soft"`) | `qwen_image`, `qwen_image_edit`, `acestep_v15_turbo` | **NO — silently excluded** by `.filter(\|d\| d.get("required") != Some("soft"))` at `artifact_selection.rs:251,342,412`. No event, no badge. The primary promotes and shows "local copy" while that component still reads from the source library. | code-cited; **see limitation note below** |
+| **Soft co-requisite** (`required: "soft"`) | `qwen_image`, `acestep_v15_turbo` (exactly two — see the addendum's correction) | **NO — silently excluded** by `.filter(\|d\| d.get("required") != Some("soft"))` at `artifact_selection.rs:251,342,412`. No event, no badge. The primary promotes and shows "local copy" while that component still reads from the source library. | code-cited; **see limitation note below** |
 | **Revision-less requirement** | `svd`, `flux2_klein_9b_true_v2`, `wan_2_2_vace_fun_14b`, `prompt_refine_anubis_8b`, `joycaption_beta_one`, `controlnet_tile_sdxl` (no pinned row at all), plus the unpinned LoRA co-requisites of `ltx_2_3_eros` / `wan_2_2_t2v_14b` / `wan_2_2_i2v_14b` | **NO — poisons the whole repository** at serve time (`external_library_runtime.rs:436-439`). Promotion may still build the bundle, so those entries can occupy cache bytes and never be served. | `a_requirement_with_no_recorded_revision_makes_its_whole_repository_unserveable` (`external_library_runtime.rs:1599`); reported as `resolved_cache_local_tier_not_selected` |
 | **LoRAs and control overlays** | `config/manifests/builtin.loras.jsonc` (8), `builtin.control_overlays.jsonc` (1) | **NO — no path into the cache at all.** They are not model manifest entries; `payload_model_entries` reads only `modelManifestEntry` / `baseModelManifestEntry` / `modelManifestEntries` (`external_library_runtime.rs:742-755`), and the producer only ever emits `Primary` and `CoRequisite`, leaving the other seven `ArtifactMemberRole` variants dead. | code-cited |
 | **Zero-download / imported models** | `aura_sr_v2` (`downloads: []`), user-imported checkpoints | **N/A** — never enter the closure (`entry_is_provably_non_hf_local`, `external_library_runtime.rs:761-802`); the API forces `local_ready` for anything under `<data_dir>/models` | code-cited |
 | Non-`huggingface` providers | none ship today | **N/A** — 298/298 `downloads[]` rows are `huggingface` | manifest scan |
 
-**Limitation worth stating in the product, not just here:** for the three soft-co-requisite models
+**Limitation worth stating in the product, not just here:** for the two soft-co-requisite models
 the "local copy" badge over-promises. The base model survives a disconnect; the optional component
 does not, so a request that needs it will fail while the badge says the model is local. This is
 documented in the user-facing troubleshooting section added by this story.
@@ -468,3 +468,140 @@ No-network-transfer evidence is a byte-exact fingerprint of both tiers plus the 
 taken before and after each local-only scenario (file list + sizes + mtimes, SHA-256 of the
 listing), with `HF_HUB_OFFLINE=1` exported to the worker for the reconnect run so that any
 attempted fetch fails loudly instead of silently succeeding.
+
+---
+
+# Addendum — closing the recorded gaps (2026-08-18)
+
+Written after the findings above were fixed and merged. **F-1 through F-5 landed in PR #2411**, now
+on `feature/sc-19703-resolved-model-hot-cache` (F-1 landed byte-identical to the patch recorded
+above; the memory matrix was re-fingerprinted mechanically and nothing staled). Everything below was
+re-run against that fixed head.
+
+This addendum closes the two things the original campaign recorded as gaps — the adversarial probes
+it designed but did not execute — re-measures F-3, and corrects one error in the matrix above.
+
+## Correction to the matrix above
+
+The soft-co-requisite row named **three** models. It is **two**: `qwen_image` and
+`acestep_v15_turbo`. `qwen_image_edit` is not a manifest id at all (the edit models ship as
+`qwen_image_edit_2511` and siblings, none of which carry a `required: "soft"` download). Verified by
+scanning every `"required": "soft"` occurrence in `config/manifests/builtin.models.jsonc` back to
+its owning `"id"`. The rows, the prose and the user-facing list in `apps/desktop/README.md` are all
+corrected; the substance of the finding is unchanged, and `qwen_image` is still the model that is
+excluded from the local tier on *both* counts (soft co-requisite **and** the only revision-less
+receipt on the real install).
+
+## Probe 6a — alias / realias rebind · **PASS**
+
+The sc-19709 fix, exercised against the real volume. A scratch symlink was bound first, then the
+configured path was switched to the direct `/Volumes` root and back again, restarting the API each
+time so the binding was re-probed from disk.
+
+| Step | Configured path | Probe | `sana_1600m` | Binding `configuredPath` | `canonicalPath` / `volumeId` | `boundAt` |
+|---|---|---|---|---|---|---|
+| 1. bind via symlink | `…/sw3/liblink` | `available` | `external_ready` | `…/sw3/liblink` | `/Volumes/Models/huggingface/hub` · `macos-volume:cd01d2ad…804bd` | `1787041411` |
+| 2. switch to direct root | `/Volumes/Models/huggingface/hub` | `available` | `external_ready` | **realiased →** `/Volumes/Models/huggingface/hub` | *unchanged* | **`1787041411` unchanged** |
+| 3. switch back to symlink | `…/sw3/liblink` | `available` | `external_ready` | **realiased →** `…/sw3/liblink` | *unchanged* | **`1787041411` unchanged** |
+
+Availability never left `external_ready`, no relocation prompt was raised, and nothing re-entered
+the download path. The ledger was realiased in both directions while canonical path, physical
+identity and `bound_at` were preserved — exactly the contract §7 of the handoff describes.
+
+One ordering detail worth knowing (not a defect): immediately after the switch, the
+`GET /api/v1/model-library` probe still reported the *previous* `configuredPath`, and the realias
+became visible on the next `/api/v1/models` read. The realias happens on the availability path
+(`bind_or_probe_validated`), not in the probe endpoint, so a UI that reads only the probe endpoint
+will show the old alias for one poll.
+
+## Probe 6b — decoy identity mismatch · **PASS (fails closed)**
+
+With the drive unmounted (`lsof` clean, `diskutil unmountDisk`, never forced), the *same* configured
+path was repointed at an HF-shaped decoy on internal disk: same `models--SceneWorks--Sana_1600M_1024px_mlx`
+directory, same `snapshots/ac421696…` revision directory, same four closure filenames — a credible
+impostor differing only in bytes and physical identity.
+
+| Assertion | Result |
+|---|---|
+| Probe status | `identity_mismatch`, `available: false` |
+| `sana_1600m` availability | `installed_external_unavailable` |
+| **`libraryPresent`** | **`true`** — the "present but wrong identity" signal, distinct from a plain disconnect |
+| Decoy adopted? | **No.** Binding still `canonicalPath: /Volumes/Models/huggingface/hub`, `volumeId: macos-volume:cd01d2ad…804bd`, `boundAt: 1787041411` — untouched |
+| Submission | `HTTP 503` `external_model_library_unavailable`, context carrying `configuredLibraryPath` (the decoy path), `expectedLibraryPath` (the real root), `expectedVolumeId`, and `libraryPresent: true` |
+| Wedge? | **No.** Restoring the symlink and remounting returned `sana_1600m` to `external_ready` with `boundAt` still `1787041411` |
+
+`libraryPresent: true` is what drives the relocation branch rather than the reconnect branch —
+`ModelLibraryDialog.jsx:50` reads `context.libraryPresent === true` as `mismatched` — so the
+choose-a-different-location lead is the one a user gets here, and the recovery is user-reachable
+rather than a dead end. The decoy was never adopted and the real binding was never overwritten.
+
+## F-3 re-measured · **improved 5.3×, NOT resolved**
+
+Same endpoint, same model, same machine, same unoptimized build; the only variable is the cache
+the request has to reason about.
+
+| Cache contents | `POST /api/v1/image/jobs` | Note |
+|---|---:|---|
+| empty | sub-second | original campaign |
+| 80 MB (1 entry) | **0.130 s** | fixed head |
+| 5.57 GB (1 entry) | **929.6 s** | **before the fix** |
+| 5.65 GB (2 entries) | **175.8 s** | fixed head, first measurement |
+| 5.65 GB (2 entries), system otherwise idle | **185.1 s / 175.0 s / 174.3 s** | three consecutive, **worker stopped entirely** |
+
+**929.6 s → ~175 s is a real 5.3× win, but a job submission still costs nearly three minutes on a
+5.65 GB cache, and it still scales with cache size.**
+
+I first assumed the residue was lock contention with the retention sweep — the worker was at 100 %
+CPU and one API sample showed `flock` with no hashing. **That was wrong, and the control disproved
+it:** with the worker killed outright, three consecutive submissions still took 174–185 s. The
+earlier sample had simply landed in an idle gap between requests.
+
+Re-sampled properly, mid-submission, with no worker running at all:
+
+```
+api cpu: 100.0
+sha2 compress samples: 13
+  12 preflight_payload_model_sources
+   2 validate_artifact_file
+```
+
+So a **full content re-hash still happens on the submission path** — `preflight_payload_model_sources`
+still reaches `validate_artifact_file`. The throughput is the tell: 5.65 GB / ~175 s ≈ 32 MB/s,
+which is one pass over the cached bytes at this build's software-SHA rate. Before the fix the same
+request burned roughly 5,600 CPU-seconds (929.6 s at ~600 % CPU); it now burns roughly 175
+(single-threaded). The fix removed most of the redundant passes; it did not remove the last one.
+
+Recommendation, unchanged in kind from the original finding: the submission path is deciding
+*availability*, not handing bytes to a loader, so it should not need a content pass at all — the
+lease boundary already re-verifies before the load. Until the last pass is gone, the feature still
+gets slower the more it is used.
+
+## F-4 and F-2 spot checks · **both confirmed fixed**
+
+- **F-4 — a promotion is visible without an API restart.** Immediately after the 5.57 GB Sana
+  bundle published, `GET /api/v1/models` returned `sana_1600m availability=local_ready` in
+  **1.13 s** with **no restart** — the exact condition that previously required one (the cached read
+  had said `installed_external_unavailable` while a fresh build said `local_ready`).
+  `person_detector` stayed `local_ready` alongside it.
+- **F-2 — the status endpoint survives maintenance.** `GET /api/v1/model-cache` was polled **34
+  times while the promotion was materializing** and answered every time; a later series taken while
+  the worker sat at 100 % CPU in a retention sweep returned **0.0046 / 0.0050 / 0.0051 / 0.0050 /
+  0.0050 / 0.0051 s**, and three more during the submission measurements returned **0.0046 /
+  0.0042 / 0.0042 s**. Previously this endpoint did not answer within 40 s during a sweep.
+
+Note the asymmetry the numbers expose: the **status** read was made cheap, but the **submission**
+path was not given the same treatment, which is why F-3 has a residue and F-2 does not.
+
+## Addendum verification
+
+| Check | Result |
+|---|---|
+| `npm run rust:check` (for the doc-comment split) | exit **0**, 3763 tests passed, 0 failed |
+| working tree after the run | clean apart from the three intended files |
+| drive at end | **mounted**, `VolumeUUID CD01D2AD-5CB6-480B-8A7E-322816A804BD` |
+
+One review minor from #2411 is also folded in here: the pre-existing doc block for
+`local_resolved_artifacts` had been left attached to the newly inserted `note_local_tier_freshness`
+(`apps/rust-api/src/model_sources.rs`), leaving the provider-agreement paragraphs describing the
+wrong function and `local_resolved_artifacts` with no documentation at all. The comment is split
+back so each block sits on the function it describes.

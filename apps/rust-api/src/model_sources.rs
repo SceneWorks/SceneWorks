@@ -306,19 +306,6 @@ pub(crate) async fn resolve_model_manifest_entry_by_repo(
     Ok(entry)
 }
 
-/// App-owned resolved-local artifacts for LocalReady detection. Empty when the resolved cache is
-/// disabled or uninitialized; read-only (never creates a session or refreshes usage).
-///
-/// This is the SAME provider the worker's pre-loader guard uses (sc-19707), so catalog/preflight
-/// and the actual load can never disagree about which entries are valid: an entry that is still
-/// materializing, torn, unverifiable, or in a shape the runtime cannot serve is not a local
-/// candidate on either side of the boundary.
-///
-/// The agreement is about the *judgement*, not the cost. The scan validates on paths and sizes;
-/// the content re-hash lives at the lease boundary inside the store (sc-19712 F-3). Both sides
-/// still read the same provider and reach the same verdict for every case a user can reach — a
-/// bundle whose bytes were altered after publication is refused when the lease is taken, and the
-/// caller falls back to the source tier, which is the same outcome the old cost bought.
 /// Tells the catalog cache what the resolved cache's published set looks like right now, so a
 /// promotion published by the WORKER is reflected in the next catalog read (sc-19712 F-4).
 ///
@@ -336,6 +323,19 @@ pub(crate) fn note_local_tier_freshness(state: &AppState) {
     state.model_catalog_cache.note_local_tier_key(key);
 }
 
+/// App-owned resolved-local artifacts for LocalReady detection. Empty when the resolved cache is
+/// disabled or uninitialized; read-only (never creates a session or refreshes usage).
+///
+/// This is the SAME provider the worker's pre-loader guard uses (sc-19707), so catalog/preflight
+/// and the actual load can never disagree about which entries are valid: an entry that is still
+/// materializing, torn, unverifiable, or in a shape the runtime cannot serve is not a local
+/// candidate on either side of the boundary.
+///
+/// The agreement is about the *judgement*, not the cost. The scan validates on paths and sizes;
+/// the content re-hash lives at the lease boundary inside the store (sc-19712 F-3). Both sides
+/// still read the same provider and reach the same verdict for every case a user can reach — a
+/// bundle whose bytes were altered after publication is refused when the lease is taken, and the
+/// caller falls back to the source tier, which is the same outcome the old cost bought.
 pub(crate) fn local_resolved_artifacts(state: &AppState) -> Vec<ResolvedModelArtifact> {
     if !state.settings.resolved_cache.enabled {
         return Vec::new();
