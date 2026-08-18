@@ -191,6 +191,7 @@ use dto::{
 mod manifest;
 // The single model-source seam every job-creation path calls (sc-19708): generic carrier
 // attachment + typed external-library availability preflight, all data-driven.
+mod model_library;
 mod model_sources;
 use manifest::{
     acquire_manifest_file_lock, load_manifest_entries, manifest_write_lock, merge_entries_by_id,
@@ -1733,6 +1734,16 @@ fn create_app_with_state_mode(
         .route(
             UI_PREFERENCES_PATH,
             get(get_ui_preferences).put(set_ui_preferences),
+        )
+        // The model source library's live status + relocation seam (sc-19709). Its own path
+        // prefix, not `/models/...`, so a library operation can never collide with a model id.
+        .route(
+            "/api/v1/model-library",
+            get(model_library::get_model_library),
+        )
+        .route(
+            "/api/v1/model-library/relocate",
+            post(model_library::relocate_model_library),
         )
         .route("/api/v1/models", get(list_models))
         .route("/api/v1/models/:model_id", delete(delete_model))
@@ -4734,6 +4745,7 @@ fn find_timeline_item<'a>(timeline: &'a Value, item_id: &str) -> Result<&'a Valu
         .ok_or_else(|| ApiError {
             status: StatusCode::NOT_FOUND,
             detail: "Timeline item not found".to_owned(),
+            context: None,
             code: None,
         })
 }

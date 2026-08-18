@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState } from "react";
 import { apiFetch, isAbortError } from "../api.js";
 import { isCurrentProjectRequest } from "../appStateHelpers.js";
+import { rethrowUnlessPrompted } from "../modelLibrary.js";
 import { refreshFailure, refreshSuccess } from "../refreshResult.js";
 import { upsertJobNewest } from "../sorters.js";
 
@@ -381,14 +382,22 @@ export function useTraining({ token, activeProject, activeProjectRef, setError, 
   );
 
   const createTrainingJob = useCallback(
-    async (request, projectId = activeProject?.id) => {
+    async function submitTrainingJob(request, projectId = activeProject?.id) {
       if (!projectId) {
         throw new Error("Select a workspace before creating a training job.");
       }
-      const job = await apiFetch(`/api/v1/projects/${projectId}/training/jobs`, token, {
-        method: "POST",
-        body: JSON.stringify(request),
-      });
+      let job;
+      try {
+        job = await apiFetch(`/api/v1/projects/${projectId}/training/jobs`, token, {
+          method: "POST",
+          body: JSON.stringify(request),
+        });
+      } catch (error) {
+        // A base model on a disconnected library is recoverable, not a failure to print: hand the
+        // prompt this exact submission to resume (sc-19709). It owns single-fire, so a reconnect
+        // cannot queue two training runs.
+        rethrowUnlessPrompted(error, () => submitTrainingJob(request, projectId));
+      }
       setJobs((items) => upsertJobNewest(items, job));
       setError("");
       return job;
