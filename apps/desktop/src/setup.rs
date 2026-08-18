@@ -3014,6 +3014,20 @@ fn unix_shutdown_pids(
         .collect()
 }
 
+/// What the graceful teardown does once every sidecar is down (sc-19709).
+///
+/// Relaunching after a settings change that only the sidecars' spawn environment can carry — a
+/// relocated model library — is the SAME teardown as quitting, not a faster one. It deliberately
+/// reuses [`begin_teardown`] rather than the auto-update path's `stop_sidecars_for_update`, which
+/// force-kills immediately because an NSIS installer is waiting on a file lock: a hard kill of an
+/// MLX worker mid-render can wedge the host GPU client until reboot, so a user-initiated restart
+/// must go through SIGTERM-and-grace like an ordinary quit.
+#[derive(Clone, Copy)]
+enum Teardown {
+    Exit,
+    Relaunch,
+}
+
 /// Begin graceful shutdown: stop the GPU worker (MLX on macOS, candle on
 /// Windows/Linux) then the API sidecar.
 /// On Unix this sends SIGTERM and waits up to the grace period before
@@ -3021,6 +3035,16 @@ fn unix_shutdown_pids(
 /// Windows-session refinement). Returns true if shutdown was initiated (caller
 /// should prevent the immediate exit), false if it was already in progress.
 pub fn begin_shutdown(app: &AppHandle) -> bool {
+    begin_teardown(app, Teardown::Exit)
+}
+
+/// The identical graceful teardown, followed by a relaunch instead of an exit (sc-19709). Returns
+/// false when a teardown is already running, so a second "Restart now" cannot start a second one.
+pub fn begin_restart(app: &AppHandle) -> bool {
+    begin_teardown(app, Teardown::Relaunch)
+}
+
+fn begin_teardown(app: &AppHandle, then: Teardown) -> bool {
     let managed = app.state::<Managed>();
     if managed.shutting_down.swap(true, Ordering::SeqCst) {
         return false;
@@ -3099,7 +3123,11 @@ pub fn begin_shutdown(app: &AppHandle) -> bool {
         if let Some(cred_ipc) = cred_ipc {
             let _ = std::fs::remove_file(&cred_ipc.socket);
         }
-        handle.exit(0);
+        match then {
+            Teardown::Exit => handle.exit(0),
+            // Diverges: the process is replaced, so nothing after this runs.
+            Teardown::Relaunch => handle.restart(),
+        }
     });
     true
 }
