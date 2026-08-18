@@ -208,10 +208,10 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).not.toContain("Jobs and GPUs");
   });
 
-  it("flips the MLX button to ready when a model conversion completes", async () => {
+  it("flips the convert button to ready when a model conversion completes", async () => {
     // `mlxConversionState` is derived server-side from the converted artifact on disk, so the
     // Models row only learns the conversion landed if the catalog is refetched when the
-    // model_convert job completes. Without that refetch the button stays on "Convert to MLX"
+    // model_convert job completes. Without that refetch the button stays on "Convert"
     // until the app restarts.
     let conversionState = "needs_conversion";
     global.fetch.mockImplementation((url) => {
@@ -253,7 +253,7 @@ describe("SceneWorks app shell", () => {
     await settle();
 
     const mlxButton = () => [...container.querySelectorAll(".mlx-status button")][0];
-    expect(mlxButton().textContent).toBe("Convert to MLX");
+    expect(mlxButton().textContent).toBe("Convert");
 
     conversionState = "converted";
     await act(async () => {
@@ -269,9 +269,9 @@ describe("SceneWorks app shell", () => {
     await settle();
     await settle();
 
-    expect(mlxButton().textContent).toBe("MLX ready");
+    expect(mlxButton().textContent).toBe("Converted");
     expect(mlxButton().disabled).toBe(true);
-    expect(container.textContent).toContain("Converted to MLX and ready.");
+    expect(container.textContent).toContain("Converted and ready.");
   });
 
   it("adds the imported model's row when a model import completes", async () => {

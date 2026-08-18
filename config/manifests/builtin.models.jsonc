@@ -8710,7 +8710,14 @@
       // local diffusers dir that borrows the VAE/text-encoder/tokenizer from the
       // base FLUX.2-klein-9B install (mlx.convertBaseRepo). sc-2235.
       "capabilities": ["text_to_image", "image_to_image", "edit_image", "character_image"],
-      "macOnly": true,
+      // No `macOnly` (sc-20529). For an IMAGE entry the flag is a no-op label — only video
+      // entries (`video_model_withdrawn_on_platform`) and the vision captioner read it — and
+      // here it was actively misleading: the FLUX.2-klein converter has a real candle twin
+      // (`runtime_cuda::providers::flux2::convert_and_assemble`, sc-7459), `POST
+      // /models/{id}/convert` is not platform-gated, and the catalog now surfaces this entry's
+      // conversion state on Windows/Linux (`CANDLE_NATIVE_CONVERTERS`). Availability is driven
+      // by the routing tables (`MLX_ROUTED_MODELS` / `CANDLE_ROUTED_MODELS`), not this flag —
+      // same posture as krea/lens/ideogram/boogu/sd3.5.
       "downloads": [
         {
           // Only the bf16 single-file transformer (the convert source). The repo

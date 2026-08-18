@@ -5479,14 +5479,23 @@ fn project_imported_operation_surface(
     }
 }
 
-/// True when this entry is a convert-at-install model whose `mlx.converter` has a REAL off-macOS
-/// (candle) implementation — [`sceneworks_core::jobs_store::CANDLE_NATIVE_CONVERTERS`]. Such a model
-/// loads from a converted artifact on Windows/Linux exactly as it does on macOS, so its conversion
-/// state belongs in the catalog on every platform (sc-20529).
+/// True when this entry is a convert-at-install model that loads from a **converted artifact on the
+/// platform this build targets** — so its conversion state belongs in the catalog here (sc-20529).
 ///
-/// The `requiresConversion` half is load-bearing: without it a turnkey model that merely names a
+/// The converter half is [`sceneworks_core::jobs_store::convert_artifact_required_here`], the SAME
+/// predicate the worker's unconverted-model preflight gates on. Re-implementing the
+/// converter-membership test here (the original shape of this function) put two copies of one
+/// platform rule on either side of the API/worker seam, where they can drift into an API that
+/// offers a convert affordance the worker refuses to honour, or the reverse.
+///
+/// Only the `requiresConversion` read stays local: it is a property of THIS catalog entry, not of
+/// the converter registry, and it is load-bearing — without it a turnkey model that merely names a
 /// converter would start reporting MLX status off-Mac.
-fn entry_has_off_mac_native_converter(object: &JsonObject) -> bool {
+///
+/// Platform-aware, like the core helper: off macOS only `CANDLE_NATIVE_CONVERTERS` qualify, on macOS
+/// every native converter does (where the call site's `cfg!(target_os = "macos")` arm has already
+/// won anyway — macOS surfaces MLX status for every entry, convert-at-install or not).
+fn entry_requires_converted_artifact_here(object: &JsonObject) -> bool {
     let Some(mlx) = object.get("mlx").and_then(Value::as_object) else {
         return false;
     };
@@ -5496,9 +5505,7 @@ fn entry_has_off_mac_native_converter(object: &JsonObject) -> bool {
     mlx.get("converter")
         .and_then(Value::as_str)
         .map(str::trim)
-        .is_some_and(|converter| {
-            sceneworks_core::jobs_store::CANDLE_NATIVE_CONVERTERS.contains(&converter)
-        })
+        .is_some_and(sceneworks_core::jobs_store::convert_artifact_required_here)
 }
 
 fn apply_mac_and_mlx_fields(object: &mut JsonObject, data_dir: &FsPath) {
@@ -5557,7 +5564,8 @@ fn apply_mac_and_mlx_fields(object: &mut JsonObject, data_dir: &FsPath) {
     // Anima's three variants to `missing` there: `anima_quant` is macOS-only, and off-Mac Anima
     // loads the raw `circlestone-labs/Anima` `split_files/` tree with no converted dir at all. The
     // const is the contract that keeps those two cases apart.
-    let mlx_status = if cfg!(target_os = "macos") || entry_has_off_mac_native_converter(object) {
+    let mlx_status = if cfg!(target_os = "macos") || entry_requires_converted_artifact_here(object)
+    {
         mlx_catalog_status(object, data_dir)
     } else {
         None
@@ -8104,45 +8112,58 @@ mod variant_install_tests {
         );
     }
 
-    /// sc-20529: which convert-at-install entries get MLX status surfaced OFF macOS. Only those
-    /// whose converter has a real candle implementation (`CANDLE_NATIVE_CONVERTERS`) — everything
-    /// else has no off-Mac convert lane and must keep the old macOS-only behaviour.
+    /// sc-20529: which convert-at-install entries get MLX status surfaced. The converter half is
+    /// delegated to `sceneworks_core::jobs_store::convert_artifact_required_here` — the same
+    /// predicate the worker's preflight gates on — so this pins the DELEGATION (identical verdicts
+    /// on both sides of the API/worker seam) as well as the entry-shape half that stays local.
     #[test]
-    fn off_mac_native_converter_predicate_admits_only_the_candle_convert_lane() {
+    fn converted_artifact_predicate_tracks_the_core_platform_rule() {
+        use sceneworks_core::jobs_store::convert_artifact_required_here;
         let entry = |value: Value| value.as_object().unwrap().clone();
 
-        // flux2_klein_9b_true_v2: candle converter exists (sc-7459) → surfaced off-Mac.
-        assert!(entry_has_off_mac_native_converter(&entry(json!({
+        // flux2_klein_9b_true_v2: the candle converter exists (sc-7459), so the converted artifact
+        // is required on EVERY platform — this is the entry the whole story is about.
+        assert!(entry_requires_converted_artifact_here(&entry(json!({
             "id": "flux2_klein_9b_true_v2",
             "mlx": { "requiresConversion": true, "converter": "flux2_klein_diffusers" }
         }))));
 
-        // Anima: `anima_quant` is macOS-only. Surfacing it off-Mac would report `missing` for three
-        // models that legitimately load the raw split_files/ tree there.
-        assert!(!entry_has_off_mac_native_converter(&entry(json!({
+        // Anima / LTX / the prequant converters are macOS-only, so off-Mac they require NO converted
+        // artifact: surfacing them there would report `missing` for models that legitimately load
+        // their raw source tree. On macOS every native converter does produce the artifact. Asserted
+        // against the core helper rather than a second hard-coded membership test — that duplication
+        // is exactly what this delegation removed.
+        for converter in [
+            "anima_quant",
+            "ltx_video",
+            "flux2_dev_quant",
+            "sd3_5_large_quant",
+        ] {
+            assert_eq!(
+                entry_requires_converted_artifact_here(&entry(json!({
+                    "id": "x",
+                    "mlx": { "requiresConversion": true, "converter": converter }
+                }))),
+                convert_artifact_required_here(converter),
+                "{converter}: the catalog predicate must agree with the core platform rule"
+            );
+        }
+        // …and off macOS that verdict is concretely `false` (the Anima trap, stated outright).
+        #[cfg(not(target_os = "macos"))]
+        assert!(!entry_requires_converted_artifact_here(&entry(json!({
             "id": "anima_base",
             "mlx": { "requiresConversion": true, "converter": "anima_quant" }
         }))));
 
-        // LTX + FLUX.2-dev prequant: macOS-only converters likewise.
-        for converter in ["ltx_video", "flux2_dev_quant", "sd3_5_large_quant"] {
-            assert!(
-                !entry_has_off_mac_native_converter(&entry(json!({
-                    "id": "x",
-                    "mlx": { "requiresConversion": true, "converter": converter }
-                }))),
-                "{converter} has no off-Mac implementation"
-            );
-        }
-
-        // A turnkey that merely names a converter is not convert-at-install.
-        assert!(!entry_has_off_mac_native_converter(&entry(json!({
+        // The entry-shape half, which stays local: a turnkey that merely names a converter is not
+        // convert-at-install, even on macOS where the converter itself qualifies.
+        assert!(!entry_requires_converted_artifact_here(&entry(json!({
             "id": "x",
             "mlx": { "converter": "flux2_klein_diffusers" }
         }))));
 
         // No mlx block at all.
-        assert!(!entry_has_off_mac_native_converter(&entry(
+        assert!(!entry_requires_converted_artifact_here(&entry(
             json!({ "id": "x" })
         )));
     }

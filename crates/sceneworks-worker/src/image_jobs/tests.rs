@@ -1855,7 +1855,12 @@ fn off_mac_anima_is_not_refused_by_the_unconverted_preflight() {
 
 /// The builtin `flux2_klein_9b` / `flux2_klein_9b_kv` turnkeys declare no `mlx.requiresConversion`,
 /// so the preflight must be structurally unreachable for them and their snapshot resolution
-/// untouched (sc-20529 AC5). Asserted on the resolver itself rather than by inspection.
+/// untouched (sc-20529 AC5).
+///
+/// Driven off the REAL embedded builtin entries (the shipped `builtin.models.jsonc` bytes, same as
+/// the sceneworks-core drift guards), not a synthetic stand-in: a hand-written entry with no `mlx`
+/// block passes this vacuously and would keep passing after a manifest edit that added
+/// `requiresConversion` to either turnkey — exactly the drift the guard exists to catch.
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
 #[test]
 fn builtin_flux2_klein_snapshot_resolution_is_untouched() {
@@ -1863,15 +1868,194 @@ fn builtin_flux2_klein_snapshot_resolution_is_untouched() {
     let mut settings = Settings::from_env();
     settings.data_dir = root.path().to_path_buf();
     for model in ["flux2_klein_9b", "flux2_klein_9b_kv"] {
+        let entry = crate::tests::builtin_model_entry(model);
+        // The manifest premise the resolver assertion rests on. Stated separately so a future edit
+        // fails with the reason rather than an opaque resolver error.
+        assert!(
+            entry.get("mlx").is_some(),
+            "{model} must still carry an mlx block for this guard to mean anything"
+        );
+        assert_ne!(
+            entry
+                .pointer("/mlx/requiresConversion")
+                .and_then(Value::as_bool),
+            Some(true),
+            "{model} is a packed turnkey, not convert-at-install — declaring requiresConversion \
+             here routes it through the sc-20529 unconverted preflight and refuses every render \
+             until a conversion that does not exist has run"
+        );
         let req = request(json!({
             "projectId": "p", "model": model, "prompt": "a lighthouse",
-            "modelManifestEntry": { "id": model, "family": "flux2-klein" }
+            "modelManifestEntry": entry
         }));
         assert!(
             resolve_weights_dir(&req, &settings).is_ok(),
             "{model} must keep its existing snapshot resolution (no preflight applies)"
         );
     }
+}
+
+/// The dispatch outcome `run_image_generate_job` reaches for a candle image job, composed exactly as
+/// the production function composes it: the prepared route decides, and when NOTHING claims the job
+/// the stub gate gets the last word before `generate_stub_stream`. `run_image_generate_job` itself
+/// needs a live API, a project on disk, and a GPU, so the composition is mirrored here and the
+/// production wiring is pinned by source assertion in the test below.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[derive(Debug, PartialEq, Eq)]
+enum CandleDispatchOutcome {
+    /// A candle route claimed the job and will render it.
+    Route(CandleImageRoute),
+    /// The job is refused with a typed `InvalidPayload`, before any render.
+    Refused(String),
+    /// Nothing claimed it and nothing refused it — `generate_stub_stream` writes a procedural
+    /// gradient and the job COMPLETES.
+    Stub,
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_dispatch_outcome(request: &ImageRequest, settings: &Settings) -> CandleDispatchOutcome {
+    match prepare_candle_image_route(request, settings) {
+        Ok(Some(route)) => CandleDispatchOutcome::Route(route.kind()),
+        Ok(None) => match candle_weights_gap(request) {
+            Some(message) => CandleDispatchOutcome::Refused(message),
+            None => CandleDispatchOutcome::Stub,
+        },
+        Err(error) => CandleDispatchOutcome::Refused(error.to_string()),
+    }
+}
+
+/// sc-20529 review regression, and the reason the preflight alone was not enough.
+///
+/// `unconverted_model_preflight` fires from `resolve_weights_dir`, which only runs once a route has
+/// claimed the job. `flux2_edit_candle_available` collapses that typed `Err` to `false`, and EVERY
+/// terminal arm of the candle ladder excludes `mode == "edit_image"` — so an unconverted
+/// `edit_image` job was claimed by no route at all, `prepare_candle_image_route` returned `None`,
+/// and the job fell through to `generate_stub_stream` and **completed with a procedural gradient**.
+/// A plausible-looking asset in place of a typed refusal is worse than the raw loader error it
+/// replaced, and is exactly the silent fallback sc-5099 forbids.
+///
+/// Mutation witness: delete the `candle_weights_gap` block from `run_image_generate_job` and both
+/// halves of this test go red — the outcome falls back to `Stub`, and the source assertion loses
+/// its marker.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn unconverted_edit_image_job_is_refused_at_dispatch_never_stubbed() {
+    let root = tempfile::tempdir().unwrap();
+    let mut settings = Settings::from_env();
+    settings.data_dir = root.path().to_path_buf();
+    settings.backend_candle_enabled = true;
+
+    let mut req = unconverted_true_v2_request();
+    req.mode = "edit_image".to_owned();
+    req.source_asset_id = Some("source-asset".to_owned());
+
+    let outcome = candle_dispatch_outcome(&req, &settings);
+    let CandleDispatchOutcome::Refused(message) = &outcome else {
+        panic!(
+            "an unconverted convert-at-install edit job must be REFUSED at dispatch, got {outcome:?}"
+        );
+    };
+    assert!(
+        message.contains("convert it from the Model Manager"),
+        "the refusal must name the convert step: {message}"
+    );
+    assert!(
+        message.contains("SceneWorks/flux2-klein-9b-mlx") && message.contains("bf16"),
+        "the refusal must name the base model + tier to install: {message}"
+    );
+    assert!(
+        !message.contains("component directory"),
+        "the raw candle-gen component-directory error must not survive: {message}"
+    );
+
+    // Production wiring: the gap must be consulted INSIDE `run_image_generate_job`, before the stub
+    // writer. Without this the composition above would keep passing while the shipped job stubbed.
+    let image_jobs = include_str!("../image_jobs.rs");
+    let run_job = image_jobs
+        .split_once("pub(crate) async fn run_image_generate_job(")
+        .expect("run_image_generate_job present")
+        .1
+        .split_once("\nasync fn generate_stub_stream(")
+        .expect("stub writer follows the job body")
+        .0;
+    let gap = run_job
+        .find("candle_weights_gap(&request)")
+        .expect("run_image_generate_job must consult the candle stub gap");
+    let stub = run_job
+        .find("generate_stub_stream(")
+        .expect("run_image_generate_job dispatches the stub writer");
+    assert!(
+        gap < stub,
+        "the candle stub gap must be checked BEFORE generate_stub_stream, or an unconverted \
+         convert-at-install job still completes with procedural output"
+    );
+}
+
+/// The non-edit modes are unchanged by the fix (sc-20529 review). They are claimed by the ladder's
+/// terminal `is_candle_engine && mode != "edit_image"` arm and propagate the SAME typed preflight
+/// error from inside `generate_candle_stream`'s weight resolve — so the stub gap must never be
+/// what refuses them, and their route must stay `CandleTxt2Img`.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn unconverted_non_edit_modes_keep_their_existing_candle_route() {
+    let root = tempfile::tempdir().unwrap();
+    let mut settings = Settings::from_env();
+    settings.data_dir = root.path().to_path_buf();
+    settings.backend_candle_enabled = true;
+
+    for mode in ["text_to_image", "character_image", "image_to_image"] {
+        let mut req = unconverted_true_v2_request();
+        req.mode = mode.to_owned();
+        assert_eq!(
+            candle_dispatch_outcome(&req, &settings),
+            CandleDispatchOutcome::Route(CandleImageRoute::CandleTxt2Img),
+            "{mode} must keep its existing candle txt2img route"
+        );
+        // …and that route's own weight resolve is what raises the typed error.
+        assert!(
+            matches!(
+                resolve_weights_dir(&req, &settings),
+                Err(WorkerError::InvalidPayload(_))
+            ),
+            "{mode} must still propagate the typed preflight through generate_candle_stream"
+        );
+    }
+}
+
+/// The positive control for the gate above: once the conversion HAS run, the API injects the
+/// converted dir as `modelPath`, `flux2_edit_candle_available` resolves it, and the very same
+/// `edit_image` job is claimed by the bespoke FLUX.2 edit lane instead of being refused. Proves the
+/// refusal is scoped to the unconverted state and not to `edit_image` on this model.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn converted_edit_image_job_still_reaches_the_flux2_edit_lane() {
+    let root = tempfile::tempdir().unwrap();
+    let mut settings = Settings::from_env();
+    settings.data_dir = root.path().to_path_buf();
+    settings.backend_candle_enabled = true;
+    let converted = root
+        .path()
+        .join("models")
+        .join("mlx")
+        .join("flux2_klein_9b_true_v2");
+    for sub in ["transformer", "text_encoder", "vae", "tokenizer"] {
+        std::fs::create_dir_all(converted.join(sub)).unwrap();
+    }
+    std::fs::write(converted.join("model_index.json"), b"{}").unwrap();
+
+    let mut req = unconverted_true_v2_request();
+    req.mode = "edit_image".to_owned();
+    req.source_asset_id = Some("source-asset".to_owned());
+    req.model_manifest_entry.insert(
+        "modelPath".to_owned(),
+        json!(converted.display().to_string()),
+    );
+
+    assert_eq!(
+        candle_dispatch_outcome(&req, &settings),
+        CandleDispatchOutcome::Route(CandleImageRoute::Flux2Edit),
+        "a CONVERTED install must still route edit_image to the bespoke FLUX.2 edit lane"
+    );
 }
 
 #[test]

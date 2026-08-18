@@ -4515,6 +4515,20 @@ fn candle_native_converters_are_a_subset_of_native_converters() {
 /// fetches a file the converter never reads, and a conversion that fails on a file that was never
 /// fetched — with no compile error and no test failure. This pins them together so the manifest
 /// cannot express the mismatch.
+///
+/// Two strengths, chosen by the manifest contract rather than by model id:
+///
+/// * **Every** convert-at-install entry: `files[0]` IS the convert source. Position matters — the
+///   allow-list's first entry is the primary artifact the converter reads; the rest (where present)
+///   are the companions it reads alongside. A `contains` check alone accepts a list that fetches
+///   the source as an afterthought behind unrelated files.
+/// * An entry that declares **`convertBaseRepo`** borrows its text encoder / VAE / tokenizer from a
+///   separately-installed base, so it has nothing else to fetch: its source-repo download must be
+///   EXACTLY the one convert source, which is what `flux2_klein_9b_true_v2`'s manifest comment
+///   claims ("it must name exactly one file") and what keeps the ~73 GB whole-repo pull off the
+///   wire. Entries with NO `convertBaseRepo` (Anima) are exempt by construction: their download IS
+///   the component bundle the converter reads (DiT + Qwen3 TE + VAE), so a longer list is correct
+///   there and asserting exactness would fail three shipped models.
 #[test]
 fn convert_source_file_matches_its_download_allow_list() {
     let manifest = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
@@ -4566,12 +4580,26 @@ fn convert_source_file_matches_its_download_allow_list() {
             if files.is_empty() {
                 continue;
             }
-            assert!(
-                files.contains(&source_file),
-                "{id}: mlx.convertSourceFile '{source_file}' is not in the {source_repo} download \
-                 files list {files:?} — the conversion would read a file the download never \
-                 fetched. Keep the two spellings identical (sc-20529)"
+            assert_eq!(
+                files.first().copied(),
+                Some(source_file),
+                "{id}: mlx.convertSourceFile '{source_file}' is not the FIRST entry of the \
+                 {source_repo} download files list {files:?} — the primary artifact the converter \
+                 reads must lead the allow-list, and it must be fetched at all. Keep the two \
+                 spellings identical (sc-20529)"
             );
+            // A base-borrowing entry fetches its convert source and NOTHING else: the text
+            // encoder / VAE / tokenizer come from the separately-installed `convertBaseRepo`.
+            if mlx.contains_key("convertBaseRepo") {
+                assert_eq!(
+                    files,
+                    vec![source_file],
+                    "{id}: declares convertBaseRepo, so its {source_repo} download must be exactly \
+                     the one convert source — every other component is borrowed from the base. A \
+                     longer list silently widens the pull (the wikeeyang repo is ~73 GB whole) and \
+                     contradicts the manifest comment on this entry (sc-20529)"
+                );
+            }
             checked += 1;
         }
     }
