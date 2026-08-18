@@ -188,14 +188,6 @@ fn sana_variants_accept_single_reference_img2img_and_reject_malformed_shapes() {
         ));
         for empty_carriers in [
             json!({ "controls": [], "controlnets": [], "referenceAssetIds": [] }),
-            // sc-19712: the shape the REAL API stores for a plain text-to-image submission. The
-            // API normalizes every optional asset carrier to an explicit `null`, and the routing
-            // layer's own convention (`has_nonempty_or_malformed_string`) is that missing, `null`
-            // and blank all mean "not supplied". Every other case in this list exercises `null`
-            // on some carrier (`maskAssetId`, `phases`, `mlxQuantize`) but never on
-            // `referenceAssetId` — so a predicate that read `null` as "not a valid reference"
-            // stayed green here while making SANA txt2img unclaimable on every real Mac install.
-            json!({ "referenceAssetId": null, "prompt": "p" }),
             json!({
                 "referenceAssetId": "reference-1",
                 "controls": null,

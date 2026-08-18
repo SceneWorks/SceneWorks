@@ -623,7 +623,10 @@ pub(crate) fn sd3_5_mlx_eligible(payload: &Map<String, Value>) -> bool {
 /// `features.edit` false (it probes with `mode: edit_image`). Off-Mac no MLX worker registers.
 pub(crate) fn sana_mlx_eligible(payload: &Map<String, Value>) -> bool {
     payload.get("mode").and_then(Value::as_str) != Some("edit_image")
-        && sana_reference_carrier_is_absent_or_usable(payload)
+        && payload
+            .get("referenceAssetId")
+            .map(|value| value.as_str().is_some_and(|id| !id.trim().is_empty()))
+            .unwrap_or(true)
         && !has_nonempty_or_malformed_string(payload, "sourceAssetId")
         && !["referenceAssetIds", "controls", "controlnets"]
             .iter()
@@ -643,26 +646,6 @@ pub(crate) fn sana_mlx_eligible(payload: &Map<String, Value>) -> bool {
         .any(|key| has_nonnull_or_malformed_nested_carrier(payload, "advanced", key))
         && !sana_has_malformed_quant_carrier(payload)
         && !has_nonempty_or_malformed_array(payload, "loras")
-}
-
-/// SANA's optional single-reference carrier (sc-19712). Reference is OPTIONAL here — the engine
-/// serves plain text-to-image as well as singular-reference latent-init img2img — so "no reference"
-/// must be eligible however the caller expressed it.
-///
-/// This has to spell the cases out rather than reuse `has_nonempty_or_malformed_string`, because the
-/// question is the opposite one: that helper answers "was something supplied", while this answers
-/// "is the carrier absent OR a usable reference". The distinction that matters is `null`: the API
-/// normalizes every unset optional asset carrier to an explicit `null` before the job is stored, and
-/// the routing layer's documented convention is that missing, `null` and blank all mean "not
-/// supplied". The previous `.map(..).unwrap_or(true)` form handled only the MISSING key, so every
-/// real text-to-image submission — which always carries `referenceAssetId: null` — read as "not a
-/// valid reference" and no MLX worker would claim it. A malformed non-string still fails closed.
-fn sana_reference_carrier_is_absent_or_usable(payload: &Map<String, Value>) -> bool {
-    match payload.get("referenceAssetId") {
-        None | Some(Value::Null) => true,
-        Some(Value::String(value)) => !value.trim().is_empty(),
-        Some(_) => false,
-    }
 }
 
 /// Mirror the worker's `quant_int` request contract without treating an invalid explicit override as

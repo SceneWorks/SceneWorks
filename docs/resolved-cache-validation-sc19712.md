@@ -11,8 +11,11 @@ self-defeating in production: once the cache holds anything, every job submissio
 re-hashes the entire cache inside the HTTP request.**
 
 Subject under test: `feature/sc-19703-resolved-model-hot-cache` @ `449461a5c` (all nine code
-stories merged). This branch adds `claude/sc-19712-validation` on top; the only behavioural change
-it makes is the F-1 fix below.
+stories merged). `claude/sc-19712-validation` adds **documentation only — no behavioural change**.
+The one code fix this campaign needed (F-1) is recorded below as a ready-to-apply patch rather
+than committed, because the file it touches is a memory-matrix fingerprint source and this story
+is barred from regenerating the matrix. The campaign itself was run with that patch applied
+locally; without it, no SANA job can be claimed at all.
 
 > **Measurement caveat (read before quoting any number in the table).** Every timing here was
 > taken on a **`cargo build` dev-profile (unoptimized) binary**, because that is what
@@ -57,7 +60,7 @@ built first, before any campaign work:
 
 ## Findings
 
-### F-1 — SANA is unroutable on macOS through the real API · severity **high** · pre-existing, **fixed in this PR**
+### F-1 — SANA is unroutable on macOS through the real API · severity **high** · pre-existing · **patch ready, deliberately NOT in this PR**
 
 `sana_mlx_eligible` read a `referenceAssetId` of JSON `null` as "not a valid reference" and
 returned ineligible, so no MLX worker would ever claim the job. The API normalizes every unset
@@ -75,15 +78,55 @@ The test blind spot was exact: `sana_variants_accept_single_reference_img2img_an
 exercises `maskAssetId: null`, `phases: null` and `mlxQuantize: null` in a case list literally
 named "empty/null optional carriers", but never `referenceAssetId: null`.
 
-Fixed by `sana_reference_carrier_is_absent_or_usable`
-(`crates/sceneworks-core/src/jobs_store/routing/mlx.rs`): absent and `null` are eligible, a
-non-empty string is eligible, a blank or non-string carrier still fails closed — which preserves
-every pre-existing assertion. The `null` case was added to the existing test **first** and
-observed to fail, then to pass; 28/28 MLX routing tests pass after.
+The fix is one predicate. It was written, verified, and then **deliberately withheld from this
+PR** — see "why it is not here" below. The campaign was run with it applied locally; without it no
+SANA job can be claimed at all.
 
-This is **not** epic-19703 code (`routing/mlx.rs` is untouched by the epic), but it blocked the
-story's own acceptance criteria on the only model small enough to cycle repeatedly, and the fix is
-one predicate with full local verification, so it is fixed here rather than reported.
+```rust
+// crates/sceneworks-core/src/jobs_store/routing/mlx.rs
+// in sana_mlx_eligible, replacing:
+//     && payload.get("referenceAssetId")
+//         .map(|value| value.as_str().is_some_and(|id| !id.trim().is_empty()))
+//         .unwrap_or(true)
+        && sana_reference_carrier_is_absent_or_usable(payload)
+
+/// SANA's optional single-reference carrier. Reference is OPTIONAL here — the engine serves plain
+/// text-to-image as well as singular-reference latent-init img2img — so "no reference" must be
+/// eligible however the caller expressed it. The distinction that matters is `null`: the API
+/// normalizes every unset optional asset carrier to an explicit `null` before the job is stored.
+/// The previous `.map(..).unwrap_or(true)` form handled only the MISSING key, so every real
+/// text-to-image submission read as "not a valid reference" and no MLX worker would claim it.
+/// A malformed non-string still fails closed.
+fn sana_reference_carrier_is_absent_or_usable(payload: &Map<String, Value>) -> bool {
+    match payload.get("referenceAssetId") {
+        None | Some(Value::Null) => true,
+        Some(Value::String(value)) => !value.trim().is_empty(),
+        Some(_) => false,
+    }
+}
+```
+
+plus the missing case in the existing test's "empty/null optional carriers" list:
+
+```rust
+json!({ "referenceAssetId": null, "prompt": "p" }),
+```
+
+Verified locally: the added case **fails** against the current predicate and passes with the fix;
+28/28 MLX routing tests green; `npm run check:rust-derived-docs` green.
+
+**Why it is not in this PR.**
+`crates/sceneworks-core/src/jobs_store/routing/mlx.rs` is one of the memory matrix's fingerprinted
+sources (`routingMlx` in `SOURCE_PATHS`, `scripts/generate-memory-matrix.mjs:2110`), so *any* edit
+to it — even a comment — makes `npm run check:memory-matrix` fail with "generated memory matrix is
+stale" and turns `rust:check` red. Landing the fix therefore requires
+`npm run generate:memory-matrix`, and this story is explicitly barred from running a memory-matrix
+regeneration. Rather than ship a red PR or take an action outside the story's mandate, the patch is
+recorded here in full. It is a one-commit change for whoever picks it up:
+apply the two hunks, run `npm run generate:memory-matrix`, `git add` the regenerated files, done.
+
+This is also **not** epic-19703 code (`routing/mlx.rs` is untouched by the epic), so by this
+story's scope rule it was reportable rather than fixable in the first place.
 
 ### F-2 — a retention checkpoint blocks the cache status surface · severity **medium** · in subject · reported
 
@@ -179,6 +222,27 @@ there. Memoizing the scan needs cross-process invalidation, because the **worker
 bundles and the **API** reads them, and a TTL reintroduces the same disagreement window. Choosing
 between those is the store author's decision.
 
+### Receipt backfill silently excludes a model from the local tier
+
+Not a new defect so much as an interaction nobody appears to have costed. On first catalog build
+the API backfills a download receipt for every installed model it discovers that lacks one
+(`backfill_current_receipt`), and those receipts carry **`snapshotRevision: null`** — verified
+directly: this campaign's isolated data dir was seeded with two real receipts and the API wrote 68
+more, all revision-less.
+
+A revision-less requirement makes its whole repository unserveable from the local tier
+(`external_library_runtime.rs:436-439`, pinned by
+`a_requirement_with_no_recorded_revision_makes_its_whole_repository_unserveable`). Promotion,
+however, *can* still build the bundle, because it resolves the unique matching snapshot. So such a
+model can occupy cache bytes it will never be served from, and the user sees no explanation beyond
+a `resolved_cache_local_tier_not_selected` event.
+
+Scale, measured against the **real** install rather than this campaign's synthetic one — 85
+receipts under `~/SceneWorks/data/models`, of which exactly **one** is revision-less:
+`SceneWorks/qwen-image-mlx`. That single model is also one of the three soft-co-requisite models
+below, so `qwen_image` is excluded from the local tier on both counts. The backfill path is rare in
+practice; it is not theoretical.
+
 ### Observations that are not defects
 
 - **`modelResolution.libraryPresent` is `false` on a healthy `external_ready` row.** It reads like
@@ -226,7 +290,7 @@ were executed against the real external volume through the real API/worker surfa
 | Eviction safety — active lease survives | **cited** — `active_lease_survives_automatic_cleanup_and_eviction_resumes_after_release` (`retention_tests.rs:368`) | pass |
 | Eviction safety — source unavailable retains | **cited** — `source_unverifiable_entries_are_retained_automatically_including_content_divergence` (`retention_tests.rs:489`); `a_disconnected_source_library_retains_and_reports_but_never_removes` (`:1109`) | pass |
 | Full disk / ENOSPC | **cited, with a gap** — `cancellation_and_io_failures_leave_only_interrupted_metadata` (`materialization_tests.rs:330`) injects `ENOSPC` on `#[cfg(unix)]` only; the non-unix arm injects only `PermissionDenied`. There is **no free-space preflight** anywhere in the cache and no ENOSPC-during-eviction case. Admission is byte-budget-based, not capacity-based, so a cache configured larger than free disk will fail mid-copy rather than decline. | partial — recorded, not closed |
-| Crash recovery | **cited** — `crash_after_atomic_rename_stays_unavailable_and_next_reservation_republishes` (`materialization_tests.rs:692`); `stale_sessions_are_removed_only_after_their_lock_is_acquirable` (`tests.rs:1015`); `cross_process_same_key_reservation_shared_lease_and_kill_recovery` (`tests.rs:1112`); `interrupted_eviction_converges_on_recovery_lookup_and_reservation` (`retention_tests.rs:826`) | pass |
+| Crash recovery | **live + cited.** Both processes were killed mid-scan by the harness while the worker held a runtime lease and an entry lock, leaving 13 stale session directories under `models/resolved/sessions/`. On restart the store re-opened, ran its recovery pass and the published bundle survived intact — the source library and the install receipts were byte-identical to the pre-kill snapshot (`t3-after-kill`: source sha `72b94cffd042…` = baseline, receipts sha `90672f50c63c…` unchanged). Also cited: `crash_after_atomic_rename_stays_unavailable_and_next_reservation_republishes` (`materialization_tests.rs:692`); `stale_sessions_are_removed_only_after_their_lock_is_acquirable` (`tests.rs:1015`); `cross_process_same_key_reservation_shared_lease_and_kill_recovery` (`tests.rs:1112`); `interrupted_eviction_converges_on_recovery_lookup_and_reservation` (`retention_tests.rs:826`) | pass |
 | Revision change | **cited** — `reconciliation_covers_tier_deletion_revision_replacement_and_full_uninstall` (`retention_tests.rs:678`); `a_superseded_revision_is_served_from_the_source_tier` (`local_preference_tests.rs:227`); `a_wrong_revision_or_wrong_tier_bundle_is_not_used` (`external_library_runtime.rs:1374`) | pass |
 | Shared components | **cited** — `tiered_multi_repo_optional_derived_and_shared_members_are_self_contained` (`materialization_tests.rs:205`); `a_shared_snapshot_stays_served_until_the_last_scope_drops` (`local_preference_tests.rs:309`); `a_pair_one_sibling_selection_does_not_cover_is_served_to_neither` (`external_library_runtime.rs:1503`) | pass |
 
