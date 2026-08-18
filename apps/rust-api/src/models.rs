@@ -5999,7 +5999,6 @@ pub(crate) fn video_model_withdrawn_on_platform(
                 && model_manifest_entry.get("macOnly").and_then(Value::as_bool) == Some(true)))
 }
 
-
 /// True when a download entry is a co-requisite dependency (sc-9696): fetched ALONGSIDE the primary
 /// download rather than as a pick-one alternate, and gating the entry's install state. See the
 /// manifest schema `downloads[].coRequisite`.
