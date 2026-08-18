@@ -535,7 +535,7 @@ impostor differing only in bytes and physical identity.
 choose-a-different-location lead is the one a user gets here, and the recovery is user-reachable
 rather than a dead end. The decoy was never adopted and the real binding was never overwritten.
 
-## F-3 re-measured · **improved 5.3×, NOT resolved**
+## F-3 re-measured · **improved 5.3×; the residue is fixed in this PR**
 
 Same endpoint, same model, same machine, same unoptimized build; the only variable is the cache
 the request has to reason about.
@@ -573,8 +573,40 @@ request burned roughly 5,600 CPU-seconds (929.6 s at ~600 % CPU); it now burns r
 
 Recommendation, unchanged in kind from the original finding: the submission path is deciding
 *availability*, not handing bytes to a loader, so it should not need a content pass at all — the
-lease boundary already re-verifies before the load. Until the last pass is gone, the feature still
-gets slower the more it is used.
+lease boundary already re-verifies before the load.
+
+### The residue is removed in this same PR
+
+The recommendation above was acted on rather than filed. The last pass was **not** in the cache
+scan #2411 converted — it was one rung further in, in the availability answer itself:
+
+| Site | Role |
+|---|---|
+| `ModelResolution::local_ready` (`external_library.rs:197`) | rung 1 of `resolve_model_availability` — reached by **every** submission preflight and every catalog row for a locally-cached model |
+| `ModelResolution::validate`, `LocalReady` arm (`external_library.rs:~241`) | re-validation of an already-built resolution, used by the read-only `probe_resolution` |
+
+Both called `ResolvedModelArtifact::validate()`, which re-reads and re-hashes every closure file.
+That is the single 32 MB/s pass the throughput identified. Both now call a new
+`ResolvedModelArtifact::validate_paths_and_sizes()`, which proves every other invariant `validate`
+does — version, identity, provenance agreement, completeness, closure shape, path confinement,
+file presence and file **sizes** — and skips only the content re-read.
+
+The availability answer stays correct because it never depended on the digests: an artifact
+admitted here can still be refused at the lease, where content identity is proven three times over
+(`acquire_complete`, `acquire_runtime_lease`, and the full-strength journal write that stamps
+usage), after which the caller falls back to the source tier. **None of those three was touched.**
+
+Pinned by `the_availability_decision_never_re_reads_the_artifact_it_admits`
+(`external_library_tests.rs`), which asserts an **operation count of zero** at the
+`validate_artifact_file` seam rather than a duration — the fixture's recorded digest is correct, so
+a re-read would succeed and only a counter can see it happen. Each of the two sites was mutated
+back to `validate()` alone and reds the count assertion (`left: 1, right: 0`).
+
+- pre-fix measured: **174–185 s** on a 5.65 GB / 2-entry cache (the table above; this stands as the
+  record of the state that was fixed)
+- expected post-fix cost: the O(entries) `stat` walk — presence and size per closure file, with no
+  bytes read
+- post-fix measured: `<pending live re-measure>`
 
 ## F-4 and F-2 spot checks · **both confirmed fixed**
 
@@ -590,7 +622,9 @@ gets slower the more it is used.
   0.0042 / 0.0042 s**. Previously this endpoint did not answer within 40 s during a sweep.
 
 Note the asymmetry the numbers expose: the **status** read was made cheap, but the **submission**
-path was not given the same treatment, which is why F-3 has a residue and F-2 does not.
+path was not given the same treatment, which is why F-3 had a residue and F-2 did not. That
+asymmetry is what the fix above closes — both paths now answer their question without reading the
+bytes they are answering about.
 
 ## Addendum verification
 
