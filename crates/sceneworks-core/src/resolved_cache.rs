@@ -912,13 +912,27 @@ impl ResolvedCacheStore {
                 .filter(|value| is_lower_hex_64(value))
                 .ok_or_else(|| ResolvedCacheError::new("invalid resolved-cache entry name"))?
                 .to_owned();
-            let metadata_lock = self.lock_metadata(&digest)?;
+            // The exclusive metadata lock is scoped to the journal READ; the entry is then judged
+            // unlocked (sc-19712). `EntryListing::Runtime` validates at full strength, so holding
+            // the lock across that judgement put a whole-bundle re-hash underneath it — and
+            // `valid_local_artifacts`, the availability read behind every job submission, takes
+            // the same per-entry lock. Measured: with the worker mid-checkpoint, one submission
+            // took 33.2 s and the next had not returned after ~11 minutes, with the API at 0 % CPU
+            // parked on `flock` and the worker at 99 % CPU hashing. Nothing is read twice here —
+            // the judgement is made against the value the read returned, and every caller that
+            // ACTS on a summary (`recover`, retention) re-proves it under fresh locks first.
+            let journal = {
+                let _metadata_lock = self.lock_metadata(&digest)?;
+                self.read_metadata_unlocked(&digest)
+            };
+            #[cfg(test)]
+            run_listing_validation_observer();
             let corrupt = |digest: &str| ResolvedCacheEntrySummary {
                 cache_key: format!("sha256:{digest}"),
                 state: ResolvedCacheEntryState::Corrupt,
                 metadata: None,
             };
-            let summary = match self.read_metadata_unlocked(&digest) {
+            let summary = match journal {
                 Ok(JournalRead::Valid { metadata, .. }) => {
                     let validated = if metadata.state == ResolvedCacheEntryState::Complete {
                         validate_complete_metadata_inner(self, &metadata, listing.verification())
@@ -942,7 +956,6 @@ impl ResolvedCacheStore {
                 },
                 Ok(JournalRead::Missing) | Err(_) => corrupt(&digest),
             };
-            drop(metadata_lock);
             entries.push(summary);
         }
         entries.sort_by(|left, right| left.cache_key.cmp(&right.cache_key));
@@ -2315,6 +2328,32 @@ fn validate_complete_metadata_inner(
         ));
     }
     Ok(())
+}
+
+// Runs once at the point a whole-store listing judges an entry — after its journal has been read
+// and the metadata lock released, with the (possibly full-strength) validation still to come. A
+// test observes from here which locks are held, because this is the window in which the
+// availability read behind every job submission used to be parked (sc-19712).
+#[cfg(test)]
+thread_local! {
+    static LISTING_VALIDATION_OBSERVER: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn set_listing_validation_observer(observer: impl FnOnce() + 'static) {
+    LISTING_VALIDATION_OBSERVER.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(observer));
+    });
+}
+
+#[cfg(test)]
+fn run_listing_validation_observer() {
+    LISTING_VALIDATION_OBSERVER.with(|slot| {
+        if let Some(observer) = slot.borrow_mut().take() {
+            observer();
+        }
+    });
 }
 
 fn artifact_without_content_hashes(artifact: &ResolvedModelArtifact) -> ResolvedModelArtifact {

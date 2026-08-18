@@ -6,6 +6,8 @@ use crate::model_artifacts::{
 };
 use std::collections::BTreeMap;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -184,6 +186,94 @@ fn the_local_tier_scan_skips_content_hashing_while_the_lease_boundary_still_refu
     assert_eq!(
         session_records, 0,
         "the lease boundary must refuse altered bytes before it writes a session record"
+    );
+}
+
+/// A submission's availability read must not park behind the sweep's expensive verification
+/// (sc-19712, the coupled residue).
+///
+/// `recover()` — the startup half of every maintenance checkpoint — begins with `enumerate()`,
+/// which validates at FULL strength. While that judgement ran under each entry's exclusive
+/// metadata lock, `valid_local_artifacts` (the provider behind `preflight_payload_model_sources`,
+/// and so behind every job submission) blocked on the same lock: one submission measured 33.2 s
+/// and the next had not returned after ~11 minutes, API at 0 % CPU on `flock`, worker at 99 % CPU
+/// hashing. F-2 gave the status endpoint this treatment; the submission path did not get it.
+///
+/// Observed from inside the listing's own validation window, so it pins the ordering rather than a
+/// duration. The probe is non-blocking on purpose: a `try_lock` reports a held lock, where the
+/// blocking acquire the real reader uses would simply hang the suite.
+#[test]
+fn a_full_strength_listing_never_parks_the_availability_read_behind_its_verification() {
+    let scratch = TempDir::new().unwrap();
+    let source = scratch.path().join("source");
+    let data = scratch.path().join("data");
+    std::fs::create_dir(&source).unwrap();
+    let store = ResolvedCacheStore::open(&data).unwrap();
+    let materializer = ResolvedCacheMaterializer::new(store.clone());
+    for revision in [REVISION_A, REVISION_B] {
+        let candidate = hub_layout_candidate(&source, revision);
+        match materializer
+            .materialize(
+                &candidate,
+                &source,
+                "fixture:model",
+                &MaterializationCancellation::default(),
+            )
+            .unwrap()
+        {
+            MaterializationOutcome::Published(_) => {}
+            other => panic!("fixture bundle was not published: {other:?}"),
+        }
+    }
+    let lock_paths = std::fs::read_dir(store.root().join("entries"))
+        .unwrap()
+        .flatten()
+        .map(|entry| {
+            let digest = entry.file_name().to_str().unwrap().to_owned();
+            store
+                .root()
+                .join("locks")
+                .join(format!("{digest}.metadata.lock"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(lock_paths.len(), 2, "the fixture cache holds two entries");
+
+    let observed = Arc::new(AtomicBool::new(false));
+    let seen = Arc::new(AtomicBool::new(false));
+    let probe = {
+        let observed = Arc::clone(&observed);
+        let seen = Arc::clone(&seen);
+        let lock_paths = lock_paths.clone();
+        move || {
+            seen.store(true, Ordering::SeqCst);
+            observed.store(
+                lock_paths.iter().all(|path| {
+                    let handle = open_lock_file(path).unwrap();
+                    FileExt::try_lock_exclusive(&handle).is_ok()
+                }),
+                Ordering::SeqCst,
+            );
+        }
+    };
+    set_listing_validation_observer(probe);
+
+    // The startup checkpoint's own entry point, at full strength.
+    let recovered = store.recover().unwrap();
+    assert_eq!(recovered.len(), 2, "recovery still judges every entry");
+    assert!(seen.load(Ordering::SeqCst), "the observer must have run");
+    assert!(
+        observed.load(Ordering::SeqCst),
+        "no entry's metadata lock may be held while a listing verifies bundle contents, or the \
+         availability read behind every job submission blocks for the whole checkpoint"
+    );
+
+    // And the read the submission path actually performs still answers, with both entries intact.
+    assert_eq!(
+        ResolvedCacheStore::valid_local_artifacts(&data)
+            .artifacts
+            .len(),
+        2,
+        "the availability read still offers both published entries"
     );
 }
 

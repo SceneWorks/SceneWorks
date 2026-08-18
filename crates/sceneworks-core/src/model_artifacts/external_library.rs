@@ -194,9 +194,25 @@ impl ModelResolution {
         self
     }
 
+    /// Paths and sizes, NOT a content re-read (sc-19712 F-3 residue).
+    ///
+    /// This constructor is rung 1 of [`resolve_model_availability`], so it runs on every job
+    /// submission's preflight and every catalog row for a locally-cached model. Re-hashing the
+    /// whole closure here left one full content pass on the submission path even after the cache
+    /// scan itself was converted: measured at ~175 s for a 5.65 GB bundle, at a software-SHA rate
+    /// that scales to roughly half an hour at the 64 GiB default budget.
+    ///
+    /// It is safe to drop because this function answers an AVAILABILITY question and never hands
+    /// bytes to a loader. The load boundary re-proves content identity three separate times —
+    /// `ResolvedCacheStore::acquire_complete`, `ModelArtifactResolver::acquire_runtime_lease`, and
+    /// the full-strength journal write that stamps usage — so an artifact admitted here whose
+    /// bytes were altered after publication is refused at the lease and the caller falls back to
+    /// the source tier. Everything a wrong availability answer could depend on is still proven:
+    /// the artifact's identity, its closure shape, that it is confined to the app-owned resolved
+    /// tier, and that every file it claims exists at the recorded size.
     pub fn local_ready(artifact: ResolvedModelArtifact) -> Result<Self, ExternalLibraryError> {
         artifact
-            .validate()
+            .validate_paths_and_sizes()
             .map_err(|error| ExternalLibraryError(error.to_string()))?;
         if !matches!(&artifact.location, ArtifactLocation::ResolvedLocal { .. }) {
             return Err(ExternalLibraryError(
@@ -238,8 +254,11 @@ impl ModelResolution {
                         "local-ready resolution must use the app-owned resolved tier".to_owned(),
                     ));
                 }
+                // Paths and sizes, for the same reason [`Self::local_ready`] uses them: this
+                // re-validates an availability answer (`probe_resolution` is a read-only probe),
+                // and re-reading the closure here would put the whole artifact's bytes behind it.
                 artifact
-                    .validate()
+                    .validate_paths_and_sizes()
                     .map_err(|error| ExternalLibraryError(error.to_string()))
             }
             ModelAvailability::ExternalReady => {

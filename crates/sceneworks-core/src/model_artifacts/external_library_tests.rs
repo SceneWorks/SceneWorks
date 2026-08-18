@@ -1001,3 +1001,102 @@ fn a_present_but_mismatched_library_is_flagged_separately_from_a_disconnected_on
         "the typed context the prompt reads must carry the same distinction"
     );
 }
+
+/// The availability decision must not re-read the artifact it admits (sc-19712 F-3 residue).
+///
+/// `resolve_model_availability` is what a job submission's preflight and every catalog row call.
+/// Rung 1 built its answer through `ModelResolution::local_ready`, which re-hashed the whole
+/// closure — one full content pass per submission, measured at ~175 s on a 5.65 GB bundle at the
+/// observed software-SHA rate, scaling to roughly half an hour at the 64 GiB default budget. It is
+/// invisible on a small fixture, so this is asserted as an OPERATION COUNT rather than a duration:
+/// the fixture's file carries a correct recorded digest, so a re-read would succeed and only the
+/// counter can tell that it happened.
+///
+/// The digest is deliberately CORRECT. The property under test is the absence of the read, not the
+/// absence of a failure — a deliberately wrong digest would also red under mutation, but for the
+/// wrong reason, and would still pass if someone replaced the hash pass with a different one.
+#[test]
+fn the_availability_decision_never_re_reads_the_artifact_it_admits() {
+    use crate::model_artifacts::observe_content_hashes;
+    use sha2::{Digest, Sha256};
+
+    let temp = TempDir::new().unwrap();
+    let data = temp.path().join("data");
+    let local = temp.path().join("resolved");
+    std::fs::create_dir_all(&local).unwrap();
+    let body = b"local-bundle-bytes";
+    std::fs::write(local.join("model.safetensors"), body).unwrap();
+
+    let identity = ArtifactIdentity::pinned("owner/model", REVISION, "default").unwrap();
+    let mut file = ArtifactFile::new("model.safetensors").unwrap();
+    file.size_bytes = Some(body.len() as u64);
+    file.sha256 = Some(format!("sha256:{:x}", Sha256::digest(body)));
+    let artifact = ResolvedModelArtifact {
+        schema_version: MODEL_ARTIFACT_CONTRACT_VERSION,
+        identity: identity.clone(),
+        location: ArtifactLocation::ResolvedLocal { root: local },
+        closure: ResolvedBundleClosure::new(vec![ResolvedBundleMember {
+            role: ArtifactMemberRole::Primary,
+            component_id: None,
+            source: identity.clone(),
+            tier: None,
+            source_subpath: PathBuf::new(),
+            destination: PathBuf::new(),
+            files: vec![file],
+        }])
+        .unwrap(),
+        provenance: ArtifactProvenance {
+            identity,
+            fixed_artifact_tier: None,
+        },
+        completeness: ArtifactCompleteness::Complete,
+        availability: ArtifactAvailability::Available,
+    };
+    // The recorded digest really does match the bytes on disk, so full-strength validation would
+    // PASS here — the only thing that distinguishes the two modes is whether it ran at all.
+    assert!(artifact.validate().is_ok());
+
+    let requirements = vec![requirement("owner/model", "model.safetensors")];
+    let local_artifacts = vec![artifact.clone()];
+    let (resolution, hashes) = observe_content_hashes(|| {
+        resolve_model_availability(
+            &data,
+            &temp.path().join("library"),
+            &requirements,
+            true,
+            &local_artifacts,
+        )
+    });
+    assert_eq!(
+        resolution.availability,
+        ModelAvailability::LocalReady,
+        "the local copy still answers the availability question"
+    );
+    assert_eq!(
+        resolution.local_artifact.as_ref().unwrap().identity,
+        artifact.identity,
+        "and still names the artifact it resolved"
+    );
+    assert_eq!(
+        hashes, 0,
+        "the submission/preflight path must not re-read a single closure file to decide \
+         availability; content identity is proven at the lease boundary"
+    );
+
+    // The read-only probe over an already-built resolution is the same kind of question.
+    let store = ExternalLibraryBindingStore::new(&data).unwrap();
+    let (probe, probe_hashes) = observe_content_hashes(|| store.probe_resolution(&resolution));
+    assert_eq!(probe.unwrap().status, ExternalLibraryProbeStatus::Available);
+    assert_eq!(
+        probe_hashes, 0,
+        "re-probing a resolution must not re-read it either"
+    );
+
+    // The counter is not vacuous: full-strength validation of the same artifact DOES read it.
+    let (result, full_hashes) = observe_content_hashes(|| artifact.validate());
+    assert!(result.is_ok());
+    assert_eq!(
+        full_hashes, 1,
+        "the probe must be able to see a content read when one happens"
+    );
+}

@@ -409,6 +409,33 @@ impl ResolvedModelArtifact {
         }
     }
 
+    /// Every invariant [`Self::validate`] proves EXCEPT the content re-read: version, identity,
+    /// provenance agreement, completeness, closure shape, path confinement, file presence and file
+    /// sizes are all still checked; recorded SHA-256 digests are not recomputed.
+    ///
+    /// This is for callers deciding **availability** — "could this artifact serve the closure a
+    /// request needs" — as opposed to callers about to hand bytes to a runtime. The distinction is
+    /// not stylistic: the availability question is asked once per job submission and once per
+    /// catalog row, so answering it by re-reading the artifact makes the cost of *asking* scale
+    /// with the artifact's size. Measured on a 5.65 GB bundle, this pass alone was ~175 s per job
+    /// submission (sc-19712 F-3 residue), and it scales to the 64 GiB default cache budget.
+    ///
+    /// Content identity is proven where it is load-bearing, at the lease boundary:
+    /// `ResolvedCacheStore::acquire_complete`, `ModelArtifactResolver::acquire_runtime_lease`
+    /// (which calls [`Self::validate`] in full), and the full-strength journal write that stamps
+    /// usage. An artifact this function admits can still be refused there, and the caller then
+    /// falls back to the source tier — so a bundle altered after publication is never loaded.
+    /// Do not use this in place of [`Self::validate`] on any path that precedes a load.
+    pub fn validate_paths_and_sizes(&self) -> Result<(), ArtifactContractError> {
+        let mut paths_only = self.clone();
+        for member in &mut paths_only.closure.members {
+            for file in &mut member.files {
+                file.sha256 = None;
+            }
+        }
+        paths_only.validate()
+    }
+
     /// Stable key over the versioned immutable identity, full sorted closure and provenance.
     /// Physical location, availability, usage state, and post-copy verification enrichment are
     /// deliberately excluded.
@@ -1003,6 +1030,30 @@ fn primary_tier(closure: &ResolvedBundleClosure) -> Option<String> {
         .and_then(|member| member.tier.clone())
 }
 
+// Counts entries into the content re-read inside `validate_artifact_file`, so a test can assert
+// that a path performs ZERO content hashing rather than merely being "fast enough".
+//
+// A timing assertion cannot express this: the whole defect class here is a full-closure hash that
+// is invisible on a small fixture and catastrophic on a 5.65 GB one, so the property has to be
+// stated as an operation count on a fixture whose files carry recorded digests.
+#[cfg(test)]
+thread_local! {
+    static CONTENT_HASH_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn count_content_hash() {
+    CONTENT_HASH_COUNT.with(|count| count.set(count.get().saturating_add(1)));
+}
+
+/// Runs `body` and reports how many closure files it re-read and re-hashed.
+#[cfg(test)]
+pub(crate) fn observe_content_hashes<T>(body: impl FnOnce() -> T) -> (T, u64) {
+    CONTENT_HASH_COUNT.with(|count| count.set(0));
+    let value = body();
+    (value, CONTENT_HASH_COUNT.with(std::cell::Cell::get))
+}
+
 fn validate_artifact_file(path: &Path, file: &ArtifactFile) -> Result<(), ArtifactContractError> {
     let metadata = std::fs::metadata(path).map_err(|error| {
         ArtifactContractError(format!(
@@ -1026,6 +1077,8 @@ fn validate_artifact_file(path: &Path, file: &ArtifactFile) -> Result<(), Artifa
         )));
     }
     if let Some(expected) = &file.sha256 {
+        #[cfg(test)]
+        count_content_hash();
         use std::io::Read;
         let mut input = std::fs::File::open(path).map_err(|error| {
             ArtifactContractError(format!("cannot hash {}: {error}", path.display()))
