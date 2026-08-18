@@ -1,7 +1,7 @@
 {
   "schemaVersion": 8,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:d72b5ed66dd8ab0258058e6fe75357bf4724671e767fc3febcda29844aeedef2",
+    "sceneWorksRevision": "source-tree:24c728841c0e9ec7ba16674ae87431dbf991abb7ef09e913faffafd890a2b07c",
     "inferenceRevision": "bb3b314500b02bbb41431aa6beb5e03e4c0738f8",
     "sources": {
       "manifest": {
@@ -94,7 +94,7 @@
       },
       "engineCapabilitiesCandle": {
         "path": "config/engine-capabilities/capabilities.candle.json",
-        "sha256": "6494a9249a7fb65a2e1ea4e8578e06c0c4b4786b2f0f999ca67fb5f471ceda7a"
+        "sha256": "3e561f141d0dd9aa1ca0de24779d87a333a3c7fd5f559e9747ab6b8652ff4297"
       },
       "cargo": {
         "path": "Cargo.toml",
@@ -189,11 +189,14 @@
     },
     "currentCalibrationRuns": 0,
     "memoryContractReconciliation": {
-      "providers": 0,
-      "bespokeWaivers": 0,
-      "mismatches": 0,
-      "byLeg": {},
-      "unavailable": "engine capability facts for candle are keyed to 717f43b5283d3449d9d19b7539045a82be1ef7bd, but Cargo pins bb3b314500b02bbb41431aa6beb5e03e4c0738f8"
+      "providers": 72,
+      "bespokeWaivers": 1,
+      "mismatches": 494,
+      "byLeg": {
+        "engine_manifest": 275,
+        "manifest_route": 70,
+        "survey_engine": 149
+      }
     },
     "rung4Survey": {
       "story": 15969,
