@@ -227,6 +227,18 @@ pub(super) fn has_nonempty_or_malformed_string(payload: &Map<String, Value>, key
     }
 }
 
+/// True when an optional string carrier is present in a shape that is neither a string nor `null`.
+/// Missing, `null`, and any string (blank included) are well-formed "not supplied or supplied"
+/// encodings; a number/bool/array/object is an authored value no route can consume and must fail
+/// closed. Use this where BOTH the populated and the absent carrier are eligible on the same gate,
+/// so [`has_nonempty_or_malformed_string`] cannot separate malformed from populated (sc-20525).
+pub(super) fn has_malformed_optional_string(payload: &Map<String, Value>, key: &str) -> bool {
+    !matches!(
+        payload.get(key),
+        None | Some(Value::Null) | Some(Value::String(_))
+    )
+}
+
 /// True when a payload key contains a non-empty JSON array.
 pub(super) fn has_nonempty_array(payload: &Map<String, Value>, key: &str) -> bool {
     payload

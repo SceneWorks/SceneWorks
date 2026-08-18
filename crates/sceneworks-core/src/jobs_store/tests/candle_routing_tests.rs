@@ -913,7 +913,6 @@ fn sana_candle_txt2img_and_single_reference_img2img_route_to_candle() {
         for malformed in [
             json!({ "model": model, "referenceAssetIds": ["a"] }),
             json!({ "model": model, "referenceAssetId": 7 }),
-            json!({ "model": model, "referenceAssetId": " " }),
             json!({ "model": model, "referenceAssetId": "a", "sourceAssetId": "b" }),
             json!({ "model": model, "referenceAssetId": "a", "maskAssetId": "m" }),
             json!({ "model": model, "referenceAssetId": "a", "loras": [{ "path": "x" }] }),
@@ -944,6 +943,104 @@ fn sana_candle_txt2img_and_single_reference_img2img_route_to_candle() {
                 image_job_candle_lane(&image_generate_job(malformed.clone())),
                 None,
                 "{model} malformed img2img shape must be rejected: {malformed}"
+            );
+        }
+    }
+}
+
+#[test]
+fn sana_absent_reference_carrier_routes_plain_txt2img_to_candle() {
+    // sc-20525: EVERY real SANA text-to-image submission was enforce-failed `candle_unsupported`
+    // off-Mac. The sc-18475 guard in `image_request_candle_eligible` read the singular carrier with
+    // an inline `match value.as_str()` whose `None` arm meant "malformed" — but `Value::Null` also
+    // lands in that arm, and `null` is exactly how the API normalizes every unset optional asset
+    // carrier before the job is stored. So the normal absent-carrier encoding was classified as a
+    // malformed conditioning shape and the job never reached the txt2img lane. The gate now shares
+    // `has_nonempty_or_malformed_string` with `sana_has_unsupported_carrier`, which is the same fix
+    // the MLX twin already carries (sc-19712 F-1) and the same convention the worker uses (a blank
+    // asset id is treated as absent).
+    for model in ["sana_1600m", "sana_sprint_1600m"] {
+        // 1. Absent, `null`, and blank are all "not supplied" -> the plain candle txt2img lane.
+        for absent in [
+            json!({ "model": model, "prompt": "a red fox", "mode": "text_to_image" }),
+            json!({
+                "model": model,
+                "prompt": "a red fox",
+                "mode": "text_to_image",
+                "referenceAssetId": null
+            }),
+            json!({
+                "model": model,
+                "prompt": "a red fox",
+                "mode": "text_to_image",
+                "referenceAssetId": "   "
+            }),
+            // The exact shape the web UI submits for a plain SANA render: mode `text_to_image`,
+            // every optional carrier explicitly `null`/empty, and no quant override.
+            json!({
+                "model": model,
+                "prompt": "a red fox",
+                "mode": "text_to_image",
+                "referenceAssetId": null,
+                "referenceAssetIds": [],
+                "sourceAssetId": null,
+                "maskAssetId": null,
+                "controls": null,
+                "controlnets": [],
+                "loras": [],
+                "advanced": {
+                    "poses": [],
+                    "phases": null,
+                    "controlMode": null,
+                    "controlImage": null,
+                    "controlScale": null,
+                    "controlWeights": null,
+                    "convRot": null,
+                    "quantTier": null,
+                    "mlxQuantize": null
+                }
+            }),
+        ] {
+            assert_eq!(
+                image_job_candle_lane(&image_generate_job(absent.clone())),
+                Some(CandleImageLane::TextToImage),
+                "{model} plain txt2img must reach the candle txt2img lane: {absent}"
+            );
+            assert!(
+                image_request_candle_eligible(model, &object(absent.clone())),
+                "{model} plain txt2img must be candle-eligible: {absent}"
+            );
+        }
+        // 2. A populated carrier still selects the specialized SANA reference lane.
+        assert_eq!(
+            image_job_candle_lane(&image_generate_job(json!({
+                "model": model,
+                "prompt": "a red fox",
+                "referenceAssetId": "reference-1"
+            }))),
+            Some(CandleImageLane::SanaImg2Img),
+            "{model} non-empty referenceAssetId must select the SANA reference lane"
+        );
+        // 3. A malformed carrier still fails closed rather than being reinterpreted as txt2img.
+        for malformed in [
+            json!(7),
+            json!({ "id": "reference-1" }),
+            json!(["reference-1"]),
+        ] {
+            let payload = json!({
+                "model": model,
+                "prompt": "a red fox",
+                "mode": "text_to_image",
+                "referenceAssetId": malformed
+            });
+            assert_eq!(
+                image_job_candle_lane(&image_generate_job(payload.clone())),
+                None,
+                "{model} malformed referenceAssetId must stay unclaimed: {payload}"
+            );
+            assert!(
+                !image_request_candle_eligible(model, &object(payload.clone())),
+                "{model} malformed referenceAssetId must not be candle-eligible: {payload}"
             );
         }
     }
