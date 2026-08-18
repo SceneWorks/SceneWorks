@@ -623,11 +623,46 @@ back to `validate()` alone and reds the count assertion (`left: 1, right: 0`).
   mid-block, the API was at **0.0 % CPU with zero `sha2` frames** — the content pass really is gone
   — sitting on `preflight_payload_model_sources → local_resolved_artifacts` with a `flock` leaf,
   while the worker held 99 % CPU in `scan_entry`'s bundle re-hash. So what remains on the
-  submission path is **not work, it is lock-wait behind F-2's retention scan**. F-2's fix made the
+  submission path is **not work, it is lock-wait behind the checkpoint**. F-2's fix made the
   *status* read lock-free; the submission path was not given the same treatment, so the two
-  findings are now coupled: the residual submission latency is entirely a function of how long a
-  retention sweep holds the per-entry metadata lock (`retention.rs:646` + `:650`, still
-  `RehashEveryFile`). Worth folding into whatever eventually addresses the retention cost.
+  findings were coupled: the residual submission latency was entirely a function of how long a
+  checkpoint held the per-entry metadata lock.
+
+  ### Resolved in this PR
+
+  The 33.2 s / ~11-minute measurements above stand as the record of the state that was fixed.
+
+  The diagnosis corrects one detail of the attribution. The holder was **not** `scan_entry` — F-2
+  already scoped that lock to the journal read and dropped its classification to paths-and-sizes,
+  and it is unchanged here. Nor was it the pre-eviction source-completeness proof, which the epic
+  AC requires at full strength: `verify_source_complete` re-hashes every *source* file and has
+  always run with **no** lock held (`evict_candidate` establishes it unlocked, then re-proves under
+  fresh locks). Both were verified untouched.
+
+  The holder was `ResolvedCacheStore::list` — a path F-2 missed. `recover()`, the startup half of
+  every maintenance checkpoint, begins with `enumerate()`, and `list` took each entry's exclusive
+  metadata lock and held it across a full-strength `RehashEveryFile` validation of that entry's
+  bundle. `valid_local_artifacts` — the provider behind `preflight_payload_model_sources`, and so
+  behind every job submission — takes the same per-entry lock. That is exactly the observed
+  profile: worker at 99 % CPU hashing bundle bytes, API at 0 % CPU with zero `sha2` frames parked
+  on `flock`.
+
+  The fix is the one F-2 already applied to `scan_entry`: the lock is scoped to the journal READ
+  and the entry is judged unlocked. The verification itself is **not** weakened — `Runtime`
+  listings still validate at full strength, because that is the corruption detector recovery
+  depends on; it simply no longer runs underneath a lock that a reader needs. Nothing is read
+  twice: the judgement is made against the value the read returned, and every caller that *acts* on
+  a summary (`recover`, retention) re-proves it under fresh locks before mutating — the same
+  unlocked-proof / fresh-lock-re-proof shape `evict_candidate` uses. An entry being evicted still
+  cannot be admitted by a concurrent availability read: a tombstoned entry reads as
+  `JournalRead::Evicted`, which `valid_local_artifacts` skips, so the answer falls back to the
+  source tier, which the lease boundary makes safe.
+
+  Pinned by `a_full_strength_listing_never_parks_the_availability_read_behind_its_verification`,
+  which observes from inside the listing's own validation window that no entry's metadata lock is
+  held, and reds when the blocking hold is restored.
+
+  - post-fix measured, submission during a sweep: `<pending live re-measure>`
 
 ## F-4 and F-2 spot checks · **both confirmed fixed**
 
