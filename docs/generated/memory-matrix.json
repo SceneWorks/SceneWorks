@@ -1,7 +1,7 @@
 {
   "schemaVersion": 8,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:33883db6278fbafec7192a7df62c59b0331827f4298da36b32080397e7ed31f2",
+    "sceneWorksRevision": "source-tree:5d4b48ab2e414b72affadb1ffc94909f0e7dfba8bb75711664c10c7954416c03",
     "inferenceRevision": "2d762d3312ac96c4feda8f89e35ee967e7700751",
     "sources": {
       "manifest": {
@@ -90,7 +90,7 @@
       },
       "engineCapabilitiesMlx": {
         "path": "config/engine-capabilities/capabilities.mlx.json",
-        "sha256": "f5f1d4def772086ac6654f4eebf46e5ee7c28c2c3866a170cd4cacc410c5d246"
+        "sha256": "93982851db191750bf1505b3dbfbb2009b7fdea16c6dc76161f225f7efe8e4dd"
       },
       "engineCapabilitiesCandle": {
         "path": "config/engine-capabilities/capabilities.candle.json",
@@ -193,7 +193,7 @@
       "bespokeWaivers": 0,
       "mismatches": 0,
       "byLeg": {},
-      "unavailable": "engine capability facts for mlx are keyed to bb3b314500b02bbb41431aa6beb5e03e4c0738f8, but Cargo pins 2d762d3312ac96c4feda8f89e35ee967e7700751"
+      "unavailable": "engine capability facts for candle are keyed to bb3b314500b02bbb41431aa6beb5e03e4c0738f8, but Cargo pins 2d762d3312ac96c4feda8f89e35ee967e7700751"
     },
     "rung4Survey": {
       "story": 15969,
