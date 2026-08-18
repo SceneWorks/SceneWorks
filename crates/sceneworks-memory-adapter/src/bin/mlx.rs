@@ -729,7 +729,7 @@ mod tests {
     /// It evaluates the same host-reserve currency production uses over every committed MLX image
     /// cell and proves that changing the image basis would loosen 54 shipped admission outcomes.
     #[test]
-    fn resident_peak_counterfactual_would_loosen_54_shipped_image_admission_cells() {
+    fn resident_peak_counterfactual_would_loosen_55_shipped_image_admission_cells() {
         use sceneworks_core::memory_calibration::{Backend, EvidenceBundle, RequiredNullable};
 
         fn phase(phase: &sceneworks_core::memory_calibration::Phase) -> PhaseMemory {
@@ -811,16 +811,20 @@ mod tests {
             }
         }
 
-        assert_eq!(image_records, 69);
-        assert_eq!(changed_records, 62);
-        assert_eq!(flipped_cells, 54);
+        // Renewed for the sc-18304 sync merge: the epic's captures grew the corpus 69 -> 74
+        // (five z-image coordinates among them), moving the counterfactual's derived counts.
+        // The load-bearing claim is the only-loosens assertion in the loop above; these pins
+        // characterize the merged corpus.
+        assert_eq!(image_records, 74);
+        assert_eq!(changed_records, 66);
+        assert_eq!(flipped_cells, 55);
         assert_eq!(
             flips_by_provider,
             std::collections::BTreeMap::from([
                 ("flux2_dev", 7),
                 ("krea_2_turbo_control", 8),
                 ("qwen_image", 38),
-                ("z_image_turbo", 1),
+                ("z_image_turbo", 2),
             ])
         );
     }
@@ -6891,7 +6895,7 @@ fn ltx_staging_is_proven(
 /// co-existence bound is CONSERVATIVE — it never under-predicts — while switching to `active`
 /// would LOOSEN shipped admission. [`PredictedPeakBasis`] and its image/video constants are the
 /// single policy declaration both lanes consume. The corpus test
-/// `resident_peak_counterfactual_would_loosen_54_shipped_image_admission_cells` pins the decision
+/// `resident_peak_counterfactual_would_loosen_55_shipped_image_admission_cells` pins the decision
 /// against all 69 committed MLX image records and production's scaled foreign-reserve currency:
 /// 62 record predictions change and 54 host-grid decisions flip from refusal to admission.
 #[cfg(test)]
