@@ -6913,6 +6913,7 @@ fn ltx_context(
 ) -> MemoryRunContext {
     MemoryRunContext {
         selection,
+        optimization_authority: MemoryOptimizationAuthority::Calibrated,
         calibration_abi: calibration.abi,
         calibration_fingerprint: fingerprint.to_owned(),
         load_shape: calibration.load_shape,
