@@ -76,6 +76,53 @@ fn capture_backend_committed_bytes() -> WorkerResult<u64> {
 
 static GENERATOR_WORKER: OnceLock<mpsc::Sender<GeneratorJob>> = OnceLock::new();
 
+/// A CUDA primary-context lease held for the span of one cold load.
+///
+/// `mem_get_info` is a bare `cuMemGetInfo_v2`: it reports the CURRENT context's device and fails
+/// with `CUDA_ERROR_INVALID_CONTEXT` when the calling thread has no context bound. The generator
+/// cache runs on a dedicated OS thread that binds one only as a side effect of building the candle
+/// device — which happens INSIDE the load, after the pre-load snapshot. So the snapshot has to
+/// establish the context itself, and must hold the lease across the load: the primary context is
+/// refcounted, and dropping the last reference destroys it out from under the thread that still has
+/// it current (a later `mem_get_info` then fails with `CUDA_ERROR_CONTEXT_IS_DESTROYED`).
+///
+/// Holding it only for the load keeps eviction reclaim intact — the generator's own reference is the
+/// last one, so dropping the cached generator still tears the context down.
+///
+/// Device 0 is this worker's GPU: the `auto` supervisor spawns each per-GPU child with
+/// `CUDA_VISIBLE_DEVICES=<its gpu id>`, which is the same assumption
+/// `runtime_cuda::media::default_device()` makes when the load builds its device.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle", not(test)))]
+type BackendLoadContext =
+    std::sync::Arc<runtime_cuda::media::candle_core::cuda::cudarc::driver::CudaContext>;
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle", not(test)))]
+fn bind_backend_load_context() -> WorkerResult<BackendLoadContext> {
+    let context = runtime_cuda::media::candle_core::cuda::cudarc::driver::CudaContext::new(0)
+        .map_err(|error| {
+            crate::WorkerError::Engine(format!(
+                "CUDA context for the generator load failed: {error}"
+            ))
+        })?;
+    context.bind_to_thread().map_err(|error| {
+        crate::WorkerError::Engine(format!(
+            "binding the CUDA context to the generator cache thread failed: {error}"
+        ))
+    })?;
+    Ok(context)
+}
+
+// The MLX, non-candle, and unit-seam builds take no lease: Metal needs no per-thread context and
+// the seams create no device at all. Still a guard value rather than `()`, so the call sites read
+// the same on every platform.
+#[cfg(any(target_os = "macos", not(feature = "backend-candle"), test))]
+struct BackendLoadContext;
+
+#[cfg(any(target_os = "macos", not(feature = "backend-candle"), test))]
+fn bind_backend_load_context() -> WorkerResult<BackendLoadContext> {
+    Ok(BackendLoadContext)
+}
+
 const fn provider_resident_delta(
     pre_load_committed_bytes: u64,
     post_load_committed_bytes: u64,
@@ -750,6 +797,9 @@ where
     let load = move || {
         let spec = crate::mlx_fit_gate::apply_residency_policy(spec, engine_id)?;
         let load_policy = spec.offload_policy;
+        // Held across the load so the two snapshots share one live primary context (see
+        // `bind_backend_load_context`).
+        let _backend_context = bind_backend_load_context()?;
         let external_committed_bytes = capture_backend_committed_bytes()?;
         let generator = load_generator(engine_id, &spec)
             .map_err(|error| crate::classify_engine_error(&load_error_context, error))?;
@@ -822,6 +872,9 @@ where
     let load = move || {
         let spec = crate::mlx_fit_gate::apply_residency_policy(spec, engine_id)?;
         let load_policy = spec.offload_policy;
+        // Held across the load so the two snapshots share one live primary context (see
+        // `bind_backend_load_context`).
+        let _backend_context = bind_backend_load_context()?;
         let external_committed_bytes = capture_backend_committed_bytes()?;
         let generator = load_generator(engine_id, &spec)
             .map_err(|error| crate::classify_engine_error(&load_error_context, error))?;
@@ -896,6 +949,9 @@ where
             // cached generator has been evicted, then retain this exact load's committed delta for
             // admission. Passing zero here would make a Candle contract double-charge its already
             // resident weights and would not be a truthful same-snapshot budget.
+            // Held across the load so the two snapshots share one live primary context (see
+            // `bind_backend_load_context`).
+            let _backend_context = bind_backend_load_context()?;
             let external_committed_bytes = capture_backend_committed_bytes()?;
             let generator = load()?;
             let post_load_committed_bytes = capture_backend_committed_bytes()?;
