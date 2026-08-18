@@ -240,8 +240,28 @@ def _assert_mage_tier_layout(model, model_id, repo, revision):
 
 
 def _assert_mage_candle_ladder(model: dict, model_id: str) -> None:
-    """sc-15813: every Candle Mage route declares the same truthful shared ladder contract."""
-    assert model["candle"] == {
+    """sc-15813: every Candle Mage route declares the same truthful shared ladder contract.
+
+    sc-20246: `memoryStrategyContract` is now ENGINE-PROJECTED per variant
+    (scripts/generate-manifest-memory-declarations.mjs), so it is necessarily NOT shared — each
+    variant names its own provider and its own catalog modes. The shared-ladder pin below therefore
+    covers the hand-authored, measured keys, and the projected contract is asserted separately in
+    shape terms: it must be wholly engine-sourced and must never claim a rung this same block
+    declares structurally exempt.
+    """
+    contract = model["candle"].get("memoryStrategyContract")
+    assert contract is not None, model_id
+    exempt = set(model["candle"].get("memoryStrategyStructuralExemptions", {}))
+    for implementation in contract["implementations"]:
+        assert implementation["source"].startswith("config/engine-capabilities/"), model_id
+        assert implementation["rung"] not in exempt, (model_id, implementation["rung"])
+    assert contract["provider"] == model_id, model_id
+
+    assert {
+        key: value
+        for key, value in model["candle"].items()
+        if key != "memoryStrategyContract"
+    } == {
         "minMemoryGb": 17,
         "vramGbByTier": {"q4": 14.67, "q8": 16.95, "bf16": 20.41},
         "vramMeasuredPixels": 1024 * 1024,
@@ -699,6 +719,61 @@ def test_builtin_models_manifest_satisfies_authoring_schema():
         f"- {'.'.join(map(str, error.absolute_path)) or '<root>'}: {error.message}"
         for error in errors
     )
+
+
+def test_memory_declaration_withhold_is_authorable_on_both_backends():
+    """sc-20246: the withhold the declaration projector honors must pass the authoring schema.
+
+    `memoryDeclarationWithhold` is how a backend block records that it declares LESS than
+    `config/engine-capabilities/capabilities.<backend>.json` dumps, on purpose, because a measurement
+    says the wider claim is wrong. No committed entry needs one today — the dumps happen to agree with
+    every recorded verdict — so without this test the property's FIRST real use would red
+    `test_builtin_models_manifest_satisfies_authoring_schema` at the moment somebody needed it, which
+    is precisely when a red is least useful. Validated against the real manifest plus a synthetic
+    withhold rather than against a hand-built document, so the property is exercised where it lives.
+    """
+    schema = _load_schema(SCHEMA_PATH)
+    validator = jsonschema.Draft202012Validator(schema)
+
+    def validate_with(withhold, backend):
+        manifest = _load_builtin_models_manifest()
+        model = next(
+            candidate
+            for candidate in manifest["models"]
+            if candidate.get(backend) is not None
+        )
+        model[backend]["memoryDeclarationWithhold"] = withhold
+        return sorted(
+            validator.iter_errors(manifest), key=lambda error: list(error.absolute_path)
+        )
+
+    for backend in ("mlx", "candle"):
+        for rungs in (["bounded_decode", "bounded_attention"], "all"):
+            errors = validate_with(
+                {
+                    "rungs": rungs,
+                    "story": "SC-15525",
+                    "reason": "rung 2 is withheld on quality: the production latent drifts 84/255.",
+                },
+                backend,
+            )
+            assert not errors, (backend, rungs, [error.message for error in errors])
+
+    # Uncited or malformed withholds must be REJECTED, matching what `withheldRungs` throws on.
+    for bad in (
+        {"rungs": ["bounded_decode"], "reason": "no story"},
+        {"rungs": ["bounded_decode"], "story": "SC-15525"},
+        {"rungs": [], "story": "SC-15525", "reason": "empty"},
+        {"rungs": ["not_a_rung"], "story": "SC-15525", "reason": "unknown rung"},
+        {"rungs": "everything", "story": "SC-15525", "reason": "not the all literal"},
+        {
+            "rungs": "all",
+            "story": "SC-15525",
+            "reason": "extra key",
+            "unexpected": True,
+        },
+    ):
+        assert validate_with(bad, "mlx"), bad
 
 
 def test_sensenova_models_do_not_advertise_lora_compatibility():
@@ -1614,7 +1689,11 @@ def test_flux2_true_v2_manifest_install_time_conversion():
     # installs), reading them from its per-tier bf16/ subdir.
     assert mlx["convertBaseRepo"] == "SceneWorks/flux2-klein-9b-mlx"
     assert mlx["convertBaseSubdir"] == "bf16"
-    assert mlx["quantize"] == 8
+    # SC-18460: the converted transformer is a fixed dense BF16 artifact — there is no packed tier
+    # to default to. `resolve_quant` maps `<= 0` to dense/no-quant, and OMITTING the key would
+    # default to q8, so 0 is the only correct declaration here. The former `== 8` described a tier
+    # this entry never ships.
+    assert mlx["quantize"] == 0
 
 
 def test_flux2_klein_manifest_entries_present():

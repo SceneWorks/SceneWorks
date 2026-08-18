@@ -224,6 +224,22 @@ function validateCrateCoverage(audit, componentIndex, crateText, pinnedRev) {
   return coverageErrors;
 }
 
+// The canonical audit payload, hashed. Extracted so `--derive-json` below can hand
+// scripts/bump-inference.mjs the digest THIS checker will grade, rather than a second copy of the
+// formula in the bump script that could drift from it.
+function auditCanonicalDigest(audit) {
+  const canonical = JSON.stringify({
+    artifacts: audit.artifacts,
+    prospectiveDisclosures: audit.prospectiveDisclosures,
+    provenanceScan: audit.provenanceScan,
+    portedSourceAreas: audit.portedSourceAreas,
+    crateCoverage: audit.crateCoverage,
+    crateDispositions: audit.crateDispositions,
+    includeSites: audit.includeSites,
+  });
+  return crypto.createHash("sha256").update(canonical).digest("hex");
+}
+
 function validateSourceAudit(audit, componentIndex, pinText, lockText, candidateText, crateText) {
   const auditErrors = [];
   const inferencePins = new Set(
@@ -250,16 +266,7 @@ function validateSourceAudit(audit, componentIndex, pinText, lockText, candidate
     );
   }
 
-  const canonical = JSON.stringify({
-    artifacts: audit.artifacts,
-    prospectiveDisclosures: audit.prospectiveDisclosures,
-    provenanceScan: audit.provenanceScan,
-    portedSourceAreas: audit.portedSourceAreas,
-    crateCoverage: audit.crateCoverage,
-    crateDispositions: audit.crateDispositions,
-    includeSites: audit.includeSites,
-  });
-  const digest = crypto.createHash("sha256").update(canonical).digest("hex");
+  const digest = auditCanonicalDigest(audit);
   if (audit.auditDigest !== digest) {
     auditErrors.push(`inference source audit digest mismatch: expected ${audit.auditDigest}, computed ${digest}. Re-run the exact pinned-revision audit; do not edit sites piecemeal.`);
   }
@@ -500,6 +507,32 @@ const buildPlan = fs.readFileSync(BUILD_PLAN, "utf8");
 errors.push(...validateDesktopNoticeContract(
   packageJson, tauriConfig, rustApiSource, bundledJs, desktopPackage, buildSidecar, buildPlan,
 ));
+
+// Structured derivation output for scripts/bump-inference.mjs (sc-18420).
+//
+// The report below is deliberately NOT fatal (sc-19751), and that broke the bump's restamp: the
+// deriver read the recomputed digest out of `execFileSync`'s thrown error, the checker stopped
+// throwing, and the restamp silently never fired again — the bump then shipped an audit whose digest
+// and population count still described the previous revision. Derived facts belong in structured
+// output, not in an exception's stderr, so they are reported here as data and exit 0 either way.
+// Every graded population fact is reported, not just the digest: `provenanceScan.matchedFiles` and
+// `crateCoverage.cratePrefixes` are graded here (see "population count changed") and the deriver never
+// wrote either, so a bump that added or removed a ported file or a crate left the audit asserting the
+// previous population.
+if (process.argv.includes("--derive-json")) {
+  const candidates = parseProvenanceCandidates(provenanceCandidates);
+  const crates = parseCratePrefixes(cratePrefixes);
+  process.stdout.write(
+    `${JSON.stringify({
+      auditDigest: auditCanonicalDigest(sourceAudit),
+      provenanceMatchedFiles: candidates.length,
+      provenancePopulationSha256: populationSha256(candidates),
+      cratePrefixes: crates.length,
+      cratePopulationSha256: cratePopulationSha256(crates),
+    })}\n`,
+  );
+  process.exit(0);
+}
 
 if (process.argv.includes("--self-test")) {
   const withoutSite = structuredClone(sourceAudit);

@@ -146,7 +146,7 @@ pub(crate) async fn create_lora_download_job(
         requested_gpu_or_auto(payload.requested_gpu),
     )
     .await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 pub(crate) async fn delete_lora(
@@ -1132,7 +1132,7 @@ pub(crate) async fn queue_lora_import_job(
         "auto".to_owned(),
     )
     .await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 pub(crate) async fn lora_import_request_from_multipart(

@@ -658,7 +658,28 @@ fn imported_preview_sink(family: &str, source: &str) -> bool {
         // Each file compiles one shared sink-bearing request closure around backend-specific MLX
         // and Candle loader arms. Ordered, comment-stripped fragments keep an unrelated helper or
         // comment from preserving this claim after the production request drops its sink.
-        "krea_2" | "sdxl" => source_has_ordered_fragments(
+        // Imported Krea builds its request in helper functions that sit ABOVE the per-item driver
+        // and generates through the memory-scoped seam rather than calling `model.generate`
+        // directly, so both the fragments and their order differ from the SDXL lane. The claim
+        // being proven is unchanged: the production request literal carries `preview`, that request
+        // is what actually generates, and the per-item driver is what supplies the live sink.
+        // The chain is required TWICE because this lane has two production request builders — the
+        // single-pass renderer and the multi-phase one — and a live preview that reaches only one
+        // of them is a half-wired sink. Demanding the pair also keeps the check fail-closed against
+        // a single removal, which a one-shot chain would survive by matching the other builder.
+        "krea_2" => source_has_ordered_fragments(
+            source,
+            &[
+                "let mut request = GenerationRequest {",
+                "preview,",
+                "generate_with_scope(",
+                "let mut request = GenerationRequest {",
+                "preview,",
+                "generate_with_scope(",
+                "drive_gen_items(tx, work, move |_index, (seed, prompt), preview, on_progress|",
+            ],
+        ),
+        "sdxl" => source_has_ordered_fragments(
             source,
             &[
                 "drive_gen_items(tx, work, move |_index, (seed, prompt), preview, on_progress|",
@@ -689,10 +710,24 @@ fn imported_family_rows(
     let mut rows = Vec::new();
     for family in crate::base_weights::IMPORT_SUPPORTED_FAMILIES {
         let synthetic_model_id = format!("sc18481_import_probe_{}", family.replace('-', "_"));
+        // The on-disk shape a real imported entry of this family records. Imported routing resolves
+        // its provider from (family, source, operation), so a probe without this field selects no
+        // route at all and would silently prove nothing about every family at once.
+        let source_shape = match *family {
+            "krea_2" => "transformer_file",
+            "sdxl" => "fused_checkpoint",
+            "mage-flow" => "transformer_directory",
+            other => {
+                return Err(format!(
+                    "unmapped imported probe source shape for {other:?}"
+                ))
+            }
+        };
         let mut entry = json!({
             "id": synthetic_model_id.clone(),
             "family": family,
             "type": "image",
+            "importSourceShape": source_shape,
             "modelPath": "/probe/imported-model.safetensors"
         })
         .as_object()
@@ -713,10 +748,31 @@ fn imported_family_rows(
                 backend_supports(&job, candle_facts)?,
                 gap_for(&model.id, "operation", operation),
             );
-            if support.mlx != Some(true) || support.candle != Some(true) {
-                return Err(format!(
-                    "supported imported family {family:?} default {operation:?} does not route on both native backends"
-                ));
+            // The expectation is DERIVED from each backend's engine facts, not asserted as "both".
+            // The two native engines genuinely declare different imported coverage — candle
+            // registers no `mage-flow` imported model, and no `krea_2` Pose provider — so demanding
+            // parity here asserted a declaration neither engine backs.
+            //
+            // This stays a real gate, and a two-sided one:
+            //   * declared but NOT routable  -> a lane the facts promise and the worker cannot reach
+            //   * routable but NOT declared  -> a lane reachable without any declaration behind it
+            // Both are failures. Only "declared and routable" or "undeclared and unroutable" pass.
+            for (backend, routable) in [("mlx", support.mlx), ("candle", support.candle)] {
+                let declared =
+                    super::catalog::imported_backend_declares_route(&job.payload, backend);
+                let routable = routable == Some(true);
+                if declared && !routable {
+                    return Err(format!(
+                        "imported family {family:?} default {operation:?} is DECLARED by the {backend} \
+                         engine facts but does not route on {backend}"
+                    ));
+                }
+                if routable && !declared {
+                    return Err(format!(
+                        "imported family {family:?} default {operation:?} routes on {backend} but no \
+                         {backend} engine fact declares that imported provider"
+                    ));
+                }
             }
             operation_and_mode.push(support);
         }
@@ -738,10 +794,37 @@ fn imported_family_rows(
                 backend_supports(&job, candle_facts)?,
                 gap_for(&model.id, "conditioning", shape),
             );
-            if support.mlx != Some(true) || support.candle != Some(true) {
-                return Err(format!(
-                    "supported imported family {family:?} default conditioning {shape:?} does not route on both native backends"
-                ));
+            // Same two-sided, facts-derived rule as the operation loop above, one level finer: the
+            // declaration here is the conditioning kind on the route the payload selects, so a
+            // backend whose facts omit `multi_reference` is expected NOT to route it.
+            let declared_kind = match shape {
+                "reference" => "reference",
+                "multiReference" => "multi_reference",
+                other => {
+                    return Err(format!(
+                        "unmapped imported conditioning probe shape {other:?}"
+                    ))
+                }
+            };
+            for (backend, routable) in [("mlx", support.mlx), ("candle", support.candle)] {
+                let declared =
+                    super::catalog::imported_backend_declared_route(&job.payload, backend)
+                        .is_some_and(|route| {
+                            route.conditioning.iter().any(|kind| kind == declared_kind)
+                        });
+                let routable = routable == Some(true);
+                if declared && !routable {
+                    return Err(format!(
+                        "imported family {family:?} conditioning {shape:?} is DECLARED by the \
+                         {backend} engine facts but does not route on {backend}"
+                    ));
+                }
+                if routable && !declared {
+                    return Err(format!(
+                        "imported family {family:?} conditioning {shape:?} routes on {backend} but \
+                         no {backend} engine fact declares that conditioning"
+                    ));
+                }
             }
             conditioning_shape.push(support);
         }
@@ -3517,15 +3600,26 @@ mod tests {
                 "imported {} UI-derived operation set drifted",
                 row.family
             );
+            // Per-backend, not parity. Candle's engine facts declare no `mage-flow` imported
+            // provider at all, so its cells are legitimately false there and MLX-only — which is
+            // exactly what a parity obligation records. Spelled out per family so a silent
+            // capability LOSS still flips a tuple and fails.
+            let candle_serves = row.family != "mage-flow";
             for cell in &row.operation_and_mode {
                 assert_eq!(
                     (cell.mlx, cell.candle),
-                    (Some(true), Some(true)),
-                    "imported {}/{} must traverse the live family route on both backends",
+                    (Some(true), Some(candle_serves)),
+                    "imported {}/{} must match the live per-backend family route",
                     row.family,
                     cell.capability
                 );
-                assert!(cell.parity_obligation.is_none());
+                assert_eq!(
+                    cell.parity_obligation.is_none(),
+                    candle_serves,
+                    "imported {}/{} must carry a parity obligation exactly when MLX serves it alone",
+                    row.family,
+                    cell.capability
+                );
             }
             let expected_conditioning = if row.family == "krea_2" {
                 &["multiReference", "reference"][..]
@@ -3557,8 +3651,9 @@ mod tests {
             assert!(row.guidance_method.is_empty());
             assert_eq!(
                 (row.preview.mlx, row.preview.candle),
-                (Some(true), Some(true)),
-                "imported {} preview must retain its production worker sink",
+                (Some(true), Some(candle_serves)),
+                "imported {} preview must retain its production worker sink on every backend that \
+                 serves the family",
                 row.family
             );
         }
@@ -3566,15 +3661,22 @@ mod tests {
 
     #[test]
     fn imported_preview_rows_fail_closed_when_the_production_sink_is_removed() {
-        for (family, source) in [
-            ("krea_2", WORKER_IMAGE_KREA_IMPORTED),
-            ("sdxl", WORKER_IMAGE_SDXL_IMPORTED),
+        // The indent is part of the fixture, not decoration: it is what pins the mutation to the
+        // real request literal instead of some similarly-worded block. Imported Krea builds its
+        // request inside a helper function (8 spaces); the SDXL lane builds it inline in the
+        // per-item closure (20). A mutation that silently fails to apply would make this test pass
+        // while proving nothing, which is why the "mutation must apply" assertion is here.
+        for (family, source, indent) in [
+            ("krea_2", WORKER_IMAGE_KREA_IMPORTED, "        "),
+            ("sdxl", WORKER_IMAGE_SDXL_IMPORTED, "                    "),
         ] {
             assert!(imported_preview_sink(family, source));
             let normalized = source.replace("\r\n", "\n");
             let without_request_sink = normalized.replacen(
-                "                    preview,\n                    cancel: cancel.clone(),\n                    ..Default::default()",
-                "                    cancel: cancel.clone(),\n                    ..Default::default()",
+                &format!(
+                    "{indent}preview,\n{indent}cancel: cancel.clone(),\n{indent}..Default::default()"
+                ),
+                &format!("{indent}cancel: cancel.clone(),\n{indent}..Default::default()"),
                 1,
             );
             assert_ne!(

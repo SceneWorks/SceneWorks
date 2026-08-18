@@ -209,9 +209,13 @@ test("an exact phase tie keeps the tier phase-flip question open", () => {
 test("video curve generation leaves the image calibration corpus byte-identical", () => {
   const imageCorpus = path.join(ROOT, "docs/generated/memory-calibration-evidence.json");
   const before = createHash("sha256").update(readFileSync(imageCorpus)).digest("hex");
+  // Renewed for the sc-18304 sync merge: the corpus gained the epic's records and the sc-18864
+  // v5 alias projection (deviceBytes/wiredBytes verbatim copies stripped). The claim this test
+  // owns — video curve generation never mutates the image corpus — is the before/after equality
+  // below; this pin only names the reviewed snapshot.
   assert.equal(
     before,
-    "3fa473dad3b109fb889444348770439b1e985f32e3499331ce182cf45059bbcb",
+    "ab790d8e83633f7546dfa61e4c244c55a2fb40a4f61b2ac049048c506d3df88f",
     "the explicit pre-video image evidence outcome remains the reviewed corpus",
   );
   const output = mkdtempSync(path.join(tmpdir(), "sceneworks-video-curves-"));

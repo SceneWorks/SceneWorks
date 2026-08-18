@@ -29,6 +29,10 @@ export function buildImageJobAdvanced(state) {
     stepsOverride,
     guidanceOverride,
     guidanceMethod,
+    // Runtime-curated compatible language encoder substitution (sc-18314).
+    supportsTextEncoderSelection,
+    textEncoderModel,
+    defaultTextEncoderId,
     // Flash attention (sc-3674).
     flashAttn,
     // Caption upsampling (sc-6135).
@@ -44,6 +48,9 @@ export function buildImageJobAdvanced(state) {
     showPidToggle,
     usePid,
     pidTarget,
+    // Experimental load-time alternate decoder. `native` is the byte-exact default and omitted.
+    showDecoderPicker,
+    decoder,
     // Character-reference knobs.
     mode,
     referenceAssetId,
@@ -126,6 +133,14 @@ export function buildImageJobAdvanced(state) {
     ...(guidanceOverride !== "" && Number.isFinite(Number(guidanceOverride))
       ? { guidanceScale: Number(guidanceOverride) }
       : {}),
+    // The bundled/paired encoder is the byte-identical default. Only an explicit non-default
+    // opaque catalog id rides the request; stale authored ids intentionally remain present so the
+    // API can fail closed instead of silently substituting the builtin encoder.
+    ...(supportsTextEncoderSelection &&
+    textEncoderModel &&
+    textEncoderModel !== defaultTextEncoderId
+      ? { textEncoderModel }
+      : {}),
     // Flash attention (sc-3674): only emitted when toggled OFF — the worker defaults to ON
     // when `advanced.flashAttn` is absent, so the default-on case adds nothing to the payload.
     // Only the candle (Windows/CUDA) SDXL backend reads it; every other backend ignores it.
@@ -190,6 +205,9 @@ export function buildImageJobAdvanced(state) {
     // size by capping the effective base. Emit `pidTarget:"2k"` only when the PiD toggle is shown+on AND
     // 2K is picked; "4k" is the worker default, so omitting it keeps existing usePid recipes byte-identical.
     ...(showPidToggle && usePid && pidTarget === "2k" ? { pidTarget: "2k" } : {}),
+    // Descriptor-derived alternate decoder. The UI exposes only ids from capability facts; the API
+    // and worker independently revalidate eligibility/install state. Never emit alongside PiD.
+    ...(showDecoderPicker && !usePid && decoder && decoder !== "native" ? { decoder } : {}),
     // IP-Adapter / InstantID reference strength only applies when a character
     // reference is attached AND the model uses the IP-Adapter knob; Qwen's
     // edit pipeline ignores this scalar (hideReferenceStrength gates it out).

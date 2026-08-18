@@ -252,5 +252,5 @@ pub(crate) async fn worker_terminated(
             );
         }
     }
-    Ok(Json(failed))
+    Ok(Json(failed.map(public_job_snapshot)))
 }

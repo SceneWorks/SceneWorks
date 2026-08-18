@@ -215,8 +215,9 @@ export function loraMatchesModel(lora, model) {
     return false;
   }
   // The API WITHDREW this model's synthesized LoRA advertisement because no backend lane on this
-  // deployment can honour it — currently a Mage-Flow full fine-tune, whose native single-file
-  // loaders deliberately reject inference adapters, or a future backend-specific deployment gap.
+  // deployment can honour it — a Mage-Flow full fine-tune, whose native single-file loaders
+  // deliberately reject inference adapters, or a ComfyUI Qwen-Image tree whose registered
+  // provider accepts the imported transformer assembly but advertises no adapter format.
   // Fail CLOSED, and check this BEFORE the family test: the withdrawal also empties
   // `loraCompatibility.families`, which would otherwise fall into the "cannot gate" permissive
   // branch below and keep offering every LoRA — a selection the API now 400s on. The models the

@@ -541,10 +541,11 @@ test("macOS memory-strategy calibration dispatch is opt-in and secret-scoped", a
     workflow,
     /memory-calibration-harness\.mjs check/,
   );
-  assert.match(
-    workflow,
-    /actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/,
-  );
+  // Pinned to the SHAPE, not to a review-time SHA. scripts/lib/action-pins.mjs is the authority on
+  // this and says so outright: the control is that the reference resolves to an immutable 40-hex
+  // commit, and Dependabot rewrites the SHA in place, so freezing the value here only means every
+  // automated bump reddens a test that has nothing to do with what it is checking.
+  assert.match(workflow, /actions\/upload-artifact@[0-9a-f]{40}\b/);
   assert.match(
     workflow,
     /if: \$\{\{ success\(\) && github\.event_name == 'workflow_dispatch' && inputs\.run_memory_calibration \}\}/,
@@ -735,7 +736,13 @@ test("the pre-push derived-docs trigger covers every non-Rust source the matrix 
   assert.ok(pattern, "the derived-docs trigger pattern is still a single-quoted ERE in the hook");
   const trigger = new RegExp(pattern);
   const rustArm = /(^|\/)([^/]+\.rs|Cargo\.(toml|lock)|rustfmt\.toml)$/;
-  for (const relative of Object.values(SOURCE_PATHS)) {
+  // Imported reconciliation logic also changes the generated summary/gate even though it is code,
+  // not a hashed data source, so a module-only edit must run the same stale-artifact check.
+  const derivedInputs = [
+    ...Object.values(SOURCE_PATHS),
+    "scripts/lib/memory-contract-reconciliation.mjs",
+  ];
+  for (const relative of derivedInputs) {
     if (rustArm.test(relative)) continue;
     assert.ok(trigger.test(relative), `${relative} must trigger the pre-push derived-docs check`);
   }
@@ -857,7 +864,7 @@ test("the MLX memory adapter is guarded on a PR lane, like its Candle twin", asy
   assert.ok(guard < firstDispatchOnly, "MLX adapter guard must precede the dispatch-only steps");
 });
 
-test("both stage-1 lanes verify their complete capability dump, then publish only its evidence", async () => {
+test("both stage-1 lanes verify their own capability dump last among coverage, reachably, and publish only its evidence", async () => {
   // sc-17119 (mlx) + sc-17592 (candle). config/engine-capabilities/capabilities.<backend>.json is
   // read as a SOURCE by every other guard: bump-inference.mjs checks only its existence, declared
   // backend and `inferenceRevision`, and the vitest drift guard re-derives the catalog from its
@@ -904,7 +911,18 @@ test("both stage-1 lanes verify their complete capability dump, then publish onl
     const nextJobAt = afterVerify.search(/\n {2}[A-Za-z0-9_-]+:\n/);
     const verifyJobTail = nextJobAt < 0 ? afterVerify : afterVerify.slice(0, nextJobAt);
     for (const block of verifyJobTail.split(/\n {6}- (?=name: |uses: )/).slice(1)) {
-      if (/^name: Upload fresh (?:MLX|Candle) capability facts/m.test(block)) {
+      // The Candle lane publishes its fresh dump ONLY when verification failed, so the upload is
+      // diagnostic evidence for a red run rather than a per-PR measurement publication.
+      const candleFailureArtifact =
+        path === ".github/workflows/windows-candle.yml" &&
+        block.startsWith(
+          "name: Upload fresh Candle capability facts after a verification failure",
+        ) &&
+        /if: \$\{\{ always\(\) && steps\.verify_candle_capabilities\.outcome == 'failure' \}\}/.test(
+          block,
+        );
+      if (candleFailureArtifact) continue;
+      if (/^name: Upload fresh MLX capability facts/m.test(block)) {
         assert.match(block, /if: \$\{\{ always\(\) \}\}/);
         assert.match(block, /uses: actions\/upload-artifact@[0-9a-f]{40}/);
         assert.match(block, /path: \$\{\{ runner\.temp \}\}\/engine-capability-facts-verify/);
@@ -996,6 +1014,50 @@ test("both stage-1 lanes verify their complete capability dump, then publish onl
       );
     }
   }
+});
+
+// Kept as its own test rather than folded into the `candleFailureArtifact` carve-out above, which was
+// raised as possible duplication. It is not: that carve-out is a `continue` GUARD, so it can only ever
+// weaken the ordering rule, never assert anything. Three claims below have nowhere else to live —
+//
+//   * the upload step EXISTS. Delete it and the guard simply stops matching, the ordering loop finds no
+//     such block, and every assertion up there still passes. The failure-only upload would be gone with
+//     nothing red.
+//   * the VERIFY step declares `id: verify_candle_capabilities`. Without the id,
+//     `steps.verify_candle_capabilities.outcome` resolves to nothing, the condition is false on every
+//     run, and the upload never fires — while the guard's literal text match keeps passing.
+//   * the artifact CONTENT: name, whole-directory path, if-no-files-found. See the note below on the
+//     enumerated two-file spelling that silently produced an unusable artifact.
+//
+// The `if:` expression is deliberately spelled in both places: up there it is the condition under which
+// the carve-out is legitimate, here it is the failure-only guarantee itself.
+test("Windows preserves exact fresh capability facts when verification fails", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  const verifyAt = workflow.indexOf(
+    "- name: Verify capabilities.candle.json is a real dump, not a restamp",
+  );
+  const uploadAt = workflow.indexOf(
+    "- name: Upload fresh Candle capability facts after a verification failure",
+  );
+  assert.ok(verifyAt > 0 && uploadAt > verifyAt);
+  const tail = workflow.slice(verifyAt, uploadAt + 1000);
+  assert.match(tail, /id: verify_candle_capabilities/);
+  assert.match(
+    tail,
+    /if: \$\{\{ always\(\) && steps\.verify_candle_capabilities\.outcome == 'failure' \}\}/,
+  );
+  // The shape, not a review-time SHA — see the note in the calibration-artifact test above.
+  assert.match(tail, /actions\/upload-artifact@[0-9a-f]{40}\b/);
+  // The whole scratch DIRECTORY, not an enumerated file list, and that distinction has already
+  // been load-bearing once. The dumper writes three files — `capabilities.candle.json`,
+  // `audio/capabilities.candle.json`, and the rich `runtime/capabilities.candle.json` — and the
+  // runtime descriptor is the one the backend capability matrix cannot be rebuilt without. The
+  // enumerated two-file spelling this used to assert predates that third file, so an artifact
+  // produced under it looks complete and silently cannot repair the matrix. Pin the directory and
+  // the artifact name the repair instructions actually tell you to download.
+  assert.match(tail, /name: backend-capability-facts-candle/);
+  assert.match(tail, /path: \$\{\{ runner\.temp \}\}\/engine-capability-facts-verify\s/);
+  assert.match(tail, /if-no-files-found: warn/);
 });
 
 test("every workspace path a self-hosted lane watches maps to a package that lane builds", async () => {

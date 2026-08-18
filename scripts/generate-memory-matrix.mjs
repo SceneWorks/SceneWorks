@@ -13,6 +13,9 @@ import {
   evidenceSemantics,
   validateBundle as validateCalibrationBundle,
 } from "./memory-calibration-harness.mjs";
+import {
+  reconcileMemoryContracts,
+} from "./lib/memory-contract-reconciliation.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const OUTPUT_JSON = "docs/generated/memory-matrix.json";
@@ -23,9 +26,39 @@ const EXPECTED_IMAGE_COUNT = 53;
 // than by omission, and admitting one would need the same three things video needed here.
 const MATRIX_MODALITIES = new Set(["image", "video"]);
 const EXPECTED_VIDEO_COUNT = 10;
-// SC-18218 removed FLUX.2-dev from this census: the pinned MLX provider is eager/resident-only,
-// so counting its generic route as staged coverage would contradict the captured contract.
-const EXPECTED_MLX_STAGED_COUNT = 38;
+// SC-18218 removed FLUX.2-dev from the MLX staged-residency census: the pinned MLX provider is
+// eager/resident-only, so counting its generic route as staged coverage would contradict the captured
+// contract. Bernini is the mirror case — inference sc-18609 made its DECLARED MLX rung-4 ladder
+// actually reachable on both variants, so it belongs in the census.
+//
+// Neither fact is a total. This census used to be pinned to an exact population, which meant hand-
+// renewing 37 -> 38 for a reachability change that had nothing to do with the contract being guarded,
+// and the number never said which entry moved. `assertMlxStagedCoverageIsStructurallyConsistent`
+// replaces it, and is DELIBERATELY WEAKER — the honest scope, so nobody reads more into it:
+//
+//   guarded — the two named lanes above by id; bespoke routes never claiming the generic ladder;
+//             per-route drift, where entries sharing a resolved route disagree with each other; and
+//             the census being neither empty nor the whole catalog.
+//   NOT guarded — uniform drift on a route nothing else shares. 35 of the 41 resolved routes are
+//             singletons (only sdxl, flux2_klein_9b, qwen_image_edit, sensenova_u1_8b,
+//             sensenova_u1_8b_fast and z_image_turbo group more than one entry), so a singleton lane
+//             silently dropping out of the census — or silently claiming staged coverage it has not
+//             implemented — passes every assertion here where the old count reddened. A whole shared
+//             family drifting uniformly passes too, for the same reason.
+//   ALSO NOT guarded, as of 2026-08-17 — the per-route comparison SKIPS entries whose MLX tier axis is
+//             a single synthetic `default`, i.e. entries advertising no tier ladder at all (no
+//             `vramGbByTier`, no tier-tagged download variant, and a `quantize` naming no packed tier).
+//             `flux2_klein_9b_true_v2` is the only such entry today, and it shares route
+//             `flux2_klein_9b` with two tiered siblings. Its verdict is structurally fixed at "not
+//             staged" — the tiers its contract declares do not exist for it — so including it reported
+//             a disagreement no declaration could resolve. A future single-dense-tier entry therefore
+//             joins that blind spot silently. Accepted for the same reason as the rest of this note:
+//             the alternative was declaring a packed tier the artifact does not ship.
+//
+// That is the accepted shape-over-population tradeoff, not an oversight: the exact count caught those
+// cases and cost a hand-edit on every unrelated catalog or reachability change, and runtime catching is
+// the chosen tradeoff for what shape assertions cannot express. A staged claim a lane cannot honour
+// surfaces when the ladder is actually engaged.
 // Provider calibration ABI versions are deliberate invalidation switches. A provider-specific
 // execution/layout/quantization change that makes measurements unsafe must add or bump its key;
 // ecosystem-wide contract changes bump `default`. Exact source revisions remain provenance only.
@@ -550,6 +583,113 @@ export function assertTwinCoverage(
     throw new Error(`${dualGroups.size} dual families map onto only ${candleFamilyTwins.size} distinct Candle family twins`);
   }
   return { dualModels: dual.length, dualFamilies: dualGroups.size };
+}
+
+// The MLX staged-residency census, checked as structure instead of an exact population (see the note
+// on EXPECTED_IMAGE_COUNT above). Runs inside `validateMatrix`, so `cells` is still the full resolved
+// cross-product and `coverage` is not populated yet; the census-versus-published cross-check belongs to
+// tests/test_memory_matrix.py, which reads the artifact after the publication slim.
+export function assertMlxStagedCoverageIsStructurallyConsistent(matrix) {
+  const staged = new Set(
+    matrix.cells
+      .filter(
+        (cell) =>
+          cell.backend === "mlx" && cell.rung === "staged_residency" && isImplemented(cell.state),
+      )
+      .map((cell) => cell.modelId),
+  );
+  if (staged.has("flux2_dev")) {
+    throw new Error(
+      "flux2_dev claims MLX staged coverage, but SC-18218 measured the pinned provider as Resident-only",
+    );
+  }
+  if (!staged.has("bernini_image")) {
+    throw new Error(
+      "bernini_image lost its MLX staged coverage; inference sc-18609 made its declared rung-4 ladder reachable",
+    );
+  }
+  if (staged.size === 0 || staged.size >= matrix.models.length) {
+    throw new Error(
+      `MLX staged coverage is partial by construction, found ${staged.size}/${matrix.models.length}`,
+    );
+  }
+  // The verdict is a property of the RESOLVED ROUTE, so entries sharing a route must agree. An entry
+  // drifting away from its own siblings is exactly what a pinned total could not see.
+  //
+  // EXEMPT: an entry whose MLX tier axis is a single synthetic `default`. That is not drift, it is an
+  // entry with no advertised tier ladder AT ALL — `mlxTiers` falls through to `["default"]` when the
+  // catalog declares no `vramGbByTier`, no tier-tagged download variant, and a `quantize` that names no
+  // packed tier (`<= 0`, i.e. dense; see `resolve_quant`). Such an entry can never reach an Implemented
+  // staged cell, because the tiers its contract declares do not exist for it, so comparing its verdict
+  // against tiered siblings on the same route reports a disagreement that no declaration change can
+  // resolve.
+  //
+  // The instance is `flux2_klein_9b_true_v2`: a convert-at-install entry whose transformer is a FIXED
+  // DENSE BF16 artifact, sharing route `flux2_klein_9b` with the tiered base and KV entries. Coordinator
+  // decision 2026-08-17, building on Michael's report-only ruling the same day: `quantize: 0` stays
+  // because it is the only truthful encoding of that artifact — declaring a packed tier it does not ship
+  // would hand-declare a q8 that does not exist and mislead tier selection, which is the drift class
+  // this epic exists to kill. So the invariant yields on the axis instead of the manifest lying.
+  //
+  // Scoped as narrowly as that reasoning allows: the exemption removes these entries from the CROSS-
+  // ENTRY comparison only. Every other assertion in this function still applies to them, and the
+  // comparison keeps full force among tiered entries sharing a route — see
+  // `a drifting tiered route-mate still reds after the single-dense-tier exemption` in
+  // `generate-memory-matrix.test.mjs`, which exists so the exemption cannot be widened into a hole.
+  const hasSingleDenseTierAxis = (model) => {
+    const tiers = model.axes?.mlx?.tiers ?? [];
+    return tiers.length === 1 && tiers[0] === "default";
+  };
+  const byRoute = new Map();
+  for (const model of matrix.models) {
+    if (hasSingleDenseTierAxis(model)) continue;
+    const verdicts = byRoute.get(model.resolvedRoute) ?? new Set();
+    verdicts.add(staged.has(model.id));
+    byRoute.set(model.resolvedRoute, verdicts);
+  }
+  const split = [...byRoute.entries()].filter(([, verdicts]) => verdicts.size > 1).map(([route]) => route);
+  if (split.length) {
+    throw new Error(`MLX staged coverage disagrees within resolved route(s) ${split.sort().join(",")}`);
+  }
+  // A bespoke route carries its own pipeline and never advertises the GENERIC staged ladder.
+  //
+  // "Generic" is load-bearing and, as of 2026-08-17, actually enforced as written. This used to reject a
+  // bespoke route for ANY implemented staged cell, which conflated two different claims: the generic
+  // base ladder (the `none` overlay, plus the `lora` overlay that rides it) and a route-local closed
+  // overlay the entry declares for itself.
+  //
+  // `routeKind: "bespoke"` means only "no row in `engines.rs`'s MODEL_TABLE" — a SceneWorks worker
+  // DISPATCH fact, and backend-agnostic. It does not mean the engine registry publishes no contract.
+  // PuLID is exactly that split: bespoke in worker dispatch, and on candle genuinely unregistered (the
+  // candle dump carries its typed `bespokeMemoryRouteWaivers` entry), yet the MLX registry publishes a
+  // real `pulid_flux` memory contract with route witnesses at pin 931366f62. SC-18460 wired its MLX
+  // declaration route on that basis, and its census cells bear it out: `character_image` +
+  // `identity` is Implemented on every tier while `none` and `lora` stay Missing on every tier — the
+  // "deliberately closed identity-only contract" this file already describes in
+  // `staticCandleOverlayIsAvailable`.
+  //
+  // So the check now asks the question it always claimed to: does a bespoke route claim staged coverage
+  // on a GENERIC coordinate? Its own closed overlay is the one declaration it IS entitled to make.
+  // Teeth preserved — if PuLID's `none` or `lora` staged cell ever turns Implemented this still reds;
+  // `a bespoke route claiming the generic staged ladder still reds` pins that.
+  const GENERIC_STAGED_OVERLAYS = new Set(["none", "lora"]);
+  const bespoke = matrix.models
+    .filter(
+      (model) =>
+        model.routeKind === "bespoke" &&
+        matrix.cells.some(
+          (cell) =>
+            cell.backend === "mlx" &&
+            cell.rung === "staged_residency" &&
+            cell.modelId === model.id &&
+            GENERIC_STAGED_OVERLAYS.has(cell.overlay) &&
+            isImplemented(cell.state),
+        ),
+    )
+    .map((model) => model.id);
+  if (bespoke.length) {
+    throw new Error(`bespoke route(s) ${bespoke.sort().join(",")} claim generic MLX staged coverage`);
+  }
 }
 
 /**
@@ -1389,24 +1529,30 @@ const CONTROL_PROVIDER_OVERRIDES = new Map([
   ["z_image_turbo:mlx", "z_image_turbo_control"],
 ]);
 
-// The pinned Z-Image crate exports one provider-id-specific contract for each of its four registry
-// variants from the same `memory_strategy_contract(provider_id, spec)` implementation. The manifest
-// stores the declaration once on each catalog base entry; allow only these source-proven aliases to
-// consume it. This is intentionally narrower than route equivalence: Qwen's separate control
-// provider, for example, remains unbounded and must not inherit the base declaration.
-const STATIC_CONTRACT_PROVIDER_ALIASES = new Map([
-  ["z_image_control", "z_image"],
-  ["z_image_turbo_control", "z_image_turbo"],
-]);
-
 function staticContractCoversProvider(contract, provider) {
   if (!contract) return false;
-  const aliasedProvider = STATIC_CONTRACT_PROVIDER_ALIASES.get(provider);
-  return contract.provider === provider ||
-    (aliasedProvider !== undefined && aliasedProvider === contract.provider);
+  return contract.implementations.some(
+    (implementation) => (implementation.runtimeProvider ?? contract.provider) === provider,
+  );
 }
 
-function providerFor(model, backend, overlay, route) {
+export function declarationModelForCoordinate({ backend, rung, route, provider, model, tier, mode, overlay, manifestById }) {
+  const routeLocalContract = model[backend]?.memoryStrategyContract;
+  const routeLocalImplementation = routeLocalContract?.implementations?.some(
+    (implementation) =>
+      (implementation.runtimeProvider ?? routeLocalContract.provider) === provider &&
+      implementation.rung === rung &&
+      implementation.tiers.includes(tier) &&
+      implementation.modes.includes(mode) &&
+      implementation.overlays.includes(overlay),
+  );
+  if (routeLocalImplementation) return model;
+  return model.id === "z_image_edit" && route.engine === "z_image_turbo"
+    ? manifestById.get("z_image_turbo")
+    : model;
+}
+
+export function providerFor(model, backend, overlay, route) {
   // Per-backend (sc-18815): the image lane's `engineFor` returns the one table route on either
   // backend, so this is unchanged for it, while a video entry gets the provider that backend
   // actually loads instead of whichever one happened to be listed first. No `?? route.engine`
@@ -1414,6 +1560,16 @@ function providerFor(model, backend, overlay, route) {
   // how a candle provider reached an MLX cell in the first place.
   const engine = route.engineFor(backend);
   if (overlay !== "control") return engine;
+  const contract = model[backend]?.memoryStrategyContract;
+  const declared = [...new Set((contract?.implementations ?? [])
+    .filter((implementation) => implementation.overlays?.includes(overlay))
+    .map((implementation) => implementation.runtimeProvider ?? contract.provider))];
+  if (declared.length === 1) return declared[0];
+  if (declared.length > 1) {
+    throw new Error(
+      `${model.id}:${backend}:${overlay} declares ambiguous runtime providers: ${declared.join(", ")}`,
+    );
+  }
   return CONTROL_PROVIDER_OVERRIDES.get(`${model.id}:${backend}`) ?? engine;
 }
 
@@ -2085,8 +2241,29 @@ export function catalogFamilyBackends(manifestModels, routedBackends) {
  * the two drift, and the drift is silent: a family that gained rung-1 capability would keep
  * reporting rung 4 as unreachable.
  */
-function stagedResidencyIsAvailable({ backend, model, route, stagedResidencyEngines, manifestById }) {
+export function stagedResidencyIsAvailable({
+  backend,
+  model,
+  route,
+  provider,
+  tier,
+  mode,
+  overlay,
+  stagedResidencyEngines,
+  manifestById,
+}) {
+  const contract = model[backend]?.memoryStrategyContract;
+  const declaredStagedResidency = contract?.implementations?.some(
+    (implementation) =>
+      (implementation.runtimeProvider ?? contract.provider) === provider &&
+      implementation.tiers.includes(tier) &&
+      implementation.modes.includes(mode) &&
+      implementation.overlays.includes(overlay) &&
+      implementation.engagedRungs?.includes("staged_residency"),
+  );
+  if (declaredStagedResidency) return true;
   const declaredModel =
+    !model[backend]?.memoryStrategyContract &&
     model.id === "z_image_edit" && route.engine === "z_image_turbo"
       ? manifestById.get("z_image_turbo")
       : model;
@@ -2192,7 +2369,7 @@ function closureIsCurrent(binding, { backend, provider, inferenceClosureDigests 
   return binding.inferenceClosureDigest === live;
 }
 
-function strategyStatus({
+export function strategyStatus({
   backend,
   rung,
   route,
@@ -2206,14 +2383,20 @@ function strategyStatus({
   manifestById,
   inferenceClosureDigests,
 }) {
-  // `z_image_edit` is a catalog alias, not an inference provider. Its MLX jobs resolve to the
-  // `z_image_turbo` descriptor and therefore must consume that provider's static contract just as
-  // they already inherit its backend scope. Keeping the declaration on the real provider prevents
-  // the catalog alias from becoming a second, independently drifting implementation claim.
-  const declaredModel =
-    model.id === "z_image_edit" && route.engine === "z_image_turbo"
-      ? manifestById.get("z_image_turbo")
-      : model;
+  // A route-local row is authoritative for its exact provider coordinate. Missing sibling rungs may
+  // still inherit the resolved provider's declaration (the established MLX alias behavior), but a
+  // native route can never mask an explicitly authored alias row such as Candle Z-Image Edit.
+  const declaredModel = declarationModelForCoordinate({
+    backend,
+    rung,
+    route,
+    provider,
+    model,
+    tier,
+    mode,
+    overlay,
+    manifestById,
+  });
   // A routing-table lane without a per-backend manifest block is real but wholly untriaged: the
   // optional block is evidence/tuning metadata, not lane-existence metadata. Emit the full slice as
   // Missing so epic 15448 can see and own that work instead of either hiding the lane or inferring
@@ -2235,11 +2418,22 @@ function strategyStatus({
     rung !== "bounded_transformer_residency" ||
     (["full", "partial"].includes(staticRung4Verdict?.structuralApplicability) &&
       staticRung4Implementation !== null &&
-      stagedResidencyIsAvailable({ backend, model, route, stagedResidencyEngines, manifestById }));
+      stagedResidencyIsAvailable({
+        backend,
+        model,
+        route,
+        provider,
+        tier,
+        mode,
+        overlay,
+        stagedResidencyEngines,
+        manifestById,
+      }));
   const staticImplementation = staticContractCoversProvider(staticMemoryContract, provider)
     ? staticMemoryContract.implementations.find(
         (implementation) =>
           staticRung4Allowed &&
+          (implementation.runtimeProvider ?? staticMemoryContract.provider) === provider &&
           implementation.rung === rung &&
           implementation.tiers.includes(tier) &&
           implementation.modes.includes(mode) &&
@@ -2270,6 +2464,14 @@ function strategyStatus({
   const currentDeclaredCalibrations = allDeclaredCalibrations.filter((binding) =>
     closureIsCurrent(binding, { backend, provider, inferenceClosureDigests }),
   );
+  // Semantic quality receipts authorize exact geometry choices in the runtime planner. They are
+  // not numeric tuning ranges and must never be projected into the published calibration matrix,
+  // where their presence could be mistaken for measured memory evidence.
+  const publishableParameterRanges = (implementation) => {
+    const { decodeGeometryPolicies: _semanticReceipt, ...publishedRanges } =
+      implementation?.parameterRanges ?? {};
+    return publishedRanges;
+  };
   const calibrationStatus = (bindings, source, evidenceAdmissionCurrent) => {
     const fingerprints = sortedUnique(bindings.map((binding) => binding.fingerprint));
     const parameters = sortedUnique(
@@ -2286,8 +2488,13 @@ function strategyStatus({
       parameters: {
         ...(staticImplementation?.parameters ?? {}),
         ...JSON.parse(parameters[0]),
-        ...(staticImplementation
-          ? { publishedRanges: staticImplementation.parameterRanges }
+        // sc-20246: keyed on the declaration actually HAVING ranges, not on a declaration existing.
+        // The engine-derived projection publishes no `parameterRanges` (the dumps carry none), and an
+        // empty `publishedRanges: {}` on a cell whose parameters came from a calibration reads as
+        // "the declaration published an empty range set" rather than "it published none". All 153
+        // hand-authored rows declare `parameterRanges`, so this is inert for them.
+        ...(staticImplementation?.parameterRanges
+          ? { publishedRanges: publishableParameterRanges(staticImplementation) }
           : {}),
       },
       calibrationFingerprint: fingerprints[0],
@@ -2307,7 +2514,28 @@ function strategyStatus({
       true,
     );
   }
-  if (staticImplementation) {
+  // sc-20246: a COVERAGE-ONLY declaration must not displace richer evidence.
+  //
+  // The engine-derived projection (`scripts/generate-manifest-memory-declarations.mjs`) writes rows
+  // that state only rung x tier x mode x overlay coverage — the engine dumps publish no
+  // `parameters`, so the projection omits them rather than guessing. Such a row was outranking every
+  // source below it: 37 published cells lost their measured decode/attention/window values to a
+  // stale-but-real calibration binding being skipped, and the rung-4 survey's window parameters were
+  // replaced by `{}` on the Lens cells. A declaration that names no parameters has nothing to say
+  // about parameters, so it now yields to whatever does and is used only where nothing else answers
+  // (see `coverageStatus` at the tail). Provably inert for hand-authored rows: all 153 of them carry
+  // both `parameters` and `parameterRanges`.
+  const coverageDeclaration =
+    staticImplementation && !staticImplementation.parameters ? staticImplementation : null;
+  const coverageStatus = () =>
+    coverageDeclaration
+      ? {
+          state: "Implemented/unverified",
+          source: coverageDeclaration.source,
+          parameters: {},
+        }
+      : { state: "Missing", source: null, parameters: {} };
+  if (staticImplementation && !coverageDeclaration) {
     return {
       // This declaration inventories production capability only. Exact runtime evidence must still
       // pass calibrationBinding before the cell can be promoted to Verified.
@@ -2315,7 +2543,9 @@ function strategyStatus({
       source: staticImplementation.source,
       parameters: {
         ...staticImplementation.parameters,
-        publishedRanges: staticImplementation.parameterRanges,
+        ...(staticImplementation.parameterRanges
+          ? { publishedRanges: publishableParameterRanges(staticImplementation) }
+          : {}),
       },
       calibrationFingerprint: staticImplementation.fingerprint,
       engagedRungs: staticImplementation.engagedRungs,
@@ -2365,7 +2595,17 @@ function strategyStatus({
     !(model.id === "krea_2_turbo" && backend === "candle") &&
     (backend !== "candle" ||
       staticCandleOverlayIsAvailable({ model, route, overlay, manifestById })) &&
-    stagedResidencyIsAvailable({ backend, model, route, stagedResidencyEngines, manifestById })
+    stagedResidencyIsAvailable({
+      backend,
+      model,
+      route,
+      provider,
+      tier,
+      mode,
+      overlay,
+      stagedResidencyEngines,
+      manifestById,
+    })
   ) {
     return {
       state: "Implemented/unverified",
@@ -2485,7 +2725,17 @@ function strategyStatus({
     );
     const implementedHere =
       implementationParameters !== null &&
-      stagedResidencyIsAvailable({ backend, model, route, stagedResidencyEngines, manifestById });
+      stagedResidencyIsAvailable({
+        backend,
+        model,
+        route,
+        provider,
+        tier,
+        mode,
+        overlay,
+        stagedResidencyEngines,
+        manifestById,
+      });
     if (verdict.structuralApplicability === "none") {
       return {
         state: "Structurally N/A",
@@ -2514,9 +2764,9 @@ function strategyStatus({
         parameters: implementationParameters,
       };
     }
-    return { state: "Missing", source: null, parameters: {} };
+    return coverageStatus();
   }
-  return { state: "Missing", source: null, parameters: {} };
+  return coverageStatus();
 }
 
 function validateMatrix(
@@ -2556,11 +2806,7 @@ function validateMatrix(
       `manifest image ids, EXPECTED_IMAGE_IDS, and generated ownership rows disagree (manifest-only=${manifestOnly.join(",")}; source-only=${sourceOnly.join(",")})`,
     );
   }
-  if (matrix.summary.mlxStagedStaticCoverage !== EXPECTED_MLX_STAGED_COUNT) {
-    throw new Error(
-      `expected MLX staged static coverage ${EXPECTED_MLX_STAGED_COUNT}/${EXPECTED_IMAGE_COUNT}, found ${matrix.summary.mlxStagedStaticCoverage}`,
-    );
-  }
+  assertMlxStagedCoverageIsStructurallyConsistent(matrix);
   for (const [key, expectedTiers] of backendTierOverrides) {
     const [modelId, backend] = key.split(":");
     const actualTiers = sortedUnique(
@@ -3085,6 +3331,8 @@ export const SOURCE_PATHS = Object.freeze({
   calibrationPlan: "config/memory-calibration-plan.json",
   inferenceClosures: "config/inference-provider-closures.json",
   rung4Survey: "config/rung4-applicability-survey.json",
+  engineCapabilitiesMlx: "config/engine-capabilities/capabilities.mlx.json",
+  engineCapabilitiesCandle: "config/engine-capabilities/capabilities.candle.json",
   cargo: "Cargo.toml",
 });
 
@@ -3122,7 +3370,7 @@ function manifestRevisionBody(body) {
  *   thirteen behavioural tests to vacuous ones. The CLI never passes it: `main()` writes the
  *   published document, and the publication path has its own tests.
  */
-export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, publish = true } = {}) {
+export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, publish = true, onReconciliation = null } = {}) {
   const sourcePaths = SOURCE_PATHS;
   const sourceEntries = Object.entries(sourcePaths);
   const sourceBodies = await Promise.all(
@@ -3280,6 +3528,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
   }
 
   const cells = [];
+  const reconciliationCells = [];
   for (const modelSummary of models) {
     const model = manifestById.get(modelSummary.id);
     const route = resolveRoute(model, routes, videoRoutes, modelSummary.backends);
@@ -3487,6 +3736,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
                   structural: status.structural ?? [],
                 },
               };
+              reconciliationCells.push(cell);
               // Mutation seam used by the inventory regression test. The CLI never supplies a filter;
               // every production build emits the full catalog and validates it below before writing.
               if (!cellFilter || cellFilter(cell)) cells.push(cell);
@@ -3497,6 +3747,41 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
     }
   }
   cells.sort((left, right) => left.id.localeCompare(right.id));
+  reconciliationCells.sort((left, right) => left.id.localeCompare(right.id));
+  // REPORT-ONLY SEAM (Michael's decision, 2026-08-17). The memory-contract reconciliation may never
+  // fail a build — not on a finding, and not on its own internal strictness either. The waiver ledger
+  // and its bijection check are deleted; see `reconcileMemoryContracts` for why. This try/catch is the
+  // structural guarantee that nothing downstream of here can turn a disagreement into a red build: a
+  // future capability re-dump that introduces, say, a load profile this lib has not met yet becomes a
+  // line in the report instead of a broken `npm run check`. That exact failure cost two rounds before
+  // the gate came out. Do not remove the catch, and do not rethrow from it.
+  let memoryContractReconciliation;
+  try {
+    memoryContractReconciliation = reconcileMemoryContracts({
+      pin,
+      engineFacts: [
+        JSON.parse(bodies.engineCapabilitiesMlx),
+        JSON.parse(bodies.engineCapabilitiesCandle),
+      ],
+      manifest,
+      cells: reconciliationCells,
+      calibrationPlan,
+      closures: JSON.parse(bodies.inferenceClosures),
+      survey: JSON.parse(bodies.rung4Survey),
+    });
+  } catch (error) {
+    memoryContractReconciliation = {
+      providers: 0,
+      bespokeWaivers: 0,
+      mismatches: 0,
+      byLeg: {},
+      findings: [],
+      unavailable: error instanceof Error ? error.message : String(error),
+    };
+  }
+  // Report-only side channel: the enumeration is deliberately absent from the checked-in document, so
+  // `report-memory-contract-reconciliation.mjs` collects it here instead of reassembling the inputs.
+  onReconciliation?.(memoryContractReconciliation);
   const calibrationRuns = calibrationBundle.records.map((record) => {
     const cell = cells.find(
       (candidate) =>
@@ -3798,6 +4083,13 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
         (count, cell) => count + cell.evidence.currentEnvironmentVerification.length,
         0,
       ),
+      // Counts only. The per-coordinate enumeration lives in
+      // `npm run report:memory-contract-reconciliation`, deliberately NOT checked in: a report that
+      // rotates with every capability dump would recreate exactly the regeneration churn that
+      // retiring the waiver ledger removed.
+      memoryContractReconciliation: (({ findings, ...summary }) => summary)(
+        memoryContractReconciliation,
+      ),
       rung4Survey: {
         story: 15969,
         surveyedFamilyBackends: rung4SurveyRows.length,
@@ -3980,6 +4272,24 @@ function renderMarkdown(matrix) {
 }
 
 async function main() {
+  // Report-only path (Michael, 2026-08-17): emit the reconciliation enumeration and nothing else, so
+  // the report script and the generator share one code path. Never fails on findings.
+  if (process.argv.includes("--emit-reconciliation")) {
+    let reconciliation = null;
+    try {
+      await buildMatrix({ onReconciliation: (value) => (reconciliation = value) });
+    } catch (error) {
+      // The reconciliation is computed BEFORE `validateMatrix`, so an unrelated matrix invariant must
+      // not deny the report its enumeration. If the callback already fired we have the findings; emit
+      // them and note what stopped the rest of the build.
+      if (!reconciliation) {
+        reconciliation = { providers: 0, bespokeWaivers: 0, mismatches: 0, byLeg: {}, findings: [] };
+      }
+      reconciliation.buildIncomplete = error instanceof Error ? error.message : String(error);
+    }
+    process.stdout.write(`${JSON.stringify(reconciliation)}\n`);
+    return;
+  }
   const matrix = await buildMatrix();
   const json = `${JSON.stringify(matrix, null, 2)}\n`;
   const markdown = renderMarkdown(matrix);

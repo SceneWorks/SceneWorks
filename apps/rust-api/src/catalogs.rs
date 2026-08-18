@@ -38,7 +38,7 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 use crate::catalog_scan_supervisor::CatalogScanSpawn;
-use crate::{project_call, ApiError, ApiJson, AppState};
+use crate::{project_call, public_job_snapshot, ApiError, ApiJson, AppState};
 
 const CATALOG_API_CONTRACT_VERSION: u32 = 1;
 const DEFAULT_QUERY_LIMIT: u32 = 50;
@@ -1702,7 +1702,7 @@ pub(crate) async fn run_catalog_analysis(
     .await?;
     crate::publish(&state, "job.updated", &job);
     crate::publish_queue(&state).await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 pub(crate) async fn pause_catalog(

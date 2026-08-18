@@ -349,16 +349,17 @@ function referencedPresetNames(recipePresets, kind, id) {
 function deleteConfirmation(kind, item, recipePresets) {
   const name = item.name ?? item.id;
   const presetNames = referencedPresetNames(recipePresets, kind, item.id);
-  const lines = [
-    `Delete ${kind} "${name}"?`,
-    "This removes the registry entry and SceneWorks-owned local files when available.",
-  ];
+  const lines = [`Delete ${kind} "${name}"?`];
+  if (item.scope === "builtin" || item.catalogScope === "builtin") {
+    lines.push(
+      "Built-in catalog identity stays protected. Deleting removes a user overlay or SceneWorks-owned local files when present; the built-in catalog entry remains.",
+    );
+  } else {
+    lines.push("This removes the registry entry and SceneWorks-owned local files when available.");
+  }
   if (presetNames.length) {
     lines.push(`Referenced by presets: ${presetNames.slice(0, 5).join(", ")}.`);
     lines.push("Those presets will keep a broken reference until updated.");
-  }
-  if (item.scope === "builtin" || item.catalogScope === "builtin") {
-    lines.push("Built-in catalog entries stay protected; only local installed files can be removed.");
   }
   return lines.join("\n\n");
 }

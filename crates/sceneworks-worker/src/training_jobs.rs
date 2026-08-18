@@ -1166,13 +1166,11 @@ pub(crate) async fn run_training_execution(
             } else {
                 Precision::Bf16
             };
-            let spec = LoadSpec {
-                precision: load_precision,
-                // LTX-2.3's bundled Gemma-3 TE (sc-9989); `None` for every other family (TE lives
-                // inside `weights_dir`) and for legacy/env-override LTX installs.
-                text_encoder: ltx_text_encoder,
-                ..LoadSpec::new(WeightsSource::Dir(weights_dir))
-            };
+            let mut spec = LoadSpec::new(WeightsSource::Dir(weights_dir));
+            spec.precision = load_precision;
+            // LTX-2.3's bundled Gemma-3 TE (sc-9989); `None` for every other family (TE lives
+            // inside `weights_dir`) and for legacy/env-override LTX installs.
+            spec.text_encoder = ltx_text_encoder;
             // Fold the caller-staged components (epic 13657, sc-13682) resolved above onto the spec — the
             // trainer's load-time gate requires them (SDXL on candle); an empty map is a no-op otherwise.
             let spec = train_components
@@ -4600,10 +4598,8 @@ mod tests {
             trigger_words: Vec::new(),
             cancel: CancelFlag::new(),
         };
-        let spec = LoadSpec {
-            text_encoder: Some(text_encoder.clone()),
-            ..LoadSpec::new(WeightsSource::Dir(q4.clone()))
-        };
+        let mut spec = LoadSpec::new(WeightsSource::Dir(q4.clone()));
+        spec.text_encoder = Some(text_encoder.clone());
         let mut trainer = crate::inference_runtime::load_trainer(engine_id, &spec)
             .expect("runtime catalog exposes LTX trainer");
         trainer
@@ -4668,10 +4664,9 @@ mod tests {
                     )]
                 })
                 .unwrap_or_default();
-            let inference_spec = LoadSpec {
-                text_encoder: Some(text_encoder.clone()),
-                ..LoadSpec::new(WeightsSource::Dir(q4.clone())).with_adapters(adapters)
-            };
+            let mut inference_spec =
+                LoadSpec::new(WeightsSource::Dir(q4.clone())).with_adapters(adapters);
+            inference_spec.text_encoder = Some(text_encoder.clone());
             assert!(
                 inference_spec.quantize.is_none(),
                 "the pre-packed q4 tier must reach the provider with quantize=None"

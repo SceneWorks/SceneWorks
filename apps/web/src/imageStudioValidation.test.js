@@ -72,6 +72,20 @@ describe("imageGenerateValidation", () => {
     expect(rolled.surfaced.map((i) => i.message)).toContain(msg);
   });
 
+  it("blocks a restored alternate decoder until engine capabilities are authoritative", () => {
+    const summary = summarize(
+      imageGenerateValidation({ ...whole, decoderCapabilitiesPending: true }),
+    );
+    expect(summary.ready).toBe(false);
+    expect(summary.surfaced).toEqual([
+      expect.objectContaining({
+        field: "decoder",
+        kind: "error",
+        message: "Waiting for engine capabilities before using the restored decoder.",
+      }),
+    ]);
+  });
+
   it("requires caption content on a structured model, silently", () => {
     const issues = imageGenerateValidation({ ...whole, structuredActive: true, captionHasContent: false, prompt: "" });
     expect(kinds(issues, "caption")).toEqual(["requirement"]);
@@ -241,6 +255,18 @@ describe("imageBatchValidation", () => {
     expect(issues.find((i) => i.field === "prompts").kind).toBe("requirement");
     expect(summarize(issues).surfaced).toEqual([]);
     expect(summarize(issues).ready).toBe(false);
+  });
+
+  it("blocks a batch while a restored alternate decoder waits for engine capabilities", () => {
+    const summary = summarize(
+      imageBatchValidation({ ...whole, decoderCapabilitiesPending: true }),
+    );
+    expect(summary.ready).toBe(false);
+    expect(summary.surfaced[0]).toMatchObject({
+      field: "decoder",
+      kind: "error",
+      message: "Waiting for engine capabilities before using the restored decoder.",
+    });
   });
 
   it("surfaces missing template keys as an error", () => {

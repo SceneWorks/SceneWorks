@@ -111,6 +111,25 @@ describe("modelEligibility predicates", () => {
     expect(characterModelUsable({ ui: {} }, caps)).toBe(false);
   });
 
+  it("re-lights an imported pose picker when any active MLX provider route serves pose", () => {
+    const activeMac = { ...DEFAULT_MAC_CAPABILITIES, macGatingActive: true, platform: "macos" };
+    const importedKrea = {
+      id: "user_kreamania",
+      type: "image",
+      family: "krea_2",
+      ui: { poseLibrary: true, poseControlScale: true, controlModes: ["pose"] },
+      macSupport: { supported: true, features: { pose: true } },
+    };
+    expect(poseModelUsable(importedKrea, activeMac)).toBe(true);
+
+    expect(
+      poseModelUsable(
+        { ...importedKrea, macSupport: { supported: true, features: { pose: false } } },
+        activeMac,
+      ),
+    ).toBe(false);
+  });
+
   it("hasUsableModelFor counts complete models, not missing or torn ones", () => {
     const installed = { id: "b", type: "image", capabilities: ["text_to_image"], installState: "installed" };
     const incomplete = { id: "c", type: "image", capabilities: ["text_to_image"], installState: "incomplete" };

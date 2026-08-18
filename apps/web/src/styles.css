@@ -9461,6 +9461,17 @@ details[open] > summary.lora-scope-group-heading::before,
   background: var(--warm-soft);
 }
 
+.decoder-capability-recovery {
+  display: grid;
+  gap: 8px;
+}
+
+.decoder-capability-recovery-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 /* Mac UI gating affordance (sc-3486): the small "unavailable on Mac (Rust/MLX only)" note
    shown under a gated picker/control. Muted so it reads as guidance, not an error. */
 .mac-gating-note {

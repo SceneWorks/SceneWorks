@@ -105,6 +105,10 @@ mod cache_thread;
 // shared availability resolver before any handler constructs a loader.
 mod external_library_runtime;
 mod inference_runtime;
+mod text_encoder_selection;
+pub use text_encoder_selection::{
+    image_text_encoder_options, resolve_image_text_encoder_selection, ImageTextEncoderOption,
+};
 // Promotion activation (sc-19706): the idle-time producer that turns a successful source-tier load
 // into an app-owned resolved bundle. The guard above records an I/O-free hint; this drains it.
 mod resolved_cache_promotion;
@@ -115,6 +119,13 @@ mod resolved_cache_promotion;
 // the production caller is cfg'd out, so allow dead_code there (the engines.rs precedent).
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod generator_cache;
+// Request-scoped execution planning (sc-18317, epic 18304 P2): the warm-hit execution-policy
+// decision the `LoadIdentity`/`ExecutionPolicy` split (sc-18305) left owing, plus selection of
+// gen-core's typed execution domains (graph-eval cadence, FFN chunk, CFG batching) from what each
+// provider declares. Backend-neutral and typed entirely against `gen_core::*`, so it links on all
+// targets exactly like `generator_cache`; off macOS its production callers are cfg'd out.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod execution_planner;
 // Resident-model cache for the native prompt-refine / caption / describe LLM (sc-8840, F-038): the
 // text-LLM sibling of `generator_cache`. Typed entirely against the tensor-free
 // `gen_core::core_llm::*` contract, so it links on ALL targets — the production seam
@@ -147,6 +158,7 @@ mod engines;
 // on the lanes that link no engines at all.
 pub mod engine_capability_facts;
 mod gpu;
+pub mod memory_route_registry;
 use gpu::*;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod candle_memory_strategy;

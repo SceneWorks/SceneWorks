@@ -729,6 +729,7 @@ fn write_imported_image_model_manifests(root: &std::path::Path) {
                     "name": "Imported Krea",
                     "type": "image",
                     "family": "krea_2",
+                    "importSourceShape": "transformer_file",
                     "capabilities": ["text_to_image", "edit_image"],
                     "paths": {{ "model": "{}" }},
                     "defaults": {{ "count": 1, "resolution": "1024x1024" }},
@@ -1214,6 +1215,716 @@ async fn retry_and_duplicate_reauthorize_merged_control_weights_before_create() 
         3,
         "only the original and two clean operations may persist"
     );
+}
+
+/// SC-18314: the browser authors only an opaque encoder id. Every image-create boundary must
+/// discard caller/persisted resolution metadata, resolve the id against current server state, and
+/// reject an id that has disappeared instead of silently substituting the model encoder.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn image_create_retry_and_duplicate_resolve_text_encoder_fresh_and_fail_closed() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let manifest_dir = temp_dir.path().join("config/manifests");
+    single_model_manifest(&manifest_dir, "krea_2_turbo", "SceneWorks/krea-2-turbo-mlx");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let stale_id = "text_encoder_ffffffffffffffffffffffffffffffff";
+    let base_payload = json!({
+        "projectId": "project-1",
+        "mode": "text_to_image",
+        "prompt": "mist over hills",
+        "model": "krea_2_turbo",
+        "count": 1,
+        "width": 1024,
+        "height": 1024
+    });
+    let mut stale_create = base_payload.clone();
+    stale_create["advanced"] = json!({ "textEncoderModel": stale_id });
+    // A typed create must ignore any client attempt to carry the private resolution and reject the
+    // unavailable authored id from a fresh catalog lookup.
+    stale_create["modelManifestEntry"] = json!({
+        "resolvedTextEncoder": {
+            "selectionId": stale_id,
+            "sourceKind": "directory",
+            "path": temp_dir.path().join("attacker-selected")
+        }
+    });
+    let (status, body) = request(app.clone(), "POST", "/api/v1/image/jobs", stale_create).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(body["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("is unavailable")));
+
+    let (status, original) = request(app.clone(), "POST", "/api/v1/image/jobs", base_payload).await;
+    assert_eq!(status, StatusCode::CREATED, "{original}");
+    assert!(original["payload"]["modelManifestEntry"]
+        .get("resolvedTextEncoder")
+        .is_none());
+    let job_id = original["id"].as_str().expect("job id");
+
+    for operation in ["retry", "duplicate"] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/{operation}"),
+            json!({
+                "payloadChanges": {
+                    "advanced": { "textEncoderModel": stale_id },
+                    "modelManifestEntry": {
+                        "resolvedTextEncoder": {
+                            "selectionId": stale_id,
+                            "sourceKind": "directory",
+                            "path": temp_dir.path().join("attacker-selected")
+                        }
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {body}");
+        assert!(body["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("is unavailable")));
+
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/{operation}"),
+            json!({
+                "payloadChanges": {
+                    "modelManifestEntry": {
+                        "resolvedTextEncoder": {
+                            "selectionId": stale_id,
+                            "sourceKind": "directory",
+                            "path": temp_dir.path().join("attacker-selected")
+                        }
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{operation}: {body}");
+        assert!(body["payload"]["modelManifestEntry"]
+            .get("resolvedTextEncoder")
+            .is_none());
+    }
+}
+
+/// SC-18314: server resolution is worker-private. Exercise the raw queue primitive with the exact
+/// typed-image metadata shape so every generic job projection is covered without depending on a
+/// platform provider fixture. The raw store and `/jobs/claim` must retain the resolution; every
+/// browser-visible HTTP/SSE shape must retain only the authored opaque id.
+#[tokio::test]
+async fn public_job_boundaries_hide_selected_text_encoder_path_but_worker_claim_retains_it() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, state) =
+        create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+    let selected = temp_dir.path().join("server/private/selected.safetensors");
+    let selected_parent = selected.parent().expect("selected parent").to_path_buf();
+    let distinct_server_root = temp_dir.path().join("other/managed/models");
+    let distinct_canonical_target = temp_dir.path().join("outside/canonical/encoder.bin");
+    let selection_id = "text_encoder_0123456789abcdef0123456789abcdef";
+    let job_payload = json!({
+        "prompt": "/imagine a lake",
+        "installedPath": "/public/models/base.safetensors",
+        "sourcePath": "/public/loras/style.safetensors",
+        "selectedEcho": selected.display().to_string(),
+        "advanced": { "textEncoderModel": selection_id },
+        "modelManifestEntry": {
+            "resolvedTextEncoder": {
+                "selectionId": selection_id,
+                "sourceKind": "file",
+                "path": selected
+            }
+        }
+    });
+    let create_request = json!({
+        "type": "image_detail",
+        "projectId": "project-1",
+        "projectName": "Project 1",
+        "payload": job_payload,
+        "requestedGpu": "auto"
+    });
+    let assert_public = |surface: &str, value: &Value| {
+        let encoded = value.to_string();
+        assert!(
+            !encoded.contains("resolvedTextEncoder"),
+            "{surface} exposed server-private resolution: {value}"
+        );
+        assert!(
+            !encoded.contains(selected.to_string_lossy().as_ref()),
+            "{surface} exposed selected filesystem path: {value}"
+        );
+        assert!(
+            !encoded.contains(selected_parent.to_string_lossy().as_ref()),
+            "{surface} exposed selected filesystem prefix: {value}"
+        );
+        assert!(
+            !encoded.contains(distinct_server_root.to_string_lossy().as_ref()),
+            "{surface} exposed an allowed model root: {value}"
+        );
+        assert!(
+            !encoded.contains(distinct_canonical_target.to_string_lossy().as_ref()),
+            "{surface} exposed a distinct canonical target: {value}"
+        );
+    };
+
+    let mut events = state.events.subscribe();
+    let (status, created) =
+        request(app.clone(), "POST", "/api/v1/jobs", create_request.clone()).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_public("create response", &created);
+    assert_eq!(
+        created["payload"]["advanced"]["textEncoderModel"],
+        selection_id
+    );
+    assert_eq!(created["payload"]["prompt"], "/imagine a lake");
+    assert_eq!(
+        created["payload"]["installedPath"],
+        "/public/models/base.safetensors"
+    );
+    assert_eq!(
+        created["payload"]["sourcePath"],
+        "/public/loras/style.safetensors"
+    );
+    assert_eq!(
+        created["payload"]["selectedEcho"],
+        "[selected text encoder]"
+    );
+    let job_id = created["id"].as_str().expect("job id").to_owned();
+    let raw = state.jobs_store.get_job(&job_id).expect("raw job reads");
+    assert_eq!(
+        raw.payload["modelManifestEntry"]["resolvedTextEncoder"]["path"],
+        selected.display().to_string(),
+        "public projection must not mutate the worker-owned stored row"
+    );
+    assert_eq!(
+        raw.payload["selectedEcho"],
+        selected.display().to_string(),
+        "the raw worker payload must retain an exact selected-path echo"
+    );
+    let mut raw_with_extra = raw.clone();
+    raw_with_extra.status = sceneworks_core::contracts::JobStatus::Failed;
+    raw_with_extra.extra.insert(
+        "partialAssetPath".to_owned(),
+        Value::String("/public/outputs/partial.png".to_owned()),
+    );
+    let projected_extra =
+        serde_json::to_value(crate::public_job_snapshot(raw_with_extra)).expect("job serializes");
+    assert_eq!(
+        projected_extra["partialAssetPath"], "/public/outputs/partial.png",
+        "unrelated partial output paths remain public contract data"
+    );
+
+    for expected in ["job.updated", "queue.updated"] {
+        let event = tokio::time::timeout(Duration::from_secs(1), events.next())
+            .await
+            .expect("create event arrives")
+            .expect("event stream remains open");
+        assert_eq!(event.event, expected);
+        assert_public(
+            &format!("live {expected}"),
+            &serde_json::from_str(&event.data).expect("event data parses"),
+        );
+    }
+
+    let (status, listed) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_public("list response", &listed);
+    let (status, fetched) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{job_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_public("get response", &fetched);
+    let (status, queue) = request(app.clone(), "GET", "/api/v1/queue", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_public("queue response", &queue);
+
+    let (status, reconnect) = request_sse_prefix(app.clone(), "/api/v1/jobs/events", 3).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(reconnect[1].0, "jobs.snapshot");
+    assert_public("reconnect jobs.snapshot", &reconnect[1].1);
+    assert_eq!(reconnect[2].0, "queue.updated");
+    assert_public("reconnect queue.updated", &reconnect[2].1);
+
+    for operation in ["retry", "duplicate"] {
+        let (status, response) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/{operation}"),
+            json!({ "payloadChanges": { "prompt": format!("safe {operation}") } }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{operation}: {response}");
+        assert_public(&format!("{operation} response"), &response);
+    }
+
+    let (status, canceled_one) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/cancel"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{canceled_one}");
+    assert_public("single cancel response", &canceled_one);
+    let (status, cleared_one) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/clear"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{cleared_one}");
+    assert_public("single clear response", &cleared_one);
+
+    let (status, canceled) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/cancel-pending",
+        json!({ "projectId": "project-1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{canceled}");
+    assert_public("cancel-pending response", &canceled);
+
+    // Seed a fresh row for the one private boundary: a compatible worker claim. The raw payload
+    // must survive public projection intact so the worker can validate and prepare its receipt.
+    let (status, worker_job) =
+        request(app.clone(), "POST", "/api/v1/jobs", create_request.clone()).await;
+    assert_eq!(status, StatusCode::CREATED, "{worker_job}");
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({
+            "workerId": "worker-1",
+            "gpuId": "gpu-0",
+            "gpuName": "Test GPU",
+            "capabilities": ["image_detail"],
+            "loadedModels": []
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, claimed) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({ "workerId": "worker-1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    assert_eq!(
+        claimed["job"]["payload"]["modelManifestEntry"]["resolvedTextEncoder"]["path"],
+        selected.display().to_string(),
+        "the worker claim must retain the server-private exact source"
+    );
+    let claimed_id = claimed["job"]["id"].as_str().expect("claimed id");
+    while tokio::time::timeout(Duration::from_millis(25), events.next())
+        .await
+        .is_ok()
+    {}
+    let (status, progress) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{claimed_id}/progress"),
+        json!({
+            "status": "running",
+            "stage": "running",
+            "progress": 0.5,
+            "message": "halfway",
+            "workerId": "worker-1"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{progress}");
+    assert_public("progress response", &progress);
+    let progress_event = tokio::time::timeout(Duration::from_secs(1), events.next())
+        .await
+        .expect("progress job.updated arrives")
+        .expect("event stream remains open");
+    assert_eq!(progress_event.event, "job.updated");
+    assert_public(
+        "progress job.updated",
+        &serde_json::from_str(&progress_event.data).expect("progress event parses"),
+    );
+    let progress_queue = tokio::time::timeout(Duration::from_secs(1), events.next())
+        .await
+        .expect("progress queue.updated arrives")
+        .expect("event stream remains open");
+    assert_eq!(progress_queue.event, "queue.updated");
+    assert_public(
+        "progress queue.updated",
+        &serde_json::from_str(&progress_queue.data).expect("progress queue event parses"),
+    );
+
+    let private_error = format!(
+        "Selected text encoder must be inside an app-managed directory ({}, {}). Pinned target changed from {} to {}",
+        selected_parent.display(),
+        distinct_server_root.display(),
+        selected.display(),
+        distinct_canonical_target.display()
+    );
+    let private_result = json!({
+        "partialAssetPath": "/public/outputs/partial.png",
+        "selectedReceipt": selected.display().to_string()
+    });
+    let (status, failed) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{claimed_id}/progress"),
+        json!({
+            "status": "failed",
+            "stage": "failed",
+            "progress": 1,
+            "message": format!("Selected encoder failed at {}", selected.display()),
+            "error": private_error,
+            "result": private_result,
+            "workerId": "worker-1"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{failed}");
+    assert_public("failed progress response", &failed);
+    assert!(failed["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("Selected text encoder must be inside")));
+    assert!(failed["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("[selected text encoder]")));
+    assert_eq!(
+        failed["result"]["partialAssetPath"],
+        "/public/outputs/partial.png"
+    );
+    assert_eq!(
+        failed["result"]["selectedReceipt"],
+        "[selected text encoder]"
+    );
+    let raw_failed = state
+        .jobs_store
+        .get_job(claimed_id)
+        .expect("raw failure reads");
+    assert_eq!(raw_failed.error.as_deref(), Some(private_error.as_str()));
+    assert!(raw_failed
+        .message
+        .contains(selected.to_string_lossy().as_ref()));
+    assert_eq!(
+        raw_failed.result["selectedReceipt"],
+        selected.display().to_string()
+    );
+    let failed_event = tokio::time::timeout(Duration::from_secs(1), events.next())
+        .await
+        .expect("failed job.updated arrives")
+        .expect("event stream remains open");
+    assert_eq!(failed_event.event, "job.updated");
+    assert_public(
+        "failed job.updated",
+        &serde_json::from_str(&failed_event.data).expect("failed event parses"),
+    );
+    let (status, failed_get) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{claimed_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_public("failed get response", &failed_get);
+    let (status, failed_list) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_public("failed list response", &failed_list);
+    let (status, failed_reconnect) =
+        request_sse_prefix(app.clone(), "/api/v1/jobs/events", 3).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_public("failed reconnect jobs.snapshot", &failed_reconnect[1].1);
+    assert_public("failed reconnect queue.updated", &failed_reconnect[2].1);
+    let (status, cleared_terminal) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{claimed_id}/clear"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{cleared_terminal}");
+    assert_public("terminal clear response", &cleared_terminal);
+
+    // The supervisor crash report wraps its snapshot in `Option<JobSnapshot>` rather than using
+    // the ordinary progress response. Claim one final raw row so that container boundary is also
+    // proven public while the persisted worker payload remains exact.
+    let (status, termination_job) =
+        request(app.clone(), "POST", "/api/v1/jobs", create_request).await;
+    assert_eq!(status, StatusCode::CREATED, "{termination_job}");
+    let termination_job_id = termination_job["id"]
+        .as_str()
+        .expect("termination job id")
+        .to_owned();
+    let (status, termination_claim) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({ "workerId": "worker-1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{termination_claim}");
+    assert_eq!(termination_claim["job"]["id"], termination_job_id);
+    let (status, terminated) = request(
+        app,
+        "POST",
+        "/api/v1/workers/worker-1/terminated",
+        json!({ "signal": 9, "exitCode": null }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{terminated}");
+    assert_eq!(terminated["id"], termination_job_id);
+    assert_public("worker-terminated response", &terminated);
+    let raw_terminated = state
+        .jobs_store
+        .get_job(&termination_job_id)
+        .expect("raw terminated job reads");
+    assert_eq!(
+        raw_terminated.payload["modelManifestEntry"]["resolvedTextEncoder"]["path"],
+        selected.display().to_string(),
+        "worker-termination projection must not mutate the stored worker payload"
+    );
+}
+
+#[test]
+fn selected_encoder_root_file_parent_is_never_a_universal_redaction_prefix() {
+    #[cfg(unix)]
+    let selected = std::path::Path::new("/selected.safetensors");
+    #[cfg(windows)]
+    let selected = std::path::Path::new(r"C:\selected.safetensors");
+
+    let cases = [
+        (
+            "https://example.com/models/help",
+            "https://example.com/models/help",
+        ),
+        (
+            "keep this/that slash-bearing prose",
+            "keep this/that slash-bearing prose",
+        ),
+        ("/", "/"),
+        ("root: / and keep this", "root: / and keep this"),
+        ("root: /; keep this", "root: /; keep this"),
+        (r#"root: "/" and keep this"#, r#"root: "/" and keep this"#),
+        (
+            "/another/private/models/escaped.safetensors",
+            "[selected text encoder]",
+        ),
+    ];
+    for (input, expected) in cases {
+        let mut actual = input.to_owned();
+        crate::redact_private_text_encoder_diagnostic(&mut actual);
+        assert_eq!(actual, expected, "input: {input}");
+    }
+
+    let mut selected = selected.display().to_string();
+    crate::redact_private_text_encoder_diagnostic(&mut selected);
+    assert_eq!(selected, "[selected text encoder]");
+}
+
+#[cfg(unix)]
+#[test]
+fn selected_encoder_symlink_canonical_target_is_redacted_without_using_root() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let lexical_parent = temp_dir.path().join("managed/text-encoders");
+    let escaped_parent = temp_dir.path().join("outside-root");
+    std::fs::create_dir_all(&lexical_parent).expect("lexical parent creates");
+    std::fs::create_dir_all(&escaped_parent).expect("escaped parent creates");
+    let canonical_target = escaped_parent.join("target.safetensors");
+    std::fs::write(&canonical_target, b"sentinel").expect("target writes");
+    let lexical = lexical_parent.join("selected.safetensors");
+    std::os::unix::fs::symlink(&canonical_target, &lexical).expect("symlink creates");
+
+    let mut diagnostic = format!(
+        "Selected text encoder resolved from {} to {}; allowed roots: {}",
+        lexical.display(),
+        canonical_target.display(),
+        temp_dir.path().join("another/model/root").display()
+    );
+    crate::redact_private_text_encoder_diagnostic(&mut diagnostic);
+    assert!(!diagnostic.contains(temp_dir.path().to_string_lossy().as_ref()));
+    assert!(diagnostic.contains("Selected text encoder resolved from"));
+    assert!(diagnostic.contains("[selected text encoder]"));
+}
+
+#[test]
+fn selected_encoder_path_token_scrubber_handles_wrappers_and_preserves_web_urls() {
+    let cases = [
+        ("source:/private/model", "source:[selected text encoder]"),
+        ("`/private/model with spaces`", "[selected text encoder]"),
+        ("</private/model>", "[selected text encoder]"),
+        (
+            r"source=C:\Models\private\model",
+            "source=[selected text encoder]",
+        ),
+        (
+            r"source=\\server\share\private\model",
+            "source=[selected text encoder]",
+        ),
+        ("file:///private/model", "[selected text encoder]"),
+        (
+            "https://example.com/private/model",
+            "https://example.com/private/model",
+        ),
+        (
+            "//cdn.example.com/private/model",
+            "//cdn.example.com/private/model",
+        ),
+        ("relative/model", "relative/model"),
+        ("./relative/model", "./relative/model"),
+        ("../relative/model", "../relative/model"),
+        ("~/relative/model", "~/relative/model"),
+        ("${HOME}/relative/model", "${HOME}/relative/model"),
+        (
+            "/Volumes/External Models/encoder.safetensors changed",
+            "[selected text encoder]",
+        ),
+        (
+            "at /tmp/private see https://example.com/public",
+            "at [selected text encoder]",
+        ),
+        ("/💾", "[selected text encoder]"),
+        ("/_", "[selected text encoder]"),
+        ("/...", "[selected text encoder]"),
+        ("/", "/"),
+        (r"C:\", r"C:\"),
+    ];
+
+    for (input, expected) in cases {
+        let mut actual = input.to_owned();
+        crate::redact_private_text_encoder_diagnostic(&mut actual);
+        assert_eq!(actual, expected, "input: {input}");
+    }
+}
+
+#[test]
+fn selected_encoder_exact_scrub_obeys_file_and_directory_component_boundaries() {
+    let file = crate::private_text_encoder_path_spellings("/models/x.safetensors", Some("file"));
+    let windows_file =
+        crate::private_text_encoder_path_spellings("C:/Models/X.safetensors", Some("file"));
+    let windows_unc = crate::private_text_encoder_path_spellings(
+        r"\\Server\Share\Encoder.safetensors",
+        Some("file"),
+    );
+    let encoded_file = crate::private_text_encoder_path_spellings(
+        "/Volumes/External Models/x.safetensors",
+        Some("file"),
+    );
+    let unix_backslash = crate::private_text_encoder_path_spellings(r"/models/a\b", Some("file"));
+    let directory =
+        crate::private_text_encoder_path_spellings("/models/encoder", Some("directory"));
+    let trailing_directory =
+        crate::private_text_encoder_path_spellings("/models/encoder/", Some("directory"));
+    let cases = [
+        (&file, "/models/x.safetensors", "[selected text encoder]"),
+        (
+            &file,
+            "file:///models/x.safetensors",
+            "[selected text encoder]",
+        ),
+        (
+            &windows_file,
+            "file:///C:/Models/X.safetensors",
+            "[selected text encoder]",
+        ),
+        (
+            &windows_file,
+            "file:/c:/models/x.safetensors",
+            "[selected text encoder]",
+        ),
+        (
+            &windows_file,
+            r"c:\models\x.safetensors",
+            "[selected text encoder]",
+        ),
+        (
+            &windows_unc,
+            "//server/share/encoder.safetensors",
+            "[selected text encoder]",
+        ),
+        (
+            &encoded_file,
+            "file:///Volumes/External%20Models/x.safetensors",
+            "[selected text encoder]",
+        ),
+        (
+            &encoded_file,
+            "file:///Volumes/%e2%98%83/x.safetensors",
+            "[selected text encoder]",
+        ),
+        (
+            &encoded_file,
+            "/Volumes/External%20Models/x.safetensors",
+            "/Volumes/External%20Models/x.safetensors",
+        ),
+        (
+            &file,
+            "/models/x.safetensors.backup",
+            "/models/x.safetensors.backup",
+        ),
+        (&file, "/models/x.safetensors.", "[selected text encoder]."),
+        (&file, "/models/x.safetensors!", "[selected text encoder]!"),
+        (
+            &file,
+            "xhttp:///models/x.safetensors",
+            "xhttp://[selected text encoder]",
+        ),
+        (
+            &directory,
+            "/models/encoder changed",
+            "[selected text encoder] changed",
+        ),
+        (
+            &directory,
+            "/models/encoder/shard.safetensors",
+            "[selected text encoder]/shard.safetensors",
+        ),
+        (
+            &trailing_directory,
+            "/models/encoder/shard.safetensors",
+            "[selected text encoder]/shard.safetensors",
+        ),
+        (&directory, "/models/encoder-v2", "/models/encoder-v2"),
+        (
+            &directory,
+            "/backup/models/encoder",
+            "/backup/models/encoder",
+        ),
+        (
+            &directory,
+            "https://example.com/models/encoder",
+            "https://example.com/models/encoder",
+        ),
+        (&unix_backslash, "/models/a/b", "/models/a/b"),
+    ];
+
+    for (spellings, input, expected) in cases {
+        let mut actual = input.to_owned();
+        crate::redact_selected_text_encoder_paths(&mut actual, spellings);
+        assert_eq!(actual, expected, "input: {input}");
+    }
+
+    let unknown_directory = crate::private_text_encoder_path_spellings("/models/unknown", None);
+    let mut unknown_descendant = "/models/unknown/shard.safetensors".to_owned();
+    crate::redact_selected_text_encoder_paths(&mut unknown_descendant, &unknown_directory);
+    assert_eq!(
+        unknown_descendant,
+        "[selected text encoder]/shard.safetensors"
+    );
+
+    let posix_double_slash =
+        crate::private_text_encoder_path_spellings("//mnt/Encoder", Some("file"));
+    let mut case_distinct_posix = "//mnt/encoder".to_owned();
+    crate::redact_selected_text_encoder_paths(&mut case_distinct_posix, &posix_double_slash);
+    assert_eq!(case_distinct_posix, "//mnt/encoder");
 }
 
 #[test]
@@ -1804,6 +2515,1252 @@ async fn create_image_job_enforces_the_pose_output_ceiling() {
         error["detail"],
         "advanced.poses must contain at most 64 entries; each pose renders one image"
     );
+}
+
+#[tokio::test]
+async fn candle_required_builtin_krea_keeps_builtin_scope_and_queues() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let manifest_dir = temp_dir.path().join("config/manifests");
+    single_model_manifest(&manifest_dir, "krea_2_turbo", "SceneWorks/krea-2-turbo-mlx");
+    let mut settings = test_settings(&temp_dir);
+    settings.candle_required = true;
+    let app = create_app(settings).expect("app creates");
+
+    let (status, created) = request(
+        app,
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": "project-1",
+            "model": "krea_2_turbo",
+            "mode": "text_to_image",
+            "prompt": "mist over hills",
+            "count": 1,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(
+        created["payload"]["modelManifestEntry"]["catalogScope"],
+        json!("builtin"),
+        "the worker-facing merged manifest must preserve builtin scope"
+    );
+}
+
+#[tokio::test]
+async fn candle_required_rejects_unsupported_import_before_creating_a_job() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let manifest_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
+    write_empty_sibling_manifests(&manifest_dir);
+    std::fs::write(
+        manifest_dir.join("builtin.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("builtin manifest writes");
+    std::fs::write(
+        manifest_dir.join("user.models.jsonc"),
+        r#"{
+          "schemaVersion": 1,
+          "models": [{
+            "id": "user_krea",
+            "name": "User Krea",
+            "type": "image",
+            "family": "krea_2",
+            "importSourceShape": "transformer_file",
+            "paths": { "model": "/probe/user-krea.safetensors" }
+          }]
+        }"#,
+    )
+    .expect("user manifest writes");
+    let mut settings = test_settings(&temp_dir);
+    settings.candle_required = true;
+    let jobs_db_path = settings.jobs_db_path.clone();
+    let app = create_app(settings).expect("app creates");
+
+    for advanced in [
+        json!({ "poses": [{ "id": "pose-1", "keypoints": [] }] }),
+        json!({ "controlImage": "control-1" }),
+        json!({ "controlMode": "pose" }),
+        json!({
+            "phases": [{ "steps": 4 }],
+            "controlImage": "control-1"
+        }),
+        json!({
+            "poses": [{ "id": "pose-1", "keypoints": [] }],
+            "controlMode": "canny"
+        }),
+    ] {
+        let (status, error) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            json!({
+                "projectId": "project-1",
+                "model": "user_krea",
+                "mode": "text_to_image",
+                "prompt": "mist over hills",
+                "count": 1,
+                "advanced": advanced,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+        assert!(error["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("candle_unsupported")));
+    }
+
+    let connection = rusqlite::Connection::open(jobs_db_path).expect("jobs db opens");
+    let count: i64 = connection
+        .query_row("select count(*) from jobs", [], |row| row.get(0))
+        .expect("job count reads");
+    assert_eq!(count, 0, "a preflight refusal must not create a queued job");
+}
+
+/// The pinned soft VAE donor the `wan_2_1_vae` decoder option depends on, mirroring the shipped
+/// `qwen_image` co-requisite row. Written into a test manifest so a tempdir catalog can advertise a
+/// genuinely SELECTABLE decoder option rather than only the "not installed" refusal.
+const DECODER_DONOR_REPO: &str = "SceneWorks/krea-realtime-14b-mlx";
+const DECODER_DONOR_REVISION: &str = "e68e9a3d98187fdf6936838ffcf6df5aa48d6626";
+const DECODER_DONOR_FILE: &str = "q4/vae.safetensors";
+
+/// A catalog holding the real `qwen_image` id — the id the checked-in engine decoder facts key on,
+/// so `decoders.byBackend` is stamped onto the resolved entry — plus that row's pinned soft VAE
+/// donor, with the donor's exact snapshot file seeded under `data_dir` so the descriptor-derived
+/// MLX option resolves `available: true`.
+///
+/// Installing the donor is what makes the backend selection observable: with it absent, both lanes
+/// refuse (candle for "no such option", MLX for "not installed") and the two are indistinguishable.
+fn write_decoder_capable_catalog(temp_dir: &tempfile::TempDir) {
+    let manifest_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
+    write_empty_sibling_manifests(&manifest_dir);
+    std::fs::write(
+        manifest_dir.join("builtin.models.jsonc"),
+        format!(
+            r#"{{ "schemaVersion": 1, "models": [{{
+                "id": "qwen_image", "name": "Qwen Image", "type": "image", "family": "test",
+                "downloads": [
+                  {{ "provider": "huggingface", "repo": "SceneWorks/qwen-image-mlx" }},
+                  {{
+                    "provider": "huggingface",
+                    "repo": "{DECODER_DONOR_REPO}",
+                    "revision": "{DECODER_DONOR_REVISION}",
+                    "coRequisite": true,
+                    "required": "soft",
+                    "componentId": "vae",
+                    "files": ["{DECODER_DONOR_FILE}"],
+                    "estimatedSizeBytes": 507591212
+                  }}
+                ]
+            }}] }}"#
+        ),
+    )
+    .expect("builtin models writes");
+
+    let data_dir = temp_dir.path().join("data");
+    std::fs::create_dir_all(&data_dir).expect("data dir creates");
+    let repo_cache =
+        huggingface_repo_cache_path(&data_dir, DECODER_DONOR_REPO).expect("donor cache path");
+    let snapshot = repo_cache.join("snapshots").join(DECODER_DONOR_REVISION);
+    let donor = snapshot.join(DECODER_DONOR_FILE);
+    std::fs::create_dir_all(donor.parent().expect("donor parent")).expect("donor dir creates");
+    std::fs::write(&donor, b"pinned donor").expect("donor writes");
+}
+
+fn decoder_image_job(decoder: Value) -> Value {
+    json!({
+        "projectId": "project-1",
+        "model": "qwen_image",
+        "mode": "text_to_image",
+        "prompt": "mist over hills",
+        "count": 1,
+        "advanced": { "decoder": decoder },
+    })
+}
+
+/// sc-18420: the alternate-decoder gate must consult the option list of the backend this API
+/// instance actually routes to. It derived that with a bare `cfg!(target_os = "macos")`, so under
+/// `SCENEWORKS_CANDLE_REQUIRED` on macOS — a real, supported mode — it validated `advanced.decoder`
+/// against MLX's list while the job executed on Candle: an MLX-only decoder was admitted and then
+/// failed on the worker, and a Candle-valid one would have been 400'd.
+///
+/// Both directions of the same catalog row and the same request: only `candle_required` differs.
+#[tokio::test]
+async fn candle_required_moves_the_decoder_gate_onto_the_candle_option_list() {
+    let _env = isolate_hf_cache();
+
+    // Candle lane: the shipped facts declare no candle decoder for this row, so the MLX-only
+    // selection must be refused at enqueue rather than deferred to a worker that cannot run it.
+    let candle_dir = tempfile::tempdir().expect("temp dir creates");
+    write_decoder_capable_catalog(&candle_dir);
+    let mut candle_settings = test_settings(&candle_dir);
+    candle_settings.candle_required = true;
+    let candle_app = create_app(candle_settings).expect("app creates");
+    let (status, error) = request(
+        candle_app,
+        "POST",
+        "/api/v1/image/jobs",
+        decoder_image_job(json!("wan_2_1_vae")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    let detail = error["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("is not compatible with qwen_image"),
+        "candle_required must reject an MLX-only decoder as incompatible, not merely uninstalled. \
+         NOTE: this exact branch is coupled to the SHIPPED decoder facts declaring ZERO candle \
+         options for qwen_image — if `capabilities.candle.json` ever gains a decoderOption for this \
+         row, the correct refusal becomes 'is not installed' (or the selection becomes valid) and \
+         this assertion must be re-stated against the new facts, NOT deleted. The backend-selection \
+         claim itself lives in the platform-free unit test \
+         `the_gate_consults_only_the_executing_backends_option_list`: {error}"
+    );
+
+    // Native lane: the same request against the same row, with candle_required off. On macOS the
+    // MLX option is installed and selectable, so it is accepted — which is what proves the
+    // refusal above came from the backend swap and not from the option being unusable.
+    let native_dir = tempfile::tempdir().expect("temp dir creates");
+    write_decoder_capable_catalog(&native_dir);
+    let native_app = create_app(test_settings(&native_dir)).expect("app creates");
+    let (status, body) = request(
+        native_app,
+        "POST",
+        "/api/v1/image/jobs",
+        decoder_image_job(json!("wan_2_1_vae")),
+    )
+    .await;
+    if cfg!(target_os = "macos") {
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(
+            body["payload"]["advanced"]["decoder"], "wan_2_1_vae",
+            "the accepted selection must reach the worker verbatim"
+        );
+    } else {
+        // Candle everywhere else regardless of the setting — same refusal as above.
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("is not compatible with qwen_image")));
+    }
+}
+
+/// sc-18420: retry/duplicate re-run the text-encoder gate but skipped the decoder gate entirely,
+/// and `payloadChanges` is a SHALLOW merge — `advanced` arrives replaced wholesale. A retry could
+/// therefore enqueue exactly the decoder shapes the create path 400s.
+#[tokio::test]
+async fn retry_and_duplicate_gate_a_merged_decoder_selection_the_create_path_refuses() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_decoder_capable_catalog(&temp_dir);
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    // The original job selects no decoder, so it is admitted on either lane.
+    let (status, original) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        decoder_image_job(Value::Null),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{original}");
+    let job_id = original["id"].as_str().expect("job id").to_owned();
+
+    let (_, before) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    let before = before.as_array().expect("jobs array").len();
+
+    for (label, advanced) in [
+        // Mutually exclusive with usePid — refused on every lane, before any list lookup.
+        (
+            "exactly one decoder",
+            json!({ "decoder": "wan_2_1_vae", "usePid": true }),
+        ),
+        // Not an option on any backend for this row.
+        (
+            "is not compatible with qwen_image",
+            json!({ "decoder": "no_such_decoder" }),
+        ),
+        // The typed shape guard the create path applies to the same field.
+        (
+            "advanced.decoder must be a decoder id string",
+            json!({ "decoder": 7 }),
+        ),
+    ] {
+        for operation in ["retry", "duplicate"] {
+            let (status, error) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{job_id}/{operation}"),
+                json!({ "payloadChanges": { "advanced": advanced } }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {error}");
+            assert!(
+                error["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains(label)),
+                "{operation} must fail with the create path's own refusal ({label}): {error}"
+            );
+        }
+    }
+
+    // A refused retry/duplicate must not have enqueued anything, and the boundary must still admit
+    // the selection the create path admits — the gate is not a blanket refusal of `advanced`.
+    let (_, after) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(
+        after.as_array().expect("jobs array").len(),
+        before,
+        "a refused retry/duplicate must not persist a job"
+    );
+
+    let (status, replayed) = request(
+        app,
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/duplicate"),
+        json!({ "payloadChanges": { "advanced": { "decoder": "wan_2_1_vae" } } }),
+    )
+    .await;
+    if cfg!(target_os = "macos") {
+        assert_eq!(status, StatusCode::CREATED, "{replayed}");
+        assert_eq!(replayed["payload"]["advanced"]["decoder"], "wan_2_1_vae");
+    } else {
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{replayed}");
+    }
+}
+
+/// sc-18420, video half: `create_video_job` runs the same decoder gate, and the merged
+/// retry/duplicate boundary skipped it there too. No video provider advertises an alternate
+/// decoder, so every selection must fail closed at enqueue rather than reach a worker that has no
+/// such option.
+#[tokio::test]
+async fn retry_and_duplicate_gate_a_merged_video_decoder_selection() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, original) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": "project-1",
+            "mode": "text_to_video",
+            "prompt": "a drone shot",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{original}");
+    let job_id = original["id"].as_str().expect("job id").to_owned();
+
+    let (_, before) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    let before = before.as_array().expect("jobs array").len();
+
+    for (label, advanced) in [
+        (
+            "is not compatible with",
+            json!({ "decoder": "wan_2_1_vae" }),
+        ),
+        (
+            "exactly one decoder",
+            json!({ "decoder": "wan_2_1_vae", "usePid": true }),
+        ),
+    ] {
+        for operation in ["retry", "duplicate"] {
+            let (status, error) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{job_id}/{operation}"),
+                json!({ "payloadChanges": { "advanced": advanced } }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {error}");
+            assert!(
+                error["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains(label)),
+                "{operation} must reproduce the video create path's refusal ({label}): {error}"
+            );
+        }
+    }
+
+    let (_, after) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(
+        after.as_array().expect("jobs array").len(),
+        before,
+        "a refused retry/duplicate must not persist a job"
+    );
+
+    // A replay that selects no decoder is untouched by the new gate.
+    let (status, replayed) = request(
+        app,
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/duplicate"),
+        json!({ "payloadChanges": { "prompt": "a slower drone shot" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{replayed}");
+}
+
+/// One image model and one video model, each declaring its own LoRA family, plus the four adapters
+/// the retry/duplicate LoRA-gate tests need: a wrong-family one, a right-family-but-absent-on-disk
+/// one, and a compatible installed one per lane. Mirrors the fixture
+/// `generation_job_routes_reject_incompatible_loras` uses on the create path, so both boundaries are
+/// asserted against the SAME catalog and therefore the same refusal strings.
+fn write_lora_gate_catalog(temp_dir: &tempfile::TempDir) {
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"{
+          "schemaVersion": 1,
+          "models": [
+            {
+              "id": "gate_image",
+              "name": "Gate Image",
+              "family": "z-image",
+              "type": "image",
+              "adapter": "z_image_diffusers",
+              "capabilities": ["text_to_image", "edit_image", "character_image"],
+              "downloads": [], "paths": {}, "defaults": {}, "limits": {},
+              "loraCompatibility": { "families": ["z-image"] },
+              "ui": {}
+            },
+            {
+              "id": "gate_video",
+              "name": "Gate Video",
+              "family": "ltx-video",
+              "type": "video",
+              "adapter": "ltx_video",
+              "capabilities": ["text_to_video", "image_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
+              "downloads": [], "paths": {}, "defaults": {}, "limits": {},
+              "loraCompatibility": { "families": ["ltx-video"] },
+              "ui": {}
+            }
+          ]
+        }"#,
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+    std::fs::write(
+        config_dir.join("builtin.loras.jsonc"),
+        r#"{ "schemaVersion": 1, "loras": [] }"#,
+    )
+    .expect("builtin loras writes");
+    std::fs::write(
+        config_dir.join("user.loras.jsonc"),
+        r#"{
+          "schemaVersion": 1,
+          "loras": [
+            {
+              "id": "qwen_style", "name": "Qwen Style", "family": "qwen-image",
+              "triggerWords": [], "compatibility": { "families": ["qwen-image"] },
+              "source": { "provider": "local", "path": "loras/qwen.safetensors" }
+            },
+            {
+              "id": "deleted_style", "name": "Deleted Style", "family": "z-image",
+              "triggerWords": [], "compatibility": { "families": ["z-image"] },
+              "source": { "provider": "local", "path": "loras/deleted.safetensors" }
+            },
+            {
+              "id": "good_style", "name": "Good Style", "family": "z-image",
+              "triggerWords": [], "compatibility": { "families": ["z-image"] },
+              "source": { "provider": "local", "path": "loras/good.safetensors" }
+            },
+            {
+              "id": "motion_style", "name": "Motion Style", "family": "ltx-video",
+              "triggerWords": [], "compatibility": { "families": ["ltx-video"] },
+              "source": { "provider": "local", "path": "loras/motion.safetensors" }
+            }
+          ]
+        }"#,
+    )
+    .expect("user loras writes");
+    for file in ["builtin.recipe-presets.jsonc", "user.recipe-presets.jsonc"] {
+        std::fs::write(
+            config_dir.join(file),
+            r#"{ "schemaVersion": 1, "presets": [] }"#,
+        )
+        .expect("preset manifest writes");
+    }
+    let lora_dir = temp_dir.path().join("data/loras");
+    std::fs::create_dir_all(&lora_dir).expect("lora dir creates");
+    // `deleted.safetensors` is deliberately NOT written: a catalog-backed adapter whose file is gone
+    // resolves to a non-installed state, which is the create path's "is not installed" refusal.
+    for name in ["qwen.safetensors", "good.safetensors", "motion.safetensors"] {
+        write_test_safetensors(&lora_dir.join(name));
+    }
+}
+
+/// sc-18420: `validate_job_lora_compatibility_with` runs at BOTH create boundaries
+/// (`create_image_job`, `create_video_job`) and at neither retry/duplicate one. `loras` is a
+/// TOP-LEVEL key, so the shallow `payload_changes` merge replaces the whole array — a retry could
+/// swap a validated adapter set for a wrong-family, uninstalled, or entirely unknown one and enqueue
+/// it, deferring the failure to a worker that cannot load the file.
+///
+/// Every refusal string here is the create path's own, asserted verbatim against the same catalog.
+#[tokio::test]
+async fn retry_and_duplicate_gate_a_merged_lora_set_the_create_path_refuses() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_lora_gate_catalog(&temp_dir);
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    // The LoRA catalog is project-scoped, so the gate needs a real project to resolve against.
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "LoRA Gate" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+
+    // Baseline: created with a COMPATIBLE adapter, so the refusals below are about the merged set
+    // and not about the route rejecting adapters at all.
+    let (status, original) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_image",
+            "prompt": "mist over hills",
+            "model": "gate_image",
+            "count": 1,
+            "loras": [{ "id": "good_style" }],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{original}");
+    let job_id = original["id"].as_str().expect("job id").to_owned();
+
+    let (_, before) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    let before = before.as_array().expect("jobs array").len();
+
+    for (expected, loras) in [
+        (
+            "LoRA qwen_style is not compatible with model gate_image",
+            json!([{ "id": "qwen_style" }]),
+        ),
+        (
+            "LoRA is not installed: deleted_style",
+            json!([{ "id": "deleted_style" }]),
+        ),
+        (
+            "LoRA not found: no_such_lora",
+            json!([{ "id": "no_such_lora" }]),
+        ),
+        // A mixed set must be refused for its bad member, not silently pruned to the good one.
+        (
+            "LoRA qwen_style is not compatible with model gate_image",
+            json!([{ "id": "good_style" }, { "id": "qwen_style" }]),
+        ),
+    ] {
+        // The create path's own verdict on the identical set, so the two boundaries are compared
+        // rather than the retry refusal being asserted in isolation.
+        let (create_status, create_error) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            json!({
+                "projectId": project_id,
+                "mode": "text_to_image",
+                "prompt": "mist over hills",
+                "model": "gate_image",
+                "count": 1,
+                "loras": loras,
+            }),
+        )
+        .await;
+        assert_eq!(create_status, StatusCode::BAD_REQUEST, "{create_error}");
+        assert_eq!(create_error["detail"], expected);
+
+        for operation in ["retry", "duplicate"] {
+            let (status, error) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{job_id}/{operation}"),
+                json!({ "payloadChanges": { "loras": loras } }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {error}");
+            assert_eq!(
+                error["detail"], expected,
+                "{operation} must reproduce the create path's LoRA refusal verbatim"
+            );
+        }
+    }
+
+    let (_, after) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(
+        after.as_array().expect("jobs array").len(),
+        before,
+        "a refused retry/duplicate must not persist a job"
+    );
+
+    // The gate must still admit — and NORMALIZE — a set the create path accepts, so the canonical
+    // object this boundary returns carries the hydrated catalog spec rather than the bare id.
+    let (status, replayed) = request(
+        app,
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/duplicate"),
+        json!({ "payloadChanges": { "loras": [{ "id": "good_style" }] } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{replayed}");
+    assert_eq!(replayed["payload"]["loras"][0]["id"], "good_style");
+    assert!(
+        replayed["payload"]["loras"][0].get("name").is_some(),
+        "the admitted set must be the normalized catalog spec, not the caller's bare id: {replayed}"
+    );
+}
+
+/// sc-18420: the retry/duplicate LoRA gate must honour the ORIGINAL job's inline-LoRA provenance.
+///
+/// `characters.rs`'s test-job route creates `image_generate` jobs with `allow_inline_loras = true`,
+/// and a character's adapters are inline links (`character_lora_<hex>`, `category: "character"`,
+/// path-bearing) that `character_store::attach_lora` registers in NO catalog. Mirroring the gate
+/// with a hard-coded `false` refused that persisted set with "LoRA not found" — breaking even a
+/// retry with EMPTY `payloadChanges`.
+///
+/// Both directions, because the obvious fix opens a hole: `characterId` and `mode` are
+/// caller-settable (`ImageJobRequest` exposes both), so permission must come from the persisted
+/// LINK SHAPE, which only the character route can have put there. An ordinary image job wearing
+/// those markers must NOT be able to smuggle an inline path-bearing adapter through
+/// `payloadChanges`.
+#[tokio::test]
+async fn retry_honours_character_inline_lora_provenance_without_letting_others_borrow_it() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_lora_gate_catalog(&temp_dir);
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Character Retry" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let (_, character) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/characters"),
+        json!({ "name": "Mira", "type": "person" }),
+    )
+    .await;
+    let character_id = character["id"].as_str().expect("character id").to_owned();
+    let source = temp_dir.path().join("data/loras/character.safetensors");
+    write_test_safetensors(&source);
+    let (status, attached) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/characters/{character_id}/loras"),
+        json!({
+            "name": "Character Style",
+            "sourcePath": source.display().to_string(),
+            // Compatible with `gate_image` so the test-job itself is admitted; the family gate is
+            // pinned elsewhere and is not what this test is about.
+            "compatibility": { "families": ["z-image"] }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{attached}");
+
+    let (status, character_job) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/characters/{character_id}/test-jobs"),
+        json!({ "prompt": "portrait", "model": "gate_image" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{character_job}");
+    let character_job_id = character_job["id"].as_str().expect("job id").to_owned();
+    let inline_lora = character_job["payload"]["loras"][0].clone();
+    assert_eq!(
+        inline_lora["category"], "character",
+        "the fixture must really be an inline character link, or this test proves nothing: \
+         {character_job}"
+    );
+    let inline_lora_id = inline_lora["id"].as_str().expect("link id").to_owned();
+    assert!(
+        inline_lora_id.starts_with("character_lora_"),
+        "got: {inline_lora_id}"
+    );
+
+    // DIRECTION 1: the character job's own inline set survives retry AND duplicate, including the
+    // no-op replay that the hard-coded `false` broke.
+    for operation in ["retry", "duplicate"] {
+        let (status, replayed) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{character_job_id}/{operation}"),
+            json!({ "payloadChanges": {} }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "{operation} of a character test job must not refuse its own inline links: {replayed}"
+        );
+        assert_eq!(
+            replayed["payload"]["loras"][0]["id"], inline_lora_id,
+            "{operation} must preserve the character link"
+        );
+    }
+    // And a real change alongside them still works.
+    let (status, replayed) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{character_job_id}/retry"),
+        json!({ "payloadChanges": { "prompt": "portrait, side light" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{replayed}");
+    assert_eq!(replayed["payload"]["prompt"], "portrait, side light");
+
+    // The permit is PER-ADAPTER, not a blanket flag on the merged array: a genuine character job may
+    // replay its own links, but may not use that standing to introduce a foreign inline adapter.
+    let foreign = temp_dir.path().join("data/loras/foreign.safetensors");
+    write_test_safetensors(&foreign);
+    for (label, loras) in [
+        // Swap the persisted set for an entirely foreign inline adapter.
+        (
+            "LoRA not found: character_lora_foreign",
+            json!([{
+                "id": "character_lora_foreign",
+                "name": "Foreign",
+                "category": "character",
+                "sourcePath": foreign.display().to_string(),
+                "compatibility": { "families": ["z-image"] }
+            }]),
+        ),
+        // Keep the persisted link AND smuggle a foreign one alongside it: the permit must not
+        // launder its companion.
+        (
+            "LoRA not found: character_lora_foreign",
+            json!([
+                inline_lora.clone(),
+                {
+                    "id": "character_lora_foreign",
+                    "name": "Foreign",
+                    "category": "character",
+                    "sourcePath": foreign.display().to_string(),
+                    "compatibility": { "families": ["z-image"] }
+                }
+            ]),
+        ),
+        // Replay the persisted link's OWN id with a REDIRECTED path — the case an id-only match
+        // would wave through, carrying an arbitrary file into the enqueued payload.
+        (
+            &format!("LoRA not found: {inline_lora_id}"),
+            json!([{
+                "id": inline_lora_id,
+                "name": "Character Style",
+                "category": "character",
+                "sourcePath": foreign.display().to_string(),
+                "compatibility": { "families": ["z-image"] }
+            }]),
+        ),
+    ] {
+        for operation in ["retry", "duplicate"] {
+            let (status, error) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{character_job_id}/{operation}"),
+                json!({ "payloadChanges": { "loras": loras } }),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{operation} must not extend the character permit beyond the PERSISTED links: \
+                 {error}"
+            );
+            assert_eq!(error["detail"], label);
+        }
+    }
+
+    // A CATALOG adapter added alongside the persisted inline set is admitted — the narrowing must
+    // not turn a character job into one that can never gain an adapter — and both survive, in order.
+    let (status, widened) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{character_job_id}/duplicate"),
+        json!({
+            "payloadChanges": {
+                "loras": [inline_lora.clone(), { "id": "good_style" }]
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{widened}");
+    assert_eq!(widened["payload"]["loras"][0]["id"], inline_lora_id);
+    assert_eq!(widened["payload"]["loras"][1]["id"], "good_style");
+    assert!(
+        widened["payload"]["loras"][1].get("name").is_some(),
+        "the added catalog adapter must be hydrated from the catalog, not passed through inline: \
+         {widened}"
+    );
+
+    // DIRECTION 2: an ORDINARY image job that wears both caller-settable markers must not borrow
+    // that permission. Create is happy to make it — the LoRA gate no-ops on an empty set — which is
+    // exactly why provenance cannot be read from the markers.
+    let smuggler = temp_dir.path().join("data/loras/smuggled.safetensors");
+    write_test_safetensors(&smuggler);
+    let (status, ordinary) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "character_image",
+            "characterId": "character_not_really_mine",
+            "prompt": "mist over hills",
+            "model": "gate_image",
+            "count": 1,
+            "referenceAssetIds": [],
+            "loras": [],
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "the marker-wearing decoy must be creatable for the smuggle attempt to be meaningful: \
+         {ordinary}"
+    );
+    let ordinary_id = ordinary["id"].as_str().expect("job id").to_owned();
+
+    let (_, before) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    let before = before.as_array().expect("jobs array").len();
+
+    for operation in ["retry", "duplicate"] {
+        let (status, error) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{ordinary_id}/{operation}"),
+            json!({
+                "payloadChanges": {
+                    "loras": [{
+                        "id": "character_lora_forged",
+                        "name": "Forged",
+                        "category": "character",
+                        "sourcePath": smuggler.display().to_string(),
+                        "compatibility": { "families": ["z-image"] }
+                    }]
+                }
+            }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{operation} must not accept an inline adapter for a job whose PERSISTED set had none: \
+             {error}"
+        );
+        assert_eq!(error["detail"], "LoRA not found: character_lora_forged");
+    }
+
+    let (_, after) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(
+        after.as_array().expect("jobs array").len(),
+        before,
+        "a refused smuggle must not persist a job"
+    );
+
+    // The decoy still validates a CATALOG adapter normally, so the refusal above is about inline
+    // permission and not about the job being unable to take adapters at all.
+    let (status, replayed) = request(
+        app,
+        "POST",
+        &format!("/api/v1/jobs/{ordinary_id}/duplicate"),
+        json!({ "payloadChanges": { "loras": [{ "id": "good_style" }] } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{replayed}");
+    assert_eq!(replayed["payload"]["loras"][0]["id"], "good_style");
+}
+
+/// The video half of the same LoRA bypass — `create_video_job` runs the identical gate.
+#[tokio::test]
+async fn retry_and_duplicate_gate_a_merged_video_lora_set_the_create_path_refuses() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_lora_gate_catalog(&temp_dir);
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    // The LoRA catalog is project-scoped, so the gate needs a real project to resolve against.
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "LoRA Gate" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+
+    let (status, original) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_video",
+            "prompt": "a drone shot",
+            "model": "gate_video",
+            "loras": [{ "id": "motion_style" }],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{original}");
+    let job_id = original["id"].as_str().expect("job id").to_owned();
+
+    let (_, before) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    let before = before.as_array().expect("jobs array").len();
+
+    for (expected, loras) in [
+        (
+            "LoRA qwen_style is not compatible with model gate_video",
+            json!([{ "id": "qwen_style" }]),
+        ),
+        // A z-image adapter is installed and well-formed, just wrong for THIS lane's model.
+        (
+            "LoRA good_style is not compatible with model gate_video",
+            json!([{ "id": "good_style" }]),
+        ),
+        (
+            "LoRA not found: no_such_lora",
+            json!([{ "id": "no_such_lora" }]),
+        ),
+    ] {
+        let (create_status, create_error) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/video/jobs",
+            json!({
+                "projectId": project_id,
+                "mode": "text_to_video",
+                "prompt": "a drone shot",
+                "model": "gate_video",
+                "loras": loras,
+            }),
+        )
+        .await;
+        assert_eq!(create_status, StatusCode::BAD_REQUEST, "{create_error}");
+        assert_eq!(create_error["detail"], expected);
+
+        for operation in ["retry", "duplicate"] {
+            let (status, error) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{job_id}/{operation}"),
+                json!({ "payloadChanges": { "loras": loras } }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {error}");
+            assert_eq!(
+                error["detail"], expected,
+                "{operation} must reproduce the video create path's LoRA refusal verbatim"
+            );
+        }
+    }
+
+    let (_, after) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(
+        after.as_array().expect("jobs array").len(),
+        before,
+        "a refused retry/duplicate must not persist a job"
+    );
+
+    let (status, replayed) = request(
+        app,
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/duplicate"),
+        json!({ "payloadChanges": { "loras": [{ "id": "motion_style" }] } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{replayed}");
+    assert_eq!(replayed["payload"]["loras"][0]["id"], "motion_style");
+}
+
+/// sc-18420: the same retry/duplicate bypass for the imported-submission gate. The create path
+/// refuses an imported request shape the resolved provider registration cannot execute; the merged
+/// boundary never ran that check, so a retry could swap `advanced` for one carrying a shape the
+/// backend has no route for.
+#[tokio::test]
+async fn retry_and_duplicate_gate_a_merged_imported_shape_the_create_path_refuses() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let manifest_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
+    write_empty_sibling_manifests(&manifest_dir);
+    std::fs::write(
+        manifest_dir.join("builtin.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("builtin manifest writes");
+    std::fs::write(
+        manifest_dir.join("user.models.jsonc"),
+        r#"{
+          "schemaVersion": 1,
+          "models": [{
+            "id": "user_krea",
+            "name": "User Krea",
+            "type": "image",
+            "family": "krea_2",
+            "importSourceShape": "transformer_file",
+            "paths": { "model": "/probe/user-krea.safetensors" }
+          }]
+        }"#,
+    )
+    .expect("user manifest writes");
+    let mut settings = test_settings(&temp_dir);
+    // Candle declares krea_2/transformer_file for `generate` but NOT for `pose`, so the plain
+    // request is admitted and the pose replay is the shape with no route.
+    settings.candle_required = true;
+    let app = create_app(settings).expect("app creates");
+
+    let (status, original) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": "project-1",
+            "model": "user_krea",
+            "mode": "text_to_image",
+            "prompt": "mist over hills",
+            "count": 1,
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "the plain imported generate shape has a candle route: {original}"
+    );
+    let job_id = original["id"].as_str().expect("job id").to_owned();
+
+    let (_, before) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    let before = before.as_array().expect("jobs array").len();
+
+    for advanced in [
+        json!({ "poses": [{ "id": "pose-1", "keypoints": [] }] }),
+        json!({ "controlImage": "control-1" }),
+        json!({ "controlMode": "pose" }),
+    ] {
+        for operation in ["retry", "duplicate"] {
+            let (status, error) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{job_id}/{operation}"),
+                json!({ "payloadChanges": { "advanced": advanced } }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {error}");
+            assert!(
+                error["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains("candle_unsupported")),
+                "{operation} must reproduce the create path's imported refusal: {error}"
+            );
+        }
+    }
+
+    let (_, after) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(
+        after.as_array().expect("jobs array").len(),
+        before,
+        "a refused retry/duplicate must not persist a job"
+    );
+
+    // The gate must still pass a merged shape the create path accepts — a prompt-only replay keeps
+    // the admitted generate operation.
+    let (status, replayed) = request(
+        app,
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/duplicate"),
+        json!({ "payloadChanges": { "prompt": "fog over hills" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{replayed}");
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn native_imported_control_requires_pose_but_preserves_krea_pose_user_map() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let manifest_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
+    write_empty_sibling_manifests(&manifest_dir);
+    std::fs::write(
+        manifest_dir.join("builtin.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("builtin manifest writes");
+    std::fs::write(
+        manifest_dir.join("user.models.jsonc"),
+        r#"{
+          "schemaVersion": 1,
+          "models": [{
+            "id": "user_krea",
+            "name": "User Krea",
+            "type": "image",
+            "family": "krea_2",
+            "importSourceShape": "transformer_file",
+            "paths": { "model": "/probe/user-krea.safetensors" }
+          }]
+        }"#,
+    )
+    .expect("user manifest writes");
+    let settings = test_settings(&temp_dir);
+    let jobs_db_path = settings.jobs_db_path.clone();
+    let app = create_app(settings).expect("app creates");
+
+    for advanced in [
+        json!({ "controlImage": "control-1" }),
+        json!({ "controlMode": "pose" }),
+        json!({
+            "phases": [{ "steps": 4 }],
+            "controlImage": "control-1"
+        }),
+        json!({
+            "poses": [{ "id": "pose-1", "keypoints": [] }],
+            "controlMode": "canny"
+        }),
+    ] {
+        let (status, error) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            json!({
+                "projectId": "project-1",
+                "model": "user_krea",
+                "mode": "text_to_image",
+                "prompt": "mist over hills",
+                "count": 1,
+                "advanced": advanced,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+        assert!(error["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("imported_control_unsupported")));
+    }
+
+    let (status, created) = request(
+        app,
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": "project-1",
+            "model": "user_krea",
+            "mode": "text_to_image",
+            "prompt": "mist over hills",
+            "count": 1,
+            "advanced": {
+                "poses": [{ "id": "pose-1", "keypoints": [] }],
+                "controlImage": "control-1",
+                "controlMode": "pose"
+            },
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["payload"]["advanced"]["controlImage"], "control-1");
+
+    let connection = rusqlite::Connection::open(jobs_db_path).expect("jobs db opens");
+    let count: i64 = connection
+        .query_row("select count(*) from jobs", [], |row| row.get(0))
+        .expect("job count reads");
+    assert_eq!(count, 1, "only the supported imported Pose request queues");
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn native_imported_mage_queues_only_the_exact_registered_generate_shape() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let manifest_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
+    write_empty_sibling_manifests(&manifest_dir);
+    std::fs::write(
+        manifest_dir.join("builtin.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("builtin manifest writes");
+    std::fs::write(
+        manifest_dir.join("user.models.jsonc"),
+        r#"{
+          "schemaVersion": 1,
+          "models": [{
+            "id": "finetune_mage",
+            "name": "Fine-tuned Mage",
+            "type": "image",
+            "family": "mage-flow",
+            "importSourceShape": "transformer_directory",
+            "paths": { "model": "/probe/finetune-mage" }
+          }]
+        }"#,
+    )
+    .expect("user manifest writes");
+    let settings = test_settings(&temp_dir);
+    let jobs_db_path = settings.jobs_db_path.clone();
+    let app = create_app(settings).expect("app creates");
+
+    for (label, extra) in [
+        (
+            "edit",
+            json!({ "mode": "edit_image", "sourceAssetId": "source-1" }),
+        ),
+        ("reference", json!({ "referenceAssetId": "reference-1" })),
+        (
+            "multi-phase",
+            json!({ "advanced": { "phases": [{ "steps": 4 }] } }),
+        ),
+        (
+            "unsupported quant tier",
+            json!({ "advanced": { "quantTier": "nvfp4" } }),
+        ),
+    ] {
+        let mut payload = json!({
+            "projectId": "project-1",
+            "model": "finetune_mage",
+            "mode": "text_to_image",
+            "prompt": "mist over hills",
+            "count": 1,
+        });
+        payload
+            .as_object_mut()
+            .expect("request object")
+            .extend(extra.as_object().expect("extra object").clone());
+        let (status, error) = request(app.clone(), "POST", "/api/v1/image/jobs", payload).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{label}: {error}");
+        assert!(
+            error["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("imported_unsupported")),
+            "{label} must fail at exact imported-provider admission: {error}"
+        );
+    }
+
+    let (status, created) = request(
+        app,
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": "project-1",
+            "model": "finetune_mage",
+            "mode": "text_to_image",
+            "prompt": "mist over hills",
+            "count": 1,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+
+    let connection = rusqlite::Connection::open(jobs_db_path).expect("jobs db opens");
+    let count: i64 = connection
+        .query_row("select count(*) from jobs", [], |row| row.get(0))
+        .expect("job count reads");
+    assert_eq!(count, 1, "only the exact registered generate shape queues");
 }
 
 /// Legacy over-limit payloads stay inspectable, but replaying them would create new unbounded work.

@@ -225,7 +225,11 @@ export function angleModelUsable(model, caps) {
 }
 
 export function poseModelUsable(model, caps) {
-  return !macModelBlock(model, caps) && Boolean(model?.ui?.poseLibrary);
+  return (
+    !macModelBlock(model, caps) &&
+    !macModelFeatureBlock(model, caps, "pose") &&
+    Boolean(model?.ui?.poseLibrary)
+  );
 }
 
 // Strict-control modes the selected backbone advertises (sc-8245). The single source of truth is the

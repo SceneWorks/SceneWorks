@@ -4,9 +4,9 @@ compile_error!("memory-candle-adapter is supported only on CUDA hosts");
 use candle_gen::testkit::VramProbe;
 use runtime_cuda::gen_core::{
     GenerationRequest, LoadShape, LoadSpec, MemoryBudget, MemoryCacheState, MemoryGeometry,
-    MemoryMode, MemoryNumericTier, MemoryPhase, MemoryRunContext, MemoryRunOutcome,
-    MemorySelection, MemoryStrategy, MemoryStrategyParameters, OffloadPolicy, Precision, Progress,
-    Quant, TransformerComponent, WeightsSource,
+    MemoryMode, MemoryNumericTier, MemoryOptimizationAuthority, MemoryPhase, MemoryRunContext,
+    MemoryRunOutcome, MemorySelection, MemoryStrategy, MemoryStrategyParameters, OffloadPolicy,
+    Precision, Progress, Quant, TransformerComponent, WeightsSource,
 };
 use sceneworks_memory_adapter as protocol;
 use serde_json::{json, Map, Value};
@@ -842,6 +842,7 @@ fn run_five_rung_reference_loaded(
         .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
     let context = MemoryRunContext {
         selection,
+        optimization_authority: MemoryOptimizationAuthority::Calibrated,
         calibration_abi: calibration.abi,
         calibration_fingerprint: calibration.fingerprint.clone(),
         load_shape: calibration.load_shape,
@@ -1347,6 +1348,7 @@ fn run(request: &Value) -> Result<Value, String> {
     let (width, height) = protocol::target_geometry(request)?;
     let context = MemoryRunContext {
         selection,
+        optimization_authority: MemoryOptimizationAuthority::Calibrated,
         calibration_abi: actual_calibration.abi,
         calibration_fingerprint: actual_calibration.fingerprint.clone(),
         load_shape: actual_calibration.load_shape,

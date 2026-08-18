@@ -115,9 +115,9 @@ PKG="${PKG:-sceneworks-worker}"
 # list is a single shell token, so the branch keeps quoting simple under `set -u`.
 run_tree() {
   if [ -n "$FEATURES" ]; then
-    cargo tree -p "$PKG" --features "$FEATURES" --target all --color never --prefix none 2>/dev/null
+    cargo tree -p "$PKG" --features "$FEATURES" --target all --locked --color never --prefix none 2>/dev/null
   else
-    cargo tree -p "$PKG" --target all --color never --prefix none 2>/dev/null
+    cargo tree -p "$PKG" --target all --locked --color never --prefix none 2>/dev/null
   fi
 }
 

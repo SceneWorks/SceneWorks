@@ -389,26 +389,27 @@ pub const AMORAL_TEXT_ENCODER_ID: &str = "ltx_amoral_gemma_3_12b";
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TextEncoderOption {
-    pub id: &'static str,
-    pub label: &'static str,
-    pub description: &'static str,
+    pub id: String,
+    pub label: String,
+    pub description: String,
     pub is_default: bool,
 }
 
 #[cfg(target_os = "macos")]
 pub(super) fn ltx_text_encoder_options(alternate_staged: bool) -> Vec<TextEncoderOption> {
     let mut options = vec![TextEncoderOption {
-        id: DEFAULT_TEXT_ENCODER_ID,
-        label: "Shipped Gemma 3 12B (default)",
-        description: "Uses the Gemma text encoder installed with LTX.",
+        id: DEFAULT_TEXT_ENCODER_ID.to_owned(),
+        label: "Shipped Gemma 3 12B (default)".to_owned(),
+        description: "Uses the Gemma text encoder installed with LTX.".to_owned(),
         is_default: true,
     }];
     if alternate_staged {
         options.push(TextEncoderOption {
-            id: AMORAL_TEXT_ENCODER_ID,
-            label: "Amoral Gemma 3 12B (operator staged)",
+            id: AMORAL_TEXT_ENCODER_ID.to_owned(),
+            label: "Amoral Gemma 3 12B (operator staged)".to_owned(),
             description:
-                "Uses the complete alternate Gemma snapshot already staged by the operator.",
+                "Uses the complete alternate Gemma snapshot already staged by the operator."
+                    .to_owned(),
             is_default: false,
         });
     }

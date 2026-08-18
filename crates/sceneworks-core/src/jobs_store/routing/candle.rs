@@ -6,10 +6,9 @@ use serde_json::{Map, Value};
 use crate::contracts::{JobSnapshot, JobType, WorkerSnapshot};
 use crate::image_request::MAX_JOB_POSES;
 use crate::jobs_store::routing::catalog::{
-    imported_image_request_family_eligible, CANDLE_IMPORTED_CAPS, CANDLE_LORA_MODELS,
-    CANDLE_QUANT_LORA_MODELS, CANDLE_QUANT_MODELS, CANDLE_ROUTED_FAMILIES, CANDLE_ROUTED_MODELS,
-    CANDLE_ROUTED_TRAINING_KERNELS, CANDLE_VIDEO_I2V_ROUTED_MODELS, CANDLE_VIDEO_ROUTED_MODELS,
-    CANDLE_VIDEO_VACE_MODELS,
+    imported_image_request_provider_eligible, CANDLE_LORA_MODELS, CANDLE_QUANT_LORA_MODELS,
+    CANDLE_QUANT_MODELS, CANDLE_ROUTED_MODELS, CANDLE_ROUTED_TRAINING_KERNELS,
+    CANDLE_VIDEO_I2V_ROUTED_MODELS, CANDLE_VIDEO_ROUTED_MODELS, CANDLE_VIDEO_VACE_MODELS,
 };
 use crate::jobs_store::routing::mlx::{
     instantid_mlx_eligible, pulid_flux_mlx_eligible, upscale_job_is_mlx_eligible,
@@ -318,12 +317,7 @@ pub(crate) fn image_job_candle_lane(job: &JobSnapshot) -> Option<CandleImageLane
     }
     let model = job.payload.get("model").and_then(Value::as_str)?;
 
-    if imported_image_request_family_eligible(
-        model,
-        &job.payload,
-        CANDLE_ROUTED_FAMILIES,
-        CANDLE_IMPORTED_CAPS,
-    ) {
+    if imported_image_request_provider_eligible(model, &job.payload, "candle") {
         return Some(CandleImageLane::ImportedFamily);
     }
 

@@ -87,6 +87,7 @@ import sensenovaU1Apache20 from "../../../desktop/licenses/sensenova-u1/Apache-2
 import zImageApache20 from "../../../desktop/licenses/z-image/Apache-2.0.txt?raw";
 import ltx23ErosLTX2CommunityLicense from "../../../desktop/licenses/ltx-2.3-eros/LTX-2-Community-License.txt?raw";
 import kreaRealtimeApache20 from "../../../desktop/licenses/krea-realtime/Apache-2.0.txt?raw";
+import wan21VaeApache20 from "../../../desktop/licenses/wan2_1_t2v_14b_diffusers/Apache-2.0.txt?raw";
 import scail2MIT from "../../../desktop/licenses/scail2/MIT.txt?raw";
 import svdStableVideoDiffusionCommunityLicense from "../../../desktop/licenses/svd/Stable-Video-Diffusion-Community-License.txt?raw";
 import wan22VaceFunApache20 from "../../../desktop/licenses/wan2.2-vace-fun/Apache-2.0.txt?raw";
@@ -172,6 +173,7 @@ const DOCUMENT_TEXT = {
   "z-image-apache": zImageApache20,
   "ltx-2.3-eros-ltx-2-community-license": ltx23ErosLTX2CommunityLicense,
   "krea-realtime-apache": kreaRealtimeApache20,
+  "wan2.1-vae-alternate-apache": wan21VaeApache20,
   "scail2-mit": scail2MIT,
   "svd-stable-video-diffusion-community-license": svdStableVideoDiffusionCommunityLicense,
   "wan2.2-vace-fun-apache": wan22VaceFunApache20,

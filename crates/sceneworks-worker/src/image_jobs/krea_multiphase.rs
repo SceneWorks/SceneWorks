@@ -96,7 +96,7 @@ fn request_has_multiphase(request: &ImageRequest) -> bool {
 /// True when this is a Krea 2 **Raw** job carrying an explicit `advanced.phases` list and its Raw
 /// weights resolve locally — the multi-phase denoise lane (S4). Keyed on model `krea_2_raw` + a present
 /// `advanced.phases`, so EVERY job without `advanced.phases` is byte-for-byte unaffected. Placed FIRST
-/// among the `krea_2_raw` lanes in [`resolve_image_route`] so an explicit phase list takes precedence
+/// among the `krea_2_raw` lanes in [`prepare_image_route`] so an explicit phase list takes precedence
 /// over the S3 whole-job turbo-on-Raw regime and the generic Raw t2i. The lane itself rejects
 /// edit/pose/reference/PiD shapes loudly (multi-phase renders from pure noise), so the gate claims the
 /// job and surfaces a clear error rather than diverting a conflicting shape elsewhere.
@@ -390,11 +390,13 @@ fn krea_multiphase_generate_one(
     guidance: Option<f32>,
     text_style_gain: Option<f32>,
     phases: Vec<gen_core::GenerationPhase>,
+    memory: Option<gen_core::GenerationMemory>,
+    memory_strategy_context: Option<&gen_core::MemoryRunContext>,
     preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
-    let request = GenerationRequest {
+    let mut request = GenerationRequest {
         prompt: prompt.to_owned(),
         // Raw supports a negative prompt for the true-CFG phases; forwarded when the job carries one.
         negative_prompt,
@@ -409,11 +411,18 @@ fn krea_multiphase_generate_one(
         guidance,
         text_style_gain,
         phases: Some(phases),
+        memory,
         preview,
         cancel: cancel.clone(),
         ..Default::default()
     };
-    let output = generator.generate(&request, on_progress).map_err(|error| {
+    let output = crate::memory_strategy::generate_with_scope(
+        generator,
+        &mut request,
+        memory_strategy_context,
+        on_progress,
+    )
+    .map_err(|error| {
         WorkerError::Engine(format!("Krea multi-phase generation failed: {error}"))
     })?;
     match output {
@@ -426,6 +435,37 @@ fn krea_multiphase_generate_one(
         _ => Err(WorkerError::Engine(
             "Krea multi-phase generator returned non-image output".to_owned(),
         )),
+    }
+}
+
+/// The `LoadSpec::quantize` this lane hands the engine, per backend.
+///
+/// A named function rather than an inline `cfg` split because the two arms silently diverged once
+/// already: the candle arm used to hardcode `None`, dropping the job's requested tier on the floor
+/// where the sibling `krea_edit.rs` candle arm forwards it. Tier is a whole-pipeline contract — q4
+/// means q4 for every segment — so the lane must not decide the tier behind the engine's back.
+///
+/// * **macOS/MLX** delegates to [`mlx_load_quant_for_resolved_artifact`], which maps the request to
+///   what the RESOLVED per-tier artifact actually needs (the MLX turnkeys ship pre-quantized, so a
+///   packed tier resolves to a `None` load quant on purpose).
+/// * **Candle** forwards the request unchanged, matching `krea_edit.rs`. At pin 931366f62,
+///   `candle-gen-krea`'s `actual_quant_tier` ignores `spec.quantize` entirely for a
+///   `WeightsSource::Dir` spec (the builtin per-tier turnkey — the tier IS the staged directory), so
+///   this is inert for the catalog path. It is load-bearing for an imported `WeightsSource::File`
+///   native checkpoint: there, `(companion = Some(tier), requested = None)` is a hard
+///   `Unsupported` — "no quant request, but its companion snapshot is packed" — so hardcoding `None`
+///   made a legitimate matching-tier multi-phase request unrunnable while telling the user to
+///   "request the matching tier" they had already requested. `spec.quantize` Q4/Q8 is documented
+///   ACCEPTED by that provider (inference sc-9607).
+fn multiphase_load_quant(engine_id: &str, quant: Option<Quant>) -> Option<Quant> {
+    #[cfg(target_os = "macos")]
+    {
+        mlx_load_quant_for_resolved_artifact(engine_id, quant)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = engine_id;
+        quant
     }
 }
 
@@ -503,10 +543,134 @@ async fn generate_krea_multiphase_stream(
 
     let (width, height) = (request.width, request.height);
     let adapter_count = adapters.len();
-    let spec = load_spec(weights_dir, quant, adapters, None);
+    let load_quant = multiphase_load_quant(engine_id, quant);
+    let mut spec = attach_selected_decoder(
+        load_spec(weights_dir.clone(), load_quant, adapters, None)
+            .with_resolved_route(request.model.clone()),
+        engine_id,
+        request,
+        settings,
+    )?;
+    spec = attach_required_components(
+        spec,
+        engine_id,
+        &request.model_manifest_entry,
+        settings,
+    )?;
+    spec = attach_manifest_text_encoder(spec, engine_id, request, settings)?;
+    #[cfg(target_os = "macos")]
+    let spec = {
+        let resolved_tier = resolved_mlx_artifact_tier(&weights_dir, quant_bits);
+        let route_mode = crate::memory_route_registry::MemoryRouteMode::TextToImage;
+        let shaped = crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request(
+            engine_id,
+            resolved_tier,
+            Some(route_mode),
+            &request.model_manifest_entry,
+            spec,
+            crate::memory_route_registry::MemoryRouteRequestContext {
+                mode: route_mode,
+                reference_count: 0,
+                use_pid: false,
+                has_phases: true,
+            },
+        );
+        if let Some(warning) =
+            crate::memory_route_registry::mlx_load_shape_declaration_warning(&shaped)
+        {
+            tracing::warn!(
+                event = "mlx_load_shape_declaration_warning",
+                provider = engine_id,
+                ?warning,
+                "provider refused deferred materialization; retaining the safe eager multi-phase load path"
+            );
+        }
+        shaped
+    };
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let spec = spec.with_offload_policy(offload_policy);
 
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let (generation_memory, memory_strategy_context) = {
+        let tier = candle_resolved_tier_key(request, &weights_dir, false);
+        let raw_budget = crate::vram_gate::apply_vram_cap(
+            crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
+            crate::vram_gate::cuda_vram_cap_gb(),
+        );
+        let reclaimable_gb = crate::vram_gate::reclaimable_pool_gb(&settings.gpu_id);
+        let budget = raw_budget
+            .map(|budget| crate::vram_gate::with_reclaimable(budget, reclaimable_gb));
+        let predicted_peak_gb = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
+            &request.model_manifest_entry,
+            tier,
+            adapter_resident_bytes,
+        );
+        let evaluation = crate::candle_memory_strategy::evaluate_shared_image(
+            engine_id,
+            &request.model,
+            &spec,
+            candle_certified_load_spec(
+                engine_id,
+                settings,
+                &spec,
+                &request.model_manifest_entry,
+                tier,
+            ),
+            &request.model_manifest_entry,
+            tier,
+            "text_to_image",
+            (adapter_count > 0).then_some("lora"),
+            gen_core::MemoryGeometry {
+                width,
+                height,
+                batch: 1,
+                frames: 1,
+                reference_count: 0,
+            },
+            false,
+            false,
+            false,
+            true,
+            budget,
+            predicted_peak_gb,
+            adapter_resident_bytes,
+            if reclaimable_gb > 0.0 {
+                gen_core::MemoryCacheState::Warm
+            } else {
+                gen_core::MemoryCacheState::Cold
+            },
+        )?;
+        (
+            evaluation
+                .as_ref()
+                .and_then(|evaluation| evaluation.memory),
+            evaluation.and_then(|evaluation| optimized_shared_memory_context(evaluation.context)),
+        )
+    };
+    #[cfg(target_os = "macos")]
+    let memory_plan = crate::mlx_fit_gate::MlxRequestPlan::for_spec_and_manifest(
+        engine_id,
+        &request.model,
+        &spec,
+        Some(&request.model_manifest_entry),
+        None,
+    )
+    .with_resolved_artifact_tier(resolved_mlx_artifact_tier(&weights_dir, quant_bits))?;
+    #[cfg(target_os = "macos")]
+    let memory_inputs = crate::mlx_fit_gate::MlxRequestInputs {
+        width,
+        height,
+        count: request.count,
+        mode: request.mode.clone(),
+        overlay: (adapter_count > 0).then(|| format!("adapters:{adapter_count}")),
+        adapter_count,
+        has_reference: false,
+        reference_count: 0,
+        use_pid: false,
+        has_phases: true,
+    };
+
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let (cancel, rx, blocking) = start_cached_gen_stream(
         job.id.clone(),
         engine_id,
@@ -528,6 +692,64 @@ async fn generate_krea_multiphase_stream(
                     guidance,
                     text_style_gain,
                     phases.clone(),
+                    generation_memory,
+                    memory_strategy_context.as_ref(),
+                    preview,
+                    &cancel,
+                    on_progress,
+                )?;
+                Ok(Some((seed, out_w, out_h, pixels)))
+            })
+        },
+    );
+    #[cfg(target_os = "macos")]
+    let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state(
+        job.id.clone(),
+        engine_id,
+        adapter_count,
+        spec,
+        format!("{engine_id} load failed"),
+        move |generator,
+              cache_state,
+              loaded_policy,
+              warm_policy,
+              external_committed_bytes,
+              tx,
+              cancel| {
+            let mut request_cache_state = cache_state;
+            // sc-18317: ONE warm hit is ONE decision, but this lane evaluates the request once per
+            // item. Hand the real proposal to the first evaluation and an inert one to the rest, so a
+            // multi-image job settles exactly one decision and emits exactly one event.
+            let mut warm_policy = crate::execution_planner::WarmPolicyOnce::new(warm_policy);
+            drive_gen_items(tx, work, move |_index, (seed, prompt), preview, on_progress| {
+                if cancel.is_cancelled() {
+                    return Ok(None);
+                }
+                let memory_evaluation = crate::mlx_fit_gate::evaluate_request(
+                    generator,
+                    &memory_plan,
+                    &memory_inputs,
+                    request_cache_state,
+                    loaded_policy.offload_policy,
+                    warm_policy.take(),
+                    external_committed_bytes,
+                )?;
+                request_cache_state = gen_core::MemoryCacheState::Warm;
+                let _request_memory_limit = memory_evaluation
+                    .process_limit_bytes
+                    .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
+                let (out_w, out_h, pixels) = krea_multiphase_generate_one(
+                    generator,
+                    &prompt,
+                    negative_prompt.clone(),
+                    width,
+                    height,
+                    seed,
+                    guidance,
+                    text_style_gain,
+                    phases.clone(),
+                    Some(memory_evaluation.memory),
+                    Some(&memory_evaluation.context),
                     preview,
                     &cancel,
                     on_progress,

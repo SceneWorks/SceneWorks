@@ -58,8 +58,9 @@ def test_matrix_accounts_for_all_models_and_pinned_mlx_staged_coverage():
     # generic staged-route claim is intentionally absent from this census.
     # sc-18815 keeps this as exactly the IMAGE-lane claim its denominator says it is. The separate
     # video census consumes the provider-owned staged-residency contracts at the frozen b4 pin;
-    # only SVD remains without an MLX staged implementation.
-    assert matrix["summary"]["mlxStagedStaticCoverage"] == 38
+    # only SVD remains without an MLX staged implementation. The image-lane numerator is asserted
+    # structurally against the census below rather than as a pinned population (the SC-18218
+    # shape-over-population ruling); the denominators are the modality totals asserted above.
     assert matrix["summary"]["mlxStagedStaticCoverageDenominator"] == 53
     assert matrix["summary"]["videoMlxStagedStaticCoverage"] == 9
     assert matrix["summary"]["videoMlxStagedStaticCoverageDenominator"] == 10
@@ -117,20 +118,18 @@ def test_matrix_accounts_for_all_models_and_pinned_mlx_staged_coverage():
     assert sum(row["elided"] for row in matrix["coverage"]) == matrix["summary"]["elidedCells"]
     # `mlxStagedStaticCoverage` is a claim about all 53 image entries. Recomputed from the census
     # rather than from `cells`, which would silently shrink it to whatever the slim happened to
-    # publish — and scoped to the image lane, which is what its denominator claims to cover.
-    assert (
-        len(
-            {
-                row["modelId"]
-                for row in matrix["coverage"]
-                if row["backend"] == "mlx"
-                and row["rung"] == "staged_residency"
-                and row["implemented"]
-                and row["modelId"] in image_ids
-            }
-        )
-        == matrix["summary"]["mlxStagedStaticCoverage"]
-    )
+    # publish — and scoped to the image lane, which is what its denominator claims to cover
+    # (sc-18815). The video lane's numerator is recomputed the same way against its own summary
+    # field.
+    mlx_staged = {
+        row["modelId"]
+        for row in matrix["coverage"]
+        if row["backend"] == "mlx"
+        and row["rung"] == "staged_residency"
+        and row["implemented"]
+        and row["modelId"] in image_ids
+    }
+    assert len(mlx_staged) == matrix["summary"]["mlxStagedStaticCoverage"]
     assert (
         len(
             {
@@ -144,6 +143,97 @@ def test_matrix_accounts_for_all_models_and_pinned_mlx_staged_coverage():
         )
         == matrix["summary"]["videoMlxStagedStaticCoverage"]
     )
+    # SC-18218 closes FLUX.2-dev to its measured Resident-only provider contract, and the current
+    # inference pin deliberately omits sequential offload from Bernini's descriptor. Neither lane may
+    # contribute a generic staged-route claim to this census.
+    #
+    # Stated as structure, not as a population. The count moved 37 -> 38 when inference sc-18609 made
+    # bernini_image's DECLARED MLX rung-4 ladder actually reachable, and renewing the constant would
+    # only have re-frozen the corpus at the next catalog change.
+    #
+    # The replacement is DELIBERATELY WEAKER than the count, and the honest scope is worth stating so
+    # nobody reads more into it. Guarded: the two lanes below by name, bespoke routes never claiming the
+    # generic ladder, per-route drift where entries sharing a resolved route disagree with each other,
+    # and the census being neither empty nor the whole catalog. NOT guarded: uniform drift on a route
+    # nothing else shares — 35 of the 41 resolved routes are singletons, so a singleton lane silently
+    # dropping out of the census, or silently claiming staged coverage it has not implemented, passes
+    # everything here where the old count reddened. A whole shared family drifting uniformly passes for
+    # the same reason.
+    #
+    # That is the accepted shape-over-population tradeoff rather than an oversight. The count did catch
+    # those cases, and charged a hand-edit for every unrelated catalog or reachability change to do it;
+    # runtime catching is the chosen tradeoff for the residue. The generator carries the same note beside
+    # `assertMlxStagedCoverageIsStructurallyConsistent`, which is where the mirror of these assertions
+    # runs against the pre-publication document.
+    assert "flux2_dev" not in mlx_staged, (
+        "SC-18218: the pinned MLX FLUX.2 provider is Resident-only and owes no staged-route claim"
+    )
+    assert "bernini_image" in mlx_staged, (
+        "inference sc-18609 made bernini_image's declared MLX rung-4 ladder reachable"
+    )
+    assert 0 < len(mlx_staged) < len(image_ids), (
+        "staged coverage is partial by construction; a total census would mean the exclusions vanished"
+    )
+    # Staged coverage is a property of the RESOLVED ROUTE, so every entry sharing a route agrees.
+    # An entry drifting away from its own route siblings is exactly what a bumped count cannot see.
+    #
+    # EXEMPT, 2026-08-17: entries whose MLX tier axis is a single synthetic `default` — no advertised
+    # tier ladder at all. Kept in lockstep with `assertMlxStagedCoverageIsStructurallyConsistent` in
+    # scripts/generate-memory-matrix.mjs, which carries the full reasoning and the coordinator decision;
+    # this is that assertion's mirror against the PUBLISHED document, so the two must scope alike or the
+    # published artifact and the pre-publication census would disagree about the same catalog.
+    #
+    # `flux2_klein_9b_true_v2` is the instance: a convert-at-install entry whose transformer is a fixed
+    # dense BF16 artifact (`mlx.quantize: 0`, the only truthful encoding under `resolve_quant`), sharing
+    # route `flux2_klein_9b` with two tiered siblings. Its verdict is structurally fixed at "not staged"
+    # because the tiers its contract declares do not exist for it, so including it reports a
+    # disagreement no declaration change can resolve.
+    #
+    # Narrow on purpose: it removes these entries from the CROSS-ENTRY comparison only, and the
+    # comparison keeps full force among tiered entries sharing a route. The JS side carries the mutation
+    # control proving a drifting tiered route-mate still reds, and that an exempt entry on the route does
+    # not suppress drift between its tiered siblings.
+    def has_single_dense_tier_axis(model: dict) -> bool:
+        return model.get("axes", {}).get("mlx", {}).get("tiers") == ["default"]
+
+    route_verdicts: dict[str, set[bool]] = {}
+    for model in matrix["models"]:
+        if model["modality"] != "image" or has_single_dense_tier_axis(model):
+            continue
+        route_verdicts.setdefault(model["resolvedRoute"], set()).add(
+            model["id"] in mlx_staged
+        )
+    assert all(len(verdicts) == 1 for verdicts in route_verdicts.values()), sorted(
+        route for route, verdicts in route_verdicts.items() if len(verdicts) > 1
+    )
+    # The exemption must stay narrow: it may never empty the comparison. If every entry became
+    # single-dense the loop above would pass vacuously, so assert it still has routes to compare.
+    assert route_verdicts, "the per-route comparison must not be emptied by the exemption"
+    # A bespoke route carries its own pipeline and never advertises the GENERIC staged ladder.
+    #
+    # "Generic" is enforced as written, 2026-08-17, in lockstep with the generator-side assertion (which
+    # carries the reasoning). `routeKind: "bespoke"` means only "no row in engines.rs's MODEL_TABLE" — a
+    # worker dispatch fact — not "the engine registers no contract". PuLID is that split: bespoke in
+    # dispatch, unregistered on candle, but the MLX registry publishes a real `pulid_flux` contract at
+    # pin 931366f62. This document agrees: its staged coverage row reads
+    # `implementedBy.overlay = {identity: 3, lora: 0, none: 0}` — its own closed identity contract and
+    # nothing generic.
+    #
+    # So the claim to reject is implemented coverage on a generic overlay. Teeth intact: if a bespoke
+    # route ever implements `none` or `lora` staged coverage, this reds.
+    generic_overlays = ("none", "lora")
+    bespoke_ids = {
+        model["id"] for model in matrix["models"] if model["routeKind"] == "bespoke"
+    }
+    assert not [
+        (row["modelId"], overlay)
+        for row in matrix["coverage"]
+        if row["backend"] == "mlx"
+        and row["rung"] == "staged_residency"
+        and row["modelId"] in bespoke_ids
+        for overlay in generic_overlays
+        if row.get("implementedBy", {}).get("overlay", {}).get(overlay, 0)
+    ]
     # Every entry keeps a slice key even when it publishes nothing, and no slice may name a cell the
     # slim dropped.
     published_ids = {cell["id"] for cell in matrix["cells"]}
@@ -192,14 +282,15 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     evidence_ids = {record["id"] for record in calibration["records"]}
     evidence_by_id = {record["id"]: record for record in calibration["records"]}
     records_by_status = Counter(record["status"] for record in calibration["records"])
-    # sc-16915 added seventeen Full-complete MLX records (qwen_image x15,
-    # krea_2_turbo_control x2) measured at the current pin: complete 33 -> 50. The
-    # base-only runtime-complete FLUX population was initially untouched. SC-18237 adds the two
-    # production-deferred q8 records: complete 50 -> 52. SC-18218 then adds four real-weight,
-    # Resident-only MLX FLUX.2 records (q4/q8 at 768/1024): runtime-complete 15 -> 19.
-    # SC-18353 adds thirteen physical deferred-materialization Qwen bf16/q4 records without
-    # replacing the retained history: complete 52 -> 65.
-    assert records_by_status == {"complete": 65, "runtime_complete": 19}
+    # The bundle carries exactly two statuses. A third would slip straight past every partition below,
+    # which is the defect this owns — not the size of either population. Those sizes have only ever
+    # grown (complete 33 -> 50 -> 52 -> 65 -> 70 across sc-16915 / SC-18237 / SC-18353 / SC-19753;
+    # runtime_complete 15 -> 19 at SC-18218), and renewing the pair each time re-froze the corpus
+    # without ever asserting a property. Both populations must be non-empty and must partition the
+    # bundle exactly; everything downstream is then derived from `records_by_status` rather than from a
+    # second transcription of it, so the matrix and the bundle cannot disagree.
+    assert set(records_by_status) == {"complete", "runtime_complete"}
+    assert all(count > 0 for count in records_by_status.values())
     assert len(evidence_ids) == len(calibration["records"]) == sum(
         records_by_status.values()
     )
@@ -244,14 +335,15 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         for run in matrix["calibrationRuns"]
         if run["record"]["status"] == "runtime_complete"
     ]
-    # sc-16915 measured seventeen Full-complete runs at the then-live closure; those records are now
-    # historical. SC-18237 and SC-18353 added physical Qwen captures at later live closures, but the
-    # rich descriptor change in sc-18473 moved the shared provider closure again. No physical record
-    # is re-dated by that source change.
+    # sc-16915 measured seventeen Full-complete runs at the then-live closure; SC-18237 and SC-18353
+    # later added fifteen Qwen records, and SC-19753 five Z-Image records, each at the closure live
+    # when it ran. The epic's pin advance moved past all of them, so every Full-complete run is now
+    # historical — an accepted floor, not a re-capture work order.
     #
-    # Pinned as an exact set AND an exact count, the same way it was when runs were current: a bare
-    # `<= {"current", "historical"}` would accept any mixture, and a count alone would let one
-    # family's promotion mask another's demotion.
+    # Still pinned as an exact set AND an exact count, the same way it was when runs were current: a
+    # bare `<= {"current", "historical"}` would accept any mixture, and a count alone would let one
+    # family's promotion mask another's demotion. Holding the current count at exactly 0 is what
+    # makes a record silently surviving the closure change fail here.
     assert {run["semantics"] for run in full_runs} == {"historical"}
     assert sum(1 for run in full_runs if run["semantics"] == "current") == 0
     expected_candle_flux2_runtime = {
@@ -384,8 +476,8 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
     assert len(runtime_complete_runs) == len(flux2_runtime) + len(
         historical_flux1_runtime
     )
-    # The MLX FLUX.2 and older FLUX.1 records are historical after the shared provider closure moved.
-    # The Candle FLUX.2 window independently becomes current only at its audited pin.
+    # SC-18306 moves the pin beyond the MLX FLUX.2 capture closure as well as the older FLUX.1
+    # captures. The Candle FLUX.2 window independently becomes current only at its audited pin.
     assert {run["semantics"] for run in runtime_complete_runs} == {"historical"}
     assert all(run["binding"]["eligible"] for run in runtime_complete_runs)
     current_eligible = [
@@ -393,8 +485,7 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         for run in matrix["calibrationRuns"]
         if run["semantics"] == "current" and run["binding"]["eligible"]
     ]
-    # Three independent sources of "current", kept separate so one lane cannot mask another. All
-    # are empty at this pin because no capture was made after the rich descriptor closure change:
+    # Independent sources of "current", kept separate so one lane cannot mask another:
     #
     #   - SC-18353 records measured at the live pin;
     #   - records whose captured provider closure still matches the live provider closure
@@ -439,9 +530,9 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         "imc-ea87169a3ea1fd340791",
     }
     # Measured at the live pin means CURRENT, without exception — a record may not be measured here
-    # and dated elsewhere. Stated as a subset so the implication survives the set above being empty:
-    # with nothing measured at the live pin there is nothing to classify, and the moment a record
-    # does appear there it must be `current` or this fails.
+    # and dated elsewhere. Stated as a subset so the implication survives the set being empty: with
+    # nothing measured at the live pin there is nothing to classify, and the moment a record does
+    # appear there it must be `current` or this fails.
     assert {
         run["semantics"]
         for run in matrix["calibrationRuns"]
@@ -527,24 +618,34 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         and run["record"]["target"]["tier"] == "bf16"
         and run["record"]["strategy"]["rung"] in {"resident", "staged_residency"}
     ]
-    # Eight, not six: SC-18353's resident/staged pair joined the six already-historical rows when the
-    # shared provider closure moved. The population grew because currency moved, not because any
-    # captured record was re-dated.
-    assert len(historical_qwen) == 8
-    # The eight are two distinct populations. Four carry the retired `-eager` fingerprint and still
-    # cannot bind. Four carry the shared fingerprint and bind the bf16 cells, but remain historical
-    # and therefore cannot authorize current verification.
+    # These are two distinct populations, and flattening them would lose the distinction that matters.
+    # One carries the retired `-eager` fingerprint and still cannot bind. The other carries the shared
+    # fingerprint and binds the bf16 cells restored by earlier captures, but remains historical and
+    # therefore cannot authorize current verification.
+    #
+    # Pinned as STRUCTURE, not as populations. The totals moved 6 -> 8 and 2 -> 4 when SC-18306 pushed
+    # the closure past the SC-18353 resident/staged captures — currency moved, nothing about the
+    # records changed — and the numbers say nothing about why. The properties below do: the two buckets
+    # PARTITION the set with no third outcome, the fingerprint decides eligibility in both directions,
+    # and the two rungs stay symmetric both overall and bucket by bucket. Each still fails on the
+    # original defect (a retired fingerprint starting to bind, or one rung quietly losing a record) at
+    # any retained-capture count.
+    assert historical_qwen
     rejected = [
         run for run in historical_qwen if run["binding"]["reasons"] == ["fingerprint-mismatch"]
     ]
-    assert len(rejected) == 4
-    assert all(not run["binding"]["eligible"] for run in rejected)
-    assert Counter(run["record"]["calibrationFingerprint"] for run in rejected) == {
-        "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager": 4,
-    }
     retained_bindings = [run for run in historical_qwen if run["binding"]["eligible"]]
-    assert len(retained_bindings) == 4
+    assert rejected and retained_bindings
+    assert len(rejected) + len(retained_bindings) == len(historical_qwen), (
+        "every historical Qwen bf16 resident/staged run is either fingerprint-rejected or a retained "
+        "binding; a third outcome would go uninspected"
+    )
+    assert all(not run["binding"]["eligible"] for run in rejected)
     assert all(run["binding"]["reasons"] == [] for run in retained_bindings)
+    # Eligibility is decided by the fingerprint, and by nothing else, in both directions.
+    assert {run["record"]["calibrationFingerprint"] for run in rejected} == {
+        "qwen-image-mlx-shared-ladder-2026-08-01-v1-eager",
+    }
     assert {
         run["record"]["calibrationFingerprint"] for run in retained_bindings
     } == {"qwen-image-mlx-shared-ladder-2026-08-01-v1"}
@@ -557,15 +658,14 @@ def test_calibration_evidence_is_schema_valid_and_matrix_ingested():
         )
         for run in historical_qwen
     } == {("mlx", "bf16", "text_to_image", "none")}
-    # Four apiece: each rung carries two shared-fingerprint bindings and two rejected `-eager` rows.
-    # The two rungs remain symmetric, which is the property
-    # this pins — an asymmetry would mean one rung lost a record rather than changing currency.
-    assert Counter(
-        run["record"]["strategy"]["rung"] for run in historical_qwen
-    ) == {
-        "resident": 4,
-        "staged_residency": 4,
-    }
+    # Symmetry is the property, not the per-rung total: each rung carries the same number of retained
+    # shared-fingerprint captures beside the same number of rejected `-eager` rows. An asymmetry means
+    # one rung lost a record rather than currency moving, and holding it bucket by bucket also catches
+    # a rung losing a record on one side while gaining one on the other.
+    for bucket in (historical_qwen, rejected, retained_bindings):
+        by_rung = Counter(run["record"]["strategy"]["rung"] for run in bucket)
+        assert set(by_rung) == {"resident", "staged_residency"}, by_rung
+        assert len(set(by_rung.values())) == 1, by_rung
 
 
 def test_complete_calibration_schema_fails_closed_on_adversarial_mutations():
@@ -724,28 +824,23 @@ def test_complete_calibration_schema_fails_closed_on_adversarial_mutations():
 def test_historical_records_remain_unverified_after_the_provider_contract_advance():
     matrix = load_matrix()
     assert matrix["summary"]["fullModels"] == 0
-    # sc-16915, SC-18237, and SC-18353 captured Qwen/Krea evidence at then-live provider closures.
-    # The rich descriptor change moved those closures again, so every physical record is historical.
-    # Positive promotion remains covered by synthetic current-closure fixtures in the Node suite;
-    # this checked-in artifact must not claim verification by silently re-stamping captures.
+    # sc-16915 recaptured the Qwen and Krea MLX evidence at its then-current pin, and SC-19753
+    # captured the five Z-Image q4 coordinates at the closure live when it ran. The epic's pin has
+    # since advanced past all of them, so every shipped capture is now an ACCEPTED FLOOR rather than
+    # current verification — a pin bump staling calibration records is the fail-closed design
+    # working, not a re-capture work order.
+    #
+    # Still stated as the exact SET rather than a count: a count would let one model's promotion
+    # silently cover another's regression, and an exact empty set still fails the moment any record
+    # survives the closure change as current.
     verified = {
         (cell["modelId"], cell["backend"], cell["tier"], cell["rung"])
         for cell in matrix["cells"]
         if cell["state"] == "Verified"
     }
-    # SC-18237/SC-18353's Qwen captures, Krea, and Z-Image are all stale after their
-    # closures moved; this test's actual subject — Z-Image's history failing closed — is pinned
-    # directly below and is unaffected.
-    #
-    # This assertion is incidental context for this test either way. Its actual subject — Z-Image's
-    # history failing closed — is pinned directly below and is unaffected.
+    # No family may remain Verified merely because it was current at an older pin.
     assert verified == set()
-    assert not [
-        cell
-        for cell in matrix["cells"]
-        if cell["state"] == "Verified" and cell["modelId"].startswith("z_image")
-    ], "Z-Image was not recaptured, so none of its cells may promote"
-    historical_z_image_turbo = [
+    current_z_image_turbo = [
         cell
         for cell in matrix["cells"]
         if cell["modelId"] == "z_image_turbo"
@@ -753,14 +848,9 @@ def test_historical_records_remain_unverified_after_the_provider_contract_advanc
         and cell["tier"] == "q4"
         and cell["mode"] == "text_to_image"
         and cell["overlay"] == "none"
-        and cell["evidence"]["historicalVerification"]
+        and cell["evidence"]["currentEnvironmentVerification"]
     ]
-    assert len(historical_z_image_turbo) == 5
-    assert all(
-        cell["state"] == "Implemented/unverified"
-        and cell["evidence"]["currentEnvironmentVerification"] == []
-        for cell in historical_z_image_turbo
-    )
+    assert current_z_image_turbo == []
     historical_z_image = [
         cell
         for cell in matrix["cells"]
@@ -770,8 +860,9 @@ def test_historical_records_remain_unverified_after_the_provider_contract_advanc
     ]
     assert historical_z_image == []
     # sc-16915's eager ladder and SC-18353's deferred physical captures both remain historical
-    # after the provider closure moved. The five bf16 coordinates stay implemented, retain their
-    # characterization and strategy parameters, and fail closed as unverified.
+    # after the provider closure moved (SC-18306 moved the closure again). The five bf16
+    # coordinates stay implemented, retain their characterization and strategy parameters, and
+    # fail closed as unverified.
     historical_qwen_cells = [
         cell
         for cell in matrix["cells"]

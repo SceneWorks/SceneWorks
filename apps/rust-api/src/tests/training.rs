@@ -4675,17 +4675,25 @@ async fn completed_full_finetune_registers_a_selectable_model_not_a_lora() {
     assert_eq!(entry["type"], "image");
     assert_eq!(entry["family"], "mage-flow");
     assert_eq!(entry["catalogScope"], "user");
-    // The three fields the picker gates on: install state, `usable`, and a `text_to_image` capability.
+    assert_eq!(
+        entry["importSourceShape"], "transformer_directory",
+        "the completion trust boundary must stamp the exact Mage directory route"
+    );
+    // The common picker gates remain healthy. Operation capabilities come from the exact active
+    // provider topology: Mage is MLX-only, so macOS advertises t2i while a Candle-only host
+    // truthfully withdraws it. The lane-parameterized projection test covers both directions.
     assert_eq!(entry["installState"], "installed");
     assert_ne!(
         entry["usable"],
         json!(false),
         "an explicitly unusable entry is dropped from every picker"
     );
-    assert!(entry["capabilities"]
+    let serves_t2i = entry["capabilities"]
         .as_array()
         .expect("capabilities")
-        .contains(&json!("text_to_image")));
+        .contains(&json!("text_to_image"));
+    assert_eq!(serves_t2i, cfg!(target_os = "macos"));
+    assert_eq!(entry["macSupport"]["supported"], json!(true));
     // The family surface it inherits from its base, without which the Studio falls back to a bare
     // 4-option resolution list.
     assert_eq!(entry["adapter"], "mlx_mage");

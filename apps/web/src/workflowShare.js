@@ -270,6 +270,7 @@ export const ADVANCED_PREFILL = {
   guidanceMethod: { label: "Guidance method", prefill: PREFILL_CONTROL },
   enhancePrompt: { label: "Prompt upsampling", prefill: PREFILL_CONTROL },
   usePid: { label: "PiD decoder", prefill: PREFILL_CONTROL },
+  decoder: { label: "Alternate decoder", prefill: PREFILL_CONTROL },
   pidTarget: { label: "PiD output", prefill: PREFILL_CONTROL },
   ipAdapterScale: { label: "Reference strength", prefill: PREFILL_CONTROL },
   controlnetConditioningScale: { label: "Identity structure", prefill: PREFILL_CONTROL },
@@ -283,6 +284,10 @@ export const ADVANCED_PREFILL = {
   styleId: { label: "Style", prefill: PREFILL_CONTROL },
   stylePrompt: { label: "Pre-style prompt", prefill: PREFILL_PROMPT },
   phases: { label: "Multi-phase denoise", prefill: PREFILL_CONTROL },
+  // Shared by Image Studio substitutions and the older LTX video selector. Image workflow replay
+  // restores the opaque authored id even when this install no longer lists it; Image Studio keeps
+  // that unavailable choice visible and the API then fails closed until it is restored or changed.
+  textEncoderModel: { label: "Text encoder", prefill: PREFILL_CONTROL },
   // The five that travel and land nowhere. Each names why, because "not restored" without a
   // reason reads like a bug.
   poses: {
@@ -332,11 +337,6 @@ export const ADVANCED_PREFILL = {
     label: "Distilled variant",
     prefill: PREFILL_NONE,
     detail: "A Video Studio setting: which distilled LTX checkpoint the clip was made with.",
-  },
-  textEncoderModel: {
-    label: "Text encoder",
-    prefill: PREFILL_NONE,
-    detail: "A Video Studio setting: which text encoder read the prompt.",
   },
   lightning: {
     label: "Lightning steps",

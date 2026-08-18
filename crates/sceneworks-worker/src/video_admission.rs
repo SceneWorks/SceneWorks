@@ -513,8 +513,11 @@ fn fitted_or_floor_phase_peaks<'a>(
     }
     let selection = MemorySelection {
         strategy,
-        parameters: crate::mlx_fit_gate::estimate_floor_parameters(selector.contract, engaged)
-            .unwrap_or_default(),
+        parameters: crate::mlx_fit_gate::estimate_floor_smallest_parameters(
+            selector.contract,
+            engaged,
+        )
+        .unwrap_or_default(),
         tier: selector.identity.tier,
     };
     let (floor, profile_revision) =
@@ -576,7 +579,7 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
         for strategy in MemoryStrategy::ALL {
             let engaged = self.contract.engaged_composition(strategy);
             let Some(parameters) =
-                crate::mlx_fit_gate::estimate_floor_parameters(self.contract, &engaged)
+                crate::mlx_fit_gate::estimate_floor_smallest_parameters(self.contract, &engaged)
             else {
                 continue;
             };
@@ -880,8 +883,17 @@ fn admit_video_generation_with_curves_and_profiles(
                 return VideoAdmissionOutcome::default();
             };
             let calibration = contract.calibration.as_ref();
+            // Video candidates are fitted-curve or floor syntheses graded behind the shared
+            // estimate margin, and the selector transcript keeps no per-candidate measured-cell
+            // basis — so no optimized video selection may claim Calibrated authority here.
+            let optimization_authority = if selected.selection.strategy.is_optimized() {
+                gen_core::MemoryOptimizationAuthority::Estimated
+            } else {
+                gen_core::MemoryOptimizationAuthority::Resident
+            };
             let context = MemoryRunContext {
                 selection: selected.selection,
+                optimization_authority,
                 calibration_abi: calibration.map_or(gen_core::MEMORY_CALIBRATION_ABI, |id| id.abi),
                 calibration_fingerprint: calibration
                     .map(|id| id.fingerprint.clone())

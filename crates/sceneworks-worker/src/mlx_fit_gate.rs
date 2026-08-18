@@ -28,23 +28,30 @@
 //! The pure decision logic is cross-platform and unit-tested on every lane; only the live
 //! `sysctl hw.memsize` probe is macOS-only (it returns `None` elsewhere, so the gate no-ops).
 
-use std::path::Path;
+use std::borrow::Cow;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 #[cfg(test)]
 use gen_core::StagedResidencyAvailability;
 use gen_core::{
-    GenerationMemory, LoadSpec, MemoryBackendRealization, MemoryBudget, MemoryCacheState,
-    MemoryConformanceState, MemoryEvidence, MemoryEvidenceDimensions, MemoryEvidenceKey,
-    MemoryEvidenceVerdict, MemoryGeometry, MemoryMode, MemoryNumericTier, MemoryParityContract,
-    MemoryParityResult, MemoryProviderContract, MemoryRunContext, MemorySelection, MemoryStrategy,
-    OffloadPolicy, PerComponentBytes, TransformerComponent, WeightsSource,
+    GenerationMemory, LoadShapeDeclarationResult, LoadSpec, MemoryBackend,
+    MemoryBackendRealization, MemoryBudget, MemoryCacheState, MemoryConformanceState,
+    MemoryDecodeArtifactIdentity, MemoryDecodeGeometryPolicy, MemoryDecodePolicyQuery,
+    MemoryDecodeQualityDisposition, MemoryDecodeQualityFixture, MemoryDecodeQualityRuntimeIdentity,
+    MemoryEvidence, MemoryEvidenceDimensions, MemoryEvidenceKey, MemoryEvidenceVerdict,
+    MemoryGeometry, MemoryMode, MemoryNumericTier, MemoryOptimizationAuthority,
+    MemoryParityContract, MemoryParityResult, MemoryProviderContract, MemoryRunContext,
+    MemorySelection, MemoryStrategy, OffloadPolicy, PerComponentBytes, Precision, Quant,
+    TransformerComponent, WeightsSource,
 };
 use sceneworks_core::memory_calibration::{
     Backend as CalibrationBackend, BundleLoad, CalibrationBinding, EvidenceBundle, EvidenceQuery,
     EvidenceVerdict, Geometry as CalibrationGeometry, LoadShapeKey, StaleEvidenceReason,
     StrategyRung,
 };
+use serde::Deserialize;
 use serde_json::{Map as JsonObject, Value};
 
 use crate::fit_gate::resolve_offload;
@@ -56,6 +63,365 @@ use crate::{WorkerError, WorkerResult};
 const REQUEST_EVIDENCE_REVISION: &str = "sc-15507-request-scope-v1";
 const INFERENCE_CONTRACT_REVISION: &str = "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82";
 const MAGE_CALIBRATION_FINGERPRINT: &str = "mage-flow-generation-peak-v1";
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DecodeQualityFixtureWire {
+    seed: u64,
+    production_latent_provenance: String,
+    production_latent_sha256: String,
+    dense_output_sha256: String,
+    tiled_output_sha256: String,
+    observed_error: u32,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DecodeQualityGeometryWire {
+    width: u32,
+    height: u32,
+    batch: u32,
+    frames: u32,
+    reference_count: u32,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DecodeQualityArtifactWire {
+    repository: String,
+    revision: String,
+    variant: String,
+    fingerprint: String,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum DecodeQualityDispositionWire {
+    Admitted,
+    Refused { reason: String },
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DecodeGeometryPolicyWire {
+    quality_abi: u32,
+    family: String,
+    resolved_route: String,
+    backend: String,
+    tier: String,
+    load_shape: String,
+    artifact: DecodeQualityArtifactWire,
+    implementation_fingerprint: String,
+    mode: String,
+    overlay: Option<String>,
+    geometry: DecodeQualityGeometryWire,
+    use_pid: bool,
+    tile_edge: u32,
+    overlap: u32,
+    metric: String,
+    maximum_error: u32,
+    fixtures: Vec<DecodeQualityFixtureWire>,
+    production_evidence_sha256: String,
+    disposition: DecodeQualityDispositionWire,
+}
+
+impl DecodeGeometryPolicyWire {
+    fn into_core(self, model_id: &str) -> WorkerResult<MemoryDecodeGeometryPolicy> {
+        if self.resolved_route != model_id {
+            return Err(WorkerError::InvalidPayload(format!(
+                "decode-quality policy route {:?} cannot authorize model {:?}",
+                self.resolved_route, model_id
+            )));
+        }
+        let backend = match self.backend.as_str() {
+            "mlx" => MemoryBackend::Mlx,
+            other => {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "MLX decode-quality policy cannot use backend {other:?}"
+                )))
+            }
+        };
+        let tier = match self.tier.as_str() {
+            "bf16" => MemoryNumericTier {
+                precision: Precision::Bf16,
+                quant: None,
+                component_precision_floors: &[],
+            },
+            "q4" => MemoryNumericTier {
+                precision: Precision::Bf16,
+                quant: Some(Quant::Q4),
+                component_precision_floors: &[],
+            },
+            "q8" => MemoryNumericTier {
+                precision: Precision::Bf16,
+                quant: Some(Quant::Q8),
+                component_precision_floors: &[],
+            },
+            "nvfp4" => MemoryNumericTier {
+                precision: Precision::Bf16,
+                quant: Some(Quant::Nvfp4),
+                component_precision_floors: &[],
+            },
+            "fp32" => MemoryNumericTier {
+                precision: Precision::Fp32,
+                quant: None,
+                component_precision_floors: &[],
+            },
+            other => {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "unsupported decode-quality tier {other:?}"
+                )))
+            }
+        };
+        let load_shape = match self.load_shape.as_str() {
+            "eager_materialization" => gen_core::LoadShape::EagerMaterialization,
+            "deferred_materialization" => gen_core::LoadShape::DeferredMaterialization,
+            other => {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "unsupported decode-quality load shape {other:?}"
+                )))
+            }
+        };
+        let mode = match self.mode.as_str() {
+            "text_to_image" => MemoryMode::TextToImage,
+            "image_to_image" => MemoryMode::ImageToImage,
+            "edit" => MemoryMode::Edit,
+            other => MemoryMode::Other(other.to_owned()),
+        };
+        let disposition = match self.disposition {
+            DecodeQualityDispositionWire::Admitted => MemoryDecodeQualityDisposition::Admitted,
+            DecodeQualityDispositionWire::Refused { reason } => {
+                MemoryDecodeQualityDisposition::Refused { reason }
+            }
+        };
+        Ok(MemoryDecodeGeometryPolicy {
+            quality_abi: self.quality_abi,
+            family: self.family,
+            resolved_route: self.resolved_route,
+            backend,
+            tier,
+            load_shape,
+            artifact: MemoryDecodeArtifactIdentity {
+                repository: self.artifact.repository,
+                revision: self.artifact.revision,
+                variant: self.artifact.variant,
+                fingerprint: self.artifact.fingerprint,
+            },
+            implementation_fingerprint: self.implementation_fingerprint,
+            mode,
+            overlay: self.overlay,
+            geometry: MemoryGeometry {
+                width: self.geometry.width,
+                height: self.geometry.height,
+                batch: self.geometry.batch,
+                frames: self.geometry.frames,
+                reference_count: self.geometry.reference_count,
+            },
+            use_pid: self.use_pid,
+            tile_edge: self.tile_edge,
+            overlap: self.overlap,
+            metric: self.metric,
+            maximum_error: self.maximum_error,
+            fixtures: self
+                .fixtures
+                .into_iter()
+                .map(|fixture| MemoryDecodeQualityFixture {
+                    seed: fixture.seed,
+                    production_latent_provenance: fixture.production_latent_provenance,
+                    production_latent_sha256: fixture.production_latent_sha256,
+                    dense_output_sha256: fixture.dense_output_sha256,
+                    tiled_output_sha256: fixture.tiled_output_sha256,
+                    observed_error: fixture.observed_error,
+                })
+                .collect(),
+            production_evidence_sha256: self.production_evidence_sha256,
+            disposition,
+        })
+    }
+}
+
+/// Typed load-time disposition for a packaged quality table. A refused binding removes semantic
+/// decode authority only; dense decode and independent higher memory rungs remain available.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DecodeQualityBindingDecision {
+    Legacy,
+    Bound {
+        artifact: MemoryDecodeArtifactIdentity,
+        row_count: usize,
+    },
+    Refused {
+        reason: String,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DecodeQualityPolicyBinding {
+    pub(crate) policies: Vec<MemoryDecodeGeometryPolicy>,
+    /// True whenever the manifest declared semantic decode scope, including a typed refusal that
+    /// strips every row before provider construction. This prevents a refused table from becoming
+    /// indistinguishable from a genuinely legacy route.
+    pub(crate) authoritative: bool,
+    pub(crate) runtime_identity: Option<MemoryDecodeQualityRuntimeIdentity>,
+    pub(crate) decision: DecodeQualityBindingDecision,
+}
+
+pub(crate) fn manifest_declares_decode_quality_policies(
+    manifest: &JsonObject<String, Value>,
+) -> bool {
+    manifest
+        .get("mlx")
+        .and_then(Value::as_object)
+        .and_then(|mlx| mlx.get("memoryStrategyContract"))
+        .and_then(|contract| contract.get("implementations"))
+        .and_then(Value::as_array)
+        .is_some_and(|implementations| {
+            implementations.iter().any(|implementation| {
+                implementation
+                    .get("parameterRanges")
+                    .and_then(|ranges| ranges.get("decodeGeometryPolicies"))
+                    .and_then(Value::as_array)
+                    .is_some_and(|rows| !rows.is_empty())
+            })
+        })
+}
+
+/// Read the semantic P9 table from the model's derived static contract. This does not read or
+/// mutate the performance/calibration bundle: quality rows have their own ABI, hashes, and runtime
+/// path. Missing policy preserves the historical provider contract and its estimated fallback.
+pub(crate) fn decode_quality_policies_from_manifest(
+    manifest: &JsonObject<String, Value>,
+    model_id: &str,
+) -> WorkerResult<Vec<MemoryDecodeGeometryPolicy>> {
+    let Some(contract) = manifest
+        .get("mlx")
+        .and_then(Value::as_object)
+        .and_then(|mlx| mlx.get("memoryStrategyContract"))
+    else {
+        return Ok(Vec::new());
+    };
+    let implementations = contract
+        .get("implementations")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(
+                "mlx.memoryStrategyContract.implementations must be an array".to_owned(),
+            )
+        })?;
+    let mut policies = Vec::new();
+    for implementation in implementations {
+        let Some(ranges) = implementation.get("parameterRanges") else {
+            continue;
+        };
+        let Some(rows) = ranges.get("decodeGeometryPolicies") else {
+            continue;
+        };
+        if implementation.get("rung").and_then(Value::as_str) != Some("bounded_decode") {
+            return Err(WorkerError::InvalidPayload(
+                "decodeGeometryPolicies may be declared only by bounded_decode".to_owned(),
+            ));
+        }
+        let rows = rows.as_array().ok_or_else(|| {
+            WorkerError::InvalidPayload("decodeGeometryPolicies must be an array".to_owned())
+        })?;
+        for row in rows {
+            let wire: DecodeGeometryPolicyWire =
+                serde_json::from_value(row.clone()).map_err(|error| {
+                    WorkerError::InvalidPayload(format!("invalid decode-quality policy: {error}"))
+                })?;
+            policies.push(wire.into_core(model_id)?);
+        }
+    }
+    Ok(policies)
+}
+
+/// Bind packaged semantic rows to provenance resolved independently beside the exact weights tree.
+/// An unavailable or mismatched identity refuses only the optimized decode table and is emitted as
+/// a typed audit decision; it never turns a valid model install into a dense-decode load failure.
+pub(crate) fn bind_decode_quality_policies_from_manifest(
+    manifest: &JsonObject<String, Value>,
+    model_id: &str,
+    resolved_artifact: Option<&ResolvedArtifactProvenance>,
+) -> WorkerResult<DecodeQualityPolicyBinding> {
+    let policies = decode_quality_policies_from_manifest(manifest, model_id)?;
+    if policies.is_empty() {
+        return Ok(DecodeQualityPolicyBinding {
+            policies,
+            authoritative: false,
+            runtime_identity: None,
+            decision: DecodeQualityBindingDecision::Legacy,
+        });
+    }
+    let Some(resolved_artifact) = resolved_artifact else {
+        return Ok(DecodeQualityPolicyBinding {
+            policies: Vec::new(),
+            authoritative: true,
+            runtime_identity: None,
+            decision: DecodeQualityBindingDecision::Refused {
+                reason: "decode-quality table has no independently resolved artifact identity"
+                    .to_owned(),
+            },
+        });
+    };
+    let artifact = MemoryDecodeArtifactIdentity {
+        repository: resolved_artifact.identity.repository.clone(),
+        revision: resolved_artifact.identity.revision.clone(),
+        variant: resolved_artifact.identity.variant.clone(),
+        fingerprint: resolved_artifact.identity.fingerprint.clone(),
+    };
+    if let Some(foreign) = policies.iter().find(|policy| policy.artifact != artifact) {
+        return Ok(DecodeQualityPolicyBinding {
+            policies: Vec::new(),
+            authoritative: true,
+            runtime_identity: None,
+            decision: DecodeQualityBindingDecision::Refused {
+                reason: format!(
+                    "decode-quality artifact {:?}@{}:{} ({}) does not match resolved artifact {:?}@{}:{} ({})",
+                    foreign.artifact.repository,
+                    foreign.artifact.revision,
+                    foreign.artifact.variant,
+                    foreign.artifact.fingerprint,
+                    artifact.repository,
+                    artifact.revision,
+                    artifact.variant,
+                    artifact.fingerprint,
+                ),
+            },
+        });
+    }
+    let runtime_identity = MemoryDecodeQualityRuntimeIdentity {
+        artifact: artifact.clone(),
+    };
+    let decision = DecodeQualityBindingDecision::Bound {
+        artifact,
+        row_count: policies.len(),
+    };
+    Ok(DecodeQualityPolicyBinding {
+        policies,
+        authoritative: true,
+        runtime_identity: Some(runtime_identity),
+        decision,
+    })
+}
+
+pub(crate) fn attach_decode_quality_binding(
+    mut spec: LoadSpec,
+    binding: DecodeQualityPolicyBinding,
+    route: &str,
+) -> LoadSpec {
+    tracing::info!(
+        event = "mlx_decode_quality_binding",
+        route,
+        decision = ?binding.decision,
+        "resolved semantic decode-quality load binding"
+    );
+    spec = spec
+        .with_decode_geometry_policy_authority(binding.authoritative)
+        .with_decode_geometry_policies(binding.policies);
+    if let Some(identity) = binding.runtime_identity {
+        spec = spec.with_decode_quality_runtime_identity(identity);
+    }
+    spec
+}
 
 /// Load-invariant inputs used to estimate each request without putting geometry or strategy in the
 /// generator cache key.
@@ -77,9 +443,35 @@ pub(crate) struct MlxRequestPlan {
     /// `<= activation_headroom_bytes`, so the area term below can never go negative.
     fixed_reserve_bytes: u64,
     calibration: MlxCalibrationConfig,
+    /// Terminal declaration refusals retain safe eager execution, but may not consume any optimized
+    /// provider strategy later in the cache-aware selector. NotEvaluated preserves every legacy
+    /// route; Applied preserves the exact declaration-owned provider contract.
+    load_shape_declaration_result: LoadShapeDeclarationResult,
 }
 
 impl MlxRequestPlan {
+    /// Bind the already-resolved artifact tier without reinterpreting `LoadSpec::quantize`.
+    /// Prepacked Krea q4/q8 artifacts intentionally load with `quantize=None`; this explicit axis is
+    /// therefore required for request/evidence identity even when no calibration provenance exists.
+    pub(crate) fn with_resolved_artifact_tier(
+        mut self,
+        resolved_tier: Option<&str>,
+    ) -> WorkerResult<Self> {
+        let Some(resolved_tier) = resolved_tier else {
+            return Err(WorkerError::InvalidPayload(format!(
+                "{} has no resolved MLX artifact tier",
+                self.model_id
+            )));
+        };
+        self.tier = numeric_tier_for_resolved(
+            resolved_tier,
+            self.tier,
+            declared_component_floors(self.engine_id),
+        )
+        .map_err(|reason| WorkerError::InvalidPayload(format!("{}: {reason}", self.model_id)))?;
+        Ok(self)
+    }
+
     pub(crate) fn for_spec_and_manifest(
         engine_id: &'static str,
         model_id: &str,
@@ -101,6 +493,63 @@ impl MlxRequestPlan {
         )
     }
 
+    /// Prepared-spec planner used by imported single-file routes. Provider queries and token
+    /// validation are fallible contract operations here: failures propagate to the job instead of
+    /// being silently converted into an unmeasured/raw-restat estimate.
+    pub(crate) fn try_for_spec_and_manifest(
+        engine_id: &'static str,
+        model_id: &str,
+        spec: &LoadSpec,
+        manifest: Option<&JsonObject<String, Value>>,
+        resolved_artifact: Option<ResolvedArtifactProvenance>,
+    ) -> WorkerResult<Self> {
+        let media = crate::inference_runtime::media();
+        let provider_footprint = media
+            .footprint(engine_id, spec)
+            .map_err(|error| crate::classify_engine_error("MLX footprint query failed", error))?;
+        let activation_anchor_bytes =
+            media
+                .activation_memory_bytes_1024(engine_id)
+                .map_err(|error| {
+                    crate::classify_engine_error("MLX activation-memory query failed", error)
+                })?;
+        let (asset_bytes, _, headroom) = spec_component_bytes_with_provider_footprint_checked(
+            engine_id,
+            spec,
+            provider_footprint,
+        )
+        .map_err(|error| {
+            crate::classify_engine_error("MLX prepared source accounting failed", error)
+        })?;
+        let file_sizes = prepared_file_sizes(spec).map_err(|error| {
+            crate::classify_engine_error("MLX prepared source validation failed", error)
+        })?;
+        let folded_control_bytes = spec
+            .control
+            .as_ref()
+            .map_or(0, |source| prepared_source_bytes(source, &file_sizes));
+        let folded_adapter_source_bytes = spec.adapters.iter().fold(0_u64, |total, adapter| {
+            total.saturating_add(prepared_source_bytes(
+                &WeightsSource::File(adapter.path.clone()),
+                &file_sizes,
+            ))
+        });
+        let folded_adapter_bytes =
+            adapter_resident_source_bytes(engine_id, spec, folded_adapter_source_bytes);
+        Ok(Self::for_spec_and_manifest_with_accounting(
+            engine_id,
+            model_id,
+            spec,
+            manifest,
+            resolved_artifact,
+            asset_bytes,
+            folded_control_bytes,
+            folded_adapter_bytes,
+            headroom,
+            activation_anchor_bytes,
+        ))
+    }
+
     /// The platform-neutral core of [`Self::for_spec_and_manifest`]. Production supplies both facts
     /// from the active provider registry; tests may inject the same provider-owned facts when the
     /// host deliberately links no MLX catalog (the default Linux workspace build). Keeping the
@@ -120,6 +569,33 @@ impl MlxRequestPlan {
             spec_component_bytes_with_provider_footprint(engine_id, spec, provider_footprint);
         let folded_control_bytes = spec.control.as_ref().map_or(0, weights_source_bytes);
         let folded_adapter_bytes = adapter_source_bytes_for_gate(engine_id, spec);
+        Self::for_spec_and_manifest_with_accounting(
+            engine_id,
+            model_id,
+            spec,
+            manifest,
+            resolved_artifact,
+            asset_bytes,
+            folded_control_bytes,
+            folded_adapter_bytes,
+            headroom,
+            activation_anchor_bytes,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn for_spec_and_manifest_with_accounting(
+        engine_id: &'static str,
+        model_id: &str,
+        spec: &LoadSpec,
+        manifest: Option<&JsonObject<String, Value>>,
+        resolved_artifact: Option<ResolvedArtifactProvenance>,
+        asset_bytes: u64,
+        folded_control_bytes: u64,
+        folded_adapter_bytes: u64,
+        headroom: HeadroomAllowance,
+        activation_anchor_bytes: Option<u64>,
+    ) -> Self {
         let declared_floors = declared_component_floors(engine_id);
         let spec_tier = MemoryNumericTier {
             precision: spec.precision,
@@ -184,6 +660,7 @@ impl MlxRequestPlan {
             activation_headroom_bytes: activation_anchor_bytes.saturating_add(fixed_reserve_bytes),
             fixed_reserve_bytes,
             calibration,
+            load_shape_declaration_result: spec.load_shape_declaration_result,
         }
     }
 
@@ -681,6 +1158,7 @@ struct VerifiedGeometryAlternative {
     /// would not honour.
     load_shape: gen_core::LoadShape,
     strategy: MemoryStrategy,
+    parameters: gen_core::MemoryStrategyParameters,
     engaged_composition: Vec<MemoryStrategy>,
 }
 
@@ -689,10 +1167,10 @@ struct VerifiedGeometryAlternative {
 /// closure-current binding, but a DIFFERENT geometry — the cell the request itself could not be
 /// admitted on.
 ///
-/// Closure-current is a deliberate restriction, not an oversight: `MLX_ESTIMATE_MARGIN` (0.10)
-/// was derived to cover extrapolation error on top of same-closure re-capture variance
-/// (`crates/sceneworks-worker/src/ladder_margin_policy.rs`). A stale-closure record already
-/// carries its own 0.05 drift allowance on the MEASURED path; stacking that drift under an
+/// Closure-current is a deliberate restriction, not an oversight: `MLX_ESTIMATE_MARGIN` was
+/// derived to cover extrapolation error on top of same-closure re-capture variance
+/// (`crates/sceneworks-worker/src/ladder_margin_policy.rs`). A stale-closure record already carries
+/// its own corpus-derived drift allowance on the MEASURED path; stacking that drift under an
 /// extrapolation would spend the estimate margin twice, and no derivation covers the sum — so a
 /// stale record may keep serving its own cell behind the stale margin (sc-18095) but may not seed
 /// an extrapolated estimate.
@@ -767,6 +1245,9 @@ pub(crate) struct MlxRequestInputs {
 pub(crate) struct MlxRequestEvaluation {
     pub memory: GenerationMemory,
     pub context: MemoryRunContext,
+    /// Typed semantic-decode admissions and refusals considered for this exact request. Kept
+    /// separate from memory evidence so no quality receipt can be mistaken for a measurement.
+    pub decode_quality_decisions: Vec<DecodeQualityRequestDecision>,
     /// Request-scoped soft MLX ceiling derived from an exact verified cell. Legacy cells keep the
     /// process-global #1947 fallback. Applying this never changes the wired limit.
     pub process_limit_bytes: Option<u64>,
@@ -827,6 +1308,157 @@ fn request_mode(mode: &str) -> (MemoryMode, &'static str) {
     }
 }
 
+/// Provider-facing behavior identity for an exact routed request.
+///
+/// Krea Raw's public reference toggle deliberately remains the catalog's `image_generation`
+/// coordinate, but the provider executes that one-reference request through its latent-init
+/// image-to-image entrypoint. Keep that internal contract identity exact without inventing a new
+/// public route or a generic CFG axis.
+fn provider_request_mode(engine_id: &str, inputs: &MlxRequestInputs) -> (MemoryMode, &'static str) {
+    if (engine_id == "flux1_dev_control"
+        && matches!(
+            inputs.mode.as_str(),
+            "image_generation" | "text_to_image" | "style_variations" | "character_image"
+        ))
+        || (engine_id == "flux1_dev" && inputs.mode == "character_image")
+    {
+        (MemoryMode::ImageToImage, "image_to_image")
+    } else if matches!(engine_id, "flux1_schnell" | "flux1_dev")
+        && matches!(
+            inputs.mode.as_str(),
+            "image_generation" | "text_to_image" | "style_variations"
+        )
+    {
+        (MemoryMode::TextToImage, "text_to_image")
+    } else if matches!(engine_id, "flux2_klein_9b_edit" | "flux2_klein_9b_kv_edit")
+        && (1..=8).contains(&inputs.reference_count)
+    {
+        (MemoryMode::Edit, "edit")
+    } else if (engine_id == "flux2_klein_9b" && inputs.has_reference && inputs.reference_count == 1)
+        || is_krea_base_dit_reference_route(engine_id, inputs)
+    {
+        (MemoryMode::ImageToImage, "image_to_image")
+    } else {
+        request_mode(&inputs.mode)
+    }
+}
+
+fn is_krea_base_dit_provider(engine_id: &str) -> bool {
+    matches!(
+        engine_id,
+        "krea_2_raw" | "krea_2_turbo" | "krea_2_edit" | "krea_2_turbo_edit"
+    )
+}
+
+fn is_flux2_klein_provider(engine_id: &str) -> bool {
+    matches!(
+        engine_id,
+        "flux2_klein_9b" | "flux2_klein_9b_edit" | "flux2_klein_9b_kv_edit"
+    )
+}
+
+fn is_flux1_provider(engine_id: &str) -> bool {
+    matches!(
+        engine_id,
+        "flux1_schnell" | "flux1_dev" | "flux1_dev_control"
+    )
+}
+
+/// Provider-owned request overlay derived from the complete load identity.
+///
+/// FLUX.2 Klein authenticates every load-time composition at request scope, including conservative
+/// eager requests whose BTR declaration refused the shape. Mirror the provider's closed axis order
+/// from the actual `LoadSpec`; public labels such as `lora` and `references:1` are not evidence
+/// identities. Krea's base-DiT family deliberately carries the same features on typed request/load
+/// axes and always uses a provider overlay of None.
+pub(crate) fn provider_overlay_for_load_spec(
+    engine_id: &str,
+    spec: &LoadSpec,
+    public_overlay: Option<String>,
+) -> Option<String> {
+    if is_krea_base_dit_provider(engine_id) {
+        return None;
+    }
+    if is_flux1_provider(engine_id) {
+        let mut axes = Vec::new();
+        if engine_id == "flux1_dev_control" || spec.control.is_some() {
+            axes.push("control");
+        }
+        if !spec.extra_controls.is_empty() {
+            axes.push("extra-controls");
+        }
+        if !spec.adapters.is_empty() {
+            axes.push("adapters");
+        }
+        if spec.ip_adapter.is_some() {
+            axes.push("ip-adapter");
+        }
+        if spec.pid.is_some() {
+            axes.push("pid");
+        }
+        if spec.identity.is_some() {
+            axes.push("identity");
+        }
+        if spec.text_encoder.is_some() {
+            axes.push("external-text-encoder");
+        }
+        return (!axes.is_empty()).then(|| axes.join("-"));
+    }
+    if !is_flux2_klein_provider(engine_id) {
+        return public_overlay;
+    }
+    let mut axes = Vec::new();
+    if !spec.adapters.is_empty() {
+        axes.push("adapters");
+    }
+    if spec.control.is_some() {
+        axes.push("control");
+    }
+    if !spec.extra_controls.is_empty() {
+        axes.push("extra-controls");
+    }
+    if spec.ip_adapter.is_some() {
+        axes.push("ip-adapter");
+    }
+    if spec.identity.is_some() {
+        axes.push("identity");
+    }
+    if spec.text_encoder.is_some() {
+        axes.push("external-text-encoder");
+    }
+    if !spec.components.is_empty() {
+        axes.push("components");
+    }
+    (!axes.is_empty()).then(|| axes.join("-"))
+}
+
+fn is_krea_base_dit_reference_route(engine_id: &str, inputs: &MlxRequestInputs) -> bool {
+    matches!(engine_id, "krea_2_raw" | "krea_2_turbo")
+        && matches!(inputs.mode.as_str(), "image_generation" | "text_to_image")
+        && inputs.has_reference
+        && inputs.reference_count == 1
+}
+
+/// Enforce provider request identity after production has derived any load-dependent overlay from
+/// the complete `LoadSpec`. Krea always normalizes to None. Klein inputs already carry the exact
+/// provider overlay from [`provider_overlay_for_load_spec`]; reconstructing it here from only an
+/// adapter count would erase text-encoder and component axes on safe eager fallback routes.
+fn provider_request_inputs<'a>(
+    engine_id: &str,
+    inputs: &'a MlxRequestInputs,
+) -> Cow<'a, MlxRequestInputs> {
+    if !is_krea_base_dit_provider(engine_id) {
+        return Cow::Borrowed(inputs);
+    }
+    if inputs.overlay.is_some() {
+        let mut normalized = inputs.clone();
+        normalized.overlay = None;
+        Cow::Owned(normalized)
+    } else {
+        Cow::Borrowed(inputs)
+    }
+}
+
 /// Translate a selection into the engine's per-rung engagement knobs.
 ///
 /// SC-15805: this asks the contract which rungs the selection ENGAGES rather than re-deriving the
@@ -838,16 +1470,7 @@ pub(crate) fn memory_for_selection(
     contract: &MemoryProviderContract,
     selection: MemorySelection,
 ) -> GenerationMemory {
-    GenerationMemory {
-        stage_residency: contract.engages(selection.strategy, MemoryStrategy::StagedResidency),
-        tile_vae_decode: contract.engages(selection.strategy, MemoryStrategy::BoundedDecode),
-        chunk_attention: contract.engages(selection.strategy, MemoryStrategy::BoundedAttention),
-        stream_transformer_blocks: contract.engages(
-            selection.strategy,
-            MemoryStrategy::BoundedTransformerResidency,
-        ),
-        ..Default::default()
-    }
+    contract.generation_memory(&selection).unwrap_or_default()
 }
 
 fn resident_evidence(
@@ -874,7 +1497,7 @@ fn resident_evidence(
             overlay: overlay.map(str::to_owned),
             geometry,
             strategy: selection.strategy,
-            engaged_composition: contract.engaged_composition(selection.strategy),
+            engaged_composition: contract.engaged_composition_for_selection(&selection),
             parameters: selection.parameters,
         },
         conformance: MemoryConformanceState::ImplementedUnverified,
@@ -1435,6 +2058,44 @@ struct SynthesizedEstimate {
     selection: MemorySelection,
     evidence: MemoryEvidence,
     basis: crate::memory_strategy::CandidateBasis,
+    decode_quality: DecodeQualityRequestDecision,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DecodeQualityRequestDecision {
+    NotDeclared,
+    NotEngaged {
+        strategy: MemoryStrategy,
+    },
+    Admitted {
+        strategy: MemoryStrategy,
+        tile_edge: u32,
+        overlap: u32,
+        evidence_sha256: String,
+    },
+    Refused {
+        strategy: MemoryStrategy,
+        tile_edge: Option<u32>,
+        overlap: Option<u32>,
+        evidence_sha256: Option<String>,
+        reason: String,
+    },
+    Unmeasured {
+        strategy: MemoryStrategy,
+        reason: String,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct EstimateParameterCandidate {
+    parameters: gen_core::MemoryStrategyParameters,
+    decode_quality: DecodeQualityRequestDecision,
+}
+
+#[derive(Default)]
+struct SynthesizedEstimateLadder {
+    estimates: Vec<SynthesizedEstimate>,
+    decode_quality_decisions: Vec<DecodeQualityRequestDecision>,
 }
 
 const fn strategy_rung(strategy: MemoryStrategy) -> StrategyRung {
@@ -1501,7 +2162,7 @@ pub(crate) fn estimate_evidence(
             overlay: overlay.map(str::to_owned),
             geometry,
             strategy: selection.strategy,
-            engaged_composition: contract.engaged_composition(selection.strategy),
+            engaged_composition: contract.engaged_composition_for_selection(&selection),
             parameters: selection.parameters,
         },
         conformance: MemoryConformanceState::ImplementedUnverified,
@@ -1574,7 +2235,14 @@ pub(crate) fn estimate_floor_weights_bytes(
 /// far below the floor's unreduced headroom charge as the provider allows. `None` when a required
 /// knob has no declared range: such a selection cannot be validated, so no candidate is
 /// synthesized for the rung.
-pub(crate) fn estimate_floor_parameters(
+/// The smallest declared value for every numeric knob the engaged composition requires — the most
+/// deeply bounding parameters the provider publishes, which keeps the true runtime transient as
+/// far below the floor's unreduced headroom charge as the provider allows. `None` when a required
+/// knob has no declared range: such a selection cannot be validated, so no candidate is
+/// synthesized for the rung. This is the video-lane floor shape (`video_admission`); the image
+/// lane's per-candidate builder below carries decode-quality decisions the video lane has no use
+/// for.
+pub(crate) fn estimate_floor_smallest_parameters(
     contract: &MemoryProviderContract,
     engaged: &[MemoryStrategy],
 ) -> Option<gen_core::MemoryStrategyParameters> {
@@ -1607,6 +2275,229 @@ pub(crate) fn estimate_floor_parameters(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn estimate_floor_parameters(
+    contract: &MemoryProviderContract,
+    engaged: &[MemoryStrategy],
+    strategy: MemoryStrategy,
+    tier: MemoryNumericTier,
+    mode_key: &str,
+    overlay: Option<&str>,
+    geometry: MemoryGeometry,
+    use_pid: bool,
+) -> (
+    Vec<EstimateParameterCandidate>,
+    Vec<DecodeQualityRequestDecision>,
+) {
+    let smallest = |strategy: MemoryStrategy,
+                    pick: fn(&gen_core::MemoryParameterRanges) -> &Vec<u32>|
+     -> Option<Option<u32>> {
+        if !engaged.contains(&strategy) {
+            return Some(None);
+        }
+        pick(&contract.capability(strategy)?.parameters)
+            .iter()
+            .copied()
+            .min()
+            .map(Some)
+    };
+    let Some(attention_chunk_size) = smallest(MemoryStrategy::BoundedAttention, |ranges| {
+        &ranges.attention_chunk_sizes
+    }) else {
+        return (
+            Vec::new(),
+            vec![DecodeQualityRequestDecision::Refused {
+                strategy,
+                tile_edge: None,
+                overlap: None,
+                evidence_sha256: None,
+                reason: "required attention chunk range is empty".to_owned(),
+            }],
+        );
+    };
+    let Some(transformer_window_size) =
+        smallest(MemoryStrategy::BoundedTransformerResidency, |ranges| {
+            &ranges.transformer_window_sizes
+        })
+    else {
+        return (
+            Vec::new(),
+            vec![DecodeQualityRequestDecision::Refused {
+                strategy,
+                tile_edge: None,
+                overlap: None,
+                evidence_sha256: None,
+                reason: "required transformer window range is empty".to_owned(),
+            }],
+        );
+    };
+    let base_parameters = gen_core::MemoryStrategyParameters {
+        decode_tile_edge: None,
+        decode_overlap: None,
+        attention_chunk_size,
+        transformer_window_size,
+        transformer_window_component: None,
+    };
+    if !engaged.contains(&MemoryStrategy::BoundedDecode) {
+        return (
+            vec![EstimateParameterCandidate {
+                parameters: base_parameters,
+                decode_quality: DecodeQualityRequestDecision::NotEngaged { strategy },
+            }],
+            Vec::new(),
+        );
+    }
+    let Some(decode) = contract.capability(MemoryStrategy::BoundedDecode) else {
+        return (
+            Vec::new(),
+            vec![DecodeQualityRequestDecision::Refused {
+                strategy,
+                tile_edge: None,
+                overlap: None,
+                evidence_sha256: None,
+                reason: "bounded decode capability is absent".to_owned(),
+            }],
+        );
+    };
+    if decode.parameters.decode_geometry_policies.is_empty() {
+        if contract.decode_geometry_policy_authoritative {
+            let refusal = DecodeQualityRequestDecision::Refused {
+                strategy,
+                tile_edge: None,
+                overlap: None,
+                evidence_sha256: None,
+                reason: "bounded decode has a declared quality scope but no applicable row for the loaded tier/load shape"
+                    .to_owned(),
+            };
+            // The decode rung itself has no exact authority. A higher independent rung retains its
+            // own estimate with decode omitted, so request-selection-aware engagement cannot
+            // accidentally resurrect the route-blind tile domain.
+            let candidates = (strategy != MemoryStrategy::BoundedDecode)
+                .then_some(EstimateParameterCandidate {
+                    parameters: base_parameters,
+                    decode_quality: DecodeQualityRequestDecision::NotEngaged { strategy },
+                })
+                .into_iter()
+                .collect();
+            return (candidates, vec![refusal]);
+        }
+        let pair = if let Some(routes) = &contract.pid_decode_routes {
+            let route = if use_pid { &routes.pid } else { &routes.native };
+            route
+                .tile_edges
+                .iter()
+                .copied()
+                .min()
+                .zip(Some(route.tile_overlap))
+        } else {
+            decode
+                .parameters
+                .decode_tile_edges
+                .iter()
+                .copied()
+                .min()
+                .zip(decode.parameters.decode_overlaps.iter().copied().min())
+        };
+        let Some((tile_edge, overlap)) = pair else {
+            return (
+                Vec::new(),
+                vec![DecodeQualityRequestDecision::Refused {
+                    strategy,
+                    tile_edge: None,
+                    overlap: None,
+                    evidence_sha256: None,
+                    reason: "legacy bounded decode has no complete edge/overlap pair".to_owned(),
+                }],
+            );
+        };
+        let mut parameters = base_parameters;
+        parameters.decode_tile_edge = Some(tile_edge);
+        parameters.decode_overlap = Some(overlap);
+        return (
+            vec![EstimateParameterCandidate {
+                parameters,
+                decode_quality: DecodeQualityRequestDecision::NotDeclared,
+            }],
+            Vec::new(),
+        );
+    }
+
+    let query = MemoryDecodePolicyQuery {
+        tier,
+        load_shape: contract.load_shape,
+        mode_key,
+        overlay,
+        geometry,
+        use_pid,
+    };
+    let rows = match contract.decode_geometry_policies_for_request(query) {
+        Ok(rows) => rows,
+        Err(error) => {
+            return (
+                Vec::new(),
+                vec![DecodeQualityRequestDecision::Refused {
+                    strategy,
+                    tile_edge: None,
+                    overlap: None,
+                    evidence_sha256: None,
+                    reason: error.to_string(),
+                }],
+            )
+        }
+    };
+    let mut rows = rows;
+    rows.sort_by_key(|policy| (policy.tile_edge, policy.overlap));
+    let mut candidates = Vec::new();
+    let mut decisions = Vec::new();
+    for policy in rows {
+        match &policy.disposition {
+            MemoryDecodeQualityDisposition::Admitted => {
+                let mut parameters = base_parameters;
+                parameters.decode_tile_edge = Some(policy.tile_edge);
+                parameters.decode_overlap = Some(policy.overlap);
+                candidates.push(EstimateParameterCandidate {
+                    parameters,
+                    decode_quality: DecodeQualityRequestDecision::Admitted {
+                        strategy,
+                        tile_edge: policy.tile_edge,
+                        overlap: policy.overlap,
+                        evidence_sha256: policy.production_evidence_sha256.clone(),
+                    },
+                });
+            }
+            MemoryDecodeQualityDisposition::Refused { reason } => {
+                decisions.push(DecodeQualityRequestDecision::Refused {
+                    strategy,
+                    tile_edge: Some(policy.tile_edge),
+                    overlap: Some(policy.overlap),
+                    evidence_sha256: Some(policy.production_evidence_sha256.clone()),
+                    reason: reason.clone(),
+                });
+            }
+        }
+    }
+    if candidates.is_empty() {
+        if decisions.is_empty() {
+            decisions.push(DecodeQualityRequestDecision::Unmeasured {
+                strategy,
+                reason: format!(
+                    "no exact production-latent row for {}x{} load_shape={:?} mode={} overlay={overlay:?} use_pid={use_pid}",
+                    geometry.width, geometry.height, contract.load_shape, mode_key,
+                ),
+            });
+        }
+        // Bounded decode itself cannot exist without an admitted pair. A higher independent rung
+        // keeps its own parameters and omits decode so selection-aware engagement excludes rung 2.
+        if strategy != MemoryStrategy::BoundedDecode {
+            candidates.push(EstimateParameterCandidate {
+                parameters: base_parameters,
+                decode_quality: DecodeQualityRequestDecision::NotEngaged { strategy },
+            });
+        }
+    }
+    (candidates, decisions)
+}
+
 /// Synthesize estimate-backed candidates for every optimized rung the provider contract marks
 /// `Implemented` (sc-18096, epic 18093 R1a). Called only on legacy admission routes — a covered
 /// cell is authorized by its exact measured ladder and gets no synthetic sibling.
@@ -1635,14 +2526,15 @@ fn synthesize_estimate_ladder(
     mode_key: &str,
     overlay: Option<&str>,
     geometry: MemoryGeometry,
+    use_pid: bool,
     calibration_fingerprint: Option<&str>,
     bases: &[MeasuredRungBasis],
-) -> Vec<SynthesizedEstimate> {
+) -> SynthesizedEstimateLadder {
     use crate::ladder_margin_policy::ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE;
     use crate::memory_strategy::CandidateBasis;
 
     let request_area = f64::from(geometry.width) * f64::from(geometry.height);
-    let mut synthesized = Vec::new();
+    let mut ladder = SynthesizedEstimateLadder::default();
     for strategy in MemoryStrategy::ALL {
         if strategy == MemoryStrategy::Resident {
             // The resident baseline candidate already exists on every legacy route.
@@ -1654,155 +2546,186 @@ fn synthesize_estimate_ladder(
         ) {
             continue;
         }
-        let engaged = contract.engaged_composition(strategy);
+        let declared_engaged = contract.engaged_composition(strategy);
+        let (parameter_candidates, decisions) = estimate_floor_parameters(
+            contract,
+            &declared_engaged,
+            strategy,
+            plan.tier,
+            mode_key,
+            overlay,
+            geometry,
+            use_pid,
+        );
+        ladder.decode_quality_decisions.extend(decisions);
 
-        // 1. Fitted-curve basis: the closest measured geometry below the request, else the
-        //    smallest above it (whose clamp-at-1.0 scaling degenerates to the measurement itself).
-        //    The basis must have been measured under the LOADED provider's exact calibration
-        //    identity: a drifted estimator invalidates the measured numbers as an extrapolation
-        //    seed, and this is the only gate on legacy routes (the `carries_verified_claim`
-        //    demotion never fires without a verified claim on the route). A contract with no
-        //    calibration identity gets no fitted candidates at all — fail closed.
-        //
-        //    The load-shape conjunct compares CONTRACT shape only — deliberately, and unlike the
-        //    Evidence-path filter's measured-candidate leg, which also compares `identity
-        //    .load_shape` (sc-18251). An estimate-basis candidate is graded downstream by the
-        //    estimate wrap of `optimized_eligibility`, which short-circuits at the conformance
-        //    gate's `Unverified` BEFORE the identity load-shape comparison ever runs, so the
-        //    identity's shape is never consulted for an estimate. Adding the conjunct here would
-        //    be stricter than the gate this filter anticipates.
-        let fitted = bases
-            .iter()
-            .filter(|basis| {
-                basis.rung == strategy_rung(strategy)
-                    && basis.load_shape == contract.load_shape
-                    && basis.engaged_composition == engaged
-                    && contract.calibration.as_ref().is_some_and(|identity| {
-                        identity.abi == basis.calibration_abi
-                            && identity.fingerprint == basis.calibration_fingerprint
-                    })
-            })
-            .max_by_key(|basis| {
-                let area = u64::from(basis.geometry.width) * u64::from(basis.geometry.height);
-                let below = area as f64 <= request_area;
-                // Rank every below-request basis above every above-request one; among "below" take
-                // the largest area, among "above" the smallest.
-                (below, if below { area as i128 } else { -(area as i128) })
-            })
-            .and_then(|basis| {
-                let selection = MemorySelection {
-                    strategy,
-                    parameters: basis.parameters,
-                    tier: plan.tier,
-                };
-                if contract.validate_selection(&selection).is_err() {
-                    return None;
-                }
-                let measured_area =
-                    f64::from(basis.geometry.width) * f64::from(basis.geometry.height);
-                let scale = (request_area / measured_area).max(1.0);
-                let scaled =
-                    |bytes: u64| (bytes as f64 * scale).ceil().clamp(0.0, u64::MAX as f64) as u64;
-                let measured_binding = binding_phase(
-                    basis.conditioning_peak_bytes,
-                    basis.denoise_peak_bytes,
-                    basis.decode_peak_bytes,
-                );
-                let extrapolated_binding = binding_phase(
-                    basis.conditioning_peak_bytes,
-                    scaled(basis.denoise_peak_bytes),
-                    scaled(basis.decode_peak_bytes),
-                );
-                if ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE
-                    && extrapolated_binding != measured_binding
-                {
-                    // The pinned sc-18094 constraint: the corpus shows a 17.14% per-phase
-                    // re-capture spread that no margin in the policy absorbs, so an extrapolation
-                    // that moves the request peak onto a different phase than the one measured is
-                    // refused rather than margined. The rung falls back to the floor path below.
+        for parameter_candidate in parameter_candidates {
+            let floor_selection = MemorySelection {
+                strategy,
+                parameters: parameter_candidate.parameters,
+                tier: plan.tier,
+            };
+            let engaged = contract.engaged_composition_for_selection(&floor_selection);
+
+            // 1. Fitted-curve basis: the closest measured geometry below the request, else the
+            //    smallest above it (whose clamp-at-1.0 scaling degenerates to the measurement itself).
+            //    The basis must have been measured under the LOADED provider's exact calibration
+            //    identity: a drifted estimator invalidates the measured numbers as an extrapolation
+            //    seed, and this is the only gate on legacy routes (the `carries_verified_claim`
+            //    demotion never fires without a verified claim on the route). A contract with no
+            //    calibration identity gets no fitted candidates at all — fail closed.
+            //
+            //    The load-shape conjunct compares CONTRACT shape only — deliberately, and unlike the
+            //    Evidence-path filter's measured-candidate leg, which also compares `identity
+            //    .load_shape` (sc-18251). An estimate-basis candidate is graded downstream by the
+            //    estimate wrap of `optimized_eligibility`, which short-circuits at the conformance
+            //    gate's `Unverified` BEFORE the identity load-shape comparison ever runs, so the
+            //    identity's shape is never consulted for an estimate. Adding the conjunct here would
+            //    be stricter than the gate this filter anticipates.
+            let fitted = bases
+                .iter()
+                .filter(|basis| {
+                    basis.rung == strategy_rung(strategy)
+                        && basis.load_shape == contract.load_shape
+                        && basis.engaged_composition == engaged
+                        && contract.calibration.as_ref().is_some_and(|identity| {
+                            identity.abi == basis.calibration_abi
+                                && identity.fingerprint == basis.calibration_fingerprint
+                        })
+                })
+                .max_by_key(|basis| {
+                    let area = u64::from(basis.geometry.width) * u64::from(basis.geometry.height);
+                    let below = area as f64 <= request_area;
+                    // Rank every below-request basis above every above-request one; among "below" take
+                    // the largest area, among "above" the smallest.
+                    (below, if below { area as i128 } else { -(area as i128) })
+                })
+                .and_then(|basis| {
+                    let mut parameters = basis.parameters;
+                    parameters.decode_tile_edge = parameter_candidate.parameters.decode_tile_edge;
+                    parameters.decode_overlap = parameter_candidate.parameters.decode_overlap;
+                    let selection = MemorySelection {
+                        strategy,
+                        parameters,
+                        tier: plan.tier,
+                    };
+                    if contract.validate_selection(&selection).is_err() {
+                        return None;
+                    }
+                    let measured_area =
+                        f64::from(basis.geometry.width) * f64::from(basis.geometry.height);
+                    let scale = (request_area / measured_area).max(1.0);
+                    let scaled = |bytes: u64| {
+                        (bytes as f64 * scale).ceil().clamp(0.0, u64::MAX as f64) as u64
+                    };
+                    let measured_binding = binding_phase(
+                        basis.conditioning_peak_bytes,
+                        basis.denoise_peak_bytes,
+                        basis.decode_peak_bytes,
+                    );
+                    let extrapolated_binding = binding_phase(
+                        basis.conditioning_peak_bytes,
+                        scaled(basis.denoise_peak_bytes),
+                        scaled(basis.decode_peak_bytes),
+                    );
+                    if ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE
+                        && extrapolated_binding != measured_binding
+                    {
+                        // The pinned sc-18094 constraint: the corpus shows a 17.14% per-phase
+                        // re-capture spread that no margin in the policy absorbs, so an extrapolation
+                        // that moves the request peak onto a different phase than the one measured is
+                        // refused rather than margined. The rung falls back to the floor path below.
+                        tracing::info!(
+                            route = contract.provider_id,
+                            backend = "mlx",
+                            ?strategy,
+                            basis_record = basis.record_id,
+                            measured_binding_phase = ?measured_binding,
+                            extrapolated_binding_phase = ?extrapolated_binding,
+                            "fitted-curve estimate rejected: extrapolation flips the binding phase \
+                             (ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE)"
+                        );
+                        return None;
+                    }
+                    let predicted_peak_bytes = scaled(basis.envelope_peak_bytes);
                     tracing::info!(
                         route = contract.provider_id,
                         backend = "mlx",
                         ?strategy,
                         basis_record = basis.record_id,
-                        measured_binding_phase = ?measured_binding,
-                        extrapolated_binding_phase = ?extrapolated_binding,
-                        "fitted-curve estimate rejected: extrapolation flips the binding phase \
-                         (ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE)"
+                        basis_geometry =
+                            format!("{}x{}", basis.geometry.width, basis.geometry.height),
+                        raw_peak_bytes = predicted_peak_bytes,
+                        area_scale = scale,
+                        "synthesized fitted-curve estimate candidate from a measured cell"
                     );
-                    return None;
-                }
-                let predicted_peak_bytes = scaled(basis.envelope_peak_bytes);
-                tracing::info!(
-                    route = contract.provider_id,
-                    backend = "mlx",
-                    ?strategy,
-                    basis_record = basis.record_id,
-                    basis_geometry = format!("{}x{}", basis.geometry.width, basis.geometry.height),
-                    raw_peak_bytes = predicted_peak_bytes,
-                    area_scale = scale,
-                    "synthesized fitted-curve estimate candidate from a measured cell"
-                );
-                Some(SynthesizedEstimate {
-                    selection,
-                    evidence: estimate_evidence(
-                        contract,
-                        gen_core::MemoryBackend::Mlx,
-                        plan.tier,
-                        mode_key,
-                        overlay,
-                        geometry,
+                    Some(SynthesizedEstimate {
                         selection,
-                        predicted_peak_bytes,
-                        calibration_fingerprint,
-                    ),
-                    basis: CandidateBasis::EstimateFittedCurve,
-                })
-            });
-        if let Some(candidate) = fitted {
-            synthesized.push(candidate);
-            continue;
-        }
+                        evidence: estimate_evidence(
+                            contract,
+                            gen_core::MemoryBackend::Mlx,
+                            plan.tier,
+                            mode_key,
+                            overlay,
+                            geometry,
+                            selection,
+                            predicted_peak_bytes,
+                            calibration_fingerprint,
+                        ),
+                        basis: CandidateBasis::EstimateFittedCurve,
+                        decode_quality: parameter_candidate.decode_quality.clone(),
+                    })
+                });
+            if let Some(candidate) = fitted {
+                ladder
+                    .decode_quality_decisions
+                    .push(candidate.decode_quality.clone());
+                ladder.estimates.push(candidate);
+                continue;
+            }
 
-        // 2. Weights + headroom floor — no measured basis, so the binding-phase constraint does
-        //    not gate it (scope sentence on the constraint's doc).
-        let Some(parameters) = estimate_floor_parameters(contract, &engaged) else {
-            continue;
-        };
-        let selection = MemorySelection {
-            strategy,
-            parameters,
-            tier: plan.tier,
-        };
-        if contract.validate_selection(&selection).is_err() {
-            continue;
-        }
-        let predicted_peak_bytes = estimate_floor_weights_bytes(contract, &engaged)
-            .saturating_add(plan.generic_headroom_bytes(geometry));
-        tracing::info!(
-            route = contract.provider_id,
-            backend = "mlx",
-            ?strategy,
-            raw_peak_bytes = predicted_peak_bytes,
-            "synthesized weights+headroom floor estimate candidate"
-        );
-        synthesized.push(SynthesizedEstimate {
-            selection,
-            evidence: estimate_evidence(
-                contract,
-                gen_core::MemoryBackend::Mlx,
-                plan.tier,
-                mode_key,
-                overlay,
-                geometry,
+            // 2. Weights + headroom floor — no measured basis, so the binding-phase constraint does
+            //    not gate it (scope sentence on the constraint's doc).
+            let selection = MemorySelection {
+                strategy,
+                parameters: parameter_candidate.parameters,
+                tier: plan.tier,
+            };
+            if contract.validate_selection(&selection).is_err() {
+                continue;
+            }
+            let predicted_peak_bytes = estimate_floor_weights_bytes(contract, &engaged)
+                .saturating_add(plan.generic_headroom_bytes(geometry));
+            tracing::info!(
+                route = contract.provider_id,
+                backend = "mlx",
+                ?strategy,
+                raw_peak_bytes = predicted_peak_bytes,
+                "synthesized weights+headroom floor estimate candidate"
+            );
+            let candidate = SynthesizedEstimate {
                 selection,
-                predicted_peak_bytes,
-                calibration_fingerprint,
-            ),
-            basis: CandidateBasis::EstimateFloor,
-        });
+                evidence: estimate_evidence(
+                    contract,
+                    gen_core::MemoryBackend::Mlx,
+                    plan.tier,
+                    mode_key,
+                    overlay,
+                    geometry,
+                    selection,
+                    predicted_peak_bytes,
+                    calibration_fingerprint,
+                ),
+                basis: CandidateBasis::EstimateFloor,
+                decode_quality: parameter_candidate.decode_quality,
+            };
+            ladder
+                .decode_quality_decisions
+                .push(candidate.decode_quality.clone());
+            ladder.estimates.push(candidate);
+        }
     }
-    synthesized
+    ladder
 }
 
 /// Select the largest strictly lower, same-aspect geometry backed by a current exact record that
@@ -1876,6 +2799,7 @@ fn verified_lower_alternative(
                     calibration_fingerprint: binding.query.fingerprint.clone(),
                     load_shape: crate::memory_strategy::load_shape_from_receipt(record.load_shape),
                     strategy,
+                    parameters: binding.selection_parameters,
                     engaged_composition: record
                         .strategy
                         .engaged_rungs
@@ -1920,6 +2844,10 @@ fn verified_lower_geometry(
 /// Pure request selector used by production and unit/hardware seams. Additional provider evidence is
 /// accepted explicitly; absent exact verified cells, only the resident baseline can be admitted.
 #[allow(clippy::too_many_arguments)]
+/// The pre-sc-18317 shape, kept for the fixture suite: an evaluation with nothing to decide about the
+/// request's execution policy. Production always goes through
+/// [`evaluate_request_with_budget_and_warm_policy`] so a grant cannot be dropped on the way in.
+#[cfg(test)]
 fn evaluate_request_with_budget(
     generator: &dyn gen_core::Generator,
     plan: &MlxRequestPlan,
@@ -1931,12 +2859,41 @@ fn evaluate_request_with_budget(
     external_committed_bytes: u64,
     additional_evidence: &[MemoryEvidence],
 ) -> WorkerResult<MlxRequestEvaluation> {
+    evaluate_request_with_budget_and_warm_policy(
+        generator,
+        plan,
+        inputs,
+        cache_state,
+        load_policy,
+        crate::execution_planner::WarmPolicyProposal::inert(plan.engine_id),
+        budget,
+        total_peak_bytes,
+        external_committed_bytes,
+        additional_evidence,
+    )
+}
+
+/// [`evaluate_request_with_budget`] carrying this request's warm-policy proposal (sc-18317).
+#[allow(clippy::too_many_arguments)]
+fn evaluate_request_with_budget_and_warm_policy(
+    generator: &dyn gen_core::Generator,
+    plan: &MlxRequestPlan,
+    inputs: &MlxRequestInputs,
+    cache_state: MemoryCacheState,
+    load_policy: OffloadPolicy,
+    warm_policy: crate::execution_planner::WarmPolicyProposal,
+    budget: MemoryBudget,
+    total_peak_bytes: u64,
+    external_committed_bytes: u64,
+    additional_evidence: &[MemoryEvidence],
+) -> WorkerResult<MlxRequestEvaluation> {
     evaluate_request_with_budget_using_bundle(
         generator,
         plan,
         inputs,
         cache_state,
         load_policy,
+        warm_policy,
         budget,
         total_peak_bytes,
         external_committed_bytes,
@@ -1953,6 +2910,7 @@ fn evaluate_request_with_budget_using_bundle(
     inputs: &MlxRequestInputs,
     cache_state: MemoryCacheState,
     load_policy: OffloadPolicy,
+    warm_policy: crate::execution_planner::WarmPolicyProposal,
     budget: MemoryBudget,
     total_peak_bytes: u64,
     external_committed_bytes: u64,
@@ -1979,10 +2937,12 @@ fn evaluate_request_with_budget_using_bundle(
         &effective_plan
     };
 
+    let provider_inputs = provider_request_inputs(plan.engine_id, inputs);
+    let inputs = provider_inputs.as_ref();
     let geometry = request_geometry(inputs);
-    let (mode, mode_key) = request_mode(&inputs.mode);
+    let (mode, mode_key) = provider_request_mode(plan.engine_id, inputs);
     let mut fallback_contract;
-    let contract = if let Some(contract) = generator.memory_strategy_contract() {
+    let provider_contract = if let Some(contract) = generator.memory_strategy_contract() {
         contract
     } else {
         fallback_contract = MemoryProviderContract::compatibility_default(
@@ -2000,6 +2960,25 @@ fn evaluate_request_with_budget_using_bundle(
         // split — so carry the whole sum on the transformer axis rather than fail conformance.
         fallback_contract.asset_facts.transformer_bytes = plan.asset_bytes;
         &fallback_contract
+    };
+    let refused_contract;
+    let contract = if plan.load_shape_declaration_result == LoadShapeDeclarationResult::Refused {
+        // A declaration refusal is terminal authority, not an invitation for the later request
+        // selector to rediscover lower optimized rungs directly from the provider. Preserve only
+        // the exact provider/load/calibration handshake needed for a safe resident request; the
+        // provider's optimized table remains unreachable until a complete declaration applies.
+        let mut resident = MemoryProviderContract::compatibility_default(
+            provider_contract.provider_id.clone(),
+            provider_contract.backend.clone(),
+        );
+        resident.load_shape = provider_contract.load_shape;
+        resident.calibration = provider_contract.calibration.clone();
+        resident.asset_facts = provider_contract.asset_facts;
+        resident.resident_request_memory = provider_contract.resident_request_memory;
+        refused_contract = resident;
+        &refused_contract
+    } else {
+        provider_contract
     };
     if plan.engine_id.starts_with("mage_flow")
         && inputs.adapter_count > 0
@@ -2149,8 +3128,13 @@ fn evaluate_request_with_budget_using_bundle(
             // order, so equality forces the captured set into canonical form — except when both
             // sides are empty, which requires the selected rung itself to be non-`Implemented`,
             // and `selection_valid` below drops exactly that candidate.
+            let selection = MemorySelection {
+                strategy: evidence.key.strategy,
+                parameters: evidence.key.parameters,
+                tier: evidence.key.tier,
+            };
             let composition_agrees = evidence.key.engaged_composition
-                == contract.engaged_composition(evidence.key.strategy);
+                == contract.engaged_composition_for_selection(&selection);
             // sc-18251: SELECTION. `select_strategy` runs every candidate through the loaded
             // contract's own `validate_selection` (`memory_strategy::candidate_exclusion`),
             // excluding with `Invalid` a candidate whose rung the provider no longer declares
@@ -2226,8 +3210,11 @@ fn evaluate_request_with_budget_using_bundle(
                 .map_or(true, |alternative| {
                     identity.abi == alternative.calibration_abi
                         && identity.fingerprint == alternative.calibration_fingerprint
-                        && contract.engaged_composition(alternative.strategy)
-                            == alternative.engaged_composition
+                        && contract.engaged_composition_for_selection(&MemorySelection {
+                            strategy: alternative.strategy,
+                            parameters: alternative.parameters,
+                            tier: plan.tier,
+                        }) == alternative.engaged_composition
                 })
         })
     {
@@ -2326,19 +3313,21 @@ fn evaluate_request_with_budget_using_bundle(
     // estimate-backed candidates for every implemented optimized rung, so the full ladder is
     // selectable behind the estimate margin instead of freezing to the resident baseline and
     // refusing. A covered (`Evidence`) route gets none: its measured ladder is authoritative.
-    let synthesized_estimates = if admission.path == AdmissionPath::Legacy {
+    let synthesized_ladder = if admission.path == AdmissionPath::Legacy {
         synthesize_estimate_ladder(
             contract,
             plan,
             mode_key,
             inputs.overlay.as_deref(),
             geometry,
+            inputs.use_pid,
             calibration_fingerprint,
             &admission.estimate_bases,
         )
     } else {
-        Vec::new()
+        SynthesizedEstimateLadder::default()
     };
+    let synthesized_estimates = &synthesized_ladder.estimates;
     let mut selections = Vec::new();
     let mut evidence = Vec::new();
     // Index-aligned with `evidence`, and pushed at the same sites. Each entry is the closure the
@@ -2459,7 +3448,7 @@ fn evaluate_request_with_budget_using_bundle(
                 .map(|_| live_closure_digest.as_str()),
         );
         candidate_bases.extend(additional_evidence.iter().map(|_| CandidateBasis::Measured));
-        for estimate in &synthesized_estimates {
+        for estimate in synthesized_estimates {
             selections.push(estimate.selection);
             evidence.push(&estimate.evidence);
             candidate_digests.push(live_closure_digest.as_str());
@@ -2487,29 +3476,105 @@ fn evaluate_request_with_budget_using_bundle(
             },
         )
         .collect::<Vec<_>>();
-    let selection = crate::memory_strategy::select_strategy(
-        RequestScope {
-            resolved_route: plan.engine_id,
-            backend: "mlx",
-            tier: plan.tier,
-            mode: mode_key,
-            overlay: inputs.overlay.as_deref(),
-            geometry,
-            expected_closure_digest: &live_closure_digest,
+    let request_scope = RequestScope {
+        resolved_route: plan.engine_id,
+        backend: "mlx",
+        tier: plan.tier,
+        mode: mode_key,
+        overlay: inputs.overlay.as_deref(),
+        geometry,
+        expected_closure_digest: &live_closure_digest,
+    };
+    let selector_budget = Some(Budget {
+        available_gb: budget.total_bytes.saturating_sub(budget.committed_bytes) as f64
+            / BYTES_PER_GIB,
+        reclaimable_gb: budget.reclaimable_bytes as f64 / BYTES_PER_GIB,
+        total_gb: budget.total_bytes as f64 / BYTES_PER_GIB,
+        reserved_headroom_gb: if admission.path == AdmissionPath::Evidence {
+            0.0
+        } else {
+            budget.reserved_headroom_bytes as f64 / BYTES_PER_GIB
         },
+    });
+    let baseline = crate::memory_strategy::select_strategy(
+        request_scope,
         contract,
-        Some(Budget {
-            available_gb: budget.total_bytes.saturating_sub(budget.committed_bytes) as f64
-                / BYTES_PER_GIB,
-            reclaimable_gb: budget.reclaimable_bytes as f64 / BYTES_PER_GIB,
-            total_gb: budget.total_bytes as f64 / BYTES_PER_GIB,
-            reserved_headroom_gb: if admission.path == AdmissionPath::Evidence {
-                0.0
-            } else {
-                budget.reserved_headroom_bytes as f64 / BYTES_PER_GIB
-            },
-        }),
+        selector_budget,
         &candidates,
+    );
+    // sc-18317: a GRANTED warm-policy switch takes effect HERE or nowhere.
+    //
+    // `select_strategy` picks the first fitting candidate in resident -> staged -> bounded-decode
+    // order, so a request whose weights fit resident never stages no matter what policy the caller
+    // asked for. Honoring a grant therefore means removing the looser candidates from the set: offer
+    // only those that engage `StagedResidency` and let the selector apply the SAME budget and margins
+    // it always does. A floored selection that comes back `Selected` has passed exactly the fit check
+    // the baseline would have had to pass, so it cannot exceed the admitted envelope — monotonicity is
+    // preserved by construction rather than asserted after the fact.
+    //
+    // The outcome (not the seam's proposal) is what gets reported: `rematerialized` is emitted only
+    // when the floor actually moved the selection.
+    let (selection, grant_outcome) = if warm_policy.requires_staged_residency() {
+        let staged = candidates
+            .iter()
+            .filter(|candidate| {
+                contract.engages(
+                    candidate.selection.strategy,
+                    MemoryStrategy::StagedResidency,
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let baseline_stages = matches!(&baseline, Selection::Selected { selection, .. }
+            if contract.engages(selection.strategy, MemoryStrategy::StagedResidency));
+        if baseline_stages {
+            (
+                baseline,
+                Some(crate::execution_planner::GrantOutcome::AlreadyStaged),
+            )
+        } else if staged.is_empty() {
+            (
+                baseline,
+                Some(crate::execution_planner::GrantOutcome::NoStagedCandidate),
+            )
+        } else {
+            let floored = crate::memory_strategy::select_strategy(
+                request_scope,
+                contract,
+                selector_budget,
+                &staged,
+            );
+            match &floored {
+                // A fitting staged selection, and it necessarily differs from the baseline's: control
+                // only reaches here when the baseline does NOT engage staged residency, while every
+                // candidate offered to this call does. Asserted rather than re-tested, so the
+                // reasoning is checked in debug builds instead of hidden in an unreachable arm.
+                Selection::Selected {
+                    selection: chosen, ..
+                } => {
+                    debug_assert!(
+                        !matches!(&baseline, Selection::Selected { selection: base, .. } if base == chosen),
+                        "a floored staged selection cannot equal a non-staging baseline"
+                    );
+                    (
+                        floored,
+                        Some(crate::execution_planner::GrantOutcome::SelectionMovedToStaged),
+                    )
+                }
+                // The staged candidates did not fit this request's budget, or their evidence is
+                // structurally unusable. The baseline stands; not a refusal, just the ordinary fit
+                // check every selection passes.
+                _ => (
+                    baseline,
+                    Some(crate::execution_planner::GrantOutcome::StagedCandidateDidNotFit),
+                ),
+            }
+        }
+    } else {
+        (baseline, None)
+    };
+    warm_policy.settle_with_selection(
+        grant_outcome.unwrap_or(crate::execution_planner::GrantOutcome::AlreadyStaged),
     );
     let (selection, mut needed_gb, mut available_gb) = match selection {
         Selection::Selected {
@@ -2570,6 +3635,23 @@ fn evaluate_request_with_budget_using_bundle(
             );
             return Err(WorkerError::InvalidPayload(message));
         }
+    };
+    let selected_basis = candidates
+        .iter()
+        .find(|candidate| candidate.selection == selection)
+        .map(|candidate| candidate.basis)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "{} selected a strategy with no candidate provenance",
+                plan.engine_id
+            ))
+        })?;
+    let optimization_authority = if !selection.strategy.is_optimized() {
+        MemoryOptimizationAuthority::Resident
+    } else if selected_basis.is_estimate() {
+        MemoryOptimizationAuthority::Estimated
+    } else {
+        MemoryOptimizationAuthority::Calibrated
     };
     let mut selected_record_id = None;
     let mut process_limit_bytes = admission.process_limit_bytes;
@@ -2651,13 +3733,16 @@ fn evaluate_request_with_budget_using_bundle(
         effective_budget_bytes = budget.effective_bytes(),
         needed_gb,
         available_gb,
+        optimization_authority = ?optimization_authority,
         "selected request-scoped MLX memory strategy"
     );
-    Ok(MlxRequestEvaluation {
+    let evaluation = MlxRequestEvaluation {
         memory: memory_for_selection(contract, selection),
         process_limit_bytes,
+        decode_quality_decisions: synthesized_ladder.decode_quality_decisions,
         context: MemoryRunContext {
             selection,
+            optimization_authority,
             calibration_abi,
             calibration_fingerprint: calibration_fingerprint.unwrap_or_default().to_owned(),
             load_shape: contract.load_shape,
@@ -2674,7 +3759,14 @@ fn evaluate_request_with_budget_using_bundle(
                 .or(admission.evidence_revision)
                 .unwrap_or_else(|| REQUEST_EVIDENCE_REVISION.to_owned()),
         },
-    })
+    };
+    tracing::info!(
+        event = "mlx_decode_quality_request_audit",
+        route = plan.engine_id,
+        decisions = ?evaluation.decode_quality_decisions,
+        "recorded typed request-scoped decode-quality decisions"
+    );
+    Ok(evaluation)
 }
 
 #[cfg(target_os = "macos")]
@@ -2730,17 +3822,19 @@ pub(crate) fn evaluate_request(
     inputs: &MlxRequestInputs,
     cache_state: MemoryCacheState,
     load_policy: OffloadPolicy,
+    warm_policy: crate::execution_planner::WarmPolicyProposal,
     external_committed_bytes: u64,
 ) -> WorkerResult<MlxRequestEvaluation> {
     let geometry = request_geometry(inputs);
     let budget = live_request_budget(plan.engine_id)?;
     let total_peak_bytes = request_total_peak_bytes(plan, geometry);
-    evaluate_request_with_budget(
+    evaluate_request_with_budget_and_warm_policy(
         generator,
         plan,
         inputs,
         cache_state,
         load_policy,
+        warm_policy,
         budget,
         total_peak_bytes,
         external_committed_bytes,
@@ -3233,6 +4327,10 @@ fn adapter_source_bytes_for_gate_where(
         };
         total.saturating_add(bytes)
     });
+    adapter_resident_source_bytes(engine_id, spec, source_bytes)
+}
+
+fn adapter_resident_source_bytes(engine_id: &str, spec: &LoadSpec, source_bytes: u64) -> u64 {
     if matches!(engine_id, "wan_vace" | "wan2_2_vace_fun_14b") {
         return 0;
     }
@@ -3253,6 +4351,50 @@ fn adapter_source_bytes_for_gate_where(
     } else {
         0
     }
+}
+
+fn prepared_file_sizes(spec: &LoadSpec) -> gen_core::Result<BTreeMap<PathBuf, u64>> {
+    spec.validate_prepared_file_pins()?;
+    if !spec.prepared_file_pins().is_prepared() {
+        return Err(gen_core::Error::Unsupported(
+            "prepared accounting requires a finalized prepared LoadSpec".into(),
+        ));
+    }
+    Ok(spec
+        .prepared_file_pins()
+        .iter()
+        .map(|(path, pin)| (path.clone(), pin.target_fingerprint().size))
+        .collect())
+}
+
+fn prepared_source_bytes(source: &WeightsSource, file_sizes: &BTreeMap<PathBuf, u64>) -> u64 {
+    match source {
+        WeightsSource::Dir(dir) => sum_safetensors_bytes(dir),
+        WeightsSource::File(file) => std::path::absolute(file)
+            .ok()
+            .and_then(|file| file_sizes.get(&file).copied())
+            .unwrap_or(0),
+    }
+}
+
+fn prepared_adapter_source_bytes_for_gate_where(
+    engine_id: &str,
+    spec: &LoadSpec,
+    file_sizes: &BTreeMap<PathBuf, u64>,
+    include: impl Fn(&Path) -> bool,
+) -> u64 {
+    let source_bytes = spec.adapters.iter().fold(0_u64, |total, adapter| {
+        if include(&adapter.path) {
+            let bytes = std::path::absolute(&adapter.path)
+                .ok()
+                .and_then(|path| file_sizes.get(&path).copied())
+                .unwrap_or(0);
+            total.saturating_add(bytes)
+        } else {
+            total
+        }
+    });
+    adapter_resident_source_bytes(engine_id, spec, source_bytes)
 }
 
 /// Resolve the TEXT-ENCODER on-disk bytes for the staged split (sc-10894), preferring the provider-owned
@@ -3793,11 +4935,13 @@ fn weights_floor_load_admission(
 
 fn with_selected_sequential_shape(engine_id: &str, spec: LoadSpec) -> LoadSpec {
     let spec = spec.with_offload_policy(OffloadPolicy::Sequential);
-    if engine_id == "z_image_turbo" {
-        spec.with_load_shape(gen_core::LoadShape::DeferredMaterialization)
-    } else {
-        spec
-    }
+    crate::memory_route_registry::apply_registered_load_shape(
+        crate::memory_route_registry::MemoryRouteBackend::Mlx,
+        engine_id,
+        crate::memory_route_registry::MemoryRouteMode::TextToImage,
+        spec,
+        true,
+    )
 }
 
 /// Pre-load admission + residency-selection gate (sc-10835 Phase 0, sc-10839 Phase 1). Called on the
@@ -3812,15 +4956,29 @@ fn with_selected_sequential_shape(engine_id: &str, spec: LoadSpec) -> LoadSpec {
 /// `engine_id` is both the [`engine_supports_sequential`] key and the human-facing model name in the
 /// rejection message.
 pub(crate) fn apply_residency_policy(spec: LoadSpec, engine_id: &str) -> WorkerResult<LoadSpec> {
+    if spec.prepared_file_pins().is_prepared() {
+        spec.validate_prepared_file_pins().map_err(|error| {
+            crate::classify_engine_error("MLX residency source validation failed", error)
+        })?;
+    }
     // Respect an offload policy already chosen upstream (defensive: the MLX cache seam normally sees
     // the default `Resident`, but never downgrade a `Sequential` set by another gate).
     if spec.offload_policy == OffloadPolicy::Sequential {
         return Ok(spec);
     }
-    match decide_residency_for_spec(engine_id, &spec) {
+    let outcome = if spec.prepared_file_pins().is_prepared() {
+        try_decide_residency_for_spec(engine_id, &spec)?
+    } else {
+        decide_residency_for_spec(engine_id, &spec)
+    };
+    match outcome {
         ResidencyOutcome::Resident => Ok(spec),
         ResidencyOutcome::Sequential => {
-            let (total_bytes, te_bytes, _) = spec_component_bytes(engine_id, &spec);
+            let (total_bytes, te_bytes, _) = if spec.prepared_file_pins().is_prepared() {
+                spec_component_bytes_checked(engine_id, &spec)?
+            } else {
+                spec_component_bytes(engine_id, &spec)
+            };
             tracing::info!(
                 event = "mlx_sequential_residency_selected",
                 engine = %engine_id,
@@ -3860,6 +5018,18 @@ fn spec_component_bytes(engine_id: &str, spec: &LoadSpec) -> (u64, u64, Headroom
     spec_component_bytes_with_provider_footprint(engine_id, spec, footprint)
 }
 
+fn spec_component_bytes_checked(
+    engine_id: &str,
+    spec: &LoadSpec,
+) -> WorkerResult<(u64, u64, HeadroomAllowance)> {
+    let footprint = crate::inference_runtime::media()
+        .footprint(engine_id, spec)
+        .map_err(|error| crate::classify_engine_error("MLX footprint query failed", error))?;
+    spec_component_bytes_with_provider_footprint_checked(engine_id, spec, footprint).map_err(
+        |error| crate::classify_engine_error("MLX prepared source accounting failed", error),
+    )
+}
+
 /// Provider-injected core of [`spec_component_bytes`]. The live path obtains `footprint` from the
 /// active registry; keeping the arithmetic independent of registry composition lets platform-neutral
 /// tests exercise the exact Lens materialization and overlay accounting used on macOS.
@@ -3868,9 +5038,34 @@ fn spec_component_bytes_with_provider_footprint(
     spec: &LoadSpec,
     footprint: Option<PerComponentBytes>,
 ) -> (u64, u64, HeadroomAllowance) {
+    let external_adapter_bytes = external_adapter_source_bytes_for_gate(engine_id, spec);
+    spec_component_bytes_with_provider_footprint_and_sizes(
+        engine_id,
+        spec,
+        footprint,
+        weights_source_bytes,
+        external_adapter_bytes,
+    )
+}
+
+fn spec_component_bytes_with_provider_footprint_and_sizes(
+    engine_id: &str,
+    spec: &LoadSpec,
+    footprint: Option<PerComponentBytes>,
+    source_bytes: impl Fn(&WeightsSource) -> u64,
+    external_adapter_bytes: u64,
+) -> (u64, u64, HeadroomAllowance) {
     let footprint_te = footprint.map(|fp| fp.text_encoder);
+    // A provider that accepts a primary single-file checkpoint owns the meaning of its named
+    // companions. Its footprint is the exact consumed assembly (imported DiT + companion TE/VAE),
+    // not a split of `spec.weights` alone. Treat it as authoritative so a `base_snapshot` supplying
+    // tokenizer/config does not recursively re-price the snapshot transformer the primary File
+    // replaces.
+    let provider_owned_file_footprint = matches!(&spec.weights, WeightsSource::File(_))
+        .then_some(footprint)
+        .flatten();
     let mut headroom = HeadroomAllowance::GENERIC;
-    let (mut total_bytes, te_bytes) = match &spec.weights {
+    let (mut total_bytes, mut te_bytes) = match &spec.weights {
         WeightsSource::Dir(dir) => {
             let mut total = sum_safetensors_bytes(dir);
             let te = resolve_text_encoder_bytes(footprint_te, dir);
@@ -3884,22 +5079,30 @@ fn spec_component_bytes_with_provider_footprint(
             }
             (total, te)
         }
-        // A single-file source has no diffusers component tree; honor a footprint TE if the provider
-        // somehow computed one, else 0 (resident-or-reject only).
-        WeightsSource::File(file) => (
-            std::fs::metadata(file).map_or(0, |meta| meta.len()),
-            footprint_te.unwrap_or(0),
+        // A single-file source has no component tree of its own. A File-aware provider footprint
+        // prices the complete consumed assembly; otherwise keep the primary file here and add only
+        // the well-known companion subtrees below.
+        WeightsSource::File(_) => provider_owned_file_footprint.map_or_else(
+            || (source_bytes(&spec.weights), footprint_te.unwrap_or(0)),
+            |components| {
+                (
+                    components
+                        .text_encoder
+                        .saturating_add(components.dit)
+                        .saturating_add(components.vae),
+                    components.text_encoder,
+                )
+            },
         ),
     };
     if let Some(control) = &spec.control {
-        total_bytes += weights_source_bytes(control);
+        total_bytes += source_bytes(control);
     }
     // Read the actual adapter sources at the same pre-load seam as controls. Provider-specific
     // residency matters: packed Wan keeps additive residuals, while dense Wan folds them into the
     // base and adds zero independent bytes. Other providers conservatively retain the source bytes;
     // a typed component contract may replace them with a more exact resident measurement below.
-    total_bytes =
-        total_bytes.saturating_add(external_adapter_source_bytes_for_gate(engine_id, spec));
+    total_bytes = total_bytes.saturating_add(external_adapter_bytes);
     // Caller-provisioned components (epic 13657) are staged from a DIFFERENT snapshot than
     // `spec.weights`, so the dir scan above cannot see them (sc-15154). Mage-Flow's per-tier dir
     // holds the DiT alone — its text encoder and VAE are bit-identical across the six variants and
@@ -3907,7 +5110,37 @@ fn spec_component_bytes_with_provider_footprint(
     // against a real 6.52 GiB, which both under-quoted the over-budget message and let the
     // the legacy override admit tiers that do not fit. A component resolved to a path INSIDE the
     // weights dir is skipped, because the scan already counted it.
-    for source in spec.components.values() {
+    for (component_id, source) in &spec.components {
+        if provider_owned_file_footprint.is_some() {
+            // The File-aware footprint already reflects every named source the provider consumes.
+            continue;
+        }
+        if matches!(&spec.weights, WeightsSource::File(_))
+            && component_id == gen_core::BASE_SNAPSHOT_COMPONENT
+        {
+            // Compatibility fallback for a File-capable provider that has not published its
+            // footprint yet. The companion snapshot supplies TE/VAE/tokenizer/config only; its
+            // transformer is replaced by `spec.weights`. Explicit ComfyUI components replace the
+            // corresponding snapshot subtree and are counted normally on their own map entries.
+            if let WeightsSource::Dir(root) = source {
+                if !spec
+                    .components
+                    .contains_key(gen_core::COMFYUI_TEXT_ENCODER_COMPONENT)
+                {
+                    let companion_te = sum_safetensors_bytes(&root.join("text_encoder"));
+                    total_bytes = total_bytes.saturating_add(companion_te);
+                    te_bytes = te_bytes.saturating_add(companion_te);
+                }
+                if !spec
+                    .components
+                    .contains_key(gen_core::COMFYUI_VAE_COMPONENT)
+                {
+                    total_bytes =
+                        total_bytes.saturating_add(sum_safetensors_bytes(&root.join("vae")));
+                }
+            }
+            continue;
+        }
         let inside = match source {
             WeightsSource::Dir(path) | WeightsSource::File(path) => match &spec.weights {
                 WeightsSource::Dir(root) => path.starts_with(root),
@@ -3915,10 +5148,59 @@ fn spec_component_bytes_with_provider_footprint(
             },
         };
         if !inside {
-            total_bytes = total_bytes.saturating_add(weights_source_bytes(source));
+            let component_bytes = source_bytes(source);
+            total_bytes = total_bytes.saturating_add(component_bytes);
+            if matches!(&spec.weights, WeightsSource::File(_))
+                && component_id == gen_core::COMFYUI_TEXT_ENCODER_COMPONENT
+            {
+                te_bytes = te_bytes.saturating_add(component_bytes);
+            }
         }
     }
     (total_bytes, te_bytes, headroom)
+}
+
+fn spec_component_bytes_with_provider_footprint_checked(
+    engine_id: &str,
+    spec: &LoadSpec,
+    footprint: Option<PerComponentBytes>,
+) -> gen_core::Result<(u64, u64, HeadroomAllowance)> {
+    let file_sizes = prepared_file_sizes(spec)?;
+    // Keep the provider's component layout/materialization facts, but replace every generic File
+    // slot it reports with the exact prepared target size. Compatibility-mode provider code may
+    // still stat a path while producing its fact; that stat never becomes prepared admission
+    // identity or overrides the caller's token.
+    let footprint = footprint.map(|mut footprint| {
+        if matches!(spec.weights, WeightsSource::File(_)) {
+            footprint.dit = prepared_source_bytes(&spec.weights, &file_sizes);
+        }
+        if let Some(source @ WeightsSource::File(_)) = spec
+            .components
+            .get(gen_core::COMFYUI_TEXT_ENCODER_COMPONENT)
+        {
+            footprint.text_encoder = prepared_source_bytes(source, &file_sizes);
+        }
+        if let Some(source @ WeightsSource::File(_)) =
+            spec.components.get(gen_core::COMFYUI_VAE_COMPONENT)
+        {
+            footprint.vae = prepared_source_bytes(source, &file_sizes);
+        }
+        footprint
+    });
+    let external_adapter_bytes =
+        prepared_adapter_source_bytes_for_gate_where(engine_id, spec, &file_sizes, |path| {
+            match &spec.weights {
+                WeightsSource::Dir(root) => !path.starts_with(root),
+                WeightsSource::File(_) => true,
+            }
+        });
+    Ok(spec_component_bytes_with_provider_footprint_and_sizes(
+        engine_id,
+        spec,
+        footprint,
+        |source| prepared_source_bytes(source, &file_sizes),
+        external_adapter_bytes,
+    ))
 }
 
 fn packed_quant_bits(root: &std::path::Path, component: &str) -> Option<i64> {
@@ -3947,6 +5229,21 @@ pub(crate) fn decide_residency_for_spec(engine_id: &str, spec: &LoadSpec) -> Res
         engine_supports_sequential(engine_id),
         headroom.total_gb,
     )
+}
+
+fn try_decide_residency_for_spec(
+    engine_id: &str,
+    spec: &LoadSpec,
+) -> WorkerResult<ResidencyOutcome> {
+    let budget = resolve_budget(probe_total_unified_memory_gib(), mlx_memory_cap_gb());
+    let (total_bytes, te_bytes, headroom) = spec_component_bytes_checked(engine_id, spec)?;
+    Ok(decide_residency_with_headroom(
+        total_bytes,
+        te_bytes,
+        budget,
+        engine_supports_sequential(engine_id),
+        headroom.total_gb,
+    ))
 }
 
 /// The residency outcome for a candidate tier's WEIGHTS DIR — a bare-`Dir` convenience over
@@ -4202,6 +5499,197 @@ pub fn full_finetune_memory_error(
 mod tests {
     use super::*;
 
+    const DECODE_QUALITY_TEST_STAMP: &str =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    fn quality_policy_json(route: &str) -> Value {
+        serde_json::json!({
+            "qualityAbi": gen_core::MEMORY_DECODE_QUALITY_ABI,
+            "family": "sdxl",
+            "resolvedRoute": route,
+            "backend": "mlx",
+            "tier": "q4",
+            "loadShape": "deferred_materialization",
+            "artifact": {
+                "repository": "SceneWorks/fixture",
+                "revision": "c".repeat(40),
+                "variant": "packed-q4",
+                "fingerprint": format!("SceneWorks/fixture@{}:packed-q4", "c".repeat(40)),
+            },
+            "implementationFingerprint": DECODE_QUALITY_TEST_STAMP,
+            "mode": "text_to_image",
+            "overlay": null,
+            "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1, "referenceCount": 0 },
+            "usePid": false,
+            "tileEdge": 896,
+            "overlap": 192,
+            "metric": "max_abs_rgb_u8",
+            "maximumError": 48,
+            "fixtures": [
+                { "seed": 7, "productionLatentProvenance": "fixture@revision seed=7", "productionLatentSha256": "a".repeat(64), "denseOutputSha256": "b".repeat(64), "tiledOutputSha256": "c".repeat(64), "observedError": 31 },
+                { "seed": 99, "productionLatentProvenance": "fixture@revision seed=99", "productionLatentSha256": "d".repeat(64), "denseOutputSha256": "e".repeat(64), "tiledOutputSha256": "f".repeat(64), "observedError": 42 }
+            ],
+            "productionEvidenceSha256": "0".repeat(64),
+            "disposition": { "kind": "admitted" }
+        })
+    }
+
+    #[test]
+    fn manifest_quality_reader_is_route_bound_and_keeps_absence_legacy() {
+        assert!(
+            decode_quality_policies_from_manifest(&JsonObject::new(), "realvisxl")
+                .unwrap()
+                .is_empty()
+        );
+        let legacy =
+            bind_decode_quality_policies_from_manifest(&JsonObject::new(), "realvisxl", None)
+                .unwrap();
+        assert!(!legacy.authoritative);
+        assert!(matches!(
+            legacy.decision,
+            DecodeQualityBindingDecision::Legacy
+        ));
+
+        let manifest = serde_json::json!({
+            "mlx": { "memoryStrategyContract": { "implementations": [{
+                "rung": "bounded_decode",
+                "parameterRanges": { "decodeGeometryPolicies": [quality_policy_json("realvisxl")] }
+            }] } }
+        });
+        let manifest = manifest.as_object().unwrap();
+        let rows = decode_quality_policies_from_manifest(manifest, "realvisxl").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].resolved_route, "realvisxl");
+        assert_eq!(
+            rows[0].load_shape,
+            gen_core::LoadShape::DeferredMaterialization
+        );
+        assert!(decode_quality_policies_from_manifest(manifest, "realvisxl_lightning").is_err());
+    }
+
+    #[test]
+    fn manifest_quality_binding_is_exact_and_refusal_is_typed() {
+        let manifest_value = serde_json::json!({
+            "mlx": { "memoryStrategyContract": { "implementations": [{
+                "rung": "bounded_decode",
+                "parameterRanges": { "decodeGeometryPolicies": [quality_policy_json("realvisxl")] }
+            }] } }
+        });
+        let manifest = manifest_value.as_object().unwrap();
+        let provenance = fixture_provenance("q4", "packed-q4");
+
+        let bound =
+            bind_decode_quality_policies_from_manifest(manifest, "realvisxl", Some(&provenance))
+                .expect("matching immutable artifact binds");
+        assert!(bound.authoritative);
+        assert!(matches!(
+            &bound.decision,
+            DecodeQualityBindingDecision::Bound { row_count: 1, .. }
+        ));
+        assert_eq!(
+            bound.runtime_identity.as_ref().unwrap().artifact.repository,
+            "SceneWorks/fixture"
+        );
+        let attached = attach_decode_quality_binding(
+            LoadSpec::new(WeightsSource::Dir("/models/realvisxl".into())),
+            bound.clone(),
+            "realvisxl",
+        );
+        assert!(attached.decode_geometry_policy_authoritative);
+        assert_eq!(attached.decode_geometry_policies.len(), 1);
+
+        let unproven =
+            bind_decode_quality_policies_from_manifest(manifest, "realvisxl", None).unwrap();
+        assert!(unproven.authoritative);
+        assert!(unproven.policies.is_empty());
+        assert!(matches!(
+            unproven.decision,
+            DecodeQualityBindingDecision::Refused { ref reason }
+                if reason.contains("no independently resolved artifact identity")
+        ));
+        let refused_spec = attach_decode_quality_binding(
+            LoadSpec::new(WeightsSource::Dir("/models/realvisxl".into())),
+            unproven.clone(),
+            "realvisxl",
+        );
+        assert!(refused_spec.decode_geometry_policy_authoritative);
+        assert!(refused_spec.decode_geometry_policies.is_empty());
+
+        let mut drifted_identities = Vec::new();
+        let mut drifted = provenance.clone();
+        drifted.identity.repository = "SceneWorks/other".to_owned();
+        drifted_identities.push(drifted);
+        let mut drifted = provenance.clone();
+        drifted.identity.revision = "d".repeat(40);
+        drifted_identities.push(drifted);
+        let mut drifted = provenance.clone();
+        drifted.identity.variant = "packed-q8".to_owned();
+        drifted_identities.push(drifted);
+        let mut drifted = provenance.clone();
+        drifted.identity.fingerprint = "SceneWorks/fixture@drifted:packed-q4".to_owned();
+        drifted_identities.push(drifted);
+        for drifted in &drifted_identities {
+            let refused =
+                bind_decode_quality_policies_from_manifest(manifest, "realvisxl", Some(drifted))
+                    .unwrap();
+            assert!(refused.authoritative);
+            assert!(refused.policies.is_empty());
+            assert!(matches!(
+                refused.decision,
+                DecodeQualityBindingDecision::Refused { ref reason }
+                    if reason.contains("does not match resolved artifact")
+            ));
+        }
+
+        let mut forensic_source_value = manifest_value;
+        forensic_source_value["mlx"]["memoryStrategyContract"]["implementations"][0]
+            ["parameterRanges"]["decodeGeometryPolicies"][0]["implementationFingerprint"] =
+            Value::String("f".repeat(64));
+        let forensic_source = bind_decode_quality_policies_from_manifest(
+            forensic_source_value.as_object().unwrap(),
+            "realvisxl",
+            Some(&provenance),
+        )
+        .unwrap();
+        assert!(forensic_source.authoritative);
+        assert_eq!(forensic_source.policies.len(), 1);
+        assert_eq!(
+            forensic_source.policies[0].implementation_fingerprint,
+            "f".repeat(64)
+        );
+        assert!(matches!(
+            forensic_source.decision,
+            DecodeQualityBindingDecision::Bound { row_count: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn prepared_component_accounting_uses_token_size_and_propagates_stale_errors() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("model.safetensors");
+        std::fs::write(&path, vec![0_u8; 23]).expect("weights write");
+        let pin = gen_core::PinnedWeightsFile::pin(&path).expect("weights pin");
+        let mut spec = LoadSpec::new(WeightsSource::File(path.clone()));
+        spec.prepare_with_file_pins([pin])
+            .expect("prepared spec finalizes");
+
+        let (total, _, _) = spec_component_bytes_with_provider_footprint_checked(
+            "fixture",
+            &spec,
+            Some(PerComponentBytes {
+                text_encoder: 0,
+                dit: 9_999,
+                vae: 0,
+            }),
+        )
+        .expect("prepared accounting succeeds");
+        assert_eq!(total, 23, "primary File size comes from its prepared token");
+
+        std::fs::write(&path, vec![1_u8; 31]).expect("weights replacement writes");
+        spec_component_bytes_with_provider_footprint_checked("fixture", &spec, None)
+            .expect_err("stale prepared source errors are propagated, not restatted or swallowed");
+    }
+
     #[test]
     fn ltx_video_tier_is_checkpoint_bound_when_the_load_assertion_is_absent() {
         let fixture = tempfile::tempdir().expect("ltx split fixture");
@@ -4427,6 +5915,252 @@ mod tests {
                 "{known} ships mlx.calibrations but the derived audit missed it — the manifest \
                  loader stopped seeing its bindings"
             );
+        }
+    }
+
+    #[test]
+    fn shipped_decode_quality_corpus_is_exact_and_drives_the_physical_planner() {
+        let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+            include_str!("../../../config/manifests/builtin.models.jsonc"),
+        ))
+        .expect("builtin.models.jsonc parses");
+        let models = manifest["models"].as_array().expect("manifest models");
+        // Which routes ship a P9 corpus, and the family each resolves through. The per-model
+        // (rows, admitted) pair that used to sit here, and the 69/69 total below it, were populations
+        // of the frozen corpus: a re-collection that widened or narrowed a sweep failed here with
+        // nothing to say about what changed, and the only available repair was to renew the numbers.
+        // What the pair was standing in for is asserted directly instead — one row per distinct
+        // geometry, every advertised resolution covered, and every shipped row admitted — which holds
+        // however many coordinates a re-collection sweeps. `expected` stays exhaustive because the
+        // final loop refuses P9 evidence on any route missing from it.
+        let expected = [
+            ("chroma1_base", "chroma"),
+            ("chroma1_flash", "chroma"),
+            ("chroma1_hd", "chroma"),
+            ("illustrious_xl_v1", "sdxl"),
+            ("illustrious_xl_v2", "sdxl"),
+            ("kolors", "kolors"),
+            ("realvisxl", "sdxl"),
+            ("realvisxl_lightning", "sdxl"),
+            ("sdxl", "sdxl"),
+        ];
+        let expected_ids = expected
+            .iter()
+            .map(|(id, ..)| *id)
+            .collect::<std::collections::BTreeSet<_>>();
+
+        for (model_id, family) in expected {
+            let model = models
+                .iter()
+                .find(|model| model["id"] == model_id)
+                .unwrap_or_else(|| panic!("shipped {model_id} manifest entry"));
+            let model_object = model.as_object().expect("model object");
+            let mlx = model["mlx"].as_object().expect("mlx object");
+            let implementations = mlx["memoryStrategyContract"]["implementations"]
+                .as_array()
+                .expect("memory strategy implementations");
+            let bounded = implementations
+                .iter()
+                .filter(|implementation| implementation["rung"] == "bounded_decode")
+                .collect::<Vec<_>>();
+            assert_eq!(
+                bounded.len(),
+                1,
+                "{model_id}: one route-local decode declaration"
+            );
+            assert_eq!(bounded[0]["tiers"], serde_json::json!(["q4"]));
+            assert_eq!(bounded[0]["modes"], serde_json::json!(["text_to_image"]));
+            assert_eq!(bounded[0]["overlays"], serde_json::json!(["none"]));
+
+            let rows = decode_quality_policies_from_manifest(model_object, model_id)
+                .unwrap_or_else(|error| panic!("{model_id}: shipped quality corpus: {error}"));
+            assert!(
+                !rows.is_empty(),
+                "{model_id}: sealed quality corpus is empty"
+            );
+            assert!(rows.iter().all(|row| {
+                row.resolved_route == model_id
+                    && row.family == family
+                    && row.backend == gen_core::MemoryBackend::Mlx
+                    && row.tier.quant == Some(gen_core::Quant::Q4)
+                    && row.mode == MemoryMode::TextToImage
+                    && row.overlay.is_none()
+                    && !row.use_pid
+                    && row.geometry.batch == 1
+                    && row.geometry.frames == 1
+                    && row.geometry.reference_count == 0
+                    && row.implementation_fingerprint.len() == 64
+                    && row
+                        .implementation_fingerprint
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            }));
+            // Every shipped row is admitted evidence. A refused row on a route that still advertises
+            // its coordinate would advertise a geometry the physical planner then declines to bound —
+            // the condition the per-model admitted count was standing in for, stated as the property.
+            assert!(
+                rows.iter()
+                    .all(|row| matches!(row.disposition, MemoryDecodeQualityDisposition::Admitted)),
+                "{model_id}: the sealed corpus must carry only admitted decode evidence"
+            );
+
+            let q4 = model["downloads"]
+                .as_array()
+                .expect("downloads")
+                .iter()
+                .find(|download| download["variant"] == "q4")
+                .unwrap_or_else(|| panic!("{model_id}: q4 artifact"));
+            assert!(rows.iter().all(|row| {
+                row.artifact.repository == q4["repo"].as_str().unwrap()
+                    && row.artifact.revision == q4["revision"].as_str().unwrap()
+                    && row.artifact.variant == "q4"
+                    && row.artifact.fingerprint
+                        == format!(
+                            "{}@{}:q4",
+                            q4["repo"].as_str().unwrap(),
+                            q4["revision"].as_str().unwrap()
+                        )
+            }));
+            let expected_shape = if family == "sdxl" {
+                gen_core::LoadShape::DeferredMaterialization
+            } else {
+                gen_core::LoadShape::EagerMaterialization
+            };
+            assert!(rows.iter().all(|row| row.load_shape == expected_shape));
+
+            let measured_resolutions = rows
+                .iter()
+                .map(|row| format!("{}x{}", row.geometry.width, row.geometry.height))
+                .collect::<std::collections::BTreeSet<_>>();
+            // One row per distinct geometry. This is the sealed-ness the row count used to spell as a
+            // population: a re-collection may legitimately sweep more or fewer coordinates, but it may
+            // never ship two rows for the same coordinate — the planner would then hold two exact
+            // policies for one request and the winner would be collection order.
+            assert_eq!(
+                rows.len(),
+                measured_resolutions.len(),
+                "{model_id}: sealed corpus carries a duplicate geometry"
+            );
+            for resolution in model["limits"]["resolutions"]
+                .as_array()
+                .expect("advertised resolutions")
+            {
+                assert!(
+                    measured_resolutions.contains(resolution.as_str().unwrap()),
+                    "{model_id}: advertised {resolution} must have an exact admitted-or-refused row"
+                );
+            }
+
+            let mut generator = fixture_generator();
+            let contract = generator.contract.as_mut().expect("fixture contract");
+            contract.provider_id = model_id.to_owned();
+            contract.load_shape = expected_shape;
+            contract.calibration = None;
+            contract
+                .adopt_decode_geometry_policies(family, rows.clone())
+                .unwrap_or_else(|error| panic!("{model_id}: adopt shipped corpus: {error}"));
+            assert!(
+                contract.conformance_errors().is_empty(),
+                "{model_id}: {:?}",
+                contract.conformance_errors()
+            );
+            let mut plan = fixture_plan();
+            plan.engine_id = model_id;
+            plan.model_id = model_id.to_owned();
+
+            // EVERY admitted row, not just the first one found. With the admitted count gone this is
+            // what carries the coverage claim, and it is strictly stronger than the count ever was: a
+            // row that stopped reaching the planner is now a failure rather than an unvisited element
+            // the count still added up correctly.
+            for row in rows
+                .iter()
+                .filter(|row| matches!(row.disposition, MemoryDecodeQualityDisposition::Admitted))
+            {
+                let result = synthesize_estimate_ladder(
+                    contract,
+                    &plan,
+                    "text_to_image",
+                    None,
+                    row.geometry,
+                    false,
+                    None,
+                    &[],
+                );
+                assert!(
+                    result.estimates.iter().any(|candidate| {
+                        candidate.selection.strategy == MemoryStrategy::BoundedDecode
+                            && candidate.selection.parameters.decode_tile_edge
+                                == Some(row.tile_edge)
+                            && candidate.selection.parameters.decode_overlap == Some(row.overlap)
+                    }),
+                    "{model_id}: admitted {}x{} row must create its exact physical decode candidate",
+                    row.geometry.width,
+                    row.geometry.height
+                );
+            }
+            let unmeasured_geometry = MemoryGeometry {
+                width: 64,
+                height: 64,
+                batch: 1,
+                frames: 1,
+                reference_count: 0,
+            };
+            let result = synthesize_estimate_ladder(
+                contract,
+                &plan,
+                "text_to_image",
+                None,
+                unmeasured_geometry,
+                false,
+                None,
+                &[],
+            );
+            assert!(
+                result.estimates.iter().all(|candidate| {
+                    candidate.selection.strategy != MemoryStrategy::BoundedDecode
+                }),
+                "{model_id}: an unmeasured coordinate must not create a physical decode candidate"
+            );
+            let matched = contract
+                .decode_geometry_policies_for_request(MemoryDecodePolicyQuery {
+                    tier: plan.tier,
+                    load_shape: contract.load_shape,
+                    mode_key: "text_to_image",
+                    overlay: None,
+                    geometry: unmeasured_geometry,
+                    use_pid: false,
+                })
+                .expect("exact policy query");
+            assert!(matched.is_empty(), "{model_id}: unmeasured policy query");
+        }
+
+        // `quality_stamps.len() == 10` used to sit here, over `implementation_fingerprint`. That axis
+        // is a FORENSIC stamp, not an admission gate: gen-core seals it into
+        // `production_evidence_sha256`, so it cannot be edited after collection, and inference sc-19728
+        // deliberately removed the comparison against the running build because a closure spanning
+        // whole crates plus `Cargo.lock` made every dependency bump restamp every row. Counting the
+        // distinct stamps re-created exactly that — a population any re-collection invalidates, over a
+        // value the production path already refuses to accept unsealed. The per-row shape check above
+        // (64 lowercase hex) is the part that is ours to make; the binding is gen-core's, and the
+        // `adopt_decode_geometry_policies` call above is where it fails closed.
+        for model in models {
+            let id = model["id"].as_str().expect("model id");
+            if !expected_ids.contains(id) {
+                let count = model["mlx"]["memoryStrategyContract"]["implementations"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|implementation| {
+                        implementation["parameterRanges"]
+                            .get("decodeGeometryPolicies")
+                            .is_some()
+                    })
+                    .count();
+                assert_eq!(
+                    count, 0,
+                    "{id}: unrelated route must not inherit P9 evidence"
+                );
+            }
         }
     }
 
@@ -5041,6 +6775,7 @@ mod tests {
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
             0,
         )
         .expect("a covered qwen cell must be admitted");
@@ -5081,14 +6816,25 @@ mod tests {
         );
     }
 
-    /// Stale admission (sc-18096) on a REAL shipped lane. Z-Image's ladder was measured at
-    /// `d4802320`, and `mlx:z_image_turbo`'s closure has moved since, so this is the one shipped
-    /// opt-in whose calibration is genuinely stale. Under sc-18095/18096 that ladder stays
-    /// SELECTABLE — its candidates reach the selector carrying their measured digest and are
-    /// graded behind the widened stale margin — while a binding that LIES about its digest still
-    /// resolves to nothing.
+    /// Admission on a REAL shipped lane. SC-19753 captured all five Z-Image rungs at the inference
+    /// closure that was live when it ran; the epic's pin has since advanced past it, so this ladder
+    /// is now an ACCEPTED FLOOR rather than current verification. A pin bump staling calibration
+    /// records is the fail-closed design working, not a re-capture work order.
+    ///
+    /// Renamed from `..._admits_current_mlx_ladder_rungs` because "current" is the one thing it no
+    /// longer proves. What it still proves exactly, and what keeps it from going vacuous:
+    ///   * the manifest binding and the packaged evidence agree with each other on the digest;
+    ///   * at the closure it WAS measured under, the ladder reaches calibrated admission on all
+    ///     five rungs;
+    ///   * a binding that lies about its digest resolves to nothing even at that same closure —
+    ///     the negative control now differs from the positive case by exactly one variable.
+    ///
+    /// Deliberately NOT asserted: that routing at the live closure degrades. `packaged_admission_route`
+    /// resolves evidence through the manifest binding rather than the caller's closure argument, so
+    /// it still reports `Evidence` there; asserting otherwise would encode a mechanism that does not
+    /// exist. Currency itself is covered by the matrix currency suite, not here.
     #[test]
-    fn shipped_z_image_manifest_admits_historical_mlx_ladder_rungs_as_stale() {
+    fn shipped_z_image_manifest_admits_the_accepted_mlx_ladder_floor() {
         let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
         let manifest: Value =
             serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
@@ -5115,14 +6861,17 @@ mod tests {
             .find(|record| {
                 matches!(record.backend, CalibrationBackend::Mlx)
                     && record.target.provider == "z_image_turbo"
+                    && record.calibration_fingerprint
+                        == "z-image-mlx-independent-materialization-v4"
             })
             .and_then(|record| record.repositories.inference.closure_digest)
-            .expect("the packaged bundle carries the historical Z-Image ladder with its digest");
+            .expect("the packaged bundle carries the current Z-Image ladder with its digest");
         let live = live_mlx_closure_digest("z_image_turbo");
         assert_ne!(
             captured, live,
-            "this test is about a lane whose closure HAS moved; if z_image_turbo were recaptured \
-             current, the assertions below would be checking the opposite of their own name"
+            "this ladder is a known accepted floor. If a re-capture has made it current again, \
+             restore the equality here and refresh the currency expectations that pair with it \
+             rather than leaving a stale `assert_ne!` asserting the opposite of the truth"
         );
         assert!(bindings.iter().all(|binding| {
             binding.query.abi == sceneworks_core::memory_calibration::MEMORY_CALIBRATION_ABI
@@ -5137,14 +6886,13 @@ mod tests {
                         batch: 1,
                         frames: 1,
                     }
-                // Capture provenance, pinned as a literal because it is a fact about the shipped
-                // opt-in that no pin bump may silently rewrite. It is NOT the currency term.
-                && binding.query.inference_revision == "d48023204cd3a4f3f8eb060f79803dccaddcb482"
-                // The currency term (sc-17774), graded against three independent artifacts: the
-                // manifest binding must agree with the evidence bundle about what it measured, and
-                // must disagree with the live closure config — which is why the route degrades.
+                && binding.query.fingerprint == "z-image-mlx-independent-materialization-v4"
+                // Capture provenance remains an exact fact about the shipped opt-in.
+                && binding.query.inference_revision == "dfd76b5aef62b2082ed4b18a8eebd2e3e2e07cfb"
+                // The manifest binding and the packaged evidence must still agree exactly with each
+                // other. They no longer agree with the LIVE closure, which is the accepted-floor
+                // state asserted above, not a drift between these two.
                 && binding.query.inference_closure_digest == captured
-                && binding.query.inference_closure_digest != live
         }));
         assert!(bindings.iter().all(|binding| {
             binding.query.load_shape
@@ -5176,62 +6924,53 @@ mod tests {
             Some(z_image),
             Some(resolved),
         );
+        // Routed at the closure the ladder was MEASURED under. That is the coordinate at which
+        // these records are evidence; at any other closure they are history, which is asserted
+        // separately below.
         let route = packaged_admission_route(
             &plan,
             &fixture_inputs(768, 768),
             "text_to_image",
             fixture_budget(128.0),
-            &live_mlx_closure_digest("z_image_turbo"),
+            &captured,
         )
-        .expect("historical Z-Image evidence must route without an error");
+        .expect("the accepted Z-Image floor must route without an error");
 
-        // sc-18096: the historical ladder is no longer pre-demoted to legacy. It reaches
-        // calibrated admission with every candidate carrying the digest it was MEASURED under, so
-        // the selector grades the whole ladder behind the widened stale-measured margin instead of
-        // refusing the render outright.
         assert_eq!(
             route.path,
             AdmissionPath::Evidence,
-            "the stale historical ladder must reach the selector; got fallback {:?}",
+            "at its captured closure the ladder must reach the selector; got fallback {:?}",
             route.fallback_reason
         );
         assert_eq!(
             route.evidence.len(),
             5,
-            "every historical rung must resolve to its promoted record"
+            "every rung must resolve to its promoted record at the captured closure"
         );
         assert!(
             route
                 .evidence
                 .iter()
                 .all(|candidate| candidate.closure_digest == captured),
-            "each candidate must carry the captured digest so the selector can widen it"
+            "each candidate must carry the captured digest"
         );
 
-        // A manifest still cannot LAUNDER a stale ladder current by claiming the live digest.
-        //
-        // With the admission pre-filter's closure conjunct retired (sc-18096), what stops the
-        // laundering is `EvidenceBundle::evidence_for` finding the RECORD still stamped with the
-        // digest it was really measured under: a binding claiming the live digest no longer
-        // matches its own record, so it resolves to NO candidates at all — a lie about identity
-        // is worse off than the honest stale declaration above, which is exactly the incentive
-        // the two comparisons must preserve. One asks "which measurement is this binding telling
-        // the truth about?"; the currency question is now the selector's widened-margin grading.
-        let mut laundered = z_image.clone();
-        for calibration in laundered
+        // A manifest still cannot substitute a different closure identity for the measured one.
+        let mut mismatched = z_image.clone();
+        for calibration in mismatched
             .get_mut("mlx")
             .and_then(|mlx| mlx.get_mut("calibrations"))
             .and_then(Value::as_array_mut)
             .expect("calibrations array")
         {
-            calibration["inferenceClosureDigest"] = Value::from(live.clone());
+            calibration["inferenceClosureDigest"] = Value::from("0".repeat(64));
         }
-        let laundered_route = packaged_admission_route(
+        let mismatched_route = packaged_admission_route(
             &MlxRequestPlan::for_spec_and_manifest(
                 "z_image_turbo",
                 "z_image_turbo",
                 &spec,
-                Some(&laundered),
+                Some(&mismatched),
                 Some(ResolvedArtifactProvenance {
                     identity: crate::model_jobs::ResolvedArtifactIdentity {
                         repository: resolved_binding.artifact_repository.clone(),
@@ -5245,16 +6984,17 @@ mod tests {
             &fixture_inputs(768, 768),
             "text_to_image",
             fixture_budget(128.0),
-            &live,
+            // Deliberately the CAPTURED closure — the same coordinate the positive case above
+            // routes at — so the lying manifest digest is the only variable between them.
+            &captured,
         )
-        .expect("a laundered opt-in degrades, it does not error");
+        .expect("a mismatched opt-in degrades, it does not error");
         assert_eq!(
-            laundered_route.path,
+            mismatched_route.path,
             AdmissionPath::Legacy,
-            "a binding claiming the live digest must not reach calibrated admission on records \
-             measured under another closure"
+            "a binding claiming a different digest must not reach calibrated admission"
         );
-        assert!(laundered_route.evidence.is_empty());
+        assert!(mismatched_route.evidence.is_empty());
     }
 
     #[test]
@@ -5344,6 +7084,8 @@ mod tests {
                 backend: "mlx",
                 modality: gen_core::Modality::Image,
                 capabilities: gen_core::Capabilities::default(),
+                encoder_contract: None,
+                denoiser_output_latent_space: None,
                 required_components: &[],
                 control_kinds: None,
             },
@@ -5369,6 +7111,7 @@ mod tests {
             activation_headroom_bytes: gib_to_bytes(6.0),
             fixed_reserve_bytes: gib_to_bytes(2.0),
             calibration: MlxCalibrationConfig::Absent,
+            load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
         }
     }
 
@@ -5427,6 +7170,228 @@ mod tests {
             use_pid: false,
             has_phases: false,
         }
+    }
+
+    #[test]
+    fn krea_raw_true_cfg_and_reference_img2img_keep_exact_public_and_provider_shapes() {
+        let plain = MlxRequestInputs {
+            width: 1024,
+            height: 1024,
+            count: 4,
+            mode: "image_generation".to_owned(),
+            overlay: None,
+            adapter_count: 0,
+            has_reference: false,
+            reference_count: 0,
+            use_pid: false,
+            has_phases: false,
+        };
+        let (mode, mode_key) = request_mode(&plain.mode);
+        assert_eq!(mode, MemoryMode::TextToImage);
+        assert_eq!(mode_key, "text_to_image");
+        assert_eq!(
+            provider_request_mode("krea_2_raw", &plain),
+            (MemoryMode::TextToImage, "text_to_image")
+        );
+        assert_eq!(request_geometry(&plain).batch, 1);
+        assert_eq!(request_geometry(&plain).reference_count, 0);
+
+        let reference = MlxRequestInputs {
+            overlay: Some("references:1".to_owned()),
+            has_reference: true,
+            reference_count: 1,
+            ..plain.clone()
+        };
+        assert_eq!(
+            request_mode(&reference.mode).0,
+            MemoryMode::TextToImage,
+            "the public catalog coordinate remains generation"
+        );
+        assert_eq!(
+            provider_request_mode("krea_2_raw", &reference),
+            (MemoryMode::ImageToImage, "image_to_image"),
+            "the Raw provider behavior contract sees its one-reference latent-init route"
+        );
+        assert_eq!(
+            provider_request_mode("krea_2_turbo", &reference),
+            (MemoryMode::ImageToImage, "image_to_image"),
+            "Turbo's one-reference latent-init route has the same provider-owned identity"
+        );
+        assert_eq!(
+            provider_request_inputs("krea_2_raw", &reference)
+                .as_ref()
+                .overlay
+                .as_deref(),
+            None,
+            "reference count is the exact Raw provider axis; no synthetic overlay is retained"
+        );
+        assert_eq!(
+            provider_request_inputs("krea_2_turbo", &reference)
+                .as_ref()
+                .overlay
+                .as_deref(),
+            None,
+            "Krea base-DiT reference cardinality is typed and never duplicated as an overlay"
+        );
+        assert_eq!(request_geometry(&reference).batch, 1);
+        assert_eq!(request_geometry(&reference).reference_count, 1);
+
+        let reference_low_rank_pid = MlxRequestInputs {
+            overlay: Some("references:1+adapters:1".to_owned()),
+            adapter_count: 1,
+            use_pid: true,
+            ..reference.clone()
+        };
+        let provider_inputs = provider_request_inputs("krea_2_raw", &reference_low_rank_pid);
+        assert_eq!(provider_inputs.as_ref().overlay, None);
+        assert_eq!(provider_inputs.as_ref().adapter_count, 1);
+        assert!(provider_inputs.as_ref().use_pid);
+        assert_eq!(provider_inputs.as_ref().reference_count, 1);
+
+        let pid = MlxRequestInputs {
+            use_pid: true,
+            ..plain
+        };
+        assert_eq!(
+            provider_request_mode("krea_2_raw", &pid),
+            (MemoryMode::TextToImage, "text_to_image")
+        );
+        assert_eq!(request_geometry(&pid).batch, 1);
+        assert!(pid.use_pid);
+
+        let edit = MlxRequestInputs {
+            mode: "edit_image".to_owned(),
+            overlay: Some("adapters:1+pid".to_owned()),
+            adapter_count: 1,
+            has_reference: true,
+            reference_count: 2,
+            use_pid: true,
+            ..reference
+        };
+        for provider in ["krea_2_edit", "krea_2_turbo_edit"] {
+            assert_eq!(
+                provider_request_mode(provider, &edit),
+                (MemoryMode::Edit, "edit")
+            );
+            let normalized = provider_request_inputs(provider, &edit);
+            assert_eq!(normalized.as_ref().overlay, None, "{provider}");
+            assert_eq!(normalized.as_ref().adapter_count, 1, "{provider}");
+            assert!(normalized.as_ref().use_pid, "{provider}");
+            assert_eq!(normalized.as_ref().reference_count, 2, "{provider}");
+        }
+        assert_eq!(
+            provider_request_inputs("krea_2_turbo_control", &edit)
+                .as_ref()
+                .overlay
+                .as_deref(),
+            Some("adapters:1+pid"),
+            "the independently keyed Krea control provider keeps its established overlay"
+        );
+    }
+
+    #[test]
+    fn flux1_provider_overlay_is_derived_from_the_complete_load_identity() {
+        let plain = LoadSpec::new(WeightsSource::Dir("flux".into()));
+        assert_eq!(
+            provider_overlay_for_load_spec("flux1_dev", &plain, None),
+            None
+        );
+        let low_rank = plain.clone().with_adapters(vec![gen_core::AdapterSpec::new(
+            "adapter.safetensors".into(),
+            1.0,
+            gen_core::AdapterKind::Lora,
+        )]);
+        assert_eq!(
+            provider_overlay_for_load_spec("flux1_dev", &low_rank, Some("lora".to_owned()))
+                .as_deref(),
+            Some("adapters")
+        );
+        let low_rank_pid = low_rank.clone().with_pid(
+            WeightsSource::File("pid.safetensors".into()),
+            WeightsSource::Dir("gemma".into()),
+        );
+        assert_eq!(
+            provider_overlay_for_load_spec("flux1_dev", &low_rank_pid, None).as_deref(),
+            Some("adapters-pid")
+        );
+        let identity = low_rank_pid.with_ip_adapter(WeightsSource::Dir("ip-adapter".into()));
+        assert_eq!(
+            provider_overlay_for_load_spec("flux1_dev", &identity, Some("identity".to_owned()))
+                .as_deref(),
+            Some("adapters-ip-adapter-pid")
+        );
+        let control = low_rank.with_control(WeightsSource::File("control.safetensors".into()));
+        assert_eq!(
+            provider_overlay_for_load_spec("flux1_dev_control", &control, Some("control".into()))
+                .as_deref(),
+            Some("control-adapters")
+        );
+
+        let text = MlxRequestInputs {
+            width: 1024,
+            height: 1024,
+            count: 1,
+            mode: "text_to_image".to_owned(),
+            overlay: None,
+            adapter_count: 0,
+            has_reference: false,
+            reference_count: 0,
+            use_pid: false,
+            has_phases: false,
+        };
+        for provider in ["flux1_schnell", "flux1_dev"] {
+            for mode in ["text_to_image", "style_variations"] {
+                let inputs = MlxRequestInputs {
+                    mode: mode.to_owned(),
+                    ..text.clone()
+                };
+                assert_eq!(
+                    provider_request_mode(provider, &inputs),
+                    (MemoryMode::TextToImage, "text_to_image"),
+                    "{provider} {mode}"
+                );
+            }
+        }
+
+        let character = MlxRequestInputs {
+            mode: "character_image".to_owned(),
+            overlay: Some("ip-adapter".to_owned()),
+            has_reference: true,
+            reference_count: 1,
+            ..text.clone()
+        };
+        assert_eq!(
+            provider_request_mode("flux1_dev", &character),
+            (MemoryMode::ImageToImage, "image_to_image")
+        );
+        for mode in ["text_to_image", "style_variations", "character_image"] {
+            let control = MlxRequestInputs {
+                mode: mode.to_owned(),
+                overlay: Some("control".to_owned()),
+                has_reference: true,
+                reference_count: 1,
+                ..text.clone()
+            };
+            assert_eq!(
+                provider_request_mode("flux1_dev_control", &control),
+                (MemoryMode::ImageToImage, "image_to_image"),
+                "control {mode}"
+            );
+        }
+
+        assert_eq!(
+            provider_request_mode(
+                "flux1_schnell",
+                &MlxRequestInputs {
+                    mode: "character_image".to_owned(),
+                    has_reference: true,
+                    reference_count: 1,
+                    ..text
+                }
+            ),
+            (MemoryMode::ImageToImage, "image_to_image"),
+            "Schnell has no declaration-owned character route; generic normalization remains visible to fail closed"
+        );
     }
 
     /// The fixture record carries its own synthetic revision and [`FIXTURE_CLOSURE_DIGEST`].
@@ -5679,6 +7644,7 @@ mod tests {
                 bindings: vec![fixture_binding("q4", variant)],
                 resolved: fixture_provenance("q4", variant),
             }),
+            load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
         }
     }
 
@@ -5803,6 +7769,7 @@ mod tests {
             activation_headroom_bytes: gib_to_bytes(2.0),
             fixed_reserve_bytes: 0,
             calibration: MlxCalibrationConfig::Valid(MlxCalibrationSet { bindings, resolved }),
+            load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
         }
     }
 
@@ -5929,6 +7896,8 @@ mod tests {
                 backend: "mlx",
                 modality: gen_core::Modality::Image,
                 capabilities: gen_core::Capabilities::default(),
+                encoder_contract: None,
+                denoiser_output_latent_space: None,
                 required_components: &[],
                 control_kinds: None,
             },
@@ -5959,6 +7928,41 @@ mod tests {
             reclaimable_bytes: 0,
             reserved_headroom_bytes: 0,
         }
+    }
+
+    /// The `full_ladder_generator` fixture's estimate floors in GiB, BEFORE the margin. Derived from
+    /// the fixture facts (base 3 GiB all-transformer, headroom 2 fixed + 4 area) and spelled out in
+    /// full on [`unmeasured_provider_under_a_small_budget_selects_a_deep_estimate_rung`]:
+    /// resident / staged / bounded-decode / bounded-attention all floor at 3 + 6 = 9 GiB, while
+    /// rung 4 windows the transformer out of residency and floors at 0 + 6 = 6 GiB.
+    const FIXTURE_DEEP_ESTIMATE_FLOOR_GB: f64 = 6.0;
+    const FIXTURE_SHALLOW_ESTIMATE_FLOOR_GB: f64 = 9.0;
+
+    /// The production widening an EstimateFloor candidate receives before the fit check.
+    ///
+    /// Read from the shipped constant rather than a literal on purpose. `MLX_ESTIMATE_MARGIN` is
+    /// re-derived from the calibration corpus and moved 5% -> 50.4073% when the corpus grew 65 -> 89
+    /// records; every fixture below that had hardcoded a host budget against the 5% term silently
+    /// FLIPPED DIRECTION at that point (a "reaches the deep rung" test became a refusal test, for the
+    /// wrong reason). Sizing budgets through this function instead keeps each test's direction fixed
+    /// across any future re-derivation, so an accepted-floor change stays bookkeeping.
+    fn widened_estimate_gb(floor_gb: f64) -> f64 {
+        floor_gb * (1.0 + crate::ladder_margin_policy::MLX_ESTIMATE_MARGIN)
+    }
+
+    /// A host budget that admits EXACTLY the deepest (rung-4) estimate floor and nothing shallower —
+    /// the midpoint of the widened window, so it cannot sit on either boundary. At the current margin
+    /// this is ~11.3 GiB (rung 4 widens to 9.02, everything shallower to 13.54); at the old 5% term
+    /// it would have been ~7.9 GiB, which is why these fixtures read 8.0.
+    fn budget_admitting_only_the_deepest_estimate_rung() -> MemoryBudget {
+        let deepest = widened_estimate_gb(FIXTURE_DEEP_ESTIMATE_FLOOR_GB);
+        let shallowest = widened_estimate_gb(FIXTURE_SHALLOW_ESTIMATE_FLOOR_GB);
+        assert!(
+            deepest < shallowest,
+            "the deep rung must stay strictly cheaper than the shallow floors: \
+             {deepest} vs {shallowest}"
+        );
+        fixture_budget((deepest + shallowest) / 2.0)
     }
 
     fn fixture_ladder() -> (EvidenceBundle, MlxRequestPlan) {
@@ -6193,6 +8197,7 @@ mod tests {
             &fixture_inputs(1024, 1024),
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
             fixture_budget(8.0),
             gib_to_bytes(6.0),
             0,
@@ -6219,12 +8224,12 @@ mod tests {
         let plan = packaged_krea_plan();
         // Realistic component facts so the floor arithmetic is meaningful: conditioning 8 GiB,
         // transformer 60 GiB, decoder 4 GiB. Floors at 1024² (headroom = 2 GiB fixture anchor):
-        //   staged (rung 1)       max(8, 64) + 2 = 66 GiB  -> widened 72.6 GiB
-        //   bounded decode floor  (8 + 64)  + 2 = 74 GiB  -> widened 81.4 GiB (never used: the
+        //   staged (rung 1)       max(8, 64) + 2 = 66 GiB  -> widened 99.27 GiB
+        //   bounded decode floor  (8 + 64)  + 2 = 74 GiB  -> widened 111.30 GiB (never used: the
         //                                                   measured 896² basis supplies a fitted
         //                                                   curve instead)
         // Fitted bounded-decode estimate from the 896² record: envelope 38.563 GiB scaled by
-        // 1024²/896² = 50.37 GiB, widened by the 0.10 MLX estimate margin to 55.41 GiB.
+        // 1024²/896² = 50.37 GiB, widened by the measured MLX estimate margin to 75.76 GiB.
         let mut generator = packaged_krea_generator();
         {
             let facts = &mut generator
@@ -6247,6 +8252,7 @@ mod tests {
                 &inputs,
                 MemoryCacheState::Cold,
                 OffloadPolicy::Resident,
+                crate::execution_planner::WarmPolicyProposal::inert("fixture"),
                 fixture_budget(budget_gib),
                 gib_to_bytes(130.0),
                 0,
@@ -6273,11 +8279,11 @@ mod tests {
             REQUEST_EVIDENCE_REVISION
         );
 
-        // At 60 GiB the staged floor (72.6 widened) no longer fits, and the FITTED bounded-decode
-        // estimate extrapolated from the measured 896² cell (55.41 GiB widened) is selected — with
+        // At 76 GiB the staged floor (99.27 widened) no longer fits, and the FITTED bounded-decode
+        // estimate extrapolated from the measured 896² cell (75.76 GiB widened) is selected — with
         // the measured cell's own sweep parameters, which a floor synthesis (built from the
-        // smallest declared ranges and a 81.4 GiB widened peak) could not produce at this budget.
-        let fitted = evaluate(&generator, 60.0)
+        // smallest declared ranges and a 111.30 GiB widened peak) could not produce at this budget.
+        let fitted = evaluate(&generator, 76.0)
             .expect("the fitted-curve estimate must admit where the floors cannot");
         assert_eq!(
             fitted.context.selection.strategy,
@@ -6318,6 +8324,7 @@ mod tests {
             &exact_896,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
             fixture_budget(83.0),
             gib_to_bytes(130.0),
             0,
@@ -6340,11 +8347,11 @@ mod tests {
         // mutated fingerprint is deliberately WELL-FORMED (`-v1` satisfies the contract's version
         // token conformance rule), so the refusal below is the work of the basis identity gate in
         // `synthesize_estimate_ladder`, not an accidental contract-conformance `Invalid`. And it
-        // runs at 60 GiB, a budget where NO lower alternative is named (both packaged cells need
+        // runs at 76 GiB, a budget where NO lower alternative is named (both packaged cells need
         // their ~47 GiB captured foreign reserve), so `carries_verified_claim` is FALSE and the
         // fingerprint demotion at the admission seam never fires — the synthesis-side gate is the
         // only thing standing between the drifted provider and the fitted candidate. The
-        // unmutated generator ADMITS at 60 (the fitted arm above), so the refusal is exactly the
+        // unmutated generator ADMITS at 76 (the fitted arm above), so the refusal is exactly the
         // mutation's doing.
         let mut mismatched_generator = packaged_krea_generator();
         {
@@ -6368,7 +8375,7 @@ mod tests {
             "the mutated fingerprint must be conformance-CLEAN so this arm exercises the basis \
              identity gate, not format validation"
         );
-        let message = evaluate(&mismatched_generator, 60.0)
+        let message = evaluate(&mismatched_generator, 76.0)
             .expect_err("a fingerprint-drifted provider loses the measured basis and refuses")
             .to_string();
         assert!(
@@ -6406,7 +8413,7 @@ mod tests {
                 .expect("bounded decode capability")
                 .support = gen_core::MemoryStrategySupport::Missing;
         }
-        let message = evaluate(&unimplemented_generator, 60.0)
+        let message = evaluate(&unimplemented_generator, 76.0)
             .expect_err("an unimplemented rung is never estimate-admissible")
             .to_string();
         assert!(
@@ -6416,7 +8423,7 @@ mod tests {
 
         // At the LIVE closure the verdict forks on the digest pair, derived rather than
         // hardcoded: a fitted-curve estimate may extrapolate only from CLOSURE-CURRENT records
-        // (see `MeasuredRungBasis` — the 0.10 estimate margin was derived over same-closure
+        // (see `MeasuredRungBasis` — the estimate margin was derived over same-closure
         // re-capture variance and cannot also absorb closure drift). While the pose-control pair
         // is current the 60 GiB request admits the fitted rung; once the closure moves, the
         // records may keep serving their own measured cells behind the stale margin (sc-18095)
@@ -6427,6 +8434,7 @@ mod tests {
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
             fixture_budget(60.0),
             gib_to_bytes(130.0),
             0,
@@ -6487,12 +8495,12 @@ mod tests {
     /// and the selection translates to the right engine knobs.
     ///
     /// Floor arithmetic (fixture facts: base 3 GiB all transformer, headroom 2 fixed + 4 area):
-    ///   resident        9 GiB modeled -> widened  9.9
-    ///   staged floor    3 + 6 = 9     -> widened  9.9
-    ///   decode floor    3 + 6 = 9     -> widened  9.9   (bounds transients, not weights)
-    ///   attention floor 3 + 6 = 9     -> widened  9.9
-    ///   rung 4 floor    0 + 6 = 6     -> widened  6.6   (windowed transformer leaves residency)
-    /// An 8 GiB budget therefore admits exactly one rung: BoundedTransformerResidency.
+    ///   resident        9 GiB modeled -> widened 13.54
+    ///   staged floor    3 + 6 = 9     -> widened 13.54
+    ///   decode floor    3 + 6 = 9     -> widened 13.54  (bounds transients, not weights)
+    ///   attention floor 3 + 6 = 9     -> widened 13.54
+    ///   rung 4 floor    0 + 6 = 6     -> widened  9.02  (windowed transformer leaves residency)
+    /// A 9.1 GiB budget therefore admits exactly one rung: BoundedTransformerResidency.
     #[test]
     fn unmeasured_provider_under_a_small_budget_selects_a_deep_estimate_rung() {
         let generator = full_ladder_generator();
@@ -6505,7 +8513,7 @@ mod tests {
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
-            fixture_budget(8.0),
+            fixture_budget(9.1),
             gib_to_bytes(9.0),
             0,
             &[],
@@ -6514,8 +8522,12 @@ mod tests {
         assert_eq!(
             evaluation.context.selection.strategy,
             MemoryStrategy::BoundedTransformerResidency,
-            "only rung 4's floor fits an 8 GiB budget: {:?}",
+            "only rung 4's floor fits a 9.1 GiB budget: {:?}",
             evaluation.context.selection
+        );
+        assert_eq!(
+            evaluation.context.optimization_authority,
+            MemoryOptimizationAuthority::Estimated
         );
         // The floor synthesizes the most deeply bounding declared parameters.
         assert_eq!(
@@ -6554,7 +8566,7 @@ mod tests {
             REQUEST_EVIDENCE_REVISION
         );
 
-        // Mutation arm: at 6 GiB even the rung-4 widened floor (6.6 GiB) overflows, and the
+        // Mutation arm: at 9 GiB even the rung-4 widened floor (~9.02 GiB) overflows, and the
         // refusal is the honest Reject quoting the widened requirement — proving the estimate
         // margin is applied on this path (a zeroed margin would admit 6.0 <= 6.0).
         let error = evaluate_request_with_budget(
@@ -6563,7 +8575,7 @@ mod tests {
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
-            fixture_budget(6.0),
+            fixture_budget(9.0),
             gib_to_bytes(9.0),
             0,
             &[],
@@ -6571,16 +8583,786 @@ mod tests {
         .expect_err("below every widened estimate the request must refuse")
         .to_string();
         assert!(
-            error.contains("needs 6.60 GiB"),
+            error.contains("needs 9.02 GiB"),
             "the refusal must quote the WIDENED rung-4 floor: {error}"
         );
+    }
+
+    #[test]
+    fn pulid_identity_route_is_estimated_only_and_refusal_is_terminal() {
+        let mut generator = full_ladder_generator();
+        generator.descriptor.id = "pulid_flux";
+        let contract = generator.contract.as_mut().expect("fixture contract");
+        contract.provider_id = "pulid_flux".to_owned();
+        contract.calibration = None;
+        let decode = contract
+            .strategies
+            .iter_mut()
+            .find(|capability| capability.strategy == MemoryStrategy::BoundedDecode)
+            .expect("bounded decode capability");
+        decode.parameters.decode_tile_edges = vec![768, 640, 512];
+        decode.parameters.decode_overlaps = vec![64];
+        let attention = contract
+            .strategies
+            .iter_mut()
+            .find(|capability| capability.strategy == MemoryStrategy::BoundedAttention)
+            .expect("bounded attention capability");
+        attention.parameters.attention_chunk_sizes = vec![67_108_864];
+        let transformer = contract
+            .strategies
+            .iter_mut()
+            .find(|capability| capability.strategy == MemoryStrategy::BoundedTransformerResidency)
+            .expect("bounded transformer capability");
+        transformer.parameters.transformer_window_sizes = vec![1];
+
+        let mut plan = fixture_plan();
+        plan.engine_id = "pulid_flux";
+        plan.model_id = "pulid_flux_dev".to_owned();
+        plan.calibration = MlxCalibrationConfig::Absent;
+        plan.load_shape_declaration_result = LoadShapeDeclarationResult::Applied;
+        let mut inputs = fixture_inputs(1024, 1024);
+        inputs.mode = "character_image".to_owned();
+        inputs.overlay = Some("identity".to_owned());
+        inputs.has_reference = true;
+        inputs.reference_count = 1;
+
+        let evaluation = evaluate_request_with_budget(
+            &generator,
+            &plan,
+            &inputs,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Sequential,
+            budget_admitting_only_the_deepest_estimate_rung(),
+            gib_to_bytes(9.0),
+            0,
+            &[],
+        )
+        .expect("the exact unmeasured PuLID identity route must reach the estimate ladder");
+        assert_eq!(
+            evaluation.context.selection.strategy,
+            MemoryStrategy::BoundedTransformerResidency
+        );
+        assert_eq!(
+            evaluation.context.optimization_authority,
+            MemoryOptimizationAuthority::Estimated,
+            "PuLID must not inherit flux_dev measurements"
+        );
+        assert_eq!(evaluation.context.mode, MemoryMode::ImageToImage);
+        assert_eq!(evaluation.context.overlay.as_deref(), Some("identity"));
+        assert_eq!(evaluation.context.geometry.reference_count, 1);
+        assert_eq!(
+            evaluation.context.selection.parameters.decode_tile_edge,
+            Some(512)
+        );
+        assert_eq!(
+            evaluation.context.selection.parameters.decode_overlap,
+            Some(64)
+        );
+        assert_eq!(
+            evaluation.context.selection.parameters.attention_chunk_size,
+            Some(67_108_864)
+        );
+        assert_eq!(
+            evaluation
+                .context
+                .selection
+                .parameters
+                .transformer_window_size,
+            Some(1)
+        );
+        assert!(evaluation.process_limit_bytes.is_none());
+
+        let mut refused = plan.clone();
+        refused.load_shape_declaration_result = LoadShapeDeclarationResult::Refused;
+        let resident = evaluate_request_with_budget(
+            &generator,
+            &refused,
+            &inputs,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget(20.0),
+            gib_to_bytes(9.0),
+            0,
+            &[],
+        )
+        .expect("a refused declaration keeps the safe roomy resident path");
+        assert_eq!(
+            resident.context.selection.strategy,
+            MemoryStrategy::Resident
+        );
+        assert_eq!(
+            resident.context.optimization_authority,
+            MemoryOptimizationAuthority::Resident
+        );
+        // Deliberately the SAME budget as the admitted arm above: the only difference between the two
+        // is `LoadShapeDeclarationResult::Applied` vs `Refused`, so the refusal is attributable to the
+        // declaration rather than to a budget that would have refused either way. (It previously read
+        // 8.0 GiB, which under the current margin refuses every rung and would have passed for the
+        // wrong reason.)
+        let error = evaluate_request_with_budget(
+            &generator,
+            &refused,
+            &inputs,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            budget_admitting_only_the_deepest_estimate_rung(),
+            gib_to_bytes(9.0),
+            0,
+            &[],
+        )
+        .expect_err("a refused over-budget eager request cannot rediscover an optimized rung")
+        .to_string();
+        assert!(
+            error.contains("needs") && error.contains("safely available"),
+            "terminal refusal must surface the safe resident fit failure: {error}"
+        );
+    }
+
+    #[test]
+    fn krea_raw_estimate_floor_selects_exact_native_and_pid_decode_domains() {
+        let mut generator = full_ladder_generator();
+        generator.descriptor.id = "krea_2_raw";
+        let contract = generator.contract.as_mut().expect("fixture contract");
+        contract.provider_id = "krea_2_raw".to_owned();
+        let decode = contract
+            .strategies
+            .iter_mut()
+            .find(|capability| capability.strategy == MemoryStrategy::BoundedDecode)
+            .expect("bounded decode capability");
+        decode.parameters.decode_tile_edges = vec![2048, 512];
+        decode.parameters.decode_overlaps = vec![256, 64];
+        contract.pid_decode_routes = Some(gen_core::MemoryPidDecodeRoutes {
+            native: gen_core::MemoryDecodeRouteDomain {
+                tile_edges: vec![512],
+                tile_overlap: 64,
+            },
+            pid: gen_core::MemoryDecodeRouteDomain {
+                tile_edges: vec![2048],
+                tile_overlap: 256,
+            },
+        });
+        let mut plan = fixture_plan();
+        plan.engine_id = "krea_2_raw";
+        plan.model_id = "krea_2_raw".to_owned();
+        plan.calibration = MlxCalibrationConfig::Absent;
+        for (profile, adapter_count, use_pid, expected_edge, expected_overlap) in [
+            ("plain", 0, false, 512, 64),
+            ("low-rank", 1, false, 512, 64),
+            ("plain+pid", 0, true, 2048, 256),
+            ("low-rank+pid", 1, true, 2048, 256),
+        ] {
+            let mut inputs = fixture_inputs(1024, 1024);
+            inputs.use_pid = use_pid;
+            inputs.adapter_count = adapter_count;
+            let evaluation = evaluate_request_with_budget(
+                &generator,
+                &plan,
+                &inputs,
+                MemoryCacheState::Cold,
+                OffloadPolicy::Sequential,
+                budget_admitting_only_the_deepest_estimate_rung(),
+                gib_to_bytes(9.0),
+                0,
+                &[],
+            )
+            .expect("the exact Raw decode domain must admit the deep estimate rung");
+            assert_eq!(
+                evaluation.context.selection.strategy,
+                MemoryStrategy::BoundedTransformerResidency
+            );
+            assert_eq!(
+                evaluation.context.selection.parameters.decode_tile_edge,
+                Some(expected_edge),
+                "profile={profile}"
+            );
+            assert_eq!(
+                evaluation.context.selection.parameters.decode_overlap,
+                Some(expected_overlap),
+                "profile={profile}"
+            );
+            assert_eq!(evaluation.context.use_pid, use_pid);
+            assert_eq!(evaluation.context.overlay, None);
+        }
+    }
+
+    #[test]
+    fn flux2_klein_provider_axes_and_estimate_floor_keep_native_and_pid_domains_exact() {
+        let mut composed = LoadSpec::new(WeightsSource::Dir("klein".into()))
+            .with_adapters(vec![gen_core::AdapterSpec::new(
+                "adapter.safetensors".into(),
+                1.0,
+                gen_core::AdapterKind::Lora,
+            )])
+            .with_control(WeightsSource::File("control.safetensors".into()))
+            .with_extra_control(WeightsSource::File("extra-control.safetensors".into()))
+            .with_ip_adapter(WeightsSource::Dir("ip-adapter".into()))
+            .with_text_encoder(WeightsSource::Dir("external-text-encoder".into()))
+            .with_component(
+                "unknown",
+                WeightsSource::File("component.safetensors".into()),
+            );
+        composed.identity = Some(gen_core::IdentityWeights::default());
+        assert_eq!(
+            provider_overlay_for_load_spec("flux2_klein_9b", &composed, None).as_deref(),
+            Some(
+                "adapters-control-extra-controls-ip-adapter-identity-external-text-encoder-components"
+            ),
+            "Klein provider identity follows the pinned provider's complete closed axis order"
+        );
+        assert_eq!(
+            provider_overlay_for_load_spec(
+                "krea_2_raw",
+                &composed,
+                Some("public-label".to_owned())
+            ),
+            None,
+            "Krea base-DiT provider overlay remains None for the same typed load axes"
+        );
+
+        let public_base = MlxRequestInputs {
+            width: 1024,
+            height: 1024,
+            count: 1,
+            mode: "text_to_image".to_owned(),
+            overlay: Some("adapters".to_owned()),
+            adapter_count: 1,
+            has_reference: false,
+            reference_count: 0,
+            use_pid: false,
+            has_phases: false,
+        };
+        assert_eq!(
+            provider_request_mode("flux2_klein_9b", &public_base),
+            (MemoryMode::TextToImage, "text_to_image")
+        );
+        assert_eq!(
+            provider_request_inputs("flux2_klein_9b", &public_base)
+                .as_ref()
+                .overlay,
+            Some("adapters".to_owned()),
+            "Klein low-rank loads use the provider's one exact adapter identity"
+        );
+
+        let reference = MlxRequestInputs {
+            has_reference: true,
+            reference_count: 1,
+            ..public_base.clone()
+        };
+        assert_eq!(
+            provider_request_mode("flux2_klein_9b", &reference),
+            (MemoryMode::ImageToImage, "image_to_image")
+        );
+        for provider in ["flux2_klein_9b_edit", "flux2_klein_9b_kv_edit"] {
+            for references in 1..=8 {
+                let edit = MlxRequestInputs {
+                    mode: "character_image".to_owned(),
+                    reference_count: references,
+                    ..reference.clone()
+                };
+                assert_eq!(
+                    provider_request_mode(provider, &edit),
+                    (MemoryMode::Edit, "edit"),
+                    "{provider} refs={references}"
+                );
+                assert_eq!(
+                    provider_request_inputs(provider, &edit).as_ref().overlay,
+                    Some("adapters".to_owned())
+                );
+            }
+        }
+
+        for (provider, mode, references) in [
+            ("flux2_klein_9b", "text_to_image", 0),
+            ("flux2_klein_9b", "text_to_image", 1),
+            ("flux2_klein_9b_edit", "edit_image", 8),
+            ("flux2_klein_9b_kv_edit", "character_image", 2),
+        ] {
+            let mut generator = full_ladder_generator();
+            generator.descriptor.id = provider;
+            let contract = generator.contract.as_mut().expect("fixture contract");
+            contract.provider_id = provider.to_owned();
+            contract.calibration = None;
+            let decode = contract
+                .strategies
+                .iter_mut()
+                .find(|capability| capability.strategy == MemoryStrategy::BoundedDecode)
+                .expect("bounded decode capability");
+            decode.parameters.decode_tile_edges = vec![2048, 768, 640, 512];
+            decode.parameters.decode_overlaps = vec![256, 128];
+            contract.pid_decode_routes = Some(gen_core::MemoryPidDecodeRoutes {
+                native: gen_core::MemoryDecodeRouteDomain {
+                    tile_edges: vec![768, 640, 512],
+                    tile_overlap: 128,
+                },
+                pid: gen_core::MemoryDecodeRouteDomain {
+                    tile_edges: vec![2048],
+                    tile_overlap: 256,
+                },
+            });
+
+            let mut plan = fixture_plan();
+            plan.engine_id = provider;
+            plan.model_id = "flux2_klein_9b".to_owned();
+            plan.calibration = MlxCalibrationConfig::Absent;
+            plan.load_shape_declaration_result = LoadShapeDeclarationResult::Applied;
+            plan.tier.quant = None;
+            let plan = plan
+                .with_resolved_artifact_tier(Some("q4"))
+                .expect("packed q4 tier is explicit without load-time quantization");
+
+            for (use_pid, edge, overlap) in [(false, 512, 128), (true, 2048, 256)] {
+                let inputs = MlxRequestInputs {
+                    width: 1024,
+                    height: 1024,
+                    count: 1,
+                    mode: mode.to_owned(),
+                    overlay: None,
+                    adapter_count: 0,
+                    has_reference: references > 0,
+                    reference_count: references,
+                    use_pid,
+                    has_phases: false,
+                };
+                let evaluation = evaluate_request_with_budget(
+                    &generator,
+                    &plan,
+                    &inputs,
+                    MemoryCacheState::Cold,
+                    OffloadPolicy::Sequential,
+                    budget_admitting_only_the_deepest_estimate_rung(),
+                    gib_to_bytes(9.0),
+                    0,
+                    &[],
+                )
+                .expect("the exact Klein estimate route must reach BTR");
+                assert_eq!(
+                    evaluation.context.selection.strategy,
+                    MemoryStrategy::BoundedTransformerResidency,
+                    "{provider} pid={use_pid}"
+                );
+                assert_eq!(
+                    evaluation.context.optimization_authority,
+                    MemoryOptimizationAuthority::Estimated,
+                    "Klein aliases must not inherit measured Flux or sibling authority"
+                );
+                assert_eq!(
+                    evaluation.context.selection.parameters.decode_tile_edge,
+                    Some(edge)
+                );
+                assert_eq!(
+                    evaluation.context.selection.parameters.decode_overlap,
+                    Some(overlap)
+                );
+                assert_eq!(evaluation.context.overlay, None);
+                assert_eq!(evaluation.context.geometry.reference_count, references);
+                assert_eq!(evaluation.context.use_pid, use_pid);
+            }
+
+            let low_rank = MlxRequestInputs {
+                width: 1024,
+                height: 1024,
+                count: 1,
+                mode: mode.to_owned(),
+                overlay: Some("adapters".to_owned()),
+                adapter_count: 1,
+                has_reference: references > 0,
+                reference_count: references,
+                use_pid: true,
+                has_phases: false,
+            };
+            let mut refused = plan.clone();
+            refused.load_shape_declaration_result = LoadShapeDeclarationResult::Refused;
+            let resident = evaluate_request_with_budget(
+                &generator,
+                &refused,
+                &low_rank,
+                MemoryCacheState::Cold,
+                OffloadPolicy::Resident,
+                fixture_budget(20.0),
+                gib_to_bytes(9.0),
+                0,
+                &[],
+            )
+            .expect("LoRA/LoKr plus PiD stays executable on the safe eager path");
+            assert_eq!(
+                resident.context.selection.strategy,
+                MemoryStrategy::Resident
+            );
+            assert_eq!(
+                resident.context.optimization_authority,
+                MemoryOptimizationAuthority::Resident
+            );
+            // Same budget as the admitted arm on purpose — it admits rung 4 and nothing shallower, so
+            // "eager cannot fit" is a statement about the eager path, not about a budget too small for
+            // anything at all.
+            let error = evaluate_request_with_budget(
+                &generator,
+                &refused,
+                &low_rank,
+                MemoryCacheState::Cold,
+                OffloadPolicy::Resident,
+                budget_admitting_only_the_deepest_estimate_rung(),
+                gib_to_bytes(9.0),
+                0,
+                &[],
+            )
+            .expect_err("a refused low-rank route cannot rediscover BTR when eager cannot fit")
+            .to_string();
+            assert!(
+                error.contains("needs") && error.contains("safely available"),
+                "{error}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn flux2_klein_refused_low_rank_routes_remain_executable_through_real_provider_scope() {
+        let registry = crate::inference_runtime::media();
+        for (provider, public_mode, provider_mode, reference_count) in [
+            (
+                "flux2_klein_9b",
+                "text_to_image",
+                MemoryMode::TextToImage,
+                0,
+            ),
+            ("flux2_klein_9b_edit", "edit_image", MemoryMode::Edit, 1),
+        ] {
+            let registration = registry
+                .memory_strategy_registrations()
+                .find(|registration| registration.provider_id == provider)
+                .unwrap_or_else(|| panic!("{provider} memory registration"));
+            let fixture = registry
+                .memory_contract_fixture_registrations()
+                .find(|fixture| fixture.provider_id == provider)
+                .unwrap_or_else(|| panic!("{provider} weights-free contract fixture"));
+            let behavior = registry
+                .memory_behavior_registrations()
+                .find(|behavior| behavior.provider_id == provider)
+                .unwrap_or_else(|| panic!("{provider} behavior registration"));
+
+            for (label, kind, external_text_encoder, expected_overlay) in [
+                ("lora", Some(gen_core::AdapterKind::Lora), false, "adapters"),
+                ("lokr", Some(gen_core::AdapterKind::Lokr), false, "adapters"),
+                ("external-te", None, true, "external-text-encoder"),
+                (
+                    "lora-external-te",
+                    Some(gen_core::AdapterKind::Lora),
+                    true,
+                    "adapters-external-text-encoder",
+                ),
+                (
+                    "lokr-external-te",
+                    Some(gen_core::AdapterKind::Lokr),
+                    true,
+                    "adapters-external-text-encoder",
+                ),
+            ] {
+                let weights = tempfile::tempdir().expect("Klein weights fixture");
+                let mut spec = LoadSpec::new(WeightsSource::Dir(weights.path().to_owned()));
+                if let Some(kind) = kind {
+                    spec = spec.with_adapters(vec![gen_core::AdapterSpec::new(
+                        weights.path().join("adapter.safetensors"),
+                        1.0,
+                        kind,
+                    )]);
+                }
+                if external_text_encoder {
+                    spec = spec.with_text_encoder(WeightsSource::Dir(
+                        weights.path().join("external-text-encoder"),
+                    ));
+                }
+                let contract = (fixture.contract)(&spec)
+                    .unwrap_or_else(|error| panic!("{provider} weights-free contract: {error}"));
+                let mut generator = fixture_generator();
+                generator.descriptor.id = provider;
+                generator.contract = Some(contract.clone());
+
+                let mut plan = fixture_plan();
+                plan.engine_id = provider;
+                plan.model_id = provider.to_owned();
+                plan.tier.quant = None;
+                plan.calibration = MlxCalibrationConfig::Absent;
+                plan.load_shape_declaration_result = LoadShapeDeclarationResult::Refused;
+                let plan = plan
+                    .with_resolved_artifact_tier(Some("bf16"))
+                    .expect("Klein dense tier remains explicit");
+                let inputs = MlxRequestInputs {
+                    width: 1024,
+                    height: 1024,
+                    count: 1,
+                    mode: public_mode.to_owned(),
+                    overlay: provider_overlay_for_load_spec(provider, &spec, None),
+                    adapter_count: usize::from(kind.is_some()),
+                    has_reference: reference_count > 0,
+                    reference_count,
+                    use_pid: false,
+                    has_phases: false,
+                };
+                let evaluation = evaluate_request_with_budget(
+                    &generator,
+                    &plan,
+                    &inputs,
+                    MemoryCacheState::Cold,
+                    OffloadPolicy::Resident,
+                    fixture_budget(20.0),
+                    gib_to_bytes(9.0),
+                    0,
+                    &[],
+                )
+                .unwrap_or_else(|error| panic!("{provider} {label} resident request: {error}"));
+
+                assert_eq!(
+                    evaluation.context.selection.strategy,
+                    MemoryStrategy::Resident,
+                    "the refused low-rank declaration remains eager/resident"
+                );
+                assert_eq!(evaluation.context.mode, provider_mode);
+                assert_eq!(
+                    evaluation.context.overlay.as_deref(),
+                    Some(expected_overlay)
+                );
+                assert_eq!(
+                    (registration.safety_check)(&spec, &contract, &evaluation.context),
+                    gen_core::MemorySafetyDecision::Accept,
+                    "{provider} {label} must pass the real pinned provider safety seam"
+                );
+                assert!(
+                    (behavior.begin_request)(&spec, &contract, &evaluation.context)
+                        .unwrap_or_else(|error| {
+                            panic!("{provider} {label} begin_request: {error}")
+                        })
+                        .is_some(),
+                    "{provider} {label} must reach a real request scope"
+                );
+                assert_eq!(
+                    plan.load_shape_declaration_result,
+                    LoadShapeDeclarationResult::Refused,
+                    "provider execution must not reauthorize BTR"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn krea_turbo_and_edit_routes_use_provider_exact_estimated_authority() {
+        for (provider, model_id, mode, references) in [
+            ("krea_2_turbo", "krea_2_turbo", "image_generation", 0),
+            ("krea_2_edit", "krea_2_raw", "edit_image", 2),
+            ("krea_2_turbo_edit", "krea_2_turbo", "edit_image", 1),
+        ] {
+            let mut generator = full_ladder_generator();
+            generator.descriptor.id = provider;
+            generator.contract.as_mut().unwrap().provider_id = provider.to_owned();
+            let mut plan = fixture_plan();
+            plan.engine_id = provider;
+            plan.model_id = model_id.to_owned();
+            plan.calibration = MlxCalibrationConfig::Absent;
+            let mut inputs = fixture_inputs(1024, 1024);
+            inputs.mode = mode.to_owned();
+            inputs.overlay = Some("adapters:1".to_owned());
+            inputs.adapter_count = 1;
+            inputs.has_reference = references > 0;
+            inputs.reference_count = references;
+            inputs.use_pid = false;
+            let evaluation = evaluate_request_with_budget(
+                &generator,
+                &plan,
+                &inputs,
+                MemoryCacheState::Cold,
+                OffloadPolicy::Sequential,
+                budget_admitting_only_the_deepest_estimate_rung(),
+                gib_to_bytes(9.0),
+                0,
+                &[],
+            )
+            .expect("the provider-exact estimate ladder must admit the deep rung");
+            assert_eq!(
+                evaluation.context.selection.strategy,
+                MemoryStrategy::BoundedTransformerResidency,
+                "{provider}"
+            );
+            assert_eq!(
+                evaluation.context.optimization_authority,
+                MemoryOptimizationAuthority::Estimated,
+                "{provider} must not inherit a catalog sibling's measured authority"
+            );
+            assert_eq!(evaluation.context.overlay, None, "{provider}");
+            assert_eq!(evaluation.context.geometry.reference_count, references);
+            assert!(!evaluation.context.use_pid);
+        }
+    }
+
+    #[test]
+    fn krea_prepacked_tier_is_explicit_and_not_load_time_quantization() {
+        let mut plan = fixture_plan();
+        plan.engine_id = "krea_2_edit";
+        plan.model_id = "krea_2_raw".to_owned();
+        plan.tier.quant = None;
+        let q4 = plan
+            .clone()
+            .with_resolved_artifact_tier(Some("q4"))
+            .unwrap();
+        let q8 = plan.with_resolved_artifact_tier(Some("q8")).unwrap();
+        assert_eq!(q4.tier.quant, Some(gen_core::Quant::Q4));
+        assert_eq!(q8.tier.quant, Some(gen_core::Quant::Q8));
+        assert!(q8.with_resolved_artifact_tier(Some("unknown")).is_err());
+    }
+
+    #[test]
+    fn krea_eager_provider_refusal_runs_only_when_the_resident_path_fits() {
+        let mut generator = full_ladder_generator();
+        generator.descriptor.id = "krea_2_turbo";
+        let contract = generator.contract.as_mut().unwrap();
+        contract.provider_id = "krea_2_turbo".to_owned();
+        for capability in &mut contract.strategies {
+            if capability.strategy != MemoryStrategy::Resident {
+                capability.support = gen_core::MemoryStrategySupport::Missing;
+            }
+        }
+        let mut plan = fixture_plan();
+        plan.engine_id = "krea_2_turbo";
+        plan.model_id = "krea_2_turbo".to_owned();
+        plan.calibration = MlxCalibrationConfig::Absent;
+        // This fixture Missings every rung but Resident, so the ONLY floor is the 12 GiB resident
+        // estimate. The pair below brackets its WIDENED value from either side (+/-10%) rather than
+        // pinning 16.0 / 8.0, which bracketed the retired 5% margin's 12.6 GiB and left the admit arm
+        // 2 GiB under the current 18.05 GiB requirement.
+        let admitted = evaluate_request_with_budget(
+            &generator,
+            &plan,
+            &fixture_inputs(1024, 1024),
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget(widened_estimate_gb(12.0) * 1.10),
+            gib_to_bytes(12.0),
+            0,
+            &[],
+        )
+        .expect("the safe eager fallback remains executable when the resident path fits");
+        assert_eq!(
+            admitted.context.selection.strategy,
+            MemoryStrategy::Resident
+        );
+        let error = evaluate_request_with_budget(
+            &generator,
+            &plan,
+            &fixture_inputs(1024, 1024),
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget(widened_estimate_gb(12.0) * 0.90),
+            gib_to_bytes(12.0),
+            0,
+            &[],
+        )
+        .expect_err("a safe eager fallback cannot exceed the live host budget")
+        .to_string();
+        assert!(error.contains("needs"), "{error}");
+        assert!(error.contains("safely available"), "{error}");
+    }
+
+    #[test]
+    fn uncalibrated_chroma_routes_authorize_exact_quality_backed_estimates() {
+        for route in ["chroma1_hd", "chroma1_flash"] {
+            let mut generator = full_ladder_generator();
+            generator.descriptor.id = route;
+            let contract = generator.contract.as_mut().unwrap();
+            contract.provider_id = route.to_owned();
+            contract.calibration = None;
+            let geometry = MemoryGeometry {
+                width: 1024,
+                height: 1024,
+                batch: 1,
+                frames: 1,
+                reference_count: 0,
+            };
+            let policy = MemoryDecodeGeometryPolicy {
+                quality_abi: gen_core::MEMORY_DECODE_QUALITY_ABI,
+                family: "chroma".to_owned(),
+                resolved_route: route.to_owned(),
+                backend: gen_core::MemoryBackend::Mlx,
+                tier: fixture_plan().tier,
+                load_shape: contract.load_shape,
+                artifact: MemoryDecodeArtifactIdentity {
+                    repository: format!("SceneWorks/{route}-mlx"),
+                    revision: "d".repeat(40),
+                    variant: "q4".to_owned(),
+                    fingerprint: format!("SceneWorks/{route}-mlx@{}:q4", "d".repeat(40)),
+                },
+                implementation_fingerprint: DECODE_QUALITY_TEST_STAMP.to_owned(),
+                mode: MemoryMode::TextToImage,
+                overlay: None,
+                geometry,
+                use_pid: false,
+                tile_edge: 512,
+                overlap: 128,
+                metric: "max_abs_rgb_u8".to_owned(),
+                maximum_error: 48,
+                fixtures: [(7, 'a', 'b', 'c'), (99, 'd', 'e', 'f')]
+                    .into_iter()
+                    .map(|(seed, latent, dense, tiled)| MemoryDecodeQualityFixture {
+                        seed,
+                        production_latent_provenance: format!("{route}@revision seed={seed}"),
+                        production_latent_sha256: latent.to_string().repeat(64),
+                        dense_output_sha256: dense.to_string().repeat(64),
+                        tiled_output_sha256: tiled.to_string().repeat(64),
+                        observed_error: 40,
+                    })
+                    .collect(),
+                production_evidence_sha256: String::new(),
+                disposition: MemoryDecodeQualityDisposition::Admitted,
+            }
+            .seal();
+            contract
+                .adopt_decode_geometry_policies("chroma", vec![policy])
+                .unwrap();
+            assert!(contract.conformance_errors().is_empty());
+
+            let mut plan = fixture_plan();
+            plan.engine_id = route;
+            plan.model_id = route.to_owned();
+            plan.calibration = MlxCalibrationConfig::Absent;
+            let evaluation = evaluate_request_with_budget(
+                &generator,
+                &plan,
+                &fixture_inputs(1024, 1024),
+                MemoryCacheState::Cold,
+                OffloadPolicy::Resident,
+                fixture_budget(9.1),
+                gib_to_bytes(9.0),
+                0,
+                &[],
+            )
+            .expect("uncalibrated Chroma must retain its estimate-backed optimized route");
+            assert!(evaluation.context.selection.strategy.is_optimized());
+            assert_eq!(
+                evaluation.context.optimization_authority,
+                MemoryOptimizationAuthority::Estimated
+            );
+            assert!(evaluation.memory.tile_vae_decode);
+            assert!(matches!(
+                gen_core::default_memory_strategy_safety_check(
+                    generator.contract.as_ref().unwrap(),
+                    &evaluation.context,
+                ),
+                gen_core::MemorySafetyDecision::Accept
+            ));
+        }
     }
 
     #[cfg(target_os = "macos")]
     #[test]
     fn shipped_plain_krea_without_a_binding_preserves_the_request_on_estimate_admission() {
         fn fixture_spec(root: &std::path::Path, policy: OffloadPolicy) -> LoadSpec {
-            for component in ["text_encoder", "transformer", "vae"] {
+            let contract = crate::inference_runtime::media_encoder_contract("krea_2_turbo")
+                .expect("Krea owns an encoder contract");
+            gen_core_testkit::write_encoder_contract_fixture_with_quant(
+                &root.join("text_encoder"),
+                contract,
+                Some(4),
+            )
+            .expect("registry-owned Krea encoder fixture");
+            for component in ["transformer", "vae"] {
                 let directory = root.join(component);
                 std::fs::create_dir_all(&directory).unwrap();
                 let header = br#"{"w":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}"#;
@@ -6589,13 +9371,11 @@ mod tests {
                 bytes.extend_from_slice(&0_f32.to_le_bytes());
                 std::fs::write(directory.join("model.safetensors"), bytes).unwrap();
             }
-            for component in ["text_encoder", "transformer"] {
-                std::fs::write(
-                    root.join(component).join("config.json"),
-                    r#"{"quantization":{"bits":4,"group_size":64}}"#,
-                )
-                .unwrap();
-            }
+            std::fs::write(
+                root.join("transformer").join("config.json"),
+                r#"{"quantization":{"bits":4,"group_size":64}}"#,
+            )
+            .unwrap();
             LoadSpec::new(WeightsSource::Dir(root.to_owned()))
                 .with_quant(gen_core::Quant::Q4)
                 .with_offload_policy(policy)
@@ -6610,7 +9390,7 @@ mod tests {
             // Preserve the shipped contract, composition, parameters and load shape while making
             // the pure selector arithmetic legible: a 6 GiB base consists of a 1 GiB conditioner
             // and 5 GiB DiT. With 6 GiB of request headroom, only the windowed composition fits an
-            // 8 GiB constrained host after the canonical 10% estimate margin.
+            // 11 GiB constrained host after the current corpus-derived estimate margin.
             contract.asset_facts.base_bytes = gib_to_bytes(6.0);
             contract.asset_facts.conditioning_bytes = gib_to_bytes(1.0);
             contract.asset_facts.transformer_bytes = gib_to_bytes(5.0);
@@ -6626,6 +9406,8 @@ mod tests {
                     backend: "mlx",
                     modality: gen_core::Modality::Image,
                     capabilities: gen_core::Capabilities::default(),
+                    encoder_contract: None,
+                    denoiser_output_latent_space: None,
                     required_components: &[],
                     control_kinds: None,
                 },
@@ -6648,6 +9430,7 @@ mod tests {
             activation_headroom_bytes: gib_to_bytes(6.0),
             fixed_reserve_bytes: gib_to_bytes(2.0),
             calibration: MlxCalibrationConfig::Absent,
+            load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
         };
         let inputs = fixture_inputs(1024, 1024);
 
@@ -6678,7 +9461,7 @@ mod tests {
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Sequential,
-            fixture_budget(8.0),
+            fixture_budget(11.0),
             gib_to_bytes(12.0),
             0,
             &[],
@@ -6730,6 +9513,393 @@ mod tests {
         }
     }
 
+    /// The shipped plain-SDXL registry contract driven through the real request seam, so a
+    /// warm-policy grant is graded by production code rather than by a hand-built contract.
+    #[cfg(target_os = "macos")]
+    struct SdxlSelectorFixture {
+        root: tempfile::TempDir,
+    }
+
+    #[cfg(target_os = "macos")]
+    impl SdxlSelectorFixture {
+        fn new() -> Self {
+            let root = tempfile::tempdir().expect("sdxl fixture tempdir");
+            for component in ["text_encoder", "text_encoder_2", "unet", "vae"] {
+                let directory = root.path().join(component);
+                std::fs::create_dir_all(&directory).unwrap();
+                let header = br#"{"w":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}"#;
+                let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+                bytes.extend_from_slice(header);
+                bytes.extend_from_slice(&0_f32.to_le_bytes());
+                std::fs::write(directory.join("model.safetensors"), bytes).unwrap();
+            }
+            std::fs::write(
+                root.path().join("unet").join("config.json"),
+                r#"{"quantization":{"bits":4,"group_size":64}}"#,
+            )
+            .unwrap();
+            Self { root }
+        }
+
+        fn spec(&self, policy: OffloadPolicy) -> LoadSpec {
+            LoadSpec::new(WeightsSource::Dir(self.root.path().to_owned()))
+                .with_quant(gen_core::Quant::Q4)
+                .with_offload_policy(policy)
+                .with_load_shape(gen_core::LoadShape::DeferredMaterialization)
+        }
+
+        fn generator(&self, policy: OffloadPolicy) -> RequestGenerator {
+            let mut contract = crate::inference_runtime::media()
+                .memory_strategy_contract("sdxl", &self.spec(policy))
+                .unwrap()
+                .expect("the shipped plain SDXL registry contract");
+            contract.asset_facts.base_bytes = gib_to_bytes(6.0);
+            contract.asset_facts.conditioning_bytes = gib_to_bytes(1.0);
+            contract.asset_facts.transformer_bytes = gib_to_bytes(5.0);
+            contract.asset_facts.decoder_bytes = 0;
+            RequestGenerator {
+                descriptor: gen_core::ModelDescriptor {
+                    id: "sdxl",
+                    family: "sdxl",
+                    backend: "mlx",
+                    modality: gen_core::Modality::Image,
+                    capabilities: gen_core::Capabilities::default(),
+                    encoder_contract: None,
+                    denoiser_output_latent_space: None,
+                    required_components: &[],
+                    control_kinds: None,
+                },
+                contract: Some(contract),
+            }
+        }
+
+        /// A proposal in the exact state the cache seam produces for a granted switch: loaded
+        /// resident/eager, request asking for staged/deferred, snapshot directory, contract implements
+        /// staging.
+        fn loaded_policy(&self) -> crate::generator_cache::ExecutionPolicy {
+            crate::generator_cache::ExecutionPolicy {
+                offload_policy: OffloadPolicy::Resident,
+                load_shape: gen_core::LoadShape::EagerMaterialization,
+                load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
+            }
+        }
+
+        fn requested_policy(&self) -> crate::generator_cache::ExecutionPolicy {
+            crate::generator_cache::ExecutionPolicy {
+                offload_policy: OffloadPolicy::Sequential,
+                load_shape: gen_core::LoadShape::DeferredMaterialization,
+                load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
+            }
+        }
+
+        fn granted_proposal(&self) -> crate::execution_planner::WarmPolicyProposal {
+            let loaded = self.loaded_policy();
+            let requested = self.requested_policy();
+            let decision = crate::execution_planner::decide_warm_policy(
+                loaded,
+                requested,
+                crate::execution_planner::SourceReopenability::Reopenable,
+                crate::execution_planner::StagingAttestation::Implemented,
+            );
+            assert!(
+                decision.grants_requested_policy(),
+                "the fixture must actually be a grant, got {decision:?}"
+            );
+            crate::execution_planner::WarmPolicyProposal::new(
+                "sdxl",
+                decision,
+                loaded,
+                requested,
+                crate::execution_planner::SourceReopenability::Reopenable,
+                crate::execution_planner::StagingAttestation::Implemented,
+            )
+        }
+
+        fn evaluate(
+            &self,
+            load_policy: OffloadPolicy,
+            warm_policy: crate::execution_planner::WarmPolicyProposal,
+            budget: MemoryBudget,
+        ) -> WorkerResult<MlxRequestEvaluation> {
+            let plan = MlxRequestPlan {
+                engine_id: "sdxl",
+                model_id: "sdxl".to_owned(),
+                tier: MemoryNumericTier {
+                    precision: gen_core::Precision::Bf16,
+                    quant: Some(gen_core::Quant::Q4),
+                    component_precision_floors: &[],
+                },
+                asset_bytes: gib_to_bytes(6.0),
+                folded_control_bytes: 0,
+                folded_adapter_bytes: 0,
+                activation_headroom_bytes: gib_to_bytes(6.0),
+                fixed_reserve_bytes: gib_to_bytes(2.0),
+                calibration: MlxCalibrationConfig::Absent,
+                load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
+            };
+            evaluate_request_with_budget_and_warm_policy(
+                &self.generator(load_policy),
+                &plan,
+                &fixture_inputs(1024, 1024),
+                MemoryCacheState::Warm,
+                load_policy,
+                warm_policy,
+                budget,
+                gib_to_bytes(12.0),
+                0,
+                &[],
+            )
+        }
+    }
+
+    /// Capture this thread's tracing output so a settled decision can be graded by the event it emits.
+    #[cfg(target_os = "macos")]
+    struct EventCapture {
+        sink: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+        _guard: tracing::subscriber::DefaultGuard,
+    }
+
+    #[cfg(target_os = "macos")]
+    impl EventCapture {
+        fn install() -> Self {
+            #[derive(Clone)]
+            struct Sink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+            impl std::io::Write for Sink {
+                fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                    self.0.lock().unwrap().extend_from_slice(buf);
+                    Ok(buf.len())
+                }
+                fn flush(&mut self) -> std::io::Result<()> {
+                    Ok(())
+                }
+            }
+            let sink = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let writer = Sink(std::sync::Arc::clone(&sink));
+            let subscriber = tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::INFO)
+                .with_writer(move || writer.clone())
+                .with_ansi(false)
+                .with_target(false)
+                .without_time()
+                .finish();
+            let guard = tracing::subscriber::set_default(subscriber);
+            Self {
+                sink,
+                _guard: guard,
+            }
+        }
+
+        fn text(&self) -> String {
+            String::from_utf8(self.sink.lock().unwrap().clone()).expect("utf-8 tracing")
+        }
+    }
+
+    /// sc-18317 MAJOR fix: a granted warm-policy switch must CHANGE WHAT RUNS.
+    ///
+    /// The first version of this feature threaded a vetted "effective policy" to the run callback,
+    /// where all eight production consumers bound it as `_requested_policy` and dropped it. Per-request
+    /// staging is chosen HERE, by `select_strategy` over the candidate set, so the grant was inert and
+    /// a `rematerialized` event could fire while the request ran fully resident.
+    ///
+    /// This drives the real seam on a ROOMY budget, where the baseline selector prefers `Resident`, and
+    /// asserts the grant floors the candidate set into a staged selection instead. It is the mutation
+    /// sentinel for the threading: delete the floor in `evaluate_request_with_budget_using_bundle` and
+    /// the staged assertions below go red.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_granted_warm_switch_moves_the_selection_and_stays_inside_the_admitted_peak() {
+        let fixture = SdxlSelectorFixture::new();
+        let roomy = fixture_budget(20.0);
+
+        let baseline = fixture
+            .evaluate(
+                OffloadPolicy::Resident,
+                crate::execution_planner::WarmPolicyProposal::inert("sdxl"),
+                roomy,
+            )
+            .expect("a roomy host must admit resident SDXL");
+        assert_eq!(
+            baseline.context.selection.strategy,
+            MemoryStrategy::Resident,
+            "the baseline must prefer resident, or this test proves nothing about the floor"
+        );
+        assert!(
+            !baseline.memory.stage_residency,
+            "a resident baseline must not stage"
+        );
+
+        let granted = fixture
+            .evaluate(OffloadPolicy::Resident, fixture.granted_proposal(), roomy)
+            .expect("a granted switch must still admit the request");
+        assert_ne!(
+            granted.context.selection.strategy,
+            MemoryStrategy::Resident,
+            "the grant must move the selection off resident, not merely be reported"
+        );
+        assert!(
+            granted.memory.stage_residency,
+            "the granted request must reach the provider asking for staged residency — that field is \
+             what `gen_core::Residency::run_request_scoped` reads, and it is the whole point"
+        );
+
+        // Memory safety, asserted rather than assumed: the granted selection's predicted peak never
+        // exceeds the baseline's, so it stays inside the envelope admission proved against
+        // `loaded_policy`. Both runs were admitted under the SAME loaded policy and the same budget.
+        assert!(
+            granted.context.predicted_peak_bytes <= baseline.context.predicted_peak_bytes,
+            "granted peak {} must not exceed the admitted baseline peak {}",
+            granted.context.predicted_peak_bytes,
+            baseline.context.predicted_peak_bytes
+        );
+        assert_eq!(
+            granted.context.budget, baseline.context.budget,
+            "a grant is an execution intent and must never move an admission input"
+        );
+    }
+
+    /// The event may not claim a re-materialization the selector did not perform.
+    ///
+    /// On a constrained budget the baseline ALREADY stages, so the floor is a no-op and the honest
+    /// report is `served_as_is` / `selection_already_staged`. Mutation sentinel for the false-fire:
+    /// settle a granted proposal with `SelectionMovedToStaged` unconditionally and this goes red.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_grant_that_changes_nothing_reports_served_as_is_rather_than_rematerialized() {
+        let fixture = SdxlSelectorFixture::new();
+        let capture = EventCapture::install();
+        let constrained = fixture
+            .evaluate(
+                OffloadPolicy::Sequential,
+                fixture.granted_proposal(),
+                fixture_budget(11.0),
+            )
+            .expect("a constrained host must still reach an estimate rung");
+        assert!(
+            constrained.memory.stage_residency,
+            "the constrained baseline already stages"
+        );
+        let text = capture.text();
+        assert!(
+            text.contains("generator_cache_warm_policy_decision")
+                && text.contains("decision=\"served_as_is\"")
+                && text.contains("reason=\"selection_already_staged\""),
+            "a no-op grant must report the truth: {text:?}"
+        );
+        assert!(
+            !text.contains("decision=\"rematerialized\""),
+            "no re-materialization happened, so none may be claimed: {text:?}"
+        );
+    }
+
+    /// MINOR 3 (review cycle 2): a MULTI-ITEM job settles ONE decision and emits ONE event.
+    ///
+    /// Every image lane calls `evaluate_request` once per seed or pose with the same `Copy` proposal, so
+    /// before `WarmPolicyOnce` a four-image warm job emitted four identical decision events for one
+    /// cache access — contradicting the one-settlement contract the seam test asserts. This drives four
+    /// evaluations through the holder exactly as a lane does.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_multi_item_job_settles_one_decision_and_emits_one_event() {
+        let fixture = SdxlSelectorFixture::new();
+        let capture = EventCapture::install();
+        let mut warm_policy =
+            crate::execution_planner::WarmPolicyOnce::new(fixture.granted_proposal());
+        let roomy = fixture_budget(20.0);
+        let mut staged_items = 0;
+        for _ in 0..4 {
+            let evaluation = fixture
+                .evaluate(OffloadPolicy::Resident, warm_policy.take(), roomy)
+                .expect("every item of the job must be admitted");
+            if evaluation.memory.stage_residency {
+                staged_items += 1;
+            }
+        }
+        let text = capture.text();
+        assert_eq!(
+            text.matches("generator_cache_warm_policy_decision").count(),
+            1,
+            "four items, one warm hit, one decision event: {text:?}"
+        );
+        assert!(
+            text.contains("decision=\"rematerialized\""),
+            "the one event must be the granted outcome from the FIRST item: {text:?}"
+        );
+        // EVERY item is floored, not just the one that reported. The decision is a fact about the
+        // resident generator, so it holds for the whole job; rationing the decision instead of only its
+        // event would have let items 2..N run at the very peak the switch exists to avoid.
+        assert_eq!(
+            staged_items, 4,
+            "the grant must apply to every item of the job, not only the reporting one"
+        );
+    }
+
+    /// The same one-event property, driven the way the POSE-control lane drives it.
+    ///
+    /// Review cycle 3 caught `generate_krea_imported_control_stream` still passing the bare `Copy`
+    /// proposal per pose inside `drive_gen_items_scored`, so a multi-pose warm job emitted N duplicate
+    /// warn events. Flooring was already correct there; only the reporting was wrong. This covers the
+    /// per-pose shape — an odd item count, and the refusing decision whose event is a warn rather than
+    /// an info, since duplicated warns were the actual complaint.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_multi_pose_job_emits_one_event_even_when_the_decision_is_a_refusal() {
+        let fixture = SdxlSelectorFixture::new();
+        let capture = EventCapture::install();
+        // A refusal, not a grant: an imported single-file source cannot re-open its components.
+        let refused = crate::execution_planner::WarmPolicyProposal::new(
+            "sdxl",
+            crate::execution_planner::decide_warm_policy(
+                fixture.loaded_policy(),
+                fixture.requested_policy(),
+                crate::execution_planner::SourceReopenability::SingleFileNotReopenable,
+                crate::execution_planner::StagingAttestation::Implemented,
+            ),
+            fixture.loaded_policy(),
+            fixture.requested_policy(),
+            crate::execution_planner::SourceReopenability::SingleFileNotReopenable,
+            crate::execution_planner::StagingAttestation::Implemented,
+        );
+        let mut warm_policy = crate::execution_planner::WarmPolicyOnce::new(refused);
+        for _ in 0..3 {
+            fixture
+                .evaluate(
+                    OffloadPolicy::Resident,
+                    warm_policy.take(),
+                    fixture_budget(20.0),
+                )
+                .expect("a refused switch must still serve every pose");
+        }
+        let text = capture.text();
+        assert_eq!(
+            text.matches("generator_cache_warm_policy_decision").count(),
+            1,
+            "three poses, one warm hit, one event: {text:?}"
+        );
+        assert!(
+            text.contains("decision=\"refused_switch\"")
+                && text.contains("reason=\"source_not_reopenable\""),
+            "the one event must carry the refusal: {text:?}"
+        );
+    }
+
+    /// A granted proposal on a route with no request-scoped memory seam must not report a switch.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_declined_grant_reports_the_route_limit_rather_than_a_switch() {
+        let fixture = SdxlSelectorFixture::new();
+        let capture = EventCapture::install();
+        fixture
+            .granted_proposal()
+            .decline(crate::execution_planner::ServedAsIsReason::RouteHasNoRequestScopedMemory);
+        let text = capture.text();
+        assert!(
+            text.contains("decision=\"served_as_is\"")
+                && text.contains("reason=\"route_has_no_request_scoped_memory\""),
+            "a declined grant must name the route limit: {text:?}"
+        );
+        assert!(!text.contains("decision=\"rematerialized\""), "{text:?}");
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn shipped_plain_sdxl_without_a_binding_preserves_the_three_rung_estimate_path() {
@@ -6774,6 +9944,8 @@ mod tests {
                     backend: "mlx",
                     modality: gen_core::Modality::Image,
                     capabilities: gen_core::Capabilities::default(),
+                    encoder_contract: None,
+                    denoiser_output_latent_space: None,
                     required_components: &[],
                     control_kinds: None,
                 },
@@ -6796,6 +9968,7 @@ mod tests {
             activation_headroom_bytes: gib_to_bytes(6.0),
             fixed_reserve_bytes: gib_to_bytes(2.0),
             calibration: MlxCalibrationConfig::Absent,
+            load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
         };
         let inputs = fixture_inputs(1024, 1024);
 
@@ -6822,7 +9995,7 @@ mod tests {
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Sequential,
-            fixture_budget(8.0),
+            fixture_budget(11.0),
             gib_to_bytes(12.0),
             0,
             &[],
@@ -6917,10 +10090,12 @@ mod tests {
                 frames: 1,
                 reference_count: 0,
             },
+            false,
             None,
             std::slice::from_ref(&basis),
         );
         let decode = flipped
+            .estimates
             .iter()
             .find(|estimate| estimate.selection.strategy == MemoryStrategy::BoundedDecode)
             .expect("the rung must still be estimate-admissible via the floor");
@@ -6947,10 +10122,12 @@ mod tests {
             "text_to_image",
             None,
             request_geometry,
+            false,
             None,
             std::slice::from_ref(&basis),
         );
         let decode = fitted
+            .estimates
             .iter()
             .find(|estimate| estimate.selection.strategy == MemoryStrategy::BoundedDecode)
             .expect("a same-binding-phase extrapolation must be admissible");
@@ -6964,6 +10141,275 @@ mod tests {
             "the fitted estimate's raw peak is the area-scaled measured envelope (the estimate \
              margin is applied later, by the selector)"
         );
+    }
+
+    #[test]
+    fn geometry_quality_policy_keys_estimated_decode_without_disabling_legacy_fallbacks() {
+        use gen_core::{
+            MemoryDecodeGeometryPolicy, MemoryDecodeQualityDisposition, MemoryDecodeQualityFixture,
+            MEMORY_DECODE_QUALITY_ABI,
+        };
+
+        let mut generator = fixture_generator();
+        let contract = generator.contract.as_mut().expect("fixture contract");
+        let admitted_geometry = MemoryGeometry {
+            width: 1280,
+            height: 1280,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        };
+        let quality = MemoryDecodeGeometryPolicy {
+            quality_abi: MEMORY_DECODE_QUALITY_ABI,
+            family: "test".to_owned(),
+            resolved_route: contract.provider_id.clone(),
+            backend: gen_core::MemoryBackend::Mlx,
+            tier: fixture_plan().tier,
+            load_shape: contract.load_shape,
+            artifact: MemoryDecodeArtifactIdentity {
+                repository: "SceneWorks/fixture".to_owned(),
+                revision: "c".repeat(40),
+                variant: "packed-q4".to_owned(),
+                fingerprint: format!("SceneWorks/fixture@{}:packed-q4", "c".repeat(40)),
+            },
+            implementation_fingerprint: DECODE_QUALITY_TEST_STAMP.to_owned(),
+            mode: MemoryMode::TextToImage,
+            overlay: None,
+            geometry: admitted_geometry,
+            use_pid: false,
+            tile_edge: 768,
+            overlap: 192,
+            metric: "max_abs_rgb_u8".to_owned(),
+            maximum_error: 48,
+            fixtures: [(7, 'a', 'b', 'c'), (99, 'd', 'e', 'f')]
+                .into_iter()
+                .map(|(seed, latent, dense, tiled)| MemoryDecodeQualityFixture {
+                    seed,
+                    production_latent_provenance: format!("fixture@revision seed={seed}"),
+                    production_latent_sha256: latent.to_string().repeat(64),
+                    dense_output_sha256: dense.to_string().repeat(64),
+                    tiled_output_sha256: tiled.to_string().repeat(64),
+                    observed_error: 40,
+                })
+                .collect(),
+            production_evidence_sha256: String::new(),
+            disposition: MemoryDecodeQualityDisposition::Admitted,
+        }
+        .seal();
+        let decode = contract
+            .strategies
+            .iter_mut()
+            .find(|capability| capability.strategy == MemoryStrategy::BoundedDecode)
+            .expect("bounded decode");
+        decode.parameters.decode_tile_edges = vec![768];
+        decode.parameters.decode_overlaps = vec![192];
+        decode.parameters.decode_geometry_policies = vec![quality];
+        assert!(
+            contract.conformance_errors().is_empty(),
+            "{:?}",
+            contract.conformance_errors()
+        );
+
+        let plan = fixture_plan();
+        let admitted = synthesize_estimate_ladder(
+            contract,
+            &plan,
+            "text_to_image",
+            None,
+            admitted_geometry,
+            false,
+            None,
+            &[],
+        );
+        let selected = admitted
+            .estimates
+            .iter()
+            .find(|candidate| candidate.selection.strategy == MemoryStrategy::BoundedDecode)
+            .expect("admitted coordinate gets an estimated decode candidate");
+        assert_eq!(selected.selection.parameters.decode_tile_edge, Some(768));
+        assert_eq!(selected.selection.parameters.decode_overlap, Some(192));
+
+        let mut second = contract
+            .capability(MemoryStrategy::BoundedDecode)
+            .unwrap()
+            .parameters
+            .decode_geometry_policies[0]
+            .clone();
+        second.tile_edge = 640;
+        second.overlap = 160;
+        second.production_evidence_sha256.clear();
+        second = second.seal();
+        let decode = contract
+            .strategies
+            .iter_mut()
+            .find(|capability| capability.strategy == MemoryStrategy::BoundedDecode)
+            .unwrap();
+        decode.parameters.decode_tile_edges = vec![640, 768];
+        decode.parameters.decode_overlaps = vec![160, 192];
+        decode.parameters.decode_geometry_policies.push(second);
+        assert!(
+            contract.conformance_errors().is_empty(),
+            "{:?}",
+            contract.conformance_errors()
+        );
+        let paired = synthesize_estimate_ladder(
+            contract,
+            &plan,
+            "text_to_image",
+            None,
+            admitted_geometry,
+            false,
+            None,
+            &[],
+        );
+        let pairs = paired
+            .estimates
+            .iter()
+            .filter(|candidate| candidate.selection.strategy == MemoryStrategy::BoundedDecode)
+            .map(|candidate| {
+                (
+                    candidate.selection.parameters.decode_tile_edge.unwrap(),
+                    candidate.selection.parameters.decode_overlap.unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(pairs, vec![(640, 160), (768, 192)]);
+
+        let off_grid = synthesize_estimate_ladder(
+            contract,
+            &plan,
+            "text_to_image",
+            None,
+            MemoryGeometry {
+                width: 1536,
+                height: 1536,
+                ..admitted_geometry
+            },
+            false,
+            None,
+            &[],
+        );
+        assert!(off_grid.estimates.iter().any(|candidate| {
+            candidate.selection.strategy != MemoryStrategy::BoundedDecode
+                && !contract.engages_selection(&candidate.selection, MemoryStrategy::BoundedDecode)
+        }));
+        assert!(off_grid.estimates.iter().all(|candidate| !contract
+            .engages_selection(&candidate.selection, MemoryStrategy::BoundedDecode)));
+        assert!(off_grid
+            .decode_quality_decisions
+            .iter()
+            .any(|decision| matches!(decision, DecodeQualityRequestDecision::Unmeasured { .. })));
+
+        let refused_geometry = MemoryGeometry {
+            width: 1536,
+            height: 1536,
+            ..admitted_geometry
+        };
+        let mut exact_refusal = contract
+            .capability(MemoryStrategy::BoundedDecode)
+            .unwrap()
+            .parameters
+            .decode_geometry_policies[0]
+            .clone();
+        exact_refusal.geometry = refused_geometry;
+        exact_refusal.disposition = MemoryDecodeQualityDisposition::Refused {
+            reason: "seed 99 exceeded the exact semantic threshold".to_owned(),
+        };
+        exact_refusal.fixtures.last_mut().unwrap().observed_error = 52;
+        exact_refusal.production_evidence_sha256.clear();
+        exact_refusal = exact_refusal.seal();
+        contract
+            .strategies
+            .iter_mut()
+            .find(|capability| capability.strategy == MemoryStrategy::BoundedDecode)
+            .unwrap()
+            .parameters
+            .decode_geometry_policies
+            .push(exact_refusal);
+        assert!(
+            contract.conformance_errors().is_empty(),
+            "{:?}",
+            contract.conformance_errors()
+        );
+        let exact_refused = synthesize_estimate_ladder(
+            contract,
+            &plan,
+            "text_to_image",
+            None,
+            refused_geometry,
+            false,
+            None,
+            &[],
+        );
+        assert!(exact_refused.estimates.iter().any(|candidate| {
+            candidate.selection.strategy != MemoryStrategy::BoundedDecode
+                && !contract.engages_selection(&candidate.selection, MemoryStrategy::BoundedDecode)
+        }));
+        assert!(exact_refused
+            .decode_quality_decisions
+            .iter()
+            .any(|decision| matches!(
+                decision,
+                DecodeQualityRequestDecision::Refused { reason, .. }
+                    if reason == "seed 99 exceeded the exact semantic threshold"
+            )));
+
+        // A provider that has not adopted the P9 table retains the pre-P9 smallest-range path.
+        let legacy = fixture_generator();
+        let legacy_contract = legacy.contract.as_ref().expect("legacy contract");
+        let legacy_candidates = synthesize_estimate_ladder(
+            legacy_contract,
+            &plan,
+            "text_to_image",
+            None,
+            admitted_geometry,
+            false,
+            None,
+            &[],
+        );
+        let legacy_decode = legacy_candidates
+            .estimates
+            .iter()
+            .find(|candidate| candidate.selection.strategy == MemoryStrategy::BoundedDecode)
+            .expect("empty P9 table preserves estimated fallback");
+        assert_eq!(
+            legacy_decode.selection.parameters.decode_tile_edge,
+            Some(512)
+        );
+        assert_eq!(legacy_decode.selection.parameters.decode_overlap, Some(128));
+
+        // Declared-but-empty is not legacy. This is the state produced when SceneWorks strips a
+        // packaged table after an artifact/source binding refusal while preserving its authority.
+        // Even if a future provider keeps a route-blind decode range implemented, rung 2 must not
+        // be synthesized from it; independent higher rungs remain eligible without decode.
+        let mut refused = fixture_generator();
+        let refused_contract = refused.contract.as_mut().expect("refused contract");
+        refused_contract.decode_geometry_policy_authoritative = true;
+        let refused_candidates = synthesize_estimate_ladder(
+            refused_contract,
+            &plan,
+            "text_to_image",
+            None,
+            admitted_geometry,
+            false,
+            None,
+            &[],
+        );
+        assert!(refused_candidates.estimates.iter().all(|candidate| {
+            candidate.selection.strategy != MemoryStrategy::BoundedDecode
+                && !refused_contract
+                    .engages_selection(&candidate.selection, MemoryStrategy::BoundedDecode)
+        }));
+        assert!(refused_candidates
+            .decode_quality_decisions
+            .iter()
+            .any(|decision| {
+                matches!(
+                    decision,
+                    DecodeQualityRequestDecision::Refused { reason, .. }
+                        if reason.contains("declared quality scope")
+                )
+            }));
     }
 
     #[test]
@@ -7858,6 +11304,7 @@ mod tests {
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
             fixture_budget(8.0),
             gib_to_bytes(4.0),
             0,
@@ -7878,6 +11325,7 @@ mod tests {
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
             fixture_budget(6.0),
             gib_to_bytes(5.0),
             0,
@@ -7912,6 +11360,7 @@ mod tests {
             &fixture_inputs(1024, 1024),
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
             fixture_budget(8.0),
             gib_to_bytes(4.0),
             0,
@@ -7955,6 +11404,7 @@ mod tests {
                 &fixture_inputs(1024, 1024),
                 MemoryCacheState::Cold,
                 OffloadPolicy::Resident,
+                crate::execution_planner::WarmPolicyProposal::inert("fixture"),
                 fixture_budget(8.0),
                 gib_to_bytes(4.0),
                 0,
@@ -8096,6 +11546,7 @@ mod tests {
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
             fixture_budget(64.0),
             gib_to_bytes(9.0),
             0,
@@ -8192,6 +11643,7 @@ mod tests {
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
             fixture_budget(64.0),
             gib_to_bytes(9.0),
             0,
@@ -8253,6 +11705,7 @@ mod tests {
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
             fixture_budget(64.0),
             gib_to_bytes(9.0),
             0,
@@ -8321,6 +11774,7 @@ mod tests {
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
             fixture_budget(64.0),
             gib_to_bytes(9.0),
             0,
@@ -8497,6 +11951,7 @@ mod tests {
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
             fixture_budget(64.0),
             gib_to_bytes(9.0),
             0,
@@ -8532,6 +11987,7 @@ mod tests {
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
             fixture_budget(64.0),
             gib_to_bytes(9.0),
             0,
@@ -8603,6 +12059,7 @@ mod tests {
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
             fixture_budget(64.0),
             gib_to_bytes(9.0),
             0,
@@ -8637,6 +12094,7 @@ mod tests {
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
             fixture_budget(64.0),
             gib_to_bytes(9.0),
             0,
@@ -8889,6 +12347,85 @@ mod tests {
         std::fs::File::create(path)
             .and_then(|file| file.set_len(bytes))
             .expect("sparse fixture size");
+    }
+
+    /// Build the exact FLUX.2 encoder/config/tokenizer admission surface used by the source-bound
+    /// audit without loading a tensor. Klein's Qwen3 stays dense across every DiT tier; Dev follows
+    /// the selected tier and its base route also retains the builtin Pixtral vision surface.
+    #[cfg(target_os = "macos")]
+    fn write_audited_flux2_encoder_fixture(
+        snapshot_root: &Path,
+        provider_id: &str,
+        tier: &str,
+    ) -> Result<Option<u64>, String> {
+        let (quant_bits, include_multimodal) = match provider_id {
+            "flux2_klein_9b" | "flux2_klein_9b_edit" | "flux2_klein_9b_kv_edit" => (None, false),
+            "flux2_dev" | "flux2_dev_edit" => (
+                match tier {
+                    "q4" => Some(4),
+                    "q8" => Some(8),
+                    "bf16" => None,
+                    other => return Err(format!("unsupported audited FLUX.2 tier {other}")),
+                },
+                true,
+            ),
+            "flux2_dev_control" => (
+                match tier {
+                    "q4" => Some(4),
+                    "q8" => Some(8),
+                    "bf16" => None,
+                    other => return Err(format!("unsupported audited FLUX.2 tier {other}")),
+                },
+                false,
+            ),
+            _ => return Ok(None),
+        };
+        let contract = crate::inference_runtime::media_encoder_contract(provider_id)
+            .ok_or_else(|| format!("{provider_id} owns an encoder contract"))?;
+        let encoder_root = snapshot_root.join("text_encoder");
+        let result = if include_multimodal {
+            gen_core_testkit::write_multimodal_encoder_contract_fixture_with_quant(
+                &encoder_root,
+                contract,
+                runtime_macos::providers::flux2::config::DEV_VISION_ENCODER_CONTRACT,
+                quant_bits,
+            )
+        } else {
+            gen_core_testkit::write_encoder_contract_fixture_with_quant(
+                &encoder_root,
+                contract,
+                quant_bits,
+            )
+        };
+        result.map_err(|error| {
+            format!("write registry-owned {provider_id} {tier} encoder fixture: {error}")
+        })?;
+        if include_multimodal {
+            if let Some(bits) = quant_bits {
+                // Mistral3 stores the language model under `text_config`, but selected-encoder
+                // admission deliberately accepts packing evidence only from the authoritative
+                // root marker. Keep both views aligned, as converted Dev snapshots do.
+                let config_path = encoder_root.join("config.json");
+                let mut config: Value = serde_json::from_slice(
+                    &std::fs::read(&config_path).map_err(|error| error.to_string())?,
+                )
+                .map_err(|error| error.to_string())?;
+                let group_size = contract
+                    .packing
+                    .ok_or_else(|| {
+                        format!("{provider_id} packed fixture has no encoder packing contract")
+                    })?
+                    .group_size;
+                config["quantization"] =
+                    serde_json::json!({"bits": bits, "group_size": group_size});
+                std::fs::write(
+                    config_path,
+                    serde_json::to_vec(&config).map_err(|error| error.to_string())?,
+                )
+                .map_err(|error| error.to_string())?;
+            }
+        }
+        Ok(Some(sum_safetensors_bytes(&encoder_root)))
     }
 
     #[cfg(target_os = "macos")]
@@ -9233,6 +12770,22 @@ mod tests {
                 r#"{"quantization_config":{"quant_method":"mxfp4"}}"#,
             )
             .map_err(|error| error.to_string())?;
+        } else if let Some(encoder_bytes) =
+            write_audited_flux2_encoder_fixture(&weights, provider_id, tier)?
+        {
+            let remaining_bytes = base_asset_bytes.checked_sub(encoder_bytes).ok_or_else(|| {
+                format!(
+                    "{provider_id} {tier} registry encoder fixture uses {encoder_bytes} bytes, \
+                    above the shipped base total {base_asset_bytes}"
+                )
+            })?;
+            let transformer_bytes = remaining_bytes.saturating_mul(9) / 10;
+            let vae_bytes = remaining_bytes - transformer_bytes;
+            set_sparse_valid_safetensor(
+                &weights.join("transformer/model.safetensors"),
+                transformer_bytes,
+            )?;
+            set_sparse_valid_safetensor(&weights.join("vae/model.safetensors"), vae_bytes)?;
         } else {
             set_sparse_len(&weights.join("model.safetensors"), base_asset_bytes);
         }
@@ -9523,11 +13076,33 @@ mod tests {
         require_exact_source_bound_inventory(&source_inventory, &classified_inventory).expect(
             "the executable audit must classify the exact source-bound candidate inventory",
         );
-        assert_eq!(
-            cells.len(),
-            35,
-            "the source-derived Resident-only inventory changed; update the recorded audit result"
+        // Resident-only means "this cell has no ladder to fall back to", so this population SHRINKS
+        // monotonically as ladders are declared and made reachable: the pin advance brought the
+        // Bernini, Lens/Lens-Turbo, SANA and SD3.5 rung-4 ladders (sc-18609, sc-18605, sc-18607,
+        // sc-18606), and the SC-18460 contract chain declares more still. A RISE is the alarming
+        // direction and the only thing this recorded result exists to catch. Asserting the exact
+        // count instead froze the corpus: every re-capture and every newly declared ladder made a
+        // green branch red for the right reason and got "fixed" by editing the integer. So bound it
+        // — a ceiling that legitimately falls, plus the vacuity floor that keeps the budget walk
+        // below from passing on an empty inventory.
+        const RESIDENT_ONLY_CEILING: usize = 18;
+        assert!(
+            !cells.is_empty() && cells.len() <= RESIDENT_ONLY_CEILING,
+            "the source-derived Resident-only inventory is {} cells; it must stay non-empty and \
+             within the recorded ceiling of {RESIDENT_ONLY_CEILING}. A rise means a cell lost a \
+             reachable ladder — fix the declaration, do not raise the ceiling.",
+            cells.len()
         );
+        for route in [
+            "flux2_klein_9b",
+            "flux2_klein_9b_kv",
+            "flux2_klein_9b_true_v2",
+        ] {
+            assert!(
+                cells.iter().all(|cell| cell.manifest_id != route),
+                "{route}'s exact optimized declaration must remove it from the Resident-only audit"
+            );
+        }
         let legacy_reserve_bytes = gib_to_bytes(crate::fit_gate::legacy_unified_reserve(48.0).gb);
         let hosts = [48_u64, 64, 96, 128];
         let mut flips = Vec::new();
@@ -9682,9 +13257,16 @@ mod tests {
                 .iter()
                 .map(|(model, provider, tier, host, ..)| (*model, *provider, *tier, *host))
                 .collect::<Vec<_>>(),
+            // The Lens and SD3.5 rows are gone with the inference pin advance, and for the same
+            // reason the Resident-only inventory above shrank 32 -> 18: sc-18605 and sc-18606 gave
+            // those providers reachable rung-4 ladders, so they are no longer Resident-only and
+            // have no estimate band left to flip. The four that remain have no ladder yet, which is
+            // what keeps this list a live audit rather than a formality.
             vec![
-                ("sd3_5_large", "sd3_5_large", "q8", 48),
-                ("sd3_5_large_turbo", "sd3_5_large_turbo", "q8", 48,),
+                ("flux2_dev", "flux2_dev", "bf16", 128),
+                ("flux2_dev", "flux2_dev_control", "q4", 64),
+                ("ideogram_4", "ideogram_4", "q8", 48),
+                ("ideogram_4_turbo", "ideogram_4_turbo", "q8", 48),
             ],
             "the source-bound resident-only audit changed; update the recorded result, \
              not only this expectation: {flips:?}"
@@ -9763,7 +13345,7 @@ mod tests {
     /// Completeness mutation for the loophole found after the production-router rewrite. A
     /// zero-cell route is still part of the candidate inventory: replacing FLUX.1 Schnell with an
     /// already-declared Chroma entry must fail before deduplication, and simply deleting Schnell
-    /// must fail exact source-inventory equality even though the 35 Resident-only cells and two
+    /// must fail exact source-inventory equality even though the 32 Resident-only cells and 12
     /// flips are unchanged.
     #[cfg(target_os = "macos")]
     #[test]
@@ -10074,7 +13656,7 @@ mod tests {
         // not merely a selector unit test.
         //
         // Fixture arithmetic: the record's envelope peak is exactly 5 GiB with a 3 GiB captured
-        // foreign reserve, so the widened requirement is 5 * 1.05 = 5.25 GiB against
+        // foreign reserve, so the widened requirement is ~5 * 1.252 = 6.26 GiB against
         // `total - reserve` of effective budget.
         let bundle = fixture_bundle();
         let generator = fixture_generator();
@@ -10115,8 +13697,8 @@ mod tests {
         // offered as a named "current verified alternative".
         assert!(stale.lower_alternative.is_none());
 
-        // End to end at 9 GiB: effective budget is 9 - 3 (captured foreign reserve) = 6 GiB, the
-        // widened 5.25 GiB fits, and the request keeps the exact verified rung INCLUDING its
+        // End to end at 9.5 GiB: effective budget is 9.5 - 3 (captured foreign reserve) = 6.5 GiB,
+        // the widened 6.26 GiB fits, and the request keeps the exact verified rung INCLUDING its
         // request-scoped process ceiling.
         let admitted = evaluate_request_with_budget_using_bundle(
             &generator,
@@ -10124,7 +13706,8 @@ mod tests {
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
-            fixture_budget(9.0),
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
+            fixture_budget(9.5),
             gib_to_bytes(4.0),
             0,
             &[],
@@ -10142,40 +13725,42 @@ mod tests {
             "a stale exact cell still derives the request-scoped ceiling"
         );
 
-        // The margin is APPLIED, not just plumbed (production-path mutation check): at 8.1 GiB the
-        // effective budget is 5.1 GiB — the RAW 5 GiB peak fits, the widened 5.25 GiB does not. A
+        // The margin is APPLIED, not just plumbed (production-path mutation check): at 9.1 GiB the
+        // effective budget is 6.1 GiB — the RAW 5 GiB peak fits, the widened 6.26 GiB does not. A
         // gate that stopped widening stale admission would admit here and flip this arm. The
-        // refusal quotes the graded host requirement: widened 5.25 GiB + the 3 GiB captured
-        // foreign reserve = 8.25 GiB.
+        // refusal quotes the graded host requirement: widened 6.26 GiB + the 3 GiB captured
+        // foreign reserve = 9.26 GiB.
         let error = evaluate_request_with_budget_using_bundle(
             &generator,
             &plan,
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
-            fixture_budget(8.1),
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
+            fixture_budget(9.1),
             gib_to_bytes(4.0),
             0,
             &[],
             Some(&bundle),
             Some(&moved),
         )
-        .expect_err("the raw peak fits 5.1 GiB but the WIDENED stale peak must not")
+        .expect_err("the raw peak fits 6.1 GiB but the WIDENED stale peak must not")
         .to_string();
         assert!(
-            error.contains("needs at least 8.25 GiB"),
+            error.contains("needs at least 9.26 GiB"),
             "the refusal must quote the widened stale host requirement: {error}"
         );
 
         // The control: the SAME request with the closure unmoved is graded at the raw peak, so the
-        // 8.1 GiB budget that refused above admits — proving the refusal was the stale widening.
+        // 9.1 GiB budget that refused above admits — proving the refusal was the stale widening.
         let current = evaluate_request_with_budget_using_bundle(
             &generator,
             &plan,
             &inputs,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
-            fixture_budget(8.1),
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
+            fixture_budget(9.1),
             gib_to_bytes(4.0),
             0,
             &[],
@@ -10190,9 +13775,9 @@ mod tests {
 
         // A stale record serves its OWN cell (the arms above) but may not SEED an extrapolation:
         // at 768² — off the measured 1024² geometry — the moved-closure request gets no fitted
-        // basis and refuses on floors alone (staged/decode/attention floors widen to 9.9 GiB
+        // basis and refuses on floors alone (staged/decode/attention floors widen to 13.54 GiB
         // against 8 GiB), while the unmoved closure admits the fitted bounded-decode estimate
-        // (clamped scale 1.0, envelope 5 GiB widened to 5.5) at the same budget. A gate that let
+        // (clamped scale 1.0, envelope 5 GiB widened to 7.52) at the same budget. A gate that let
         // stale records seed extrapolations would admit BOTH and flip the first arm.
         let off_geometry = fixture_inputs(768, 768);
         let error = evaluate_request_with_budget_using_bundle(
@@ -10201,6 +13786,7 @@ mod tests {
             &off_geometry,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
             fixture_budget(8.0),
             gib_to_bytes(12.0),
             0,
@@ -10220,6 +13806,7 @@ mod tests {
             &off_geometry,
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
             fixture_budget(8.0),
             gib_to_bytes(12.0),
             0,
@@ -10279,6 +13866,7 @@ mod tests {
                 &inputs,
                 cache_state,
                 OffloadPolicy::Resident,
+                crate::execution_planner::WarmPolicyProposal::inert("fixture"),
                 MemoryBudget {
                     committed_bytes,
                     ..fixture_budget(8.0)
@@ -10324,6 +13912,7 @@ mod tests {
                 &inputs,
                 MemoryCacheState::Cold,
                 OffloadPolicy::Resident,
+                crate::execution_planner::WarmPolicyProposal::inert("fixture"),
                 fixture_budget(total_gib),
                 gib_to_bytes(4.0),
                 0,
@@ -10469,6 +14058,7 @@ mod tests {
                 &fixture_inputs(1024, 1024),
                 MemoryCacheState::Cold,
                 OffloadPolicy::Resident,
+                crate::execution_planner::WarmPolicyProposal::inert("fixture"),
                 fixture_budget(total_gib),
                 gib_to_bytes(4.0),
                 0,
@@ -10505,6 +14095,7 @@ mod tests {
             &fixture_inputs(1024, 1024),
             MemoryCacheState::Cold,
             OffloadPolicy::Resident,
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
             fixture_budget(10.0),
             gib_to_bytes(4.0),
             0,
@@ -10777,6 +14368,7 @@ mod tests {
             activation_headroom_bytes: gib_to_bytes(HEADROOM_GB - 2.0),
             fixed_reserve_bytes: gib_to_bytes(OS_APP_RESERVE_GB - 2.0),
             calibration: MlxCalibrationConfig::Absent,
+            load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
         };
         // Go through `request_geometry` rather than hand-building a `batch: 1` geometry, so this
         // exercises the production count -> batch seam instead of asserting a value it supplies.
@@ -10903,6 +14495,7 @@ mod tests {
             activation_headroom_bytes: gib_to_bytes(HEADROOM_GB - 2.0),
             fixed_reserve_bytes: gib_to_bytes(OS_APP_RESERVE_GB - 2.0),
             calibration: MlxCalibrationConfig::Absent,
+            load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
         };
         let peak_gb = |width, height| {
             plan.generic_total_peak_bytes(request_geometry(&request_inputs(width, height, 1)))
@@ -10981,6 +14574,7 @@ mod tests {
                     .saturating_add(fixed_reserve_bytes),
                 fixed_reserve_bytes,
                 calibration: MlxCalibrationConfig::Absent,
+                load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
             }
         };
         let dense = plan(HeadroomAllowance::LENS_DENSE);
@@ -11077,6 +14671,7 @@ mod tests {
             activation_headroom_bytes: gib_to_bytes(6.0),
             fixed_reserve_bytes: gib_to_bytes(2.0),
             calibration: MlxCalibrationConfig::Absent,
+            load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
         };
         let selected = evaluate_request_with_budget(
             &request_generator(None),
@@ -11085,7 +14680,7 @@ mod tests {
             MemoryCacheState::Warm,
             OffloadPolicy::Resident,
             MemoryBudget {
-                total_bytes: gib_to_bytes(10.0),
+                total_bytes: gib_to_bytes(11.0),
                 committed_bytes: gib_to_bytes(6.0),
                 reclaimable_bytes: 0,
                 reserved_headroom_bytes: 0,
@@ -11552,11 +15147,11 @@ mod tests {
         // sc-18096 repin. The mismatched record's 5 GiB raw peak fits the 10 GiB budget easily, so
         // ANY error here proves the record was excluded rather than authorizing the fit — the
         // fail-closed property this test owns. What changed: the bounded-decode rung now also
-        // carries a synthesized floor estimate (weights 6 GiB + headroom 6 GiB, widened to 13.2),
+        // carries a synthesized floor estimate (weights 6 GiB + headroom 6 GiB, widened to 18.05),
         // so the refusal is the honest "no rung fits with margins" `Reject` quoting the floor's
         // widened requirement instead of an `Unverified`/`FingerprintMismatch` refusal.
         assert!(
-            error.contains("needs 13.20 GiB"),
+            error.contains("needs 18.05 GiB"),
             "the mismatched record must not authorize the fit; the refusal must quote the \
              estimate floor instead: {error}"
         );
@@ -12129,14 +15724,83 @@ mod tests {
         assert_eq!(weights_source_bytes(&WeightsSource::Dir(dir)), 3000);
     }
 
+    #[test]
+    fn imported_file_plan_prices_consumed_companions_not_replaced_snapshot_transformer() {
+        let root = tempfile::tempdir().expect("imported plan tempdir");
+        let imported = root.path().join("imported.safetensors");
+        let base = root.path().join("base");
+        for component in ["text_encoder", "vae", "transformer", "tokenizer"] {
+            std::fs::create_dir_all(base.join(component)).expect("component dir");
+        }
+        std::fs::write(&imported, vec![0_u8; 11]).expect("imported DiT");
+        std::fs::write(
+            base.join("text_encoder").join("model.safetensors"),
+            vec![0_u8; 13],
+        )
+        .expect("text encoder");
+        std::fs::write(base.join("vae").join("model.safetensors"), vec![0_u8; 17]).expect("vae");
+        std::fs::write(
+            base.join("transformer").join("model.safetensors"),
+            vec![0_u8; 19],
+        )
+        .expect("replaced snapshot transformer");
+        std::fs::write(base.join("tokenizer").join("tokenizer.json"), b"{}")
+            .expect("tokenizer config");
+        std::fs::write(base.join("transformer").join("config.json"), b"{}")
+            .expect("transformer config");
+
+        let spec = LoadSpec::new(WeightsSource::File(imported))
+            .with_component(gen_core::BASE_SNAPSHOT_COMPONENT, WeightsSource::Dir(base));
+        let consumed = 11 + 13 + 17;
+        let (fallback_total, fallback_te, _) =
+            spec_component_bytes_with_provider_footprint("krea_2_turbo", &spec, None);
+        assert_eq!((fallback_total, fallback_te), (consumed, 13));
+
+        let fallback = MlxRequestPlan::for_spec_and_manifest_with_provider_facts(
+            "krea_2_turbo",
+            "imported_krea",
+            &spec,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            fallback.asset_bytes, consumed,
+            "the compatibility path must enumerate only File + TE + VAE; tokenizer/config carry no \
+             tensors and the snapshot transformer is replaced"
+        );
+
+        let provider_owned = MlxRequestPlan::for_spec_and_manifest_with_provider_facts(
+            "krea_2_turbo",
+            "imported_krea",
+            &spec,
+            None,
+            None,
+            Some(PerComponentBytes {
+                text_encoder: 13,
+                dit: 11,
+                vae: 17,
+            }),
+            None,
+        );
+        assert_eq!(provider_owned.asset_bytes, consumed);
+        assert_eq!(provider_owned.asset_bytes + 19, 60);
+        assert_ne!(
+            provider_owned.asset_bytes, 60,
+            "recursively charging base_snapshot would add the unused 19-byte transformer"
+        );
+    }
+
     /// The gate derives sequential-capability from each engine's REGISTERED descriptor bit
     /// (`Capabilities::supports_sequential_offload`) rather than a hand-maintained allowlist (sc-10840,
     /// epic 10834). This exercises the LIVE registry, so it must see the force-linked `mlx_gen_*`
     /// providers — anchored (`use mlx_gen_* as _;` in `image_jobs`) only on macOS, the sole platform the
     /// MLX gate runs on. Off-Mac the image registry is empty, so this is macOS-gated exactly like the
-    /// `engines.rs` descriptor sweeps. Selectable engines resolve true through the shared registry
-    /// query, while a registered provider that stages unconditionally remains false for this specific
-    /// request-selectable control.
+    /// `engines.rs` descriptor sweeps. The assertions below mirror the capability bits of the
+    /// currently pinned providers, so the shared registry query stays the only source of truth:
+    /// selectable engines resolve true through that query, while a registered provider that stages
+    /// unconditionally remains false for this specific request-selectable control.
     #[cfg(target_os = "macos")]
     #[test]
     fn engine_supports_sequential_is_derived_from_the_registered_capability() {
@@ -12197,7 +15861,8 @@ mod tests {
         ] {
             assert!(
                 engine_supports_sequential(id),
-                "{id}: sc-10840 fan-out engine must advertise selectable sequential residency"
+                "{id}: sc-10840 fan-out engine must advertise selectable sequential residency at the \
+                 pinned inference revision"
             );
         }
         // Bernini's provider is registered and physically stages every request, but it has no
@@ -12305,6 +15970,42 @@ mod tests {
             gen_core::LoadShape::DeferredMaterialization,
             "the shipped Z-Image rung-4 binding must be producible by the production cold-load route"
         );
+        let eager_edit = eager
+            .clone()
+            .with_resolved_route("z_image_edit")
+            .with_refused_load_shape_declaration();
+        let refused_edit = with_selected_sequential_shape("z_image_turbo", eager_edit);
+        assert_eq!(refused_edit.offload_policy, OffloadPolicy::Sequential);
+        assert_eq!(
+            refused_edit.load_shape,
+            gen_core::LoadShape::EagerMaterialization,
+            "the shared provider id must not bypass z_image_edit's declaration/predicate refusal"
+        );
+        let admitted_edit = eager
+            .clone()
+            .with_resolved_route("z_image_edit")
+            .with_applied_load_shape_declaration();
+        assert_eq!(
+            with_selected_sequential_shape("z_image_turbo", admitted_edit).load_shape,
+            gen_core::LoadShape::DeferredMaterialization,
+        );
+        for provider in ["anima_base", "chroma1_base", "kolors", "z_image"] {
+            let refused = eager
+                .clone()
+                .with_resolved_route(provider)
+                .with_refused_load_shape_declaration();
+            let refused = with_selected_sequential_shape(provider, refused);
+            assert_eq!(refused.offload_policy, OffloadPolicy::Sequential);
+            assert_eq!(
+                refused.load_shape,
+                gen_core::LoadShape::EagerMaterialization,
+                "{provider}: a same-id declaration refusal must survive the late sequential shaper",
+            );
+            assert_eq!(
+                refused.load_shape_declaration_result,
+                gen_core::LoadShapeDeclarationResult::Refused,
+            );
+        }
 
         let qwen_resident = eager
             .clone()
@@ -13001,6 +16702,7 @@ mod tests {
             &fixture_inputs(1024, 1024),
             MemoryCacheState::Warm,
             OffloadPolicy::Resident,
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
             0,
         )
         .expect("the reported generation must be admitted, not refused");

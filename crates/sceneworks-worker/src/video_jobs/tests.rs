@@ -292,6 +292,8 @@ impl VideoLifecycleGenerator {
                 capabilities: Default::default(),
                 required_components: &[],
                 control_kinds: None,
+                encoder_contract: None,
+                denoiser_output_latent_space: None,
             },
             behavior,
             record: Default::default(),
@@ -389,6 +391,13 @@ fn video_lifecycle_context(strategy: gen_core::MemoryStrategy) -> gen_core::Memo
                 quant: Some(gen_core::Quant::Q8),
                 component_precision_floors: &[],
             },
+        },
+        // Fixture selections stand in for fitted/floor video syntheses, which never claim
+        // Calibrated authority (see video_admission's context construction).
+        optimization_authority: if strategy.is_optimized() {
+            gen_core::MemoryOptimizationAuthority::Estimated
+        } else {
+            gen_core::MemoryOptimizationAuthority::Resident
         },
         calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
         calibration_fingerprint: "video-lifecycle-fixture-v1".to_owned(),
@@ -2452,7 +2461,9 @@ impl ArmProbe {
                     backend: "probe",
                     modality: gen_core::Modality::Video,
                     capabilities: gen_core::Capabilities::default(),
+                    denoiser_output_latent_space: None,
                     control_kinds: None,
+                    encoder_contract: None,
                     required_components: &[],
                 },
                 request: seen_request,
@@ -9609,7 +9620,7 @@ fn ltx_text_encoder_options_hide_unstaged_alternate() {
     assert_eq!(
         default_only
             .iter()
-            .map(|option| option.id)
+            .map(|option| option.id.as_str())
             .collect::<Vec<_>>(),
         vec![DEFAULT_TEXT_ENCODER_ID]
     );
@@ -9617,7 +9628,10 @@ fn ltx_text_encoder_options_hide_unstaged_alternate() {
 
     let staged = ltx_text_encoder_options(true);
     assert_eq!(
-        staged.iter().map(|option| option.id).collect::<Vec<_>>(),
+        staged
+            .iter()
+            .map(|option| option.id.as_str())
+            .collect::<Vec<_>>(),
         vec![DEFAULT_TEXT_ENCODER_ID, AMORAL_TEXT_ENCODER_ID]
     );
     assert!(!staged[1].is_default);

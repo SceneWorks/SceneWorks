@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "6f3a84ef4ad4f858c6fe199e14925a01a7943f97",
+    "inferenceRevision": "2d762d3312ac96c4feda8f89e35ee967e7700751",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities --no-default-features --features backend-candle"
   },
   "modelMappings": {
@@ -346,6 +346,7 @@
       "krea_2_turbo",
       "krea_2_raw",
       "krea_2_edit",
+      "krea_2_turbo_edit",
       "lens_turbo",
       "lens",
       "ltx_2_3_distilled",
@@ -1087,6 +1088,47 @@
       },
       {
         "id": "krea_2_edit",
+        "family": "krea_2",
+        "backend": "candle",
+        "modality": "image",
+        "conditioning": [
+          "reference",
+          "multiReference"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": true,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "krea_2_turbo_edit",
         "family": "krea_2",
         "backend": "candle",
         "modality": "image",

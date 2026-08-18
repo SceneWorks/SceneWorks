@@ -165,7 +165,13 @@ describe("the two lists a user acts on (sc-15953)", () => {
       }
     }
     expect(WORKFLOW_FIELDS_IN_FILE.map(([key]) => key)).toContain("advanced.poses");
+    expect(WORKFLOW_FIELDS_IN_FILE.map(([key]) => key)).toContain("advanced.decoder");
     expect(WORKFLOW_FIELDS_NOT_IN_FILE.map(([key]) => key)).toContain("advanced.quantTier");
+  });
+
+  it("tells the user that an authored alternate decoder travels with the workflow", () => {
+    const rendered = inFileItems().join(" | ");
+    expect(rendered).toContain("alternate decoder");
   });
 
   it("names the without-workflow control once, for every surface to reuse", () => {

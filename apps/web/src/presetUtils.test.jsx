@@ -102,18 +102,27 @@ describe("loraMatchesModel", () => {
 
   it("fails CLOSED when the API withdrew the model's LoRA advertisement", () => {
     // The API emits this shape for an imported/fine-tuned model no backend lane on this deployment
-    // can serve adapters for — currently a Mage-Flow full fine-tune. Imported Krea routes adapters
-    // on both native backends. Submitting the withdrawn shape 400s, so offering it is a dead end.
+    // can serve adapters for — a Mage-Flow full fine-tune (whose native single-file loaders reject
+    // inference adapters), or a model whose active registered provider serves the base assembly but
+    // advertises no adapter format (ComfyUI Qwen-Image). Imported Krea routes adapters on both
+    // native backends. Submitting the withdrawn shape 400s, so offering it is a dead-end selection.
     //
     // The empty family list ALONE is not enough: it lands in the permissive "cannot gate" branch
     // asserted above (`noFamilyModel`), which is why the explicit `supported: false` signal exists.
     // These two cases differ only by that flag, so a regression that drops it is caught here.
-    const withdrawn = {
+    const withdrawnFineTune = {
       id: "user_mage_flow_finetune",
       family: "mage-flow",
       loraCompatibility: { families: [], supported: false },
     };
-    expect(loraMatchesModel({ id: "l", family: "mage-flow" }, withdrawn)).toBe(false);
+    const withdrawn = {
+      id: "external_base_qwen_image",
+      family: "qwen-image",
+      loraCompatibility: { families: [], supported: false },
+    };
+    expect(loraMatchesModel({ id: "l", family: "mage-flow" }, withdrawnFineTune)).toBe(false);
+    expect(loraMatchesModel(familylessLora, withdrawnFineTune)).toBe(false);
+    expect(loraMatchesModel({ id: "l", family: "qwen-image" }, withdrawn)).toBe(false);
     expect(loraMatchesModel(familylessLora, withdrawn)).toBe(false);
     // ...while a model that genuinely serves adapters is untouched.
     expect(loraMatchesModel(sdxlLora, { ...sdxlModel, loraCompatibility: { families: ["sdxl"], supported: true } })).toBe(true);

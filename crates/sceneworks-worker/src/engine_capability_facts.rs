@@ -79,10 +79,12 @@
 //!    invisible to all three *without editing the media discovery at all*; a sibling
 //!    `capabilities.candle.audio.json` would be picked up by the glob's `*`, which does cross a dot.
 //!
-//! The media files' schema is deliberately **unchanged**: `capabilities.mlx.json` can only be
-//! re-dumped on a Mac, so a schema change made off-Mac would strand it at the old shape with no lane
-//! able to fix it. The audio file instead carries its own [`AudioCapabilityFacts::registry`]
-//! discriminator, so a file can never be mistaken for the other kind regardless of where it sits.
+//! Media files deliberately carry no registry discriminator: `capabilities.mlx.json` can only be
+//! re-dumped on a Mac, so the audio lane must remain distinguishable without rewriting that file.
+//! Optional descriptor facts may still extend each engine row when both backend-owned dumps are
+//! regenerated from the corresponding linked registries. The audio file instead carries its own
+//! [`AudioCapabilityFacts::registry`] discriminator, so a file can never be mistaken for the other
+//! kind regardless of where it sits.
 //!
 //! Only **generators** carry [`gen_core::Capabilities`], so only they are dumped. The audio lane's
 //! other provider kinds — `openvoice_v2` (an `AudioTransform`), `chatterbox_ve` (a `VoiceEmbedder`),
@@ -115,6 +117,8 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+
+use sha2::{Digest, Sha256};
 
 /// Every backend SceneWorks can link a **media** registry for, and therefore every backend stage 2
 /// requires a checked-in facts file for (sc-17119).
@@ -158,8 +162,144 @@ pub const SCENEWORKS_BACKENDS: &[&str] = &["candle", "mlx"];
 /// is the hole sc-17119's backend-level coverage passed straight over.
 pub const SCENEWORKS_AUDIO_BACKENDS: &[&str] = &["candle"];
 
-/// One engine's weights-free preview facts, as written to a per-backend facts file.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+/// A latent grid's spatial pixel compression, serialized without backend-specific types.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpatialCompressionFact {
+    pub height: u16,
+    pub width: u16,
+}
+
+/// Whether the decoder seam receives the native latent grid or a patch-packed one.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
+pub enum LatentPatchLayoutFact {
+    Unpacked,
+    Packed { patch_height: u8, patch_width: u8 },
+}
+
+/// Temporal pixel-to-latent law. Kept explicit so a still-image z16 space never compares equal to
+/// Wan's numerically normalized but causally compressed z16 video space.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum LatentTemporalLawFact {
+    #[serde(rename = "none")]
+    None,
+    #[serde(rename = "causal-4x")]
+    Causal4x,
+    #[serde(rename = "causal-6x")]
+    Causal6x,
+    #[serde(rename = "causal-8x")]
+    Causal8x,
+}
+
+/// Stable normalization identity at the denoiser-to-decoder seam.
+///
+/// Fixed per-channel vectors carry a string hash because a 64-bit JSON number cannot be compared
+/// exactly by JavaScript. Learned vectors deliberately carry no content hash, preserving gen-core's
+/// fail-closed rule instead of claiming two independently loaded checkpoints are compatible.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
+pub enum LatentNormalizationFact {
+    Identity,
+    Affine {
+        scale_bits: u32,
+        shift_bits: u32,
+    },
+    PerChannel {
+        identity: String,
+        channels: u16,
+        content_hash: String,
+    },
+    LearnedPerChannel {
+        identity: String,
+    },
+}
+
+/// Complete backend-neutral identity of a tensor at a denoiser-to-decoder boundary.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LatentSpaceFact {
+    pub channels: u16,
+    pub spatial_compression: SpatialCompressionFact,
+    pub patch_layout: LatentPatchLayoutFact,
+    pub temporal_law: LatentTemporalLawFact,
+    pub normalization: LatentNormalizationFact,
+}
+
+impl From<&gen_core::LatentSpace> for LatentSpaceFact {
+    fn from(space: &gen_core::LatentSpace) -> Self {
+        let patch_layout = match space.patch_layout {
+            gen_core::LatentPatchLayout::Unpacked => LatentPatchLayoutFact::Unpacked,
+            gen_core::LatentPatchLayout::Packed {
+                patch_height,
+                patch_width,
+            } => LatentPatchLayoutFact::Packed {
+                patch_height,
+                patch_width,
+            },
+        };
+        let temporal_law = match space.temporal_law {
+            gen_core::LatentTemporalLaw::None => LatentTemporalLawFact::None,
+            gen_core::LatentTemporalLaw::Causal4x => LatentTemporalLawFact::Causal4x,
+            gen_core::LatentTemporalLaw::Causal6x => LatentTemporalLawFact::Causal6x,
+            gen_core::LatentTemporalLaw::Causal8x => LatentTemporalLawFact::Causal8x,
+        };
+        let normalization = match space.normalization {
+            gen_core::LatentNormalization::Identity => LatentNormalizationFact::Identity,
+            gen_core::LatentNormalization::Affine {
+                scale_bits,
+                shift_bits,
+            } => LatentNormalizationFact::Affine {
+                scale_bits,
+                shift_bits,
+            },
+            gen_core::LatentNormalization::PerChannel(stats) => {
+                LatentNormalizationFact::PerChannel {
+                    identity: stats.identity.to_owned(),
+                    channels: stats.channels,
+                    content_hash: format!("fnv1a64:{:016x}", stats.content_hash),
+                }
+            }
+            gen_core::LatentNormalization::LearnedPerChannel { identity } => {
+                LatentNormalizationFact::LearnedPerChannel {
+                    identity: identity.to_owned(),
+                }
+            }
+        };
+        Self {
+            channels: space.channels,
+            spatial_compression: SpatialCompressionFact {
+                height: space.spatial_compression.height,
+                width: space.spatial_compression.width,
+            },
+            patch_layout,
+            temporal_law,
+            normalization,
+        }
+    }
+}
+
+/// One engine's weights-free capability facts, as written to a per-backend facts file.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DecoderOptionFact {
+    pub id: String,
+    pub label: String,
+    pub component_id: String,
+    pub license_component: String,
+    pub experimental: bool,
+}
+
+/// One engine's weights-free capability facts, as written to a per-backend facts file.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EngineFact {
     /// The gen-core registry id (`ModelDescriptor::id`) — the join key stage 2 resolves
@@ -169,10 +309,37 @@ pub struct EngineFact {
     pub modality: String,
     /// `Capabilities::supports_preview` — whether this engine emits `PreviewSink` frames.
     pub supports_preview: bool,
+    /// Exact denoiser output contract. Missing remains unknown and therefore incompatible with
+    /// every decoder; no consumer may infer it from the engine id or family.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub denoiser_output_latent_space: Option<LatentSpaceFact>,
+    /// Alternate decoder choices derived from the provider's typed latent contract. Empty is omitted
+    /// so the existing Candle/audio facts remain byte-stable when only MLX adds this capability.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decoder_options: Vec<DecoderOptionFact>,
+}
+
+/// One provider-owned route for an exact imported source shape and request operation. These rows
+/// are emitted from the linked inference registry; an absent row is an explicit backend refusal.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportedProviderFact {
+    pub family: String,
+    pub source: String,
+    pub operation: String,
+    pub provider_id: String,
+    pub conditioning: Vec<String>,
+    pub supports_lora: bool,
+    pub supports_lokr: bool,
+    pub supported_quants: Vec<String>,
+    pub supports_kv_cache: bool,
+    pub supports_sequential_offload: bool,
+    /// Every route is resolved and loaded through the ordinary runtime registry/cache seam.
+    pub registry_cached: bool,
 }
 
 /// Provenance stamped onto every facts file so a stale dump is detectable without rebuilding.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FactsProvenance {
     /// The inference revision the descriptors were read from — the same constant
@@ -184,7 +351,7 @@ pub struct FactsProvenance {
 }
 
 /// One backend's complete, weights-free engine facts.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EngineCapabilityFacts {
     /// `"mlx"` | `"candle"` — `ModelDescriptor::backend`.
@@ -192,6 +359,76 @@ pub struct EngineCapabilityFacts {
     pub generated_from: FactsProvenance,
     /// Every generator this backend registered, sorted by id so the file is byte-stable across runs.
     pub engines: Vec<EngineFact>,
+    /// Exact provider-declared import routes. Consumers must match both `source` and `operation`;
+    /// family-wide unioning would advertise shapes the selected loader cannot validate.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub imports: Vec<ImportedProviderFact>,
+    /// Every memory-strategy registration in this backend, including platform-composed routes.
+    /// Omitted only by pure descriptor fixtures; real registry dumps always populate it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub memory_contracts: Vec<MemoryContractFact>,
+    /// Exact production load-shape route witness. Every coordinate is concrete; there are no null
+    /// modes or tier/overlay wildcards for a consumer to broaden.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub memory_route_witnesses: Vec<MemoryRouteWitnessFact>,
+    /// Explicit upstream exceptions for descriptor-less, worker-owned bespoke memory routes. These
+    /// are topology waivers only: they cannot fabricate a provider registration or an optimized
+    /// contract surface.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bespoke_memory_route_waivers: Vec<BespokeMemoryRouteWaiverFact>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BespokeMemoryRouteWaiverFact {
+    pub provider_id: String,
+    pub crate_name: String,
+    pub owner: String,
+    pub reason: String,
+    pub contract_path: String,
+    pub verification_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryRouteWitnessFact {
+    pub provider: String,
+    pub tier: String,
+    pub mode: String,
+    pub overlay: String,
+    /// Exact load-time component profile behind the public overlay coordinate.
+    pub load_profile: String,
+}
+
+/// Finite registry-load selector owned by the pinned inference provider.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryContractSelectorFact {
+    pub tier: String,
+    pub offload_policy: String,
+    pub load_shape: String,
+}
+
+/// One weights-free contract result at an exact selector.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryContractSurfaceFact {
+    pub selector: MemoryContractSelectorFact,
+    pub implemented_rungs: Vec<String>,
+    pub structurally_not_applicable_rungs: Vec<String>,
+    pub deferred_materialization_rungs: Vec<String>,
+}
+
+/// Exhaustive, generated memory-contract surface for one registry provider.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryContractFact {
+    pub id: String,
+    pub composed: bool,
+    /// SHA-256 over the canonical JSON surface array. Reconciliation waivers bind this exact value,
+    /// so a provider contract change makes the old waiver stale rather than silently inheriting it.
+    pub selector_digest: String,
+    pub surfaces: Vec<MemoryContractSurfaceFact>,
 }
 
 impl EngineCapabilityFacts {
@@ -204,8 +441,8 @@ impl EngineCapabilityFacts {
 
 /// The `registry` discriminator every audio facts file carries.
 ///
-/// Media facts files carry **no** `registry` key — deliberately, because adding one would change
-/// their bytes and `capabilities.mlx.json` can only be re-dumped on a Mac. So "has
+/// Media facts files carry **no** `registry` key — deliberately, because that discriminator is
+/// owned by the audio lane. So "has
 /// `registry: audio`" is the test for an audio file, and its absence means media.
 pub const AUDIO_REGISTRY_LABEL: &str = "audio";
 
@@ -213,8 +450,8 @@ pub const AUDIO_REGISTRY_LABEL: &str = "audio";
 ///
 /// Structurally [`EngineCapabilityFacts`] plus the [`AUDIO_REGISTRY_LABEL`] discriminator, so a file
 /// that ends up in the wrong directory is still self-describing. A distinct type rather than a flag
-/// on the media struct for exactly that reason: the media schema must not move.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+/// on the media struct for exactly that reason: the two registry namespaces must stay distinct.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioCapabilityFacts {
     /// Always [`AUDIO_REGISTRY_LABEL`]. Serialized first so the discriminator is the first line of
@@ -334,9 +571,174 @@ pub fn facts_from_descriptors(
                 dumper: dumper.to_owned(),
             },
             engines,
+            imports: Vec::new(),
+            memory_contracts: Vec::new(),
+            memory_route_witnesses: Vec::new(),
+            bespoke_memory_route_waivers: Vec::new(),
         });
     }
     Ok(out)
+}
+
+fn imported_source_label(source: gen_core::ImportedModelSource) -> &'static str {
+    match source {
+        gen_core::ImportedModelSource::TransformerFile => "transformer_file",
+        gen_core::ImportedModelSource::FusedCheckpoint => "fused_checkpoint",
+        gen_core::ImportedModelSource::TransformerDirectory => "transformer_directory",
+        gen_core::ImportedModelSource::ComfyUiTree => "comfy_ui_tree",
+    }
+}
+
+fn imported_operation_label(operation: gen_core::ImportedModelOperation) -> &'static str {
+    match operation {
+        gen_core::ImportedModelOperation::Generate => "generate",
+        gen_core::ImportedModelOperation::Edit => "edit",
+        gen_core::ImportedModelOperation::Pose => "pose",
+        gen_core::ImportedModelOperation::MultiPhase => "multi_phase",
+    }
+}
+
+fn conditioning_label(kind: gen_core::ConditioningKind) -> &'static str {
+    match kind {
+        gen_core::ConditioningKind::Reference => "reference",
+        gen_core::ConditioningKind::ReferenceAudio => "reference_audio",
+        gen_core::ConditioningKind::AudioEdit => "audio_edit",
+        gen_core::ConditioningKind::AudioEditRegions => "audio_edit_regions",
+        gen_core::ConditioningKind::VoiceEmbedding => "voice_embedding",
+        gen_core::ConditioningKind::MultiReference => "multi_reference",
+        gen_core::ConditioningKind::ReduxRefs => "redux_refs",
+        gen_core::ConditioningKind::Control => "control",
+        gen_core::ConditioningKind::Depth => "depth",
+        gen_core::ConditioningKind::Mask => "mask",
+        gen_core::ConditioningKind::Keyframe => "keyframe",
+        gen_core::ConditioningKind::VideoClip => "video_clip",
+        gen_core::ConditioningKind::ControlClip => "control_clip",
+        gen_core::ConditioningKind::VideoSync => "video_sync",
+        gen_core::ConditioningKind::ConversationHistory => "conversation_history",
+    }
+}
+
+fn quant_label(quant: gen_core::Quant) -> &'static str {
+    match quant {
+        gen_core::Quant::Q4 => "q4",
+        gen_core::Quant::Q8 => "q8",
+        gen_core::Quant::Nvfp4 => "nvfp4",
+    }
+}
+
+fn append_imported_fact(
+    facts: &mut [EngineCapabilityFacts],
+    route: &gen_core::ImportedModelRegistration,
+    descriptor: gen_core::ModelDescriptor,
+) {
+    let backend = facts
+        .iter_mut()
+        .find(|facts| facts.backend == descriptor.backend)
+        .expect("descriptor backend was grouped above");
+    backend.imports.push(ImportedProviderFact {
+        family: route.family.to_owned(),
+        source: imported_source_label(route.source).to_owned(),
+        operation: imported_operation_label(route.operation).to_owned(),
+        provider_id: route.provider_id.to_owned(),
+        conditioning: descriptor
+            .capabilities
+            .conditioning
+            .iter()
+            .copied()
+            .map(conditioning_label)
+            .map(str::to_owned)
+            .collect(),
+        supports_lora: descriptor.capabilities.supports_lora,
+        supports_lokr: descriptor.capabilities.supports_lokr,
+        supported_quants: descriptor
+            .capabilities
+            .supported_quants
+            .iter()
+            .copied()
+            .map(quant_label)
+            .map(str::to_owned)
+            .collect(),
+        supports_kv_cache: descriptor.capabilities.supports_kv_cache,
+        supports_sequential_offload: descriptor.capabilities.supports_sequential_offload,
+        registry_cached: true,
+    });
+}
+
+fn sort_imported_facts(facts: &mut [EngineCapabilityFacts]) {
+    for backend in facts {
+        backend.imports.sort_by(|left, right| {
+            (
+                &left.family,
+                &left.source,
+                &left.operation,
+                &left.provider_id,
+            )
+                .cmp(&(
+                    &right.family,
+                    &right.source,
+                    &right.operation,
+                    &right.provider_id,
+                ))
+        });
+    }
+}
+
+/// Test-facing pure derivation from registry parts. Production uses [`facts_from_registry`] so the
+/// exact gen-core resolution seam owns provider lookup and structural capability withdrawal.
+pub fn facts_from_registry_parts(
+    descriptors: &[gen_core::ModelDescriptor],
+    imports: &[gen_core::ImportedModelRegistration],
+    inference_revision: &str,
+    dumper: &str,
+) -> Result<Vec<EngineCapabilityFacts>, String> {
+    let mut facts = facts_from_descriptors(descriptors, inference_revision, dumper)?;
+    for route in imports {
+        let mut descriptor = descriptors
+            .iter()
+            .find(|descriptor| descriptor.id == route.provider_id)
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "imported route {}/{:?}/{:?} targets missing provider {}",
+                    route.family, route.source, route.operation, route.provider_id
+                )
+            })?;
+        if !route.inherit_adapters {
+            descriptor.capabilities.supports_lora = false;
+            descriptor.capabilities.supports_lokr = false;
+        }
+        append_imported_fact(&mut facts, route, descriptor);
+    }
+    sort_imported_facts(&mut facts);
+    Ok(facts)
+}
+
+/// Derive facts directly from the provider registry. `imported_model_descriptor` performs exact
+/// family/source/operation resolution and applies `inherit_adapters`; the serializer never
+/// re-implements either decision.
+pub fn facts_from_registry(
+    registry: &gen_core::ProviderRegistry,
+    inference_revision: &str,
+    dumper: &str,
+) -> Result<Vec<EngineCapabilityFacts>, String> {
+    let descriptors: Vec<gen_core::ModelDescriptor> = registry
+        .generators()
+        .map(|registration| (registration.descriptor)())
+        .collect();
+    let mut facts = facts_from_descriptors(&descriptors, inference_revision, dumper)?;
+    for route in registry.imported_models() {
+        let descriptor = registry
+            .imported_model_descriptor(route.family, route.source, route.operation)
+            .ok_or_else(|| {
+                format!(
+                    "registry refused its own imported route {}/{:?}/{:?} targeting {}",
+                    route.family, route.source, route.operation, route.provider_id
+                )
+            })?;
+        append_imported_fact(&mut facts, route, descriptor);
+    }
+    sort_imported_facts(&mut facts);
+    Ok(facts)
 }
 
 /// Bucket descriptors per backend, each bucket sorted by id and proven duplicate-free.
@@ -356,6 +758,20 @@ fn group_by_backend(
                 id: descriptor.id.to_owned(),
                 modality: modality_label(&descriptor.modality).to_owned(),
                 supports_preview: descriptor.capabilities.supports_preview,
+                denoiser_output_latent_space: descriptor
+                    .denoiser_output_latent_space
+                    .map(LatentSpaceFact::from),
+                decoder_options: descriptor
+                    .compatible_decoder_options()
+                    .into_iter()
+                    .map(|option| DecoderOptionFact {
+                        id: option.id.to_owned(),
+                        label: option.label.to_owned(),
+                        component_id: option.component_id.to_owned(),
+                        license_component: option.license_component.to_owned(),
+                        experimental: option.experimental,
+                    })
+                    .collect(),
             });
     }
     for (backend, engines) in &mut by_backend {
@@ -441,20 +857,254 @@ const AUDIO_DUMPER_INVOCATION: &str = "cargo run -p sceneworks-worker --bin \
                                        dump-engine-capabilities [--no-default-features --features \
                                        backend-candle]";
 
+fn memory_strategy_label(strategy: gen_core::MemoryStrategy) -> &'static str {
+    match strategy {
+        gen_core::MemoryStrategy::Resident => "resident",
+        gen_core::MemoryStrategy::StagedResidency => "staged_residency",
+        gen_core::MemoryStrategy::BoundedDecode => "bounded_decode",
+        gen_core::MemoryStrategy::BoundedAttention => "bounded_attention",
+        gen_core::MemoryStrategy::BoundedTransformerResidency => "bounded_transformer_residency",
+    }
+}
+
+fn memory_selector_fact(
+    selector: gen_core::MemoryContractSurfaceSelector,
+) -> MemoryContractSelectorFact {
+    let tier = match selector.tier {
+        gen_core::MemoryContractSurfaceTier::Bf16 => "bf16",
+        gen_core::MemoryContractSurfaceTier::Q4 => "q4",
+        gen_core::MemoryContractSurfaceTier::Q8 => "q8",
+        gen_core::MemoryContractSurfaceTier::Nvfp4 => "nvfp4",
+    };
+    let offload_policy = match selector.offload_policy {
+        gen_core::OffloadPolicy::Resident => "resident",
+        gen_core::OffloadPolicy::Sequential => "sequential",
+    };
+    let load_shape = match selector.load_shape {
+        gen_core::LoadShape::EagerMaterialization => "eager_materialization",
+        gen_core::LoadShape::DeferredMaterialization => "deferred_materialization",
+    };
+    MemoryContractSelectorFact {
+        tier: tier.to_owned(),
+        offload_policy: offload_policy.to_owned(),
+        load_shape: load_shape.to_owned(),
+    }
+}
+
+fn memory_surface_fact(surface: &gen_core::MemoryContractSurface) -> MemoryContractSurfaceFact {
+    let mut implemented_rungs = Vec::new();
+    let mut structurally_not_applicable_rungs = Vec::new();
+    let mut deferred_materialization_rungs = Vec::new();
+    for capability in &surface.contract.strategies {
+        match &capability.support {
+            gen_core::MemoryStrategySupport::Implemented => {
+                implemented_rungs.push(memory_strategy_label(capability.strategy).to_owned());
+                if surface
+                    .contract
+                    .requires(capability.strategy)
+                    .any(|prerequisite| {
+                        matches!(
+                            prerequisite,
+                            gen_core::MemoryStrategyPrerequisite::LoadShape(
+                                gen_core::LoadShape::DeferredMaterialization
+                            )
+                        )
+                    })
+                {
+                    deferred_materialization_rungs
+                        .push(memory_strategy_label(capability.strategy).to_owned());
+                }
+            }
+            gen_core::MemoryStrategySupport::StructurallyNotApplicable { .. } => {
+                structurally_not_applicable_rungs
+                    .push(memory_strategy_label(capability.strategy).to_owned());
+            }
+            gen_core::MemoryStrategySupport::Missing => {}
+        }
+    }
+    implemented_rungs.sort();
+    structurally_not_applicable_rungs.sort();
+    deferred_materialization_rungs.sort();
+    MemoryContractSurfaceFact {
+        selector: memory_selector_fact(surface.selector),
+        implemented_rungs,
+        structurally_not_applicable_rungs,
+        deferred_materialization_rungs,
+    }
+}
+
+/// Convert the pinned registry's complete provider-owned memory surfaces into backend facts.
+///
+/// The registry call fails when even one `MemoryRegistration` lacks its paired finite surface, so
+/// a partial dump cannot masquerade as complete coverage.
+pub fn memory_contract_facts_from_registry(
+    registry: &gen_core::ProviderRegistry,
+) -> Result<BTreeMap<String, Vec<MemoryContractFact>>, String> {
+    let mut grouped: BTreeMap<String, BTreeMap<String, (bool, Vec<MemoryContractSurfaceFact>)>> =
+        BTreeMap::new();
+    for surface in registry
+        .memory_contract_surfaces()
+        .map_err(|error| error.to_string())?
+    {
+        let backend = surface.contract.backend.backend_id().to_owned();
+        let provider = surface.contract.provider_id.clone();
+        let entry = grouped
+            .entry(backend)
+            .or_default()
+            .entry(provider)
+            .or_insert_with(|| (surface.composed, Vec::new()));
+        if entry.0 != surface.composed {
+            return Err(format!(
+                "memory-contract provider '{}' disagrees whether it is platform-composed",
+                surface.contract.provider_id
+            ));
+        }
+        entry.1.push(memory_surface_fact(&surface));
+    }
+
+    let mut out = BTreeMap::new();
+    for (backend, providers) in grouped {
+        let mut facts = Vec::with_capacity(providers.len());
+        for (id, (composed, mut surfaces)) in providers {
+            surfaces.sort_by(|left, right| {
+                let key = |surface: &MemoryContractSurfaceFact| {
+                    format!(
+                        "{}:{}:{}",
+                        surface.selector.tier,
+                        surface.selector.offload_policy,
+                        surface.selector.load_shape
+                    )
+                };
+                key(left).cmp(&key(right))
+            });
+            let canonical = serde_json::to_vec(&surfaces).map_err(|error| {
+                format!("{id}: memory-contract surfaces do not serialize: {error}")
+            })?;
+            let selector_digest = format!("sha256:{:x}", Sha256::digest(canonical));
+            facts.push(MemoryContractFact {
+                id,
+                composed,
+                selector_digest,
+                surfaces,
+            });
+        }
+        facts.sort_by(|left, right| left.id.cmp(&right.id));
+        out.insert(backend, facts);
+    }
+    Ok(out)
+}
+
 /// Walk the linked provider registry weights-free and group it per backend.
 ///
 /// Reads only each registration's `descriptor` closure — no model load, no weights on disk — the
 /// same introspection `mlx-gen-catalog` and [`crate::engines::registry_capabilities`] do.
 pub fn collect_engine_capability_facts() -> Result<Vec<EngineCapabilityFacts>, String> {
-    let descriptors: Vec<gen_core::ModelDescriptor> = crate::inference_runtime::media()
-        .generators()
-        .map(|registration| (registration.descriptor)())
-        .collect();
-    facts_from_descriptors(
-        &descriptors,
+    let registry = crate::inference_runtime::media();
+    let mut facts = facts_from_registry(
+        registry,
         crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION,
         dumper_invocation(),
-    )
+    )?;
+    let contract_registry = crate::inference_runtime::memory_contract_surface_registry()
+        .map_err(|error| error.to_string())?;
+    let mut memory_contracts = memory_contract_facts_from_registry(&contract_registry)?;
+    let route_witnesses = crate::memory_route_registry::deferred_route_witnesses();
+    let builtin_models = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| sceneworks_core::jsonc::strip_jsonc_comments(contents))
+        .ok_or_else(|| "builtin.models.jsonc is not embedded".to_owned())?;
+    let builtin_manifest: serde_json::Value = serde_json::from_str(&builtin_models)
+        .map_err(|error| format!("builtin.models.jsonc is malformed: {error}"))?;
+    let declared_request_strategy_witnesses =
+        crate::memory_route_registry::declared_candle_request_strategy_route_witnesses(
+            builtin_manifest["models"]
+                .as_array()
+                .ok_or_else(|| "builtin.models.jsonc has no models array".to_owned())?,
+        )?;
+    for entry in &mut facts {
+        entry.memory_contracts = memory_contracts.remove(&entry.backend).ok_or_else(|| {
+            format!(
+                "{} descriptor facts have no memory-contract surface inventory",
+                entry.backend
+            )
+        })?;
+        entry.memory_route_witnesses = route_witnesses
+            .iter()
+            .filter(|row| row.backend.as_str() == entry.backend)
+            .map(|row| MemoryRouteWitnessFact {
+                provider: row.provider.to_owned(),
+                tier: row.tier.as_str().to_owned(),
+                mode: row.mode.as_str().to_owned(),
+                overlay: row.overlay.as_str().to_owned(),
+                load_profile: row.load_profile.as_str().to_owned(),
+            })
+            .collect();
+        if entry.backend == "candle" {
+            entry
+                .memory_route_witnesses
+                .extend(declared_request_strategy_witnesses.iter().map(|row| {
+                    MemoryRouteWitnessFact {
+                        provider: row.provider.clone(),
+                        tier: row.tier.as_str().to_owned(),
+                        mode: row.mode.as_str().to_owned(),
+                        overlay: row.overlay.as_str().to_owned(),
+                        load_profile: row.load_profile.as_str().to_owned(),
+                    }
+                }));
+            entry.memory_route_witnesses.sort_by(|left, right| {
+                (
+                    &left.provider,
+                    &left.tier,
+                    &left.mode,
+                    &left.overlay,
+                    &left.load_profile,
+                )
+                    .cmp(&(
+                        &right.provider,
+                        &right.tier,
+                        &right.mode,
+                        &right.overlay,
+                        &right.load_profile,
+                    ))
+            });
+            entry.memory_route_witnesses.dedup();
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+            {
+                entry.bespoke_memory_route_waivers = runtime_cuda::BESPOKE_MEMORY_ROUTE_WAIVERS
+                    .iter()
+                    .map(|waiver| BespokeMemoryRouteWaiverFact {
+                        provider_id: waiver.provider_id.to_owned(),
+                        crate_name: waiver.crate_name.to_owned(),
+                        owner: waiver.owner.to_owned(),
+                        reason: waiver.reason.to_owned(),
+                        contract_path: waiver.contract_path.to_owned(),
+                        verification_path: waiver.verification_path.to_owned(),
+                    })
+                    .collect();
+                entry
+                    .bespoke_memory_route_waivers
+                    .sort_by(|left, right| left.provider_id.cmp(&right.provider_id));
+            }
+        }
+        if entry.memory_route_witnesses.is_empty() {
+            return Err(format!(
+                "{} descriptor facts have no typed memory-route witnesses",
+                entry.backend
+            ));
+        }
+    }
+    if !memory_contracts.is_empty() {
+        return Err(format!(
+            "memory-contract surfaces named backends with no descriptor facts: {}",
+            memory_contracts
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    Ok(facts)
 }
 
 /// Walk the linked **audio** provider registry weights-free and group it per backend (sc-17593).
@@ -914,6 +1564,63 @@ pub fn dump_runtime_descriptor_to(root: &Path) -> Result<Vec<PathBuf>, String> {
 mod tests {
     use super::*;
 
+    fn fixture_memory_contract(
+        spec: &gen_core::LoadSpec,
+    ) -> gen_core::Result<gen_core::MemoryProviderContract> {
+        let mut contract = gen_core::MemoryProviderContract::compatibility_default(
+            "fixture_contract",
+            gen_core::MemoryBackendRealization::MlxMetal {
+                bounded_wired_residency: true,
+                lazy_or_mmap_materialization: true,
+                explicit_evaluation_and_synchronization: true,
+                cache_eviction: true,
+            },
+        );
+        contract.load_shape = spec.load_shape;
+        contract
+            .strategies
+            .iter_mut()
+            .find(|capability| {
+                capability.strategy == gen_core::MemoryStrategy::BoundedTransformerResidency
+            })
+            .expect("compatibility contract carries all rungs")
+            .support = gen_core::MemoryStrategySupport::Implemented;
+        Ok(contract)
+    }
+
+    const FIXTURE_MEMORY_REGISTRATION: gen_core::MemoryRegistration =
+        gen_core::MemoryRegistration {
+            provider_id: "fixture_contract",
+            contract: fixture_memory_contract,
+            safety_check: gen_core::default_registered_memory_strategy_safety_check,
+        };
+
+    #[test]
+    fn memory_contract_facts_are_exhaustive_sorted_and_digest_bound() {
+        let registry = gen_core::ProviderRegistryBuilder::new()
+            .register_composed_memory_strategy(FIXTURE_MEMORY_REGISTRATION)
+            .register_memory_contract_fixture(gen_core::MemoryContractFixtureRegistration {
+                provider_id: "fixture_contract",
+                contract: fixture_memory_contract,
+                surface_specs: gen_core::mlx_memory_contract_surface_specs,
+            })
+            .build()
+            .expect("fixture registry");
+        let facts = memory_contract_facts_from_registry(&registry).expect("contract facts");
+        let providers = &facts["mlx"];
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].id, "fixture_contract");
+        assert!(providers[0].composed);
+        assert_eq!(providers[0].surfaces.len(), 12);
+        assert!(providers[0].selector_digest.starts_with("sha256:"));
+        assert!(providers[0].surfaces.iter().all(|surface| surface
+            .implemented_rungs
+            .contains(&"bounded_transformer_residency".to_owned())));
+        assert!(providers[0].surfaces.iter().all(|surface| surface
+            .deferred_materialization_rungs
+            .contains(&"bounded_transformer_residency".to_owned())));
+    }
+
     fn descriptor(
         id: &'static str,
         backend: &'static str,
@@ -929,6 +1636,7 @@ mod tests {
         modality: gen_core::Modality,
     ) -> gen_core::ModelDescriptor {
         gen_core::ModelDescriptor {
+            denoiser_output_latent_space: None,
             id,
             family: id,
             backend,
@@ -937,6 +1645,7 @@ mod tests {
                 supports_preview,
                 ..Default::default()
             },
+            encoder_contract: None,
             required_components: &[],
             control_kinds: None,
         }
@@ -1159,11 +1868,15 @@ mod tests {
 
     #[test]
     fn groups_by_backend_and_sorts_engines_by_id() {
+        let mut candle_krea = descriptor("krea_2_turbo", "candle", true);
+        candle_krea.denoiser_output_latent_space = Some(&gen_core::QWEN_KREA_Z16_LATENT_SPACE);
+        let mut mlx_krea = descriptor("krea_2_turbo", "mlx", true);
+        mlx_krea.denoiser_output_latent_space = Some(&gen_core::QWEN_KREA_Z16_LATENT_SPACE);
         let facts = facts_from_descriptors(
             &[
                 descriptor("z_image_turbo", "candle", false),
-                descriptor("krea_2_turbo", "candle", true),
-                descriptor("krea_2_turbo", "mlx", true),
+                candle_krea,
+                mlx_krea,
             ],
             "d48023204cd3a4f3f8eb060f79803dccaddcb482",
             "dump",
@@ -1186,8 +1899,51 @@ mod tests {
         );
         assert!(facts[0].engines[0].supports_preview);
         assert!(!facts[0].engines[1].supports_preview);
+        assert!(
+            facts[0].engines[0].decoder_options.is_empty(),
+            "the MLX-only alternate decoder must not leak into Candle facts"
+        );
+        assert_eq!(facts[1].engines[0].decoder_options.len(), 1);
+        assert_eq!(
+            facts[1].engines[0].decoder_options[0].id,
+            gen_core::WAN_2_1_VAE_DECODER_ID
+        );
+        assert!(facts[1].engines[0].decoder_options[0].experimental);
         assert_eq!(facts[0].file_name(), "capabilities.candle.json");
         assert_eq!(facts[1].file_name(), "capabilities.mlx.json");
+    }
+
+    #[test]
+    fn imported_facts_match_exact_shape_and_apply_structural_adapter_refusal() {
+        let mut provider = descriptor("mage_flow_base", "mlx", true);
+        provider.family = "mage-flow";
+        provider.capabilities.supports_lora = true;
+        provider.capabilities.supports_lokr = true;
+        provider.capabilities.supported_quants = &[gen_core::Quant::Q4];
+        provider.capabilities.supports_kv_cache = true;
+        let route = gen_core::ImportedModelRegistration {
+            family: "mage-flow",
+            source: gen_core::ImportedModelSource::TransformerDirectory,
+            operation: gen_core::ImportedModelOperation::Generate,
+            provider_id: "mage_flow_base",
+            required_components: Some(&["mage_text_encoder", "mage_vae"]),
+            inherit_adapters: false,
+        };
+
+        let facts = facts_from_registry_parts(&[provider], &[route], "revision", "dump")
+            .expect("exact imported facts");
+        assert_eq!(facts.len(), 1);
+        assert_eq!(facts[0].imports.len(), 1);
+        let imported = &facts[0].imports[0];
+        assert_eq!(imported.family, "mage-flow");
+        assert_eq!(imported.source, "transformer_directory");
+        assert_eq!(imported.operation, "generate");
+        assert_eq!(imported.provider_id, "mage_flow_base");
+        assert!(!imported.supports_lora);
+        assert!(!imported.supports_lokr);
+        assert_eq!(imported.supported_quants, ["q4"]);
+        assert!(imported.supports_kv_cache);
+        assert!(imported.registry_cached);
     }
 
     // The same engine id twice in one backend would make the stage-2 join through
@@ -1251,6 +2007,23 @@ mod tests {
                 entry.file_name(),
             );
         }
+        let imported = facts
+            .iter()
+            .flat_map(|entry| entry.imports.iter())
+            .collect::<Vec<_>>();
+        assert!(
+            !imported.is_empty(),
+            "the linked registry must publish its exact imported-source routes"
+        );
+        if facts.iter().any(|entry| entry.backend == "mlx") {
+            assert!(imported.iter().any(|route| {
+                route.family == "mage-flow"
+                    && route.source == "transformer_directory"
+                    && route.operation == "generate"
+                    && !route.supports_lora
+                    && !route.supports_lokr
+            }));
+        }
     }
 
     // sc-17593. The audio twin of `refuses_to_dump_an_empty_registry`, and the same trap: an audio
@@ -1303,10 +2076,9 @@ mod tests {
 
     // The discriminator is what keeps a misplaced file from being read as the other kind, so assert
     // it is actually IN the bytes rather than only on the struct. Media files carry no `registry`
-    // key at all — deliberately, since changing their schema would strand capabilities.mlx.json,
-    // which only a Mac can re-dump.
+    // key at all; their optional engine-level descriptor facts do not change that namespace rule.
     #[test]
-    fn audio_json_is_discriminated_and_media_json_is_unchanged() {
+    fn audio_json_is_discriminated_and_media_json_has_no_registry_key() {
         let audio = audio_facts_from_descriptors(
             &[audio_descriptor("kokoro_82m", false)],
             "a4f409ae8ce73eda2ee8117b89b5f479666606b8",
@@ -1320,6 +2092,9 @@ mod tests {
         assert_eq!(json["backend"], "candle");
         assert_eq!(json["engines"][0]["modality"], "audio");
         assert_eq!(json["engines"][0]["supportsPreview"], false);
+        assert!(json["engines"][0]
+            .get("denoiserOutputLatentSpace")
+            .is_none());
 
         let media = facts_from_descriptors(
             &[descriptor("krea_2_turbo", "candle", true)],
@@ -1331,7 +2106,7 @@ mod tests {
             serde_json::from_str(&facts_json(&media[0]).expect("serializes")).expect("parses");
         assert!(
             media_json.get("registry").is_none(),
-            "the media schema must not move: capabilities.mlx.json can only be re-dumped on a Mac"
+            "media facts must remain distinguishable from the audio registry"
         );
     }
 
@@ -1455,5 +2230,69 @@ mod tests {
         assert_eq!(parsed["engines"][0]["id"], "krea_2_turbo");
         assert_eq!(parsed["engines"][0]["supportsPreview"], true);
         assert_eq!(parsed["engines"][0]["modality"], "image");
+    }
+
+    #[test]
+    fn latent_space_facts_are_exact_fail_closed_and_round_trip() {
+        let mut qwen = descriptor("qwen", "mlx", true);
+        qwen.denoiser_output_latent_space = Some(&gen_core::QWEN_KREA_Z16_LATENT_SPACE);
+        let mut wan = descriptor("wan", "mlx", false);
+        wan.denoiser_output_latent_space = Some(&gen_core::WAN_Z16_VIDEO_LATENT_SPACE);
+        let mut flux2 = descriptor("flux2", "mlx", true);
+        flux2.denoiser_output_latent_space = Some(&gen_core::FLUX2_PACKED_LATENT_SPACE);
+        let mut mochi = descriptor("mochi", "mlx", false);
+        mochi.denoiser_output_latent_space = Some(&gen_core::MOCHI_VIDEO_LATENT_SPACE);
+        let mut ltx = descriptor("ltx", "mlx", false);
+        ltx.denoiser_output_latent_space = Some(&gen_core::LTX_VIDEO_LATENT_SPACE);
+        let unknown = descriptor("unknown", "mlx", false);
+
+        let facts = facts_from_descriptors(
+            &[qwen, wan, flux2, mochi, ltx, unknown],
+            "d48023204cd3a4f3f8eb060f79803dccaddcb482",
+            "cargo run …",
+        )
+        .expect("facts");
+        let json = facts_json(&facts[0]).expect("serializes");
+        let round_trip: EngineCapabilityFacts =
+            serde_json::from_str(&json).expect("typed facts deserialize");
+        assert_eq!(round_trip, facts[0]);
+
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("parses");
+        let engine = |id: &str| {
+            parsed["engines"]
+                .as_array()
+                .expect("engine array")
+                .iter()
+                .find(|engine| engine["id"] == id)
+                .unwrap_or_else(|| panic!("missing {id}"))
+        };
+        let qwen = &engine("qwen")["denoiserOutputLatentSpace"];
+        let wan = &engine("wan")["denoiserOutputLatentSpace"];
+        assert_eq!(qwen["channels"], 16);
+        assert_eq!(qwen["patchLayout"]["kind"], "unpacked");
+        assert_eq!(qwen["temporalLaw"], "none");
+        assert_eq!(wan["temporalLaw"], "causal-4x");
+        assert_eq!(
+            engine("mochi")["denoiserOutputLatentSpace"]["temporalLaw"],
+            "causal-6x"
+        );
+        assert_eq!(
+            engine("ltx")["denoiserOutputLatentSpace"]["temporalLaw"],
+            "causal-8x"
+        );
+        assert_eq!(qwen["normalization"], wan["normalization"]);
+        assert!(qwen["normalization"]["contentHash"]
+            .as_str()
+            .expect("string hash")
+            .starts_with("fnv1a64:"));
+        assert_eq!(
+            engine("flux2")["denoiserOutputLatentSpace"]["patchLayout"]["kind"],
+            "packed"
+        );
+        assert_eq!(
+            engine("flux2")["denoiserOutputLatentSpace"]["normalization"]["kind"],
+            "learnedPerChannel"
+        );
+        assert!(engine("unknown").get("denoiserOutputLatentSpace").is_none());
     }
 }

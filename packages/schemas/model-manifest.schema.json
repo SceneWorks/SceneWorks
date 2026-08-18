@@ -23,6 +23,107 @@
         }
       }
     },
+    "decodeQualityFixture": {
+      "type": "object",
+      "required": ["seed", "productionLatentProvenance", "productionLatentSha256", "denseOutputSha256", "tiledOutputSha256", "observedError"],
+      "additionalProperties": false,
+      "properties": {
+        "seed": { "type": "integer", "minimum": 0 },
+        "productionLatentProvenance": { "type": "string", "minLength": 1 },
+        "productionLatentSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "denseOutputSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "tiledOutputSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "observedError": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "decodeGeometryPolicy": {
+      "type": "object",
+      "required": ["qualityAbi", "family", "resolvedRoute", "backend", "tier", "loadShape", "artifact", "implementationFingerprint", "mode", "overlay", "geometry", "usePid", "tileEdge", "overlap", "metric", "maximumError", "fixtures", "productionEvidenceSha256", "disposition"],
+      "additionalProperties": false,
+      "properties": {
+        "qualityAbi": { "const": 2 },
+        "family": { "type": "string", "minLength": 1 },
+        "resolvedRoute": { "type": "string", "minLength": 1 },
+        "backend": { "const": "mlx" },
+        "tier": { "enum": ["bf16", "q4", "q8", "nvfp4", "fp32"] },
+        "loadShape": { "enum": ["eager_materialization", "deferred_materialization"] },
+        "artifact": {
+          "type": "object",
+          "required": ["repository", "revision", "variant", "fingerprint"],
+          "additionalProperties": false,
+          "properties": {
+            "repository": { "type": "string", "minLength": 1 },
+            "revision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+            "variant": { "type": "string", "minLength": 1 },
+            "fingerprint": { "type": "string", "minLength": 1 }
+          }
+        },
+        "implementationFingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "mode": { "type": "string", "minLength": 1 },
+        "overlay": { "type": ["string", "null"], "minLength": 1 },
+        "geometry": {
+          "type": "object",
+          "required": ["width", "height", "batch", "frames", "referenceCount"],
+          "additionalProperties": false,
+          "properties": {
+            "width": { "type": "integer", "minimum": 1 },
+            "height": { "type": "integer", "minimum": 1 },
+            "batch": { "type": "integer", "minimum": 1 },
+            "frames": { "type": "integer", "minimum": 1 },
+            "referenceCount": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "usePid": { "type": "boolean" },
+        "tileEdge": { "type": "integer", "minimum": 1 },
+        "overlap": { "type": "integer", "minimum": 1 },
+        "metric": { "type": "string", "minLength": 1 },
+        "maximumError": { "type": "integer", "minimum": 0 },
+        "fixtures": {
+          "type": "array",
+          "minItems": 2,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/decodeQualityFixture" }
+        },
+        "productionEvidenceSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "disposition": {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": ["kind"],
+              "additionalProperties": false,
+              "properties": { "kind": { "const": "admitted" } }
+            },
+            {
+              "type": "object",
+              "required": ["kind", "reason"],
+              "additionalProperties": false,
+              "properties": {
+                "kind": { "const": "refused" },
+                "reason": { "type": "string", "minLength": 1 }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "memoryParameterRanges": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "decodeTileEdges": { "type": "array", "uniqueItems": true, "items": { "type": "integer", "minimum": 1 } },
+        "decodeOverlaps": { "type": "array", "uniqueItems": true, "items": { "type": "integer", "minimum": 1 } },
+        "decodeGeometryPolicies": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/decodeGeometryPolicy" },
+          "description": "Exact production-latent tiled-decode quality rows. Once present, an output coordinate absent from this table is not authorized by the route-blind edge/overlap union."
+        },
+        "attentionChunkSizes": { "type": "array", "uniqueItems": true, "items": { "type": "integer", "minimum": 1 } },
+        "transformerWindowSizes": { "type": "array", "uniqueItems": true, "items": { "type": "integer", "minimum": 1 } },
+        "transformerWindowComponents": { "type": "array", "uniqueItems": true, "items": { "enum": ["Dit", "TextEncoder", "Both"] } }
+      }
+    },
     "structuralMemoryStrategyExemption": {
       "type": "object",
       "required": ["overlays", "evidence"],
@@ -48,6 +149,36 @@
           }
         }
       }
+    },
+    "memoryDeclarationWithhold": {
+      "type": "object",
+      "required": ["rungs", "story", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "rungs": {
+          "oneOf": [
+            { "const": "all" },
+            {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "enum": [
+                  "resident",
+                  "staged_residency",
+                  "bounded_decode",
+                  "bounded_attention",
+                  "bounded_transformer_residency"
+                ]
+              }
+            }
+          ],
+          "description": "The rungs this block declares LESS of than the engine dumps. \"all\" withholds the whole backend block."
+        },
+        "story": { "type": "string", "minLength": 1 },
+        "reason": { "type": "string", "minLength": 1 }
+      },
+      "description": "A DELIBERATE withhold: the manifest declaring less than config/engine-capabilities/capabilities.<backend>.json dumps, on purpose, because a measurement says the wider claim is wrong (the SC-15525 sdxl quality withholding is the shape this exists for). scripts/generate-manifest-memory-declarations.mjs honors it and reports it; it never overrides one. `story` and `reason` are required because a withhold with no cited verdict is indistinguishable from an untriaged gap, which is exactly what the projection exists to eliminate."
     },
     "samplerKey": {
       "type": "string",
@@ -818,7 +949,11 @@
             "additionalProperties": false,
             "description": "macOS/Apple-Silicon MLX variant metadata (desktop only). Surfaced by the Model Manager to show MLX availability, conversion status, and the minimum unified-memory tier. Inference repos/paths are owned by the Python MlxVideoAdapter; these mirror them for catalog display.",
             "properties": {
-              "quantize": { "type": "integer", "minimum": 1 },
+              "quantize": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Default MLX transformer tier, in bits. `resolve_quant` (crates/sceneworks-worker/src/image_jobs/base.rs) reads this as: <=0 -> dense bf16 with no packed tier, <=4 -> q4, anything else -> q8. 0 is therefore the ONLY way to declare a dense-only artifact: OMITTING the key means q8, not dense. The former `minimum: 1` forbade a value the runtime has always honored, which made FLUX.2 [klein] 9B True V2 — a converted, fixed dense-BF16 transformer — unrepresentable."
+              },
               "minQualityTier": { "type": "string" },
               "converter": { "type": "string" },
               "convertSourceFile": { "type": "string" },
@@ -968,6 +1103,17 @@
                 "type": "boolean",
                 "description": "Static provider capability: the registered MLX generator can defer and release model components during request execution. Exact per-rung availability remains declared by memoryStrategyContract and runtime evidence."
               },
+              "memoryDeclarationWithhold": {
+                "$ref": "#/$defs/memoryDeclarationWithhold",
+                "x-sceneworks-contract": "descriptive",
+                "x-sceneworks-readers": [
+                  {
+                    "path": "scripts/lib/manifest-memory-declarations.mjs",
+                    "anchor": "withheldRungs"
+                  }
+                ],
+                "description": "Optional deliberate withhold for the MLX memory declaration: rungs this entry declares LESS of than the engine dump, with the measured verdict that decided it. Read only by the declaration projector, which skips those rungs and reports them; it constrains no request."
+              },
               "memoryStrategyContract": {
                 "type": "object",
                 "required": ["abi", "provider", "implementations"],
@@ -985,14 +1131,86 @@
                     "uniqueItems": true,
                     "items": {
                       "type": "object",
-                      "required": ["rung", "fingerprint", "tiers", "modes", "overlays", "engagedRungs", "parameters", "parameterRanges", "source"],
+                      "required": ["rung", "tiers", "modes", "overlays", "source"],
                       "additionalProperties": false,
+                      "allOf": [
+                        {
+                          "description": "Two row shapes, told apart by `source` (sc-20246). A MEASURED row is hand-authored from provider code and must name its fingerprint, engaged ladder composition and parameter shape. An ENGINE-PROJECTED row is written by scripts/generate-manifest-memory-declarations.mjs from the committed capability dumps, which publish rung x tier coverage and the route witnesses and nothing else — it must therefore NOT carry those four fields, because there is no engine fact behind them and a generator filling them in would be inventing measurement. It must name loadProfiles, which the witnesses do publish.",
+                          "if": {
+                            "required": ["source"],
+                            "properties": { "source": { "pattern": "^config/engine-capabilities/" } }
+                          },
+                          "then": {
+                            "required": ["loadProfiles"],
+                            "not": {
+                              "anyOf": [
+                                { "required": ["fingerprint"] },
+                                { "required": ["engagedRungs"] },
+                                { "required": ["parameters"] },
+                                { "required": ["parameterRanges"] },
+                                { "required": ["requestContexts"] },
+                                { "required": ["providerOverlay"] },
+                                { "required": ["requiredOffloadPolicy"] },
+                                { "required": ["sourceKinds"] }
+                              ]
+                            }
+                          },
+                          "else": {
+                            "required": ["fingerprint", "engagedRungs", "parameters", "parameterRanges"]
+                          }
+                        }
+                      ],
                       "properties": {
                         "rung": { "enum": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"] },
+                        "runtimeProvider": {
+                          "type": "string",
+                          "minLength": 1,
+                          "description": "Exact runtime provider implementing this row when it differs from the contract provider, such as a composed strict-control provider. Omission means the contract provider."
+                        },
                         "fingerprint": { "type": "string", "minLength": 1 },
                         "tiers": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "enum": ["bf16", "q4", "q8"] } },
                         "modes": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
                         "overlays": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "enum": ["none", "lora", "identity", "control"] } },
+                        "loadProfiles": {
+                          "type": "array",
+                          "minItems": 1,
+                          "uniqueItems": true,
+                          "items": { "enum": ["plain", "lora", "lora_pid", "lora_single_control", "lora_ip_adapter", "ip_adapter_pid", "lora_ip_adapter_pid", "single_control", "multi_control", "ip_adapter", "pid", "identity"] },
+                          "description": "Exact LoadSpec component profiles served by this implementation. Omission retains the legacy one-profile-per-overlay interpretation; declaration-driven request-strategy routes must name this axis explicitly."
+                        },
+                        "sourceKinds": {
+                          "type": "array",
+                          "minItems": 1,
+                          "uniqueItems": true,
+                          "items": { "enum": ["dir", "file"] },
+                          "description": "Exact primary weight-source kinds admitted by this implementation."
+                        },
+                        "requestContexts": {
+                          "type": "array",
+                          "minItems": 1,
+                          "uniqueItems": true,
+                          "items": {
+                            "type": "object",
+                            "required": ["mode", "providerMode", "referenceCounts", "pid", "hasPhases"],
+                            "additionalProperties": false,
+                            "properties": {
+                              "mode": { "type": "string", "minLength": 1 },
+                              "providerMode": { "enum": ["text_to_image", "image_to_image", "edit_image"] },
+                              "referenceCounts": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "integer", "minimum": 0 } },
+                              "pid": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "boolean" } },
+                              "hasPhases": { "type": "boolean" }
+                            }
+                          },
+                          "description": "Exact public request coordinates admitted by a declaration-owned request-strategy route, plus the provider-facing mode bound to that same coordinate. hasPhases means GenerationRequest.phases, never Hires.fix or another worker multipass."
+                        },
+                        "providerOverlay": {
+                          "enum": ["none", "lora", "identity", "control", "adapters", "pid", "adapters-pid", "ip-adapter", "adapters-ip-adapter", "ip-adapter-pid", "adapters-ip-adapter-pid", "control-adapters"],
+                          "description": "Exact MemoryRunContext overlay sent to the provider. This may differ from the public matrix overlay when adapters are load identity rather than provider evidence identity."
+                        },
+                        "requiredOffloadPolicy": {
+                          "enum": ["resident", "sequential"],
+                          "description": "Optional exact load-policy prerequisite for this implementation row. This is distinct from engagedRungs: request-scoped staged residency can be implemented under a Resident load default, while providers such as FLUX.2 Klein expose BTR only for Sequential+Deferred."
+                        },
                         "engagedRungs": {
                           "type": "array",
                           "minItems": 1,
@@ -1000,7 +1218,7 @@
                           "items": { "enum": ["resident", "staged_residency", "bounded_decode", "bounded_attention", "bounded_transformer_residency"] }
                         },
                         "parameters": { "type": "object" },
-                        "parameterRanges": { "type": "object" },
+                        "parameterRanges": { "$ref": "#/$defs/memoryParameterRanges" },
                         "source": { "type": "string", "minLength": 1 }
                       }
                     }
@@ -1008,7 +1226,7 @@
                 },
                 "x-sceneworks-contract": "derived-static-contract",
                 "x-sceneworks-readers": [{ "path": "scripts/generate-memory-matrix.mjs", "anchor": "memoryStrategyContract" }],
-                "description": "Pinned provider capability declaration for static matrix inventory. It cannot mark a cell Verified; exact promoted runtime evidence remains owned by mlx.calibrations. An exhaustive declaration also prevents generic route fallbacks from widening the provider's declared capability surface."
+                "description": "Pinned provider capability declaration for static matrix inventory. It cannot mark a cell Verified; exact promoted runtime evidence remains owned by mlx.calibrations. Per-row runtimeProvider binds composed implementations without aliases or inferred provider names. An exhaustive declaration also prevents generic route fallbacks from widening the provider's declared capability surface."
               },
               "repo": {
                 "type": "string",
@@ -1107,6 +1325,17 @@
                   }
                 ],
                 "description": "Optional exact per-cell Candle/CUDA calibration bindings. The worker submits only exact authoritative packaged records to the shared selector; absence or any identity mismatch leaves optimized execution unavailable."
+              },
+              "memoryDeclarationWithhold": {
+                "$ref": "#/$defs/memoryDeclarationWithhold",
+                "x-sceneworks-contract": "descriptive",
+                "x-sceneworks-readers": [
+                  {
+                    "path": "scripts/lib/manifest-memory-declarations.mjs",
+                    "anchor": "withheldRungs"
+                  }
+                ],
+                "description": "Optional deliberate withhold for the Candle/CUDA memory declaration: rungs this entry declares LESS of than the engine dump, with the measured verdict that decided it. Read only by the declaration projector, which skips those rungs and reports them; it constrains no request."
               },
               "memoryStrategyContract": {
                 "$ref": "#/properties/models/items/properties/mlx/properties/memoryStrategyContract",

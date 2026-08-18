@@ -11,6 +11,7 @@ import {
   assertCellOwnershipIsBackendScoped,
   assertCharacterizationIsConsistent,
   assertCalibrationPlanTargetsResolvedCoordinates,
+  assertMlxStagedCoverageIsStructurallyConsistent,
   assertCellInventoryMatchesCatalog,
   assertPublishedDocumentIsClosed,
   hoistManifestScopes,
@@ -43,12 +44,188 @@ import {
   mlxRequiredHostBytes,
   observedPeakBytes,
   modelStory,
+  providerFor,
+  declarationModelForCoordinate,
+  stagedResidencyIsAvailable,
+  strategyStatus,
 } from "./generate-memory-matrix.mjs";
 import { recordId } from "./memory-calibration-harness.mjs";
 import { recordsNeedingDigest } from "./backfill-closure-digests.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 import { stripInertLines } from "./lib/source-revision.mjs";
 import { routedLanes } from "./check-tier-integrity.mjs";
+
+async function memoryContractSource(name) {
+  return JSON.parse(
+    await readFile(new URL(`../${SOURCE_PATHS[name]}`, import.meta.url), "utf8"),
+  );
+}
+
+test("control provider resolution uses one exact declaration and rejects ambiguity", () => {
+  // Real routes carry sc-18815's per-backend `engineFor`; the scalar stays for the alias checks.
+  const route = { engine: "z_image", engineFor: () => "z_image" };
+  const legacy = { id: "z_image", candle: {} };
+  assert.equal(providerFor(legacy, "candle", "control", route), "z_image");
+
+  const declared = {
+    id: "z_image",
+    candle: {
+      memoryStrategyContract: {
+        provider: "z_image",
+        implementations: [{
+          runtimeProvider: "z_image_control",
+          overlays: ["control"],
+        }],
+      },
+    },
+  };
+  assert.equal(
+    providerFor(declared, "candle", "control", route),
+    "z_image_control",
+  );
+
+  declared.candle.memoryStrategyContract.implementations.push({
+    runtimeProvider: "z_image_turbo_control",
+    overlays: ["control"],
+  });
+  assert.throws(
+    () => providerFor(declared, "candle", "control", route),
+    /ambiguous runtime providers: z_image_control, z_image_turbo_control/,
+  );
+});
+
+test("route-local alias declarations win only on their exact coordinate", () => {
+  const target = {
+    id: "z_image_turbo",
+    candle: {
+      memoryStrategyContract: {
+        provider: "z_image_turbo",
+        implementations: [{
+          rung: "bounded_decode",
+          tiers: ["q4"],
+          modes: ["edit_image"],
+          overlays: ["none"],
+        }],
+      },
+    },
+  };
+  const alias = {
+    id: "z_image_edit",
+    candle: {
+      memoryStrategyContract: {
+        provider: "z_image_turbo",
+        implementations: [{
+          rung: "bounded_transformer_residency",
+          tiers: ["q4"],
+          modes: ["edit_image"],
+          overlays: ["none"],
+        }],
+      },
+    },
+  };
+  const input = {
+    backend: "candle",
+    route: { engine: "z_image_turbo" },
+    provider: "z_image_turbo",
+    model: alias,
+    tier: "q4",
+    mode: "edit_image",
+    overlay: "none",
+    manifestById: new Map([[target.id, target], [alias.id, alias]]),
+  };
+  assert.equal(
+    declarationModelForCoordinate({ ...input, rung: "bounded_transformer_residency" }),
+    alias,
+  );
+  assert.equal(
+    declarationModelForCoordinate({ ...input, rung: "bounded_decode" }),
+    target,
+  );
+  assert.equal(
+    declarationModelForCoordinate({ ...input, rung: "bounded_transformer_residency", mode: "text_to_image" }),
+    target,
+  );
+});
+
+test("exact declaration composition supplies staged residency without a legacy flag", () => {
+  const model = {
+    id: "lens",
+    candle: {
+      memoryStrategyContract: {
+        provider: "lens",
+        implementations: [{
+          rung: "bounded_transformer_residency",
+          tiers: ["q4"],
+          modes: ["text_to_image"],
+          overlays: ["none"],
+          engagedRungs: [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency",
+          ],
+        }],
+      },
+    },
+  };
+  assert.equal(model.candle.supportsSequentialOffload, undefined);
+  const input = {
+    backend: "candle",
+    model,
+    route: { engine: "lens" },
+    provider: "lens",
+    tier: "q4",
+    mode: "text_to_image",
+    overlay: "none",
+    sequentialEngines: new Set(),
+    manifestById: new Map([[model.id, model]]),
+  };
+  assert.equal(stagedResidencyIsAvailable(input), true);
+  assert.equal(stagedResidencyIsAvailable({ ...input, provider: "lens_turbo" }), false);
+  assert.equal(stagedResidencyIsAvailable({ ...input, mode: "style_variations" }), false);
+
+  const statusInput = {
+    backend: "candle",
+    rung: "staged_residency",
+    route: { engine: "lens", kind: "registry" },
+    provider: "lens",
+    sequentialEngines: new Set(),
+    model,
+    tier: "q4",
+    mode: "text_to_image",
+    overlay: "none",
+    rung4Survey: new Map(),
+    manifestById: new Map([[model.id, model]]),
+    inferenceClosureDigests: new Map(),
+  };
+  assert.equal(strategyStatus(statusInput).state, "Implemented/unverified");
+
+  const mutated = structuredClone(model);
+  mutated.candle.memoryStrategyContract.implementations[0].engagedRungs = ["resident"];
+  assert.equal(
+    strategyStatus({
+      ...statusInput,
+      model: mutated,
+      manifestById: new Map([[mutated.id, mutated]]),
+    }).state,
+    "Missing",
+  );
+});
+
+
+async function memoryContractPinOverrides(pin) {
+  const [mlx, candle] = await Promise.all([
+    memoryContractSource("engineCapabilitiesMlx"),
+    memoryContractSource("engineCapabilitiesCandle"),
+  ]);
+  mlx.generatedFrom.inferenceRevision = pin;
+  candle.generatedFrom.inferenceRevision = pin;
+  return {
+    engineCapabilitiesMlx: JSON.stringify(mlx),
+    engineCapabilitiesCandle: JSON.stringify(candle),
+  };
+}
 
 // Line-ending and comment normalisation now lives in `scripts/lib/source-revision.mjs` and is unit
 // tested there; these tests cover the same rules end to end, through the real generator.
@@ -139,6 +316,8 @@ test("the fingerprint covers every declared source, and the artifact publishes t
     "calibrationEvidence",
     "calibrationPlan",
     "cargo",
+    "engineCapabilitiesCandle",
+    "engineCapabilitiesMlx",
     "engines",
     "imageRouting",
     // sc-17774: `inferenceCompatibility` left with the flux2-only artifact audit; the per-provider
@@ -529,12 +708,28 @@ test("Qwen MLX static ladder contracts expose every shipped entry and promote on
   for (const modelId of qwenEntries) {
     const implementations = manifest.models.find((model) => model.id === modelId)
       .mlx.memoryStrategyContract.implementations;
+    // sc-20246: scoped to the HAND-AUTHORED rows. The engine-derived projection
+    // (`scripts/generate-manifest-memory-declarations.mjs`) publishes rung x tier coverage and
+    // nothing else — the capability dumps carry no fingerprint, so a projected row has none to
+    // carry and asserting one would be asserting a value the generator would have to invent. The
+    // exemption cannot hide a hand row that dropped its fingerprint: the second assertion pins every
+    // fingerprint-less row to the engine dump as its source.
+    const [projected, handAuthored] = [
+      implementations.filter((implementation) => implementation.fingerprint === undefined),
+      implementations.filter((implementation) => implementation.fingerprint !== undefined),
+    ];
     assert.ok(
-      implementations.every(
+      handAuthored.every(
         (implementation) =>
           implementation.fingerprint === "qwen-image-mlx-shared-ladder-2026-08-01-v1",
       ),
       `${modelId} must keep load shape separate from the provider content fingerprint`,
+    );
+    assert.ok(
+      projected.every((implementation) =>
+        implementation.source?.startsWith("config/engine-capabilities/"),
+      ),
+      `${modelId} rows without a fingerprint must be engine-projected, not hand-authored`,
     );
   }
   const boundedRungs = [
@@ -594,11 +789,12 @@ test("Qwen MLX static ladder contracts expose every shipped entry and promote on
       boundedRungs.includes(cell.rung) &&
       cell.state === "Verified",
   );
-  // SC-18353 adds production-deferred physical MLX receipts for q4/bf16. The fixture below
-  // deliberately re-stamps the formerly-current q4/bf16 records together with the retained q8
-  // records, because this epic's gen-core contract change moved the live closure for every
-  // provider. Pinned as the SET, not a
-  // count: neither admitting an unbound sibling nor losing any current binding may read as green.
+  // This is the SYNTHETIC current-closure fixture: it re-stamps the shipped records onto whatever
+  // closure is live, so it measures the promotion RULE rather than today's shipped currency. The
+  // q4/bf16 receipts rejoin here because the pin advance moved them into the re-stamped set; the
+  // shipped artifact keeps them historical, which the checked-in assertions below pin separately.
+  // Pinned as the SET, not a count: neither admitting a stale sibling nor losing a refreshed
+  // binding may read as green.
   assert.deepEqual(
     verified.map((cell) => cell.id).sort(),
     [
@@ -615,8 +811,8 @@ test("Qwen MLX static ladder contracts expose every shipped entry and promote on
   // Exact per-cell counts, because `>= 1` would accept a cell that had silently lost evidence.
   //
   // q8 carries three records per bound rung because the fixture re-stamps the superseded q8 records
-  // and also includes SC-18237's production-deferred pair. The new q4/bf16 cells carry one exact
-  // current record each. Exact counts keep both facts visible.
+  // and also includes SC-18237's production-deferred pair. The q4/bf16 cells carry one exact record
+  // each. Exact counts keep both facts visible.
   assert.deepEqual(
     Object.fromEntries(
       verified.map((cell) => [cell.id, cell.evidence.currentEnvironmentVerification.length]),
@@ -664,7 +860,45 @@ test("Qwen MLX static ladder contracts expose every shipped entry and promote on
   );
 });
 
-test("FLUX.2-dev MLX exposes only the captured q4/q8 T2I Resident cells", async () => {
+test("decode geometry receipts stay semantic and never publish calibration ranges", async () => {
+  const matrix = await buildMatrix({ publish: false });
+  const fingerprint = "800d06acf579a36e604f91955fd6a6852ec70bc39701f7a320f1fdd2bf5ff29d";
+  const targetModels = [
+    "chroma1_base",
+    "chroma1_flash",
+    "chroma1_hd",
+    "illustrious_xl_v1",
+    "illustrious_xl_v2",
+    "kolors",
+    "realvisxl",
+    "realvisxl_lightning",
+    "sdxl",
+  ];
+  const cells = matrix.cells.filter(
+    (cell) =>
+      targetModels.includes(cell.modelId) &&
+      cell.backend === "mlx" &&
+      cell.tier === "q4" &&
+      cell.mode === "text_to_image" &&
+      cell.overlay === "none" &&
+      cell.rung === "bounded_decode" &&
+      cell.calibrationFingerprint === fingerprint,
+  );
+
+  assert.deepEqual([...new Set(cells.map((cell) => cell.modelId))].sort(), targetModels);
+  assert.ok(
+    cells.every(
+      (cell) =>
+        cell.state === "Implemented/unverified" &&
+        cell.requiresCurrentCalibrationBinding !== true &&
+        !Object.hasOwn(cell.strategyParameters.publishedRanges, "decodeGeometryPolicies") &&
+        cell.evidence.currentEnvironmentVerification.length === 0,
+    ),
+    "quality receipts must not create a published range, calibration requirement, or Verified evidence",
+  );
+});
+
+test("FLUX.2-dev MLX exposes only the captured q4/q8 T2I Resident cells and keeps stale captures historical", async () => {
   const manifest = JSON.parse(stripJsoncComments(await readFile(
     new URL("../config/manifests/builtin.models.jsonc", import.meta.url),
     "utf8",
@@ -777,12 +1011,13 @@ test("Z-Image MLX static contracts cover every bounded rung through the actual p
   );
   assert.ok(
     bounded.every((cell) =>
-      cell.calibrationFingerprint.startsWith("z-image-mlx-independent-materialization-v3") &&
+      cell.calibrationFingerprint.startsWith("z-image-mlx-independent-materialization-v4") &&
       cell.evidence.staticImplementation.some((entry) =>
-        entry.source.includes("mlx-gen-z-image/src/memory_strategy.rs"),
+        entry.source.includes("mlx-gen-z-image/src/memory_strategy.rs") ||
+        entry.source.includes("mlx_fit_gate.rs#evidence_admission_route"),
       ),
     ),
-    "historical bindings must not mask the pinned MLX provider contract",
+    "every bounded cell must resolve through either the pinned provider contract or exact admitted evidence",
   );
 
   const turboContract = manifest.models.find((model) => model.id === "z_image_turbo")
@@ -797,7 +1032,7 @@ test("Z-Image MLX static contracts cover every bounded rung through the actual p
 
   for (const cell of bounded) {
     const ranges = cell.strategyParameters.publishedRanges;
-    assert.deepEqual(ranges.decodeTileEdges, [2048, 768, 640, 512]);
+    assert.deepEqual(ranges.decodeTileEdges, [2048, 768, 640, 512, 448, 384, 320, 256]);
     assert.deepEqual(ranges.decodeOverlaps, [256, 64]);
     if (cell.rung !== "bounded_decode") {
       assert.deepEqual(ranges.attentionChunkSizes, [67108864]);
@@ -826,10 +1061,24 @@ test("Z-Image MLX static contracts cover every bounded rung through the actual p
     (cell) => zImageIds.includes(cell.modelId) && cell.backend === "mlx",
   );
   const verified = allZImageMlx.filter((cell) => cell.state === "Verified");
-  assert.deepEqual(verified, [], "the d480 Z-Image records must remain historical at pin bf06");
-  assert.ok(
-    allZImageMlx.every((cell) => cell.evidence.currentEnvironmentVerification.length === 0),
-    "no historical Z-Image capture may be promoted across an exact inference-pin change",
+  // SC-19753's five q4 rungs were captured at the closure live at the time. The epic's inference
+  // pin has since advanced past it, so they are an ACCEPTED FLOOR and no longer promote — a pin
+  // bump staling calibration records is the fail-closed design, not a re-capture work order. Kept
+  // as an exact empty SET rather than a count so a record that silently survives the drift as
+  // current still fails here.
+  const expectedVerified = [];
+  assert.deepEqual(
+    verified.map((cell) => cell.id).sort(),
+    expectedVerified,
+    "no Z-Image rung may verify while its capture closure is superseded",
+  );
+  assert.deepEqual(
+    allZImageMlx
+      .filter((cell) => cell.evidence.currentEnvironmentVerification.length > 0)
+      .map((cell) => cell.id)
+      .sort(),
+    expectedVerified,
+    "a superseded capture must not survive the closure change as current evidence",
   );
   assert.ok(
     allZImageMlx
@@ -1712,12 +1961,23 @@ test("an implemented family is Implemented/unverified only where the provider ac
         cell.rung === rung,
     );
     assert.ok(cells.length > 0);
+    // RESTATED 2026-08-17: the Turbo control cell used to be required Missing, which read the absence
+    // of a declaration as the invariant. Engine truth at pin 931366f62 overrides that —
+    // `candle-gen-z-image` registers `z_image_turbo_control` as its own `provider_id`/`route_id` with
+    // its own `control_contract`, and the candle dump exports all five rungs for it. SC-18460 declared
+    // it (`runtimeProvider: "z_image_turbo_control"`), so it is now Implemented by its OWN contract.
+    //
+    // The anti-leak intent is what mattered and is preserved exactly: base Z-Image's declaration must
+    // not reach the Turbo control route. That is now asserted as identity rather than as absence — a
+    // Turbo control cell may be Implemented, but ONLY while resolving to `z_image_turbo_control`. If it
+    // ever went Implemented under the base `z_image_turbo` identity, that IS the leak, and this reds.
     assert.ok(
       cells.every((cell) =>
         cell.modelId === "z_image"
           ? ["Implemented/unverified", "Verified"].includes(cell.state)
           : cell.overlay === "control"
-            ? cell.state === "Missing"
+            ? cell.resolvedRoute === "z_image_turbo_control" &&
+              ["Implemented/unverified", "Verified"].includes(cell.state)
             : cell.state === "Implemented/unverified",
       ),
       `${rung} must reach base control without leaking to the Turbo control route`,
@@ -1930,7 +2190,13 @@ test("PuLID's closed overlay contract does not redefine legacy Candle resident c
   const expectedResident = [
     "flux_dev:flux1_dev:candle:q4:text_to_image:lora:resident",
     "qwen_image:qwen_image:candle:q4:text_to_image:control:resident",
-    "z_image_turbo:z_image_turbo:candle:q4:text_to_image:control:resident",
+    // RESTATED 2026-08-17: this coordinate's provider segment moved from the base `z_image_turbo` to
+    // the registered `z_image_turbo_control` when SC-18460 declared the control route's own runtime
+    // provider (`candle-gen-z-image` registers it with its own `control_contract`; the candle dump
+    // exports all five rungs). The cell and its state are unchanged — only the identity it resolves
+    // under. The point of this test, that PuLID's closed identity contract does not redefine somebody
+    // else's generic resident fallback, is untouched.
+    "z_image_turbo:z_image_turbo_control:candle:q4:text_to_image:control:resident",
   ];
   for (const id of expectedResident) {
     assert.equal(
@@ -2052,9 +2318,10 @@ test("the rung-1 prerequisite gates the rung-4 claim, and is the ONLY thing sepa
     verdict.implementation = "shared-primitive";
     verdict.implementedEntries = [entry];
     verdict.strategyParameters = { transformerWindowSize: 1 };
+    const sourceOverrides = { rung4Survey: JSON.stringify(survey) };
     const matrix = await buildMatrix({
       publish: false,
-      sourceOverrides: { rung4Survey: JSON.stringify(survey) },
+      sourceOverrides,
     });
     const of = (rung) =>
       matrix.cells.filter(
@@ -2407,7 +2674,26 @@ test("only the independently wired base Z-Image Candle control route exposes sta
       .filter((cell) => cell.modelId === "z_image")
       .every((cell) => ["Implemented/unverified", "Verified"].includes(cell.state)),
   );
-  assert.ok(cells.filter((cell) => cell.modelId === "z_image_turbo").every((cell) => cell.state === "Missing"));
+  // RESTATED 2026-08-17 (sc-20246), for the same reason and in the same shape as the sibling
+  // restatement in "an implemented family is Implemented/unverified only where the provider actually
+  // exposes it": the Turbo control cell used to be required Missing, which read the absence of a
+  // declaration as the invariant. `candle-gen-z-image` registers `z_image_turbo_control` as its own
+  // provider with its own contract, and the candle dump exports staged residency for it, so the
+  // engine-derived projection declares it under `runtimeProvider: "z_image_turbo_control"`.
+  //
+  // The anti-leak intent is what mattered and is preserved exactly: base Z-Image's declaration must
+  // not reach the Turbo control route. That is asserted as identity rather than as absence — a Turbo
+  // control cell may be Implemented, but ONLY while resolving to `z_image_turbo_control`. If it ever
+  // went Implemented under the base `z_image_turbo` identity, that IS the leak, and this reds.
+  assert.ok(
+    cells
+      .filter((cell) => cell.modelId === "z_image_turbo")
+      .every(
+        (cell) =>
+          cell.resolvedRoute === "z_image_turbo_control" &&
+          ["Implemented/unverified", "Verified"].includes(cell.state),
+      ),
+  );
 });
 
 test("a survey verdict that reaches no cell is rejected, not silently carried", async () => {
@@ -2551,9 +2837,10 @@ test("`requires-different-primitive` is a finding, never an exemption or an impl
   delete stated.families["15511"].backends.mlx.implementedTiers;
   delete stated.families["15511"].backends.mlx.implementedOverlays;
   stated.families["15511"].backends.mlx.findings = ["fixture: the driver's shape cannot express it"];
+  const sourceOverrides = { rung4Survey: JSON.stringify(stated) };
   const matrix = await buildMatrix({
     publish: false,
-    sourceOverrides: { rung4Survey: JSON.stringify(stated) },
+    sourceOverrides,
   });
   const cells = matrix.cells.filter(
     (cell) =>
@@ -2855,11 +3142,10 @@ async function currentManifestCalibrationFixture({
 /// Retained Qwen production-deferred records using the shared fingerprint, re-stamped current.
 ///
 /// Selected by their calibration fingerprint, which is what separates them from the 22 older Qwen
-/// records in the bundle: the rung-4 ingest and SC-18237/SC-18353 production-deferred records carry
-/// the bare `qwen-image-mlx-shared-ladder-2026-08-01-v1`, while older captures carry the `-eager` /
-/// `-deferred` fingerprint variants. Q8 retains the historical rung-4 set used by this fixture;
-/// Q4/BF16 select only SC-18353's final capture revision so older same-fingerprint attempts cannot
-/// silently increase the exact per-cell evidence counts.
+/// records in the bundle: the rung-4 ingest and SC-18237's production-deferred pair carry the bare
+/// `qwen-image-mlx-shared-ladder-2026-08-01-v1`, while the earlier captures carry the `-eager` /
+/// `-deferred` load-shape variants. Q4/BF16 are deliberately not re-stamped: their physical source
+/// sessions bind the superseded closure and cannot truthfully be made current by a synthetic fixture.
 const QWEN_RUNG4_FINGERPRINT = "qwen-image-mlx-shared-ladder-2026-08-01-v1";
 const QWEN_PRODUCTION_DEFERRED_REVISION = "014134e3035ad7e4eca5c2ed7bded2375dc3c071";
 const qwenRung4OnCurrentPin = () =>
@@ -2913,29 +3199,64 @@ test("current evidence promotes a cell to Verified, and historical evidence does
   assert.equal(
     verifiedQwen(promotedQwen),
     9,
-    "the retained q8 fixture plus the physical q4/bf16 captures must verify all nine bindings",
+    "every re-stamped Qwen binding must verify once evidence and manifest share the live closure",
   );
   assert.equal(
     verifiedQwen(shipped),
     0,
-    "the shipped Qwen captures must become historical when the provider closure moves",
+    "SC-18311 moves the Qwen provider closure, so every shipped capture is historical until recaptured",
   );
 
-  const evidenceOnlyZ = await buildMatrix({
+  const verifiedZ = (matrix) =>
+    matrix.cells.filter(
+      (cell) => cell.modelId === "z_image_turbo" && cell.backend === "mlx" &&
+        cell.state === "Verified",
+    ).length;
+  // The shipped Z-Image ladder is an accepted floor now: its capture closure was superseded by the
+  // pin advance, so nothing promotes from the checked-in artifact.
+  assert.equal(
+    verifiedZ(shipped),
+    0,
+    "a Z-Image ladder whose capture closure was superseded must not ship as Verified",
+  );
+  // ...which would leave the mismatched-binding control below comparing 0 against 0. Re-establish a
+  // real positive first: with BOTH evidence and manifest binding re-stamped onto the live closure,
+  // all five rungs promote. That is the baseline the mismatch must then destroy.
+  const promotedZ = await buildMatrix({
     publish: false,
     sourceOverrides: {
       calibrationEvidence: await currentEvidenceFixture({
         select: (record) => record.target.provider === "z_image_turbo",
       }),
+      manifest: await currentManifestCalibrationFixture({
+        select: (binding) => binding.provider === "z_image_turbo",
+      }),
     },
   });
   assert.equal(
-    evidenceOnlyZ.cells.filter(
-      (cell) => cell.modelId === "z_image_turbo" && cell.backend === "mlx" &&
-        cell.state === "Verified",
-    ).length,
+    verifiedZ(promotedZ),
+    5,
+    "on a shared live closure every Z-Image rung must still promote — the rule is intact, only the shipped capture is stale",
+  );
+
+  const manifestWithMismatchedZBinding = JSON.parse(stripJsoncComments(await readFile(
+    new URL("../config/manifests/builtin.models.jsonc", import.meta.url),
+    "utf8",
+  )));
+  for (const binding of manifestWithMismatchedZBinding.models
+    .find((model) => model.id === "z_image_turbo").mlx.calibrations) {
+    binding.inferenceClosureDigest = "0".repeat(64);
+  }
+  const mismatchedBindingZ = await buildMatrix({
+    publish: false,
+    sourceOverrides: {
+      manifest: JSON.stringify(manifestWithMismatchedZBinding),
+    },
+  });
+  assert.equal(
+    verifiedZ(mismatchedBindingZ),
     0,
-    "current evidence cannot promote through a historical exact manifest binding",
+    "current evidence cannot promote through a manifest binding with a different closure identity",
   );
 
   // sc-17774: moving the PIN must no longer demote anything — that was the whole defect. Moving
@@ -2952,6 +3273,7 @@ test("current evidence promotes a cell to Verified, and historical evidence does
       `$1${pin}$2`,
     );
   const movedPin = "0".repeat(40);
+  const movedMemoryContractSources = await memoryContractPinOverrides(movedPin);
   const withClosures = (mutate) => {
     const next = structuredClone(closures);
     next.inferenceRevision = movedPin;
@@ -2966,6 +3288,7 @@ test("current evidence promotes a cell to Verified, and historical evidence does
       manifest: qwenManifestOnCurrentPin,
       cargo: withPin(movedPin),
       inferenceClosures: withClosures(() => {}),
+      ...movedMemoryContractSources,
     },
   });
   assert.equal(
@@ -2983,6 +3306,7 @@ test("current evidence promotes a cell to Verified, and historical evidence does
       inferenceClosures: withClosures((providers) => {
         providers["mlx:z_image_turbo"].digest = "f".repeat(64);
       }),
+      ...movedMemoryContractSources,
     },
   });
   assert.equal(
@@ -3000,6 +3324,7 @@ test("current evidence promotes a cell to Verified, and historical evidence does
       inferenceClosures: withClosures((providers) => {
         providers["mlx:qwen_image"].digest = "e".repeat(64);
       }),
+      ...movedMemoryContractSources,
     },
   });
   assert.equal(
@@ -3256,15 +3581,15 @@ test("publication keeps every planned, measured, bound and cited coordinate — 
     assert.ok(resolved.cells.some(arm), `the "${name}" arm admits no coordinate at all`);
   }
 
-  // The seventh arm, `currentEnvironmentVerification`, is empty at this pin because the rich
-  // capability-descriptor change moved the shared MLX provider closure. The physical Qwen and
-  // FLUX.2 captures remain historical until they are actually re-captured; they are not re-stamped.
-  // Two facts keep this assertion useful:
+  // The seventh arm, `currentEnvironmentVerification`, now admits exactly the five freshly captured
+  // Z-Image rungs. SC-18311 still moves the Qwen and FLUX.2 provider closures, so their prior
+  // captures remain historical until they are re-run. Two facts keep this assertion useful:
   //
-  //   1. It is exact: no historical or sibling-rung row may join merely because the pin moved.
+  //   1. It is exact: only the new Z-Image capture may be current; no historical Qwen or FLUX.2 row
+  //      may survive the closure change as current.
   //   2. It is SUBSUMED. A current run is an eligible run, and `memoryCharacterization` counts every
   //      eligible run's geometry, so a cell carrying current evidence is `point` or `fitted` and the
-  //      measured arm already admits it. The arm being empty therefore cannot elide anything.
+  //      measured arm already admits it. The arm therefore cannot uniquely admit or elide anything.
   //
   // Asserted as an exact set so another recapture flips this test rather than silently passing, and
   // the field's presence is asserted separately so a rename cannot make the arm quietly vanish.
@@ -3766,6 +4091,103 @@ test("manifest-derived evidence is published once per scope, and the join is clo
   }
 });
 
+// The two scopings applied to `assertMlxStagedCoverageIsStructurallyConsistent` on 2026-08-17 (see the
+// honest-scope note at the top of generate-memory-matrix.mjs) each narrow it, so each needs a control
+// proving the narrowing did not become a hole. Driven against the exported assertion over a synthetic
+// census rather than the real catalog: the boundary being tested is the assertion's own logic, and a
+// fixture states the boundary in one screen instead of depending on whatever the catalog happens to
+// declare this week.
+function stagedCensusFixture() {
+  const model = (id, { route = id, routeKind = "registry", tiers = ["q4"] } = {}) => ({
+    id,
+    resolvedRoute: route,
+    routeKind,
+    axes: { mlx: { tiers } },
+  });
+  const cell = (modelId, { overlay = "none", state = "Implemented/unverified" } = {}) => ({
+    backend: "mlx",
+    rung: "staged_residency",
+    modelId,
+    tier: "q4",
+    mode: "text_to_image",
+    overlay,
+    state,
+  });
+  // Minimum shape the other assertions in the function demand: bernini in the census, flux2_dev out of
+  // it, and the census neither empty nor the whole catalog.
+  return {
+    models: [model("bernini_image"), model("filler_a"), model("filler_b")],
+    cells: [cell("bernini_image")],
+    model,
+    cell,
+  };
+}
+
+test("the staged-coverage census fixture is green before any perturbation", () => {
+  const { models, cells } = stagedCensusFixture();
+  assertMlxStagedCoverageIsStructurallyConsistent({ models, cells });
+});
+
+test("a drifting tiered route-mate still reds after the single-dense-tier exemption", () => {
+  const { models, cells, model, cell } = stagedCensusFixture();
+  // Two TIERED entries sharing one route, disagreeing: the exemption must not reach this.
+  const drifted = {
+    models: [...models, model("tiered_staged", { route: "shared" }), model("tiered_bare", { route: "shared" })],
+    cells: [...cells, cell("tiered_staged")],
+  };
+  assert.throws(
+    () => assertMlxStagedCoverageIsStructurallyConsistent(drifted),
+    /MLX staged coverage disagrees within resolved route\(s\) shared/,
+    "per-route drift between tiered entries must still red",
+  );
+
+  // Same disagreement, except the entry that lacks staged coverage advertises NO tier ladder — the
+  // `flux2_klein_9b_true_v2` shape. Structurally fixed, not drift, so it is exempt.
+  const exempt = {
+    models: [
+      ...models,
+      model("tiered_staged", { route: "shared" }),
+      model("single_dense", { route: "shared", tiers: ["default"] }),
+    ],
+    cells: [...cells, cell("tiered_staged")],
+  };
+  assertMlxStagedCoverageIsStructurallyConsistent(exempt);
+
+  // And the exemption is keyed on the axis, not on the id: a single-dense entry is only exempt from the
+  // CROSS-ENTRY comparison. Add a third TIERED route-mate that disagrees and the route reds again.
+  const exemptPlusDrift = {
+    models: [...exempt.models, model("tiered_bare", { route: "shared" })],
+    cells: exempt.cells,
+  };
+  assert.throws(
+    () => assertMlxStagedCoverageIsStructurallyConsistent(exemptPlusDrift),
+    /disagrees within resolved route\(s\) shared/,
+    "an exempt entry on the route must not suppress drift between its tiered siblings",
+  );
+});
+
+test("a bespoke route claiming the generic staged ladder still reds", () => {
+  const { models, cells, model, cell } = stagedCensusFixture();
+  // PuLID's actual shape: bespoke dispatch, staged coverage ONLY on its own closed overlay. Allowed.
+  const closedOverlayOnly = {
+    models: [...models, model("bespoke_identity", { routeKind: "bespoke" })],
+    cells: [...cells, cell("bespoke_identity", { overlay: "identity" })],
+  };
+  assertMlxStagedCoverageIsStructurallyConsistent(closedOverlayOnly);
+
+  // The generic coordinates are the ones a bespoke route may never claim.
+  for (const overlay of ["none", "lora"]) {
+    const generic = {
+      models: [...models, model("bespoke_identity", { routeKind: "bespoke" })],
+      cells: [...cells, cell("bespoke_identity", { overlay })],
+    };
+    assert.throws(
+      () => assertMlxStagedCoverageIsStructurallyConsistent(generic),
+      /bespoke route\(s\) bespoke_identity claim generic MLX staged coverage/,
+      `a bespoke route claiming the ${overlay} overlay must red`,
+    );
+  }
+});
 
 // ---------------------------------------------------------------------------------------------
 // sc-18815 — the modality-aware model universe.

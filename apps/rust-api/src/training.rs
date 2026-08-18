@@ -569,7 +569,7 @@ pub(crate) async fn create_training_dataset_caption_job(
     .await?;
     publish(&state, "job.updated", &job);
     publish_queue(&state).await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 const MAX_PARQUET_IMPORT_CONCURRENCY: usize = 64;
@@ -721,7 +721,7 @@ pub(crate) async fn create_training_dataset_parquet_import_job(
     .await?;
     publish(&state, "job.updated", &job);
     publish_queue(&state).await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 #[derive(Debug, Deserialize)]
@@ -910,7 +910,7 @@ pub(crate) async fn create_training_dataset_analysis_job(
     .await?;
     publish(&state, "job.updated", &job);
     publish_queue(&state).await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 pub(crate) fn validate_dataset_analysis_job_request(
@@ -1010,7 +1010,7 @@ pub(crate) async fn create_training_dataset_face_analysis_job(
     .await?;
     publish(&state, "job.updated", &job);
     publish_queue(&state).await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 /// Persist the analysis worker's computed CLIP embeddings to the dataset's content-hash-keyed
@@ -1195,7 +1195,7 @@ pub(crate) async fn create_training_dataset_upscale_job(
     .await?;
     publish(&state, "job.updated", &job);
     publish_queue(&state).await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 /// Re-point dataset items at the upscaled child assets the worker just wrote (sc-6539) — the
@@ -1774,6 +1774,10 @@ pub(crate) async fn create_training_job(
                 "paths".to_owned(),
                 json!({ "model": output_dir.display().to_string() }),
             );
+            entry.insert(
+                "importSourceShape".to_owned(),
+                Value::String("transformer_directory".to_owned()),
+            );
             // The catalog has one global user manifest; record the effective scope honestly rather
             // than echoing a "project" the model store cannot honour.
             entry.insert("scope".to_owned(), Value::String("global".to_owned()));
@@ -1877,7 +1881,7 @@ pub(crate) async fn create_training_job(
     .await?;
     publish(&state, "job.updated", &job);
     publish_queue(&state).await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 /// Final adapter files a trainer is required to produce. Wan A14B is a dual-expert model and its

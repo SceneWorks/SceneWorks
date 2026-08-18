@@ -3,9 +3,9 @@ compile_error!("memory-mlx-adapter is supported only on macOS");
 
 use mlx_gen::gen_core::{
     GenerationMemory, MemoryBudget, MemoryCacheState, MemoryCalibrationIdentity, MemoryGeometry,
-    MemoryMode, MemoryNumericTier, MemoryPhase, MemoryRunContext, MemoryRunOutcome,
-    MemorySafetyDecision, MemorySelection, MemoryStrategy, MemoryStrategyParameters,
-    TransformerComponent,
+    MemoryMode, MemoryNumericTier, MemoryOptimizationAuthority, MemoryPhase, MemoryRunContext,
+    MemoryRunOutcome, MemorySafetyDecision, MemorySelection, MemoryStrategy,
+    MemoryStrategyParameters, TransformerComponent,
 };
 use mlx_gen::tiling::{SpatialTiling, TilingConfig, VaeTiling};
 use mlx_gen::{
@@ -729,7 +729,7 @@ mod tests {
     /// It evaluates the same host-reserve currency production uses over every committed MLX image
     /// cell and proves that changing the image basis would loosen 54 shipped admission outcomes.
     #[test]
-    fn resident_peak_counterfactual_would_loosen_54_shipped_image_admission_cells() {
+    fn resident_peak_counterfactual_would_loosen_55_shipped_image_admission_cells() {
         use sceneworks_core::memory_calibration::{Backend, EvidenceBundle, RequiredNullable};
 
         fn phase(phase: &sceneworks_core::memory_calibration::Phase) -> PhaseMemory {
@@ -811,16 +811,20 @@ mod tests {
             }
         }
 
-        assert_eq!(image_records, 69);
-        assert_eq!(changed_records, 62);
-        assert_eq!(flipped_cells, 54);
+        // Renewed for the sc-18304 sync merge: the epic's captures grew the corpus 69 -> 74
+        // (five z-image coordinates among them), moving the counterfactual's derived counts.
+        // The load-bearing claim is the only-loosens assertion in the loop above; these pins
+        // characterize the merged corpus.
+        assert_eq!(image_records, 74);
+        assert_eq!(changed_records, 66);
+        assert_eq!(flipped_cells, 55);
         assert_eq!(
             flips_by_provider,
             std::collections::BTreeMap::from([
                 ("flux2_dev", 7),
                 ("krea_2_turbo_control", 8),
                 ("qwen_image", 38),
-                ("z_image_turbo", 1),
+                ("z_image_turbo", 2),
             ])
         );
     }
@@ -1462,6 +1466,7 @@ fn krea_context(
                 component_precision_floors: &[],
             },
         },
+        optimization_authority: MemoryOptimizationAuthority::Calibrated,
         // From the LOADED provider's own identity, never a local copy. A hardcoded fingerprint
         // silently goes stale the moment the provider re-fingerprints — which is exactly what
         // happened here: `krea-control-mlx-v4-q4-pose-bounded-decode-512-64` outlived the
@@ -2179,6 +2184,7 @@ fn run_z_image_reference_loaded(
         .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
     let context = MemoryRunContext {
         selection,
+        optimization_authority: MemoryOptimizationAuthority::Calibrated,
         calibration_abi: calibration.abi,
         calibration_fingerprint: calibration.fingerprint.clone(),
         load_shape: calibration.load_shape,
@@ -2697,6 +2703,7 @@ fn flux2_admission_context(
 ) -> MemoryRunContext {
     MemoryRunContext {
         selection: *selection,
+        optimization_authority: MemoryOptimizationAuthority::Calibrated,
         calibration_abi: calibration.abi,
         // A parameter only so the stale-evidence probe can pass a deliberate mismatch; the real
         // call sites pass `calibration.fingerprint` (the Krea-arm lesson at `krea_context`).
@@ -3346,6 +3353,7 @@ fn krea_base_context(
 ) -> MemoryRunContext {
     MemoryRunContext {
         selection,
+        optimization_authority: MemoryOptimizationAuthority::Calibrated,
         calibration_abi: calibration.abi,
         calibration_fingerprint: fingerprint.to_owned(),
         load_shape: calibration.load_shape,
@@ -4029,6 +4037,7 @@ fn sdxl_context(
 ) -> MemoryRunContext {
     MemoryRunContext {
         selection,
+        optimization_authority: MemoryOptimizationAuthority::Calibrated,
         calibration_abi: calibration.abi,
         calibration_fingerprint: fingerprint.to_owned(),
         load_shape: calibration.load_shape,
@@ -4968,6 +4977,7 @@ fn qwen_provider_context(
 ) -> MemoryRunContext {
     MemoryRunContext {
         selection,
+        optimization_authority: MemoryOptimizationAuthority::Calibrated,
         calibration_abi: calibration.abi,
         calibration_fingerprint: calibration.fingerprint.clone(),
         // From the LOADED provider's own identity. The Qwen spec is not default-shaped —
@@ -6885,7 +6895,7 @@ fn ltx_staging_is_proven(
 /// co-existence bound is CONSERVATIVE — it never under-predicts — while switching to `active`
 /// would LOOSEN shipped admission. [`PredictedPeakBasis`] and its image/video constants are the
 /// single policy declaration both lanes consume. The corpus test
-/// `resident_peak_counterfactual_would_loosen_54_shipped_image_admission_cells` pins the decision
+/// `resident_peak_counterfactual_would_loosen_55_shipped_image_admission_cells` pins the decision
 /// against all 69 committed MLX image records and production's scaled foreign-reserve currency:
 /// 62 record predictions change and 54 host-grid decisions flip from refusal to admission.
 #[cfg(test)]
@@ -6907,6 +6917,7 @@ fn ltx_context(
 ) -> MemoryRunContext {
     MemoryRunContext {
         selection,
+        optimization_authority: MemoryOptimizationAuthority::Calibrated,
         calibration_abi: calibration.abi,
         calibration_fingerprint: fingerprint.to_owned(),
         load_shape: calibration.load_shape,
@@ -9183,7 +9194,7 @@ mod z_image_reuse_tests {
 
     #[test]
     fn shape_independent_fingerprint_still_keeps_eager_and_deferred_loads_distinct() {
-        let fingerprint = "z-image-mlx-independent-materialization-v3";
+        let fingerprint = "z-image-mlx-independent-materialization-v4";
         assert_ne!(
             z_image_reuse_identity(fingerprint, LoadShape::EagerMaterialization),
             z_image_reuse_identity(fingerprint, LoadShape::DeferredMaterialization),
@@ -9638,7 +9649,17 @@ mod krea_base_tests {
     }
 
     fn fixture_spec(root: &std::path::Path) -> LoadSpec {
-        for component in ["text_encoder", "transformer", "vae"] {
+        let encoder_contract = mlx_gen_krea::provider_registry()
+            .unwrap()
+            .provider_encoder_contract(KREA_BASE_PROVIDER)
+            .expect("the pinned Krea base encoder contract");
+        gen_core_testkit::write_encoder_contract_fixture_with_quant(
+            &root.join("text_encoder"),
+            encoder_contract,
+            Some(4),
+        )
+        .expect("registry-owned Krea text encoder fixture");
+        for component in ["transformer", "vae"] {
             let directory = root.join(component);
             std::fs::create_dir_all(&directory).unwrap();
             let header = br#"{"w":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}"#;
@@ -9647,13 +9668,11 @@ mod krea_base_tests {
             bytes.extend_from_slice(&0_f32.to_le_bytes());
             std::fs::write(directory.join("model.safetensors"), bytes).unwrap();
         }
-        for component in ["text_encoder", "transformer"] {
-            std::fs::write(
-                root.join(component).join("config.json"),
-                r#"{"quantization":{"bits":4,"group_size":64}}"#,
-            )
-            .unwrap();
-        }
+        std::fs::write(
+            root.join("transformer").join("config.json"),
+            r#"{"quantization":{"bits":4,"group_size":64}}"#,
+        )
+        .unwrap();
         LoadSpec::new(WeightsSource::Dir(root.to_owned()))
             .with_quant(Quant::Q4)
             .with_offload_policy(OffloadPolicy::Sequential)

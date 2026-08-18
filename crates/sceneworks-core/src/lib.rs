@@ -9,6 +9,7 @@ pub mod contracts;
 pub mod control_weights;
 pub mod credentials;
 pub mod dataset_quality;
+pub mod decoder_support;
 pub mod external_roots;
 pub mod hf_home;
 pub mod hf_repo_renames;

@@ -69,10 +69,7 @@ fn assert_dir(path: &Path, label: &str) {
 }
 
 fn load_spec(eros_dir: PathBuf, gemma_dir: PathBuf) -> LoadSpec {
-    LoadSpec {
-        text_encoder: Some(WeightsSource::Dir(gemma_dir)),
-        ..LoadSpec::new(WeightsSource::Dir(eros_dir))
-    }
+    LoadSpec::new(WeightsSource::Dir(eros_dir)).with_text_encoder(WeightsSource::Dir(gemma_dir))
 }
 
 fn request() -> GenerationRequest {
