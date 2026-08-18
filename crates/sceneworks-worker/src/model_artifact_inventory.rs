@@ -283,6 +283,27 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
             entrypoint: TypedResolverEntrypoint::SourceLibrary,
         },
     },
+    // sc-19709: the model source library's status + relocation seam. It never resolves a MODEL
+    // path — it probes and re-binds the library ROOT itself — but it reaches that root through the
+    // same typed `model_source_library` entrypoint, so it is classified here rather than exempted.
+    ModelConsumerInventoryEntry {
+        source_files: &["apps/rust-api/src/model_library.rs"],
+        categories: &[
+            Category::Image,
+            Category::Video,
+            Category::Audio,
+            Category::CaptioningUtility,
+            Category::Training,
+            Category::LoraControl,
+            Category::Primary,
+            Category::OptionalComponent,
+            Category::CoRequisite,
+            Category::ImportedConverted,
+        ],
+        resolution: Resolution::SharedContract {
+            entrypoint: TypedResolverEntrypoint::SourceLibrary,
+        },
+    },
     // sc-19711: the resolved-model hot cache's read + control surface. It reads the source library
     // ONLY to report its path and to compare its volume against the local tier's — it never
     // resolves weights for a load, so it constructs no model root of its own and goes through the

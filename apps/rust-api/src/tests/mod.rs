@@ -11,6 +11,7 @@ mod jobs;
 mod mcp;
 mod media;
 mod model_cache;
+mod model_library;
 mod projects;
 mod prompt_batches;
 mod recipe_presets;

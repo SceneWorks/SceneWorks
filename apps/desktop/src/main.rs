@@ -83,6 +83,9 @@ fn main() {
             settings::choose_folder,
             settings::set_data_dir,
             settings::choose_data_dir,
+            // Relocating an unavailable model library (sc-19709).
+            settings::set_model_library,
+            settings::restart_app,
             settings::reveal_in_os,
             // Save an asset to a user-chosen destination + resolve an asset's
             // project-relative path to its absolute on-disk path (sc-8726).

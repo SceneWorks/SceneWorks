@@ -16413,6 +16413,40 @@ details[open] > summary.lora-scope-group-heading::before,
   gap: 8px;
 }
 
+/* Unavailable model library prompt (sc-19709). Wider than a plain confirm because it names a
+   filesystem location the user has to recognize, and carries three exits rather than two. */
+.model-library-modal {
+  width: 460px;
+}
+.model-library-path {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  font-size: 12px;
+}
+.model-library-path-label {
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 11px;
+}
+.model-library-path code {
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+.model-library-status {
+  margin: 0;
+  min-height: 16px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.model-library-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
 /* Generation Stats screen (epic 10402, sc-10408/sc-10409) */
 .stats-filters {
   display: flex;

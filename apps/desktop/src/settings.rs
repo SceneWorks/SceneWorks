@@ -945,6 +945,34 @@ pub async fn choose_data_dir(app: AppHandle) -> Option<String> {
     pick_folder(&app)
 }
 
+/// Persist a relocated model library (sc-19709).
+///
+/// The API has already validated the chosen root and re-bound its durable identity; it returns the
+/// exact `HF_HOME` that resolves to that library, and this is the ONE place it becomes durable.
+/// Deliberately the same field, normalization and file as the first-run storage step — relocation
+/// is a change to the existing library-path configuration, not a parallel setting. Like the data
+/// directory, the sidecars receive it as spawn environment, so it applies on the next launch.
+#[tauri::command]
+pub fn set_model_library(path: String) -> Result<AppSettings, String> {
+    let mut settings = load_settings();
+    settings.hf_home = Some(model_library_override_for(
+        &path,
+        cfg!(all(unix, not(target_os = "macos"))),
+    )?);
+    save_settings(&settings)?;
+    Ok(settings)
+}
+
+/// The pure decision behind [`set_model_library`], with the Linux absolute-path rule as an explicit
+/// argument so it is testable on every platform. Relocation always names a concrete folder, so —
+/// unlike the first-run storage step — an empty value is a rejection rather than "use the default":
+/// silently reverting to the platform default would leave the user pointed at a library that is not
+/// the one they just chose.
+fn model_library_override_for(path: &str, linux_absolute: bool) -> Result<String, String> {
+    storage_override_input_for("Model library folder", path, linux_absolute)?
+        .ok_or_else(|| "A model library folder is required.".to_owned())
+}
+
 #[tauri::command]
 pub fn reveal_in_os(path: String) -> Result<(), String> {
     let target = validate_reveal_target(&path)?;
@@ -1284,6 +1312,18 @@ pub fn restart_worker(app: AppHandle) {
     crate::setup::restart_gpu_worker(&app);
 }
 
+/// Relaunch the whole app so a spawn-environment setting takes effect (sc-19709).
+///
+/// The relocated model library reaches the API and GPU worker as `HF_HOME` at spawn, so it cannot
+/// apply to the running sidecars. This is the "Restart now" the disclosure offers: the SAME
+/// graceful teardown as quitting — SIGTERM then grace, never an immediate force-kill of a worker
+/// that may be mid-render — followed by a relaunch. Idempotent: a second call while a teardown is
+/// already running is a no-op, so a double click cannot start two.
+#[tauri::command]
+pub fn restart_app(app: AppHandle) {
+    crate::setup::begin_restart(&app);
+}
+
 #[tauri::command]
 pub fn get_gpu_info() -> GpuInfo {
     #[cfg(target_os = "macos")]
@@ -1405,6 +1445,23 @@ mod tests {
         let hf_error = storage_override_input_for("HF cache", "./huggingface", true)
             .expect_err("relative Linux HF cache must be rejected");
         assert!(hf_error.contains("absolute path on Linux"));
+    }
+
+    /// sc-19709: relocating the model library writes the SAME `hf_home` override the first-run
+    /// storage step writes, with the same normalization — but an empty choice is a rejection, not a
+    /// silent revert to the platform default (the user just picked a specific library).
+    #[test]
+    fn relocating_the_model_library_normalizes_and_refuses_an_empty_choice() {
+        assert_eq!(
+            model_library_override_for(" /Volumes/Models/hf ", true).expect("absolute path"),
+            "/Volumes/Models/hf".to_owned()
+        );
+        let empty = model_library_override_for("   ", false)
+            .expect_err("an empty folder must not clear the override");
+        assert!(empty.contains("required"), "{empty}");
+        let relative = model_library_override_for("./models", true)
+            .expect_err("relative Linux library root must be rejected");
+        assert!(relative.contains("absolute path on Linux"), "{relative}");
     }
 
     #[test]
