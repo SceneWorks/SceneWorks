@@ -11,6 +11,14 @@ pub use materialization::{
     PromotionScheduleOutcome, ResolvedCacheMaterializer, ResolvedCachePromotionScheduler,
 };
 
+#[path = "resolved_cache/retention.rs"]
+mod retention;
+pub use retention::{
+    EvictedRecord, EvictionCause, ManualRemovalOutcome, ManualRemovalPreview, ReconciliationReport,
+    ResolvedCacheRetention, RetainedRecord, RetentionCheckpointOutcome, RetentionHold,
+    RetentionReport, SourceLifecycleSelector,
+};
+
 use crate::model_artifacts::{
     ActiveArtifactLease, ArtifactLocation, ModelArtifactResolver, PromotionCandidate,
     ResolvedModelArtifact,
@@ -36,6 +44,12 @@ pub const RESOLVED_CACHE_STORE_VERSION: u32 = 1;
 
 const STORE_MARKER: &str = ".sceneworks-resolved-cache-v1";
 const STORE_MARKER_BODY: &[u8] = b"sceneworks-resolved-cache\nschema=1\n";
+const EVICTED_MARKER_FILE: &str = "evicted.marker.json";
+const AUDIT_DIR: &str = "audit";
+/// The one journal-read failure that means "this entry holds no recoverable state", as opposed to
+/// a transient or environmental read failure. Manual removal is allowed to clear it; every other
+/// read error must refuse, because it cannot rule out a pin or an in-flight materialization.
+const BOTH_METADATA_SLOTS_CORRUPT: &str = "both cache metadata slots are corrupt";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -162,6 +176,12 @@ impl ResolvedCacheError {
     fn new(message: impl Into<String>) -> Self {
         Self(message.into())
     }
+
+    /// True only for the journal read failure that proves the entry retains no recoverable
+    /// state — never for a transient, environmental, or fail-closed refusal.
+    pub fn is_unrecoverable_metadata(&self) -> bool {
+        self.0 == BOTH_METADATA_SLOTS_CORRUPT
+    }
 }
 
 impl std::fmt::Display for ResolvedCacheError {
@@ -186,6 +206,10 @@ pub enum ResolvedCacheEntryState {
     Interrupted,
     Complete,
     Corrupt,
+    /// Summary-only state for an entry with a durable eviction tombstone whose removal has not
+    /// finished yet. Never persisted into the metadata journal; `validate_metadata_shape` rejects
+    /// it there.
+    Evicting,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -502,6 +526,13 @@ impl ResolvedCacheStore {
         let _metadata_lock = self.lock_metadata(&digest)?;
         let existing = match self.read_metadata_unlocked(&digest)? {
             JournalRead::Missing => None,
+            JournalRead::Evicted { .. } => {
+                // A crash interrupted a sanctioned removal. Finish it under the locks this
+                // reservation already holds, then materialize from scratch.
+                self.finish_pending_eviction(&digest)?;
+                ensure_managed_entry_dir(&entry)?;
+                None
+            }
             JournalRead::Valid { metadata, .. } => Some(*metadata),
         };
         if let Some(mut metadata) = existing {
@@ -639,6 +670,11 @@ impl ResolvedCacheStore {
                         metadata: Some(*metadata),
                     }
                 }
+                Ok(JournalRead::Evicted { .. }) => ResolvedCacheEntrySummary {
+                    cache_key: format!("sha256:{digest}"),
+                    state: ResolvedCacheEntryState::Evicting,
+                    metadata: None,
+                },
                 Ok(JournalRead::Missing) => ResolvedCacheEntrySummary {
                     cache_key: format!("sha256:{digest}"),
                     state: ResolvedCacheEntryState::Corrupt,
@@ -795,13 +831,39 @@ impl ResolvedCacheStore {
                         self.write_metadata_unlocked(&digest, &metadata)?;
                     }
                 }
-                Ok(JournalRead::Missing) => self.write_corrupt_marker(&digest)?,
+                Ok(JournalRead::Evicted { .. }) => {
+                    // A valid tombstone means removal was sanctioned before the interruption;
+                    // finishing it is the safe convergence.
+                    self.finish_pending_eviction(&digest)?;
+                }
+                Ok(JournalRead::Missing) => {
+                    // Another session may have finished an eviction (removing the whole entry
+                    // directory) between enumeration and this pass; only an entry that still
+                    // exists without readable metadata is parked as corrupt.
+                    if self
+                        .inner
+                        .root
+                        .join("entries")
+                        .join(&digest)
+                        .symlink_metadata()
+                        .is_ok()
+                    {
+                        self.write_corrupt_marker(&digest)?;
+                    }
+                }
                 Err(_) => {
                     let receipt = self.read_complete_receipt(&digest).and_then(|metadata| {
                         validate_complete_metadata(self, &metadata)?;
                         Ok(metadata)
                     });
                     if let Ok(mut metadata) = receipt {
+                        // An INVALID tombstone routed us here (a valid one is handled above). It
+                        // does not prove a sanctioned eviction, so fail safe: drop the garbage
+                        // tombstone and resurrect the receipt-validated entry pinned.
+                        let marker_path = self.eviction_marker_path(&digest);
+                        if std::fs::symlink_metadata(&marker_path).is_ok() {
+                            std::fs::remove_file(&marker_path)?;
+                        }
                         metadata.recovery_status = RecoveryStatus::ReconstructedFromCompleteReceipt;
                         metadata.artifact_pinned = true;
                         metadata.refresh_effective_pin();
@@ -902,11 +964,156 @@ impl ResolvedCacheStore {
     ) -> Result<ResolvedCacheMetadata, ResolvedCacheError> {
         match self.read_metadata_unlocked(digest)? {
             JournalRead::Valid { metadata, .. } => Ok(*metadata),
+            JournalRead::Evicted { .. } => Err(ResolvedCacheError::new(
+                "cache entry has a pending eviction tombstone",
+            )),
             JournalRead::Missing => Err(ResolvedCacheError::new("cache metadata is missing")),
         }
     }
 
+    fn eviction_marker_path(&self, digest: &str) -> PathBuf {
+        self.inner
+            .root
+            .join("entries")
+            .join(digest)
+            .join(EVICTED_MARKER_FILE)
+    }
+
+    /// Reads the eviction tombstone if one exists. An unreadable or checksum-invalid tombstone is
+    /// an error, never a sanction to delete: readers surface it and recovery either resurrects the
+    /// entry from a valid complete receipt or parks it as corrupt.
+    ///
+    /// This probe runs on *every* metadata read, so the overwhelmingly common "no tombstone" case
+    /// must stay cheap and must not consume a file descriptor: it is decided by a single
+    /// `symlink_metadata`, and only a tombstone that is actually present is opened and read. An
+    /// earlier revision read the path unconditionally, adding an open/read/close to every metadata
+    /// read; under descriptor pressure that turned into an unreadable-metadata error inside
+    /// `ResolvedCacheReservation::drop`, which left the entry `Materializing` and reddened the
+    /// pre-existing stale-staging cleanup test on the hosted macOS lane. The tombstone is also
+    /// confinement-checked here like every other managed path in this module.
+    fn read_eviction_marker(
+        &self,
+        digest: &str,
+    ) -> Result<Option<EvictionMarker>, ResolvedCacheError> {
+        let path = self.eviction_marker_path(digest);
+        match std::fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink()
+                    || metadata_is_reparse_point(&metadata)
+                    || !metadata.is_file()
+                {
+                    return Err(ResolvedCacheError::new(format!(
+                        "eviction tombstone {} is a link or not a regular file",
+                        path.display()
+                    )));
+                }
+            }
+        }
+        let body = match std::fs::read(&path) {
+            Ok(body) => body,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let envelope: EvictionMarkerEnvelope = serde_json::from_slice(&body).map_err(|error| {
+            ResolvedCacheError::new(format!("decode eviction tombstone: {error}"))
+        })?;
+        envelope.validate(digest)?;
+        Ok(Some(envelope.marker))
+    }
+
+    /// Writes the durable eviction tombstone. Caller holds the exclusive artifact lock and the
+    /// metadata lock and has already re-verified every eviction protection under those locks.
+    fn write_eviction_marker(
+        &self,
+        digest: &str,
+        marker: &EvictionMarker,
+    ) -> Result<(), ResolvedCacheError> {
+        if cache_key_digest(&marker.cache_key)? != digest {
+            return Err(ResolvedCacheError::new(
+                "eviction tombstone cache key does not match its entry",
+            ));
+        }
+        let envelope = EvictionMarkerEnvelope::new(marker.clone())?;
+        atomic_write_json(&self.eviction_marker_path(digest), &envelope)
+    }
+
+    /// Finishes a tombstoned removal: removes the whole entry directory (bundle, journal slots,
+    /// receipt, tombstone) with the confined deleter, then records the audit trail outside the
+    /// entry. Caller holds the exclusive artifact lock and the metadata lock. Idempotent under
+    /// interruption: rerunning after a crash converges because the tombstone survives until the
+    /// directory removal completes.
+    ///
+    /// The audit trail is two-state so a removal failure and an audit-write failure stay
+    /// distinguishable. A `Started` record is written *before* the last unlink, so the intent
+    /// survives outside the entry even though the tombstone dies with it; the record is then
+    /// rewritten `Completed` once the bytes are actually gone. A `Started` record left behind by a
+    /// crash or a sharing violation is therefore an honest "attempted, unconfirmed" — never the
+    /// false "completed" an earlier revision recorded — and the deterministic per-entry record
+    /// path means a retry overwrites its own record instead of accumulating duplicates.
+    ///
+    /// Audit-write failures after a successful removal do not fail the eviction: the bytes really
+    /// are gone, so reporting failure would corrupt size accounting and re-drive eviction. Those
+    /// are warned instead.
+    fn finish_pending_eviction(&self, digest: &str) -> Result<EvictionMarker, ResolvedCacheError> {
+        let marker = self.read_eviction_marker(digest)?.ok_or_else(|| {
+            ResolvedCacheError::new("cache entry has no eviction tombstone to finish")
+        })?;
+        if let Err(error) =
+            self.write_eviction_audit_record(digest, &marker, EvictionAuditStatus::Started)
+        {
+            tracing::warn!(
+                cache_key = %marker.cache_key,
+                error = %error,
+                "could not record resolved-cache eviction intent before removal"
+            );
+        }
+        let entries = self.inner.root.join("entries");
+        remove_managed_tree(&entries.join(digest), &entries)?;
+        if let Err(error) =
+            self.write_eviction_audit_record(digest, &marker, EvictionAuditStatus::Completed)
+        {
+            tracing::warn!(
+                cache_key = %marker.cache_key,
+                error = %error,
+                "resolved-cache entry was removed but its completed audit record could not be \
+                 written; the started record remains"
+            );
+        }
+        Ok(marker)
+    }
+
+    fn write_eviction_audit_record(
+        &self,
+        digest: &str,
+        marker: &EvictionMarker,
+        status: EvictionAuditStatus,
+    ) -> Result<(), ResolvedCacheError> {
+        let audit = self.inner.root.join(AUDIT_DIR);
+        match std::fs::create_dir(&audit) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+        ensure_regular_directory(&audit)?;
+        let record = EvictionAuditRecord {
+            schema_version: RESOLVED_CACHE_STORE_VERSION,
+            marker: marker.clone(),
+            status,
+            recorded_at: now_seconds()?,
+            recorded_by_session: self.inner.session_id.clone(),
+        };
+        let name = format!("{digest}-{}.json", marker.requested_at);
+        atomic_write_json(&audit.join(name), &record)
+    }
+
     fn read_metadata_unlocked(&self, digest: &str) -> Result<JournalRead, ResolvedCacheError> {
+        if let Some(marker) = self.read_eviction_marker(digest)? {
+            return Ok(JournalRead::Evicted {
+                marker: Box::new(marker),
+            });
+        }
         let entry = self.inner.root.join("entries").join(digest);
         let mut valid = Vec::new();
         let mut had_file = false;
@@ -932,9 +1139,7 @@ impl ResolvedCacheStore {
             });
         }
         if had_file {
-            Err(ResolvedCacheError::new(
-                "both cache metadata slots are corrupt",
-            ))
+            Err(ResolvedCacheError::new(BOTH_METADATA_SLOTS_CORRUPT))
         } else {
             Ok(JournalRead::Missing)
         }
@@ -1268,21 +1473,39 @@ impl Drop for ResolvedCacheReservation {
         if self.finished {
             return;
         }
-        if let Ok(_metadata_lock) = self.store.lock_metadata(&self.digest) {
-            if let Ok(mut metadata) = self.store.read_metadata_locked(&self.digest) {
-                if self.verify_ownership(&metadata).is_ok() {
-                    metadata.state = ResolvedCacheEntryState::Interrupted;
-                    metadata.reservation_id = None;
-                    metadata.reservation_owner = None;
-                    metadata.session_id = None;
-                    metadata.recovery_status = RecoveryStatus::InterruptedReservation;
-                    metadata.updated_at = now_seconds().unwrap_or(metadata.updated_at);
-                    let _ = self.store.write_metadata_unlocked(&self.digest, &metadata);
-                }
-            }
+        // A reservation that cannot record its own interruption leaves a `Materializing` entry
+        // owned by this still-live session, which every liveness check must keep treating as live.
+        // Recovery cannot converge that until the process exits and its session lock frees, so the
+        // condition is warned rather than silently swallowed.
+        if let Err(error) = self.mark_interrupted_on_drop() {
+            tracing::warn!(
+                cache_key = %self.cache_key,
+                reservation_id = %self.reservation_id,
+                error = %error,
+                "resolved-cache reservation could not record its interruption; the entry stays \
+                 materializing until this session ends"
+            );
         }
         let _ = std::fs::remove_file(&self.record_path);
         self.artifact_lock.take();
+    }
+}
+
+impl ResolvedCacheReservation {
+    fn mark_interrupted_on_drop(&self) -> Result<(), ResolvedCacheError> {
+        let _metadata_lock = self.store.lock_metadata(&self.digest)?;
+        let mut metadata = self.store.read_metadata_locked(&self.digest)?;
+        if self.verify_ownership(&metadata).is_err() {
+            // Another owner legitimately took the entry over; nothing of ours to interrupt.
+            return Ok(());
+        }
+        metadata.state = ResolvedCacheEntryState::Interrupted;
+        metadata.reservation_id = None;
+        metadata.reservation_owner = None;
+        metadata.session_id = None;
+        metadata.recovery_status = RecoveryStatus::InterruptedReservation;
+        metadata.updated_at = now_seconds().unwrap_or(metadata.updated_at);
+        self.store.write_metadata_unlocked(&self.digest, &metadata)
     }
 }
 
@@ -1384,10 +1607,90 @@ impl ReceiptEnvelope {
 
 enum JournalRead {
     Missing,
+    /// A durable eviction tombstone governs this entry: removal was sanctioned and must finish
+    /// before the entry can be read or reused. The journal slots are no longer authoritative.
+    Evicted {
+        marker: Box<EvictionMarker>,
+    },
     Valid {
         metadata: Box<ResolvedCacheMetadata>,
         had_invalid_slot: bool,
     },
+}
+
+/// Durable, checksummed eviction tombstone. Written under the exclusive artifact and metadata
+/// locks before any byte of the entry is deleted, so an interrupted removal always converges:
+/// every reader treats a valid tombstone as "this entry is gone", and recovery finishes the
+/// deletion instead of resurrecting a half-removed entry.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EvictionMarker {
+    pub schema_version: u32,
+    pub cache_key: String,
+    pub cause: retention::EvictionCause,
+    pub reclaimable_bytes: u64,
+    pub requested_at: u64,
+    pub session_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EvictionMarkerEnvelope {
+    schema_version: u32,
+    checksum: String,
+    marker: EvictionMarker,
+}
+
+impl EvictionMarkerEnvelope {
+    fn new(marker: EvictionMarker) -> Result<Self, ResolvedCacheError> {
+        let checksum = eviction_marker_checksum(&marker)?;
+        Ok(Self {
+            schema_version: RESOLVED_CACHE_STORE_VERSION,
+            checksum,
+            marker,
+        })
+    }
+
+    fn validate(&self, digest: &str) -> Result<(), ResolvedCacheError> {
+        if self.schema_version != RESOLVED_CACHE_STORE_VERSION
+            || self.marker.schema_version != RESOLVED_CACHE_STORE_VERSION
+            || self.checksum != eviction_marker_checksum(&self.marker)?
+            || cache_key_digest(&self.marker.cache_key)? != digest
+        {
+            return Err(ResolvedCacheError::new(
+                "eviction tombstone checksum is invalid",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn eviction_marker_checksum(marker: &EvictionMarker) -> Result<String, ResolvedCacheError> {
+    let bytes = serde_json::to_vec(marker).map_err(|error| {
+        ResolvedCacheError::new(format!("encode eviction tombstone checksum: {error}"))
+    })?;
+    Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
+}
+
+/// Audit record persisted outside the removed entry so the eviction remains auditable after the
+/// entry directory (and the tombstone inside it) is gone.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EvictionAuditRecord {
+    pub schema_version: u32,
+    pub marker: EvictionMarker,
+    pub status: EvictionAuditStatus,
+    pub recorded_at: u64,
+    pub recorded_by_session: String,
+}
+
+/// `Started` means the removal was authorized and attempted; `Completed` means the bytes are
+/// confirmed gone. A record left at `Started` is an attempted-but-unconfirmed removal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvictionAuditStatus {
+    Started,
+    Completed,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1590,6 +1893,7 @@ fn validate_metadata_shape(
         }
     };
     if metadata.schema_version != RESOLVED_CACHE_STORE_VERSION
+        || metadata.state == ResolvedCacheEntryState::Evicting
         || cache_key_digest(&metadata.cache_key)? != digest
         || artifact_key != metadata.cache_key
         || metadata.entry_relative_path != PathBuf::from("entries").join(digest)
@@ -1625,6 +1929,27 @@ fn validate_complete_metadata(
     store: &ResolvedCacheStore,
     metadata: &ResolvedCacheMetadata,
 ) -> Result<(), ResolvedCacheError> {
+    validate_complete_metadata_inner(store, metadata, ContentVerification::RehashEveryFile)
+}
+
+/// How thoroughly a complete entry's own bundle bytes are re-verified.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ContentVerification {
+    /// Re-reads and re-hashes every bundle file. Required before handing an artifact to a runtime
+    /// load, and the cost is proportional to the bundle size.
+    RehashEveryFile,
+    /// Validates identity, shape, confinement, file presence and sizes, but does not re-hash file
+    /// contents. Used by retention, which is deciding whether to *delete* the bundle rather than
+    /// load it: the link/escape confinement checks are what keep a removal inside the managed
+    /// root, while re-hashing gigabytes would hold locks that block model loads.
+    PathsAndSizesOnly,
+}
+
+fn validate_complete_metadata_inner(
+    store: &ResolvedCacheStore,
+    metadata: &ResolvedCacheMetadata,
+    verification: ContentVerification,
+) -> Result<(), ResolvedCacheError> {
     let digest = cache_key_digest(&metadata.cache_key)?;
     validate_metadata_shape(metadata, &digest)?;
     if metadata.state != ResolvedCacheEntryState::Complete
@@ -1642,10 +1967,20 @@ fn validate_complete_metadata(
         ));
     }
     validate_completion_confinement(store, &metadata.cache_key, &metadata.artifact)?;
-    metadata
-        .artifact
-        .validate()
-        .map_err(|error| ResolvedCacheError::new(error.to_string()))?;
+    // Stripping the recorded hashes makes `validate` check identity, confinement, file presence
+    // and sizes while skipping the content re-read; every other invariant is unchanged, and the
+    // cache key deliberately excludes post-copy verification enrichment, so it is unaffected.
+    match verification {
+        ContentVerification::RehashEveryFile => metadata
+            .artifact
+            .validate()
+            .map_err(|error| ResolvedCacheError::new(error.to_string()))?,
+        ContentVerification::PathsAndSizesOnly => {
+            artifact_without_content_hashes(&metadata.artifact)
+                .validate()
+                .map_err(|error| ResolvedCacheError::new(error.to_string()))?
+        }
+    }
     if metadata
         .artifact
         .cache_key()
@@ -1658,6 +1993,16 @@ fn validate_complete_metadata(
         ));
     }
     Ok(())
+}
+
+fn artifact_without_content_hashes(artifact: &ResolvedModelArtifact) -> ResolvedModelArtifact {
+    let mut artifact = artifact.clone();
+    for member in &mut artifact.closure.members {
+        for file in &mut member.files {
+            file.sha256 = None;
+        }
+    }
+    artifact
 }
 
 fn validate_completion_confinement(
