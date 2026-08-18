@@ -198,25 +198,46 @@ async fn a_retention_checkpoint_never_blocks_the_caller_that_starts_it() {
     // that the poll loop never *awaits* a checkpoint — is pinned at the source level, the same way
     // this crate pins its temp-fixture rule. Re-introducing an await on the claim path reddens
     // this immediately, where a behavioural test would silently keep passing on a small cache.
+    //
+    // sc-19706 folded the promotion drain into the SAME maintenance slot, so the anchor is the
+    // slot rather than the retention handle, and the rule now covers both occupants: a promotion
+    // copies and hashes a whole bundle, which is if anything worse to sit behind than a sweep.
     let source = include_str!("lib.rs");
     let loop_body = source
-        .split_once("let mut retention_task =")
-        .expect("the poll loop keeps the checkpoint handle in a local")
+        .split_once("let mut maintenance_task =")
+        .expect("the poll loop keeps the maintenance handle in a local")
         .1;
     assert!(
-        !loop_body.contains("retention_task.expect")
-            && !loop_body.contains("retention_task.unwrap"),
-        "the poll loop must not unwrap the checkpoint handle"
+        !loop_body.contains("maintenance_task.expect")
+            && !loop_body.contains("maintenance_task.unwrap"),
+        "the poll loop must not unwrap the maintenance handle"
     );
     for forbidden in [
         "spawn_retention_checkpoint(settings.data_dir.clone(), false).await",
         "spawn_retention_checkpoint(settings.data_dir.clone(), true).await",
         "run_retention_checkpoint",
+        "spawn_promotion_drain(settings.clone()).await",
+        "resolved_cache_promotion::drain_intake",
     ] {
         assert!(
             !loop_body.contains(forbidden),
-            "the poll loop must never await a retention checkpoint (found `{forbidden}`): a sweep \
-             re-hashes every eviction candidate's source, so awaiting one delays the next claim"
+            "the poll loop must never await resolved-cache maintenance (found `{forbidden}`): a \
+             sweep re-hashes every eviction candidate's source and a promotion copies a whole \
+             bundle, so awaiting either delays the next claim"
         );
     }
+    // The drain's gate is on the claim path itself, so it must be the in-memory check and never
+    // the blocking one. `drain_intake` opens the store; `work_pending` reads two mutexes.
+    assert!(
+        loop_body.contains("resolved_cache_promotion::work_pending(&settings.data_dir)"),
+        "the poll loop must gate the promotion drain on the in-memory pending check"
+    );
+    // ...and the gate must actually START something. The never-await rules above are all
+    // ABSENCE assertions, so an empty `else if work_pending(..) {}` body satisfies every one of
+    // them while promotion silently never runs — which is precisely the shape of the defect that
+    // reopened this story.
+    assert!(
+        loop_body.contains("spawn_promotion_drain(settings.clone())"),
+        "the poll loop must spawn the promotion drain, not merely test for pending work"
+    );
 }

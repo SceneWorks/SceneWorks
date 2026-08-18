@@ -263,6 +263,31 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
             entrypoint: TypedResolverEntrypoint::SourceLibrary,
         },
     },
+    // sc-19706: the idle-time promotion producer. It never resolves a path for a LOAD — it turns a
+    // closure a successful load already used into an app-owned bundle — and it constructs no model
+    // root of its own: the source root is handed to it by the guard above, which obtained it from
+    // the typed `model_source_library` entrypoint. It rebuilds a NON-preferring
+    // `ArtifactSourceLibrary` over that same root on purpose, so a bundle can never be promoted
+    // from a bundle. Classified rather than exempted because it does resolve closures against the
+    // authoritative source.
+    ModelConsumerInventoryEntry {
+        source_files: &["crates/sceneworks-worker/src/resolved_cache_promotion.rs"],
+        categories: &[
+            Category::Image,
+            Category::Video,
+            Category::Audio,
+            Category::CaptioningUtility,
+            Category::Training,
+            Category::LoraControl,
+            Category::Primary,
+            Category::OptionalComponent,
+            Category::CoRequisite,
+            Category::ImportedConverted,
+        ],
+        resolution: Resolution::SharedContract {
+            entrypoint: TypedResolverEntrypoint::SourceLibrary,
+        },
+    },
     // sc-19708: the API's single model-source seam (carrier attachment + submission preflight);
     // same shared source-library contract, mirrored on the API side of the boundary.
     ModelConsumerInventoryEntry {

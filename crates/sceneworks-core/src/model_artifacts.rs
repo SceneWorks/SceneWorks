@@ -11,6 +11,8 @@ pub mod artifact_selection;
 pub mod external_library;
 #[path = "model_artifacts/local_preference.rs"]
 pub mod local_preference;
+#[path = "model_artifacts/promotion.rs"]
+pub mod promotion;
 #[path = "resolved_cache.rs"]
 pub mod resolved_cache;
 

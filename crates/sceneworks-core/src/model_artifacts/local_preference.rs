@@ -61,6 +61,9 @@ pub struct LocalArtifactOverlayEntry {
 /// layout for that member's repository, immutable revision and subpath. Materialization writes
 /// members here, and local preference reads them back through the identical rule, so the two can
 /// never drift into a layout only one of them understands.
+///
+/// This is the ONE definition: [`crate::model_artifacts::promotion`], the write side, re-exports
+/// this function rather than restating the rule.
 pub fn hub_cache_member_destination(
     repository: &str,
     revision: &str,
