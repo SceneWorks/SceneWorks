@@ -16,7 +16,13 @@ const OTHER_REVISION: &str = "2222222222222222222222222222222222222222";
 const TEXT_ENCODER_REVISION: &str = "3333333333333333333333333333333333333333";
 
 /// The exact `models--<safe>/snapshots/<revision>/<file>` layout a real Hugging Face library has.
-fn install_snapshot_file(library: &Path, repository: &str, revision: &str, file: &str, body: &[u8]) {
+fn install_snapshot_file(
+    library: &Path,
+    repository: &str,
+    revision: &str,
+    file: &str,
+    body: &[u8],
+) {
     let path = library
         .join(format!("models--{}", repository.replace('/', "--")))
         .join("snapshots")
@@ -27,9 +33,7 @@ fn install_snapshot_file(library: &Path, repository: &str, revision: &str, file:
 }
 
 fn write_receipts(data_dir: &Path, repository: &str, receipts: Value) {
-    let managed = data_dir
-        .join("models")
-        .join(safe_download_dir(repository));
+    let managed = data_dir.join("models").join(safe_download_dir(repository));
     std::fs::create_dir_all(&managed).unwrap();
     std::fs::write(
         managed.join(".sceneworks-download-complete.json"),
@@ -122,9 +126,7 @@ fn a_multi_repository_closure_becomes_one_source_library_shaped_bundle() {
     assert_eq!(primary.source_subpath, PathBuf::new());
     assert_eq!(
         primary.destination,
-        PathBuf::from(format!(
-            "models--owner--model/snapshots/{PRIMARY_REVISION}"
-        ))
+        PathBuf::from(format!("models--owner--model/snapshots/{PRIMARY_REVISION}"))
     );
 
     let co_requisite = candidate
@@ -312,9 +314,7 @@ fn an_uninstalled_closure_declines_without_creating_anything() {
     .expect_err("an uninstalled co-requisite must decline");
     assert!(!error.to_string().is_empty());
     assert!(
-        !library
-            .join("models--owner--missing")
-            .exists(),
+        !library.join("models--owner--missing").exists(),
         "promotion must never create, fetch, or reserve anything for an absent source"
     );
 }
@@ -440,11 +440,8 @@ fn a_manifest_entry_promotes_and_is_then_recognized_as_the_local_tier() {
         ArtifactLocation::ResolvedLocal { .. }
     ));
     assert_eq!(
-        local_artifact_for_requirements(
-            std::slice::from_ref(&published),
-            &selected.requirements
-        )
-        .map(|artifact| artifact.identity),
+        local_artifact_for_requirements(std::slice::from_ref(&published), &selected.requirements)
+            .map(|artifact| artifact.identity),
         Some(published.identity.clone()),
         "the promoted bundle must cover the exact closure that produced it"
     );

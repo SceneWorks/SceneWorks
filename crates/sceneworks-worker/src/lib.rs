@@ -105,6 +105,9 @@ mod cache_thread;
 // shared availability resolver before any handler constructs a loader.
 mod external_library_runtime;
 mod inference_runtime;
+// Promotion activation (sc-19706): the idle-time producer that turns a successful source-tier load
+// into an app-owned resolved bundle. The guard above records an I/O-free hint; this drains it.
+mod resolved_cache_promotion;
 // Backend-neutral generator load/run cache (epic 3720, sc-3724). Typed entirely against
 // `gen_core::*` (no tensor types leak), so it links on ALL targets — the production load seam
 // (`with_cached_generator`) is reached only from the macOS image/video paths, but the all-targets
@@ -1252,6 +1255,18 @@ fn spawn_retention_checkpoint(
     })
 }
 
+/// Starts one resolved-cache promotion drain on the blocking pool and returns its handle **without
+/// awaiting it** (sc-19706).
+///
+/// Same rule as the retention checkpoint, for the same reason: the drain resolves whole closures
+/// against the source library and then copies and hashes a bundle, so awaiting it would make the
+/// next job wait for a promotion it has nothing to do with. Failures are never fatal — the cache is
+/// an optimization, and a closure that could not be promoted is simply recorded again the next time
+/// that model loads.
+fn spawn_promotion_drain(settings: Settings) -> tokio::task::JoinHandle<()> {
+    tokio::task::spawn_blocking(move || resolved_cache_promotion::drain_intake(&settings))
+}
+
 /// Re-run the CUDA probe for a worker that is currently unhealthy, and act on any change
 /// (sc-16260 AC 4).
 ///
@@ -1343,10 +1358,16 @@ pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
     // interval and re-advertises if the host is repaired underneath it. Seeded a full interval
     // out — the startup probe just ran, and re-running it immediately would say nothing new.
     let mut next_gpu_recheck = Instant::now() + GPU_HEALTH_RECHECK;
-    // sc-19710: the startup checkpoint recovers the store (finishing any eviction interrupted by a
-    // crash) and then enforces retention. It is started, never awaited — the first job claim must
-    // not queue behind a recover-plus-retention pass.
-    let mut retention_task = Some(spawn_retention_checkpoint(settings.data_dir.clone(), true));
+    // sc-19710 / sc-19706: ONE resolved-cache maintenance slot, shared by the retention checkpoint
+    // and the promotion drain. A single slot is deliberate rather than one handle each: a sweep
+    // walks and re-hashes eviction candidates while a promotion copies and hashes a whole bundle,
+    // and running both at once would have them competing for the same disk and the same entries —
+    // retention deciding what fits while promotion is still adding to it.
+    //
+    // The startup occupant is the retention checkpoint, which recovers the store (finishing any
+    // eviction interrupted by a crash) and then enforces retention. It is started, never awaited —
+    // the first job claim must not queue behind a recover-plus-retention pass.
+    let mut maintenance_task = Some(spawn_retention_checkpoint(settings.data_dir.clone(), true));
     let mut next_retention_checkpoint = Instant::now() + RESOLVED_CACHE_RETENTION_INTERVAL;
     loop {
         if !health.is_usable() && Instant::now() >= next_gpu_recheck {
@@ -1375,24 +1396,37 @@ pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
         match claim {
             Ok(None) => {
                 lock_failures = 0;
-                // Claiming nothing is the proof of idleness the checkpoint requires: no job is in
-                // flight, so a sweep cannot compete with one. Every artifact lock a sweep takes is
-                // non-blocking, so an in-use model is skipped rather than waited on.
+                // Claiming nothing is the proof of idleness both maintenance activities require:
+                // no job is in flight, so neither a sweep nor a bundle copy can compete with one.
+                // Every artifact lock a sweep takes is non-blocking, so an in-use model is skipped
+                // rather than waited on.
                 //
                 // The handle is polled, never awaited: this arm sits directly on the claim path,
-                // so the loop must come straight back round to claim the next job while a sweep is
-                // still running. A checkpoint is also skipped entirely while its predecessor is in
-                // flight, so slow sweeps cannot stack up.
-                if retention_task
+                // so the loop must come straight back round to claim the next job while
+                // maintenance is still running. Work is also skipped entirely while a predecessor
+                // is in flight, so slow sweeps and slow copies cannot stack up.
+                if maintenance_task
                     .as_ref()
                     .is_some_and(tokio::task::JoinHandle::is_finished)
                 {
-                    retention_task = None;
+                    maintenance_task = None;
                 }
-                if retention_task.is_none() && Instant::now() >= next_retention_checkpoint {
-                    next_retention_checkpoint = Instant::now() + RESOLVED_CACHE_RETENTION_INTERVAL;
-                    retention_task =
-                        Some(spawn_retention_checkpoint(settings.data_dir.clone(), false));
+                if maintenance_task.is_none() {
+                    if Instant::now() >= next_retention_checkpoint {
+                        // Retention wins whenever it is due. It comes due at most once per
+                        // interval, so this cannot starve promotion; the reverse ordering could
+                        // starve retention indefinitely on a worker with a steady promotion
+                        // stream, and retention is what keeps the cache inside its size limit —
+                        // the limit promotion admission itself is judged against.
+                        next_retention_checkpoint =
+                            Instant::now() + RESOLVED_CACHE_RETENTION_INTERVAL;
+                        maintenance_task =
+                            Some(spawn_retention_checkpoint(settings.data_dir.clone(), false));
+                    } else if resolved_cache_promotion::work_pending(&settings.data_dir) {
+                        // sc-19706: in-memory check only — no store open, no stat — because this
+                        // sits on the claim path exactly like the checkpoint gate above.
+                        maintenance_task = Some(spawn_promotion_drain(settings.clone()));
+                    }
                 }
             }
             Ok(Some(job)) => {

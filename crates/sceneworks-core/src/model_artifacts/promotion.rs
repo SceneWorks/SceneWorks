@@ -28,9 +28,9 @@
 
 use super::external_library::ExternalArtifactRequirement;
 use super::{
-    ArtifactAvailability, ArtifactContractError, ArtifactFile, ArtifactIdentity, ArtifactMemberRole,
-    ArtifactSourceLibrary, ModelArtifactResolver, PromotionCandidate, ResolvedBundleClosure,
-    ResolvedBundleMember,
+    ArtifactAvailability, ArtifactContractError, ArtifactFile, ArtifactIdentity,
+    ArtifactMemberRole, ArtifactSourceLibrary, ModelArtifactResolver, PromotionCandidate,
+    ResolvedBundleClosure, ResolvedBundleMember,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -42,26 +42,11 @@ const UNTIERED_VARIANT: &str = "default";
 /// The canonical bundle-relative destination of one closure member: the source library's own
 /// layout for that member's repository, immutable revision and subpath.
 ///
-/// Materialization writes members here and the local tier reads them back through this identical
-/// rule, so the two can never drift into a layout only one of them understands.
-pub fn hub_cache_member_destination(
-    repository: &str,
-    revision: &str,
-    source_subpath: &Path,
-) -> Result<PathBuf, ArtifactContractError> {
-    super::validate_immutable_revision(revision)?;
-    super::validate_repository(repository)?;
-    let safe = repository.replace('/', "--");
-    let mut destination = PathBuf::from(format!("models--{safe}"))
-        .join("snapshots")
-        .join(revision);
-    if source_subpath.as_os_str().is_empty() {
-        return Ok(destination);
-    }
-    super::validate_relative_path(source_subpath, "artifact source subpath")?;
-    destination.push(source_subpath);
-    Ok(destination)
-}
+/// The rule has EXACTLY ONE definition, in the local-preference module, and the write side
+/// re-exports it here. Producing a bundle and reading one back are two halves of the same layout
+/// invariant, so two copies — however byte-identical they start out — are a latent divergence
+/// between the materializer's output and the only module that knows how to serve it.
+pub use super::local_preference::hub_cache_member_destination;
 
 /// Build the promotion candidate for one exact selected requirement closure that a runtime just
 /// loaded successfully from the configured source library.
@@ -171,8 +156,8 @@ fn resolve_requirement_revision(
             requirement.repository
         ))
     })? {
-        let entry =
-            entry.map_err(|error| ArtifactContractError(format!("read source snapshots: {error}")))?;
+        let entry = entry
+            .map_err(|error| ArtifactContractError(format!("read source snapshots: {error}")))?;
         let Some(revision) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };

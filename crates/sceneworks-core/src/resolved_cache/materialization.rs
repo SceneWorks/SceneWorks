@@ -887,21 +887,23 @@ impl ResolvedCachePromotionScheduler {
             state.active = Some((scheduled.candidate.cache_key.clone(), cancellation.clone()));
             (scheduled, cancellation)
         };
-        let result = self.admit(&scheduled).and_then(|admission| match admission {
-            Admission::AlreadyComplete(metadata) => Ok(IdlePromotionOutcome::AlreadyComplete(
-                Box::new(*metadata),
-            )),
-            Admission::Declined(reason) => Ok(IdlePromotionOutcome::Declined(reason)),
-            Admission::Proceed => self
-                .materializer
-                .materialize(
-                    &scheduled.candidate,
-                    &scheduled.source_configured_path,
-                    &scheduled.logical_model_owner,
-                    &cancellation,
-                )
-                .map(IdlePromotionOutcome::Materialized),
-        });
+        let result = self
+            .admit(&scheduled)
+            .and_then(|admission| match admission {
+                Admission::AlreadyComplete(metadata) => {
+                    Ok(IdlePromotionOutcome::AlreadyComplete(Box::new(*metadata)))
+                }
+                Admission::Declined(reason) => Ok(IdlePromotionOutcome::Declined(reason)),
+                Admission::Proceed => self
+                    .materializer
+                    .materialize(
+                        &scheduled.candidate,
+                        &scheduled.source_configured_path,
+                        &scheduled.logical_model_owner,
+                        &cancellation,
+                    )
+                    .map(IdlePromotionOutcome::Materialized),
+            });
         lock_scheduler(&self.state).active = None;
         result
     }
@@ -1001,9 +1003,9 @@ fn source_bundle_bytes(candidate: &PromotionCandidate) -> Result<u64, ResolvedCa
             continue;
         }
         let metadata = std::fs::metadata(&location.source_path)?;
-        total = total.checked_add(metadata.len()).ok_or_else(|| {
-            ResolvedCacheError::new("promotion candidate byte total overflow")
-        })?;
+        total = total
+            .checked_add(metadata.len())
+            .ok_or_else(|| ResolvedCacheError::new("promotion candidate byte total overflow"))?;
     }
     Ok(total)
 }

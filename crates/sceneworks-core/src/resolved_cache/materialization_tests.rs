@@ -929,6 +929,230 @@ fn scheduler_is_bounded_coalescing_disabled_and_stoppable() {
     );
 }
 
+// ---------------------------------------------------------------------------------------------
+// sc-19706 — POLICY ADMISSION. Everything below covers `ResolvedCachePromotionScheduler::admit`,
+// which is applied when the worker goes IDLE rather than when the candidate was recorded: the
+// queue is a hint taken at load time, and completeness, cache size and source availability are all
+// live facts. Each test names the exact decision it pins, and each of the three admission guards
+// is covered alone so a mutation to one cannot be absorbed by another's test.
+// ---------------------------------------------------------------------------------------------
+
+fn sized_policy(max_bytes: u64) -> ResolvedCachePolicy {
+    ResolvedCachePolicy {
+        enabled: true,
+        max_bytes,
+        ..ResolvedCachePolicy::default()
+    }
+}
+
+/// Publish `candidate` from `source` through the real materializer and return the published
+/// metadata. Used to put a KNOWN number of complete bytes in the store before the test's real
+/// subject runs.
+fn publish(
+    store: &ResolvedCacheStore,
+    candidate: &PromotionCandidate,
+    source: &Path,
+    owner: &str,
+) -> ResolvedCacheMetadata {
+    match ResolvedCacheMaterializer::new(store.clone())
+        .materialize(
+            candidate,
+            source,
+            owner,
+            &MaterializationCancellation::default(),
+        )
+        .unwrap()
+    {
+        MaterializationOutcome::Published(metadata) => *metadata,
+        other => panic!("expected a published bundle, got {other:?}"),
+    }
+}
+
+/// A candidate is admitted only when it fits BESIDE the bytes retention may not reclaim. Promoting
+/// past that point would only be undone by the next sweep, so the promote-then-immediately-evict
+/// churn is refused before a single byte is copied.
+#[test]
+fn a_candidate_that_cannot_fit_beside_the_pinned_set_is_declined_before_any_bytes_move() {
+    let scratch = TempDir::new().unwrap();
+    let (held_source, held) = flat_fixture(&scratch);
+    let second = TempDir::new().unwrap();
+    let (source, candidate) = flat_fixture_at_revision(&second, REV_B);
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let held_metadata = publish(&store, &held, &held_source, "image:held");
+    // PINNED — the whole point of the rule. An unpinned entry could lose its place to this
+    // candidate, a pinned one never can.
+    store.set_artifact_pin(&held.cache_key, true).unwrap();
+    assert!(held_metadata.verified_bytes > 0);
+
+    // One byte short of holding both.
+    let candidate_bytes = std::fs::metadata(source.join(format!(
+        "models--SceneWorks--model/snapshots/{REV_B}/model.safetensors"
+    )))
+    .unwrap()
+    .len();
+    let max_bytes = held_metadata.verified_bytes + candidate_bytes - 1;
+    let scheduler = ResolvedCachePromotionScheduler::new(
+        sized_policy(max_bytes),
+        ResolvedCacheMaterializer::new(store.clone()),
+        2,
+    )
+    .unwrap();
+    scheduler
+        .schedule(candidate.clone(), source, "image:candidate".to_owned())
+        .unwrap();
+    assert_eq!(
+        scheduler.run_next_if_idle(true).unwrap(),
+        IdlePromotionOutcome::Declined(PromotionDeclineReason::ExceedsSizeLimit {
+            candidate_bytes,
+            protected_bytes: held_metadata.verified_bytes,
+            max_bytes,
+        })
+    );
+    // Declined means NOTHING was reserved, staged or published — not a rollback.
+    assert!(store
+        .lookup_complete(&candidate.cache_key)
+        .unwrap()
+        .is_none());
+    assert!(std::fs::read_dir(store.root().join("staging"))
+        .unwrap()
+        .next()
+        .is_none());
+}
+
+/// The size rule is deliberately `protected_bytes + candidate_bytes`, NOT total complete bytes.
+/// An unpinned entry can lose its place to a fresher bundle, so counting it would refuse promotions
+/// the cache is perfectly able to hold. This is the same store and the same numbers as the test
+/// above with the pin removed — the pin is the ONLY difference, and it flips the decision.
+#[test]
+fn an_unpinned_complete_entry_never_blocks_a_promotion_the_cache_can_hold() {
+    let scratch = TempDir::new().unwrap();
+    let (held_source, held) = flat_fixture(&scratch);
+    let second = TempDir::new().unwrap();
+    let (source, candidate) = flat_fixture_at_revision(&second, REV_B);
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let held_metadata = publish(&store, &held, &held_source, "image:held");
+    assert!(!store.effective_pin(&held.cache_key).unwrap());
+
+    let candidate_bytes = std::fs::metadata(source.join(format!(
+        "models--SceneWorks--model/snapshots/{REV_B}/model.safetensors"
+    )))
+    .unwrap()
+    .len();
+    let max_bytes = held_metadata.verified_bytes + candidate_bytes - 1;
+    let scheduler = ResolvedCachePromotionScheduler::new(
+        sized_policy(max_bytes),
+        ResolvedCacheMaterializer::new(store.clone()),
+        2,
+    )
+    .unwrap();
+    scheduler
+        .schedule(candidate.clone(), source, "image:candidate".to_owned())
+        .unwrap();
+    assert!(
+        matches!(
+            scheduler.run_next_if_idle(true).unwrap(),
+            IdlePromotionOutcome::Materialized(MaterializationOutcome::Published(_))
+        ),
+        "an unpinned neighbour must not be counted as protected"
+    );
+    assert!(store
+        .lookup_complete(&candidate.cache_key)
+        .unwrap()
+        .is_some());
+}
+
+/// Promotion COPIES what is already installed; it never fetches. A source that stopped resolving
+/// between the load that recorded the hint and the idle drain is an ordinary policy decline, and
+/// must not become a download, an error, or a half-written entry.
+#[test]
+fn a_source_that_vanished_between_the_load_and_the_drain_declines_rather_than_fetching() {
+    let scratch = TempDir::new().unwrap();
+    let (source, candidate) = flat_fixture(&scratch);
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let scheduler = ResolvedCachePromotionScheduler::new(
+        enabled_policy(),
+        ResolvedCacheMaterializer::new(store.clone()),
+        2,
+    )
+    .unwrap();
+    scheduler
+        .schedule(candidate.clone(), source.clone(), "image:model".to_owned())
+        .unwrap();
+    // The library is still configured; the model's own snapshot is gone — the shape a component
+    // removal or an interrupted uninstall leaves behind.
+    std::fs::remove_dir_all(source.join("models--SceneWorks--model")).unwrap();
+
+    let outcome = scheduler.run_next_if_idle(true).unwrap();
+    assert!(
+        matches!(
+            outcome,
+            IdlePromotionOutcome::Declined(PromotionDeclineReason::SourceUnavailable(_))
+        ),
+        "expected a source-unavailable decline, got {outcome:?}"
+    );
+    assert!(store
+        .lookup_complete(&candidate.cache_key)
+        .unwrap()
+        .is_none());
+    assert!(!store.entry_path(&candidate.cache_key).unwrap().exists());
+}
+
+/// `IdlePromotionOutcome::AlreadyComplete` exists so an already-published entry is skipped WITHOUT
+/// taking its exclusive artifact lock — the lock a live local-tier load of that same bundle holds
+/// SHARED. This test holds exactly that shared lock through a real runtime lease.
+///
+/// Without the `lookup_complete` short-circuit, admission would fall through to `materialize` →
+/// `reserve` → `try_lock_exclusive`, which the held shared lock defeats, and the promotion would be
+/// reported as `Materialized(Contended)`: a live load of a cached model would make its own entry
+/// look contended on every idle turn for as long as the job ran.
+#[test]
+fn an_already_published_entry_is_skipped_without_taking_the_lock_a_live_load_holds() {
+    let scratch = TempDir::new().unwrap();
+    let (source, candidate) = flat_fixture(&scratch);
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let published = publish(&store, &candidate, &source, "image:model");
+
+    // A live local-tier load: `acquire_complete` takes the entry's SHARED artifact lock and holds
+    // it for the lifetime of the lease.
+    let resolver = ModelArtifactResolver::new(ArtifactSourceLibrary::new(&source).unwrap());
+    let lease = store
+        .acquire_complete(&candidate.cache_key, &resolver, "image:model")
+        .unwrap()
+        .expect("the published entry leases");
+
+    let scheduler = ResolvedCachePromotionScheduler::new(
+        enabled_policy(),
+        ResolvedCacheMaterializer::new(store.clone()),
+        2,
+    )
+    .unwrap();
+    scheduler
+        .schedule(candidate.clone(), source, "image:model".to_owned())
+        .unwrap();
+    let outcome = scheduler.run_next_if_idle(true).unwrap();
+    // Compared by variant and identity, not by whole metadata: the live lease legitimately stamped
+    // `last_used_at` on the way in, and asserting equality with the pre-lease record would fail for
+    // a reason that has nothing to do with the decision under test.
+    match &outcome {
+        IdlePromotionOutcome::AlreadyComplete(metadata) => {
+            assert_eq!(metadata.cache_key, published.cache_key);
+            assert_eq!(metadata.state, ResolvedCacheEntryState::Complete);
+            assert_eq!(metadata.verified_bytes, published.verified_bytes);
+        }
+        other => panic!(
+            "a published entry under a live shared lock must report AlreadyComplete, never \
+             Contended; got {other:?}"
+        ),
+    }
+    // Proof the lock really was held for the whole decision: taking it exclusively only succeeds
+    // once the lease is dropped, so a `Contended` answer above would have been the lock talking.
+    drop(lease);
+    assert!(store
+        .lookup_complete(&candidate.cache_key)
+        .unwrap()
+        .is_some());
+}
+
 #[cfg(unix)]
 #[test]
 fn materializer_copies_a_same_repository_hf_blob_symlink() {

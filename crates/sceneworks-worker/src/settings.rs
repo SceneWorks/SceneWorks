@@ -115,6 +115,36 @@ impl Settings {
         sceneworks_core::model_artifacts::resolved_cache::ResolvedCachePolicy::from_env_or_safe_default()
     }
 
+    /// A minimal offline `Settings` for tests that only care about `data_dir`. Every field that
+    /// could reach the network is pinned to the offline stub URL, so a test using this cannot
+    /// accidentally acquire a live dependency.
+    #[cfg(test)]
+    pub(crate) fn for_test(data_dir: PathBuf) -> Self {
+        Self {
+            api_url: crate::test_env::OFFLINE_URL.to_owned(),
+            access_token: None,
+            data_dir,
+            config_dir: PathBuf::new(),
+            worker_id: "worker".to_owned(),
+            gpu_id: "cpu".to_owned(),
+            is_child_worker: false,
+            poll_seconds: 1,
+            heartbeat_seconds: 1,
+            shutdown_timeout_seconds: 1,
+            huggingface_base_url: crate::test_env::OFFLINE_URL.to_owned(),
+            huggingface_token: None,
+            credentials: Vec::new(),
+            max_lora_url_bytes: 1,
+            max_model_url_bytes: 1,
+            allow_private_lora_urls: false,
+            utility_workers: 1,
+            backend_mlx_enabled: false,
+            backend_candle_enabled: false,
+            external_model_roots: Vec::new(),
+            gpu_memory_limit_bytes: 0,
+        }
+    }
+
     pub fn from_env() -> Self {
         let defaults = sceneworks_core::app_paths::AppPaths::platform_default();
         let config_dir = env_path_or("SCENEWORKS_CONFIG_DIR", &defaults.config_dir);

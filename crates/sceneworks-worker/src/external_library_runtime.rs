@@ -58,6 +58,15 @@ pub(crate) struct RuntimeSourceGuard {
     /// non-blockingly, and even when it re-verifies under the lock — cannot remove bytes a load is
     /// reading. Released on drop; `finish_success` crosses the promotion boundary first.
     cache_leases: Vec<ResolvedCacheLease>,
+    /// sc-19706: the closures this job served from the SOURCE tier, recorded here so
+    /// [`Self::finish_success`] can hand them to the promotion intake without doing any work.
+    ///
+    /// This is the whole of the trigger's job-path cost: a `Vec` built from values the guard had
+    /// already computed for admission. Building the promotion candidate needs the source library
+    /// walked, every closure member stat-ed and canonicalized, and a reservation taken — all of it
+    /// belongs on the idle drain (`crate::resolved_cache_promotion`), never in the job's critical
+    /// path, so nothing here touches the filesystem.
+    pending_promotions: Vec<crate::resolved_cache_promotion::PendingPromotion>,
 }
 
 impl RuntimeSourceGuard {
@@ -176,6 +185,20 @@ impl RuntimeSourceGuard {
         let (local_scope, cache_leases) =
             select_local_tier(settings, &configured_library, &mut plans);
 
+        // sc-19706 — the PRODUCER trigger, recorded here and fired only on success. Read AFTER
+        // pass 3 so it reflects the tier that will really serve: a model that fell back from the
+        // local tier is external-ready now, and its own closure is exactly what is missing from
+        // the cache. Only `ExternalReady` qualifies — a local-ready model is already promoted,
+        // and incomplete/missing/unavailable models have nothing installed to copy.
+        let pending_promotions = crate::resolved_cache_promotion::pending_for_plans(
+            settings,
+            &configured_library,
+            plans.iter().filter_map(|plan| {
+                (plan.resolution.availability == ModelAvailability::ExternalReady)
+                    .then_some(plan.requirements.as_slice())
+            }),
+        );
+
         let mut resolutions: Vec<ModelResolution> = Vec::new();
         for plan in plans {
             if !resolutions.contains(&plan.resolution) {
@@ -240,6 +263,7 @@ impl RuntimeSourceGuard {
             sessions,
             local_scope,
             cache_leases,
+            pending_promotions,
         })
     }
 
@@ -249,6 +273,7 @@ impl RuntimeSourceGuard {
             sessions: Vec::new(),
             local_scope: None,
             cache_leases: Vec::new(),
+            pending_promotions: Vec::new(),
         }
     }
 
@@ -265,6 +290,15 @@ impl RuntimeSourceGuard {
             // entry is already published, so this only records the successful use.
             let _candidate = lease.mark_success();
         }
+        // sc-19706 — the only place a real install becomes a promotion candidate. A job that
+        // reached here loaded and ran to completion against the configured source library, which
+        // is the exact evidence promotion needs: the bytes exist, they are valid, and something
+        // actually used them. Pushing is a lock-and-move into a bounded in-memory queue and is
+        // deliberately the last thing the job does — the drain that turns these into bundles runs
+        // on the blocking pool when the worker next claims nothing.
+        crate::resolved_cache_promotion::record_pending(std::mem::take(
+            &mut self.pending_promotions,
+        ));
         Ok(())
     }
 
@@ -782,8 +816,16 @@ mod tests {
     use std::path::{Path, PathBuf};
     use tempfile::TempDir;
 
-    const REV_A: &str = "0123456789abcdef0123456789abcdef01234567";
-    const REV_B: &str = "89abcdef0123456789abcdef0123456789abcdef";
+    // FILE-UNIQUE fixture identities, deliberately. Some of these tests install the PROCESS-WIDE
+    // local-tier preference overlay, and the overlay is keyed on `(repository, revision)` — so a
+    // fixture repository or revision shared with an unrelated test elsewhere in this crate
+    // (`model_jobs.rs`, `image_jobs/tests.rs`, `flux1_control_candle.rs` all used the same
+    // `owner/...` names and the same `0123456789ab…` revision) lets a live overlay here answer for
+    // a snapshot that test expects to read from its own temp library. The suite runs in parallel,
+    // so that is a rare, load-dependent, entirely genuine false red in a file that never mentions
+    // the resolved cache. The `guardfx/` prefix and the `e19706…` revisions appear nowhere else.
+    const REV_A: &str = "e19706aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const REV_B: &str = "e19706bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
     fn settings(data_dir: PathBuf) -> Settings {
         Settings {
@@ -851,18 +893,18 @@ mod tests {
     fn installed_model(temp: &TempDir) -> (Settings, PathBuf, JsonObject) {
         let data = temp.path().join("data");
         let library = temp.path().join("external-hf");
-        seed_snapshot(&library, "owner/model", REV_A, "model.safetensors");
+        seed_snapshot(&library, "guardfx/model", REV_A, "model.safetensors");
         write_receipts(
             &data,
-            "owner/model",
-            json!([{ "repo": "owner/model", "modelId": "m",
+            "guardfx/model",
+            json!([{ "repo": "guardfx/model", "modelId": "m",
                      "resolvedFiles": ["model.safetensors"], "snapshotRevision": REV_A }]),
         );
         let payload = json!({
             "model": "m",
             "modelManifestEntry": {
                 "id": "m",
-                "downloads": [{ "provider": "huggingface", "repo": "owner/model",
+                "downloads": [{ "provider": "huggingface", "repo": "guardfx/model",
                                 "revision": REV_A, "files": ["model.safetensors"] }]
             }
         })
@@ -876,10 +918,10 @@ mod tests {
     /// by design (model paths resolve on engine threads far below the job task), so two of these
     /// bodies running concurrently would read each other's overlay.
     ///
-    /// `.cargo/config.toml` currently forces `RUST_TEST_THREADS=1`, which means a green run WITHOUT
-    /// this mutex proves nothing about the shared state these tests actually depend on — it only
-    /// proves the harness happened to serialize them. The mutex makes the dependency real and
-    /// keeps these tests honest if that setting ever changes.
+    /// This mutex is the ONLY thing serializing them. `.cargo/config.toml` sets no
+    /// `RUST_TEST_THREADS`, so this suite really does run in parallel and the interleaving is live
+    /// rather than hypothetical — an earlier version of this comment claimed the harness already
+    /// serialized the suite, which was false and would have made dropping the mutex look safe.
     fn overlay_guard() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
         LOCK.get_or_init(|| std::sync::Mutex::new(()))
@@ -1001,7 +1043,7 @@ mod tests {
             let artifact = publish_bundle(
                 &settings.data_dir,
                 &library,
-                "owner/model",
+                "guardfx/model",
                 REV_A,
                 "default",
                 &["model.safetensors"],
@@ -1011,7 +1053,7 @@ mod tests {
 
             // Before the guard runs, the shared resolver reads the configured source library.
             let source_snapshot =
-                crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, "owner/model")
+                crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, "guardfx/model")
                     .expect("source snapshot");
             assert!(source_snapshot.starts_with(&library));
 
@@ -1025,18 +1067,18 @@ mod tests {
             // The one shared snapshot resolver — every model-consuming runtime funnels through it
             // — now answers with the app-owned bundle.
             let loaded =
-                crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, "owner/model")
+                crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, "guardfx/model")
                     .expect("leased local snapshot");
             assert_eq!(
                 loaded,
-                bundle_root.join(format!("models--owner--model/snapshots/{REV_A}"))
+                bundle_root.join(format!("models--guardfx--model/snapshots/{REV_A}"))
             );
             assert!(loaded.join("model.safetensors").is_file());
             // And so does the pinned-component resolver used by the utility/co-requisite lanes.
             assert_eq!(
                 crate::model_jobs::huggingface_pinned_snapshot_dir(
                     &settings.data_dir,
-                    "owner/model",
+                    "guardfx/model",
                     REV_A
                 ),
                 Some(loaded.clone())
@@ -1056,7 +1098,7 @@ mod tests {
             };
             assert!(matches!(
                 evictor
-                    .reserve(&candidate, &library, "owner/model")
+                    .reserve(&candidate, &library, "guardfx/model")
                     .unwrap(),
                 sceneworks_core::model_artifacts::resolved_cache::ReservationOutcome::Contended
             ));
@@ -1067,7 +1109,7 @@ mod tests {
             assert!(metadata.last_used_at.is_some());
             // With the job finished the source tier serves again.
             assert_eq!(
-                crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, "owner/model"),
+                crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, "guardfx/model"),
                 Some(source_snapshot)
             );
         });
@@ -1081,7 +1123,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let data = temp.path().join("data");
         let library = temp.path().join("external-hf");
-        for repo in ["owner/primary", "owner/utility"] {
+        for repo in ["guardfx/primary", "guardfx/utility"] {
             seed_snapshot(&library, repo, REV_A, "model.safetensors");
             write_receipts(
                 &data,
@@ -1099,14 +1141,14 @@ mod tests {
             })
         };
         let payload = json!({
-            "modelManifestEntry": entry("owner/primary"),
-            "modelManifestEntries": [entry("owner/utility")]
+            "modelManifestEntry": entry("guardfx/primary"),
+            "modelManifestEntries": [entry("guardfx/utility")]
         })
         .as_object()
         .unwrap()
         .clone();
         with_local_cache(&library, || {
-            for repo in ["owner/primary", "owner/utility"] {
+            for repo in ["guardfx/primary", "guardfx/utility"] {
                 publish_bundle(
                     &settings.data_dir,
                     &library,
@@ -1123,7 +1165,7 @@ mod tests {
                 .resolutions()
                 .iter()
                 .all(|resolution| resolution.availability == ModelAvailability::LocalReady));
-            for repo in ["owner/primary", "owner/utility"] {
+            for repo in ["guardfx/primary", "guardfx/utility"] {
                 let loaded = crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, repo)
                     .expect("leased local snapshot");
                 assert!(loaded.join("model.safetensors").is_file());
@@ -1145,7 +1187,7 @@ mod tests {
             let artifact = publish_bundle(
                 &settings.data_dir,
                 &library,
-                "owner/model",
+                "guardfx/model",
                 REV_A,
                 "default",
                 &["model.safetensors"],
@@ -1153,10 +1195,10 @@ mod tests {
             let bundle_snapshot = artifact
                 .location
                 .root()
-                .join(format!("models--owner--model/snapshots/{REV_A}"));
+                .join(format!("models--guardfx--model/snapshots/{REV_A}"));
             let source_snapshot = ArtifactSourceLibrary::new(&library)
                 .unwrap()
-                .repository_root("owner/model")
+                .repository_root("guardfx/model")
                 .unwrap()
                 .join("snapshots")
                 .join(REV_A);
@@ -1185,7 +1227,7 @@ mod tests {
             assert_eq!(
                 crate::model_jobs::huggingface_receipt_weights_dir(
                     &settings.data_dir,
-                    "owner/model",
+                    "guardfx/model",
                     Some("m"),
                     None
                 ),
@@ -1217,7 +1259,7 @@ mod tests {
             publish_bundle(
                 &settings.data_dir,
                 &library,
-                "owner/model",
+                "guardfx/model",
                 REV_A,
                 "default",
                 &["model.safetensors"],
@@ -1231,7 +1273,7 @@ mod tests {
                 ModelAvailability::LocalReady
             );
             let loaded =
-                crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, "owner/model")
+                crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, "guardfx/model")
                     .expect("leased local snapshot while disconnected");
             assert!(loaded.join("model.safetensors").is_file());
             let resolved_root =
@@ -1254,14 +1296,14 @@ mod tests {
             let artifact = publish_bundle(
                 &settings.data_dir,
                 &library,
-                "owner/model",
+                "guardfx/model",
                 REV_A,
                 "default",
                 &["model.safetensors"],
             );
             let bundle = artifact.location.root().to_path_buf();
             let source_snapshot =
-                crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, "owner/model")
+                crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, "guardfx/model")
                     .expect("source snapshot");
 
             let guard =
@@ -1283,7 +1325,7 @@ mod tests {
                 "an invalid local entry must fall back to the authoritative source"
             );
             assert_eq!(
-                crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, "owner/model"),
+                crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, "guardfx/model"),
                 Some(source_snapshot),
                 "and the load must read the source library, not the invalid bundle"
             );
@@ -1292,7 +1334,7 @@ mod tests {
 
     fn published_file(bundle: &Path) -> PathBuf {
         bundle.join(format!(
-            "models--owner--model/snapshots/{REV_A}/model.safetensors"
+            "models--guardfx--model/snapshots/{REV_A}/model.safetensors"
         ))
     }
 
@@ -1333,15 +1375,15 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let data = temp.path().join("data");
         let library = temp.path().join("external-hf");
-        seed_snapshot(&library, "owner/matrix", REV_A, "q4/model.safetensors");
-        seed_snapshot(&library, "owner/matrix", REV_A, "q8/model.safetensors");
+        seed_snapshot(&library, "guardfx/matrix", REV_A, "q4/model.safetensors");
+        seed_snapshot(&library, "guardfx/matrix", REV_A, "q8/model.safetensors");
         write_receipts(
             &data,
-            "owner/matrix",
+            "guardfx/matrix",
             json!([
-                { "repo": "owner/matrix", "modelId": "m", "variant": "q4",
+                { "repo": "guardfx/matrix", "modelId": "m", "variant": "q4",
                   "resolvedFiles": ["q4/model.safetensors"], "snapshotRevision": REV_A },
-                { "repo": "owner/matrix", "modelId": "m", "variant": "q8",
+                { "repo": "guardfx/matrix", "modelId": "m", "variant": "q8",
                   "resolvedFiles": ["q8/model.safetensors"], "snapshotRevision": REV_A }
             ]),
         );
@@ -1349,9 +1391,9 @@ mod tests {
         let entry = json!({
             "id": "m",
             "downloads": [
-                { "provider": "huggingface", "repo": "owner/matrix", "variant": "q4",
+                { "provider": "huggingface", "repo": "guardfx/matrix", "variant": "q4",
                   "default": true, "files": ["q4/*"] },
-                { "provider": "huggingface", "repo": "owner/matrix", "variant": "q8",
+                { "provider": "huggingface", "repo": "guardfx/matrix", "variant": "q8",
                   "files": ["q8/*"] }
             ]
         });
@@ -1366,7 +1408,7 @@ mod tests {
             let q4_bundle = publish_bundle(
                 &settings.data_dir,
                 &library,
-                "owner/matrix",
+                "guardfx/matrix",
                 REV_A,
                 "q4",
                 &["q4/model.safetensors"],
@@ -1393,10 +1435,10 @@ mod tests {
             );
             // AND — the assertion this test used to skip by calling `drop(guard)` first — the PATH
             // layer must agree. Availability said "source tier"; the bug lived one layer down,
-            // where the process-wide overlay would still redirect `owner/matrix@REV_A` into the q4
+            // where the process-wide overlay would still redirect `guardfx/matrix@REV_A` into the q4
             // bundle root, which holds no `q8/` subtree at all. With the guard STILL HELD:
             let loaded =
-                crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, "owner/matrix")
+                crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, "guardfx/matrix")
                     .expect("source snapshot");
             assert!(
                 loaded.starts_with(&library),
@@ -1411,11 +1453,11 @@ mod tests {
             drop(guard);
 
             // A bundle of another revision of the same model is likewise not this model.
-            seed_snapshot(&library, "owner/other", REV_B, "model.safetensors");
+            seed_snapshot(&library, "guardfx/other", REV_B, "model.safetensors");
             let other_bundle = publish_bundle(
                 &settings.data_dir,
                 &library,
-                "owner/other",
+                "guardfx/other",
                 REV_B,
                 "default",
                 &["model.safetensors"],
@@ -1423,7 +1465,7 @@ mod tests {
             let other = json!({
                 "modelManifestEntry": {
                     "id": "other",
-                    "downloads": [{ "provider": "huggingface", "repo": "owner/other",
+                    "downloads": [{ "provider": "huggingface", "repo": "guardfx/other",
                                     "revision": REV_A, "files": ["model.safetensors"] }]
                 }
             })
@@ -1440,7 +1482,7 @@ mod tests {
             // Path layer, guard still held: the REV_B bundle must not answer for a REV_A request.
             assert!(crate::model_jobs::huggingface_pinned_snapshot_dir(
                 &settings.data_dir,
-                "owner/other",
+                "guardfx/other",
                 REV_A
             )
             .is_none_or(|path| !path.starts_with(other_bundle.location.root())));
@@ -1462,15 +1504,15 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let data = temp.path().join("data");
         let library = temp.path().join("external-hf");
-        seed_snapshot(&library, "owner/matrix", REV_A, "q4/model.safetensors");
-        seed_snapshot(&library, "owner/matrix", REV_A, "q8/model.safetensors");
+        seed_snapshot(&library, "guardfx/matrix", REV_A, "q4/model.safetensors");
+        seed_snapshot(&library, "guardfx/matrix", REV_A, "q8/model.safetensors");
         write_receipts(
             &data,
-            "owner/matrix",
+            "guardfx/matrix",
             json!([
-                { "repo": "owner/matrix", "modelId": "q4model", "variant": "q4",
+                { "repo": "guardfx/matrix", "modelId": "q4model", "variant": "q4",
                   "resolvedFiles": ["q4/model.safetensors"], "snapshotRevision": REV_A },
-                { "repo": "owner/matrix", "modelId": "q8model", "variant": "q8",
+                { "repo": "guardfx/matrix", "modelId": "q8model", "variant": "q8",
                   "resolvedFiles": ["q8/model.safetensors"], "snapshotRevision": REV_A }
             ]),
         );
@@ -1478,7 +1520,7 @@ mod tests {
         let entry = |id: &str, variant: &str, glob: &str| {
             json!({
                 "id": id,
-                "downloads": [{ "provider": "huggingface", "repo": "owner/matrix",
+                "downloads": [{ "provider": "huggingface", "repo": "guardfx/matrix",
                                 "variant": variant, "default": true, "files": [glob] }]
             })
         };
@@ -1495,7 +1537,7 @@ mod tests {
             let q4_bundle = publish_bundle(
                 &settings.data_dir,
                 &library,
-                "owner/matrix",
+                "guardfx/matrix",
                 REV_A,
                 "q4",
                 &["q4/model.safetensors"],
@@ -1535,7 +1577,7 @@ mod tests {
             // The load-bearing half, at the path layer with the guard held: NOTHING resolves into
             // the q4 bundle, so the q8 load cannot land in a root that has no `q8/` subtree.
             let loaded =
-                crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, "owner/matrix")
+                crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, "guardfx/matrix")
                     .expect("source snapshot");
             assert!(!loaded.starts_with(&q4_root), "{}", loaded.display());
             assert!(loaded.starts_with(&library), "{}", loaded.display());
@@ -1558,35 +1600,35 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let data = temp.path().join("data");
         let library = temp.path().join("external-hf");
-        seed_snapshot(&library, "owner/shared", REV_A, "pinned.safetensors");
-        seed_snapshot(&library, "owner/shared", REV_A, "legacy.safetensors");
+        seed_snapshot(&library, "guardfx/shared", REV_A, "pinned.safetensors");
+        seed_snapshot(&library, "guardfx/shared", REV_A, "legacy.safetensors");
         // `refs/main` is what an unpinned resolve reads — the walk that would reach the overlay.
-        let repo_root = library.join("models--owner--shared");
+        let repo_root = library.join("models--guardfx--shared");
         std::fs::create_dir_all(repo_root.join("refs")).unwrap();
         std::fs::write(repo_root.join("refs").join("main"), REV_A).unwrap();
 
-        let pinned_receipt = json!({ "repo": "owner/shared", "modelId": "pinned",
+        let pinned_receipt = json!({ "repo": "guardfx/shared", "modelId": "pinned",
                                      "resolvedFiles": ["pinned.safetensors"],
                                      "snapshotRevision": REV_A });
         // The legacy receipt: same repository, NO `snapshotRevision`.
-        let legacy_receipt = json!({ "repo": "owner/shared", "modelId": "legacy",
+        let legacy_receipt = json!({ "repo": "guardfx/shared", "modelId": "legacy",
                                      "resolvedFiles": ["legacy.safetensors"] });
         let pinned_entry = json!({
             "id": "pinned",
-            "downloads": [{ "provider": "huggingface", "repo": "owner/shared",
+            "downloads": [{ "provider": "huggingface", "repo": "guardfx/shared",
                             "revision": REV_A, "files": ["pinned.safetensors"] }]
         });
         // The legacy carrier declares NO revision, so nothing overrides its receipt's `None` with a
         // declared-exact pin — this is what makes `revision: None` actually reach the guard.
         let legacy_entry = json!({
             "id": "legacy",
-            "downloads": [{ "provider": "huggingface", "repo": "owner/shared",
+            "downloads": [{ "provider": "huggingface", "repo": "guardfx/shared",
                             "files": ["legacy.safetensors"] }]
         });
 
         // Control: the pinned selection ALONE is served locally. Without this the assertion below
         // could pass merely because the bundle was unusable.
-        write_receipts(&data, "owner/shared", json!([pinned_receipt.clone()]));
+        write_receipts(&data, "guardfx/shared", json!([pinned_receipt.clone()]));
         let settings = settings(data.clone());
         let alone = json!({ "modelManifestEntry": pinned_entry.clone() })
             .as_object()
@@ -1596,7 +1638,7 @@ mod tests {
             publish_bundle(
                 &settings.data_dir,
                 &library,
-                "owner/shared",
+                "guardfx/shared",
                 REV_A,
                 "default",
                 &["pinned.safetensors"],
@@ -1614,7 +1656,7 @@ mod tests {
         // Now add the legacy carrier on the SAME repository.
         write_receipts(
             &data,
-            "owner/shared",
+            "guardfx/shared",
             json!([pinned_receipt, legacy_receipt]),
         );
         let payload = json!({
@@ -1650,7 +1692,7 @@ mod tests {
             // the unpinned resolve may reach the bundle.
             let pinned = crate::model_jobs::huggingface_pinned_snapshot_dir(
                 &settings.data_dir,
-                "owner/shared",
+                "guardfx/shared",
                 REV_A,
             )
             .expect("source snapshot");
@@ -1658,7 +1700,7 @@ mod tests {
             assert!(pinned.starts_with(&library), "{}", pinned.display());
             // The unpinned walk (`refs/main`) is the one the poison exists to stop.
             let unpinned =
-                crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, "owner/shared")
+                crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, "guardfx/shared")
                     .expect("source snapshot");
             assert!(
                 !unpinned.starts_with(&bundle_root),
@@ -1728,7 +1770,7 @@ mod tests {
             publish_bundle_at(
                 &settings.data_dir,
                 &library,
-                "owner/model",
+                "guardfx/model",
                 REV_A,
                 "default",
                 &["model.safetensors"],
@@ -1753,7 +1795,7 @@ mod tests {
                 "an unsupported shape must never serve the load"
             );
             let loaded =
-                crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, "owner/model")
+                crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, "guardfx/model")
                     .expect("source snapshot");
             assert!(loaded.starts_with(&library), "{}", loaded.display());
         });
@@ -1767,7 +1809,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let data = temp.path().join("data");
         let library = temp.path().join("external-hf");
-        for repo in ["owner/bundled", "owner/external"] {
+        for repo in ["guardfx/bundled", "guardfx/external"] {
             seed_snapshot(&library, repo, REV_A, "model.safetensors");
             write_receipts(
                 &data,
@@ -1785,8 +1827,8 @@ mod tests {
             })
         };
         let payload = json!({
-            "modelManifestEntry": entry("owner/bundled"),
-            "modelManifestEntries": [entry("owner/external")]
+            "modelManifestEntry": entry("guardfx/bundled"),
+            "modelManifestEntries": [entry("guardfx/external")]
         })
         .as_object()
         .unwrap()
@@ -1798,7 +1840,7 @@ mod tests {
             publish_bundle(
                 &settings.data_dir,
                 &library,
-                "owner/bundled",
+                "guardfx/bundled",
                 REV_A,
                 "default",
                 &["model.safetensors"],
@@ -1821,7 +1863,7 @@ mod tests {
                 "the unbundled model must report the source tier: {logged}"
             );
             assert!(
-                logged.contains("owner/bundled") && logged.contains("owner/external"),
+                logged.contains("guardfx/bundled") && logged.contains("guardfx/external"),
                 "each report must name its repository: {logged}"
             );
             // The unsupported-shape class describes a bundle that cannot be served at all; nothing
@@ -1852,15 +1894,15 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let data = temp.path().join("data");
         let library = temp.path().join("external-hf");
-        seed_snapshot(&library, "owner/matrix", REV_A, "q4/model.safetensors");
-        seed_snapshot(&library, "owner/matrix", REV_A, "q8/model.safetensors");
+        seed_snapshot(&library, "guardfx/matrix", REV_A, "q4/model.safetensors");
+        seed_snapshot(&library, "guardfx/matrix", REV_A, "q8/model.safetensors");
         write_receipts(
             &data,
-            "owner/matrix",
+            "guardfx/matrix",
             json!([
-                { "repo": "owner/matrix", "modelId": "q4model", "variant": "q4",
+                { "repo": "guardfx/matrix", "modelId": "q4model", "variant": "q4",
                   "resolvedFiles": ["q4/model.safetensors"], "snapshotRevision": REV_A },
-                { "repo": "owner/matrix", "modelId": "q8model", "variant": "q8",
+                { "repo": "guardfx/matrix", "modelId": "q8model", "variant": "q8",
                   "resolvedFiles": ["q8/model.safetensors"], "snapshotRevision": REV_A }
             ]),
         );
@@ -1868,7 +1910,7 @@ mod tests {
         let entry = |id: &str, variant: &str, glob: &str| {
             json!({
                 "id": id,
-                "downloads": [{ "provider": "huggingface", "repo": "owner/matrix",
+                "downloads": [{ "provider": "huggingface", "repo": "guardfx/matrix",
                                 "variant": variant, "default": true, "files": [glob] }]
             })
         };
@@ -1884,7 +1926,7 @@ mod tests {
             publish_bundle(
                 &settings.data_dir,
                 &library,
-                "owner/matrix",
+                "guardfx/matrix",
                 REV_A,
                 "q4",
                 &["q4/model.safetensors"],
@@ -1914,7 +1956,7 @@ mod tests {
             publish_bundle(
                 &settings.data_dir,
                 &library,
-                "owner/model",
+                "guardfx/model",
                 REV_A,
                 "default",
                 &["model.safetensors"],
@@ -1927,10 +1969,124 @@ mod tests {
                 guard.resolutions()[0].availability,
                 ModelAvailability::ExternalReady
             );
+            assert!(crate::model_jobs::huggingface_snapshot_dir(
+                &settings.data_dir,
+                "guardfx/model"
+            )
+            .expect("source snapshot")
+            .starts_with(&library));
+        });
+    }
+
+    /// sc-19706 — THE test the reopened story exists for: production populates the cache.
+    ///
+    /// Nothing here publishes a bundle by hand. A job resolves against the configured source
+    /// library, runs, and finishes; the trigger records the closure; the idle drain builds the
+    /// candidate and materializes it; and a SECOND guard pass over the SAME payload resolves the
+    /// model from the app-owned tier, with the shared snapshot resolver answering from the bundle.
+    /// That whole chain is the epic's user-visible value, and before this story none of it ran
+    /// outside a test that published the bundle itself.
+    ///
+    /// It also pins the two-stage split: the bundle must NOT exist when the job finishes. If
+    /// `finish_success` ever materialized inline, the first assertion below fails — which is the
+    /// only way to catch source-library I/O silently moving onto the job path.
+    #[test]
+    fn a_successful_source_tier_job_promotes_itself_and_the_next_job_loads_from_the_bundle() {
+        let temp = TempDir::new().unwrap();
+        let (settings, library, payload) = installed_model(&temp);
+        with_local_cache(&library, || {
+            // FIRST JOB — nothing is cached, so it is served by the configured source library.
+            let guard =
+                RuntimeSourceGuard::begin(&JobType::ImageGenerate, &payload, &settings).unwrap();
+            assert_eq!(
+                guard.resolutions()[0].availability,
+                ModelAvailability::ExternalReady
+            );
+            let source_snapshot =
+                crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, "guardfx/model")
+                    .expect("source snapshot");
+            assert!(source_snapshot.starts_with(&library));
+
+            guard.finish_success().unwrap();
+
+            // The job path did the queueing and NOTHING else: no bundle, no store, no copy.
             assert!(
-                crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, "owner/model")
-                    .expect("source snapshot")
-                    .starts_with(&library)
+                crate::resolved_cache_promotion::work_pending(&settings.data_dir),
+                "a successful source-tier load must record a promotion candidate"
+            );
+            assert!(
+                !settings
+                    .data_dir
+                    .join("models")
+                    .join("resolved")
+                    .join("entries")
+                    .is_dir(),
+                "finish_success must not materialize inline — that is source-library I/O on the \
+                 job path"
+            );
+
+            // IDLE DRAIN — what the worker's poll loop runs on the blocking pool when a claim
+            // returns nothing.
+            crate::resolved_cache_promotion::drain_intake(&settings);
+            assert!(
+                !crate::resolved_cache_promotion::work_pending(&settings.data_dir),
+                "the drain consumes the intake"
+            );
+
+            let store = ResolvedCacheStore::open(&settings.data_dir).unwrap();
+            let published = store
+                .enumerate()
+                .unwrap()
+                .into_iter()
+                .filter_map(|entry| entry.metadata)
+                .find(|metadata| {
+                    metadata.state
+                        == sceneworks_core::model_artifacts::resolved_cache::ResolvedCacheEntryState::Complete
+                })
+                .expect("the drain published a complete bundle");
+            assert_eq!(published.artifact.identity.repository, "guardfx/model");
+            assert_eq!(published.artifact.identity.revision, REV_A);
+
+            // SECOND JOB — same payload, same worker, nothing else changed. It must now be served
+            // from the app-owned tier.
+            let second =
+                RuntimeSourceGuard::begin(&JobType::ImageGenerate, &payload, &settings).unwrap();
+            assert_eq!(
+                second.resolutions()[0].availability,
+                ModelAvailability::LocalReady,
+                "the bundle production just wrote must serve the next load"
+            );
+            let loaded =
+                crate::model_jobs::huggingface_snapshot_dir(&settings.data_dir, "guardfx/model")
+                    .expect("leased local snapshot");
+            // Compared against the published bundle root rather than a `starts_with` on
+            // `data_dir`: the store records the CANONICAL root, and on macOS the temp dir's
+            // `/var` -> `/private/var` symlink makes a lexical prefix check fail on a path that is
+            // in fact inside the bundle.
+            assert_eq!(
+                loaded,
+                published
+                    .artifact
+                    .location
+                    .root()
+                    .join(format!("models--guardfx--model/snapshots/{REV_A}")),
+                "the shared snapshot resolver must answer from the bundle"
+            );
+            assert!(loaded.join("model.safetensors").is_file());
+            second.finish_success().unwrap();
+
+            // And the already-published entry is not promoted a second time: the drain admits it
+            // as already complete and copies nothing.
+            crate::resolved_cache_promotion::drain_intake(&settings);
+            assert_eq!(
+                store
+                    .enumerate()
+                    .unwrap()
+                    .iter()
+                    .filter(|entry| entry.state
+                        == sceneworks_core::model_artifacts::resolved_cache::ResolvedCacheEntryState::Complete)
+                    .count(),
+                1
             );
         });
     }
@@ -1962,7 +2118,7 @@ mod tests {
         with_library(&library, || {
             let receipt_path = settings.data_dir.join("models").join(
                 sceneworks_core::model_artifacts::artifact_selection::safe_download_dir(
-                    "owner/model",
+                    "guardfx/model",
                 ),
             );
             let receipt_before =
@@ -2001,7 +2157,7 @@ mod tests {
                 .unwrap()
                 .finish_success()
                 .unwrap();
-            let safe = sceneworks_core::hf_home::safe_repo_dir_name("owner/model").unwrap();
+            let safe = sceneworks_core::hf_home::safe_repo_dir_name("guardfx/model").unwrap();
             std::fs::remove_file(
                 library
                     .join(format!("models--{safe}"))
@@ -2059,14 +2215,14 @@ mod tests {
         let data = temp.path().join("data");
         let library = temp.path().join("external-hf");
         // q4 fully installed; q8 receipt exists but its library snapshot was pruned.
-        seed_snapshot(&library, "owner/matrix", REV_A, "q4/model.safetensors");
+        seed_snapshot(&library, "guardfx/matrix", REV_A, "q4/model.safetensors");
         write_receipts(
             &data,
-            "owner/matrix",
+            "guardfx/matrix",
             json!([
-                { "repo": "owner/matrix", "modelId": "m", "variant": "q4",
+                { "repo": "guardfx/matrix", "modelId": "m", "variant": "q4",
                   "resolvedFiles": ["q4/model.safetensors"], "snapshotRevision": REV_A },
-                { "repo": "owner/matrix", "modelId": "m", "variant": "q8",
+                { "repo": "guardfx/matrix", "modelId": "m", "variant": "q8",
                   "resolvedFiles": ["q8/model.safetensors"], "snapshotRevision": REV_B }
             ]),
         );
@@ -2074,9 +2230,9 @@ mod tests {
         let entry = json!({
             "id": "m",
             "downloads": [
-                { "provider": "huggingface", "repo": "owner/matrix", "variant": "q4",
+                { "provider": "huggingface", "repo": "guardfx/matrix", "variant": "q4",
                   "default": true, "files": ["q4/*"] },
-                { "provider": "huggingface", "repo": "owner/matrix", "variant": "q8",
+                { "provider": "huggingface", "repo": "guardfx/matrix", "variant": "q8",
                   "files": ["q8/*"] }
             ]
         });
@@ -2122,11 +2278,11 @@ mod tests {
         } else {
             "macos"
         };
-        seed_snapshot(&library, "owner/native", REV_A, "model.safetensors");
+        seed_snapshot(&library, "guardfx/native", REV_A, "model.safetensors");
         write_receipts(
             &data,
-            "owner/native",
-            json!([{ "repo": "owner/native", "modelId": "m",
+            "guardfx/native",
+            json!([{ "repo": "guardfx/native", "modelId": "m",
                      "resolvedFiles": ["model.safetensors"], "snapshotRevision": REV_A }]),
         );
         // The other platform's primary and co-requisite are NOT installed anywhere. If the guard
@@ -2135,11 +2291,11 @@ mod tests {
             "modelManifestEntry": {
                 "id": "m",
                 "downloads": [
-                    { "provider": "huggingface", "repo": "owner/native", "revision": REV_A,
+                    { "provider": "huggingface", "repo": "guardfx/native", "revision": REV_A,
                       "files": ["model.safetensors"], "platforms": [this_os] },
-                    { "provider": "huggingface", "repo": "owner/foreign", "revision": REV_B,
+                    { "provider": "huggingface", "repo": "guardfx/foreign", "revision": REV_B,
                       "files": ["foreign.safetensors"], "platforms": [other_os] },
-                    { "provider": "huggingface", "repo": "owner/foreign-corequisite",
+                    { "provider": "huggingface", "repo": "guardfx/foreign-corequisite",
                       "revision": REV_B, "coRequisite": true,
                       "files": ["encoder.safetensors"], "platforms": [other_os] }
                 ]
@@ -2161,7 +2317,7 @@ mod tests {
                 .iter()
                 .map(|requirement| requirement.repository.as_str())
                 .collect::<Vec<_>>();
-            assert_eq!(repositories, ["owner/native"]);
+            assert_eq!(repositories, ["guardfx/native"]);
         });
     }
 
@@ -2219,7 +2375,7 @@ mod tests {
         let payload = json!({
             "modelManifestEntry": {
                 "id": "m",
-                "downloads": [{ "provider": "huggingface", "repo": "owner/new",
+                "downloads": [{ "provider": "huggingface", "repo": "guardfx/new",
                                 "revision": REV_A, "files": ["q4/*"] }]
             }
         })
