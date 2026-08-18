@@ -290,7 +290,7 @@ describe("SceneWorks app shell", () => {
         // presetLorasResolvedClientSide so the server won't re-merge it.
         prompt: "Camera slowly pushes in while the scene comes alive",
         presetLorasResolvedClientSide: true,
-        loras: [expect.objectContaining({ id: "video_motion", weight: 0.8 })],
+        loras: [expect.objectContaining({ id: "video_motion", weight: 1.0 })],
         advanced: expect.objectContaining({
           resolution: "1280x720",
         }),

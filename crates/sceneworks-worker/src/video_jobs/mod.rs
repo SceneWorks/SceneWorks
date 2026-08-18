@@ -1962,7 +1962,8 @@ fn lora_scale(lora: &Value) -> f32 {
                 .as_f64()
                 .or_else(|| value.as_str()?.trim().parse().ok())
         })
-        .unwrap_or(0.8) as f32
+        // Last resort only — see `image_jobs::lora_weight`; matches the API/web default.
+        .unwrap_or(1.0) as f32
 }
 
 /// Resolve a LoRA spec's file (a directory → its first `.safetensors`, recursively via core's
