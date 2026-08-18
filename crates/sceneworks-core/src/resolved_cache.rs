@@ -316,6 +316,29 @@ impl ResolvedCacheMetadata {
     }
 }
 
+/// One published entry the local tier cannot serve because of its SHAPE — the bundle is intact and
+/// verified, but its layout is not one the shared snapshot resolvers can be handed. Kept distinct
+/// from every other rejection class (torn, incomplete, unverifiable) because this is the only one
+/// worth reporting: those are ordinary fail-closed fallbacks, this is a bundle that will never
+/// serve until something changes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalArtifactRejection {
+    pub cache_key: String,
+    pub repository: String,
+    pub revision: String,
+    pub reason: String,
+}
+
+/// The result of enumerating the local tier: what can serve, and what was rejected for an
+/// unsupported shape. Rejections are returned rather than dropped so the caller that emits the
+/// runtime's observability can name them — dropping them at the scan made the local-tier-unsupported
+/// class unreachable for exactly the case it is named after.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LocalArtifactScan {
+    pub artifacts: Vec<ResolvedModelArtifact>,
+    pub rejections: Vec<LocalArtifactRejection>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedCacheEntrySummary {
     pub cache_key: String,
@@ -405,6 +428,12 @@ impl ResolvedCacheStore {
 
     /// Read-only handle onto an already-initialized cache, or `None` when no cache root exists.
     /// Never creates the root, never takes a session slot, never writes.
+    ///
+    /// sc-19707 introduced the same handle independently as a private `open_read_only`; the two
+    /// bodies were identical, so they are ONE function here. The public name is kept because the
+    /// API's cache-status surface needs it from outside this crate, and every caller — the
+    /// catalog/preflight read, the status read, and the local-tier scan below — wants exactly the
+    /// same no-session, no-usage, no-write handle.
     pub fn open_for_inspection(data_dir: &Path) -> Result<Option<Self>, ResolvedCacheError> {
         let root = data_dir.join("models").join("resolved");
         if !root.exists() {
@@ -427,6 +456,126 @@ impl ResolvedCacheStore {
                 _session_lock: None,
             }),
         }))
+    }
+
+    /// Every published artifact this cache can actually serve a runtime load from (sc-19707).
+    ///
+    /// Validity is judged per entry and fails CLOSED to the source tier: an entry that is not
+    /// `Complete`, whose journal or receipt does not verify, whose bundle no longer matches the
+    /// recorded closure (a torn, truncated, or hand-edited bundle), or whose shape the local tier
+    /// cannot serve is skipped rather than poisoning the whole answer. Read-only: never creates a
+    /// session, never stamps usage, and never repairs.
+    ///
+    /// Entries rejected for an UNSUPPORTED SHAPE are reported separately rather than dropped, so
+    /// the guard can name them: they are the only rejection class a user can act on (the bundle is
+    /// intact, but its layout is one the shared snapshot resolvers cannot be handed). Every other
+    /// rejection is a torn/absent/unverifiable entry, which is a fallback rather than a report, and
+    /// is logged at debug with the reason instead of being swallowed silently.
+    pub fn valid_local_artifacts(data_dir: &Path) -> LocalArtifactScan {
+        let store = match Self::open_for_inspection(data_dir) {
+            Ok(Some(store)) => store,
+            Ok(None) => return LocalArtifactScan::default(),
+            Err(error) => {
+                tracing::debug!(
+                    data_dir = %data_dir.display(),
+                    %error,
+                    "resolved cache could not be opened for local-tier enumeration; every model \
+                     stays on the source tier"
+                );
+                return LocalArtifactScan::default();
+            }
+        };
+        let entries_root = store.inner.root.join("entries");
+        let entries = match std::fs::read_dir(&entries_root) {
+            Ok(entries) => entries,
+            Err(error) => {
+                // A cache that has never published anything has no `entries/` directory at all;
+                // that is the ordinary empty case, not a fault worth reporting.
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    tracing::debug!(
+                        entries_root = %entries_root.display(),
+                        %error,
+                        "resolved cache entries could not be enumerated for the local tier"
+                    );
+                }
+                return LocalArtifactScan::default();
+            }
+        };
+        let mut scan = LocalArtifactScan::default();
+        for item in entries.flatten() {
+            let Some(digest) = item
+                .file_name()
+                .to_str()
+                .filter(|value| is_lower_hex_64(value))
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            if !item.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            let metadata_lock = match store.lock_metadata(&digest) {
+                Ok(lock) => lock,
+                Err(error) => {
+                    tracing::debug!(%digest, %error, "resolved cache entry could not be locked for \
+                         local-tier enumeration");
+                    continue;
+                }
+            };
+            let read = store.read_metadata_unlocked(&digest);
+            drop(metadata_lock);
+            let metadata = match read {
+                Ok(JournalRead::Valid { metadata, .. }) => metadata,
+                Ok(other) => {
+                    tracing::debug!(
+                        %digest,
+                        journal = ?std::mem::discriminant(&other),
+                        "resolved cache entry journal is not valid; the model stays on the source \
+                         tier"
+                    );
+                    continue;
+                }
+                Err(error) => {
+                    tracing::debug!(%digest, %error, "resolved cache entry journal could not be read");
+                    continue;
+                }
+            };
+            if metadata.state != ResolvedCacheEntryState::Complete {
+                tracing::debug!(
+                    %digest,
+                    state = ?metadata.state,
+                    "resolved cache entry is not complete; the model stays on the source tier"
+                );
+                continue;
+            }
+            if let Err(error) = validate_complete_metadata(&store, &metadata) {
+                tracing::debug!(
+                    %digest,
+                    %error,
+                    "resolved cache entry did not re-verify; the model stays on the source tier"
+                );
+                continue;
+            }
+            // A published bundle that is not stored in the source-library layout cannot be handed
+            // to the shared snapshot resolvers, so it is not a local-tier candidate at all. This
+            // is REPORTED rather than dropped: the guard emits it as the local-tier-unsupported
+            // class, which is otherwise unreachable for the very case it names.
+            if let Err(error) =
+                crate::model_artifacts::local_preference::overlay_entries_for_artifact(
+                    &metadata.artifact,
+                )
+            {
+                scan.rejections.push(LocalArtifactRejection {
+                    cache_key: metadata.cache_key.clone(),
+                    repository: metadata.artifact.identity.repository.clone(),
+                    revision: metadata.artifact.identity.revision.clone(),
+                    reason: error.to_string(),
+                });
+                continue;
+            }
+            scan.artifacts.push(metadata.artifact);
+        }
+        scan
     }
 
     pub fn root(&self) -> &Path {
@@ -1540,6 +1689,7 @@ impl ResolvedCacheReservation {
     }
 }
 
+#[derive(Debug)]
 pub struct ResolvedCacheLease {
     runtime_lease: Option<ActiveArtifactLease>,
     #[allow(dead_code)]
