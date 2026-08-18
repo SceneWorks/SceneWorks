@@ -9,6 +9,8 @@
 pub mod artifact_selection;
 #[path = "model_artifacts/external_library.rs"]
 pub mod external_library;
+#[path = "model_artifacts/local_preference.rs"]
+pub mod local_preference;
 #[path = "model_artifacts/promotion.rs"]
 pub mod promotion;
 #[path = "resolved_cache.rs"]
@@ -624,6 +626,12 @@ pub struct PromotionCandidate {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ArtifactSourceLibrary {
     root: PathBuf,
+    /// Whether snapshot discovery through this handle may be served from an active local-tier
+    /// preference scope (sc-19707). True only for the CONFIGURED runtime library built by
+    /// [`crate::hf_home::model_source_library`]; a library constructed directly for maintenance,
+    /// confinement, or materialization deliberately keeps reading the authoritative source, so
+    /// promoting a bundle can never read from a bundle.
+    prefer_local: bool,
 }
 
 /// Behavior-preserving runtime resolver. Source discovery and runtime validation are separate:
@@ -764,7 +772,22 @@ impl ArtifactSourceLibrary {
                 "source library root is empty".to_owned(),
             ));
         }
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            prefer_local: false,
+        })
+    }
+
+    /// The configured runtime library: snapshot discovery through this handle prefers an active
+    /// local-tier bundle (sc-19707). Reserved for [`crate::hf_home::model_source_library`], the
+    /// one place that resolves the user's configured source library for a runtime load.
+    pub(crate) fn new_preferring_local(
+        root: impl Into<PathBuf>,
+    ) -> Result<Self, ArtifactContractError> {
+        Ok(Self {
+            prefer_local: true,
+            ..Self::new(root)?
+        })
     }
 
     pub fn root(&self) -> &Path {
@@ -821,6 +844,13 @@ impl ArtifactSourceLibrary {
 
     /// Resolve an immutable source snapshot. `None` reads `refs/main` only to obtain its exact
     /// commit; a caller-provided mutable revision is rejected.
+    ///
+    /// On the configured runtime library (see [`Self::new_preferring_local`]) a leased local-tier
+    /// bundle serves the exact `(repository, revision)` pair when one is active — the single point
+    /// at which every model-consuming runtime prefers the local tier (sc-19707). The revision is
+    /// still chosen by the authoritative source whenever it can answer, so a bundle holding a
+    /// superseded revision never wins; only a source library that cannot be read at all (the
+    /// disconnected-drive case) falls back to the bundle's own revision.
     pub fn discover_snapshot(
         &self,
         repository: &str,
@@ -832,14 +862,35 @@ impl ArtifactSourceLibrary {
                 validate_immutable_revision(revision)?;
                 revision.to_owned()
             }
-            None => std::fs::read_to_string(repo_root.join("refs/main"))
-                .map_err(|error| {
-                    ArtifactContractError(format!("cannot resolve {repository} refs/main: {error}"))
-                })?
-                .trim()
-                .to_owned(),
+            None => match std::fs::read_to_string(repo_root.join("refs/main")) {
+                Ok(revision) => revision.trim().to_owned(),
+                Err(error) => {
+                    if self.prefer_local {
+                        if let Some((revision, snapshot)) =
+                            local_preference::unique_local_snapshot(repository)
+                        {
+                            validate_immutable_revision(&revision)?;
+                            return Ok((
+                                ArtifactIdentity::pinned(repository, revision, "default")?,
+                                snapshot,
+                            ));
+                        }
+                    }
+                    return Err(ArtifactContractError(format!(
+                        "cannot resolve {repository} refs/main: {error}"
+                    )));
+                }
+            },
         };
         validate_immutable_revision(&revision)?;
+        if self.prefer_local {
+            if let Some(snapshot) = local_preference::local_snapshot(repository, &revision) {
+                return Ok((
+                    ArtifactIdentity::pinned(repository, revision, "default")?,
+                    snapshot,
+                ));
+            }
+        }
         let snapshot = repo_root.join("snapshots").join(&revision);
         if !snapshot.is_dir() {
             return Err(ArtifactContractError(format!(
