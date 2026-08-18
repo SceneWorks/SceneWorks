@@ -606,7 +606,28 @@ back to `validate()` alone and reds the count assertion (`left: 1, right: 0`).
   record of the state that was fixed)
 - expected post-fix cost: the O(entries) `stat` walk — presence and size per closure file, with no
   bytes read
-- post-fix measured: `<pending live re-measure>`
+- post-fix measured: **0.0104 s / 0.0094 s / 0.0093 s** — three consecutive `POST /api/v1/image/jobs`
+  against the identical 5.65 GB, 2-entry cache (`SceneWorks/Sana_1600M_1024px_mlx` 5,574,343,418 B
+  + `SceneWorks/yolo11m-person-detect-mlx` 80,388,864 B) on `75fdf5732`. Catalog read
+  `GET /api/v1/models`: **3.96 s** on a cold snapshot build (92 rows, fresh API), **0.110 s /
+  0.111 s** warm. `GET /api/v1/model-cache` stayed at **0.0041 s**. Availability is unchanged and
+  still correct — `sana_1600m` and `person_detector` both read `local_ready`.
+
+  Against the same cache, that is **929.6 s → ~175 s → 0.0093 s**: about four orders of magnitude
+  below the original finding and roughly 18,700× below the intermediate state. The O(entries)
+  `stat` walk is, as predicted, not measurable next to the rest of the request.
+
+  **One caveat, measured rather than assumed.** The numbers above were taken with no retention
+  sweep in flight. While the worker *is* sweeping, a submission still blocks: the first attempt
+  took **33.2 s** and the next did not return at all for the ~11 minutes it was given. Sampled
+  mid-block, the API was at **0.0 % CPU with zero `sha2` frames** — the content pass really is gone
+  — sitting on `preflight_payload_model_sources → local_resolved_artifacts` with a `flock` leaf,
+  while the worker held 99 % CPU in `scan_entry`'s bundle re-hash. So what remains on the
+  submission path is **not work, it is lock-wait behind F-2's retention scan**. F-2's fix made the
+  *status* read lock-free; the submission path was not given the same treatment, so the two
+  findings are now coupled: the residual submission latency is entirely a function of how long a
+  retention sweep holds the per-entry metadata lock (`retention.rs:646` + `:650`, still
+  `RehashEveryFile`). Worth folding into whatever eventually addresses the retention cost.
 
 ## F-4 and F-2 spot checks · **both confirmed fixed**
 
