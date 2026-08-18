@@ -3003,6 +3003,7 @@ mod download_receipt_tests {
             Some(context),
             data_dir,
             &std::collections::HashSet::new(),
+            &std::collections::HashSet::new(),
         )
         .unwrap();
         assert_eq!(
@@ -3105,6 +3106,7 @@ mod download_receipt_tests {
             context,
             data_dir,
             &std::collections::HashSet::new(),
+            &std::collections::HashSet::new(),
         )
         .unwrap();
         assert_eq!(
@@ -3170,6 +3172,7 @@ mod download_receipt_tests {
             projection.pop().unwrap(),
             context,
             data_dir,
+            &std::collections::HashSet::new(),
             &std::collections::HashSet::new(),
         )
         .unwrap();
@@ -3249,6 +3252,7 @@ mod download_receipt_tests {
             retry_projection.pop().unwrap(),
             context,
             data_dir,
+            &std::collections::HashSet::new(),
             &std::collections::HashSet::new(),
         )
         .unwrap();
