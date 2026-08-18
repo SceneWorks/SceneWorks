@@ -1006,13 +1006,26 @@ pub(crate) fn preset_lora_id(preset_lora: &Value) -> Option<&str> {
         .or_else(|| preset_lora.get("id").and_then(Value::as_str))
 }
 
+/// The apply weight a LoRA starts at when nothing explicit is recorded for it — ONE neutral 1.0
+/// for every family. There is deliberately no per-family table: the sole exception used to be
+/// krea-2 at 1.5 (sc-7579 / sc-7932 — Krea 2's distilled, CFG-free Turbo attenuates Raw-trained
+/// LoRAs), which overshot in practice and landed fresh picks over-applied. A model that genuinely
+/// wants a different starting point should ship `defaultWeight` on its LoRA manifest entry rather
+/// than reintroduce a family branch here.
+///
+/// ⚠️ Mirrors the web `DEFAULT_LORA_WEIGHT` (`apps/web/src/presetUtils.js`) and MUST stay in
+/// lockstep with it: this is the weight a preset actually APPLIES, while the web constant is the
+/// weight the studio SHOWS on the slider. A divergence means a run silently uses a scale the user
+/// never picked.
+pub(crate) const DEFAULT_LORA_WEIGHT: f64 = 1.0;
+
 pub(crate) fn preset_lora_weight(lora: &Value, preset_lora: &Value) -> f64 {
     preset_lora
         .get("weight")
         .and_then(Value::as_f64)
         .or_else(|| lora.get("defaultWeight").and_then(Value::as_f64))
         .or_else(|| lora.get("weight").and_then(Value::as_f64))
-        .unwrap_or(0.8)
+        .unwrap_or(DEFAULT_LORA_WEIGHT)
 }
 
 pub(crate) fn serialize_preset_lora(lora: &Value, preset_lora: &Value, lora_id: &str) -> Value {

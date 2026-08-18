@@ -583,7 +583,7 @@ export function CharacterStudio() {
       name: lora.name ?? lora.id,
       sourcePath: lora.installedPath ?? lora.source?.path ?? null,
       triggerWords: lora.triggerWords ?? [],
-      defaultWeight: lora.defaultWeight ?? 0.8,
+      defaultWeight: lora.defaultWeight ?? 1.0,
       compatibility: { families: extractFamilies(lora) },
       scope: lora.scope ?? "global",
     });
