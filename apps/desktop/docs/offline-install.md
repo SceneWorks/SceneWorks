@@ -312,6 +312,27 @@ offline workstation you must also pre-seed that cache:
 Only the runtime DLLs are covered by this guide; the model cache is standard Hugging
 Face layout and can be seeded with any of the usual tooling.
 
+### Generating with the library disconnected
+
+An offline workstation is not the only case where the weights are out of reach: the model library
+can also live on an external or network drive that is not always attached. SceneWorks distinguishes
+the two, and never treats "the drive is unplugged" as "the model is missing":
+
+- A model with a **local copy** loads and generates normally with the library disconnected. Nothing
+  is fetched.
+- A model **without** one is refused with a typed *"library disconnected"* message naming the
+  library SceneWorks expects, and the reconnect prompt. It is never silently re-downloaded, and its
+  install state and download receipts are left untouched, so reconnecting restores it exactly as it
+  was.
+- Refreshing the catalog while the library is away does not erase installed state.
+
+Turn local copies on in **Settings → Local model copies** (off by default, applies after a
+restart) and generate once with each model you want to keep available. See
+[Keeping models on an external drive](../README.md#keeping-models-on-an-external-drive).
+
+Local copies are made only by copying bytes that are already present — the feature contains no
+download path of any kind, so it is safe on a fully air-gapped machine.
+
 ---
 
 ## See also
