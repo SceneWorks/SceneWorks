@@ -3,7 +3,7 @@
 //! Ideogram 4 is trained EXCLUSIVELY on structured JSON captions; a raw plain-text prompt is
 //! out-of-distribution and stochastically renders the "Image blocked by safety filter" placeholder
 //! (sc-6307, reference-confirmed faithful — NOT a porting bug). The web Image Studio avoids this by
-//! auto-expanding plain text into a RICH caption via the magic-prompt utility model (Llama-3.2-3B)
+//! auto-expanding plain text into a RICH caption via the magic-prompt utility model (Anubis-Mini-8B)
 //! BEFORE it ever submits the image job (sc-6501). A direct/headless caller that POSTs plain text to
 //! `ideogram_4` bypasses that expansion and gets only the worker's FORMAT guard — and the real-weight
 //! finding is that a SPARSE caption does NOT escape the placeholder (content RICHNESS is the lever, not
@@ -12,7 +12,7 @@
 //!
 //! This closes the gap with full UI parity: when an `ideogram_4`/`ideogram_4_turbo` image job arrives
 //! with a non-caption prompt, the API runs the SAME `magic_prompt` expansion job the web runs (a
-//! separate `prompt_refine` job — so the 3B refiner and the ~50GB Ideogram weights are never
+//! separate `prompt_refine` job — so the 8B refiner and the ~50GB Ideogram weights are never
 //! co-resident, exactly as the UI achieves it) and rewrites the prompt to the rich caption BEFORE the
 //! image job is created and dispatched. If the expansion is unavailable (no refiner staged, the job
 //! fails, or it times out), the original prompt is left untouched and the image job still dispatches —
