@@ -85,6 +85,82 @@ export function canHoldLocalCopy(model) {
   );
 }
 
+// ---- local-copy coverage ---------------------------------------------------------
+
+// The typed coverage states from `LocalCacheCoverage` (sc-19712 F-5), verbatim. Read like
+// `MODEL_AVAILABILITY`: this is the backend's own judgement of how much of a model a local copy
+// can ever serve, and nothing here re-derives it from the download list or the install shape.
+export const CACHE_COVERAGE = {
+  FULL: "full",
+  PARTIAL: "partial",
+  NONE: "none",
+};
+
+// One badge per coverage state that a person needs to be warned about. `full` gets none — a model
+// whose local copy covers it needs no caveat, and the existing availability badge already says the
+// copy exists. `tone` reuses the screen's `.status-badge` modifiers, as the availability badges do.
+const CACHE_COVERAGE_BADGES = {
+  [CACHE_COVERAGE.PARTIAL]: {
+    text: "partial local copy",
+    tone: "warning",
+    title:
+      "A local copy of this model covers only part of it; the rest is always read from the model library.",
+  },
+  [CACHE_COVERAGE.NONE]: {
+    text: "no local copy possible",
+    tone: "warning",
+    title:
+      "This model can’t be served from a local copy, so it always loads from the model library.",
+  },
+};
+
+// The badge for a catalog row's typed local-copy coverage, or null when there is nothing to warn
+// about: no `cacheEligibility` field at all (a row with no external requirement closure — "not
+// applicable", which is NOT the same as "full"), or `full` coverage. An UNRECOGNIZED coverage
+// value is labelled rather than dropped, for the same reason `availabilityBadge` labels one: a
+// state this build doesn't know about must not read as "fine".
+//
+// The `detail` sentence the backend supplied is supporting copy carried on the title; the branch is
+// always on the typed `coverage`, never on the prose.
+export function cacheEligibilityBadge(model) {
+  const eligibility = model?.cacheEligibility;
+  const coverage = eligibility?.coverage;
+  if (typeof coverage !== "string" || coverage === "" || coverage === CACHE_COVERAGE.FULL) {
+    return null;
+  }
+  const badge = CACHE_COVERAGE_BADGES[coverage];
+  if (!badge) {
+    return {
+      text: "unknown local-copy coverage",
+      tone: "warning",
+      title: `This build doesn’t recognize the local-copy coverage “${coverage}”.`,
+    };
+  }
+  const detail =
+    typeof eligibility.detail === "string" && eligibility.detail !== "" ? eligibility.detail : "";
+  return { ...badge, title: detail || badge.title };
+}
+
+// What to say where a model has no local copy yet. The default sentence PROMISES one will be made,
+// which is a lie for a model the cache can never fully serve (sc-19712 F-5) — so the promise is
+// made only where the backend says the copy would actually cover the model.
+export function describeMissingLocalCopy(model) {
+  const badge = cacheEligibilityBadge(model);
+  if (!badge) {
+    return "No local copy yet. SceneWorks makes one the next time it loads this model, if local copies are turned on in Settings.";
+  }
+  const coverage = model?.cacheEligibility?.coverage;
+  if (coverage === CACHE_COVERAGE.PARTIAL) {
+    return `A local copy of this model would cover only part of it. ${badge.title}`;
+  }
+  if (coverage === CACHE_COVERAGE.NONE) {
+    return `This model can’t be given a local copy. ${badge.title}`;
+  }
+  // An unrecognized coverage: say what we don't know rather than promising a copy that may never
+  // be made, and never claim the exclusion either.
+  return `No local copy yet. ${badge.title}`;
+}
+
 // ---- entry states ----------------------------------------------------------------
 
 // The store's typed entry states (`ResolvedCacheEntryState`), verbatim. Nothing here invents a

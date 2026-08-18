@@ -15,6 +15,7 @@
 //!   as the fallback so never-downloaded installs still carry a checkable identity.
 
 use super::external_library::ExternalArtifactRequirement;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 
@@ -510,6 +511,133 @@ pub fn selected_requirements_for_closure(
         requirements,
         receipt_backed,
     }
+}
+
+/// The schema version of [`LocalCacheEligibility`], so a client can branch on shape rather than
+/// on the presence of individual keys.
+pub const LOCAL_CACHE_ELIGIBILITY_SCHEMA_VERSION: u32 = 1;
+
+/// How much of a model the resolved model cache can ever serve from a local copy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalCacheCoverage {
+    /// Everything the selected closure needs can be held locally.
+    Full,
+    /// The primary can be held locally, but part of the declared closure never enters it, so a
+    /// request that needs the excluded part still reads from the source library.
+    Partial,
+    /// Nothing can be served locally, however much of it is copied.
+    None,
+}
+
+/// Why a model's local copy cannot cover it. Typed so the UI branches on the reason instead of
+/// parsing prose, which is the same discipline `ModelAvailability` established.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalCacheExclusion {
+    /// The model declares `required: "soft"` co-requisites. Closure selection drops them
+    /// (`selected_model_artifact_closure`, `receipt_requirements_for_model`,
+    /// `declared_exact_requirements_for_model`), so they are never promoted and never served
+    /// locally, while the primary is — which is exactly how a "local copy" badge over-promises.
+    OptionalComponentsExcluded,
+    /// A requirement carries no recorded snapshot revision, which makes its WHOLE repository
+    /// unserveable from the local tier: with no revision there is no pair to compare coverage
+    /// against. Promotion can still build the bundle, so such a model can occupy cache bytes it
+    /// will never be served from.
+    UnpinnedRevision,
+}
+
+/// What a model's local copy can and cannot cover, and why (sc-19712 F-5).
+///
+/// The epic's acceptance criteria require unsupported artifact classes to be identified in the
+/// product rather than silently bypassed. Before this, a model with soft co-requisites or a
+/// revision-less requirement showed the same "local copy" affordance as a fully cacheable one and
+/// the exclusion was visible only as a `resolved_cache_local_tier_not_selected` log line.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LocalCacheEligibility {
+    pub schema_version: u32,
+    pub coverage: LocalCacheCoverage,
+    /// `None` exactly when `coverage` is [`LocalCacheCoverage::Full`].
+    pub reason: Option<LocalCacheExclusion>,
+    /// A short sentence naming what is excluded. Supporting copy, never the thing to branch on.
+    pub detail: Option<String>,
+}
+
+impl LocalCacheEligibility {
+    fn full() -> Self {
+        Self {
+            schema_version: LOCAL_CACHE_ELIGIBILITY_SCHEMA_VERSION,
+            coverage: LocalCacheCoverage::Full,
+            reason: None,
+            detail: None,
+        }
+    }
+
+    fn excluded(coverage: LocalCacheCoverage, reason: LocalCacheExclusion, detail: String) -> Self {
+        Self {
+            schema_version: LOCAL_CACHE_ELIGIBILITY_SCHEMA_VERSION,
+            coverage,
+            reason: Some(reason),
+            detail: Some(detail),
+        }
+    }
+}
+
+/// True when the model declares at least one optional (`required: "soft"`) co-requisite download.
+/// These are filtered out of every requirement closure this module builds, so they can never be
+/// promoted — the check is deliberately made against the RAW entry rather than a selected closure,
+/// because by the time selection has run the evidence is already gone.
+pub fn declares_optional_co_requisites(model: &Value) -> bool {
+    model
+        .get("downloads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|download| {
+            is_co_requisite_download(download)
+                && download.get("required").and_then(Value::as_str) == Some("soft")
+        })
+}
+
+/// The one judgement of what a model's local copy can cover, shared by every surface that shows it.
+///
+/// Ordering matters: an unpinned revision beats an excluded optional component, because it is the
+/// stronger statement — a model can be excluded on both counts (a real install of `qwen_image` is),
+/// and reporting "some components are excluded" for something that can serve nothing at all would
+/// still over-promise.
+pub fn local_cache_eligibility_for_model(
+    model: &Value,
+    platform: &str,
+    requested_variant: Option<&str>,
+    data_dir: &Path,
+) -> LocalCacheEligibility {
+    let selected = selected_requirements_for_model(model, platform, requested_variant, data_dir);
+    if let Some(unpinned) = selected
+        .requirements
+        .iter()
+        .find(|requirement| requirement.revision.is_none())
+    {
+        return LocalCacheEligibility::excluded(
+            LocalCacheCoverage::None,
+            LocalCacheExclusion::UnpinnedRevision,
+            format!(
+                "No snapshot revision was recorded for {}, so no local copy of this model can be \
+                 used and it will always load from the model library.",
+                unpinned.repository
+            ),
+        );
+    }
+    if declares_optional_co_requisites(model) {
+        return LocalCacheEligibility::excluded(
+            LocalCacheCoverage::Partial,
+            LocalCacheExclusion::OptionalComponentsExcluded,
+            "Optional components of this model are never copied locally, so a request that needs \
+             one still reads from the model library."
+                .to_owned(),
+        );
+    }
+    LocalCacheEligibility::full()
 }
 
 /// One-call composition: select the exact closure for (`platform`, `requested_variant`), then

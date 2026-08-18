@@ -8,11 +8,14 @@ vi.mock("./api.js", () => ({ apiFetch: vi.fn(() => Promise.resolve({})) }));
 import { apiFetch } from "./api.js";
 import { ACCESS_TOKEN_KEY } from "./accessToken.js";
 import {
+  CACHE_COVERAGE,
   MODEL_AVAILABILITY,
   availabilityBadge,
   bytesToGib,
+  cacheEligibilityBadge,
   canHoldLocalCopy,
   daysToSeconds,
+  describeMissingLocalCopy,
   describeDisableConsequence,
   describeLimitConsequence,
   describeRemovalPreview,
@@ -113,6 +116,137 @@ describe("canHoldLocalCopy", () => {
     expect(canHoldLocalCopy({ modelAvailability: MODEL_AVAILABILITY.MISSING })).toBe(false);
     expect(canHoldLocalCopy({ modelAvailability: "something_new" })).toBe(false);
     expect(canHoldLocalCopy(null)).toBe(false);
+  });
+});
+
+// ---- local-copy coverage -----------------------------------------------------------
+
+// `cacheEligibility` exactly as `LocalCacheEligibility` serializes it (sc-19712 F-5): a typed
+// coverage, a typed reason, and a prose detail that is supporting copy only.
+const eligibility = (coverage, reason, detail) => ({
+  schemaVersion: 1,
+  coverage,
+  reason: reason ?? null,
+  detail: detail ?? null,
+});
+
+describe("cacheEligibilityBadge", () => {
+  // A model whose local copy covers it needs no caveat — badging every model would make the
+  // exclusions invisible again by drowning them.
+  it("renders no badge for full coverage", () => {
+    expect(cacheEligibilityBadge({ cacheEligibility: eligibility(CACHE_COVERAGE.FULL) })).toBeNull();
+  });
+
+  // The real `qwen_image` / `acestep_v15_turbo` case: the primary is cached, the optional
+  // co-requisite never is, so a request needing it still reads from the library.
+  it("warns that a partial local copy covers only part of the model", () => {
+    const badge = cacheEligibilityBadge({
+      cacheEligibility: eligibility(
+        CACHE_COVERAGE.PARTIAL,
+        "optional_components_excluded",
+        "Optional components of this model are never copied locally, so a request that needs one still reads from the model library.",
+      ),
+    });
+    expect(badge.text).toBe("partial local copy");
+    expect(badge.tone).toBe("warning");
+    // The backend's own sentence is what the user hovers, not a second explanation invented here.
+    expect(badge.title).toContain("Optional components of this model are never copied locally");
+  });
+
+  // The real `SceneWorks/qwen-image-mlx` case: no recorded snapshot revision, so the whole
+  // repository is unserveable from the local tier however many bytes are copied.
+  it("warns that no local copy is possible when coverage is none", () => {
+    const badge = cacheEligibilityBadge({
+      cacheEligibility: eligibility(
+        CACHE_COVERAGE.NONE,
+        "unpinned_revision",
+        "No snapshot revision was recorded for SceneWorks/qwen-image-mlx, so no local copy of this model can be used and it will always load from the model library.",
+      ),
+    });
+    expect(badge.text).toBe("no local copy possible");
+    expect(badge.tone).toBe("warning");
+    expect(badge.title).toContain("SceneWorks/qwen-image-mlx");
+  });
+
+  // A null field means "no external requirement closure" — not applicable, NOT "full". Either way
+  // there is nothing to warn about, so no badge; the distinction matters only in that neither may
+  // be treated as an exclusion.
+  it("renders no badge when the row carries no eligibility judgement", () => {
+    expect(cacheEligibilityBadge({ cacheEligibility: null })).toBeNull();
+    expect(cacheEligibilityBadge({})).toBeNull();
+    expect(cacheEligibilityBadge({ cacheEligibility: { schemaVersion: 1 } })).toBeNull();
+    expect(cacheEligibilityBadge({ cacheEligibility: { coverage: "" } })).toBeNull();
+    expect(cacheEligibilityBadge(null)).toBeNull();
+    expect(cacheEligibilityBadge(undefined)).toBeNull();
+  });
+
+  // The same rule the availability badge follows: a coverage value this build doesn't know must be
+  // LABELLED, never dropped (which would read as "fully cacheable").
+  it("labels an unrecognized coverage instead of hiding it", () => {
+    const badge = cacheEligibilityBadge({ cacheEligibility: eligibility("mostly") });
+    expect(badge).not.toBeNull();
+    expect(badge.text).toBe("unknown local-copy coverage");
+    expect(badge.tone).toBe("warning");
+    expect(badge.title).toContain("mostly");
+  });
+
+  // With no detail sentence on the wire, the badge still explains itself rather than showing an
+  // empty tooltip.
+  it("falls back to its own explanation when the backend sent no detail", () => {
+    const badge = cacheEligibilityBadge({
+      cacheEligibility: eligibility(CACHE_COVERAGE.NONE, "unpinned_revision", null),
+    });
+    expect(badge.title).toBeTruthy();
+    expect(badge.title).toContain("model library");
+  });
+});
+
+describe("describeMissingLocalCopy", () => {
+  // The promise is kept exactly where it is true.
+  it("promises a copy for a fully cacheable model and for a row with no judgement", () => {
+    const promised = "SceneWorks makes one the next time it loads this model";
+    expect(describeMissingLocalCopy({ cacheEligibility: eligibility(CACHE_COVERAGE.FULL) })).toContain(
+      promised,
+    );
+    expect(describeMissingLocalCopy({ cacheEligibility: null })).toContain(promised);
+    expect(describeMissingLocalCopy({})).toContain(promised);
+  });
+
+  // The defect itself: this sentence used to promise a local copy for a model that can never have
+  // one. It must now say the opposite, and carry the reason.
+  it("states plainly that an excluded model cannot be given a local copy", () => {
+    const text = describeMissingLocalCopy({
+      cacheEligibility: eligibility(
+        CACHE_COVERAGE.NONE,
+        "unpinned_revision",
+        "No snapshot revision was recorded for SceneWorks/qwen-image-mlx, so no local copy of this model can be used and it will always load from the model library.",
+      ),
+    });
+    expect(text).toContain("can’t be given a local copy");
+    expect(text).toContain("No snapshot revision was recorded");
+    expect(text).not.toContain("SceneWorks makes one the next time");
+  });
+
+  it("says a partial copy covers only part of the model", () => {
+    const text = describeMissingLocalCopy({
+      cacheEligibility: eligibility(
+        CACHE_COVERAGE.PARTIAL,
+        "optional_components_excluded",
+        "Optional components of this model are never copied locally, so a request that needs one still reads from the model library.",
+      ),
+    });
+    expect(text).toContain("would cover only part of it");
+    expect(text).toContain("Optional components");
+    expect(text).not.toContain("SceneWorks makes one the next time");
+  });
+
+  // An unrecognized coverage promises nothing and claims nothing — it neither guarantees a copy
+  // nor asserts an exclusion this build cannot actually read.
+  it("neither promises nor denies a copy for an unrecognized coverage", () => {
+    const text = describeMissingLocalCopy({ cacheEligibility: eligibility("mostly") });
+    expect(text).not.toContain("SceneWorks makes one the next time");
+    expect(text).not.toContain("can’t be given a local copy");
+    expect(text).toContain("mostly");
   });
 });
 

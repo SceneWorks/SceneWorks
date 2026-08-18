@@ -17,8 +17,10 @@ import { appConfirm } from "../appConfirm.jsx";
 import { formatBytes } from "../formatting.js";
 import {
   availabilityBadge,
+  cacheEligibilityBadge,
   canHoldLocalCopy,
   describeEntryState,
+  describeMissingLocalCopy,
   describeRemovalPreview,
   entriesForModel,
   fetchModelCache,
@@ -1318,6 +1320,10 @@ export function ModelManagerScreen() {
     // shared resolver produced (sc-19708). NEVER re-derived here from paths or error text — that
     // discipline is the whole reason a second, drifting availability opinion can't exist.
     const availability = availabilityBadge(model);
+    // How much of this model a local copy could ever serve, straight off the backend's typed
+    // `cacheEligibility` (sc-19712 F-5). Null for a fully cacheable model and for a row with no
+    // external requirement closure; a badge whenever the local-copy affordance would over-promise.
+    const cacheCoverage = cacheEligibilityBadge(model);
     // Local copies of THIS model, joined by the backend.
     const localCopies = entriesForModel(modelCache, model.id);
     // The block renders ONLY when the cache state is actually known. `modelCache` is null when the
@@ -1342,6 +1348,14 @@ export function ModelManagerScreen() {
                 title={availability.title}
               >
                 {availability.text}
+              </span>
+            ) : null}
+            {cacheCoverage ? (
+              <span
+                className={cacheCoverage.tone ? `status-badge ${cacheCoverage.tone}` : "status-badge"}
+                title={cacheCoverage.title}
+              >
+                {cacheCoverage.text}
               </span>
             ) : null}
             {model.updateAvailable ? <span className="status-badge warning">update available</span> : null}
@@ -1512,10 +1526,11 @@ export function ModelManagerScreen() {
               ) : null}
             </div>
             {localCopies.length === 0 ? (
-              <p>
-                No local copy yet. SceneWorks makes one the next time it loads this model, if local
-                copies are turned on in Settings.
-              </p>
+              // The empty state must not promise a copy the cache can never serve: for a model the
+              // backend excluded (soft co-requisites, or a requirement with no recorded revision)
+              // this says so instead (sc-19712 F-5). The block itself stays VISIBLE — the exclusion
+              // is the thing the user has to be able to see.
+              <p>{describeMissingLocalCopy(model)}</p>
             ) : (
               <ul className="model-local-copy-list">
                 {localCopies.map((entry) => {

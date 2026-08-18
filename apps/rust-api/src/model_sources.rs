@@ -20,7 +20,7 @@ use crate::error::ApiError;
 use crate::AppState;
 use sceneworks_core::contracts::{JobType, JsonObject};
 use sceneworks_core::model_artifacts::artifact_selection::{
-    requested_runtime_variant, selected_requirements_for_model,
+    requested_runtime_variant, selected_requirements_for_model, LocalCacheEligibility,
 };
 use sceneworks_core::model_artifacts::external_library::{
     resolve_model_availability, ExternalLibraryUnavailableContext, ModelAvailability,
@@ -313,6 +313,29 @@ pub(crate) async fn resolve_model_manifest_entry_by_repo(
 /// and the actual load can never disagree about which entries are valid: an entry that is still
 /// materializing, torn, unverifiable, or in a shape the runtime cannot serve is not a local
 /// candidate on either side of the boundary.
+///
+/// The agreement is about the *judgement*, not the cost. The scan validates on paths and sizes;
+/// the content re-hash lives at the lease boundary inside the store (sc-19712 F-3). Both sides
+/// still read the same provider and reach the same verdict for every case a user can reach — a
+/// bundle whose bytes were altered after publication is refused when the lease is taken, and the
+/// caller falls back to the source tier, which is the same outcome the old cost bought.
+/// Tells the catalog cache what the resolved cache's published set looks like right now, so a
+/// promotion published by the WORKER is reflected in the next catalog read (sc-19712 F-4).
+///
+/// Reads a handful of `stat`s and no locks — see
+/// [`ResolvedCacheStore::published_generation`](sceneworks_core::model_artifacts::resolved_cache::ResolvedCacheStore::published_generation).
+/// The catalog cache decides whether the key moved; this only observes it.
+pub(crate) fn note_local_tier_freshness(state: &AppState) {
+    if !state.settings.resolved_cache.enabled {
+        return;
+    }
+    let key =
+        sceneworks_core::model_artifacts::resolved_cache::ResolvedCacheStore::published_generation(
+            &state.settings.data_dir,
+        );
+    state.model_catalog_cache.note_local_tier_key(key);
+}
+
 pub(crate) fn local_resolved_artifacts(state: &AppState) -> Vec<ResolvedModelArtifact> {
     if !state.settings.resolved_cache.enabled {
         return Vec::new();
@@ -345,6 +368,31 @@ pub(crate) fn availability_for_entry(
         &selected.requirements,
         selected.receipt_backed,
         local_artifacts,
+    )
+}
+
+/// What a local copy of this entry could ever cover on this host, through the same shared
+/// selection the availability judgement uses (sc-19712 F-5). `None` for an entry with no external
+/// requirement closure at all — an imported or zero-download model is not served through the
+/// resolved cache in the first place, so "how much can it cache" has no answer to give, and a
+/// reassuring `full` would be an invention.
+pub(crate) fn cache_eligibility_for_entry(
+    data_dir: &Path,
+    entry: &Value,
+    requested_variant: Option<&str>,
+) -> Option<LocalCacheEligibility> {
+    let selected =
+        selected_requirements_for_model(entry, std::env::consts::OS, requested_variant, data_dir);
+    if selected.requirements.is_empty() {
+        return None;
+    }
+    Some(
+        sceneworks_core::model_artifacts::artifact_selection::local_cache_eligibility_for_model(
+            entry,
+            std::env::consts::OS,
+            requested_variant,
+            data_dir,
+        ),
     )
 }
 

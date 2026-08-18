@@ -2546,6 +2546,7 @@
   "model manifest response": [
     {
       "adapter": "z_image_diffusers",
+      "cacheEligibility": null,
       "cacheState": "missing",
       "capabilities": [
         "text_to_image"
@@ -2640,6 +2641,7 @@
     },
     {
       "adapter": "z_image_diffusers",
+      "cacheEligibility": null,
       "cacheState": "missing",
       "capabilities": [
         "text_to_image",

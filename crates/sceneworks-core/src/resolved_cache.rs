@@ -426,6 +426,12 @@ impl ResolvedCacheStore {
             .map_or_else(|| Ok(Vec::new()), |store| store.list(EntryListing::Inspect))
     }
 
+    /// Where this cache lives under a data dir. One definition, so a reader that never opens the
+    /// store cannot drift from one that does.
+    fn store_root(data_dir: &Path) -> PathBuf {
+        data_dir.join("models").join("resolved")
+    }
+
     /// Read-only handle onto an already-initialized cache, or `None` when no cache root exists.
     /// Never creates the root, never takes a session slot, never writes.
     ///
@@ -435,7 +441,7 @@ impl ResolvedCacheStore {
     /// catalog/preflight read, the status read, and the local-tier scan below — wants exactly the
     /// same no-session, no-usage, no-write handle.
     pub fn open_for_inspection(data_dir: &Path) -> Result<Option<Self>, ResolvedCacheError> {
-        let root = data_dir.join("models").join("resolved");
+        let root = Self::store_root(data_dir);
         if !root.exists() {
             return Ok(None);
         }
@@ -458,13 +464,82 @@ impl ResolvedCacheStore {
         }))
     }
 
+    /// A cheap change key for the published local tier, safe to read on every request (sc-19712
+    /// F-4).
+    ///
+    /// The **worker** publishes bundles and the **API** answers catalog reads from a cached
+    /// snapshot, and nothing crossed that process boundary: a model promoted after running from
+    /// the source library kept reading `installed_external_unavailable` until the snapshot
+    /// happened to be rebuilt, so the Model Manager withheld — with a "reconnect the library"
+    /// prompt — the very models a user had just made survive a disconnect.
+    ///
+    /// This is a `stat` per entry directory over the two files that mark the transitions the local
+    /// tier can see: `complete.receipt.json`, written once by `record_complete` and by nothing
+    /// else, and the eviction tombstone, which withdraws an entry before its directory is gone. It
+    /// deliberately does NOT move when an entry's journal is rewritten to stamp usage, because a
+    /// load changes no availability and re-deriving the catalog on every load would trade one
+    /// stale answer for a permanent rebuild. Entries not present, unreadable, or missing a receipt
+    /// simply contribute nothing.
+    ///
+    /// It is a change *detector*, not an ordering: compare it for equality only. A cache that does
+    /// not exist yet answers 0, which is also what an unreadable root answers — the caller's
+    /// fallback for both is the same, to keep whatever it had.
+    pub fn published_generation(data_dir: &Path) -> u64 {
+        let entries_root = Self::store_root(data_dir).join("entries");
+        let Ok(entries) = std::fs::read_dir(&entries_root) else {
+            return 0;
+        };
+        let mut observed = BTreeSet::new();
+        for item in entries.flatten() {
+            let Some(digest) = item
+                .file_name()
+                .to_str()
+                .filter(|value| is_lower_hex_64(value))
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            let entry = entries_root.join(&digest);
+            let receipt = std::fs::metadata(entry.join("complete.receipt.json"))
+                .ok()
+                .and_then(|metadata| metadata.modified().ok())
+                .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+                .map(|since| (since.as_secs(), since.subsec_nanos()));
+            let withdrawn = std::fs::symlink_metadata(entry.join(EVICTED_MARKER_FILE)).is_ok();
+            observed.insert((digest, receipt, withdrawn));
+        }
+        if observed.is_empty() {
+            return 0;
+        }
+        let mut hasher = Sha256::new();
+        for (digest, receipt, withdrawn) in observed {
+            hasher.update(digest.as_bytes());
+            let (seconds, nanos) = receipt.unwrap_or((0, 0));
+            hasher.update(seconds.to_le_bytes());
+            hasher.update(nanos.to_le_bytes());
+            hasher.update([u8::from(withdrawn)]);
+        }
+        let digest = hasher.finalize();
+        let mut key = [0_u8; 8];
+        key.copy_from_slice(&digest[..8]);
+        // Never collide with the "nothing to report" answer, so a real cache always reads as a
+        // change against an empty one.
+        u64::from_le_bytes(key) | 1
+    }
+
     /// Every published artifact this cache can actually serve a runtime load from (sc-19707).
     ///
     /// Validity is judged per entry and fails CLOSED to the source tier: an entry that is not
     /// `Complete`, whose journal or receipt does not verify, whose bundle no longer matches the
-    /// recorded closure (a torn, truncated, or hand-edited bundle), or whose shape the local tier
-    /// cannot serve is skipped rather than poisoning the whole answer. Read-only: never creates a
-    /// session, never stamps usage, and never repairs.
+    /// recorded closure by path or size (a torn, truncated, or hand-edited bundle), or whose shape
+    /// the local tier cannot serve is skipped rather than poisoning the whole answer. Read-only:
+    /// never creates a session, never stamps usage, and never repairs.
+    ///
+    /// Verification here is [`ContentVerification::PathsAndSizesOnly`] — this is a *scan*, and its
+    /// cost is paid per job submission and per catalog build. The content re-hash belongs to
+    /// [`Self::acquire_complete`], which re-runs this same validation at full strength under the
+    /// entry's locks before a lease is issued, so an entry this scan offers can still be refused
+    /// at the load boundary. See sc-19712 F-3.
     ///
     /// Entries rejected for an UNSUPPORTED SHAPE are reported separately rather than dropped, so
     /// the guard can name them: they are the only rejection class a user can act on (the bundle is
@@ -548,7 +623,23 @@ impl ResolvedCacheStore {
                 );
                 continue;
             }
-            if let Err(error) = validate_complete_metadata(&store, &metadata) {
+            // Paths and sizes only, NOT a content re-hash (sc-19712 F-3). This scan is a read:
+            // it answers "which entries could serve a load", for the API's per-submission
+            // preflight and catalog build and for the worker's pre-loader guard. Re-hashing here
+            // made that answer cost the whole cache — measured at 929.6 s for one 5.57 GB bundle
+            // on a single job submission, against a default budget of 64 GiB — so populating the
+            // cache made every submission slower than the load the cache exists to save.
+            //
+            // What makes the cheap scan safe is that it is not the last word: `acquire_complete`
+            // re-verifies at full strength under the entry's locks immediately before the lease
+            // that hands bytes to a runtime, and every write validates at full strength. A scan
+            // that offers an entry whose bytes were altered after publication therefore cannot
+            // load it; the lease refuses and the caller falls back to the source tier.
+            if let Err(error) = validate_complete_metadata_inner(
+                &store,
+                &metadata,
+                ContentVerification::PathsAndSizesOnly,
+            ) {
                 tracing::debug!(
                     %digest,
                     %error,
@@ -924,6 +1015,18 @@ impl ResolvedCacheStore {
             }
             _ => return Ok(None),
         };
+        // FULL STRENGTH, deliberately: this is the load boundary. The scan
+        // ([`Self::valid_local_artifacts`]) and the retention sweep both validate on paths and
+        // sizes only, and this re-hash under the entry's locks is precisely what makes that safe —
+        // it is the check that must refuse an altered bundle before any bytes reach a runtime.
+        //
+        // The boundary is defended three times over, so do not read a green suite as licence to
+        // relax any one of them: this call, `acquire_runtime_lease`'s own
+        // `ResolvedModelArtifact::validate` just below, and the full-strength
+        // `write_metadata_unlocked` that stamps usage all re-hash the closure. The *property* is
+        // pinned by
+        // `the_local_tier_scan_skips_content_hashing_while_the_lease_boundary_still_refuses_altered_bytes`;
+        // because of the redundancy that test stays green if only one of the three is downgraded.
         validate_complete_metadata(self, &metadata)?;
         let artifact = Arc::new(metadata.artifact.clone());
         let runtime_lease = resolver
@@ -2151,9 +2254,16 @@ enum ContentVerification {
     /// load, and the cost is proportional to the bundle size.
     RehashEveryFile,
     /// Validates identity, shape, confinement, file presence and sizes, but does not re-hash file
-    /// contents. Used by retention, which is deciding whether to *delete* the bundle rather than
-    /// load it: the link/escape confinement checks are what keep a removal inside the managed
-    /// root, while re-hashing gigabytes would hold locks that block model loads.
+    /// contents. Used by every path that is *reading* rather than loading: journal slot selection,
+    /// the status listing, the local-tier scan, and retention. Retention is deciding whether to
+    /// *delete* the bundle rather than load it, so the link/escape confinement checks are what
+    /// keep a removal inside the managed root; re-hashing gigabytes would hold locks that block
+    /// model loads.
+    ///
+    /// This mode is safe on a read path only because it is never the last word: the load boundary
+    /// ([`ResolvedCacheStore::acquire_complete`]) re-verifies at [`Self::RehashEveryFile`] under
+    /// the entry's locks before any bytes reach a runtime, and every journal write validates at
+    /// full strength. Do not weaken that boundary — it is what this mode leans on.
     PathsAndSizesOnly,
 }
 
