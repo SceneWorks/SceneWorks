@@ -22,6 +22,7 @@ import wanI2vA14bApache from "../../../desktop/licenses/wan2.2-i2v-a14b/Apache-2
 import wanT2vA14bApache from "../../../desktop/licenses/wan2.2-t2v-a14b/Apache-2.0.txt?raw";
 import ltxLicense from "../../../desktop/licenses/ltx-2.3/LTX-2-Community-License.txt?raw";
 import ltxGemma from "../../../desktop/licenses/ltx-2.3/Gemma-Terms.txt?raw";
+import ltx23IcLorasNotice from "../../../desktop/licenses/ltx-2.3-ic-loras/NOTICE.txt?raw";
 // Audio model weights (epic 13400, sc-13402). All permissive (Apache-2.0 / MIT) —
 // downloaded on first use from the upstream Hugging Face repos and run natively
 // (Candle) on every platform.
@@ -130,6 +131,7 @@ const DOCUMENT_TEXT = {
   "wan2.2-t2v-a14b-apache": wanT2vA14bApache,
   "ltx-2.3-license": ltxLicense,
   "ltx-2.3-gemma": ltxGemma,
+  "ltx-2.3-ic-loras-notice": ltx23IcLorasNotice,
   "kokoro-82m-apache": kokoroApache,
   "moss-soundeffect-v2-apache": mossApache,
   "acestep-v15-turbo-mit": acestepMit,

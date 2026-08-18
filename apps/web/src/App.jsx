@@ -52,7 +52,7 @@ import { useJobEvents } from "./hooks/useJobEvents.js";
 import { AppStaticContext, AppLiveContext } from "./context/AppContext.js";
 import { ScreenActiveContext } from "./context/ScreenActiveContext.js";
 import { DEFAULT_MAC_CAPABILITIES } from "./macGating.js";
-import { generationModelsForType } from "./modelEligibility.js";
+import { generationModelsForType, videoModelUsable } from "./modelEligibility.js";
 import { isAccentId } from "./accents.js";
 import { writeDefaultGenerationQuality } from "./generationQuality.js";
 import { persistNavigationPreferences, putUiPreferences } from "./uiPreferences.js";
@@ -1322,8 +1322,10 @@ export function App() {
   }, [models]);
   const videoModels = useMemo(() => {
     const items = generationModelsForType(models, "video");
-    return items.length || models.length ? items : fallbackModels.filter((model) => model.type === "video");
-  }, [models]);
+    return items.length || models.length
+      ? items
+      : fallbackModels.filter((model) => videoModelUsable(model, macCapabilities));
+  }, [models, macCapabilities]);
   // Audio models (epic 13400) — same live-catalog-then-fallback split as image/video, consumed by
   // the Audio Studio (C0/C1). Per-mode eligibility comes from audioModelServesMode.
   const audioModels = useMemo(() => {

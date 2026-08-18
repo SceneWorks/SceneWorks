@@ -7116,6 +7116,7 @@
           // avoids a ~73 GB whole-repo download.
           "provider": "huggingface",
           "repo": "wikeeyang/Flux2-Klein-9B-True-V2",
+          "revision": "9c9fe9880029a4e0c4af5ca7d86e83cdb83eea83",
           "files": ["Flux2-Klein-9B-True-v2-bf16.safetensors"],
           "estimatedSizeBytes": 18253611008
         }
@@ -10903,6 +10904,8 @@
           // Dense bf16 tier (sc-8513): built from ltx-2.3-22b-distilled-1.1 via convert_and_assemble
           // (LtxConvertOpts::default, quantize:false). Exact on-disk size of the hosted bf16/ subdir
           // (transformer 37.98 GB dense BF16 + the already-bf16 connector/vae/upsampler/vocoder).
+          // The subdir exists ONLY at `01df27d3…` (upload commit "Add dense bf16 tier (sc-8513)",
+          // 2026-07-05) — see the REVISION note at the head of this array for why every row moved.
           "estimatedSizeBytes": 47092811992,
           "footprint": { "diskSizeBytes": 47092811992, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
@@ -11006,12 +11009,16 @@
       "family": "ltx-video",
       "type": "video",
       "adapter": "ltx_video",
+      // SC-18902: the exact-head Windows/CUDA route produced unusable undistilled noise. Eros is
+      // available only through its validated MLX two-pass cond_safe recipe; base LTX-2.3 remains
+      // the cross-platform LTX choice.
+      "macOnly": true,
       "capabilities": ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
       "downloads": [
         {
-          // Candle and MLX both require the external Gemma-3-12B encoder. Provision the same pinned
-          // shared bundle component as base LTX so a fresh Eros install is runnable without relying on
-          // a previously-installed sibling model or an ambient Hugging Face cache.
+          // MLX requires the external Gemma-3-12B encoder. Provision the same pinned shared bundle
+          // component as base LTX so a fresh Eros install is runnable without relying on a
+          // previously-installed sibling model or an ambient Hugging Face cache.
           "provider": "huggingface",
           "repo": "SceneWorks/ltx-2.3-mlx",
           "coRequisite": true,
@@ -11023,25 +11030,32 @@
         {
           "provider": "huggingface",
           "repo": "TenStrip/LTX2.3-10Eros",
+          "revision": "84a05a13610d78dbe4340d1be23fd8185e10f697",
           // Community LTX-2.3 merge (Sulphur-2-base, I2V-tuned). The repo also ships
           // fp8 and fp8-transformer variants; we only need the bf16 all-in-one, which
           // shares the official ltx-2.3-22b-distilled key layout (model.diffusion_model.*
           // transformer + bundled vae/audio_vae/vocoder), so it is a drop-in checkpoint.
           "files": ["10Eros_v1.3_bf16.safetensors"],
           "default": true,
+          "platforms": ["macos"],
           "estimatedSizeBytes": 46139885750
         },
         {
-          // Recommended cond_safe distill LoRA. Required runtime component on both native
-          // paths: it is auto-injected per-pass (see mlx.autoDistillLora) so 10Eros
-          // produces usable text-to-video. Only the cond_safe variant is fetched.
+          // Recommended cond_safe distill LoRA. Required runtime component on the MLX path: it is
+          // auto-injected per-pass (see mlx.autoDistillLora) so 10Eros produces usable text-to-video.
+          // Only the cond_safe variant is fetched.
           "provider": "huggingface",
           "repo": "TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments",
+          "revision": "9c3548954510182827d7bfc872fd7cceb64230fd",
           // Co-requisite (sc-9696): the cond_safe distill LoRA is a required runtime component
           // (auto-injected per-pass; see mlx.autoDistillLora), so it must download alongside the
           // 10Eros checkpoint rather than being a pick-one alternate.
           "coRequisite": true,
+          // This adapter is exclusive to Eros. If an old off-Mac Eros install is removed through
+          // its cleanup-only catalog tombstone, reclaim this repo alongside the primary checkpoint.
+          "cleanupWithModel": true,
           "files": ["ltx-2.3-22b-distilled-lora-1.1_fro90_ceil72_condsafe.safetensors"],
+          "platforms": ["macos"],
           "estimatedSizeBytes": 662072824
         }
       ],
@@ -11090,8 +11104,8 @@
         // 704 (= 64·11) 720p buckets apply (sc-12294).
         "resolutions": ["768x512", "512x768", "640x640", "1280x704", "704x1280"],
         "requiresDimensionsMultipleOf": 64,
-        // Epic 7114 curated sampler menu (sc-7296): shares LTX's curated set (same engine id as
-        // base LTX-2.3 per backend). No scheduler axis.
+        // Epic 7114 curated sampler menu (sc-7296): shares base LTX's curated set on its MLX route.
+        // Eros has no Candle route after SC-18902 acceptance. No scheduler axis.
         "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_sde", "uni_pc", "lcm", "ddim"]
       },
       "loraCompatibility": {
@@ -11506,6 +11520,7 @@
         {
           "provider": "huggingface",
           "repo": "lightx2v/Wan2.2-Lightning",
+          "revision": "18bccf8884ec0a078eed79785eb4ef13ea16ce1e",
           "coRequisite": true,
           "files": [
             "Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1.1/high_noise_model.safetensors",
@@ -11794,6 +11809,7 @@
         {
           "provider": "huggingface",
           "repo": "lightx2v/Wan2.2-Lightning",
+          "revision": "18bccf8884ec0a078eed79785eb4ef13ea16ce1e",
           "coRequisite": true,
           "files": [
             "Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1/high_noise_model.safetensors",
@@ -13530,6 +13546,7 @@
         {
           "provider": "huggingface",
           "repo": "xinsir/controlnet-tile-sdxl-1.0",
+          "revision": "1ae8d9529efe58f7362a987363ff86a7904dc84f",
           "files": ["diffusion_pytorch_model.safetensors", "config.json"],
           "estimatedSizeBytes": 2500000000
         }
@@ -15013,7 +15030,7 @@
       // `synchformer` / `dit` / `vae` / `vocoder` from `LoadSpec::components` via `require_component`.
       // So EACH of the five checkpoints is provisioned by its OWN `coRequisite` download tagged with the
       // matching `componentId`, and the worker's generic `resolve_co_requisites` seam (sc-13679) stages
-      // all five by id. The five span two repos: the DFN5B-CLIP conditioner (apple/DFN5B-CLIP-ViT-H-14-384)
+      // all five by id. The five span two repos: the DFN5B-CLIP conditioner (apple/DFN5B-CLIP-ViT-H-14-378)
       // and synchformer/dit/vae + the in-repo BigVGAN vocoder (hkchengrex/MMAudio). The install/download
       // flow requires ONE non-coRequisite primary anchor (`model_download()` returns None otherwise), yet
       // mmaudio has no primary checkpoint — so the `dit` network doubles as the anchor (the most-primary
@@ -15045,7 +15062,7 @@
         },
         {
           "provider": "huggingface",
-          "repo": "apple/DFN5B-CLIP-ViT-H-14-384",
+          "repo": "apple/DFN5B-CLIP-ViT-H-14-378",
           "revision": "01b771ed0d1395ca5ffdd279897d665ebe00dfd2",
           "coRequisite": true,
           "componentId": "clip",
@@ -15148,7 +15165,7 @@
         },
         {
           "provider": "huggingface",
-          "repo": "apple/DFN5B-CLIP-ViT-H-14-384",
+          "repo": "apple/DFN5B-CLIP-ViT-H-14-378",
           "revision": "01b771ed0d1395ca5ffdd279897d665ebe00dfd2",
           "coRequisite": true,
           "componentId": "clip",

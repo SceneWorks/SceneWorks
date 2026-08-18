@@ -15,6 +15,9 @@ const CALIBRATION_SCHEMA = JSON.parse(
   readFileSync(path.join(ROOT, "packages/schemas/memory-calibration.schema.json"), "utf8"),
 );
 export const HARNESS_VERSION = "sceneworks-memory-v5";
+// sc-18864 bumped the RECORD SHAPE (per-phase `deviceBytes`/`wiredBytes` removed) without changing
+// the measuring instrument, so the bundle schema version moves and the harness version does not.
+export const SCHEMA_VERSION = 5;
 export const REQUIRED_SCENARIOS = [
   "exact_fit", "unknown_budget", "stale_evidence", "warm_repeat",
   "cancel", "error", "loadability", "overlay",
@@ -145,8 +148,40 @@ function physicalMlxDerivation(sessionId) {
   };
 }
 
+// sc-18864. The immutable provider-stdout receipts under `docs/calibration/` were emitted by the
+// schema-v4 adapter, which wrote `deviceBytes` and `wiredBytes` as verbatim copies of
+// `allocatorBytes`. The receipts are byte-immutable provenance and must NOT be rewritten, so the
+// v4 -> v5 projection happens here, during reconstruction, and only for a receipt that actually
+// carries the aliasing the adapter is known to have produced. A receipt whose aliases are NOT
+// copies is refused outright rather than normalised: it would mean the adapter measured something
+// the field names claimed, and this projection would be discarding a real reading.
+export function projectPhaseMetricsToSchemaV5(observedMemory, label) {
+  if (!observedMemory || typeof observedMemory !== "object") return observedMemory;
+  const projected = {};
+  for (const [phaseName, values] of Object.entries(observedMemory)) {
+    if (!values || typeof values !== "object" || !("deviceBytes" in values || "wiredBytes" in values)) {
+      projected[phaseName] = values;
+      continue;
+    }
+    const { deviceBytes, wiredBytes, ...rest } = values;
+    for (const [alias, aliasValue] of [["deviceBytes", deviceBytes], ["wiredBytes", wiredBytes]]) {
+      if (aliasValue !== rest.allocatorBytes) {
+        fail(`${label}.${phaseName}.${alias} is ${aliasValue}, not a copy of allocatorBytes ${rest.allocatorBytes}`);
+      }
+    }
+    projected[phaseName] = rest;
+  }
+  return projected;
+}
+
 function recordFromPhysicalMlxResponse(providerResponse, request, session) {
   const { sourceCapture, ...fragment } = providerResponse;
+  if (fragment.observedMemory) {
+    fragment.observedMemory = projectPhaseMetricsToSchemaV5(
+      fragment.observedMemory,
+      `${session.id}.providerResponse.observedMemory`,
+    );
+  }
   const planned = request.planned;
   const baseInput = sourceCapture.inputs.find((input) => input?.role === "base");
   const record = {
@@ -404,22 +439,26 @@ function validateHardware(record) {
   }
 }
 
+// sc-18864: schema v5 carries the two counters MLX actually exposes plus their documented sum.
+// `deviceBytes`/`wiredBytes` are gone — both adapters emitted them as copies of `allocatorBytes`,
+// which is how every committed MLX record asserted wired residency above its own probed ceiling.
+// `allocatorBytes` is DERIVED, so the rule here is an IDENTITY, not an ordering: an ordering is
+// what let one number wear three names and drift from its own definition.
+export const PHASE_METRICS = Object.freeze(["activeBytes", "allocatorBytes", "reclaimableBytes"]);
+
 function validatePhaseMetrics(metrics, label) {
   object(metrics, label);
   for (const phase of ["conditioning", "denoise", "decode", "overall"]) {
     const values = metrics[phase];
     object(values, `${label}.${phase}`);
-    for (const metric of ["activeBytes", "allocatorBytes", "deviceBytes", "wiredBytes", "reclaimableBytes"]) {
+    for (const metric of PHASE_METRICS) {
       number(values[metric], `${label}.${phase}.${metric}`);
     }
-    if (values.allocatorBytes < values.activeBytes || values.deviceBytes < values.activeBytes) {
-      fail(`${label}.${phase}: allocator/device must cover active bytes`);
-    }
-    if (values.wiredBytes < values.activeBytes || values.reclaimableBytes > values.allocatorBytes) {
-      fail(`${label}.${phase}: wired must cover active and reclaimable cannot exceed allocator bytes`);
+    if (values.allocatorBytes !== values.activeBytes + values.reclaimableBytes) {
+      fail(`${label}.${phase}: allocator bytes must equal active plus reclaimable bytes`);
     }
   }
-  for (const metric of ["activeBytes", "allocatorBytes", "deviceBytes", "wiredBytes", "reclaimableBytes"]) {
+  for (const metric of PHASE_METRICS) {
     const phaseMax = Math.max(metrics.conditioning[metric], metrics.denoise[metric], metrics.decode[metric]);
     if (metrics.overall[metric] < phaseMax) fail(`${label}.overall.${metric} must cover phase peaks`);
   }
@@ -548,12 +587,20 @@ function validateComplete(record) {
   ) fail(`${record.id}: negative mutation did not breach a threshold`);
   if (record.loadability.result !== "passed") fail(`${record.id}: loadability did not pass`);
   text(record.loadability.resolvedPathFingerprint, `${record.id}.loadability.resolvedPathFingerprint`);
-  const observedDeviceBytes = record.observedMemory.overall.deviceBytes
-    ?? record.observedMemory.overall.activeBytes;
-  if (observedDeviceBytes > record.hardware.memoryBytes) {
-    fail(`${record.id}: overall device bytes exceed probed hardware memory`);
+  assertResidencyFitsHardware(record);
+}
+
+// sc-18864. The quantity that must physically fit is the NON-RECLAIMABLE residency — the live-array
+// peak. `allocatorBytes` adds an instantaneous end-of-phase cache reading to a peak-over-window, so
+// it is an upper bound across two instants and legitimately exceeds physical memory on a capture
+// that completed (a real LTX render co-existed 7.46 GiB above recommendedMaxWorkingSetSize). This
+// used to read `deviceBytes`, which was that bound under another name.
+function assertResidencyFitsHardware(record) {
+  const resident = record.observedMemory.overall.activeBytes;
+  if (resident > record.hardware.memoryBytes) {
+    fail(`${record.id}: overall resident bytes exceed probed hardware memory`);
   }
-  if (record.backend === "mlx" && record.observedMemory.overall.wiredBytes > record.hardware.wiredLimitBytes) {
+  if (record.backend === "mlx" && resident > record.hardware.wiredLimitBytes) {
     fail(`${record.id}: overall wired bytes exceed the probed wired ceiling`);
   }
 }
@@ -602,10 +649,18 @@ function validateRuntimeComplete(record) {
   for (const name of ["exact_fit", "unknown_budget", "stale_evidence", "loadability"]) {
     if (scenarios.get(name)?.result !== "passed") fail(`${record.id}: ${name} must pass for runtime activation`);
   }
-  for (const name of ["warm_repeat", "cancel", "error"]) {
-    const scenario = scenarios.get(name);
-    if (scenario?.result !== "not_run") fail(`${record.id}: ${name} must remain explicitly not_run`);
-    text(scenario.reason, `${record.id}.${name}.reason`);
+  const lifecycle = ["warm_repeat", "cancel", "error"].map((name) => scenarios.get(name));
+  const lifecycleNotRun = lifecycle.every((scenario) => scenario?.result === "not_run");
+  const parityOnlyLifecycle = lifecycle[0]?.result === "passed"
+    && lifecycle.slice(1).every((scenario) => scenario?.result === "not_run");
+  const lifecyclePassed = lifecycle.every((scenario) => scenario?.result === "passed")
+    && lifecycle.slice(1).every((scenario) =>
+      scenario.cleanupVerified === true && scenario.warmFollowUpPassed === true);
+  if (!lifecycleNotRun && !parityOnlyLifecycle && !lifecyclePassed) {
+    fail(`${record.id}: runtime lifecycle must be entirely not_run, parity-only, or fully passed with cleanup and recovery`);
+  }
+  for (const [index, name] of ["warm_repeat", "cancel", "error"].entries()) {
+    text(lifecycle[index].reason, `${record.id}.${name}.reason`);
   }
   const exact = scenarios.get("exact_fit");
   number(exact.predictedBytes, `${record.id}.exact_fit.predictedBytes`);
@@ -633,10 +688,33 @@ function validateRuntimeComplete(record) {
   ) fail(`${record.id}: runtime-complete quality threshold exceeded`);
   if (record.loadability.result !== "passed") fail(`${record.id}: runtime-complete loadability did not pass`);
   text(record.loadability.resolvedPathFingerprint, `${record.id}.loadability.resolvedPathFingerprint`);
-  const observedDeviceBytes = record.observedMemory.overall.deviceBytes
-    ?? record.observedMemory.overall.activeBytes;
-  if (observedDeviceBytes > record.hardware.memoryBytes) {
-    fail(`${record.id}: overall device bytes exceed probed hardware memory`);
+  // The wired ceiling was checked only on `complete` before sc-18864, which is exactly how three
+  // runtime-complete `mlx:flux2_dev` records shipped claiming up to 26.0 GB more wired residency
+  // than the probed limit allows. Both statuses now run the same check.
+  assertResidencyFitsHardware(record);
+}
+
+// sc-18864 review: `diagnostics.measurements.predictedOverallCeiling` is a DIAGNOSTIC COPY of the
+// typed `predictedPeakBytes.overall`. The LTX arm derives both from `predicted_ceiling` over the
+// same `overall.active` peak and says so in its own comment ("Agrees with the emitted
+// predictedPeakBytes.overall by construction"). Nothing compared them, so when this story moved
+// `predictedPeakBytes` onto the resident peak, all 14 committed LTX records kept a diagnostic still
+// computed over the `allocatorBytes` co-existence bound: 2.5-4x the typed field sitting beside it,
+// and `imc-2c064567893ea869006e` publishing 149.79 GB of predicted demand on a 130.57 GB host — the
+// exact impossible figure this story exists to remove. An unchecked copy is a SECOND, UNVERSIONED
+// DEFINITION of one quantity, which is the drift this story closes. The rule is EQUALITY, not an
+// ordering: an ordering is what let the two spellings diverge in the first place.
+function validateDiagnosticCeilingAgreesWithTypedField(record) {
+  const measurements = record.diagnostics?.measurements;
+  if (!Array.isArray(measurements)) return;
+  const declared = measurements.find((entry) => entry?.name === "predictedOverallCeiling");
+  const typed = record.predictedPeakBytes?.overall;
+  if (declared === undefined || typeof typed !== "number") return;
+  if (declared.value !== typed) {
+    fail(
+      `${record.id}: diagnostics predictedOverallCeiling ${declared.value} must equal ` +
+        `predictedPeakBytes.overall ${typed}`,
+    );
   }
 }
 
@@ -678,6 +756,7 @@ export function validateRecord(record) {
   object(record.loadability, `${record.id}.loadability`);
   object(record.quality, `${record.id}.quality`);
   if (!Array.isArray(record.scenarios)) fail(`${record.id}: scenarios must be an array`);
+  validateDiagnosticCeilingAgreesWithTypedField(record);
   if (record.status === "complete") validateComplete(record);
   if (record.status === "runtime_complete") validateRuntimeComplete(record);
   if (record.status === "negative_complete") validateNegative(record);
@@ -687,7 +766,7 @@ export function validateRecord(record) {
 export function validateBundle(bundle) {
   validateSchema(bundle);
   object(bundle, "bundle");
-  if (bundle.schemaVersion !== 4 || bundle.harnessVersion !== HARNESS_VERSION || !Array.isArray(bundle.records)) {
+  if (bundle.schemaVersion !== SCHEMA_VERSION || bundle.harnessVersion !== HARNESS_VERSION || !Array.isArray(bundle.records)) {
     fail("invalid bundle envelope");
   }
   const sessions = new Map();
@@ -1065,7 +1144,7 @@ export function mergeBundles(left, right) {
     sourceSessions.set(session.id, session);
   }
   return {
-    schemaVersion: 4,
+    schemaVersion: SCHEMA_VERSION,
     harnessVersion: HARNESS_VERSION,
     sourceSessions: [...sourceSessions.values()].sort((a, b) => a.id.localeCompare(b.id)),
     records: [...records.values()].sort((a, b) => a.id.localeCompare(b.id)),
@@ -1101,9 +1180,7 @@ export function compareRungReuse(fresh, reused, tolerance = RUNG_REUSE_TOLERANCE
       || Object.keys(reusedRecord.observedMemory).length !== 1
     )) fail(`${logicalCaseId}: fresh/reused observedMemory shapes differ`);
     const phases = overallOnly ? ["overall"] : ["conditioning", "denoise", "decode", "overall"];
-    const metricNames = overallOnly
-      ? ["activeBytes"]
-      : ["activeBytes", "allocatorBytes", "deviceBytes", "wiredBytes", "reclaimableBytes"];
+    const metricNames = overallOnly ? ["activeBytes"] : PHASE_METRICS;
     for (const phase of phases) {
       for (const metric of metricNames) {
         const freshBytes = freshRecord.observedMemory[phase][metric];
@@ -1293,6 +1370,9 @@ export async function runProviderPlan({
   // sc-17774: injectable so the runner's own tests can drive synthetic repositories, which have no
   // inference crate layout to derive a real closure from. Production always uses the default.
   closureDigestFor = null,
+  // SC-20191 keeps the canonical request/record assembly here while allowing the one contained
+  // campaign entry to transport the provider request through its sealed watchdog wrapper.
+  executeProvider = execute,
 }) {
   if (!Array.isArray(providerCommand) || !providerCommand.length) fail("provider command must be a JSON argv array");
   if (Boolean(rawLogDir) !== Boolean(sourcePathPrefix)) {
@@ -1373,7 +1453,7 @@ export async function runProviderPlan({
   };
   const existing = resume
     ? validateBundle(resume)
-    : { schemaVersion: 4, harnessVersion: HARNESS_VERSION, sourceSessions: [], records: [] };
+    : { schemaVersion: SCHEMA_VERSION, harnessVersion: HARNESS_VERSION, sourceSessions: [], records: [] };
   const selectedConfig = {
     ...config,
     providers: config.providers.filter(
@@ -1406,7 +1486,7 @@ export async function runProviderPlan({
   if (backends.size !== 1) {
     fail(`provider run must select exactly one backend; pass --backend mlx|candle (selected: ${[...backends].join(", ")})`);
   }
-  const probe = JSON.parse(await execute(
+  const probe = JSON.parse(await executeProvider(
     providerCommand[0],
     providerCommand.slice(1),
     canonicalJson({ action: "probe", repositories }),
@@ -1494,7 +1574,7 @@ export async function runProviderPlan({
       repositoryPaths: { sceneWorks: sceneWorksRepo, inference: inferenceRepo },
       hardware: probe.hardware,
     });
-    const providerOutput = await execute(
+    const providerOutput = await executeProvider(
       providerCommand[0],
       providerCommand.slice(1),
       providerRequest,
@@ -1694,7 +1774,7 @@ export async function runProviderPlan({
     );
     if (onProviderCheckpoint) {
       await onProviderCheckpoint(mergeBundles(existing, {
-        schemaVersion: 4,
+        schemaVersion: SCHEMA_VERSION,
         harnessVersion: HARNESS_VERSION,
         sourceSessions: incomingSessions,
         records: incoming,
@@ -1702,7 +1782,7 @@ export async function runProviderPlan({
     }
   }
   return mergeBundles(existing, {
-    schemaVersion: 4,
+    schemaVersion: SCHEMA_VERSION,
     harnessVersion: HARNESS_VERSION,
     sourceSessions: incomingSessions,
     records: incoming,

@@ -28,14 +28,17 @@
       "unmeasured": "No request-peak measurement exists for this family/backend at the pinned revision."
     },
     "requestPeak.byTier": "Optional per-tier override of the family/backend request-peak finding. Required when measurements differ by numeric tier; omitted tiers inherit requestPeak.finding.",
-    "requestPeak.scopes": "Optional exact cell selectors for measurements narrower than a whole family/backend or tier. Each selector may name entries, tiers, modes, and overlays; omitted dimensions are wildcards. A matching selector overrides byTier and finding."
+    "requestPeak.scopes": "Optional exact cell selectors for measurements narrower than a whole family/backend or tier. Each selector may name entries, tiers, modes, and overlays; omitted dimensions are wildcards. A matching selector overrides byTier and finding.",
+    "unroutedBackends": "Family-level declarations for a backend the routing catalog does not serve. Each declaration carries a reason, owning story, and evidence. It is distinct from a routed backend whose rungs are Missing, and generation fails if the route appears while the declaration remains.",
+    "modalityRelationship": "Optional explicit relationship between image and video entries that share one surveyed family. Entries remain modality-distinct while provider/architecture facts may be shared; generation validates every named entry against the admitted catalog."
   },
   "notes": [
     "Rung 4 requires rung 1 engaged in the same request (gen_core::memory_strategy BOUNDED_TRANSFORMER_RESIDENCY_REQUIRES). That prerequisite is NOT restated per family here: the generator reads it from the same rung-1 predicate it already uses for the staged_residency cells, so a family that gains rung-1 capability stops reporting the prerequisite gap without a survey edit.",
     "Structural applicability is about the DENOISE trunk. The component-scope axis (Dit / TextEncoder / Both) is a published rung-4 parameter, not a separate rung; where a family's text encoder changes the answer it is recorded in `findings`.",
     "Overlay compatibility is a property of the provider's ADAPTER MECHANISM, not of the architecture: a provider that installs adapters as forward-time residuals can replay them onto a materialized block, while one that folds a delta into the base weight at load cannot. Only the two families with code evidence either way carry an `overlays` finding.",
     "Why `unmeasured` is the honest answer almost everywhere, and why a static proxy will not do. docs/sc-16195/resolution-sweep.json measures, at 1024x1024 on the RESIDENT hold-all path, weight residency against activation transient: illustrious q8 4.74 vs 14.04 GiB, sdxl bf16 6.48 vs 14.04, z-image-turbo q4 5.38 vs 14.04, lens q4 16.46 vs 14.04, qwen-image q8 33.45 vs 7.66, krea-2-turbo q8 18.06 vs 7.67. Weight residency is a MINORITY of that peak on three of the six tiers, which is enough to show rung 4 cannot be assumed to move the request peak — but not enough to predict that it will not, because rung 4 is only ever selected in composition with rungs 2 and 3, which attack exactly the transient term those rows are dominated by. Z-Image is the worked case: its resident-path row looks transient-bound, and once the ladder is engaged its request peak is decode-bound at ~4.36 GiB and rung 4 still moved it. So this axis is decided by a per-family measurement of the rung-3 composition against the rung-4 composition, which is what Krea's Candle evidence records and what no other family has.",
-    "What `blockStacks` covers, stated once. It inventories the stacks resident during the DENOISE phase — the trunk a rung-4 window would bound, plus any second network held alongside it (a control branch, an identity path, a second expert), because those set the share of resident transformer weight the rung can actually move. It does NOT inventory text-encoder or vision-tower stacks: those belong to the conditioning phase, they are what rung 1 sheds, and the component-scope parameter (Dit / TextEncoder / Both) is the axis that addresses them. Where a family's encoder changes the rung-4 answer it is recorded in `findings` instead."
+    "What `blockStacks` covers, stated once. It inventories the stacks resident during the DENOISE phase — the trunk a rung-4 window would bound, plus any second network held alongside it (a control branch, an identity path, a second expert), because those set the share of resident transformer weight the rung can actually move. It does NOT inventory text-encoder or vision-tower stacks: those belong to the conditioning phase, they are what rung 1 sheds, and the component-scope parameter (Dit / TextEncoder / Both) is the axis that addresses them. Where a family's encoder changes the rung-4 answer it is recorded in `findings` instead.",
+    "An unrouted backend is a routing fact, not five implementation verdicts. Video families must declare every absent family-level backend under `unroutedBackends`; the generator cross-checks those declarations against the same route oracle that creates matrix lanes and rejects both an undeclared absence and a declaration that outlives a newly added route."
   ],
   "families": {
     "15509": {
@@ -2400,11 +2403,39 @@
     },
     "15528": {
       "name": "Bernini",
+      "modalityRelationship": {
+        "entries": {
+          "image": ["bernini_image"],
+          "video": ["bernini"]
+        },
+        "sharedProviderContract": true,
+        "reason": "The image and video catalog entries resolve to the same Bernini provider, dual-expert renderer weights, and memory-strategy contract. Their catalog modalities and mode surfaces remain distinct; architecture and provider-memory facts are shared rather than duplicated.",
+        "evidence": [
+          {
+            "source": "SceneWorks:crates/sceneworks-worker/src/engines.rs:543-558",
+            "reason": "The image engine table resolves `bernini_image` to the `bernini` provider rather than a second image-only model."
+          },
+          {
+            "source": "SceneWorks:crates/sceneworks-worker/src/video_jobs/bernini.rs:17-39,79-87",
+            "reason": "The video resolver maps `bernini` to the same provider id, and the shared tier machinery explicitly serves both the video and image catalog entries."
+          },
+          {
+            "source": "inference:crates/media/mlx-gen/mlx-gen-bernini/src/memory_strategy.rs:1-8",
+            "reason": "The contract module explicitly states that the full provider serving `bernini_image` and the renderer sibling share one architecture, staged phase order, tiled decode, bounded attention, and block stream."
+          }
+        ]
+      },
       "backends": {
         "mlx": {
           "structuralApplicability": "partial",
-          "implementation": "none",
-          "summary": "Two uniform 40-block Wan expert stacks, both held resident for the whole denoise and switched between by noise level. Each is windowable; one BlockPlan does not cover the trunk, because the trunk is two models.",
+          "implementation": "shared-primitive",
+          "implementedEntries": ["bernini", "bernini_image"],
+          "implementedOverlays": ["none"],
+          "strategyParameters": {
+            "transformerWindowSize": 10,
+            "transformerWindowComponent": "Dit"
+          },
+          "summary": "Two uniform 40-block Wan expert stacks form one 80-block global window space. Both experts load deferred and mlx-gen's shared block-residency runner materializes only the selected window, so the old finding that an idle expert remains resident is no longer true.",
           "blockStacks": [
             {
               "name": "low_noise_model blocks",
@@ -2419,30 +2450,31 @@
           ],
           "evidence": [
             {
-              "source": "inference:crates/media/mlx-gen/mlx-gen-wan/src/transformer.rs",
-              "reason": "WanTransformer holds a single `blocks: Vec<Block>`; everything else is patch/text/time embedders and the head. So ONE expert is a uniform stack."
+              "source": "inference:crates/media/mlx-gen/mlx-gen-bernini/src/memory_strategy.rs:1-44",
+              "reason": "The complete contract declares all five rungs and proves the only accepted shape is 2 × 40 blocks. Its global block indices are high 0..40 and low 40..80, and every published cadence divides the expert boundary."
             },
             {
-              "source": "inference:crates/media/mlx-gen/mlx-gen-bernini/src/pipeline.rs",
-              "reason": "The renderer loads `low_noise_model.safetensors` AND `high_noise_model.safetensors` into two WanTransformers, builds a `BExpert` over each, and passes both live into the denoise, which switches on a noise boundary per step. Both stacks are alive across the whole denoise — the trunk is 2 x 40 blocks, not 40."
+              "source": "inference:crates/media/mlx-gen/mlx-gen-bernini/src/memory_strategy.rs:286-373",
+              "reason": "The provider contract marks Resident, StagedResidency, BoundedDecode, BoundedAttention and streamable BoundedTransformerResidency Implemented, with transformer materialization gated on a directory-backed deferred load."
             },
             {
-              "source": "inference:crates/media/mlx-gen/mlx-gen-bernini/src/bernini.rs",
-              "reason": "`if !config.dual_model { return Err(...) }` — a single-expert snapshot is refused, so the two-stack shape is the only shape this family has."
+              "source": "inference:crates/media/mlx-gen/mlx-gen-bernini/src/pipeline.rs:549-581",
+              "reason": "Both experts use `WanTransformer::from_weights_deferred` on a windowed request and carry a `WanBlockStream`; neither expert materializes its resident block Vec."
             },
             {
-              "source": "inference:crates/media/mlx-gen/mlx-gen-bernini/src/forward.rs",
-              "reason": "Each conditioning source and the noisy target are patch-embedded and concatenated on the token axis, and the packed sequence runs through `WanTransformer::forward_packed` — so the windowable unit is an expert's block stack."
+              "source": "inference:crates/media/mlx-gen/mlx-gen-wan/src/transformer.rs:999-1045",
+              "reason": "The Wan expert's windowed forward drives the shared MLX block-residency runner over the same per-block arithmetic as the resident `forward_packed` path."
             }
           ],
           "requestPeak": {
             "finding": "unmeasured",
-            "reason": "No rung-4 run exists for Bernini."
+            "reason": "The production calibration fingerprint remains absent, so implementation is not evidence that a request-level saving has been measured."
           },
           "findings": [
-            "Dual residency makes this the largest structural rung-4 opportunity in the catalog after Qwen-Image, and for a different reason: 80 blocks are resident while at most one expert's window is in use at any instant. A per-expert plan bounds each, and the idle expert is a whole model that a window schedule could hold at zero.",
-            "The guided-velocity modes run SEVERAL full forward passes per step over different conditioning combos. A window plan is re-walked once per forward, so the re-materialization cost of rung 4 is multiplied by the mode's pass count — a latency consequence to price into the window size, not a correctness problem.",
-            "Bernini already loads and quantizes one expert before the next so only one bf16 dequant transient is resident. That is a LOAD-TIME transient bound; both experts are resident afterwards, so it does not overlap with what rung 4 would do."
+            "Rung 0 is the no-extra-controls baseline: both experts co-reside during denoise. Rung 1 does not provide a request-side choice over the cross-phase schedule. `memory_strategy.rs:727-737` says so explicitly: every generate path releases completed phases unconditionally and `GenerationMemory::stage_residency` selects nothing. Therefore the corrected SC-18816 descriptor tuple is `supports_sequential_offload = false`, `unconditionally_engages_staged_residency = true` for BOTH `bernini` and `bernini_renderer`; the former `true` selectable flag was a workaround, not evidence of a selectable seam.",
+            "Rung 2 is a real request-selected spatial tile edge over `[768, 640, 512, 384, 320, 256]` with overlap 64; rung 3 is a request-selected attention budget over both experts; rung 4 is a request-selected global 80-block deferred stream with windows `[1, 2, 4, 5, 8, 10, 20]` and default 10. The block stream is unavailable for an in-memory/single-file load and refuses adapters, so only the catalog's directory-backed, no-overlay routes are claimed.",
+            "The same phase and trunk mechanisms serve every video mode (`t2v`, `v2v`, `r2v`, `rv2v`, `mv2v`, `ads2v`) and the one-frame image entry. Modes change conditioning inputs and guidance pass count, not the stage order or decoder. Guided modes re-walk a window several times per denoise step, which is a latency cost rather than a different applicability verdict.",
+            "No image cell is assigned a modality-specific value by this reconciliation: `bernini_image` and `bernini` intentionally share this one provider verdict. The generated-artifact review must still diff image cells after the final inference pin; a pin-derived state change is not to be hidden by falsifying the shared survey."
           ]
         },
         "candle": {
@@ -2463,20 +2495,475 @@
           ],
           "evidence": [
             {
-              "source": "inference:crates/media/candle-gen/candle-gen-bernini/src/pipeline.rs",
+              "source": "inference:crates/media/candle-gen/candle-gen-bernini/src/pipeline.rs:1-24,70-115,300-328",
               "reason": "The Candle renderer loads the dual-expert Wan snapshot, selects the high- or low-noise expert per timestep, and declares `supports_sequential_offload: false`."
             },
             {
-              "source": "inference:crates/media/candle-gen/candle-gen-wan/src/wan14b.rs",
-              "reason": "The shared Candle Wan expert provides the uniform transformer stack used by each Bernini expert but no Bernini block-window loader is wired."
+              "source": "inference:crates/media/candle-gen/candle-gen-bernini/src/components.rs:13-50",
+              "reason": "The shared component load eagerly constructs and retains both complete WanTransformer experts; no deferred block-window materializer is present."
             }
           ],
           "requestPeak": {
             "finding": "unmeasured",
-            "reason": "SC-17414 and SC-17480 own the missing implementation and CUDA measurement work."
+            "reason": "No Bernini Candle block-window run or authoritative CUDA request-peak comparison exists at the surveyed revision."
           },
           "findings": [
-            "In scope for epic 15448. The newly visible Candle cells stay Missing until per-expert streaming and authoritative CUDA evidence land."
+            "Rung 0 is the cached resident baseline. Rung 1 is Missing: the Candle descriptor is `supports_sequential_offload = false`, the provider has no unconditional-stage declaration, and its component bundle is retained rather than driven through a request residency resolver. Rungs 2 and 3 use the underlying Wan decoder/attention mechanisms only where the Bernini pipeline actually calls them; no Bernini memory-strategy contract publishes them as selectable ladder controls. Rung 4 is Missing: no Bernini block-window loader is wired.",
+            "The two 40-block experts and mode-independent renderer make rung 4 structurally applicable on every image/video mode, but structural opportunity, provider implementation, and measured request saving remain three separate facts."
+          ]
+        }
+      }
+    },
+    "ltx-video": {
+      "name": "LTX-Video",
+      "backends": {
+        "mlx": {
+          "structuralApplicability": "full",
+          "implementation": "none",
+          "summary": "One uniform 48-block AvDiT stack walked by a single loop; only the per-modality patchify/adaLN embedders and the two output heads sit outside it, so one BlockPlan bounds essentially all of the trunk's weight bytes. This is also the catalog's cleanest rung-4 target by share of denoise-phase residency: the MLX path stages the ~24 GB Gemma text encoder out BEFORE the trunk loads and drops the trunk BEFORE decode, so during denoise the 48 blocks are very nearly the whole footprint.",
+          "blockStacks": [
+            {
+              "name": "transformer_blocks (AvDiT — joint video + audio + cross-modal)",
+              "blocks": "48",
+              "windowable": true
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-ltx/src/transformer.rs",
+              "reason": "`AvDiT` (`:1894`) holds `video: Stream`, `audio: Stream` and ONE `blocks: Vec<AvBlock>`; `forward` (`:2072`) walks that single Vec in one linear loop. The two `Stream`s are patchify + adaLN heads + `proj_out` (`:1474-1497`) — embedders and heads, not a second indexed stack. `AvBlock::load` (`:1706`) builds every index identically, with no per-index variation of the SD3.5 `is_dual_attention_block(i)` kind, so the stack mixes no block KINDS: the dual-modality (video / audio / cross-modal, 9 sub-modules) lives INSIDE each block."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-ltx/src/config.rs",
+              "reason": "`num_layers: 48` (`:122`), consumed at `transformer.rs:1958` as `transformer_blocks.{i}` — the block count is a config constant, not a checkpoint-shape inference."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-ltx/src/model.rs",
+              "reason": "`supports_sequential_offload: false` (`:269-270`) carries the comment \"Not wired onto the shared `Residency` seam (F-176); Sequential is a no-op fallback\" — the flag declares NOT-ON-THE-SEAM, not unimplemented, and the behaviour below is scored from the code rather than from the flag. The `Ltx` struct (`:293`) holds `root`/`gemma_dir` PATHS (`:300`, `:304`), never the text encoder or the transformer, with the design stated at `:296-299`."
+            },
+            {
+              "source": "inference:crates/contracts/gen-core/src/block_window.rs",
+              "reason": "The shared rung-4 primitive — `BlockPlan` (`:91`), `BlockWindowBackend` (`:152`), `run_windowed` (`:194`) — exists and its shape fits a single uniform stack. `grep -rn \"block_window\\|BlockWindowBackend\\|run_windowed\\|BlockPlan\" crates/media/mlx-gen/mlx-gen-ltx/` returns zero hits, so nothing in this family calls it."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "reason": "No rung-4 run exists for LTX on either backend. The family's only real-weight capture (sc-18808, `docs/generated/ltx-mlx-video-sc-18808.json`) measures the shipped baseline, not a windowed trunk — see the findings for what it nevertheless says about where the peak sits."
+          },
+          "findings": [
+            "Rung 1 is engaged UNCONDITIONALLY, and this is the one place in the family where the capability flag and the behaviour disagree. `stage_text_phase` (`model.rs:578`) builds the Gemma TE, runs prompt enhancement and `encode_av` inside one scope (`:579-585`), then forces the graph with `mlx_rs::transforms::eval` (`:588`) so lazy evaluation cannot keep the ~24 GB of weights alive past the scope, and lets `te` drop at end of scope; the caller `mlx_rs::memory::clear_cache()`s immediately after (`:1186`) and only then builds the AvDiT (`:759`, comment `:756-758`: \"so the TE and the DiT never co-reside\"). So `supports_sequential_offload: false` (`:269-270`) UNDER-reports on this backend: the staging ships, it is simply not driven by the shared `Residency` seam. sc-18816 owns making that visible to the ladder; this verdict describes the behaviour as it is at the pinned revision.",
+            "`resident` is NOT a reachable state for MLX LTX, and should not be scored as if it were selectable. No code path co-resides the TE and the AvDiT, so the family's floor is already `max(TE, DiT)` rather than their sum and a `resident` measurement would have nothing to measure. sc-18808's real-weight capture corroborates it from the allocator side at 768x512x97 q8: `stagedTextEncoderBytes` 32.73 GB and `stagedTransformerBytes` 20.61 GB against a `costagedGiantsBytes` bound of 53.35 GB, with active memory dropping from `denoiseEntryActive` 20.69 GB to `decodeEntryActive` 1.02 GB.",
+            "The AvDiT is staged too, not only the text encoder: `model.rs:806-808` `eval`s the latents, `drop(transformer)`s and `clear_cache()`s before `decode_to_frames` (`:811`). That is what makes the 48-block trunk essentially the entire denoise-phase residency and gives rung 4 a larger share to move here than on any image family — but it is also why the request-peak question below is not answered by the trunk's size.",
+            "Where the request peak actually sits, from the one real-weight capture — and it is not the trunk. At 768x512x97 q8 (`ltx-2-3-mlx-q8-768x512-f97-fps24-seed18808`) the phase active peaks are `conditioningActivePeak` 35.56 GB, `denoiseActivePeak` 27.44 GB, `decodeActivePeak` 15.03 GB: the request peak is the CONDITIONING phase, i.e. the text encoder that rung 1 already stages, not the denoise trunk that rung 4 would bound. At that geometry a perfect rung-4 window could not move the request peak at all. This is n=1, one tier, one geometry, and video activations grow with frames as well as area, so denoise may well dominate at the top of the envelope (1280x704, 449 frames) — which is exactly why the finding here is `unmeasured` and not `does-not-move`. It does mean a rung-4 measurement for this family has to be taken across the frames axis, not at one geometry.",
+            "Rung 2 ships and auto-selects, but is INERT at the geometries this host renders. `decode_to_frames` (`pipeline.rs:157`) calls `auto_tiling_budgeted_ltx(out_h, out_w, out_f)` (`:260`) and tiles only when the modelled peak exceeds 85% of `get_memory_limit()` (`:266-267`); the shared planner returns `Ok(None)` when a single pass fits under the budget and the frame count is under the i32 write cap (`crates/contracts/gen-core/src/tiling.rs:840-843`). The cost model (`pipeline.rs:239-255`) puts 768x512x97 at ~15.15 GiB against an ~103 GiB budget on the sc-18808 host (`mlxMemoryLimitBytes` 130.6 GB x 0.85), so decode is single-pass there and rung 2 is implemented-but-not-engaged. Implemented is not engaged, and the matrix must not read the two as the same claim.",
+            "Rung 3 is NOT implemented on MLX — do not score it from the Candle twin, which does have real chunking. The only candidate is `ckpt_sdpa` (`transformer.rs:566-570`), documented \"Training-only knob ... `false` on the inference path\", initialised `false` at load (`:601`), settable only through `set_sdpa_checkpoint`, private at the attention level (`:606`) and public only on the `AvDiT` (`:1140`), whose sole non-test caller is the trainer (`training.rs:418`); even its `true` arm wraps the same monolithic `scaled_dot_product_attention` in `mlx::checkpoint` (recompute-for-backward, `:660`/`:682`), not query-row chunking. There is no `attn_budget` field on this attention, unlike `mlx-gen-wan/src/transformer.rs:289`, and `mlx-gen-ltx` appears in no `AttentionBudget` consumer.",
+            "Overlays are COMPATIBLE, with code evidence — this is the Z-Image situation, not the Krea/Candle one. `Linear` (`transformer.rs:329-331`) keeps `kind` (the possibly still-quantized base) and `lora: Option<LoraStack>` as separate fields; the forward runs the base (`:376`) and then ADDS each adapter's residual (`:418-420`), and `push_lora` (`:428`) appends rather than folding. The doc is explicit: \"a forward-time residual ... NOT a merged weight\" (`:270-274`), chosen over the reference `apply_loras_to_model` dequant-and-merge precisely because the shipped base is quantized (`adapters.rs:5-9`). So a block re-materialized by a rung-4 window can carry its overlay, provided the window re-runs `apply_ltx_adapters` (`adapters.rs:337`) or reattaches the `LoraStack` per re-materialization. The only in-place base mutation in the file is `cast_weights` (`:489`), a training-path dtype cast.",
+            "On the DISTILLED LoRA specifically — the overlay this family was asked about, and it is a LIVE RUNTIME overlay on this backend, not a baked one. `ltx_2_3_eros` declares `mlx.autoDistillLora` (`config/manifests/builtin.models.jsonc:11174`) and ships the cond_safe distill LoRA as a `coRequisite` download (`:11087-11098`) because its base checkpoint is NOT pre-distilled — without it the MLX video collapses to noise a few frames in (`crates/sceneworks-worker/src/video_jobs/ltx.rs:738-742`). The worker injects it AHEAD of the user LoRAs as an `AdapterSpec` carrying `pass_scales = [stage1, stage2]` (`ltx.rs:693-703`, resolver `:754`, MLX-gated at `:753`). Base `ltx_2_3` declares none and injects nothing (`crates/sceneworks-worker/src/video_jobs/tests.rs:10224`), because its hosted tiers are assembled FROM the distilled checkpoint at conversion time (`builtin.models.jsonc:10966`) — so the family carries both shapes at once, one baked and one injected.",
+            "COMPATIBILITY VERDICT for that distilled LoRA against a rung-4-rebuilt block: COMPATIBLE, on code evidence, because it rides exactly the same forward-time residual path as any user adapter — `push_lora` appends to a `LoraStack` beside an untouched base (`transformer.rs:428`), the forward adds the residual after the base matmul (`:418-420`), and the per-pass strength is runtime state, a `pass: Cell<usize>` on the stack (`:323`) driven by `dit.set_lora_pass(0)` / `(1)` (`pipeline.rs:929`, `:978`) across `NUM_DENOISE_PASSES = 2` (`:47`). Nothing is folded into the base, so nothing has to be un-folded to re-materialize a block. Two obligations a rung-4 window inherits here that no image family's has: it must re-apply the adapters on every re-materialization AND preserve the per-pass selection across both passes — losing the stage-2 strength would silently render at stage-1 strength rather than fail — and it must re-enter the whole trunk once per pass, so the window's re-materialization cost is doubled.",
+            "One second network is held resident and invoked MID-denoise, between the two passes: `LatentUpsampler` (`upsampler.rs:179`), called at `pipeline.rs:967` and again on the IC-LoRA path at `:1094` while the AvDiT is still live. It is deliberately NOT inventoried in `blockStacks`: it is a conv/ResBlock latent upscaler loaded from its own checkpoint, not transformer trunk weight, and `model.rs:312` records the intent — \"The small components (each << the TE / DiT) stay resident\". It is recorded here because a rung-4 window schedule for this family has to survive being re-entered for a second pass over an upscaled latent, which no image family's plan has to do.",
+            "The family is two catalog entries with different artifact shapes and the same trunk. `ltx_2_3` ships q4 (default) / q8 / bf16 tiers from `SceneWorks/ltx-2.3-mlx`; `ltx_2_3_eros` is a single bf16 all-in-one community merge that shares the same `model.diffusion_model.*` key layout. The 48-block structure is therefore family-wide, but per-block bytes differ by tier, so any future implementation claim has to be per entry and per tier rather than family-level."
+          ]
+        },
+        "candle": {
+          "structuralApplicability": "full",
+          "implementation": "none",
+          "summary": "The same uniform 48-block AvDiT, walked by one loop. The difference from the MLX twin is RESIDENCY, not shape: Candle caches the Gemma text encoder, the AvDiT, the VAE and the audio chain together in one `Components` bundle that outlives the request, so the trunk is a much smaller share of what is resident while it runs, and rung 4's prerequisite — rung 1 — is genuinely absent here rather than merely undeclared.",
+          "blockStacks": [
+            {
+              "name": "transformer_blocks (AvDiT — joint video + audio + cross-modal)",
+              "blocks": "48",
+              "windowable": true
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-ltx/src/transformer.rs",
+              "reason": "`AvDiT` (`:553`) holds `video: AvStream`, `audio: AvStream` and ONE `blocks: Vec<AvBlock>`, built as `transformer_blocks.{i}` over `cfg.video.num_layers` (`:591-597`) and walked by a single loop in `forward` (`:764-768`). All 48 entries are the same `AvBlock` type — the video/audio/cross-modal split is inside the block (`:373-391`) — so the stack mixes no block kinds, and the `AvStream`s outside it are patchify + adaLN + `proj_out` (`:268-280`)."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-ltx/src/config.rs",
+              "reason": "`num_layers: 48` (`:96`) — the same depth as the MLX twin, from the same checkpoint layout."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-ltx/src/lib.rs",
+              "reason": "`Components` (`:78-90`) holds `te`, `avdit`, `vae`, the audio chain and the tokenizer together; it is stored in `Mutex<Option<Components>>` (`:367`) and populated through `candle_gen::cached` (`:374-376`). `supports_sequential_offload: false` (`:493`) is ACCURATE on this backend, and there is no `MemoryStrategyContract` impl in the crate at all — so the provider advertises no ladder capability beyond `supports_lora: true` (`:473`)."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen/src/sync.rs",
+              "reason": "`cached` (`:52-58`) clones out of the slot and STORES on miss (`*guard = Some(c.clone())`); nothing in the LTX crate ever clears it. This is what makes the bundle outlive the request rather than the call."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "reason": "SC-18902 exact-head CUDA baseline run 31766800005 established the Eros product output, but it did not exercise rung 4 or record request-peak telemetry. No rung-4 run or phase-peak calibration record exists for Candle LTX at the pinned revision, so that product baseline cannot support a memory claim here."
+          },
+          "findings": [
+            "**The Candle rung-1 question, answered: the Gemma text encoder is RESIDENT, not staged.** The encoder is a field of `Components` (`lib.rs:79-80`), the bundle is built once and stored in `Mutex<Option<Components>>` (`:367`) by `candle_gen::cached` (`:374-376`), and `candle-gen/src/sync.rs:52-58` stores on miss and never clears — so the encoder outlives the request, not merely the encode. `load_components` builds the AvDiT FIRST and the encoder SECOND with no free between (`:168-174`; same order on the packed-tier path at `:227-236`), so the two co-reside from the first load onward. `render` takes `comps: &Components` (`:276`), which means it structurally CANNOT drop it: the encode at `:284-285` is followed by the denoise at `:303`/`:316` with `comps.te` still alive. Greps over the crate for `drop(`, `clear_cache`, `unload`, `release`, `empty_cache`, `Drop for` and `residency` find no free path. The fit gate agrees from the other direction: `component_footprint` (`:645-654`) sizes `text_encoder` and `dit` as a partition of ONE simultaneous load, documented at `:619-623` as \"the slots are a partition of the load\".",
+            "So `supports_sequential_offload: false` (`lib.rs:493`) is honest on Candle and under-reporting on MLX — the same flag value means different things on the two backends, which is precisely why this survey scores the behaviour from the code. The consequence for the ladder is the inverse of the MLX twin: `resident` is the Candle BASELINE and `staged_residency` is a real Missing, whereas on MLX staged is the baseline and `resident` is unreachable. Rung 4 requires rung 1 in the same request, so the Candle rung-4 cells will report the prerequisite gap from the generator's own rung-1 predicate — that is correct here and must not be \"fixed\" by copying the MLX finding across.",
+            "What is held alongside the trunk during denoise is what most limits rung 4's reach on this backend: `Components` keeps the ~24 GB Gemma encoder, the video VAE and the audio decoder + vocoder alive through the whole block loop (`lib.rs:79-97`), none of which is needed until after it. Rung 4 bounds the 48 blocks; on Candle it cannot bound the majority of what is resident while they run. Not inventoried in `blockStacks` because none of it is transformer trunk weight — recorded here per this survey's own convention for encoder and decode-side residents.",
+            "Rung 2 ships and auto-selects. `decode_budgeted` (`vae.rs:558-566`) is called unconditionally on the render path (`lib.rs:341`) and dispatches `auto_tiling_budgeted_ltx` to the shared `vae_tiling::decode_tiled(VaeTiling::LTX, ...)` (`vae.rs:547-549`). The budget resolves from `LTX_VAE_BUDGET_GIB`, else `nvidia-smi` total x 0.85 (`vae.rs:582`), else a 16.0 GiB default (`vae.rs:584`, resolution at `:639-645`), over a candidate grid of spatial 768->192 px and temporal (96,24)->(24,8) (`:611-613`); an over-budget geometry is a catchable error BEFORE the decode rather than an OOM (`:650-656`). Unlike the MLX twin's ~103 GiB unified-memory budget, a 16 GiB default means tiling is realistically engaged here.",
+            "Rung 3 is PARTIAL, and partial for a stated reason rather than by rounding. Every attention role — self, text cross, cross-modal — goes through one `Attention::forward` (`transformer.rs:131-192`) onto `candle_gen::sdpa_budgeted_bhsd(..., ATTN_SCORES_BUDGET)` (`:169-177`), which chunks the QUERY rows (`candle-gen/src/attention.rs:207-239`). But the budget is a compile-time `1_000_000_000` (`attention.rs:92`) and the planner returns the whole `sq` when `b*h*sk*sq` fits (`crates/contracts/gen-core/src/attention_budget.rs:170-171`). With `TEXT_MAX_LENGTH = 256` (`config.rs:39`) and 32 video heads (`config.rs:97`), cross-attention to the fixed text context needs ~122k query rows before it splits — a single un-chunked pass for every geometry below the validated `MAX_LATENT_TOKENS = 131_072` ceiling (`config.rs:50`) bar its top ~7%. Video SELF-attention chunks from ~5,590 tokens, so it is engaged on every real clip. The crate says so itself (`transformer.rs:159-164`). It is an i32-overflow correctness guard (sc-9116) that happens to bound memory, not a tunable operating point: the budget is a constant with no request or env knob, and there is no `AttentionPlan` variant on this path.",
+            "Rung 4 is absent: `block_window`, `BlockWindowBackend`, `run_windowed` and `BlockPlan` return zero hits across `crates/media/candle-gen/candle-gen-ltx/`. The AvDiT is loaded eagerly and wholly (`transformer.rs:591-597`) with no streamed loader analogous to `candle-gen-mage`'s, which does drive the shared primitive (`candle-gen-mage/src/transformer.rs:757-759`). The primitive is reachable; LTX simply does not call it.",
+            "Overlays are COMPATIBLE here too, by the same mechanism as the MLX twin. `install_ltx_adapters` calls `push_additive_lora` (`adapters.rs:213-217`), which appends an `AdditiveResidual::Lora { a, b, scale }` to a `Vec` on the shared `LoraLinear` (`candle-gen/src/train/lora.rs:307-309`) and applies it AFTER the base matmul in the forward (`:439-445`), in the deferred two-matmul form that never materializes the `[out,in]` product (`:110-112`) and never dequantizes a packed base. The module doc states the base is left unchanged specifically to avoid materializing a 22B dense transformer to fold a small adapter (`adapters.rs:3-6`). So a re-materialized block could replay the same pushes.",
+            "On the DISTILLED LoRA specifically: there is no fold to undo on this backend because `ltx_2_3_eros` no longer routes to Candle (sc-18902). Exact-head CUDA baseline run 31766800005 proved that sending its undistilled dense checkpoint through Candle's single distilled denoise pass produces unresolved noise with no prompt subject. The published cond_safe recipe cannot be transferred honestly: it is two-pass on MLX and only 768/3,320 keys match Candle's narrower adapter surface (`transformer_blocks.N.attn{1,2}.{to_q,to_k,to_v,to_out.0}` only, `adapters.rs:49-60`). Base LTX and its user LoRAs remain compatible with the Candle forward-time residual mechanism described above.",
+            "SC-18902 closed the survey's former open question with exact-head runtime evidence: run 31766800005 completed the 153-frame Candle/CUDA render at the shipped 768x512, 6 s, 25 fps, 8-step defaults, and artifact 9207109616 showed severe unresolved noise, no identifiable fox, and no coherent subject motion in the native renderer and product mux. `VIDEO_MODEL_CAPS` now keeps `ltx_2_3_eros` MLX-only and `candle_video_engine_id` returns no Eros provider. A future Candle rung-4 claim therefore covers base `ltx_2_3`, not Eros, unless a complete Candle-native distill recipe is separately implemented and CUDA-validated."
+          ]
+        }
+      }
+    },
+    "wan-video": {
+      "name": "Wan Video",
+      "backends": {
+        "mlx": {
+          "structuralApplicability": "partial",
+          "implementation": "none",
+          "summary": "The family is deliberately partial rather than rounded: TI2V-5B is one uniform 30-block trunk, while the A14B T2V/I2V and VACE-Fun entries are dual 40-block experts; VACE-Fun adds per-expert VACE modules. No Wan catalog route drives a block-window implementation at the surveyed heads.",
+          "blockStacks": [
+            {
+              "name": "TI2V-5B transformer blocks",
+              "blocks": "30",
+              "windowable": true,
+              "entries": ["wan_2_2"]
+            },
+            {
+              "name": "A14B high-noise expert blocks",
+              "blocks": "40",
+              "windowable": true,
+              "entries": ["wan_2_2_t2v_14b", "wan_2_2_i2v_14b", "wan_2_2_vace_fun_14b"]
+            },
+            {
+              "name": "A14B low-noise expert blocks",
+              "blocks": "40",
+              "windowable": true,
+              "entries": ["wan_2_2_t2v_14b", "wan_2_2_i2v_14b", "wan_2_2_vace_fun_14b"]
+            },
+            {
+              "name": "VACE-Fun per-expert injection blocks",
+              "blocks": "8 per expert",
+              "windowable": false,
+              "entries": ["wan_2_2_vace_fun_14b"]
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-wan/src/config.rs:128-139,205-212,290-291,322-333,650-673",
+              "reason": "The concrete configs pin `num_layers = 30` for TI2V-5B and `num_layers = 40`, `dual_model = true` for A14B and VACE-Fun."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-wan/src/transformer.rs:750-913,999-1045",
+              "reason": "Each WanTransformer is one uniform `Vec<Block>`. The crate contains a window-capable forward used by Bernini, but the ordinary Wan providers do not construct a WanBlockStream or call it."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-wan/src/model_vace.rs:559-606,912-936",
+              "reason": "VACE-Fun is a genuine dual-expert provider with high/low snapshots, each carrying its own VACE modules."
+            },
+            {
+              "source": "SceneWorks:crates/sceneworks-core/src/jobs_store/routing/catalog.rs:881-900",
+              "reason": "The canonical capability table now carries the previously missing MLX-only `wan_2_2_vace_fun_14b` row and leaves every Candle column false."
+            },
+            {
+              "source": "SceneWorks:crates/sceneworks-worker/src/video_jobs/mod.rs:230-240,464-477,530-541",
+              "reason": "The worker resolves the VACE-Fun catalog id to its native MLX engine and explicitly refuses the absent non-mac provider rather than substituting Wan-VACE."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "reason": "No Wan MLX block-window request exists, so there is no rung-3 versus rung-4 request-peak comparison."
+          },
+          "findings": [
+            "Rung 0 remains the provider baseline. Rung 1 is physically engaged on every MLX Wan route, but the shared-seam bit is entry-specific: TI2V-5B, T2V-A14B, I2V-A14B and VACE-Fun are `(supports_sequential_offload, unconditionally_engages_staged_residency) = (true, true)`; the single-expert `wan_vace` provider reached through advanced modes is `(false, true)`. These are not interchangeable claims: `false` means no shared selectable seam, while the unconditional phase drops are still real.",
+            "Rung 2 is implemented by the provider-owned z48/z16 budgeted decode paths. Engagement depends on geometry and memory budget; an untiled fit is not evidence that the mechanism is absent. Rung 3 has real provider-local attention budgeting in the Wan transformer, but the pending TI2V-5B contract correctly leaves the shared request-selected BoundedAttention strategy Missing. Rung 4 is Missing for every entry: no ordinary Wan load constructs the deferred block stream Bernini uses.",
+            "The pending MLX TI2V-5B provider contract is narrower than this family: it declares Resident and BoundedDecode Implemented, while StagedResidency, BoundedAttention and BoundedTransformerResidency remain Missing as request-selected strategies. It must not be copied onto either A14B expert or VACE. Physical unconditional staging is carried by the separate descriptor flag, not invented as a selectable contract.",
+            "`wan_2_2_vace_fun_14b` was a catalog defect, not a deliberately unavailable model. The manifest entry and native `wan2_2_vace_fun_14b` engine already existed and the worker explicitly routes it on macOS while rejecting Candle. SC-18826 adds the missing MLX-only VideoModelCaps row; the model is no longer a wholly-unrouted exception. It is untiered, so no tier-conditioned claim is made."
+          ]
+        },
+        "candle": {
+          "structuralApplicability": "partial",
+          "implementation": "none",
+          "summary": "TI2V-5B is a single 30-block trunk and A14B is a dual 40-block MoE; VACE modes add a separate control path. All are eager Candle loads and none exposes a block-window loader. VACE-Fun is not routed on Candle and is not silently included in this backend verdict.",
+          "blockStacks": [
+            {
+              "name": "TI2V-5B transformer blocks",
+              "blocks": "30",
+              "windowable": true,
+              "entries": ["wan_2_2"]
+            },
+            {
+              "name": "A14B high-noise expert blocks",
+              "blocks": "40",
+              "windowable": true,
+              "entries": ["wan_2_2_t2v_14b", "wan_2_2_i2v_14b"]
+            },
+            {
+              "name": "A14B low-noise expert blocks",
+              "blocks": "40",
+              "windowable": true,
+              "entries": ["wan_2_2_t2v_14b", "wan_2_2_i2v_14b"]
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-wan/src/config.rs:8-13,66-107,175-180",
+              "reason": "The registered Candle providers distinguish the 30-layer TI2V-5B from the dual 40-layer A14B models and their different VAEs."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-wan/src/transformer.rs:390-453,637-651",
+              "reason": "The eager transformer owns one complete Vec<Block> and runs it sequentially; no deferred per-window materializer exists on the Wan route."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-wan/src/memory_strategy.rs:529-550",
+              "reason": "The reviewed TI2V-5B contract marks Resident, StagedResidency and BoundedDecode Implemented, with BoundedAttention and BoundedTransformerResidency Missing."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "reason": "No Candle Wan block-window run exists, and no family-wide CUDA request-peak result may be inferred from the TI2V-5B declaration."
+          },
+          "findings": [
+            "Rung 1 is selectable for the 5B and A14B providers, `(true, false)`, but absent for Candle Wan-VACE, `(false, false)`. Rung 2 is implemented for the ordinary Wan routes by the reviewed decode contract and provider VAE tilers. Rung 3 has fixed provider-local budgeted SDPA but no request-selected contract. Rung 4 is Missing everywhere.",
+            "The reviewed TI2V-5B contract applies only to `wan2_2_ti2v_5b`, directory-backed native bf16/packed loads. It explicitly declines a calibrated contract for native GGUF and does not cover T2V-A14B, I2V-A14B, or Wan-VACE. Planned GGUF expert swapping therefore contributes no implemented rung at this pin.",
+            "No Candle verdict is emitted for `wan_2_2_vace_fun_14b`: SceneWorks' new routing row is MLX-only and the worker rejects the absent Candle provider rather than substituting another Wan engine."
+          ]
+        }
+      }
+    },
+    "scail2": {
+      "name": "SCAIL-2",
+      "backends": {
+        "mlx": {
+          "structuralApplicability": "full",
+          "implementation": "none",
+          "summary": "One homogeneous 40-block Wan2.1-14B I2V stack. The architecture fits one block plan, but the shipped SCAIL-2 provider eagerly owns all blocks and exposes no block-window path.",
+          "blockStacks": [
+            {
+              "name": "dit.blocks",
+              "blocks": "40",
+              "windowable": true
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-scail2/src/model.rs:468-530,578-580,784-789",
+              "reason": "Scail2Model owns one Vec<Block>, loads every index from the same constructor, reports 40 blocks for the 14B config, and walks them in one loop."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-scail2/src/generate.rs:385-450,642-686",
+              "reason": "The VAE remains live for pose/final decode, while UMT5 and CLIP are scoped, evaluated, and released before the DiT; decode uses the shared budgeted z16 tiler."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "reason": "SCAIL-2 has no block-window execution to compare with its current request peak."
+          },
+          "findings": [
+            "Rung 1 is unconditional rather than selectable: the corrected tuple is `(false, true)`. UMT5 and CLIP are loaded, evaluated and freed before DiT execution, but there is no shared request resolver. Rung 2 is automatic budgeted z16 decode. Rung 3 has optional provider-local query/FFN chunk controls, but the shipped default/request surface does not declare the shared selectable BoundedAttention strategy. Rung 4 is Missing.",
+            "The model is macOS-download-only in the manifest. That distribution fact does not erase the distinct Candle runtime route below and does not justify an MLX-only family verdict."
+          ]
+        },
+        "candle": {
+          "structuralApplicability": "full",
+          "implementation": "none",
+          "summary": "The distinct Candle SCAIL-2 engine carries the same uniform 40-block trunk, but caches one resident Components bundle and has no block-window loader.",
+          "blockStacks": [
+            {
+              "name": "dit.blocks",
+              "blocks": "40",
+              "windowable": true
+            }
+          ],
+          "evidence": [
+            {
+              "source": "SceneWorks:crates/sceneworks-core/src/jobs_store/routing/catalog.rs:1368-1391",
+              "reason": "`video_model_has_candle_video_route` explicitly unions `CANDLE_SCAIL2_VIDEO_MODELS = [\"scail2_14b\"]`; the generic VIDEO_MODEL_CAPS Candle bit is false because this is a separate engine, not because the lane is absent."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-scail2/src/pipeline.rs:124-200",
+              "reason": "The generator stores `Mutex<Option<Arc<Components>>>` and populates it through the shared cache; UMT5, CLIP, DiT, and VAE remain in one bundle."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-scail2/src/generate.rs:490-501",
+              "reason": "The production segment path calls plain `decode_with_cancel`, not the available budgeted/tiled VAE entry point."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "reason": "No Candle SCAIL-2 block-window implementation or authoritative CUDA request-peak comparison exists."
+          },
+          "findings": [
+            "Rung 0 is resident. Rung 1 is Missing `(false, false)`: the cached Components bundle outlives each request. Rung 2 is Missing on the actual route because it calls plain decode. Rung 3 uses fixed provider-local budgeted SDPA, not a shared request selection. Rung 4 is Missing.",
+            "This lane was absent only from the old JavaScript route parser. SC-18828 repairs the oracle by following the canonical backend-existence predicate's direct model-id slice and pins `scail2_14b:candle` in regression tests."
+          ]
+        }
+      }
+    },
+    "krea-realtime": {
+      "name": "Krea Realtime 14B",
+      "unroutedBackends": {
+        "candle": {
+          "reason": "No Candle Krea-Realtime provider or worker dispatch exists; the shipped descriptor is MLX/macOS-only and off-Mac requests fail rather than falling through to a different Wan engine.",
+          "owningStory": 18828,
+          "evidence": [
+            {
+              "source": "SceneWorks:crates/sceneworks-core/src/jobs_store/routing/catalog.rs:931-943",
+              "reason": "The Krea row is deliberately `video_mlx_routed = true` with every Candle column false, and the comment ties that shape to the absent candle-gen crate."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-krea-realtime/src/pipeline.rs:108-138",
+              "reason": "The registered MLX provider is marked macOS-only; its descriptor does not establish a Candle lane."
+            }
+          ]
+        }
+      },
+      "backends": {
+        "mlx": {
+          "structuralApplicability": "full",
+          "implementation": "none",
+          "summary": "One uniform 40-block causal Wan transformer. Its per-layer causal KV cache changes carried state and latency, but not the fact that the weight trunk is one sequential stack; no block-window materializer is wired.",
+          "blockStacks": [
+            {
+              "name": "causal_transformer.blocks",
+              "blocks": "40",
+              "windowable": true
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-krea-realtime/src/causal.rs:705-759,818-872",
+              "reason": "CausalKreaTransformer wraps one Wan transformer and carries one KV-cache slot per layer while executing the same ordered block stack."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-krea-realtime/src/t2v.rs:887-915",
+              "reason": "Every t2v/i2v/v2v path uses shared component staging: UMT5 prompt encode completes before the DiT and VAE are loaded."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-krea-realtime/src/t2v.rs:178-316",
+              "reason": "The terminal z16 decode resolves the shared budgeted Wan tiling plan and trims causal temporal over-delivery after decode."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "reason": "No Krea-Realtime block-window path exists, so causal-window coherence evidence does not measure rung-4 request memory."
+          },
+          "findings": [
+            "Rung 1 is unconditional, not selectable: the corrected tuple is `(false, true)` for all t2v/i2v/v2v paths. Rung 2 is automatic budgeted z16 decode. The causal KV history window bounds temporal attention context as part of model execution, but it is not the shared request-selected BoundedAttention strategy and must not promote rung 3. Rung 4 is Missing.",
+            "The family has no quant-tier axis in this survey claim beyond what the manifest actually hosts; no tier-conditioned applicability or request-peak result is invented. Candle is recorded once under `unroutedBackends`, not as five Missing rungs."
+          ]
+        }
+      }
+    },
+    "svd": {
+      "name": "Stable Video Diffusion",
+      "backends": {
+        "mlx": {
+          "structuralApplicability": "partial",
+          "implementation": "none",
+          "summary": "SVD is not one uniform top-level stack, but it is not Structurally N/A. Its heterogeneous convolutional U-Net contains 16 separately indexed TransformerSpatioTemporal modules: six in the cross-attention down stages, one in the mid stage, and nine in the cross-attention up stages. Every module owns one spatial BasicBlock and one TemporalBlock, while the surrounding ResNet/conv/skip trunk is non-windowable, so the exact survey verdict is partial.",
+          "structural": [
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-svd/src/config.rs:20-28",
+              "reason": "The concrete SVD-XT config fixes four channel stages, two layers per down block, and one mid transformer layer."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-svd/src/unet.rs:217-250,287-313,326-370,419-461",
+              "reason": "Three cross-attention down stages each construct two modules, the mid constructs one, and three cross-attention up stages each construct three: 3 × 2 + 1 + 3 × 3 = 16 TransformerSpatioTemporal modules. The fourth down and first up stages are plain, and the surrounding ResNet/downsample/upsample structure is not a uniform windowable stack."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-svd/src/transformer.rs:181-268",
+              "reason": "Each TransformerSpatioTemporal owns separately indexed `blocks: Vec<BasicBlock>` and `temporal_blocks: Vec<TemporalBlock>`, constructs both at `num_layers`, and executes the paired blocks in order. The U-Net passes one layer at every one of its 16 modules, yielding 16 × 1 spatial and 16 × 1 temporal stacks."
+            }
+          ],
+          "blockStacks": [
+            {
+              "name": "nested spatial transformer stacks across down / mid / up attention modules",
+              "blocks": "16 × 1 BasicBlock",
+              "windowable": true
+            },
+            {
+              "name": "nested temporal transformer stacks across down / mid / up attention modules",
+              "blocks": "16 × 1 TemporalBlock",
+              "windowable": true
+            },
+            {
+              "name": "convolutional / ResNet U-Net trunk and skip path",
+              "blocks": "4 down + 1 mid + 4 up stages",
+              "windowable": false
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-svd/src/model.rs:69-100,120-184",
+              "reason": "The descriptor declares no sequential offload and load constructs one complete SvdPipeline containing image encoder, VAE and heterogeneous U-Net."
+            },
+            {
+              "source": "inference:crates/media/mlx-gen/mlx-gen-svd/src/pipeline.rs:20-53,99-159,230-267",
+              "reason": "The request exposes temporal decode chunking, while denoise remains the assembled U-Net; there is no block-window load or forward."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "reason": "No SVD MLX block-window implementation or rung-3 versus rung-4 request comparison exists at the surveyed revision."
+          },
+          "findings": [
+            "Rung 0 is resident and rung 1 is Missing `(false, false)`. Rung 2 exposes temporal decode chunking but no Candle-style automatic spatial budget planner at this pin. Rung 3 uses the ordinary fused attention path with no bounded request control. Rung 4 is Missing, not Structurally N/A: the 32 one-block nested transformer stacks make the architecture partially applicable, but no MLX materializer or scheduling plan spans them.",
+            "SVD is dual-lane and untiered. Neither fact permits a tier-conditioned claim, and the MLX verdict must not be erased merely because the filed story described only Candle i2v."
+          ]
+        },
+        "candle": {
+          "structuralApplicability": "partial",
+          "implementation": "none",
+          "summary": "The Candle twin has the same partial SVD topology: 16 separately indexed TransformerSpatioTemporal modules hold one spatial BasicBlock and one TemporalBlock apiece inside a heterogeneous, non-windowable ResNet/conv/skip U-Net. Selectable phase residency and bounded decode/attention do not supply the missing multi-stack block-window implementation.",
+          "structural": [
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-svd/src/config.rs:25-39",
+              "reason": "The concrete SVD-XT config fixes four channel stages, two layers per down block, and one mid transformer layer."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-svd/src/unet.rs:165-220,248-305,307-395,414-472",
+              "reason": "Three cross-attention down stages each construct two modules, the mid constructs one, and three cross-attention up stages each construct three: 3 × 2 + 1 + 3 × 3 = 16 TransformerSpatioTemporal modules. The fourth down and first up stages are plain, and the surrounding ResNet/downsample/upsample structure remains non-windowable."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-svd/src/transformer.rs:193-250,253-305",
+              "reason": "Each TransformerSpatioTemporal owns separately indexed `blocks: Vec<BasicBlock>` and `temporal_blocks: Vec<TemporalBlock>`, constructs both at `num_layers`, and executes the paired blocks in order. The U-Net passes one layer at every one of its 16 modules, yielding 16 × 1 spatial and 16 × 1 temporal stacks."
+            }
+          ],
+          "blockStacks": [
+            {
+              "name": "nested spatial transformer stacks across down / mid / up attention modules",
+              "blocks": "16 × 1 BasicBlock",
+              "windowable": true
+            },
+            {
+              "name": "nested temporal transformer stacks across down / mid / up attention modules",
+              "blocks": "16 × 1 TemporalBlock",
+              "windowable": true
+            },
+            {
+              "name": "convolutional / ResNet U-Net trunk and skip path",
+              "blocks": "4 down + 1 mid + 4 up stages",
+              "windowable": false
+            }
+          ],
+          "evidence": [
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-svd/src/lib.rs:300-306,620-715",
+              "reason": "The provider resolves Resident versus Sequential at load and the sequential path loads conditioner, U-Net, and decoder in three synchronized disjoint phases."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-svd/src/lib.rs:513-539,620-631",
+              "reason": "`decode_chunk_size` is request-selectable and the decode path is incremental; the provider additionally owns the spatial tiling/write-bound policy."
+            },
+            {
+              "source": "inference:crates/media/candle-gen/candle-gen-svd/src/transformer.rs:29-91",
+              "reason": "Nested spatial/temporal transformer attention uses Candle's bounded SDPA helper, but no U-Net block-window materializer exists."
+            }
+          ],
+          "requestPeak": {
+            "finding": "unmeasured",
+            "reason": "No SVD Candle block-window implementation or rung-3 versus rung-4 request comparison exists; CUDA measurements of lower rungs cannot be re-labelled as rung-4 evidence."
+          },
+          "findings": [
+            "Rung 0 is resident and rung 1 is selectable `(true, false)`: the shared lifecycle runs conditioner → U-Net → decoder with synchronized release. Rung 2 combines request-selected temporal chunks with automatic spatial budget tiling. Rung 3 uses provider-local budgeted attention. Rung 4 is Missing, not Structurally N/A: the 32 one-block nested transformer stacks are a real partial opportunity, but Candle has no materializer or scheduling plan spanning them.",
+            "The family is i2v-only on both routed backends and has no quant tiers. Those are catalog axes, not reasons to infer a missing MLX lane or tier-specific memory result."
           ]
         }
       }

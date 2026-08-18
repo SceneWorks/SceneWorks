@@ -157,8 +157,20 @@ mod fit_gate;
 // `scripts/derive-ladder-margins.test.mjs`.
 pub mod ladder_margin_policy;
 pub mod memory_strategy;
+// The worker half of the VIDEO memory gate (sc-18814, epic 18803): implements
+// `sceneworks_core::video_request`'s selector seam by calling `memory_strategy::select_strategy`.
+// Cross-platform on purpose — the video lane spans both backends and the gate must not imply the
+// two are symmetric, so one module serves both and names the difference explicitly.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod mlx_fit_gate;
+#[cfg_attr(
+    not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )),
+    allow(dead_code)
+)]
+mod video_admission;
 // The full base fine-tune memory-envelope gate (sc-14056) lives beside the generation MLX fit gate
 // (it reuses that module's byte-summing + unified-memory budget probe). Re-exported for the rust-api
 // training submit gate, which calls it alongside `training_base_model_status`/`training_disk_space_error`.
@@ -354,6 +366,12 @@ mod anima_gpu_smoke;
 // the hardware evidence for the sc-13817 dense-force fix.
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod sensenova_gpu_smoke;
+// SC-18902's retained real-weight evidence harness for the former `ltx_2_3_eros` Candle route.
+// Test-only + candle-only, and itself #[ignore]d: the exact-head Windows CUDA capture proved the
+// undistilled route unusable, so product routing now rejects Eros off-Mac. The harness remains as
+// reproducible historical evidence and does not advertise or restore that route.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod ltx_eros_gpu_smoke;
 // Real-weight GPU smoke for the candle SANA 1600M lane (epic 8485, sc-11780). Test-only + candle-only;
 // drives the WORKER's `resolve_weights_dir("sana_1600m")` (the diffusers-snapshot-root resolution) +
 // `gen_core::load("sana_1600m")` against the whole `Efficient-Large-Model/Sana_1600M_1024px_diffusers`

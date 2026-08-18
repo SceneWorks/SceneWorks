@@ -1,0 +1,4147 @@
+{
+  "schemaVersion": 1,
+  "story": "sc-18810",
+  "generatedBy": "scripts/fit-ltx-temporal-form.mjs",
+  "capturedRecords": 13,
+  "tiers": [
+    "q8"
+  ],
+  "sourceSessions": [
+    {
+      "log": "docs/calibration/sc-18810/precrash-q8-run.log",
+      "firstBeginAt": "08:26:28",
+      "begins": 5,
+      "completed": 4,
+      "failed": 0,
+      "begunWithoutTerminalLine": 1,
+      "records": 4,
+      "sceneWorksRevisions": [
+        "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+      ]
+    },
+    {
+      "log": "docs/calibration/sc-18810/sweep-run.log",
+      "firstBeginAt": "10:32:40",
+      "begins": 14,
+      "completed": 9,
+      "failed": 3,
+      "begunWithoutTerminalLine": 2,
+      "records": 9,
+      "sceneWorksRevisions": [
+        "41e8151fb317ff6d9099a9afc96bbc6a5e60c82b",
+        "817cf55097a69163632684cfbf3be667747ff256",
+        "c30c497489d0a7b0404e9baa42e3aabc6e852192"
+      ]
+    }
+  ],
+  "coverage": {
+    "plannedEntries": 44,
+    "capturedFixtures": 8,
+    "capturedGeometries": 7,
+    "byState": {
+      "captured": {
+        "total": 8,
+        "byTier": {
+          "q8": 8
+        }
+      },
+      "attempted_failed_host_limit": {
+        "total": 3,
+        "byTier": {
+          "q8": 3
+        }
+      },
+      "stopped_before": {
+        "total": 1,
+        "byTier": {
+          "q8": 1
+        }
+      },
+      "not_attempted_host_limit": {
+        "total": 7,
+        "byTier": {
+          "q8": 1,
+          "bf16": 3,
+          "q4": 3
+        }
+      },
+      "not_reached": {
+        "total": 25,
+        "byTier": {
+          "q8": 2,
+          "bf16": 12,
+          "q4": 11
+        }
+      }
+    },
+    "entries": [
+      {
+        "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+        "role": "fit",
+        "tier": "q8",
+        "outputVoxels": 47579136,
+        "latentTokens": 6144,
+        "driverTerminalState": "completed",
+        "state": "captured",
+        "captures": 3
+      },
+      {
+        "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+        "role": "held_out",
+        "tier": "q8",
+        "outputVoxels": 72499200,
+        "latentTokens": 9200,
+        "driverTerminalState": "completed",
+        "state": "captured",
+        "captures": 2
+      },
+      {
+        "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+        "role": "fit",
+        "tier": "q8",
+        "outputVoxels": 94765056,
+        "latentTokens": 11904,
+        "driverTerminalState": "completed",
+        "state": "captured",
+        "captures": 2
+      },
+      {
+        "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+        "role": "held_out_fps_probe",
+        "tier": "q8",
+        "outputVoxels": 94765056,
+        "latentTokens": 11904,
+        "driverTerminalState": "completed",
+        "state": "captured",
+        "captures": 2
+      },
+      {
+        "fixture": "ltx-2-3-mlx-q8-1280x704-f121-fps30-seed18808",
+        "role": "fit",
+        "tier": "q8",
+        "outputVoxels": 109035520,
+        "latentTokens": 14080,
+        "driverTerminalState": "completed",
+        "state": "captured",
+        "captures": 1
+      },
+      {
+        "fixture": "ltx-2-3-mlx-q8-1280x704-f145-fps30-seed18808",
+        "role": "fit",
+        "tier": "q8",
+        "outputVoxels": 130662400,
+        "latentTokens": 16720,
+        "driverTerminalState": "completed",
+        "state": "captured",
+        "captures": 1
+      },
+      {
+        "fixture": "ltx-2-3-mlx-q8-768x512-f361-fps30-seed18808",
+        "role": "fit",
+        "tier": "q8",
+        "outputVoxels": 141950976,
+        "latentTokens": 17664,
+        "driverTerminalState": "failed",
+        "state": "attempted_failed_host_limit",
+        "captures": 0
+      },
+      {
+        "fixture": "ltx-2-3-mlx-q8-512x768-f361-fps30-seed18808",
+        "role": "held_out",
+        "tier": "q8",
+        "outputVoxels": 141950976,
+        "latentTokens": 17664,
+        "driverTerminalState": "completed",
+        "state": "captured",
+        "captures": 1
+      },
+      {
+        "fixture": "ltx-2-3-mlx-q8-1280x704-f177-fps30-seed18808",
+        "role": "fit",
+        "tier": "q8",
+        "outputVoxels": 159498240,
+        "latentTokens": 20240,
+        "driverTerminalState": "not_begun",
+        "state": "stopped_before",
+        "captures": 0
+      },
+      {
+        "fixture": "ltx-2-3-mlx-q8-704x1280-f177-fps30-seed18808",
+        "role": "held_out",
+        "tier": "q8",
+        "outputVoxels": 159498240,
+        "latentTokens": 20240,
+        "driverTerminalState": "completed",
+        "state": "captured",
+        "captures": 1
+      },
+      {
+        "fixture": "ltx-2-3-mlx-q8-768x512-f449-fps30-seed18808",
+        "role": "attempted_failed_host_limit",
+        "tier": "q8",
+        "outputVoxels": 176553984,
+        "latentTokens": 21888,
+        "driverTerminalState": "failed",
+        "state": "attempted_failed_host_limit",
+        "captures": 0
+      },
+      {
+        "fixture": "ltx-2-3-mlx-q8-1280x704-f241-fps30-seed18808",
+        "role": "attempted_failed_host_limit",
+        "tier": "q8",
+        "outputVoxels": 217169920,
+        "latentTokens": 27280,
+        "driverTerminalState": "no_terminal_record",
+        "state": "attempted_failed_host_limit",
+        "captures": 0
+      },
+      {
+        "fixture": "ltx-2-3-mlx-q8-1280x704-f297-fps30-seed18808",
+        "role": "not_attempted_host_limit",
+        "tier": "q8",
+        "outputVoxels": 267632640,
+        "latentTokens": 33440,
+        "driverTerminalState": "not_begun",
+        "state": "not_attempted_host_limit",
+        "captures": 0
+      },
+      {
+        "fixture": "ltx-2-3-mlx-q8-1280x704-f305-fps30-seed18808",
+        "role": "rung2_boundary",
+        "tier": "q8",
+        "outputVoxels": 274841600,
+        "latentTokens": 34320,
+        "driverTerminalState": "not_begun",
+        "state": "not_reached",
+        "captures": 0
+      },
+      {
+        "fixture": "ltx-2-3-mlx-q8-1280x704-f449-fps30-seed18808",
+        "role": "rung2_boundary",
+        "tier": "q8",
+        "outputVoxels": 404602880,
+        "latentTokens": 50160,
+        "driverTerminalState": "not_begun",
+        "state": "not_reached",
+        "captures": 0
+      },
+      {
+        "fixture": "ltx-2-3-mlx-bf16-768x512-f121-fps30-seed18808",
+        "role": "fit",
+        "tier": "bf16",
+        "outputVoxels": 47579136,
+        "latentTokens": 6144,
+        "driverTerminalState": "not_begun",
+        "state": "not_reached",
+        "captures": 0
+      },
+      {
+        "fixture": "ltx-2-3-mlx-bf16-768x512-f145-fps24-seed18808",
+        "role": "reproduction_probe",
+        "tier": "bf16",
+        "outputVoxels": 57016320,
+        "latentTokens": 7296,
+        "driverTerminalState": "not_begun",
+        "state": "not_reached",
+        "captures": 0
+      },
+      {
+        "fixture": "ltx-2-3-mlx-bf16-640x640-f177-fps30-seed18808",
+        "role": "held_out",
+        "tier": "bf16",
+        "outputVoxels": 72499200,
+        "latentTokens": 9200,
+        "driverTerminalState": "not_begun",
+        "state": "not_reached",
+        "captures": 0
+      },
+      {
+        "fixture": "ltx-2-3-mlx-bf16-768x512-f241-fps30-seed18808",
+        "role": "fit",
+        "tier": "bf16",
+        "outputVoxels": 94765056,
+        "latentTokens": 11904,
+        "driverTerminalState": "not_begun",
+        "state": "not_reached",
+        "captures": 0
+      },
+      {
+        "fixture": "ltx-2-3-mlx-bf16-1280x704-f121-fps30-seed18808",
+        "role": "fit",
+        "tier": "bf16",
+        "outputVoxels": 109035520,
+        "latentTokens": 14080,
+        "driverTerminalState": "not_begun",
+        "state": "not_reached",
+        "captures": 0
+      },
+      {
+        "fixture": "ltx-2-3-mlx-bf16-1280x704-f145-fps30-seed18808",
+        "role": "fit",
+        "tier": "bf16",
+        "outputVoxels": 130662400,
+        "latentTokens": 16720,
+        "driverTerminalState": "not_begun",
+        "state": "not_reached",
+        "captures": 0
+      },
+      {
+        "fixture": "ltx-2-3-mlx-bf16-768x512-f361-fps30-seed18808",
+        "role": "fit",
+        "tier": "bf16",
+        "outputVoxels": 141950976,
+        "latentTokens": 17664,
+        "driverTerminalState": "not_begun",
+        "state": "not_reached",
+        "captures": 0
+      },
+      {
+        "fixture": "ltx-2-3-mlx-bf16-512x768-f361-fps30-seed18808",
+        "role": "held_out",
+        "tier": "bf16",
+        "outputVoxels": 141950976,
+        "latentTokens": 17664,
+        "driverTerminalState": "not_begun",
+        "state": "not_reached",
+        "captures": 0
+      },
+      {
+        "fixture": "ltx-2-3-mlx-bf16-1280x704-f177-fps30-seed18808",
+        "role": "fit",
+        "tier": "bf16",
+        "outputVoxels": 159498240,
+        "latentTokens": 20240,
+        "driverTerminalState": "not_begun",
+        "state": "not_reached",
+        "captures": 0
+      },
+      {
+        "fixture": "ltx-2-3-mlx-bf16-704x1280-f177-fps30-seed18808",
+        "role": "held_out",
+        "tier": "bf16",
+        "outputVoxels": 159498240,
+        "latentTokens": 20240,
+        "driverTerminalState": "not_begun",
+        "state": "not_reached",
+        "captures": 0
+      },
+      {
+        "fixture": "ltx-2-3-mlx-bf16-768x512-f449-fps30-seed18808",
+        "role": "not_attempted_host_limit",
+        "tier": "bf16",
+        "outputVoxels": 176553984,
+        "latentTokens": 21888,
+        "driverTerminalState": "not_begun",
+        "state": "not_attempted_host_limit",
+        "captures": 0
+      },
+      {
+        "fixture": "ltx-2-3-mlx-bf16-1280x704-f241-fps30-seed18808",
+        "role": "not_attempted_host_limit",
+        "tier": "bf16",
+        "outputVoxels": 217169920,
+        "latentTokens": 27280,
+        "driverTerminalState": "not_begun",
+        "state": "not_attempted_host_limit",
+        "captures": 0
+      },
+      {
+        "fixture": "ltx-2-3-mlx-bf16-1280x704-f297-fps30-seed18808",
+        "role": "not_attempted_host_limit",
+        "tier": "bf16",
+        "outputVoxels": 267632640,
+        "latentTokens": 33440,
+        "driverTerminalState": "not_begun",
+        "state": "not_attempted_host_limit",
+        "captures": 0
+      },
+      {
+        "fixture": "ltx-2-3-mlx-bf16-1280x704-f305-fps30-seed18808",
+        "role": "rung2_boundary",
+        "tier": "bf16",
+        "outputVoxels": 274841600,
+        "latentTokens": 34320,
+        "driverTerminalState": "not_begun",
+        "state": "not_reached",
+        "captures": 0
+      },
+      {
+        "fixture": "ltx-2-3-mlx-bf16-1280x704-f449-fps30-seed18808",
+        "role": "rung2_boundary",
+        "tier": "bf16",
+        "outputVoxels": 404602880,
+        "latentTokens": 50160,
+        "driverTerminalState": "not_begun",
+        "state": "not_reached",
+        "captures": 0
+      },
+      {
+        "fixture": "ltx-2-3-mlx-q4-768x512-f121-fps30-seed18808",
+        "role": "fit",
+        "tier": "q4",
+        "outputVoxels": 47579136,
+        "latentTokens": 6144,
+        "driverTerminalState": "not_begun",
+        "state": "not_reached",
+        "captures": 0
+      },
+      {
+        "fixture": "ltx-2-3-mlx-q4-640x640-f177-fps30-seed18808",
+        "role": "held_out",
+        "tier": "q4",
+        "outputVoxels": 72499200,
+        "latentTokens": 9200,
+        "driverTerminalState": "not_begun",
+        "state": "not_reached",
+        "captures": 0
+      },
+      {
+        "fixture": "ltx-2-3-mlx-q4-768x512-f241-fps30-seed18808",
+        "role": "fit",
+        "tier": "q4",
+        "outputVoxels": 94765056,
+        "latentTokens": 11904,
+        "driverTerminalState": "not_begun",
+        "state": "not_reached",
+        "captures": 0
+      },
+      {
+        "fixture": "ltx-2-3-mlx-q4-1280x704-f121-fps30-seed18808",
+        "role": "fit",
+        "tier": "q4",
+        "outputVoxels": 109035520,
+        "latentTokens": 14080,
+        "driverTerminalState": "not_begun",
+        "state": "not_reached",
+        "captures": 0
+      },
+      {
+        "fixture": "ltx-2-3-mlx-q4-1280x704-f145-fps30-seed18808",
+        "role": "fit",
+        "tier": "q4",
+        "outputVoxels": 130662400,
+        "latentTokens": 16720,
+        "driverTerminalState": "not_begun",
+        "state": "not_reached",
+        "captures": 0
+      },
+      {
+        "fixture": "ltx-2-3-mlx-q4-768x512-f361-fps30-seed18808",
+        "role": "fit",
+        "tier": "q4",
+        "outputVoxels": 141950976,
+        "latentTokens": 17664,
+        "driverTerminalState": "not_begun",
+        "state": "not_reached",
+        "captures": 0
+      },
+      {
+        "fixture": "ltx-2-3-mlx-q4-512x768-f361-fps30-seed18808",
+        "role": "held_out",
+        "tier": "q4",
+        "outputVoxels": 141950976,
+        "latentTokens": 17664,
+        "driverTerminalState": "not_begun",
+        "state": "not_reached",
+        "captures": 0
+      },
+      {
+        "fixture": "ltx-2-3-mlx-q4-1280x704-f177-fps30-seed18808",
+        "role": "fit",
+        "tier": "q4",
+        "outputVoxels": 159498240,
+        "latentTokens": 20240,
+        "driverTerminalState": "not_begun",
+        "state": "not_reached",
+        "captures": 0
+      },
+      {
+        "fixture": "ltx-2-3-mlx-q4-704x1280-f177-fps30-seed18808",
+        "role": "held_out",
+        "tier": "q4",
+        "outputVoxels": 159498240,
+        "latentTokens": 20240,
+        "driverTerminalState": "not_begun",
+        "state": "not_reached",
+        "captures": 0
+      },
+      {
+        "fixture": "ltx-2-3-mlx-q4-768x512-f449-fps30-seed18808",
+        "role": "not_attempted_host_limit",
+        "tier": "q4",
+        "outputVoxels": 176553984,
+        "latentTokens": 21888,
+        "driverTerminalState": "not_begun",
+        "state": "not_attempted_host_limit",
+        "captures": 0
+      },
+      {
+        "fixture": "ltx-2-3-mlx-q4-1280x704-f241-fps30-seed18808",
+        "role": "not_attempted_host_limit",
+        "tier": "q4",
+        "outputVoxels": 217169920,
+        "latentTokens": 27280,
+        "driverTerminalState": "not_begun",
+        "state": "not_attempted_host_limit",
+        "captures": 0
+      },
+      {
+        "fixture": "ltx-2-3-mlx-q4-1280x704-f297-fps30-seed18808",
+        "role": "not_attempted_host_limit",
+        "tier": "q4",
+        "outputVoxels": 267632640,
+        "latentTokens": 33440,
+        "driverTerminalState": "not_begun",
+        "state": "not_attempted_host_limit",
+        "captures": 0
+      },
+      {
+        "fixture": "ltx-2-3-mlx-q4-1280x704-f305-fps30-seed18808",
+        "role": "rung2_boundary",
+        "tier": "q4",
+        "outputVoxels": 274841600,
+        "latentTokens": 34320,
+        "driverTerminalState": "not_begun",
+        "state": "not_reached",
+        "captures": 0
+      },
+      {
+        "fixture": "ltx-2-3-mlx-q4-1280x704-f449-fps30-seed18808",
+        "role": "rung2_boundary",
+        "tier": "q4",
+        "outputVoxels": 404602880,
+        "latentTokens": 50160,
+        "driverTerminalState": "not_begun",
+        "state": "not_reached",
+        "captures": 0
+      }
+    ]
+  },
+  "noiseFloors": {
+    "text": {
+      "replicatedGeometries": 4,
+      "maxSpreadGib": 0.10953521728515625,
+      "maxSpreadFraction": 0.0033033086466509954,
+      "crossRevision": true,
+      "spreads": [
+        {
+          "key": "[\"ltx_2_3\",\"ltx_2_3\",\"mlx\",\"q8\",\"text_to_video\",\"staged_residency\",\"eager_materialization\",1,\"87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3\",\"sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1\",0,768,512,241,24]",
+          "replicates": 2,
+          "meanGib": 33.2283246293664,
+          "spreadGib": 0,
+          "sceneWorksRevisions": [
+            "817cf55097a69163632684cfbf3be667747ff256",
+            "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+          ]
+        },
+        {
+          "key": "[\"ltx_2_3\",\"ltx_2_3\",\"mlx\",\"q8\",\"text_to_video\",\"staged_residency\",\"eager_materialization\",1,\"87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3\",\"sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1\",0,768,512,121,30]",
+          "replicates": 3,
+          "meanGib": 33.159243958691754,
+          "spreadGib": 0.10953521728515625,
+          "sceneWorksRevisions": [
+            "41e8151fb317ff6d9099a9afc96bbc6a5e60c82b",
+            "817cf55097a69163632684cfbf3be667747ff256",
+            "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+          ]
+        },
+        {
+          "key": "[\"ltx_2_3\",\"ltx_2_3\",\"mlx\",\"q8\",\"text_to_video\",\"staged_residency\",\"eager_materialization\",1,\"87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3\",\"sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1\",0,640,640,177,30]",
+          "replicates": 2,
+          "meanGib": 33.2283246293664,
+          "spreadGib": 0,
+          "sceneWorksRevisions": [
+            "817cf55097a69163632684cfbf3be667747ff256",
+            "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+          ]
+        },
+        {
+          "key": "[\"ltx_2_3\",\"ltx_2_3\",\"mlx\",\"q8\",\"text_to_video\",\"staged_residency\",\"eager_materialization\",1,\"87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3\",\"sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1\",0,768,512,241,30]",
+          "replicates": 2,
+          "meanGib": 33.2283246293664,
+          "spreadGib": 0,
+          "sceneWorksRevisions": [
+            "817cf55097a69163632684cfbf3be667747ff256",
+            "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+          ]
+        }
+      ]
+    },
+    "denoise": {
+      "replicatedGeometries": 4,
+      "maxSpreadGib": 0.00027042627334594727,
+      "maxSpreadFraction": 0.000010185324997970276,
+      "crossRevision": true,
+      "spreads": [
+        {
+          "key": "[\"ltx_2_3\",\"ltx_2_3\",\"mlx\",\"q8\",\"text_to_video\",\"staged_residency\",\"eager_materialization\",1,\"87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3\",\"sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1\",0,768,512,241,24]",
+          "replicates": 2,
+          "meanGib": 32.38183308765292,
+          "spreadGib": 0.000045180320739746094,
+          "sceneWorksRevisions": [
+            "817cf55097a69163632684cfbf3be667747ff256",
+            "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+          ]
+        },
+        {
+          "key": "[\"ltx_2_3\",\"ltx_2_3\",\"mlx\",\"q8\",\"text_to_video\",\"staged_residency\",\"eager_materialization\",1,\"87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3\",\"sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1\",0,768,512,121,30]",
+          "replicates": 3,
+          "meanGib": 26.550578739494085,
+          "spreadGib": 0.00027042627334594727,
+          "sceneWorksRevisions": [
+            "41e8151fb317ff6d9099a9afc96bbc6a5e60c82b",
+            "817cf55097a69163632684cfbf3be667747ff256",
+            "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+          ]
+        },
+        {
+          "key": "[\"ltx_2_3\",\"ltx_2_3\",\"mlx\",\"q8\",\"text_to_video\",\"staged_residency\",\"eager_materialization\",1,\"87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3\",\"sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1\",0,640,640,177,30]",
+          "replicates": 2,
+          "meanGib": 29.584157425910234,
+          "spreadGib": 0.000016450881958007812,
+          "sceneWorksRevisions": [
+            "817cf55097a69163632684cfbf3be667747ff256",
+            "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+          ]
+        },
+        {
+          "key": "[\"ltx_2_3\",\"ltx_2_3\",\"mlx\",\"q8\",\"text_to_video\",\"staged_residency\",\"eager_materialization\",1,\"87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3\",\"sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1\",0,768,512,241,30]",
+          "replicates": 2,
+          "meanGib": 32.35757365450263,
+          "spreadGib": 0.000004351139068603516,
+          "sceneWorksRevisions": [
+            "817cf55097a69163632684cfbf3be667747ff256",
+            "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+          ]
+        }
+      ]
+    },
+    "decode": {
+      "replicatedGeometries": 4,
+      "maxSpreadGib": 0,
+      "maxSpreadFraction": 0,
+      "crossRevision": true,
+      "spreads": [
+        {
+          "key": "[\"ltx_2_3\",\"ltx_2_3\",\"mlx\",\"q8\",\"text_to_video\",\"staged_residency\",\"eager_materialization\",1,\"87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3\",\"sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1\",0,768,512,241,24]",
+          "replicates": 2,
+          "meanGib": 30.98037526383996,
+          "spreadGib": 0,
+          "sceneWorksRevisions": [
+            "817cf55097a69163632684cfbf3be667747ff256",
+            "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+          ]
+        },
+        {
+          "key": "[\"ltx_2_3\",\"ltx_2_3\",\"mlx\",\"q8\",\"text_to_video\",\"staged_residency\",\"eager_materialization\",1,\"87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3\",\"sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1\",0,768,512,121,30]",
+          "replicates": 3,
+          "meanGib": 16.829830512404442,
+          "spreadGib": 0,
+          "sceneWorksRevisions": [
+            "41e8151fb317ff6d9099a9afc96bbc6a5e60c82b",
+            "817cf55097a69163632684cfbf3be667747ff256",
+            "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+          ]
+        },
+        {
+          "key": "[\"ltx_2_3\",\"ltx_2_3\",\"mlx\",\"q8\",\"text_to_video\",\"staged_residency\",\"eager_materialization\",1,\"87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3\",\"sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1\",0,640,640,177,30]",
+          "replicates": 2,
+          "meanGib": 24.302487295120955,
+          "spreadGib": 0,
+          "sceneWorksRevisions": [
+            "817cf55097a69163632684cfbf3be667747ff256",
+            "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+          ]
+        },
+        {
+          "key": "[\"ltx_2_3\",\"ltx_2_3\",\"mlx\",\"q8\",\"text_to_video\",\"staged_residency\",\"eager_materialization\",1,\"87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3\",\"sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1\",0,768,512,241,30]",
+          "replicates": 2,
+          "meanGib": 30.98037489131093,
+          "spreadGib": 0,
+          "sceneWorksRevisions": [
+            "817cf55097a69163632684cfbf3be667747ff256",
+            "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+          ]
+        }
+      ]
+    },
+    "overallActive": {
+      "replicatedGeometries": 4,
+      "maxSpreadGib": 0.10953521728515625,
+      "maxSpreadFraction": 0.0033033086466509954,
+      "crossRevision": true,
+      "spreads": [
+        {
+          "key": "[\"ltx_2_3\",\"ltx_2_3\",\"mlx\",\"q8\",\"text_to_video\",\"staged_residency\",\"eager_materialization\",1,\"87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3\",\"sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1\",0,768,512,241,24]",
+          "replicates": 2,
+          "meanGib": 33.2283246293664,
+          "spreadGib": 0,
+          "sceneWorksRevisions": [
+            "817cf55097a69163632684cfbf3be667747ff256",
+            "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+          ]
+        },
+        {
+          "key": "[\"ltx_2_3\",\"ltx_2_3\",\"mlx\",\"q8\",\"text_to_video\",\"staged_residency\",\"eager_materialization\",1,\"87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3\",\"sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1\",0,768,512,121,30]",
+          "replicates": 3,
+          "meanGib": 33.159243958691754,
+          "spreadGib": 0.10953521728515625,
+          "sceneWorksRevisions": [
+            "41e8151fb317ff6d9099a9afc96bbc6a5e60c82b",
+            "817cf55097a69163632684cfbf3be667747ff256",
+            "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+          ]
+        },
+        {
+          "key": "[\"ltx_2_3\",\"ltx_2_3\",\"mlx\",\"q8\",\"text_to_video\",\"staged_residency\",\"eager_materialization\",1,\"87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3\",\"sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1\",0,640,640,177,30]",
+          "replicates": 2,
+          "meanGib": 33.2283246293664,
+          "spreadGib": 0,
+          "sceneWorksRevisions": [
+            "817cf55097a69163632684cfbf3be667747ff256",
+            "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+          ]
+        },
+        {
+          "key": "[\"ltx_2_3\",\"ltx_2_3\",\"mlx\",\"q8\",\"text_to_video\",\"staged_residency\",\"eager_materialization\",1,\"87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3\",\"sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1\",0,768,512,241,30]",
+          "replicates": 2,
+          "meanGib": 33.2283246293664,
+          "spreadGib": 0,
+          "sceneWorksRevisions": [
+            "817cf55097a69163632684cfbf3be667747ff256",
+            "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+          ]
+        }
+      ]
+    },
+    "maxPhaseActivePlusCache": {
+      "replicatedGeometries": 4,
+      "maxSpreadGib": 0.48833170905709267,
+      "maxSpreadFraction": 0.004434882133151637,
+      "crossRevision": true,
+      "spreads": [
+        {
+          "key": "[\"ltx_2_3\",\"ltx_2_3\",\"mlx\",\"q8\",\"text_to_video\",\"staged_residency\",\"eager_materialization\",1,\"87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3\",\"sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1\",0,768,512,241,24]",
+          "replicates": 2,
+          "meanGib": 129.6140967886895,
+          "spreadGib": 0.4094945229589939,
+          "sceneWorksRevisions": [
+            "817cf55097a69163632684cfbf3be667747ff256",
+            "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+          ]
+        },
+        {
+          "key": "[\"ltx_2_3\",\"ltx_2_3\",\"mlx\",\"q8\",\"text_to_video\",\"staged_residency\",\"eager_materialization\",1,\"87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3\",\"sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1\",0,768,512,121,30]",
+          "replicates": 3,
+          "meanGib": 84.7649530035754,
+          "spreadGib": 0.3759225755929947,
+          "sceneWorksRevisions": [
+            "41e8151fb317ff6d9099a9afc96bbc6a5e60c82b",
+            "817cf55097a69163632684cfbf3be667747ff256",
+            "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+          ]
+        },
+        {
+          "key": "[\"ltx_2_3\",\"ltx_2_3\",\"mlx\",\"q8\",\"text_to_video\",\"staged_residency\",\"eager_materialization\",1,\"87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3\",\"sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1\",0,640,640,177,30]",
+          "replicates": 2,
+          "meanGib": 115.22630941309035,
+          "spreadGib": 0.48833170905709267,
+          "sceneWorksRevisions": [
+            "817cf55097a69163632684cfbf3be667747ff256",
+            "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+          ]
+        },
+        {
+          "key": "[\"ltx_2_3\",\"ltx_2_3\",\"mlx\",\"q8\",\"text_to_video\",\"staged_residency\",\"eager_materialization\",1,\"87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3\",\"sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1\",0,768,512,241,30]",
+          "replicates": 2,
+          "meanGib": 129.88112881034613,
+          "spreadGib": 0.01202799379825592,
+          "sceneWorksRevisions": [
+            "817cf55097a69163632684cfbf3be667747ff256",
+            "f301d712c7e31841103ee5fde0c826c5ad0e2768"
+          ]
+        }
+      ]
+    }
+  },
+  "selectorFits": [
+    {
+      "key": "[\"ltx_2_3\",\"ltx-video\",\"ltx_2_3\",\"mlx\",\"q8\",\"text_to_video\",\"staged_residency\",\"eager_materialization\",1,\"87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3\",3,\"sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1\",\"single_pass\"]",
+      "selector": {
+        "modelId": "ltx_2_3",
+        "modelFamily": "ltx-video",
+        "provider": "ltx_2_3",
+        "backend": "mlx",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "rung": "staged_residency",
+        "loadShape": "eager_materialization",
+        "batch": 1,
+        "closureDigest": "87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3",
+        "calibrationAbi": 3,
+        "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+        "decodePass": "single_pass"
+      },
+      "recordIds": [
+        "imc-2c064567893ea869006e",
+        "imc-3b8b84711b810ff12c89",
+        "imc-4502c367ad50b19be74f",
+        "imc-5aff3e74b46b30fb797c",
+        "imc-60f463ae74a2d3cd7fc5",
+        "imc-624c0e5c472b3ba92c78",
+        "imc-7defacb76cdfeaa95e92",
+        "imc-9af21f4be28530a6e5b0",
+        "imc-c74655ab0699898fb6b7",
+        "imc-c7bf2b2ff37d73d6d1a1",
+        "imc-ed4386179ee8edd3776b",
+        "imc-f3ef6ea4a4033293f99f",
+        "imc-f6e97ce0817a6f697d1d"
+      ],
+      "legacyFitTier": "q8"
+    }
+  ],
+  "observations": [
+    {
+      "recordId": "imc-2c064567893ea869006e",
+      "fixture": "ltx-2-3-mlx-q8-1280x704-f121-fps30-seed18808",
+      "modelId": "ltx_2_3",
+      "modelFamily": "ltx-video",
+      "provider": "ltx_2_3",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "text_to_video",
+      "role": "fit",
+      "rung": "staged_residency",
+      "loadShape": "eager_materialization",
+      "batch": 1,
+      "closureDigest": "87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3",
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "calibrationAbi": 3,
+      "decodeTilingEngaged": false,
+      "sceneWorksRevision": "817cf55097a69163632684cfbf3be667747ff256",
+      "geometry": {
+        "width": 1280,
+        "height": 704,
+        "frames": 121,
+        "fps": 30,
+        "mpx": 0.90112,
+        "tLat": 16,
+        "tokens": 14080
+      },
+      "activeGib": {
+        "text": 33.2283246293664,
+        "denoise": 34.30222716554999,
+        "decode": 35.32644306123257,
+        "overallActive": 35.32644306123257,
+        "maxPhaseActivePlusCache": 132.85159958526492
+      },
+      "cacheGib": {
+        "text": 4.0714802127331495,
+        "denoise": 0,
+        "decode": 97.52515652403235
+      }
+    },
+    {
+      "recordId": "imc-3b8b84711b810ff12c89",
+      "fixture": "ltx-2-3-mlx-q8-1280x704-f145-fps30-seed18808",
+      "modelId": "ltx_2_3",
+      "modelFamily": "ltx-video",
+      "provider": "ltx_2_3",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "text_to_video",
+      "role": "fit",
+      "rung": "staged_residency",
+      "loadShape": "eager_materialization",
+      "batch": 1,
+      "closureDigest": "87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3",
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "calibrationAbi": 3,
+      "decodeTilingEngaged": false,
+      "sceneWorksRevision": "c30c497489d0a7b0404e9baa42e3aabc6e852192",
+      "geometry": {
+        "width": 1280,
+        "height": 704,
+        "frames": 145,
+        "fps": 30,
+        "mpx": 0.90112,
+        "tLat": 19,
+        "tokens": 16720
+      },
+      "activeGib": {
+        "text": 33.83128140680492,
+        "denoise": 36.95603733882308,
+        "decode": 41.801113683730364,
+        "overallActive": 41.801113683730364,
+        "maxPhaseActivePlusCache": 139.38051231950521
+      },
+      "cacheGib": {
+        "text": 4.8618372324854136,
+        "denoise": 0,
+        "decode": 97.57939863577485
+      }
+    },
+    {
+      "recordId": "imc-4502c367ad50b19be74f",
+      "fixture": "ltx-2-3-mlx-q8-512x768-f361-fps30-seed18808",
+      "modelId": "ltx_2_3",
+      "modelFamily": "ltx-video",
+      "provider": "ltx_2_3",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "text_to_video",
+      "role": "held_out",
+      "rung": "staged_residency",
+      "loadShape": "eager_materialization",
+      "batch": 1,
+      "closureDigest": "87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3",
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "calibrationAbi": 3,
+      "decodeTilingEngaged": false,
+      "sceneWorksRevision": "817cf55097a69163632684cfbf3be667747ff256",
+      "geometry": {
+        "width": 512,
+        "height": 768,
+        "frames": 361,
+        "fps": 30,
+        "mpx": 0.393216,
+        "tLat": 46,
+        "tokens": 17664
+      },
+      "activeGib": {
+        "text": 33.2283246293664,
+        "denoise": 37.98825467005372,
+        "decode": 45.13084305822849,
+        "overallActive": 45.13084305822849,
+        "maxPhaseActivePlusCache": 142.7955947443843
+      },
+      "cacheGib": {
+        "text": 5.089454820379615,
+        "denoise": 0,
+        "decode": 97.6647516861558
+      }
+    },
+    {
+      "recordId": "imc-7defacb76cdfeaa95e92",
+      "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+      "modelId": "ltx_2_3",
+      "modelFamily": "ltx-video",
+      "provider": "ltx_2_3",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "text_to_video",
+      "role": "held_out",
+      "rung": "staged_residency",
+      "loadShape": "eager_materialization",
+      "batch": 1,
+      "closureDigest": "87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3",
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "calibrationAbi": 3,
+      "decodeTilingEngaged": false,
+      "sceneWorksRevision": "817cf55097a69163632684cfbf3be667747ff256",
+      "geometry": {
+        "width": 640,
+        "height": 640,
+        "frames": 177,
+        "fps": 30,
+        "mpx": 0.4096,
+        "tLat": 23,
+        "tokens": 9200
+      },
+      "activeGib": {
+        "text": 33.2283246293664,
+        "denoise": 29.584149200469255,
+        "decode": 24.302487295120955,
+        "overallActive": 33.2283246293664,
+        "maxPhaseActivePlusCache": 115.4704752676189
+      },
+      "cacheGib": {
+        "text": 2.7569761145859957,
+        "denoise": 0,
+        "decode": 91.16798797249794
+      }
+    },
+    {
+      "recordId": "imc-ed4386179ee8edd3776b",
+      "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+      "modelId": "ltx_2_3",
+      "modelFamily": "ltx-video",
+      "provider": "ltx_2_3",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "text_to_video",
+      "role": "held_out",
+      "rung": "staged_residency",
+      "loadShape": "eager_materialization",
+      "batch": 1,
+      "closureDigest": "87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3",
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "calibrationAbi": 3,
+      "decodeTilingEngaged": false,
+      "sceneWorksRevision": "f301d712c7e31841103ee5fde0c826c5ad0e2768",
+      "geometry": {
+        "width": 640,
+        "height": 640,
+        "frames": 177,
+        "fps": 30,
+        "mpx": 0.4096,
+        "tLat": 23,
+        "tokens": 9200
+      },
+      "activeGib": {
+        "text": 33.2283246293664,
+        "denoise": 29.584165651351213,
+        "decode": 24.302487295120955,
+        "overallActive": 33.2283246293664,
+        "maxPhaseActivePlusCache": 114.9821435585618
+      },
+      "cacheGib": {
+        "text": 2.7569761145859957,
+        "denoise": 0,
+        "decode": 90.67965626344085
+      }
+    },
+    {
+      "recordId": "imc-5aff3e74b46b30fb797c",
+      "fixture": "ltx-2-3-mlx-q8-704x1280-f177-fps30-seed18808",
+      "modelId": "ltx_2_3",
+      "modelFamily": "ltx-video",
+      "provider": "ltx_2_3",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "text_to_video",
+      "role": "held_out",
+      "rung": "staged_residency",
+      "loadShape": "eager_materialization",
+      "batch": 1,
+      "closureDigest": "87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3",
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "calibrationAbi": 3,
+      "decodeTilingEngaged": false,
+      "sceneWorksRevision": "41e8151fb317ff6d9099a9afc96bbc6a5e60c82b",
+      "geometry": {
+        "width": 704,
+        "height": 1280,
+        "frames": 177,
+        "fps": 30,
+        "mpx": 0.90112,
+        "tLat": 23,
+        "tokens": 20240
+      },
+      "activeGib": {
+        "text": 33.2283246293664,
+        "denoise": 40.4880257435143,
+        "decode": 50.43400279805064,
+        "overallActive": 50.43400279805064,
+        "maxPhaseActivePlusCache": 148.67285177484155
+      },
+      "cacheGib": {
+        "text": 5.755351053550839,
+        "denoise": 0,
+        "decode": 98.2388489767909
+      }
+    },
+    {
+      "recordId": "imc-624c0e5c472b3ba92c78",
+      "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+      "modelId": "ltx_2_3",
+      "modelFamily": "ltx-video",
+      "provider": "ltx_2_3",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "text_to_video",
+      "role": "fit",
+      "rung": "staged_residency",
+      "loadShape": "eager_materialization",
+      "batch": 1,
+      "closureDigest": "87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3",
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "calibrationAbi": 3,
+      "decodeTilingEngaged": false,
+      "sceneWorksRevision": "41e8151fb317ff6d9099a9afc96bbc6a5e60c82b",
+      "geometry": {
+        "width": 768,
+        "height": 512,
+        "frames": 121,
+        "fps": 30,
+        "mpx": 0.393216,
+        "tLat": 16,
+        "tokens": 6144
+      },
+      "activeGib": {
+        "text": 33.2283246293664,
+        "denoise": 26.55072697624564,
+        "decode": 16.829830512404442,
+        "overallActive": 33.2283246293664,
+        "maxPhaseActivePlusCache": 84.59038115292788
+      },
+      "cacheGib": {
+        "text": 1.9908843003213406,
+        "denoise": 0,
+        "decode": 67.76055064052343
+      }
+    },
+    {
+      "recordId": "imc-9af21f4be28530a6e5b0",
+      "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+      "modelId": "ltx_2_3",
+      "modelFamily": "ltx-video",
+      "provider": "ltx_2_3",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "text_to_video",
+      "role": "fit",
+      "rung": "staged_residency",
+      "loadShape": "eager_materialization",
+      "batch": 1,
+      "closureDigest": "87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3",
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "calibrationAbi": 3,
+      "decodeTilingEngaged": false,
+      "sceneWorksRevision": "817cf55097a69163632684cfbf3be667747ff256",
+      "geometry": {
+        "width": 768,
+        "height": 512,
+        "frames": 121,
+        "fps": 30,
+        "mpx": 0.393216,
+        "tLat": 16,
+        "tokens": 6144
+      },
+      "activeGib": {
+        "text": 33.11878941208124,
+        "denoise": 26.55055269226432,
+        "decode": 16.829830512404442,
+        "overallActive": 33.11878941208124,
+        "maxPhaseActivePlusCache": 84.96630372852087
+      },
+      "cacheGib": {
+        "text": 1.8632981088012457,
+        "denoise": 0,
+        "decode": 68.13647321611643
+      }
+    },
+    {
+      "recordId": "imc-f6e97ce0817a6f697d1d",
+      "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+      "modelId": "ltx_2_3",
+      "modelFamily": "ltx-video",
+      "provider": "ltx_2_3",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "text_to_video",
+      "role": "fit",
+      "rung": "staged_residency",
+      "loadShape": "eager_materialization",
+      "batch": 1,
+      "closureDigest": "87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3",
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "calibrationAbi": 3,
+      "decodeTilingEngaged": false,
+      "sceneWorksRevision": "f301d712c7e31841103ee5fde0c826c5ad0e2768",
+      "geometry": {
+        "width": 768,
+        "height": 512,
+        "frames": 121,
+        "fps": 30,
+        "mpx": 0.393216,
+        "tLat": 16,
+        "tokens": 6144
+      },
+      "activeGib": {
+        "text": 33.13061783462763,
+        "denoise": 26.550456549972296,
+        "decode": 16.829830512404442,
+        "overallActive": 33.13061783462763,
+        "maxPhaseActivePlusCache": 84.73817412927747
+      },
+      "cacheGib": {
+        "text": 1.8249613922089338,
+        "denoise": 0,
+        "decode": 67.90834361687303
+      }
+    },
+    {
+      "recordId": "imc-f3ef6ea4a4033293f99f",
+      "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+      "modelId": "ltx_2_3",
+      "modelFamily": "ltx-video",
+      "provider": "ltx_2_3",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "text_to_video",
+      "role": "held_out_fps_probe",
+      "rung": "staged_residency",
+      "loadShape": "eager_materialization",
+      "batch": 1,
+      "closureDigest": "87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3",
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "calibrationAbi": 3,
+      "decodeTilingEngaged": false,
+      "sceneWorksRevision": "817cf55097a69163632684cfbf3be667747ff256",
+      "geometry": {
+        "width": 768,
+        "height": 512,
+        "frames": 241,
+        "fps": 24,
+        "mpx": 0.393216,
+        "tLat": 31,
+        "tokens": 11904
+      },
+      "activeGib": {
+        "text": 33.2283246293664,
+        "denoise": 32.38185567781329,
+        "decode": 30.98037526383996,
+        "overallActive": 33.2283246293664,
+        "maxPhaseActivePlusCache": 129.40934952721
+      },
+      "cacheGib": {
+        "text": 3.556833429262042,
+        "denoise": 0,
+        "decode": 98.42897426337004
+      }
+    },
+    {
+      "recordId": "imc-60f463ae74a2d3cd7fc5",
+      "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+      "modelId": "ltx_2_3",
+      "modelFamily": "ltx-video",
+      "provider": "ltx_2_3",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "text_to_video",
+      "role": "held_out_fps_probe",
+      "rung": "staged_residency",
+      "loadShape": "eager_materialization",
+      "batch": 1,
+      "closureDigest": "87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3",
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "calibrationAbi": 3,
+      "decodeTilingEngaged": false,
+      "sceneWorksRevision": "f301d712c7e31841103ee5fde0c826c5ad0e2768",
+      "geometry": {
+        "width": 768,
+        "height": 512,
+        "frames": 241,
+        "fps": 24,
+        "mpx": 0.393216,
+        "tLat": 31,
+        "tokens": 11904
+      },
+      "activeGib": {
+        "text": 33.2283246293664,
+        "denoise": 32.38181049749255,
+        "decode": 30.98037526383996,
+        "overallActive": 33.2283246293664,
+        "maxPhaseActivePlusCache": 129.818844050169
+      },
+      "cacheGib": {
+        "text": 3.556845711544156,
+        "denoise": 0,
+        "decode": 98.83846878632903
+      }
+    },
+    {
+      "recordId": "imc-c7bf2b2ff37d73d6d1a1",
+      "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+      "modelId": "ltx_2_3",
+      "modelFamily": "ltx-video",
+      "provider": "ltx_2_3",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "text_to_video",
+      "role": "fit",
+      "rung": "staged_residency",
+      "loadShape": "eager_materialization",
+      "batch": 1,
+      "closureDigest": "87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3",
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "calibrationAbi": 3,
+      "decodeTilingEngaged": false,
+      "sceneWorksRevision": "817cf55097a69163632684cfbf3be667747ff256",
+      "geometry": {
+        "width": 768,
+        "height": 512,
+        "frames": 241,
+        "fps": 30,
+        "mpx": 0.393216,
+        "tLat": 31,
+        "tokens": 11904
+      },
+      "activeGib": {
+        "text": 33.2283246293664,
+        "denoise": 32.357571478933096,
+        "decode": 30.98037489131093,
+        "overallActive": 33.2283246293664,
+        "maxPhaseActivePlusCache": 129.88714280724525
+      },
+      "cacheGib": {
+        "text": 3.5543747823685408,
+        "denoise": 0,
+        "decode": 98.90676791593432
+      }
+    },
+    {
+      "recordId": "imc-c74655ab0699898fb6b7",
+      "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+      "modelId": "ltx_2_3",
+      "modelFamily": "ltx-video",
+      "provider": "ltx_2_3",
+      "backend": "mlx",
+      "tier": "q8",
+      "mode": "text_to_video",
+      "role": "fit",
+      "rung": "staged_residency",
+      "loadShape": "eager_materialization",
+      "batch": 1,
+      "closureDigest": "87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3",
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "calibrationAbi": 3,
+      "decodeTilingEngaged": false,
+      "sceneWorksRevision": "f301d712c7e31841103ee5fde0c826c5ad0e2768",
+      "geometry": {
+        "width": 768,
+        "height": 512,
+        "frames": 241,
+        "fps": 30,
+        "mpx": 0.393216,
+        "tLat": 31,
+        "tokens": 11904
+      },
+      "activeGib": {
+        "text": 33.2283246293664,
+        "denoise": 32.357575830072165,
+        "decode": 30.98037489131093,
+        "overallActive": 33.2283246293664,
+        "maxPhaseActivePlusCache": 129.875114813447
+      },
+      "cacheGib": {
+        "text": 3.5301065761595964,
+        "denoise": 0,
+        "decode": 98.89473992213607
+      }
+    }
+  ],
+  "fits": {
+    "text": {
+      "q8": {
+        "fitPoints": 7,
+        "heldOutPoints": 6,
+        "unscoredPoints": 0,
+        "candidates": {
+          "area_only": {
+            "coefficients": {
+              "fixedGb": 32.921384517704226,
+              "perMpxGb": 0.6751803315667936
+            },
+            "fit": {
+              "count": 7,
+              "rmseGib": 0.16679035985495116,
+              "maxAbsGib": 0.3014783887192962
+            },
+            "heldOut": {
+              "count": 6,
+              "rmseGib": 0.12773003899345103,
+              "maxAbsGib": 0.3014783887192962
+            },
+            "points": [
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.529803018085694,
+                "residualGib": 0.3014783887192962
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f145-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.83128140680492,
+                "predictedGib": 33.529803018085694,
+                "residualGib": -0.30147838871922517
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.186876226961594,
+                "residualGib": -0.04144840240480363
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.11878941208124,
+                "predictedGib": 33.186876226961594,
+                "residualGib": 0.06808681488035262
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.186876226961594,
+                "residualGib": -0.04144840240480363
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.186876226961594,
+                "residualGib": -0.04144840240480363
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.13061783462763,
+                "predictedGib": 33.186876226961594,
+                "residualGib": 0.0562583923339659
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-512x768-f361-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.186876226961594,
+                "residualGib": -0.04144840240480363
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-704x1280-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.529803018085694,
+                "residualGib": 0.3014783887192962
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.186876226961594,
+                "residualGib": -0.04144840240480363
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.197938381513985,
+                "residualGib": -0.030386247852412396
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.197938381513985,
+                "residualGib": -0.030386247852412396
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.186876226961594,
+                "residualGib": -0.04144840240480363
+              }
+            ]
+          },
+          "additive": {
+            "coefficients": {
+              "fixedGb": 32.728826849578084,
+              "perMpxGb": 0.7445069488048299,
+              "perFrameGb": 0.0009780907278240803
+            },
+            "fit": {
+              "count": 7,
+              "rmseGib": 0.15943047756949438,
+              "maxAbsGib": 0.2897412999854083
+            },
+            "heldOut": {
+              "count": 6,
+              "rmseGib": 0.1542206979907233,
+              "maxAbsGib": 0.3445143807435542
+            },
+            "points": [
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.518065929351806,
+                "residualGib": 0.2897412999854083
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f145-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.83128140680492,
+                "predictedGib": 33.54154010681958,
+                "residualGib": -0.28974129998533726
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.139927872026036,
+                "residualGib": -0.08839675734036234
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.11878941208124,
+                "predictedGib": 33.139927872026036,
+                "residualGib": 0.021138459944793908
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.25729875936493,
+                "residualGib": 0.028974129998530884
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.25729875936493,
+                "residualGib": 0.028974129998530884
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.13061783462763,
+                "predictedGib": 33.139927872026036,
+                "residualGib": 0.00931003739840719
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-512x768-f361-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.374669646703815,
+                "residualGib": 0.146345017337417
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-704x1280-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.57283901010995,
+                "residualGib": 0.3445143807435542
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.25729875936493,
+                "residualGib": 0.028974129998530884
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.2068989546334,
+                "residualGib": -0.021425674732995503
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.2068989546334,
+                "residualGib": -0.021425674732995503
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.25729875936493,
+                "residualGib": 0.028974129998530884
+              }
+            ]
+          },
+          "cross": {
+            "coefficients": {
+              "fixedGb": 32.83121938258379,
+              "perMpxGb": 0.29775883963241845,
+              "perMpxFrameGb": 0.003590078628403169
+            },
+            "fit": {
+              "count": 7,
+              "rmseGib": 0.14989658748887047,
+              "maxAbsGib": 0.2626572888757863
+            },
+            "heldOut": {
+              "count": 6,
+              "rmseGib": 0.2071149772647549,
+              "maxAbsGib": 0.4438224214788775
+            },
+            "points": [
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.490981918242184,
+                "residualGib": 0.2626572888757863
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f145-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.83128140680492,
+                "predictedGib": 33.568624117929225,
+                "residualGib": -0.26265728887569395
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.11911576178018,
+                "residualGib": -0.10920886758621862
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.11878941208124,
+                "predictedGib": 33.11911576178018,
+                "residualGib": 0.00032634969893763355
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.28851692473372,
+                "residualGib": 0.0601922953673224
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.28851692473372,
+                "residualGib": 0.0601922953673224
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.13061783462763,
+                "predictedGib": 33.11911576178018,
+                "residualGib": -0.011502072847449085
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-512x768-f361-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.45791808768726,
+                "residualGib": 0.22959345832086342
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-704x1280-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.672147050845275,
+                "residualGib": 0.4438224214788775
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.28851692473372,
+                "residualGib": 0.0601922953673224
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.21345923179356,
+                "residualGib": -0.014865397572840777
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.21345923179356,
+                "residualGib": -0.014865397572840777
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.28851692473372,
+                "residualGib": 0.0601922953673224
+              }
+            ]
+          },
+          "latent_tokens": {
+            "coefficients": {
+              "fixedGb": 32.85025523410308,
+              "perLatentTokenGb": 0.000041651157341974375
+            },
+            "fit": {
+              "count": 7,
+              "rmseGib": 0.15484544101239248,
+              "maxAbsGib": 0.2846188219440293
+            },
+            "heldOut": {
+              "count": 6,
+              "rmseGib": 0.24895698910252487,
+              "maxAbsGib": 0.46495002933824736
+            },
+            "points": [
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.43670352947808,
+                "residualGib": 0.2083789001116827
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f145-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.83128140680492,
+                "predictedGib": 33.54666258486089,
+                "residualGib": -0.2846188219440293
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.10615994481217,
+                "residualGib": -0.12216468455422813
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.11878941208124,
+                "predictedGib": 33.10615994481217,
+                "residualGib": -0.012629467269071881
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.34607061110194,
+                "residualGib": 0.11774598173554551
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.34607061110194,
+                "residualGib": 0.11774598173554551
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.13061783462763,
+                "predictedGib": 33.10615994481217,
+                "residualGib": -0.0244578898154586
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-512x768-f361-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.58598127739172,
+                "residualGib": 0.35765664802531916
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-704x1280-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.693274658704645,
+                "residualGib": 0.46495002933824736
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.34607061110194,
+                "residualGib": 0.11774598173554551
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.233445881649246,
+                "residualGib": 0.005121252282847877
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.233445881649246,
+                "residualGib": 0.005121252282847877
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.34607061110194,
+                "residualGib": 0.11774598173554551
+              }
+            ]
+          },
+          "output_voxels": {
+            "coefficients": {
+              "fixedGb": 32.85644396419057,
+              "perMpxFrameGb": 0.005243112978374031
+            },
+            "fit": {
+              "count": 7,
+              "rmseGib": 0.15624478930393135,
+              "maxAbsGib": 0.2897597173888542
+            },
+            "heldOut": {
+              "count": 6,
+              "rmseGib": 0.2535423940979736,
+              "maxAbsGib": 0.46438662699598865
+            },
+            "points": [
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.428129514206326,
+                "residualGib": 0.19980488483992787
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f145-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.83128140680492,
+                "predictedGib": 33.541521689416065,
+                "residualGib": -0.2897597173888542
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.10590674965199,
+                "residualGib": -0.12241787971440488
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.11878941208124,
+                "predictedGib": 33.10590674965199,
+                "residualGib": -0.012882662429248626
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.35330785920051,
+                "residualGib": 0.1249832298341147
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.35330785920051,
+                "residualGib": 0.1249832298341147
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.13061783462763,
+                "predictedGib": 33.10590674965199,
+                "residualGib": -0.024711084975635345
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-512x768-f361-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.60070896874903,
+                "residualGib": 0.37238433938263427
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-704x1280-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.69271125636239,
+                "residualGib": 0.46438662699598865
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.35330785920051,
+                "residualGib": 0.1249832298341147
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.2365654606323,
+                "residualGib": 0.00824083126590125
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.2365654606323,
+                "residualGib": 0.00824083126590125
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.35330785920051,
+                "residualGib": 0.1249832298341147
+              }
+            ]
+          }
+        },
+        "chosen": "area_only",
+        "unscored": {
+          "area_only": [],
+          "additive": [],
+          "cross": [],
+          "latent_tokens": [],
+          "output_voxels": []
+        }
+      }
+    },
+    "denoise": {
+      "q8": {
+        "fitPoints": 7,
+        "heldOutPoints": 6,
+        "unscoredPoints": 0,
+        "candidates": {
+          "area_only": {
+            "coefficients": {
+              "fixedGb": 23.643114346770474,
+              "perMpxGb": 13.301245012224882
+            },
+            "fit": {
+              "count": 7,
+              "rmseGib": 2.5067560764290664,
+              "maxAbsGib": 3.4841991245746726
+            },
+            "heldOut": {
+              "count": 6,
+              "rmseGib": 4.686757710844129,
+              "maxAbsGib": 9.114877964556229
+            },
+            "points": [
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 34.30222716554999,
+                "predictedGib": 35.62913225218656,
+                "residualGib": 1.3269050866365646
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f145-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 36.95603733882308,
+                "predictedGib": 35.62913225218656,
+                "residualGib": -1.326905086636522
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 26.55072697624564,
+                "predictedGib": 28.873376705497492,
+                "residualGib": 2.32264972925185
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 26.55055269226432,
+                "predictedGib": 28.873376705497492,
+                "residualGib": 2.3228240132331734
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 32.357575830072165,
+                "predictedGib": 28.873376705497492,
+                "residualGib": -3.4841991245746726
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 32.357571478933096,
+                "predictedGib": 28.873376705497492,
+                "residualGib": -3.484194773435604
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 26.550456549972296,
+                "predictedGib": 28.873376705497492,
+                "residualGib": 2.322920155525196
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-512x768-f361-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 37.98825467005372,
+                "predictedGib": 28.873376705497492,
+                "residualGib": -9.114877964556229
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-704x1280-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 40.4880257435143,
+                "predictedGib": 35.62913225218656,
+                "residualGib": -4.858893491327741
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 32.38181049749255,
+                "predictedGib": 28.873376705497492,
+                "residualGib": -3.50843379199506
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 29.584149200469255,
+                "predictedGib": 29.091304303777786,
+                "residualGib": -0.49284489669146936
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 29.584165651351213,
+                "predictedGib": 29.091304303777786,
+                "residualGib": -0.49286134757342737
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 32.38185567781329,
+                "predictedGib": 28.873376705497492,
+                "residualGib": -3.5084789723157996
+              }
+            ]
+          },
+          "additive": {
+            "coefficients": {
+              "fixedGb": 13.915516887686854,
+              "perMpxGb": 16.803475965965937,
+              "perFrameGb": 0.04941103084246972
+            },
+            "fit": {
+              "count": 7,
+              "rmseGib": 0.39558079057272155,
+              "maxAbsGib": 0.733972716526921
+            },
+            "heldOut": {
+              "count": 6,
+              "rmseGib": 1.1071485193007173,
+              "maxAbsGib": 2.684808134259079
+            },
+            "points": [
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 34.30222716554999,
+                "predictedGib": 35.036199882076914,
+                "residualGib": 0.733972716526921
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f145-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 36.95603733882308,
+                "predictedGib": 36.22206462229619,
+                "residualGib": -0.7339727165268926
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 26.55072697624564,
+                "predictedGib": 26.501647225058953,
+                "residualGib": -0.049079751186688725
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 26.55055269226432,
+                "predictedGib": 26.501647225058953,
+                "residualGib": -0.04890546720536548
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 32.357575830072165,
+                "predictedGib": 32.43097092615532,
+                "residualGib": 0.07339509608315353
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 32.357571478933096,
+                "predictedGib": 32.43097092615532,
+                "residualGib": 0.07339944722222214
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 26.550456549972296,
+                "predictedGib": 26.501647225058953,
+                "residualGib": -0.04880932491334278
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-512x768-f361-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 37.98825467005372,
+                "predictedGib": 38.36029462725169,
+                "residualGib": 0.3720399571979698
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-704x1280-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 40.4880257435143,
+                "predictedGib": 37.80321760925522,
+                "residualGib": -2.684808134259079
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 32.38181049749255,
+                "predictedGib": 32.43097092615532,
+                "residualGib": 0.049160428662766265
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 29.584149200469255,
+                "predictedGib": 29.543973102463646,
+                "residualGib": -0.04017609800560962
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 29.584165651351213,
+                "predictedGib": 29.543973102463646,
+                "residualGib": -0.040192548887567625
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 32.38185567781329,
+                "predictedGib": 32.43097092615532,
+                "residualGib": 0.04911524834202652
+              }
+            ]
+          },
+          "cross": {
+            "coefficients": {
+              "fixedGb": 20.55301688321141,
+              "perMpxGb": 0.3664316460458359,
+              "perMpxFrameGb": 0.12303750056813449
+            },
+            "fit": {
+              "count": 7,
+              "rmseGib": 0.001982188852272617,
+              "maxAbsGib": 0.0035535435069675714
+            },
+            "heldOut": {
+              "count": 6,
+              "rmseGib": 0.0763919520410562,
+              "maxAbsGib": 0.17414228953649058
+            },
+            "points": [
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 34.30222716554999,
+                "predictedGib": 34.29867362204307,
+                "residualGib": -0.003553543506924939
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f145-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 36.95603733882308,
+                "predictedGib": 36.95959088233005,
+                "residualGib": 0.0035535435069675714
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 26.55072697624564,
+                "predictedGib": 26.551121641974316,
+                "residualGib": 0.00039466572867397076
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 26.55055269226432,
+                "predictedGib": 26.551121641974316,
+                "residualGib": 0.000568949709997213
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 32.357575830072165,
+                "predictedGib": 32.356759300782265,
+                "residualGib": -0.0008165292898993926
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 32.357571478933096,
+                "predictedGib": 32.356759300782265,
+                "residualGib": -0.000812178150830789
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 26.550456549972296,
+                "predictedGib": 26.551121641974316,
+                "residualGib": 0.000665092002019918
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-512x768-f361-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 37.98825467005372,
+                "predictedGib": 38.16239695959021,
+                "residualGib": 0.17414228953649058
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-704x1280-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 40.4880257435143,
+                "predictedGib": 40.507480562712686,
+                "residualGib": 0.019454819198386986
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 32.38181049749255,
+                "predictedGib": 32.356759300782265,
+                "residualGib": -0.02505119671028666
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 29.584149200469255,
+                "predictedGib": 29.623227646621082,
+                "residualGib": 0.03907844615182654
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 29.584165651351213,
+                "predictedGib": 29.623227646621082,
+                "residualGib": 0.03906199526986853
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 32.38185567781329,
+                "predictedGib": 32.356759300782265,
+                "residualGib": -0.025096377031026407
+              }
+            ]
+          },
+          "latent_tokens": {
+            "coefficients": {
+              "fixedGb": 20.518466078651898,
+              "perLatentTokenGb": 0.0009857048943222525
+            },
+            "fit": {
+              "count": 7,
+              "rmseGib": 0.0705141038982854,
+              "maxAbsGib": 0.10527868940817342
+            },
+            "heldOut": {
+              "count": 6,
+              "rmseGib": 0.07887779967404271,
+              "maxAbsGib": 0.12955853714930043
+            },
+            "points": [
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 34.30222716554999,
+                "predictedGib": 34.39719099070921,
+                "residualGib": 0.09496382515921908
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f145-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 36.95603733882308,
+                "predictedGib": 36.99945191171996,
+                "residualGib": 0.04341457289687867
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 26.55072697624564,
+                "predictedGib": 26.574636949367818,
+                "residualGib": 0.023909973122176353
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 26.55055269226432,
+                "predictedGib": 26.574636949367818,
+                "residualGib": 0.024084257103499596
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 32.357575830072165,
+                "predictedGib": 32.25229714066399,
+                "residualGib": -0.10527868940817342
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 32.357571478933096,
+                "predictedGib": 32.25229714066399,
+                "residualGib": -0.10527433826910482
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 26.550456549972296,
+                "predictedGib": 26.574636949367818,
+                "residualGib": 0.0241803993955223
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-512x768-f361-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 37.98825467005372,
+                "predictedGib": 37.92995733196017,
+                "residualGib": -0.05829733809355275
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-704x1280-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 40.4880257435143,
+                "predictedGib": 40.46913313973429,
+                "residualGib": -0.01889260378001012
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 32.38181049749255,
+                "predictedGib": 32.25229714066399,
+                "residualGib": -0.1295133568285607
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 29.584149200469255,
+                "predictedGib": 29.58695110641662,
+                "residualGib": 0.0028019059473649577
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 29.584165651351213,
+                "predictedGib": 29.58695110641662,
+                "residualGib": 0.00278545506540695
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 32.38185567781329,
+                "predictedGib": 32.25229714066399,
+                "residualGib": -0.12955853714930043
+              }
+            ]
+          },
+          "output_voxels": {
+            "coefficients": {
+              "fixedGb": 20.584059068123196,
+              "perMpxFrameGb": 0.12507177803434807
+            },
+            "fit": {
+              "count": 7,
+              "rmseGib": 0.054288066290370474,
+              "maxAbsGib": 0.08090174212707524
+            },
+            "heldOut": {
+              "count": 6,
+              "rmseGib": 0.15247885664407979,
+              "maxAbsGib": 0.34986536010054436
+            },
+            "points": [
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 34.30222716554999,
+                "predictedGib": 34.22132542342292,
+                "residualGib": -0.08090174212707524
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f145-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 36.95603733882308,
+                "predictedGib": 36.9262377583584,
+                "residualGib": -0.029799580464683117
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 26.55072697624564,
+                "predictedGib": 26.534866204981256,
+                "residualGib": -0.015860771264385676
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 26.55055269226432,
+                "predictedGib": 26.534866204981256,
+                "residualGib": -0.015686487283062434
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 32.357575830072165,
+                "predictedGib": 32.436493117567764,
+                "residualGib": 0.07891728749559945
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 32.357571478933096,
+                "predictedGib": 32.436493117567764,
+                "residualGib": 0.07892163863466806
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 26.550456549972296,
+                "predictedGib": 26.534866204981256,
+                "residualGib": -0.015590344991039728
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-512x768-f361-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 37.98825467005372,
+                "predictedGib": 38.338120030154265,
+                "residualGib": 0.34986536010054436
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-704x1280-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 40.4880257435143,
+                "predictedGib": 40.53278753827237,
+                "residualGib": 0.04476179475807385
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 32.38181049749255,
+                "predictedGib": 32.436493117567764,
+                "residualGib": 0.054682620075212185
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 29.584149200469255,
+                "predictedGib": 29.651662918191004,
+                "residualGib": 0.06751371772174863
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 29.584165651351213,
+                "predictedGib": 29.651662918191004,
+                "residualGib": 0.06749726683979063
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 32.38185567781329,
+                "predictedGib": 32.436493117567764,
+                "residualGib": 0.05463743975447244
+              }
+            ]
+          }
+        },
+        "chosen": "latent_tokens",
+        "unscored": {
+          "area_only": [],
+          "additive": [],
+          "cross": [],
+          "latent_tokens": [],
+          "output_voxels": []
+        }
+      }
+    },
+    "decode": {
+      "q8": {
+        "fitPoints": 7,
+        "heldOutPoints": 6,
+        "unscoredPoints": 0,
+        "candidates": {
+          "area_only": {
+            "coefficients": {
+              "fixedGb": 10.045870115439747,
+              "perMpxGb": 31.6471815707583
+            },
+            "fit": {
+              "count": 7,
+              "rmseGib": 6.109081849394396,
+              "maxAbsGib": 8.490326627343887
+            },
+            "heldOut": {
+              "count": 6,
+              "rmseGib": 11.55441935633783,
+              "maxAbsGib": 22.64079479426145
+            },
+            "points": [
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 35.32644306123257,
+                "predictedGib": 38.563778372481465,
+                "residualGib": 3.2373353112488985
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f145-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 41.801113683730364,
+                "predictedGib": 38.563778372481465,
+                "residualGib": -3.2373353112488985
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 16.829830512404442,
+                "predictedGib": 22.490048263967044,
+                "residualGib": 5.660217751562602
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 16.829830512404442,
+                "predictedGib": 22.490048263967044,
+                "residualGib": 5.660217751562602
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 30.98037489131093,
+                "predictedGib": 22.490048263967044,
+                "residualGib": -8.490326627343887
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 30.98037489131093,
+                "predictedGib": 22.490048263967044,
+                "residualGib": -8.490326627343887
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 16.829830512404442,
+                "predictedGib": 22.490048263967044,
+                "residualGib": 5.660217751562602
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-512x768-f361-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 45.13084305822849,
+                "predictedGib": 22.490048263967044,
+                "residualGib": -22.64079479426145
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-704x1280-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 50.43400279805064,
+                "predictedGib": 38.563778372481465,
+                "residualGib": -11.870224425569177
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 30.98037526383996,
+                "predictedGib": 22.490048263967044,
+                "residualGib": -8.490326999872917
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 24.302487295120955,
+                "predictedGib": 23.008555686822348,
+                "residualGib": -1.2939316082986068
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 24.302487295120955,
+                "predictedGib": 23.008555686822348,
+                "residualGib": -1.2939316082986068
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 30.98037526383996,
+                "predictedGib": 22.490048263967044,
+                "residualGib": -8.490326999872917
+              }
+            ]
+          },
+          "additive": {
+            "coefficients": {
+              "fixedGb": -13.659492632284088,
+              "perMpxGb": 40.18183316730572,
+              "perFrameGb": 0.12041065790257902
+            },
+            "fit": {
+              "count": 7,
+              "rmseGib": 0.9660330890818996,
+              "maxAbsGib": 1.7924074164179657
+            },
+            "heldOut": {
+              "count": 6,
+              "rmseGib": 2.6944027024226895,
+              "maxAbsGib": 6.572155477855716
+            },
+            "points": [
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 35.32644306123257,
+                "predictedGib": 37.118850477650504,
+                "residualGib": 1.7924074164179373
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f145-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 41.801113683730364,
+                "predictedGib": 40.0087062673124,
+                "residualGib": -1.7924074164179657
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 16.829830512404442,
+                "predictedGib": 16.71033668464326,
+                "residualGib": -0.11949382776118256
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 16.829830512404442,
+                "predictedGib": 16.71033668464326,
+                "residualGib": -0.11949382776118256
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 30.98037489131093,
+                "predictedGib": 31.15961563295274,
+                "residualGib": 0.17924074164180936
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 30.98037489131093,
+                "predictedGib": 31.15961563295274,
+                "residualGib": 0.17924074164180936
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 16.829830512404442,
+                "predictedGib": 16.71033668464326,
+                "residualGib": -0.11949382776118256
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-512x768-f361-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 45.13084305822849,
+                "predictedGib": 45.60889458126222,
+                "residualGib": 0.4780515230337272
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-704x1280-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 50.43400279805064,
+                "predictedGib": 43.861847320194926,
+                "residualGib": -6.572155477855716
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 30.98037526383996,
+                "predictedGib": 31.15961563295274,
+                "residualGib": 0.17924036911277952
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 24.302487295120955,
+                "predictedGib": 24.111672681800822,
+                "residualGib": -0.19081461332013205
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 24.302487295120955,
+                "predictedGib": 24.111672681800822,
+                "residualGib": -0.19081461332013205
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 30.98037526383996,
+                "predictedGib": 31.15961563295274,
+                "residualGib": 0.17924036911277952
+              }
+            ]
+          },
+          "cross": {
+            "coefficients": {
+              "fixedGb": 2.5151564578656265,
+              "perMpxGb": 0.12442967585020881,
+              "perMpxFrameGb": 0.2998482076533136
+            },
+            "fit": {
+              "count": 7,
+              "rmseGib": 0.002817945410393455,
+              "maxAbsGib": 0.00505529131776683
+            },
+            "heldOut": {
+              "count": 6,
+              "rmseGib": 0.007820584018555298,
+              "maxAbsGib": 0.018541117175182364
+            },
+            "points": [
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 35.32644306123257,
+                "predictedGib": 35.3213877699148,
+                "residualGib": -0.00505529131776683
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f145-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 41.801113683730364,
+                "predictedGib": 41.80616897504809,
+                "residualGib": 0.005055291317724198
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 16.829830512404442,
+                "predictedGib": 16.83060284857799,
+                "residualGib": 0.0007723361735472167
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 16.829830512404442,
+                "predictedGib": 16.83060284857799,
+                "residualGib": 0.0007723361735472167
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 30.98037489131093,
+                "predictedGib": 30.979216387050634,
+                "residualGib": -0.001158504260295956
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 30.98037489131093,
+                "predictedGib": 30.979216387050634,
+                "residualGib": -0.001158504260295956
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 16.829830512404442,
+                "predictedGib": 16.83060284857799,
+                "residualGib": 0.0007723361735472167
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-512x768-f361-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 45.13084305822849,
+                "predictedGib": 45.12782992552328,
+                "residualGib": -0.003013132705213195
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-704x1280-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 50.43400279805064,
+                "predictedGib": 50.452543915225824,
+                "residualGib": 0.018541117175182364
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 30.98037526383996,
+                "predictedGib": 30.979216387050634,
+                "residualGib": -0.0011588767893258023
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 24.302487295120955,
+                "predictedGib": 24.304878029392988,
+                "residualGib": 0.0023907342720335123
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 24.302487295120955,
+                "predictedGib": 24.304878029392988,
+                "residualGib": 0.0023907342720335123
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 30.98037526383996,
+                "predictedGib": 30.979216387050634,
+                "residualGib": -0.0011588767893258023
+              }
+            ]
+          },
+          "latent_tokens": {
+            "coefficients": {
+              "fixedGb": 2.377289485270886,
+              "perLatentTokenGb": 0.002367699502572589
+            },
+            "fit": {
+              "count": 7,
+              "rmseGib": 0.28127310262574107,
+              "maxAbsGib": 0.4179905274159452
+            },
+            "heldOut": {
+              "count": 6,
+              "rmseGib": 0.46077806502324725,
+              "maxAbsGib": 0.9305095595153929
+            },
+            "points": [
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 35.32644306123257,
+                "predictedGib": 35.71449848149294,
+                "residualGib": 0.3880554202603719
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f145-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 41.801113683730364,
+                "predictedGib": 41.965225168284576,
+                "residualGib": 0.16411148455421198
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 16.829830512404442,
+                "predictedGib": 16.924435229076874,
+                "residualGib": 0.09460471667243198
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 16.829830512404442,
+                "predictedGib": 16.924435229076874,
+                "residualGib": 0.09460471667243198
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 30.98037489131093,
+                "predictedGib": 30.562384363894985,
+                "residualGib": -0.4179905274159452
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 30.98037489131093,
+                "predictedGib": 30.562384363894985,
+                "residualGib": -0.4179905274159452
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 16.829830512404442,
+                "predictedGib": 16.924435229076874,
+                "residualGib": 0.09460471667243198
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-512x768-f361-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 45.13084305822849,
+                "predictedGib": 44.2003334987131,
+                "residualGib": -0.9305095595153929
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-704x1280-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 50.43400279805064,
+                "predictedGib": 50.29952741734009,
+                "residualGib": -0.13447538071055476
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 30.98037526383996,
+                "predictedGib": 30.562384363894985,
+                "residualGib": -0.41799089994497507
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 24.302487295120955,
+                "predictedGib": 24.160124908938705,
+                "residualGib": -0.14236238618224917
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 24.302487295120955,
+                "predictedGib": 24.160124908938705,
+                "residualGib": -0.14236238618224917
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 30.98037526383996,
+                "predictedGib": 30.562384363894985,
+                "residualGib": -0.41799089994497507
+              }
+            ]
+          },
+          "output_voxels": {
+            "coefficients": {
+              "fixedGb": 2.5256974934119185,
+              "perMpxFrameGb": 0.30053898992728423
+            },
+            "fit": {
+              "count": 7,
+              "rmseGib": 0.01863665259772913,
+              "maxAbsGib": 0.03132052082445114
+            },
+            "heldOut": {
+              "count": 6,
+              "rmseGib": 0.030495653816790886,
+              "maxAbsGib": 0.05665738141559018
+            },
+            "points": [
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 35.32644306123257,
+                "predictedGib": 35.295122540408116,
+                "residualGib": -0.03132052082445114
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f145-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 41.801113683730364,
+                "predictedGib": 41.7948432108867,
+                "residualGib": -0.0062704728436671076
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 16.829830512404442,
+                "predictedGib": 16.825082968464805,
+                "residualGib": -0.0047475439396365005
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 16.829830512404442,
+                "predictedGib": 16.825082968464805,
+                "residualGib": -0.0047475439396365005
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 30.98037489131093,
+                "predictedGib": 31.006291704054444,
+                "residualGib": 0.025916812743513873
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 30.98037489131093,
+                "predictedGib": 31.006291704054444,
+                "residualGib": 0.025916812743513873
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 16.829830512404442,
+                "predictedGib": 16.825082968464805,
+                "residualGib": -0.0047475439396365005
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-512x768-f361-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 45.13084305822849,
+                "predictedGib": 45.18750043964408,
+                "residualGib": 0.05665738141559018
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-704x1280-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 50.43400279805064,
+                "predictedGib": 50.461137438191486,
+                "residualGib": 0.027134640140843658
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 30.98037526383996,
+                "predictedGib": 31.006291704054444,
+                "residualGib": 0.025916440214484027
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 24.302487295120955,
+                "predictedGib": 24.314533831948083,
+                "residualGib": 0.012046536827128307
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 24.302487295120955,
+                "predictedGib": 24.314533831948083,
+                "residualGib": 0.012046536827128307
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 30.98037526383996,
+                "predictedGib": 31.006291704054444,
+                "residualGib": 0.025916440214484027
+              }
+            ]
+          }
+        },
+        "chosen": "cross",
+        "unscored": {
+          "area_only": [],
+          "additive": [],
+          "cross": [],
+          "latent_tokens": [],
+          "output_voxels": []
+        }
+      }
+    },
+    "overallActive": {
+      "q8": {
+        "fitPoints": 7,
+        "heldOutPoints": 6,
+        "unscoredPoints": 0,
+        "candidates": {
+          "area_only": {
+            "coefficients": {
+              "fixedGb": 29.024113275591347,
+              "perMpxGb": 10.58645363202477
+            },
+            "fit": {
+              "count": 7,
+              "rmseGib": 1.7309631739159514,
+              "maxAbsGib": 3.237335311248941
+            },
+            "heldOut": {
+              "count": 6,
+              "rmseGib": 6.875061885156209,
+              "maxAbsGib": 11.943966831266891
+            },
+            "points": [
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 35.32644306123257,
+                "predictedGib": 38.56377837248151,
+                "residualGib": 3.237335311248941
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f145-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 41.801113683730364,
+                "predictedGib": 38.56377837248151,
+                "residualGib": -3.237335311248856
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.1868762269616,
+                "residualGib": -0.041448402404796525
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.11878941208124,
+                "predictedGib": 33.1868762269616,
+                "residualGib": 0.06808681488035973
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.1868762269616,
+                "residualGib": -0.041448402404796525
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.1868762269616,
+                "residualGib": -0.041448402404796525
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.13061783462763,
+                "predictedGib": 33.1868762269616,
+                "residualGib": 0.056258392333973006
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-512x768-f361-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 45.13084305822849,
+                "predictedGib": 33.1868762269616,
+                "residualGib": -11.943966831266891
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-704x1280-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 50.43400279805064,
+                "predictedGib": 38.56377837248151,
+                "residualGib": -11.870224425569134
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.1868762269616,
+                "residualGib": -0.041448402404796525
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.36032468326869,
+                "residualGib": 0.13200005390229563
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.36032468326869,
+                "residualGib": 0.13200005390229563
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.1868762269616,
+                "residualGib": -0.041448402404796525
+              }
+            ]
+          },
+          "additive": {
+            "coefficients": {
+              "fixedGb": 28.041958621822825,
+              "perMpxGb": 10.940059179978098,
+              "perFrameGb": 0.00498882422854739
+            },
+            "fit": {
+              "count": 7,
+              "rmseGib": 1.7128253906294855,
+              "maxAbsGib": 3.1774694205063554
+            },
+            "heldOut": {
+              "count": 6,
+              "rmseGib": 6.540883482426813,
+              "maxAbsGib": 11.650716159513067
+            },
+            "points": [
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 35.32644306123257,
+                "predictedGib": 38.50391248173892,
+                "residualGib": 3.1774694205063554
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f145-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 41.801113683730364,
+                "predictedGib": 38.62364426322406,
+                "residualGib": -3.1774694205063057
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 32.94741266399133,
+                "residualGib": -0.28091196537506846
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.11878941208124,
+                "predictedGib": 32.94741266399133,
+                "residualGib": -0.1713767480899122
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.546071571417016,
+                "residualGib": 0.3177469420506185
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.546071571417016,
+                "residualGib": 0.3177469420506185
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.13061783462763,
+                "predictedGib": 32.94741266399133,
+                "residualGib": -0.18320517063629893
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-512x768-f361-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 45.13084305822849,
+                "predictedGib": 34.1447304788427,
+                "residualGib": -10.98611257938579
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-704x1280-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 50.43400279805064,
+                "predictedGib": 38.783286638537575,
+                "residualGib": -11.650716159513067
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.546071571417016,
+                "residualGib": 0.3177469420506185
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.40602875039474,
+                "residualGib": 0.17770412102834143
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.40602875039474,
+                "residualGib": 0.17770412102834143
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.546071571417016,
+                "residualGib": 0.3177469420506185
+              }
+            ]
+          },
+          "cross": {
+            "coefficients": {
+              "fixedGb": 28.38514509384801,
+              "perMpxGb": 7.911802014966322,
+              "perMpxFrameGb": 0.025441607894695573
+            },
+            "fit": {
+              "count": 7,
+              "rmseGib": 1.651530159943627,
+              "maxAbsGib": 2.962224010776133
+            },
+            "heldOut": {
+              "count": 6,
+              "rmseGib": 6.048070219464071,
+              "maxAbsGib": 10.861482990502132
+            },
+            "points": [
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 35.32644306123257,
+                "predictedGib": 38.2886670720087,
+                "residualGib": 2.962224010776133
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f145-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 41.801113683730364,
+                "predictedGib": 38.83888967295433,
+                "residualGib": -2.9622240107760334
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 32.706681957045404,
+                "residualGib": -0.5216426723209935
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.11878941208124,
+                "predictedGib": 32.706681957045404,
+                "residualGib": -0.41210745503583723
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.907167631835875,
+                "residualGib": 0.6788430024694776
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.907167631835875,
+                "residualGib": 0.6788430024694776
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.13061783462763,
+                "predictedGib": 32.706681957045404,
+                "residualGib": -0.42393587758222395
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-512x768-f361-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 45.13084305822849,
+                "predictedGib": 35.10765330662635,
+                "residualGib": -10.023189751602146
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-704x1280-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 50.43400279805064,
+                "predictedGib": 39.57251980754851,
+                "residualGib": -10.861482990502132
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.907167631835875,
+                "residualGib": 0.6788430024694776
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.47031541825733,
+                "residualGib": 0.24199078889093073
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.47031541825733,
+                "residualGib": 0.24199078889093073
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 33.907167631835875,
+                "residualGib": 0.6788430024694776
+              }
+            ]
+          },
+          "latent_tokens": {
+            "coefficients": {
+              "fixedGb": 28.92513956811297,
+              "perLatentTokenGb": 0.0005556675917713609
+            },
+            "fit": {
+              "count": 7,
+              "rmseGib": 1.9852302173009482,
+              "maxAbsGib": 3.5852119812002385
+            },
+            "heldOut": {
+              "count": 6,
+              "rmseGib": 5.13393230542387,
+              "maxAbsGib": 10.262151172485325
+            },
+            "points": [
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 35.32644306123257,
+                "predictedGib": 36.748939260253735,
+                "residualGib": 1.4224961990211682
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f145-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 41.801113683730364,
+                "predictedGib": 38.215901702530125,
+                "residualGib": -3.5852119812002385
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 32.33916125195621,
+                "residualGib": -0.8891633774101848
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.11878941208124,
+                "predictedGib": 32.33916125195621,
+                "residualGib": -0.7796281601250286
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 35.53980658055925,
+                "residualGib": 2.311481951192853
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 35.53980658055925,
+                "residualGib": 2.311481951192853
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.13061783462763,
+                "predictedGib": 32.33916125195621,
+                "residualGib": -0.7914565826714153
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-512x768-f361-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 45.13084305822849,
+                "predictedGib": 38.74045190916229,
+                "residualGib": -6.390391149066204
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-704x1280-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 50.43400279805064,
+                "predictedGib": 40.17185162556532,
+                "residualGib": -10.262151172485325
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 35.53980658055925,
+                "residualGib": 2.311481951192853
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 34.03728141240949,
+                "residualGib": 0.8089567830430937
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 34.03728141240949,
+                "residualGib": 0.8089567830430937
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 35.53980658055925,
+                "residualGib": 2.311481951192853
+              }
+            ]
+          },
+          "output_voxels": {
+            "coefficients": {
+              "fixedGb": 29.05539184732659,
+              "perMpxFrameGb": 0.06936467166352717
+            },
+            "fit": {
+              "count": 7,
+              "rmseGib": 2.024766327838715,
+              "maxAbsGib": 3.682367361635322
+            },
+            "heldOut": {
+              "count": 6,
+              "rmseGib": 5.134705405342482,
+              "maxAbsGib": 10.315067902213599
+            },
+            "points": [
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 35.32644306123257,
+                "predictedGib": 36.618604891788536,
+                "residualGib": 1.292161830555969
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f145-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 41.801113683730364,
+                "predictedGib": 38.11874632209504,
+                "residualGib": -3.682367361635322
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 32.35570299400089,
+                "residualGib": -0.8726216353655047
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.11878941208124,
+                "predictedGib": 32.35570299400089,
+                "residualGib": -0.7630864180803485
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 35.62873884194235,
+                "residualGib": 2.400414212575953
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 35.62873884194235,
+                "residualGib": 2.400414212575953
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 33.13061783462763,
+                "predictedGib": 32.35570299400089,
+                "residualGib": -0.7749148406267352
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-512x768-f361-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 45.13084305822849,
+                "predictedGib": 38.901774689883815,
+                "residualGib": -6.229068368344677
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-704x1280-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 50.43400279805064,
+                "predictedGib": 40.11893489583704,
+                "residualGib": -10.315067902213599
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 35.62873884194235,
+                "residualGib": 2.400414212575953
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 34.08427505119498,
+                "residualGib": 0.8559504218285809
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 34.08427505119498,
+                "residualGib": 0.8559504218285809
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 33.2283246293664,
+                "predictedGib": 35.62873884194235,
+                "residualGib": 2.400414212575953
+              }
+            ]
+          }
+        },
+        "chosen": "latent_tokens",
+        "unscored": {
+          "area_only": [],
+          "additive": [],
+          "cross": [],
+          "latent_tokens": [],
+          "output_voxels": []
+        }
+      }
+    },
+    "maxPhaseActivePlusCache": {
+      "q8": {
+        "fitPoints": 7,
+        "heldOutPoints": 6,
+        "unscoredPoints": 0,
+        "candidates": {
+          "area_only": {
+            "coefficients": {
+              "fixedGb": 77.02719161575347,
+              "perMpxGb": 65.57269213493397
+            },
+            "fit": {
+              "count": 7,
+              "rmseGib": 18.761466364213096,
+              "maxAbsGib": 27.075719480961595
+            },
+            "heldOut": {
+              "count": 6,
+              "rmseGib": 23.98121698034174,
+              "maxAbsGib": 39.98417141810063
+            },
+            "points": [
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 132.85159958526492,
+                "predictedGib": 136.11605595238518,
+                "residualGib": 3.2644563671202604
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f145-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 139.38051231950521,
+                "predictedGib": 136.11605595238518,
+                "residualGib": -3.264456367120033
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 84.59038115292788,
+                "predictedGib": 102.81142332628366,
+                "residualGib": 18.221042173355784
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 84.96630372852087,
+                "predictedGib": 102.81142332628366,
+                "residualGib": 17.84511959776279
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 129.875114813447,
+                "predictedGib": 102.81142332628366,
+                "residualGib": -27.06369148716334
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 129.88714280724525,
+                "predictedGib": 102.81142332628366,
+                "residualGib": -27.075719480961595
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 84.73817412927747,
+                "predictedGib": 102.81142332628366,
+                "residualGib": 18.07324919700619
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-512x768-f361-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 142.7955947443843,
+                "predictedGib": 102.81142332628366,
+                "residualGib": -39.98417141810063
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-704x1280-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 148.67285177484155,
+                "predictedGib": 136.11605595238518,
+                "residualGib": -12.556795822456365
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 129.818844050169,
+                "predictedGib": 102.81142332628366,
+                "residualGib": -27.007420723885332
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 115.4704752676189,
+                "predictedGib": 103.88576631422242,
+                "residualGib": -11.584708953396472
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 114.9821435585618,
+                "predictedGib": 103.88576631422242,
+                "residualGib": -11.09637724433938
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 129.40934952721,
+                "predictedGib": 102.81142332628366,
+                "residualGib": -26.597926200926338
+              }
+            ]
+          },
+          "additive": {
+            "coefficients": {
+              "fixedGb": 3.3454049552183136,
+              "perMpxGb": 92.10037639149255,
+              "perFrameGb": 0.3742643595734216
+            },
+            "fit": {
+              "count": 7,
+              "rmseGib": 0.6688617185828212,
+              "maxAbsGib": 1.2267159477609937
+            },
+            "heldOut": {
+              "count": 6,
+              "rmseGib": 13.88477414820977,
+              "maxAbsGib": 31.874585619996367
+            },
+            "points": [
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 132.85159958526492,
+                "predictedGib": 131.62488363750407,
+                "residualGib": -1.2267159477608516
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f145-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 139.38051231950521,
+                "predictedGib": 140.6072282672662,
+                "residualGib": 1.2267159477609937
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 84.59038115292788,
+                "predictedGib": 84.84673406675947,
+                "residualGib": 0.2563529138315914
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 84.96630372852087,
+                "predictedGib": 84.84673406675947,
+                "residualGib": -0.11956966176140327
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 129.875114813447,
+                "predictedGib": 129.75845721557005,
+                "residualGib": -0.11665759787695151
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 129.88714280724525,
+                "predictedGib": 129.75845721557005,
+                "residualGib": -0.12868559167520743
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 84.73817412927747,
+                "predictedGib": 84.84673406675947,
+                "residualGib": 0.10855993748199921
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-512x768-f361-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 142.7955947443843,
+                "predictedGib": 174.67018036438066,
+                "residualGib": 31.874585619996367
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-704x1280-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 148.67285177484155,
+                "predictedGib": 152.58368777361568,
+                "residualGib": 3.9108359987741323
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 129.818844050169,
+                "predictedGib": 129.75845721557005,
+                "residualGib": -0.060386834598944006
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 115.4704752676189,
+                "predictedGib": 107.31451076966928,
+                "residualGib": -8.155964497949611
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 114.9821435585618,
+                "predictedGib": 107.31451076966928,
+                "residualGib": -7.667632788892519
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 129.40934952721,
+                "predictedGib": 129.75845721557005,
+                "residualGib": 0.3491076883600499
+              }
+            ]
+          },
+          "cross": {
+            "coefficients": {
+              "fixedGb": 54.33621873380271,
+              "perMpxGb": -29.409263219644572,
+              "perMpxFrameGb": 0.903479783980341
+            },
+            "fit": {
+              "count": 7,
+              "rmseGib": 3.627612770069963,
+              "maxAbsGib": 6.50526806816427
+            },
+            "heldOut": {
+              "count": 6,
+              "rmseGib": 15.555013571937994,
+              "maxAbsGib": 28.22626827552125
+            },
+            "points": [
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 132.85159958526492,
+                "predictedGib": 126.34633151710074,
+                "residualGib": -6.505268068164185
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f145-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 139.38051231950521,
+                "predictedGib": 145.88578038766948,
+                "residualGib": 6.50526806816427
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 84.59038115292788,
+                "predictedGib": 85.75881340287822,
+                "residualGib": 1.1684322499503423
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 84.96630372852087,
+                "predictedGib": 85.75881340287822,
+                "residualGib": 0.7925096743573476
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 129.875114813447,
+                "predictedGib": 128.39033821139188,
+                "residualGib": -1.4847766020551205
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 129.88714280724525,
+                "predictedGib": 128.39033821139188,
+                "residualGib": -1.4968045958533764
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 84.73817412927747,
+                "predictedGib": 85.75881340287822,
+                "residualGib": 1.0206392736007501
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-512x768-f361-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 142.7955947443843,
+                "predictedGib": 171.02186301990554,
+                "residualGib": 28.22626827552125
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-704x1280-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 148.67285177484155,
+                "predictedGib": 171.93837888176117,
+                "residualGib": 23.26552710691962
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 129.818844050169,
+                "predictedGib": 128.39033821139188,
+                "residualGib": -1.428505838777113
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 115.4704752676189,
+                "predictedGib": 107.79174607378383,
+                "residualGib": -7.678729193835068
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 114.9821435585618,
+                "predictedGib": 107.79174607378383,
+                "residualGib": -7.190397484777975
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 129.40934952721,
+                "predictedGib": 128.39033821139188,
+                "residualGib": -1.019011315818119
+              }
+            ]
+          },
+          "latent_tokens": {
+            "coefficients": {
+              "fixedGb": 51.84117348746807,
+              "perLatentTokenGb": 0.005796837542769882
+            },
+            "fit": {
+              "count": 7,
+              "rmseGib": 6.250478952251959,
+              "maxAbsGib": 9.383784883075293
+            },
+            "heldOut": {
+              "count": 6,
+              "rmseGib": 12.295698160025381,
+              "maxAbsGib": 20.496313578288948
+            },
+            "points": [
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 132.85159958526492,
+                "predictedGib": 133.460646089668,
+                "residualGib": 0.609046504403068
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f145-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 139.38051231950521,
+                "predictedGib": 148.7642972025805,
+                "residualGib": 9.383784883075293
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 84.59038115292788,
+                "predictedGib": 87.45694335024622,
+                "residualGib": 2.866562197318345
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 84.96630372852087,
+                "predictedGib": 87.45694335024622,
+                "residualGib": 2.49063962172535
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 129.875114813447,
+                "predictedGib": 120.84672759660074,
+                "residualGib": -9.028387216846255
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 129.88714280724525,
+                "predictedGib": 120.84672759660074,
+                "residualGib": -9.040415210644511
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 84.73817412927747,
+                "predictedGib": 87.45694335024622,
+                "residualGib": 2.7187692209687526
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-512x768-f361-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 142.7955947443843,
+                "predictedGib": 154.23651184295528,
+                "residualGib": 11.440917098570992
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-704x1280-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 148.67285177484155,
+                "predictedGib": 169.1691653531305,
+                "residualGib": 20.496313578288948
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 129.818844050169,
+                "predictedGib": 120.84672759660074,
+                "residualGib": -8.972116453568248
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 115.4704752676189,
+                "predictedGib": 105.17207888095098,
+                "residualGib": -10.298396386667918
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 114.9821435585618,
+                "predictedGib": 105.17207888095098,
+                "residualGib": -9.810064677610825
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 129.40934952721,
+                "predictedGib": 120.84672759660074,
+                "residualGib": -8.562621930609254
+              }
+            ]
+          },
+          "output_voxels": {
+            "coefficients": {
+              "fixedGb": 51.84481877739876,
+              "perMpxFrameGb": 0.7402116762411333
+            },
+            "fit": {
+              "count": 7,
+              "rmseGib": 5.66731087163812,
+              "maxAbsGib": 9.182140583582992
+            },
+            "heldOut": {
+              "count": 6,
+              "rmseGib": 12.620191772665008,
+              "maxAbsGib": 21.23442659046779
+            },
+            "points": [
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 132.85159958526492,
+                "predictedGib": 132.55418380642237,
+                "residualGib": -0.29741577884254866
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-1280x704-f145-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 139.38051231950521,
+                "predictedGib": 148.5626529030882,
+                "residualGib": 9.182140583582992
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 84.59038115292788,
+                "predictedGib": 87.0634507900636,
+                "residualGib": 2.4730696371357226
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 84.96630372852087,
+                "predictedGib": 87.0634507900636,
+                "residualGib": 2.097147061542728
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 129.875114813447,
+                "predictedGib": 121.99101972824361,
+                "residualGib": -7.884095085203384
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 129.88714280724525,
+                "predictedGib": 121.99101972824361,
+                "residualGib": -7.89612307900164
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+                "role": "fit",
+                "measuredGib": 84.73817412927747,
+                "predictedGib": 87.0634507900636,
+                "residualGib": 2.3252766607861304
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-512x768-f361-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 142.7955947443843,
+                "predictedGib": 156.91858866642363,
+                "residualGib": 14.122993922039342
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-704x1280-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 148.67285177484155,
+                "predictedGib": 169.90727836530934,
+                "residualGib": 21.23442659046779
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 129.818844050169,
+                "predictedGib": 121.99101972824361,
+                "residualGib": -7.827824321925377
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 115.4704752676189,
+                "predictedGib": 105.50957313553992,
+                "residualGib": -9.96090213207897
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+                "role": "held_out",
+                "measuredGib": 114.9821435585618,
+                "predictedGib": 105.50957313553992,
+                "residualGib": -9.472570423021878
+              },
+              {
+                "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+                "role": "held_out_fps_probe",
+                "measuredGib": 129.40934952721,
+                "predictedGib": 121.99101972824361,
+                "residualGib": -7.418329798966383
+              }
+            ]
+          }
+        },
+        "chosen": "latent_tokens",
+        "unscored": {
+          "area_only": [],
+          "additive": [],
+          "cross": [],
+          "latent_tokens": [],
+          "output_voxels": []
+        }
+      }
+    }
+  }
+}
