@@ -275,6 +275,11 @@ fn sana_variants_accept_single_reference_img2img_and_reject_malformed_shapes() {
         ));
         for empty_carriers in [
             json!({ "controls": [], "controlnets": [], "referenceAssetIds": [] }),
+            // sc-19712 F-1: the API normalizes every unset optional asset carrier to an explicit
+            // `null` before storing the job, so this is the shape EVERY real SANA text-to-image
+            // submission arrives in. Reading it as "not a valid reference" made the job
+            // unclaimable by any MLX worker.
+            json!({ "referenceAssetId": null, "prompt": "p" }),
             json!({
                 "referenceAssetId": "reference-1",
                 "controls": null,

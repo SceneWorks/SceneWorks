@@ -104,6 +104,11 @@ import seedvr2Apache20 from "../../../desktop/licenses/seedvr2/Apache-2.0.txt?ra
 // "Copyright 2018-2020 Open-MMLab. All rights reserved." notice, which is the attribution that has
 // to travel with the two ONNX graphs SceneWorks re-hosts at SceneWorks/dwpose-onnx.
 import dwposeApache20 from "../../../desktop/licenses/dwpose/Apache-2.0.txt?raw";
+// InsightFace SCRFD + ArcFace weights (sc-19708): upstream publishes NO standalone weights
+// license — the governing terms live in the project README, so the notice reproduces those
+// statements VERBATIM (code MIT; models trained on InsightFace's annotated data are for
+// non-commercial research purposes only). Not a generic license template on purpose.
+import insightfaceModelNotice from "../../../desktop/licenses/insightface/InsightFace-Model-License-Notice.txt?raw";
 // Production third-party source/data compiled into the inference runtimes (sc-14403).
 import cephesBsd3Clause from "../../../desktop/licenses/cephes/BSD-3-Clause.txt?raw";
 import mageMit from "../../../desktop/licenses/mage/MIT.txt?raw";
@@ -182,6 +187,7 @@ const DOCUMENT_TEXT = {
   "qwen3-vl-caption-apache": qwen3VlCaptionApache20,
   "seedvr2-apache": seedvr2Apache20,
   "dwpose-apache": dwposeApache20,
+  "insightface-model-notice": insightfaceModelNotice,
   "cephes-bsd-3-clause": cephesBsd3Clause,
   "mage-mit": mageMit,
   "cmudict-bsd-2-clause": cmudictBsd2Clause,

@@ -1812,7 +1812,10 @@ fn lora_weight(lora: &Value) -> f64 {
                 .as_f64()
                 .or_else(|| value.as_str()?.trim().parse().ok())
         })
-        .unwrap_or(0.8)
+        // Last resort only — the API always stamps a weight onto the spec. Matches the API/web
+        // default (`DEFAULT_LORA_WEIGHT`) so a weightless payload can't apply at a scale no
+        // surface would have shown.
+        .unwrap_or(1.0)
 }
 
 #[cfg(any(

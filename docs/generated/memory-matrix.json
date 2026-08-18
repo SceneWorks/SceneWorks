@@ -1,12 +1,12 @@
 {
   "schemaVersion": 8,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:5d4b48ab2e414b72affadb1ffc94909f0e7dfba8bb75711664c10c7954416c03",
+    "sceneWorksRevision": "source-tree:aa7719fb4138c442728af1ae248816fd65cb09297d715419b660059c144cecd9",
     "inferenceRevision": "2d762d3312ac96c4feda8f89e35ee967e7700751",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "ef5f8571969e33b93cbaa21a583b177b3571024aba5f2d83accb4de8fa043e7c"
+        "sha256": "8cc63fe5d709ffce5e41e84ef52f5201078591e600fcca1872c0bffbb76ba362"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -18,7 +18,7 @@
       },
       "routingMlx": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
-        "sha256": "af0ea526a4833b627af9eb01fb14a567d1c2e5896dd3c0b1fa597b4dd354dbb7"
+        "sha256": "0e6ae55f5b0c99c942ab0e67ab59a21ae76e7caabc1874394eec496fa69a9a06"
       },
       "engines": {
         "path": "crates/sceneworks-worker/src/engines.rs",
@@ -94,7 +94,7 @@
       },
       "engineCapabilitiesCandle": {
         "path": "config/engine-capabilities/capabilities.candle.json",
-        "sha256": "3e561f141d0dd9aa1ca0de24779d87a333a3c7fd5f559e9747ab6b8652ff4297"
+        "sha256": "bd303e853d468dfc7b3c660776c090d4ef13b6bc199397688da62368a78603ec"
       },
       "cargo": {
         "path": "Cargo.toml",
@@ -189,11 +189,14 @@
     },
     "currentCalibrationRuns": 0,
     "memoryContractReconciliation": {
-      "providers": 0,
-      "bespokeWaivers": 0,
-      "mismatches": 0,
-      "byLeg": {},
-      "unavailable": "engine capability facts for candle are keyed to bb3b314500b02bbb41431aa6beb5e03e4c0738f8, but Cargo pins 2d762d3312ac96c4feda8f89e35ee967e7700751"
+      "providers": 72,
+      "bespokeWaivers": 1,
+      "mismatches": 494,
+      "byLeg": {
+        "engine_manifest": 275,
+        "manifest_route": 70,
+        "survey_engine": 149
+      }
     },
     "rung4Survey": {
       "story": 15969,

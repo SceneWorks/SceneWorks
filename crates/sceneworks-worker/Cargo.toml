@@ -50,6 +50,8 @@ uuid = { version = "1.11", features = ["v4"] }
 [dev-dependencies]
 axum = "0.7"
 sceneworks-gen-core-testkit = { git = "https://github.com/SceneWorks/inference", rev = "2d762d3312ac96c4feda8f89e35ee967e7700751" }
+quote = "1.0"
+syn = { version = "2.0", features = ["full"] }
 tower = { version = "0.5", features = ["util"] }
 # Dev-only stdout subscriber so the residency/fit-gate tests can surface their `tracing::info!`
 # events under --nocapture (e.g. `mlx_sequential_residency_selected`). sc-10863.

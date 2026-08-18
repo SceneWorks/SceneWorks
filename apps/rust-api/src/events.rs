@@ -67,6 +67,7 @@ pub(crate) async fn create_event_ticket(
             .map_err(|error| ApiError {
                 status: StatusCode::UNPROCESSABLE_ENTITY,
                 detail: format!("JSON decode error: {error}"),
+                context: None,
                 code: None,
             })?
             .unwrap_or_default()
@@ -106,6 +107,7 @@ pub(crate) async fn create_event_ticket(
                 "Too many outstanding event tickets; retry after at most \
                  {EVENT_TICKET_TTL_SECONDS} seconds"
             ),
+            context: None,
             code: None,
         })
 }

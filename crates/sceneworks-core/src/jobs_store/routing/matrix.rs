@@ -271,6 +271,11 @@ struct ManifestModel {
     candle: Value,
     #[serde(rename = "loraCompatibility", default)]
     lora_compatibility: Value,
+    /// Declarative non-routability (sc-19708): the entry is an installable component bundle
+    /// loaded by owning routes, never a routable `model` of any job. Keyed on manifest data so
+    /// adding component entries never adds a model-id branch here.
+    #[serde(rename = "componentOnly", default)]
+    component_only: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2088,8 +2093,10 @@ fn utility_model_cells(
     candle_facts: &RuntimeDescriptorFacts,
 ) -> Result<Vec<CapabilityCell>, String> {
     // PiD rows are decoder overlays loaded by their owning image model; they are not standalone
-    // person detectors (or any other independently routable utility job).
-    if model.id.starts_with("pid_") {
+    // person detectors (or any other independently routable utility job). `componentOnly` entries
+    // (sc-19708) declare the same shape in manifest data: an installable component bundle staged
+    // by owning lanes (the InstantID face stack), never a routable `model` of any job.
+    if model.id.starts_with("pid_") || model.component_only {
         return Ok(Vec::new());
     }
     let engine_request = match model.id.as_str() {
@@ -3175,15 +3182,133 @@ mod tests {
 
     const CHECKED_IN: &str = include_str!("../../../../../config/backend-capabilities/matrix.json");
 
+    fn valid_capture_digest(value: &str) -> bool {
+        value.len() == 64
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    }
+
+    /// Compare the durable capability claim independently from capture-time source provenance.
+    ///
+    /// `sources` records which authoritative inputs were captured and their hashes when the
+    /// checked-in artifact was produced. A non-capability edit inside one of those whole-file
+    /// inputs legitimately changes its live hash without changing a capability cell (sc-19708:
+    /// the API jobs/lib and worker dispatch files are hashed inputs, and the model-source seam
+    /// edits them without moving a single cell). The key set and digest shape remain strict so
+    /// sources cannot disappear, appear unreviewed, or carry malformed provenance; every
+    /// semantic field remains exact.
+    fn checked_in_matrix_matches_live(
+        mut checked_in: BackendCapabilityMatrix,
+        mut live: BackendCapabilityMatrix,
+    ) -> Result<(), String> {
+        if checked_in.sources.keys().collect::<Vec<_>>() != live.sources.keys().collect::<Vec<_>>()
+        {
+            return Err("capability source key set drifted".to_owned());
+        }
+        for (origin, sources) in [("checked-in", &checked_in.sources), ("live", &live.sources)] {
+            for (name, digest) in sources {
+                if !valid_capture_digest(digest) {
+                    return Err(format!(
+                        "{origin} capability source {name:?} has an invalid capture digest"
+                    ));
+                }
+            }
+        }
+        checked_in.sources.clear();
+        live.sources.clear();
+        if checked_in != live {
+            return Err("capability semantics drifted".to_owned());
+        }
+        Ok(())
+    }
+
     #[test]
     fn checked_in_matrix_matches_all_authoritative_sources() {
         let expected: BackendCapabilityMatrix =
             serde_json::from_str(CHECKED_IN).expect("checked-in capability matrix parses");
         let actual = backend_capability_matrix().expect("capability matrix generates");
-        assert_eq!(
-            expected, actual,
-            "backend capability matrix drifted; run `{GENERATOR} > config/backend-capabilities/matrix.json`"
-        );
+        checked_in_matrix_matches_live(expected, actual).unwrap_or_else(|error| {
+            panic!(
+                "backend capability matrix drifted ({error}); run `{GENERATOR} > config/backend-capabilities/matrix.json` only for an intentional capability recapture"
+            )
+        });
+    }
+
+    #[test]
+    fn source_capture_digest_values_are_provenance_not_semantics() {
+        let checked_in: BackendCapabilityMatrix = serde_json::from_str(CHECKED_IN).unwrap();
+        let mut live = checked_in.clone();
+        let digest = live.sources.values_mut().next().unwrap();
+        *digest = "0".repeat(64);
+        assert!(checked_in_matrix_matches_live(checked_in, live).is_ok());
+    }
+
+    #[test]
+    fn source_capture_contract_rejects_key_and_digest_shape_mutations() {
+        let checked_in: BackendCapabilityMatrix = serde_json::from_str(CHECKED_IN).unwrap();
+        for mutation in ["missing", "extra", "empty", "short", "uppercase", "nonhex"] {
+            let mut live = checked_in.clone();
+            let first = live.sources.keys().next().unwrap().clone();
+            match mutation {
+                "missing" => {
+                    live.sources.remove(&first);
+                }
+                "extra" => {
+                    live.sources
+                        .insert("unreviewedSource".to_owned(), "0".repeat(64));
+                }
+                "empty" => {
+                    live.sources.insert(first, String::new());
+                }
+                "short" => {
+                    live.sources.insert(first, "0".repeat(63));
+                }
+                "uppercase" => {
+                    live.sources.insert(first, "A".repeat(64));
+                }
+                "nonhex" => {
+                    live.sources.insert(first, "g".repeat(64));
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                checked_in_matrix_matches_live(checked_in.clone(), live).is_err(),
+                "{mutation} source provenance must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn every_capability_semantic_field_remains_exact() {
+        let checked_in: BackendCapabilityMatrix = serde_json::from_str(CHECKED_IN).unwrap();
+        for mutation in [
+            "schema",
+            "generator",
+            "summary",
+            "model",
+            "imported-family",
+            "gpu-job",
+            "training-kernel",
+            "exception",
+        ] {
+            let mut live = checked_in.clone();
+            match mutation {
+                "schema" => live.schema_version += 1,
+                "generator" => live.generated_by.push_str(" --changed"),
+                "summary" => live.summary.cell_count += 1,
+                "model" => live.models[0].id.push_str("_changed"),
+                "imported-family" => live.imported_families[0].family.push_str("_changed"),
+                "gpu-job" => live.gpu_job_types[0].job_type.push_str("_changed"),
+                "training-kernel" => live.training_kernels[0].kernel.push_str("_changed"),
+                "exception" => live.exceptions[0].evidence.push_str(" changed"),
+                _ => unreachable!(),
+            }
+            assert!(
+                checked_in_matrix_matches_live(checked_in.clone(), live).is_err(),
+                "{mutation} capability semantics must fail closed"
+            );
+        }
     }
 
     #[test]

@@ -1803,6 +1803,21 @@
       ]
     },
     {
+      "key": "SceneWorks/instantid-mlx@bca0cacf8e5e04529bb2b326a521361b02be84fd",
+      "repo": "SceneWorks/instantid-mlx",
+      "revision": "bca0cacf8e5e04529bb2b326a521361b02be84fd",
+      "resolvedSha": "bca0cacf8e5e04529bb2b326a521361b02be84fd",
+      "servedRepo": "SceneWorks/instantid-mlx",
+      "gated": false,
+      "files": [
+        ".gitattributes",
+        "README.md",
+        "arcface_iresnet100.safetensors",
+        "ip-adapter.safetensors",
+        "scrfd_10g.safetensors"
+      ]
+    },
+    {
       "key": "SceneWorks/kolors-mlx@aadbd49f53b66a33ef1be09384eac409cbc44061",
       "repo": "SceneWorks/kolors-mlx",
       "revision": "aadbd49f53b66a33ef1be09384eac409cbc44061",
