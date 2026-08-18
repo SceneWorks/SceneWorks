@@ -1722,6 +1722,158 @@ fn job_weight_resolution_uses_receipt_after_manifest_filename_change() {
     );
 }
 
+/// The `flux2_klein_9b_true_v2` manifest shape (sc-20529): a convert-at-install model whose
+/// download is the bare single-file transformer and whose conversion borrows the base klein's
+/// text encoder / VAE / tokenizer. `modelPath` is ABSENT — the API only injects it once the
+/// conversion has produced a local dir — which is exactly the unconverted state.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn unconverted_true_v2_request() -> ImageRequest {
+    request(json!({
+        "projectId": "p", "model": "flux2_klein_9b_true_v2", "prompt": "a lighthouse",
+        "modelManifestEntry": {
+            "id": "flux2_klein_9b_true_v2",
+            "name": "FLUX.2 [klein] 9B True V2",
+            "family": "flux2-klein",
+            "mlx": {
+                "requiresConversion": true,
+                "converter": "flux2_klein_diffusers",
+                "convertSourceRepo": "wikeeyang/Flux2-Klein-9B-True-V2",
+                "convertSourceFile": "Flux2-Klein-9B-True-v2-bf16.safetensors",
+                "convertBaseRepo": "SceneWorks/flux2-klein-9b-mlx",
+                "convertBaseSubdir": "bf16"
+            }
+        }
+    }))
+}
+
+/// sc-20529 core regression. An UNCONVERTED convert-at-install model must fail the weights resolve
+/// with a typed, actionable error — naming the convert step AND the base model to install — rather
+/// than falling through to its raw single-file source snapshot and dying deep in the loader with
+/// candle-gen's "snapshot missing the text_encoder/ component directory", which names an internal
+/// path and no remedy. This is the failure the 2026-08-18 model sweep reported.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[test]
+fn unconverted_convert_at_install_model_fails_with_an_actionable_error() {
+    let root = tempfile::tempdir().unwrap();
+    let mut settings = Settings::from_env();
+    settings.data_dir = root.path().to_path_buf();
+
+    let error = resolve_weights_dir(&unconverted_true_v2_request(), &settings)
+        .expect_err("an unconverted convert-at-install model must not resolve weights");
+    let WorkerError::InvalidPayload(message) = &error else {
+        panic!("expected the user-facing InvalidPayload class, got {error:?}");
+    };
+    // Names the model, the remedy, and the second install the conversion depends on.
+    assert!(
+        message.contains("FLUX.2 [klein] 9B True V2"),
+        "error must name the model: {message}"
+    );
+    assert!(
+        message.contains("convert it from the Model Manager"),
+        "error must name the convert step: {message}"
+    );
+    assert!(
+        message.contains("SceneWorks/flux2-klein-9b-mlx") && message.contains("bf16"),
+        "error must name the base model + tier to install: {message}"
+    );
+    // The engine-level wording must be unreachable for this class.
+    assert!(
+        !message.contains("component directory"),
+        "the raw candle-gen component-directory error must not survive: {message}"
+    );
+}
+
+/// The preflight is a gate on the UNCONVERTED state only. Once the conversion has run, the API
+/// injects the converted dir as `modelPath` and resolution returns it unchanged — the preflight is
+/// never consulted, so a converted install renders exactly as before.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[test]
+fn converted_convert_at_install_model_resolves_its_injected_model_path() {
+    let root = tempfile::tempdir().unwrap();
+    let mut settings = Settings::from_env();
+    settings.data_dir = root.path().to_path_buf();
+    let converted = root
+        .path()
+        .join("models")
+        .join("mlx")
+        .join("flux2_klein_9b_true_v2");
+    for sub in ["transformer", "text_encoder", "vae", "tokenizer"] {
+        std::fs::create_dir_all(converted.join(sub)).unwrap();
+    }
+    std::fs::write(converted.join("model_index.json"), b"{}").unwrap();
+
+    let mut req = unconverted_true_v2_request();
+    req.model_manifest_entry.insert(
+        "modelPath".to_owned(),
+        json!(converted.display().to_string()),
+    );
+
+    // Compare canonicalized: the resolver confines through `resolve_app_managed_model_dir`, which on
+    // Windows returns the extended-length (`\\?\`) spelling of the same directory.
+    let resolved = resolve_weights_dir(&req, &settings)
+        .unwrap()
+        .expect("a converted install must resolve to its injected modelPath");
+    assert_eq!(
+        std::fs::canonicalize(&resolved).unwrap(),
+        std::fs::canonicalize(&converted).unwrap(),
+        "a converted install must resolve to its injected modelPath"
+    );
+}
+
+/// The Anima trap (sc-20529). `anima_base` / `anima_aesthetic` / `anima_turbo` declare
+/// `requiresConversion` AND ship windows/linux downloads, but `anima_quant` is a macOS-only
+/// converter: OFF-MAC they legitimately load the raw `circlestone-labs/Anima` `split_files/` tree
+/// with no converted dir and no `modelPath` at all. A preflight keyed on a bare `requiresConversion`
+/// read would refuse all three on Windows/Linux — three shipped models broken to fix one. Keying on
+/// `convert_artifact_required_here` is what keeps them apart, and this pins that.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn off_mac_anima_is_not_refused_by_the_unconverted_preflight() {
+    let root = tempfile::tempdir().unwrap();
+    let mut settings = Settings::from_env();
+    settings.data_dir = root.path().to_path_buf();
+    let req = request(json!({
+        "projectId": "p", "model": "anima_base", "prompt": "a lighthouse",
+        "modelManifestEntry": {
+            "id": "anima_base",
+            "name": "Anima Base",
+            "mlx": {
+                "requiresConversion": true,
+                "converter": "anima_quant",
+                "convertSourceRepo": "circlestone-labs/Anima",
+                "convertSourceFile": "split_files/diffusion_models/anima-base-v1.0.safetensors"
+            }
+        }
+    }));
+    // No weights are staged, so the resolve legitimately finds nothing — the point is that it does
+    // not ERROR. An absent snapshot stays the caller's existing `None` fall-through.
+    assert!(
+        resolve_weights_dir(&req, &settings).is_ok(),
+        "off-Mac Anima has no converted artifact by design and must not be refused by the preflight"
+    );
+}
+
+/// The builtin `flux2_klein_9b` / `flux2_klein_9b_kv` turnkeys declare no `mlx.requiresConversion`,
+/// so the preflight must be structurally unreachable for them and their snapshot resolution
+/// untouched (sc-20529 AC5). Asserted on the resolver itself rather than by inspection.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[test]
+fn builtin_flux2_klein_snapshot_resolution_is_untouched() {
+    let root = tempfile::tempdir().unwrap();
+    let mut settings = Settings::from_env();
+    settings.data_dir = root.path().to_path_buf();
+    for model in ["flux2_klein_9b", "flux2_klein_9b_kv"] {
+        let req = request(json!({
+            "projectId": "p", "model": model, "prompt": "a lighthouse",
+            "modelManifestEntry": { "id": model, "family": "flux2-klein" }
+        }));
+        assert!(
+            resolve_weights_dir(&req, &settings).is_ok(),
+            "{model} must keep its existing snapshot resolution (no preflight applies)"
+        );
+    }
+}
+
 #[test]
 fn render_and_save_writes_png_and_contract_fact() {
     let dir = tempfile::tempdir().unwrap();

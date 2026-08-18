@@ -8716,6 +8716,13 @@
           // Only the bf16 single-file transformer (the convert source). The repo
           // also hosts GGUF/fp8/fp4 quants we don't use — pulling just this file
           // avoids a ~73 GB whole-repo download.
+          //
+          // This is NOT the pinned-allow-list antipattern the whole-repo download
+          // rule forbids: the list IS the convert source, so it must name exactly
+          // one file. `files[0]` and `mlx.convertSourceFile` below are the same
+          // checkpoint by construction, and sceneworks-core's
+          // `convert_source_file_matches_its_download_allow_list` fails the build
+          // if the two spellings ever drift apart (sc-20529).
           "provider": "huggingface",
           "repo": "wikeeyang/Flux2-Klein-9B-True-V2",
           "revision": "9c9fe9880029a4e0c4af5ca7d86e83cdb83eea83",

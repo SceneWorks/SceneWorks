@@ -1579,6 +1579,87 @@ fn model_path_override(request: &ImageRequest) -> Option<String> {
     Some(raw_path.to_owned())
 }
 
+/// Typed, actionable preflight for a **convert-at-install** model whose conversion has not produced
+/// a local artifact yet (sc-20529).
+///
+/// Such a model is declared with `mlx.requiresConversion` + `mlx.converter`, and the API injects the
+/// converted dir as `modelPath` (`inject_converted_model_path`) once, and only once, the conversion
+/// has actually run. So reaching this function with NO `modelPath` means there is no converted
+/// artifact — and the source repo it would otherwise fall back to is a bare single-file transformer
+/// with no `text_encoder/` / `vae/` / `tokenizer/`. Loading it produced a raw engine-level
+/// `"<label>: snapshot missing the text_encoder/ component directory (at …)"` from candle-gen's
+/// shared `loader.rs`, which names an internal path and tells the user nothing about what to do.
+///
+/// This turns that class into one typed [`WorkerError::InvalidPayload`] naming BOTH remedies: run
+/// the conversion, and install the base model whose text encoder / VAE / tokenizer the conversion
+/// borrows (`mlx.convertBaseRepo` + `mlx.convertBaseSubdir` — for `flux2_klein_9b_true_v2`,
+/// `SceneWorks/flux2-klein-9b-mlx` `bf16`). Keyed on the MANIFEST CONTRACT, never on a model id, so
+/// every present and future convert-at-install model inherits it.
+///
+/// **Platform-scoped on purpose.** The gate is [`convert_artifact_required_here`], not a bare
+/// `requiresConversion` read: Anima (`anima_base` / `anima_aesthetic` / `anima_turbo`) declares
+/// `requiresConversion` and ships windows/linux downloads, but its `anima_quant` converter is
+/// macOS-only — off-Mac those models legitimately resolve the raw `circlestone-labs/Anima`
+/// `split_files/` tree below with no `modelPath` at all. Refusing them here would break three
+/// models that render fine today.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn unconverted_model_preflight(request: &ImageRequest) -> WorkerResult<()> {
+    let Some(mlx) = request.model_manifest_entry.get("mlx") else {
+        return Ok(());
+    };
+    if mlx.get("requiresConversion").and_then(Value::as_bool) != Some(true) {
+        return Ok(());
+    }
+    let converter = mlx
+        .get("converter")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if !sceneworks_core::jobs_store::convert_artifact_required_here(converter) {
+        return Ok(());
+    }
+    let name = request
+        .model_manifest_entry
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(request.model.as_str());
+    // The base whose text encoder / VAE / tokenizer the conversion borrows. Named explicitly when
+    // the manifest declares it so the user knows the exact second install to make; the sentence is
+    // dropped rather than faked when it does not (a dir-sourced converter borrows nothing).
+    let base = mlx
+        .get("convertBaseRepo")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|repo| {
+            let tier = mlx
+                .get("convertBaseSubdir")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            match tier {
+                Some(tier) => format!(
+                    " It also requires the base model {repo} ({tier}) to be installed — the \
+                     conversion borrows that base's text encoder, VAE, and tokenizer, which the \
+                     single-file checkpoint does not contain."
+                ),
+                None => format!(
+                    " It also requires the base model {repo} to be installed — the conversion \
+                     borrows that base's text encoder, VAE, and tokenizer, which the single-file \
+                     checkpoint does not contain."
+                ),
+            }
+        })
+        .unwrap_or_default();
+    Err(WorkerError::InvalidPayload(format!(
+        "{name} has not been converted yet — convert it from the Model Manager before \
+         generating. It downloads as a transformer-only checkpoint, so there is nothing to load \
+         until the conversion assembles a complete local model.{base}"
+    )))
+}
+
 /// Resolve the weights snapshot directory: an explicit `modelPath` dir wins, else the
 /// HuggingFace cache snapshot for the model repo. `None` when the model is not a known
 /// engine family or its snapshot is absent. Available on the candle lane too (sc-5501): the
@@ -1600,6 +1681,11 @@ pub(crate) fn resolve_weights_dir(
         }
         return Ok(Some(dir));
     }
+    // No `modelPath` on a convert-at-install model means the conversion has not produced its local
+    // artifact. Refuse HERE with an actionable error rather than falling through to the raw
+    // single-file source snapshot, which loads no further than candle-gen's "snapshot missing the
+    // text_encoder/ component directory" (sc-20529).
+    unconverted_model_preflight(request)?;
     let Some(model) = mlx_model(&request.model) else {
         return Ok(None);
     };
