@@ -662,7 +662,27 @@ back to `validate()` alone and reds the count assertion (`left: 1, right: 0`).
   which observes from inside the listing's own validation window that no entry's metadata lock is
   held, and reds when the blocking hold is restored.
 
-  - post-fix measured, submission during a sweep: `<pending live re-measure>`
+  - post-fix measured, submission during a sweep: **0.0086 s / 0.0083 s / 0.0085 s** — three
+    consecutive `POST /api/v1/image/jobs` taken while the worker held **96.5–100 % CPU** in
+    full-strength store maintenance over the same 5.65 GB / 2-entry cache, on `cf8230884`.
+    Alongside them, `GET /api/v1/model-cache` returned in **0.0045 s** and `GET /api/v1/models` in
+    **0.136 s**. Pre-fix the same measurement gave **33.2 s** for the first submission and the
+    second **never returned in the ~11 minutes it was given**.
+
+    Submission during a sweep is now indistinguishable from submission on an idle system
+    (0.0093–0.0104 s), so the sweep no longer parks the availability read at all.
+
+    The measurement is guarded rather than assumed. A first attempt produced a misleading number
+    because the expensive work the worker was doing turned out to be a **model load**, not a sweep:
+    the baseline submission earlier in the same script had been claimed, and the worker was inside
+    `acquire_complete` doing the lease-boundary content verification of the 5.57 GB bundle — which
+    is full-strength **by design** and legitimately holds that entry. That is a real behaviour and
+    worth stating plainly: **a submission naming a model whose bundle is concurrently being
+    verified at the lease boundary still waits**, because the load path deliberately kept its
+    content proof. It is not the sweep contention this fix addresses. The rerun therefore purges
+    every claimable job first and then samples the worker before measuring, aborting unless
+    load-path frames are zero; the run recorded above passed that guard with **load-path frames 0,
+    maintenance frames 3, sha2 13**.
 
 ## F-4 and F-2 spot checks · **both confirmed fixed**
 
