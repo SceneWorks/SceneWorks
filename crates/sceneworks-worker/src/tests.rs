@@ -232,4 +232,12 @@ async fn a_retention_checkpoint_never_blocks_the_caller_that_starts_it() {
         loop_body.contains("resolved_cache_promotion::work_pending(&settings.data_dir)"),
         "the poll loop must gate the promotion drain on the in-memory pending check"
     );
+    // ...and the gate must actually START something. The never-await rules above are all
+    // ABSENCE assertions, so an empty `else if work_pending(..) {}` body satisfies every one of
+    // them while promotion silently never runs — which is precisely the shape of the defect that
+    // reopened this story.
+    assert!(
+        loop_body.contains("spawn_promotion_drain(settings.clone())"),
+        "the poll loop must spawn the promotion drain, not merely test for pending work"
+    );
 }

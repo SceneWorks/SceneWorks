@@ -2075,6 +2075,18 @@ mod tests {
             assert!(loaded.join("model.safetensors").is_file());
             second.finish_success().unwrap();
 
+            // A LOCALLY served job records NOTHING. This is the qualification rule asserted in the
+            // widening direction, which the `Complete == 1` check below cannot do: relaxing the
+            // filter to record local-ready closures too would still leave exactly one complete
+            // entry, because the redundant candidate is admitted as `AlreadyComplete`. Only the
+            // intake being empty distinguishes "never recorded" from "recorded and then declined",
+            // and the difference is a whole idle turn plus a full source-library closure walk
+            // burned on a bundle that is already published.
+            assert!(
+                !crate::resolved_cache_promotion::work_pending(&settings.data_dir),
+                "a job served from the local tier is already promoted and must record nothing"
+            );
+
             // And the already-published entry is not promoted a second time: the drain admits it
             // as already complete and copies nothing.
             crate::resolved_cache_promotion::drain_intake(&settings);

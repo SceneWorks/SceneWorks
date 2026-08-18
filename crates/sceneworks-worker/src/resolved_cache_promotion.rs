@@ -244,13 +244,26 @@ fn decline(item: &PendingPromotion, reason: &str) {
 ///
 /// It must outlive a single drain: the queue, the coalescing key set and the single active slot all
 /// live in it, so a fresh scheduler per idle turn would lose the queue every time and re-materialize
-/// whatever a previous turn had already admitted. Opening the store is real I/O, which is why this
-/// is only ever reached from the blocking drain and never from [`work_pending`].
+/// whatever a previous turn had already admitted.
+///
+/// # The memo lock is never held across I/O
+///
+/// `ResolvedCacheStore::open` takes a durable session lock and writes session records. That lock is
+/// therefore taken, dropped, and only re-taken to publish the result — because [`work_pending`]
+/// locks the same mutex and runs **on the claim path**, where blocking behind a store open would
+/// delay the next job. Today the single maintenance slot means no two callers can reach the I/O at
+/// once, so the contention is unreachable; that is a positional accident of the poll loop's shape,
+/// not a property of this function, and this ordering makes it structural instead.
+///
+/// The race that ordering admits — two callers both building a scheduler — resolves **first-wins**:
+/// a loser drops its own scheduler and adopts the installed one. Last-wins would replace a
+/// scheduler that may already hold queued work AND leave two live "single active slot" owners for
+/// one store, which is exactly the concurrent-materialization case the slot exists to prevent.
 fn scheduler_for(settings: &Settings) -> Option<ResolvedCachePromotionScheduler> {
-    let mut schedulers = lock_schedulers();
-    if let Some(scheduler) = schedulers.get(&settings.data_dir) {
+    if let Some(scheduler) = lock_schedulers().get(&settings.data_dir) {
         return Some(scheduler.clone());
     }
+    // Unlocked: real filesystem work.
     let store = match ResolvedCacheStore::open(&settings.data_dir) {
         Ok(store) => store,
         Err(error) => {
@@ -269,8 +282,12 @@ fn scheduler_for(settings: &Settings) -> Option<ResolvedCachePromotionScheduler>
             return None;
         }
     };
-    schedulers.insert(settings.data_dir.clone(), scheduler.clone());
-    Some(scheduler)
+    Some(
+        lock_schedulers()
+            .entry(settings.data_dir.clone())
+            .or_insert(scheduler)
+            .clone(),
+    )
 }
 
 type Intake = BTreeMap<PathBuf, VecDeque<PendingPromotion>>;

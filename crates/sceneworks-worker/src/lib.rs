@@ -1413,11 +1413,20 @@ pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
                 }
                 if maintenance_task.is_none() {
                     if Instant::now() >= next_retention_checkpoint {
-                        // Retention wins whenever it is due. It comes due at most once per
-                        // interval, so this cannot starve promotion; the reverse ordering could
-                        // starve retention indefinitely on a worker with a steady promotion
-                        // stream, and retention is what keeps the cache inside its size limit —
-                        // the limit promotion admission itself is judged against.
+                        // Retention wins whenever it is due. The reverse ordering could starve
+                        // retention indefinitely on a worker with a steady promotion stream, and
+                        // retention is what keeps the cache inside its size limit — the limit
+                        // promotion admission itself is judged against.
+                        //
+                        // This does NOT make starving promotion impossible, only bounded by an
+                        // assumption: the next checkpoint is armed when this one is STARTED, so a
+                        // sweep that runs longer than the interval is already due again when it
+                        // finishes and sweeps run back to back, with no idle turn left over for a
+                        // drain. That holds only while sweep duration stays under the interval.
+                        // It is self-stabilizing rather than a defect — a sweep that slow means
+                        // the cache is over its limit, which is the condition promotion must not
+                        // be adding to — so the ordering stands, but the guarantee is
+                        // "promotion yields to retention", not "promotion always runs".
                         next_retention_checkpoint =
                             Instant::now() + RESOLVED_CACHE_RETENTION_INTERVAL;
                         maintenance_task =
