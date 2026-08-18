@@ -6120,10 +6120,14 @@ fn pinned_component_download_installed(download: &Value, data_dir: &FsPath) -> b
     if files.is_empty() {
         return false;
     }
-    let Some(repo_cache) = huggingface_repo_cache_path(data_dir, repo) else {
+    // Through the typed source-library resolver, not a hand-built `snapshots/<rev>` root — the
+    // model-path inventory audit (sc-19703) forbids direct root construction on this file.
+    let resolver = sceneworks_core::model_artifacts::ModelArtifactResolver::new(
+        sceneworks_core::hf_home::model_source_library(data_dir),
+    );
+    let Ok((_, snapshot)) = resolver.discover_source_snapshot(repo, Some(revision)) else {
         return false;
     };
-    let snapshot = repo_cache.join("snapshots").join(revision);
     files
         .iter()
         .all(|pattern| snapshot_contains_pattern(&snapshot, pattern))

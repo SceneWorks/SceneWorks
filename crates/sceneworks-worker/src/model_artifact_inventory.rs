@@ -450,6 +450,10 @@ mod tests {
             "shared path/confinement implementation",
         ),
         (
+            "crates/sceneworks-worker/src/text_encoder_selection.rs",
+            "text-encoder selection/confinement, not a model loader",
+        ),
+        (
             "crates/sceneworks-worker/src/snapshot_install.rs",
             "source-library installation implementation",
         ),
