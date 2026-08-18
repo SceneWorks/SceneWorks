@@ -176,22 +176,59 @@ promotion is what turns them from latent into live.
 
 ---
 
-## 5. sc-19709 / PR #2406 — batch pushed, needs re-review
+## 5. sc-19709 / PR #2406 — COMPLETE, one lane from mergeable. **Start here.**
 
-Head **`45d7fe30f`**, state BLOCKED (checks pending/stale). Contains the full batch:
-`d499b6d6b` (restart disclosure + review fixes) and `45d7fe30f` (path-aliasing fix).
+Head **`45d7fe30f`**. **Every review item and the restart work landed**; verified green locally
+*after* merging the moved base (sc-19710 landed mid-batch): `npm run rust:check` exit 0,
+`npm run check` 412 pass, web suite 3694 pass / 250 files, eslint clean,
+`cargo check -p sceneworks-desktop` clean, contract snapshots 14/14 (regenerated for the new
+`modelResolution.libraryPresent` field). CI on the current head: build-windows, candle,
+check-linux, check-macos, web, parity, parity-rust, parity-scaffold, parity-digests, parity-docker
+all **SUCCESS**; **only "macOS build, lint and workspace tests (hosted)" is unconfirmed** — still
+running when the session ended. The previous push (`d499b6d6b`) was fully green on every lane.
 
-Landed in that batch: Michael's **restart-now dialog** (his decision: relocation applies next
-launch; show the disclosure and offer restart, and say explicitly that the in-flight generation was
-dropped); ModelLibraryDialog now mounted in the **Simple UI** shell (it was below the early return
-while the handler registered in both shells — a blocked submission was silently swallowed and every
-later one too, a permanently dead Generate path); `relocate_binding` now validated against the same
-**installed-evidence union** availability uses (it previously checked only the closure ledger, so a
-decoy HF-shaped folder could overwrite a good binding and report success); relocate/persist
-ordering compensation; desktop/loopback gating of the relocate endpoint; and the
-**path-aliasing fix** — see §7.
+Landed: the **restart dialog** ("The generation you started was not queued. Submit it again after
+SceneWorks restarts.", Restart now / Later) via a `restart_app` command → `setup::begin_restart`
+(graceful SIGTERM + grace teardown, **not** the auto-update force-kill), fired once through a ref
+guard, **withheld while a job is running**, degrading to guidance off-desktop; both overlays hoisted
+into `modelLibraryOverlays` and rendered in the **Simple** branch (verified: the new Simple-shell
+test fails without it); `relocate_binding` judging the **same evidence union availability uses**
+(validated-closure ledger **and** download receipts from
+`<data_dir>/models/*/.sceneworks-download-complete.json`), refusing with typed `no_installed_models`
+when there is none; validate(`dryRun`) → persist → adopt with the persist **undone** if adopt fails
+(distinct messages for undo-succeeded vs undo-failed); 11 new core cases in
+`external_library_tests.rs`; the four minors; **loopback-only** relocate endpoint, fail-closed on
+unknown peer; and the path-aliasing fix (§7).
 
-**Next:** re-run the adversarial review against the delta, confirm all lanes green, merge.
+**🔴 Design note that is easy to get wrong:** relaxing `probe_binding` alone is **not sufficient
+and looks sufficient**. `ModelResolution::validate` requires
+`binding.configured_path == resolution.configured_library_path`, and the worker's pre-loader guard
+calls it — so an aliased resolution would pass the probe and then be **rejected at job start**.
+`bind_or_probe_validated` therefore **re-aliases the ledger** (`realias_unlocked`) once the probe
+has proven both names are the same library; canonical path, identity and `bound_at` are untouched.
+The gate also deliberately **drops** the pending action on relocation (like cancel) rather than
+resuming — resuming would only be refused again until relaunch, which is why the dropped-action
+wording exists in both dialog and notice. `library_present` is `#[serde(default)]` on purpose so
+resolutions stamped into jobs before this field still deserialize under `deny_unknown_fields`.
+
+**Next:** confirm that one macOS hosted lane reached SUCCESS (`gh pr checks 2406`); if it failed,
+read the job log before assuming anything — everything it runs passed locally on the same commit.
+Then re-review the delta and merge.
+
+### Environment gotchas this PR paid for (they will bite again)
+- **`apps/desktop/capabilities/default.json` is a THIRD registration site** beyond `main.rs` and
+  `build.rs`. A command missing there is **ACL-rejected at runtime** at the shell's remote
+  `127.0.0.1:<port>` origin, and web tests mock `tauriInvoke` so **nothing catches it**.
+- `cargo check -p sceneworks-desktop` fails in a fresh worktree until you run
+  `node apps/desktop/scripts/stage-test-sidecars.mjs`.
+- A worktree needs `node_modules` symlinked from the main checkout for vitest.
+- Contract snapshots need a venv with `pytest==9.0.2 httpx==0.28.1 jsonschema==4.25.1`; regenerate
+  with `UPDATE_SNAPSHOTS=1 python -m pytest tests/test_rust_api_contract_snapshots.py` —
+  **unfiltered**, because a filtered update run will not delete stale entries.
+- Any new file calling `model_source_library(` must be classified in
+  `crates/sceneworks-worker/src/model_artifact_inventory.rs` or that guard fires.
+- App-level web tests need `ui-preferences` to return `workflowEmbedNoticeSeen: true`, or the
+  workflow-embed modal silently blocks the first generation and the test sees zero POSTs.
 
 ---
 
@@ -285,7 +322,7 @@ else may be running in `gpu-local`/`nax-ci`.
 1. **Fix #2407** (§3) — make it compile first (`held.entry.*` + stale callers), then the three-pass
    guard selection, then the remaining review items. Rewrite the two tests that drop the guard
    before asserting. Merge the feature branch (PR is DIRTY) and rebuild.
-2. **Re-review and merge #2406** (§5) — it is the most nearly finished, and it carries the
+1b. **Re-review and merge #2406** (§5) — COMPLETE and one unconfirmed lane from mergeable; it carries the
    path-aliasing fix Michael's own configuration needs.
 3. **Finish promotion activation** (§4) — trigger, idle drain, admission tests with per-guard
    mutation evidence, the one real end-to-end worker test. Open its PR **after** #2407 merges.
