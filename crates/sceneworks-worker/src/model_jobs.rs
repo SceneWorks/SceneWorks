@@ -1795,10 +1795,7 @@ pub(crate) fn huggingface_snapshot_dir(data_dir: &Path, repo: &str) -> Option<Pa
 /// [`resolve_optional_component`] key off whether the manifest row *declares* a `revision` at all,
 /// which is a different question — a row declaring `"main"` is unpinned here but `Some` there.
 pub(crate) fn is_pinned_hf_revision(revision: &str) -> bool {
-    revision.len() == 40
-        && revision
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    sceneworks_core::model_artifacts::validate_immutable_revision(revision).is_ok()
 }
 
 /// Whether a convert job's declared source file is already materialized in the HF cache — the
@@ -1849,17 +1846,12 @@ pub(crate) fn huggingface_pinned_snapshot_dir(
     repo: &str,
     revision: &str,
 ) -> Option<PathBuf> {
-    if !is_pinned_hf_revision(revision) {
-        return None;
-    }
-    let dir = safe_join(
-        &huggingface_repo_cache_path(data_dir, repo)?.join("snapshots"),
-        revision,
-    )
-    .ok()?;
-    if !dir.is_dir() {
-        return None;
-    }
+    let resolver = sceneworks_core::model_artifacts::ModelArtifactResolver::new(
+        sceneworks_core::hf_home::model_source_library(data_dir),
+    );
+    let (_, dir) = resolver
+        .discover_source_snapshot(repo, Some(revision))
+        .ok()?;
     #[cfg(windows)]
     materialize_snapshot_hardlinks(&dir);
     Some(dir)
@@ -2386,19 +2378,8 @@ pub(crate) fn resolve_optional_component(
 /// when every recorded file exists in one snapshot directory; a torn set returns `None` atomically.
 /// `model_id` narrows primary-model receipts, while the repo-wide fallback also covers co-requisite
 /// downloads whose marker directory is not known to the loader.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ResolvedArtifactIdentity {
-    pub(crate) repository: String,
-    pub(crate) revision: String,
-    pub(crate) variant: String,
-    pub(crate) fingerprint: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ResolvedArtifactProvenance {
-    pub(crate) identity: ResolvedArtifactIdentity,
-    pub(crate) fixed_artifact_tier: Option<String>,
-}
+pub(crate) type ResolvedArtifactIdentity = sceneworks_core::model_artifacts::ArtifactIdentity;
+pub(crate) type ResolvedArtifactProvenance = sceneworks_core::model_artifacts::ArtifactProvenance;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg(any(target_os = "macos", feature = "backend-candle", test))]
@@ -2926,9 +2907,11 @@ mod artifact_provenance_tests {
             ConvertSourceState::RepoNotCached
         );
 
+        let revision = "0123456789abcdef0123456789abcdef01234567";
         let snapshot = huggingface_repo_cache_path(data.path(), repo)
             .expect("cache")
-            .join("snapshots/rev-shared");
+            .join("snapshots")
+            .join(revision);
         std::fs::create_dir_all(snapshot.join("split_files/diffusion_models")).expect("dit dir");
         std::fs::write(snapshot.join(alpha), b"weights").expect("alpha weights");
         assert_eq!(
@@ -3138,8 +3121,20 @@ pub(crate) fn huggingface_receipt_weights_dir(
 ) -> Option<PathBuf> {
     // Path-only callers never read provenance, so they must not trigger a receipt write as a side
     // effect of locating weights. Repair belongs to the provenance consumer.
-    huggingface_receipt_weights(data_dir, repo, model_id, variant, ProvenanceRepair::Skip)
-        .map(|resolved| resolved.path)
+    let resolved =
+        huggingface_receipt_weights(data_dir, repo, model_id, variant, ProvenanceRepair::Skip)?;
+    // sc-19707: the receipt resolves and PROVES its install against the authoritative source
+    // (its tree stamp is a source-tree fact and must stay one); only the path handed to the loader
+    // is then served from a leased app-owned bundle covering that exact snapshot. Inert without an
+    // active lease.
+    let library = sceneworks_core::hf_home::model_source_library(data_dir);
+    Some(
+        sceneworks_core::model_artifacts::local_preference::redirect_source_library_path(
+            library.root(),
+            &resolved.path,
+        )
+        .unwrap_or(resolved.path),
+    )
 }
 
 #[cfg(any(target_os = "macos", feature = "backend-candle", test))]
@@ -3451,7 +3446,10 @@ pub(crate) fn receipt_markers_read() -> usize {
 }
 
 fn resolve_huggingface_snapshot_dir(data_dir: &Path, repo: &str) -> Option<PathBuf> {
-    let repo_dir = huggingface_repo_cache_path(data_dir, repo)?;
+    let resolver = sceneworks_core::model_artifacts::ModelArtifactResolver::new(
+        sceneworks_core::hf_home::model_source_library(data_dir),
+    );
+    let repo_dir = resolver.source_library().repository_root(repo).ok()?;
     let snapshots = repo_dir.join("snapshots");
     // Prefer `refs/main`, but ONLY when the snapshot it names actually holds files. A polluted
     // `refs/main` — e.g. a test that clobbered it to an empty placeholder snapshot (sc-13834) —
@@ -3459,21 +3457,50 @@ fn resolve_huggingface_snapshot_dir(data_dir: &Path, repo: &str) -> Option<PathB
     // substitute for a correct `refs/main`: it distinguishes a materialized snapshot from an
     // empty/torn one, not dummy fixture weights from real ones.
     if let Ok(rev) = std::fs::read_to_string(repo_dir.join("refs").join("main")) {
-        let candidate = snapshots.join(rev.trim());
+        let revision = rev.trim();
+        let candidate = snapshots.join(revision);
         if snapshot_has_any_file(&candidate) {
-            return Some(candidate);
+            // The name is read off disk, so it is resolved as an installed snapshot rather than
+            // admitted as a caller-supplied revision: an install materialized under a mutable name
+            // (the endpoint omitted `X-Repo-Commit`) is still installed. Demanding an immutable
+            // name here returned `None` for it — and, because this arm returns, without even
+            // trying the fallback scan below.
+            return resolver
+                .source_library()
+                .discover_installed_snapshot_path(repo, revision)
+                .ok();
         }
     }
     // Fallback: the cached snapshot with the most files, so an empty/partial one never wins over a
     // fully materialized sibling (the old "first dir wins" scan happily returned an empty snapshot).
-    std::fs::read_dir(&snapshots)
-        .ok()?
+    let from_source_library = std::fs::read_dir(&snapshots)
+        .ok()
+        .into_iter()
+        .flatten()
         .flatten()
         .map(|entry| entry.path())
         .filter(|path| path.is_dir())
         .map(|path| (snapshot_file_count(&path), path))
         .filter(|(count, _)| *count > 0)
         .max_by_key(|(count, _)| *count)
+        .and_then(|(_, path)| {
+            let revision = path.file_name()?.to_str()?;
+            resolver
+                .source_library()
+                .discover_installed_snapshot_path(repo, revision)
+                .ok()
+        });
+    if from_source_library.is_some() {
+        return from_source_library;
+    }
+    // Last resort (sc-19707): the configured library cannot name a revision at all — it is
+    // disconnected, or was never installed here. The typed resolver answers from a leased
+    // app-owned bundle when exactly one revision of this repository is being served, which is what
+    // keeps a complete local model loadable while the drive is unplugged. With no active lease it
+    // still returns nothing, so an uninstalled model keeps its established behavior.
+    resolver
+        .discover_source_snapshot(repo, None)
+        .ok()
         .map(|(_, path)| path)
 }
 
@@ -6008,7 +6035,9 @@ mod co_requisite_tests {
         let snapshots = repo_dir.join("snapshots");
 
         // The real, fully materialized snapshot …
-        let populated = snapshots.join("b88090c7");
+        let populated_revision = "b88090c7b88090c7b88090c7b88090c7b88090c7";
+        let empty_revision = "abc12300abc12300abc12300abc12300abc12300";
+        let populated = snapshots.join(populated_revision);
         std::fs::create_dir_all(populated.join("q8/transformer")).expect("populated tree");
         std::fs::write(
             populated.join("q8/transformer/diffusion_pytorch_model.safetensors"),
@@ -6016,11 +6045,12 @@ mod co_requisite_tests {
         )
         .expect("write real weight");
         // … alongside an EMPTY placeholder snapshot (tier dirs only, no files) …
-        std::fs::create_dir_all(snapshots.join("abc123/q8/transformer"))
+        std::fs::create_dir_all(snapshots.join(empty_revision).join("q8/transformer"))
             .expect("empty placeholder");
         // … with `refs/main` clobbered to point at the empty one.
         std::fs::create_dir_all(repo_dir.join("refs")).expect("create refs");
-        std::fs::write(repo_dir.join("refs").join("main"), "abc123").expect("write refs/main");
+        std::fs::write(repo_dir.join("refs").join("main"), empty_revision)
+            .expect("write refs/main");
 
         let resolved = resolve_huggingface_snapshot_dir(data_dir.path(), repo)
             .expect("a populated snapshot exists, so resolution must succeed");
@@ -6031,11 +6061,61 @@ mod co_requisite_tests {
 
         // Sanity: a VALID `refs/main` (populated) is still honored on the fast path — the fallback
         // only engages when `refs/main` names an empty/absent snapshot.
-        std::fs::write(repo_dir.join("refs").join("main"), "b88090c7").expect("repoint refs/main");
+        std::fs::write(repo_dir.join("refs").join("main"), populated_revision)
+            .expect("repoint refs/main");
         assert_eq!(
             resolve_huggingface_snapshot_dir(data_dir.path(), repo).expect("still resolves"),
             populated,
             "a populated refs/main must resolve to exactly that snapshot"
+        );
+    }
+
+    /// A snapshot directory whose name is not a 40-hex commit is still an installed snapshot.
+    ///
+    /// Routing discovery through the typed artifact seam (sc-19704) started admitting the on-disk
+    /// directory name as if it were a caller-supplied revision, so `ArtifactSourceLibrary`'s
+    /// immutability rule applied to it and every such snapshot resolved to `None` — the model read
+    /// as not installed, silently, on every lane. This is reachable in production:
+    /// `downloads::download_snapshot_into_cache` falls back to
+    /// `commit.unwrap_or_else(|| revision.to_owned())`, so an endpoint that omits `X-Repo-Commit`
+    /// materializes a complete install under `snapshots/main`.
+    ///
+    /// Both arms are asserted because the `refs/main` arm *returns*: when it rejected the name it
+    /// did not fall through to the scan, so a repository with a valid `refs/main` resolved to
+    /// nothing even though the populated snapshot was sitting right there.
+    #[test]
+    fn snapshot_resolution_accepts_a_snapshot_named_by_a_mutable_revision() {
+        let _env = isolate_hf_cache();
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        let repo = "SceneWorks/krea-2-raw-mlx";
+        let repo_dir =
+            huggingface_repo_cache_path(data_dir.path(), repo).expect("repo cache path resolves");
+        let snapshot = repo_dir.join("snapshots").join("main");
+        std::fs::create_dir_all(snapshot.join("q8/transformer")).expect("snapshot tree");
+        std::fs::write(
+            snapshot.join("q8/transformer/diffusion_pytorch_model.safetensors"),
+            b"real",
+        )
+        .expect("write weight");
+
+        // The scan arm: no `refs/main` at all, exactly like the seeded turnkey fixtures the candle
+        // image lanes resolve against.
+        assert_eq!(
+            resolve_huggingface_snapshot_dir(data_dir.path(), repo)
+                .expect("a populated snapshot exists, so resolution must succeed"),
+            snapshot,
+            "a snapshot directory named by a mutable revision is still installed"
+        );
+
+        // The `refs/main` fast-path arm, which is what a real mirror-endpoint install looks like:
+        // the pointer and the snapshot directory both carry the mutable name.
+        std::fs::create_dir_all(repo_dir.join("refs")).expect("create refs");
+        std::fs::write(repo_dir.join("refs").join("main"), "main").expect("write refs/main");
+        assert_eq!(
+            resolve_huggingface_snapshot_dir(data_dir.path(), repo)
+                .expect("refs/main names a populated snapshot, so resolution must succeed"),
+            snapshot,
+            "a refs/main naming a populated mutable snapshot must resolve to exactly that snapshot"
         );
     }
 

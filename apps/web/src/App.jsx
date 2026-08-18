@@ -1,4 +1,12 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { apiFetch, isAbortError } from "./api.js";
 import {
   beginAssetRequest,
@@ -60,6 +68,15 @@ import {
 import { buildWorkersById } from "./workers.js";
 import { createEditorScratchRegistry } from "./editorScratch.js";
 import { appConfirm, ConfirmHost } from "./appConfirm.jsx";
+import { ModelLibraryDialog } from "./components/ModelLibraryDialog.jsx";
+import { ModelLibraryRestartDialog } from "./components/ModelLibraryRestartDialog.jsx";
+import {
+  createModelLibraryGate,
+  fetchModelLibraryStatus,
+  relocateModelLibrary,
+  setModelLibraryHandler,
+  validateModelLibrary,
+} from "./modelLibrary.js";
 import { isDesktop as isDesktopShell, tauriInvoke } from "./runtime.js";
 // Simple UI (design handoff "Simple UI for creative studios") — an ALTERNATIVE shell that
 // renders instead of this workspace when the sidebar switch is on Simple. The workspace
@@ -695,6 +712,82 @@ export function App() {
     saveToken,
     lockRemote,
   } = useAccessGate({ setError, pushNotice, dismissNoticeKind });
+  // The unavailable-model-library prompt (sc-19709). One gate for the whole app: it holds at most
+  // one blocked action and resumes it at most once, so a reconnect (or an impatient second click)
+  // can never turn one blocked generation into two jobs. Registered as the module-level handler so
+  // every submission path — and the studios' selection check — reaches it without prop threading.
+  const modelLibraryGate = useMemo(
+    () =>
+      createModelLibraryGate({
+        probe: () => fetchModelLibraryStatus(token),
+        validate: (path) => validateModelLibrary(token, path),
+        adopt: (path) => relocateModelLibrary(token, path),
+        // Durable persistence of a relocated library is desktop state: the API hands back the exact
+        // HF_HOME the shell must store, in the same field, file and normalization as the first-run
+        // storage step. Returns an undo so the gate can restore the previous location if the
+        // server's re-bind then fails — the two copies must never disagree.
+        //
+        // Fails CLOSED when the previous location cannot be read, BEFORE the first durable write:
+        // without a previous location there is no undo, so a re-bind failure afterwards would leave
+        // the shell pointed at the new library while the gate reported the previous location still
+        // in use — the disagreement this undo path exists to prevent, with the wrong message on top.
+        persist: async (target) => {
+          // Nothing to persist — the browser shell keeps no copy of the location. A NO-OP undo, not
+          // `null`: the gate treats a missing undo as "changed and unrestorable", and here nothing
+          // changed, so the previous location genuinely is still in use.
+          if (!isDesktopShell || !target?.hfHome) return () => {};
+          let before = null;
+          try {
+            before = await tauriInvoke("get_storage_setup");
+          } catch (error) {
+            throw new Error(
+              `The current model library location could not be read, so nothing was changed. ${String(error)}`.trim(),
+            );
+          }
+          const previous = before?.hfHome ?? before?.hfHomeDefault ?? null;
+          if (!previous) {
+            throw new Error(
+              "The current model library location could not be read, so nothing was changed.",
+            );
+          }
+          await tauriInvoke("set_model_library", { path: target.hfHome });
+          return () => tauriInvoke("set_model_library", { path: previous });
+        },
+      }),
+    [token],
+  );
+  const modelLibraryState = useSyncExternalStore(
+    modelLibraryGate.subscribe,
+    modelLibraryGate.getState,
+  );
+  useEffect(() => setModelLibraryHandler(modelLibraryGate.block), [modelLibraryGate]);
+  // The relocated library, held until the user answers the restart disclosure. The relocation is
+  // already durable at this point — this only decides WHEN the app picks it up.
+  const [modelLibraryRelocation, setModelLibraryRelocation] = useState(null);
+  // True while the NATIVE folder picker is up. The prompt's auto re-probe pauses on it: a drive
+  // that comes back while the user is choosing a folder must not resume the submission behind a
+  // modal OS dialog the user cannot see past.
+  const [modelLibraryPickerOpen, setModelLibraryPickerOpen] = useState(false);
+  const chooseModelLibraryLocation = useCallback(async () => {
+    if (!isDesktopShell) return;
+    setModelLibraryPickerOpen(true);
+    let picked = null;
+    try {
+      picked = await tauriInvoke("choose_folder").catch(() => null);
+    } finally {
+      setModelLibraryPickerOpen(false);
+    }
+    if (!picked) return;
+    const adopted = await modelLibraryGate.relocate(picked);
+    if (adopted?.hfHome) {
+      setModelLibraryRelocation(adopted);
+      // The notice outlives the dialog, so "Later" still leaves the reason visible.
+      pushNotice(
+        "general",
+        `Model library set to ${adopted.hfHome} — restart SceneWorks to apply it. The generation you started was not queued; submit it again after the restart.`,
+      );
+    }
+  }, [modelLibraryGate, pushNotice]);
   // The drop guard that stops a stray file from navigating the webview (issue #1308) is
   // installed further down, next to `useWorkflowDrop` — it now hands the unclaimed file to
   // the workflow inspector (sc-15951), which needs the active project and `importAsset`.
@@ -1358,6 +1451,16 @@ export function App() {
       { active: 0 },
     );
   }, [jobs, queueSummary]);
+  // Jobs actually executing on a worker. The restart disclosure (sc-19709) withholds "Restart now"
+  // while any of these are in flight: the teardown is graceful, but interrupting a render still
+  // throws away the work, so the user defers rather than discovers. Prefers the server's own count
+  // when the queue summary is loaded, since `jobs` is a recent window rather than the whole queue.
+  const runningJobCount = useMemo(
+    () =>
+      queueSummary?.counts?.running ??
+      jobs.filter((job) => job.status === "running").length,
+    [jobs, queueSummary],
+  );
   const filteredJobs = useMemo(() => {
     if (projectFilter === "all") {
       return jobs;
@@ -3090,6 +3193,40 @@ export function App() {
     />
   );
 
+  // The unavailable-model-library prompt and its post-relocation restart disclosure (sc-19709).
+  // Built once and rendered in BOTH shells for the same reason `workflowDropPanel` is: the handler
+  // that opens them is registered at App level and therefore fires in both, so a Simple-UI user
+  // whose library is disconnected would otherwise have their submission swallowed by a dialog that
+  // was never mounted — a silently dead Generate button. Both portal to <body>, so neither
+  // disturbs the shell it renders in.
+  const modelLibraryOverlays = (
+    <>
+      <ModelLibraryDialog
+        autoProbePaused={modelLibraryPickerOpen}
+        canRelocate={isDesktopShell}
+        onCancel={modelLibraryGate.cancel}
+        onRelocate={chooseModelLibraryLocation}
+        onRetry={modelLibraryGate.retry}
+        state={modelLibraryState}
+      />
+      <ModelLibraryRestartDialog
+        canRestart={isDesktopShell}
+        onLater={() => setModelLibraryRelocation(null)}
+        // The rejection is RE-THROWN after the notice: the dialog needs it to leave its restarting
+        // state, or a restart that never launched would leave the disclosure permanently stuck on
+        // "Restarting SceneWorks…" with both buttons disabled, for this and every later relocation.
+        onRestart={() =>
+          tauriInvoke("restart_app").catch((error) => {
+            pushNotice("general", `SceneWorks could not restart: ${String(error)}`);
+            throw error;
+          })
+        }
+        relocation={modelLibraryRelocation}
+        runningJobCount={runningJobCount}
+      />
+    </>
+  );
+
   const jobAction = useCallback(
     async (job, action, options = {}) => {
       try {
@@ -3558,6 +3695,7 @@ export function App() {
               too — otherwise a Simple-UI user's drop would be inspected and then answered by
               nothing. It portals to <body>, so it does not disturb this shell's layout. */}
           {workflowDropPanel}
+          {modelLibraryOverlays}
         </AppLiveContext.Provider>
       </AppStaticContext.Provider>
     );
@@ -3869,6 +4007,11 @@ export function App() {
           navTo — resolve through a real React dialog instead of window.confirm (which
           silently no-ops in the Tauri WebView). Renders nothing until a confirm is asked. */}
       <ConfirmHost />
+
+      {/* The unavailable-model-library prompt and its post-relocation restart disclosure
+          (sc-19709), built above and rendered in BOTH shells. Renders nothing while the gate is
+          idle, which is every normal run. */}
+      {modelLibraryOverlays}
 
       {/* "Workflow found" (sc-15951) — opened by a drop no in-app dropzone claimed, and only
           after the file turned out to carry a recipe. Renders nothing otherwise, which is the

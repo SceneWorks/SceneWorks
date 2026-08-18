@@ -1,4 +1,5 @@
 import { apiFetch } from "./api.js";
+import { handleModelLibraryRejection } from "./modelLibrary.js";
 import { upsertJobNewest } from "./sorters.js";
 
 function generationBody([payload], project, requestedGpu) {
@@ -63,7 +64,7 @@ export function makeCreateJob({
   beforeCreate,
   afterCreate,
 }) {
-  return async (...args) => {
+  return async function createJob(...args) {
     if (!project) {
       setError("Create or open a project first.");
       return null;
@@ -81,6 +82,12 @@ export function makeCreateJob({
       setError("");
       return job;
     } catch (err) {
+      // A model installed on a currently-unavailable library is recoverable, not a failure to
+      // report: hand the prompt this exact submission as the action to resume. The prompt owns
+      // single-fire, so a reconnect can never turn one blocked click into two jobs.
+      if (handleModelLibraryRejection(err, () => createJob(...args))) {
+        return null;
+      }
       setError(err.message);
       return null;
     }

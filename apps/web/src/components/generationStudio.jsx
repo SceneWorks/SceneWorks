@@ -4,6 +4,10 @@ import { Icon } from "./Icons.jsx";
 import { StudioUpdateBadge, StudioUpdateNotice } from "./StudioUpdateNotice.jsx";
 import { terminalStatuses } from "../jobTypes.js";
 import {
+  modelLibraryContextForModel,
+  raiseModelLibraryPrompt,
+} from "../modelLibrary.js";
+import {
   LORA_WEIGHT_MAX,
   LORA_WEIGHT_MIN,
   LORA_WEIGHT_STEP,
@@ -323,6 +327,25 @@ export function useGenerationStudio({
       setModel(models[0]?.id ?? fallbackModelId);
     }
   }, [models, model, setModel, fallbackModelId]);
+
+  // Raise the model-library prompt at SELECTION time, not only at submit (sc-19709): picking a
+  // model whose library is disconnected should say so immediately rather than after the user has
+  // written a prompt and pressed Generate. The catalog re-probes live, so this is the seam's own
+  // typed judgement — never a client-side re-derivation.
+  //
+  // Keyed on the model id + its typed availability, NOT on the `selectedModel` object: a catalog
+  // refresh mints new objects every poll, and an object-identity dependency would re-open the
+  // prompt seconds after the user dismissed it.
+  const selectedLibraryContext = modelLibraryContextForModel(selectedModel);
+  const blockedModelKey = selectedLibraryContext
+    ? `${selectedLibraryContext.modelId}:${selectedLibraryContext.expectedLibraryPath ?? ""}`
+    : null;
+  const selectedLibraryContextRef = useRef(selectedLibraryContext);
+  selectedLibraryContextRef.current = selectedLibraryContext;
+  useEffect(() => {
+    if (!blockedModelKey) return;
+    raiseModelLibraryPrompt(selectedLibraryContextRef.current);
+  }, [blockedModelKey]);
 
   // Drop a character selection that's no longer in the catalog. Guard on a loaded catalog
   // (sc-11964): on the first mount after a restart the character catalog is still resolving

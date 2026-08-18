@@ -1549,6 +1549,26 @@ function assertFeaturePullRequestCoverage(workflow, context) {
   );
 }
 
+function assertWindowsResolvedCacheRuntimeCoverage(workflow, context) {
+  const lines = workflow.split("\n");
+  const buildStart = lines.findIndex((line) => line === "  build-windows:");
+  assert.ok(buildStart >= 0, `${context}: build-windows job must be present`);
+  const nextJob = lines
+    .slice(buildStart + 1)
+    .findIndex((line) => /^  [A-Za-z0-9_-]+:\s*$/.test(line));
+  assert.ok(nextJob >= 0, `${context}: build-windows job must have a following job boundary`);
+  const requiredBuild = lines
+    .slice(buildStart, buildStart + 1 + nextJob)
+    .filter((line) => !/^\s*#/.test(line))
+    .join("\n");
+  assert.match(
+    requiredBuild,
+    /^ {8}run: "cargo test -p sceneworks-core model_artifacts::resolved_cache:: -- --test-threads=1"$/m,
+    `${context}: required build-windows must execute both the durable-store and native ` +
+      "materialization safety suites, not only compile or select one half",
+  );
+}
+
 test("every required workflow reports on feature-target pull requests", async () => {
   for (const path of REQUIRED_WORKFLOWS) {
     assertFeaturePullRequestCoverage(await source(path), path);
@@ -1731,6 +1751,37 @@ test("dropping the PR path filter did not expose the self-hosted pools", async (
     /github\.event_name == 'pull_request' \|\| github\.event_name == 'merge_group'/,
     "build-windows is the required check; it must actually run on the speculative merge rather " +
       "than skip into a free Success.",
+  );
+  assertWindowsResolvedCacheRuntimeCoverage(desktop, ".github/workflows/desktop-windows.yml");
+});
+
+test("Windows resolved-cache coverage rejects either narrowed test module", async () => {
+  const workflow = await source(".github/workflows/desktop-windows.yml");
+  for (const narrowed of [
+    "model_artifacts::resolved_cache::tests::",
+    "model_artifacts::resolved_cache::materialization::tests::",
+  ]) {
+    const mutated = workflow.replace("model_artifacts::resolved_cache:: --", `${narrowed} --`);
+    assert.notEqual(mutated, workflow, "the workflow mutation must replace the widened filter");
+    assert.throws(
+      () => assertWindowsResolvedCacheRuntimeCoverage(mutated, `${narrowed} mutation`),
+      /execute both the durable-store and native materialization safety suites/,
+    );
+  }
+
+  const decoy = workflow
+    .replace(
+      '        run: "cargo test -p sceneworks-core model_artifacts::resolved_cache:: -- --test-threads=1"',
+      '        run: "cargo test -p sceneworks-core model_artifacts::resolved_cache::tests:: -- --test-threads=1"\n' +
+        '        # run: "cargo test -p sceneworks-core model_artifacts::resolved_cache:: -- --test-threads=1"',
+    )
+    .replace(
+      "\n  package-windows:",
+      '\n  decoy-resolved-cache:\n    steps:\n      - run: "cargo test -p sceneworks-core model_artifacts::resolved_cache:: -- --test-threads=1"\n\n  package-windows:',
+    );
+  assert.throws(
+    () => assertWindowsResolvedCacheRuntimeCoverage(decoy, "comment and sibling decoy mutation"),
+    /execute both the durable-store and native materialization safety suites/,
   );
 });
 

@@ -1270,9 +1270,10 @@ async fn lora_download_endpoint_queues_hf_download_for_builtin_lora() {
     let repo_dir =
         huggingface_repo_cache_path(&temp_dir.path().join("data"), "Test/lora-install-probe")
             .expect("repo cache path");
+    let revision = "0123456789abcdef0123456789abcdef01234567";
     std::fs::create_dir_all(repo_dir.join("refs")).expect("create refs");
-    std::fs::write(repo_dir.join("refs").join("main"), "rev1").expect("write refs/main");
-    let snapshot = repo_dir.join("snapshots").join("rev1");
+    std::fs::write(repo_dir.join("refs").join("main"), revision).expect("write refs/main");
+    let snapshot = repo_dir.join("snapshots").join(revision);
     std::fs::create_dir_all(&snapshot).expect("create snapshot");
     std::fs::write(snapshot.join("cached.safetensors"), b"").expect("write adapter");
 
@@ -3868,9 +3869,13 @@ async fn lora_catalog_uses_huggingface_cache_install_state() {
         r#"{ "schemaVersion": 1, "presets": [] }"#,
     )
     .expect("user presets writes");
+    let stale_revision = "1111111111111111111111111111111111111111";
+    let current_revision = "2222222222222222222222222222222222222222";
     let stale_cache_file = temp_dir
             .path()
-            .join("data/cache/huggingface/hub/models--Lightricks--LTX-2.3-22b-IC-LoRA-Union-Control/snapshots/aaa111/ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors");
+            .join("data/cache/huggingface/hub/models--Lightricks--LTX-2.3-22b-IC-LoRA-Union-Control/snapshots")
+            .join(stale_revision)
+            .join("ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors");
     std::fs::create_dir_all(
         stale_cache_file
             .parent()
@@ -3880,7 +3885,9 @@ async fn lora_catalog_uses_huggingface_cache_install_state() {
     std::fs::write(&stale_cache_file, b"stale-lora").expect("stale lora cache writes");
     let cache_file = temp_dir
             .path()
-            .join("data/cache/huggingface/hub/models--Lightricks--LTX-2.3-22b-IC-LoRA-Union-Control/snapshots/zzz999/ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors");
+            .join("data/cache/huggingface/hub/models--Lightricks--LTX-2.3-22b-IC-LoRA-Union-Control/snapshots")
+            .join(current_revision)
+            .join("ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors");
     std::fs::create_dir_all(cache_file.parent().expect("cache file has parent"))
         .expect("hf cache creates");
     std::fs::write(&cache_file, b"lora").expect("lora cache writes");
@@ -3889,7 +3896,7 @@ async fn lora_catalog_uses_huggingface_cache_install_state() {
             .join("data/cache/huggingface/hub/models--Lightricks--LTX-2.3-22b-IC-LoRA-Union-Control/refs/main");
     std::fs::create_dir_all(refs_main.parent().expect("refs main has parent"))
         .expect("refs dir creates");
-    std::fs::write(&refs_main, b"zzz999").expect("refs main writes");
+    std::fs::write(&refs_main, current_revision).expect("refs main writes");
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
     let (status, loras) = request(app, "GET", "/api/v1/loras", Value::Null).await;
@@ -5026,4 +5033,276 @@ fn external_lora_without_a_detected_family_is_refused_at_job_create() {
         "the refusal explains why: {}",
         error.detail
     );
+}
+
+/// Deleting a model must reconcile the resolved-model hot cache (sc-19710). Without this the
+/// entry survives its own source: automatic retention refuses to evict anything it cannot
+/// re-verify as a second copy, so an orphaned entry would be held forever rather than reclaimed.
+#[tokio::test]
+async fn deleting_a_model_reconciles_its_resolved_cache_entries() {
+    use sceneworks_core::model_artifacts::resolved_cache::{
+        MaterializationCancellation, MaterializationOutcome, ResolvedCacheMaterializer,
+        ResolvedCacheStore,
+    };
+    use sceneworks_core::model_artifacts::{
+        ArtifactAvailability, ArtifactCompleteness, ArtifactFile, ArtifactIdentity,
+        ArtifactLocation, ArtifactMemberRole, ArtifactProvenance, ArtifactSourceLibrary,
+        PromotionCandidate, ResolvedBundleClosure, ResolvedBundleMember, ResolvedModelArtifact,
+        MODEL_ARTIFACT_CONTRACT_VERSION,
+    };
+
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let data_dir = temp_dir.path().join("data");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    let model_dir = data_dir.join("models/imports/cached_model");
+    std::fs::create_dir_all(&model_dir).expect("model dir creates");
+    std::fs::write(model_dir.join(".sceneworks-download-complete.json"), "{}")
+        .expect("marker writes");
+
+    // Materialize a real resolved-cache entry for the model's source repository.
+    let revision = "a".repeat(40);
+    let library = sceneworks_core::hf_home::model_source_library(&data_dir)
+        .root()
+        .to_owned();
+    let snapshot = ArtifactSourceLibrary::new(&library)
+        .expect("library root")
+        .repository_root("owner/cached-model")
+        .expect("repository root")
+        .join("snapshots")
+        .join(&revision);
+    std::fs::create_dir_all(&snapshot).expect("snapshot dir creates");
+    std::fs::write(snapshot.join("model.safetensors"), b"weights").expect("weights write");
+    let identity =
+        ArtifactIdentity::pinned("owner/cached-model", &revision, "default").expect("identity");
+    let closure = ResolvedBundleClosure::new(vec![ResolvedBundleMember {
+        role: ArtifactMemberRole::Primary,
+        component_id: None,
+        source: identity.clone(),
+        tier: Some("q8".to_owned()),
+        source_subpath: std::path::PathBuf::new(),
+        destination: std::path::PathBuf::new(),
+        files: vec![ArtifactFile::new("model.safetensors").expect("file")],
+    }])
+    .expect("closure");
+    let artifact = ResolvedModelArtifact {
+        schema_version: MODEL_ARTIFACT_CONTRACT_VERSION,
+        identity: identity.clone(),
+        location: ArtifactLocation::SourceLibrary { root: snapshot },
+        closure,
+        provenance: ArtifactProvenance {
+            identity,
+            fixed_artifact_tier: Some("q8".to_owned()),
+        },
+        completeness: ArtifactCompleteness::Complete,
+        availability: ArtifactAvailability::Available,
+    };
+    let candidate = PromotionCandidate {
+        cache_key: artifact.cache_key().expect("cache key"),
+        artifact,
+    };
+    let store = ResolvedCacheStore::open(&data_dir).expect("store opens");
+    let entry = store.entry_path(&candidate.cache_key).expect("entry path");
+    match ResolvedCacheMaterializer::new(store.clone())
+        .materialize(
+            &candidate,
+            &library,
+            "test:cached_model",
+            &MaterializationCancellation::default(),
+        )
+        .expect("materialization runs")
+    {
+        MaterializationOutcome::Published(_) => {}
+        other => panic!("fixture must publish, got {other:?}"),
+    }
+    assert!(entry.join("bundle").join("model.safetensors").is_file());
+    // Pinned on purpose: an explicit uninstall must reclaim the copy anyway, because the model it
+    // belonged to no longer exists.
+    store
+        .set_artifact_pin(&candidate.cache_key, true)
+        .expect("pin applies");
+
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        format!(
+            r#"{{
+                  "schemaVersion": 1,
+                  "models": [{{
+                    "id": "cached_model",
+                    "name": "Cached Model",
+                    "type": "image",
+                    "family": "z-image",
+                    "downloads": [{{ "repo": "owner/cached-model", "variant": "q8" }}],
+                    "paths": {{ "model": "{}" }}
+                  }}]
+                }}"#,
+            model_dir.display().to_string().replace('\\', "\\\\")
+        ),
+    )
+    .expect("user models writes");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, body) = request(
+        app,
+        "DELETE",
+        "/api/v1/models/cached_model?permanent=true",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["removedManifestEntry"], true);
+    assert!(
+        !entry.exists(),
+        "the resolved-cache entry must be reconciled away with its deleted source"
+    );
+    assert!(
+        store
+            .lookup_complete(&candidate.cache_key)
+            .expect("lookup succeeds")
+            .is_none(),
+        "the reconciled entry must no longer be loadable"
+    );
+}
+
+/// Deleting ONE quant tier must reconcile only that tier's resolved-cache entries (sc-19710).
+/// The sibling tier's entry stays valid, and the tier match is case-insensitive because routes
+/// lowercase the variant while a stored artifact tier keeps whatever case the catalog used — a
+/// mismatch there would silently strand exactly the orphan this story exists to prevent.
+#[tokio::test]
+async fn deleting_one_tier_reconciles_only_that_tiers_resolved_cache_entries() {
+    use sceneworks_core::model_artifacts::resolved_cache::{
+        MaterializationCancellation, MaterializationOutcome, ResolvedCacheMaterializer,
+        ResolvedCacheStore,
+    };
+    use sceneworks_core::model_artifacts::{
+        ArtifactAvailability, ArtifactCompleteness, ArtifactFile, ArtifactIdentity,
+        ArtifactLocation, ArtifactMemberRole, ArtifactProvenance, ArtifactSourceLibrary,
+        PromotionCandidate, ResolvedBundleClosure, ResolvedBundleMember, ResolvedModelArtifact,
+        MODEL_ARTIFACT_CONTRACT_VERSION,
+    };
+
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let data_dir = temp_dir.path().join("data");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+
+    let revision = "b".repeat(40);
+    let library = sceneworks_core::hf_home::model_source_library(&data_dir)
+        .root()
+        .to_owned();
+    let snapshot = ArtifactSourceLibrary::new(&library)
+        .expect("library root")
+        .repository_root("owner/tiered-model")
+        .expect("repository root")
+        .join("snapshots")
+        .join(&revision);
+    std::fs::create_dir_all(&snapshot).expect("snapshot dir creates");
+    std::fs::write(snapshot.join("q8.safetensors"), b"q8-weights").expect("q8 writes");
+    std::fs::write(snapshot.join("q4.safetensors"), b"q4-weights").expect("q4 writes");
+
+    let store = ResolvedCacheStore::open(&data_dir).expect("store opens");
+    let materializer = ResolvedCacheMaterializer::new(store.clone());
+    // `Q8` is stored upper-case on purpose: the route will ask to reconcile `q8`.
+    let mut keys = Vec::new();
+    for (tier, file) in [("Q8", "q8.safetensors"), ("q4", "q4.safetensors")] {
+        let identity =
+            ArtifactIdentity::pinned("owner/tiered-model", &revision, tier).expect("identity");
+        let closure = ResolvedBundleClosure::new(vec![ResolvedBundleMember {
+            role: ArtifactMemberRole::Primary,
+            component_id: None,
+            source: identity.clone(),
+            tier: Some(tier.to_owned()),
+            source_subpath: std::path::PathBuf::new(),
+            destination: std::path::PathBuf::new(),
+            files: vec![ArtifactFile::new(file).expect("file")],
+        }])
+        .expect("closure");
+        let artifact = ResolvedModelArtifact {
+            schema_version: MODEL_ARTIFACT_CONTRACT_VERSION,
+            identity: identity.clone(),
+            location: ArtifactLocation::SourceLibrary {
+                root: snapshot.clone(),
+            },
+            closure,
+            provenance: ArtifactProvenance {
+                identity,
+                fixed_artifact_tier: Some(tier.to_owned()),
+            },
+            completeness: ArtifactCompleteness::Complete,
+            availability: ArtifactAvailability::Available,
+        };
+        let candidate = PromotionCandidate {
+            cache_key: artifact.cache_key().expect("cache key"),
+            artifact,
+        };
+        match materializer
+            .materialize(
+                &candidate,
+                &library,
+                "test:tiered_model",
+                &MaterializationCancellation::default(),
+            )
+            .expect("materialization runs")
+        {
+            MaterializationOutcome::Published(_) => {}
+            other => panic!("fixture must publish, got {other:?}"),
+        }
+        keys.push(candidate.cache_key);
+    }
+    let q8_entry = store.entry_path(&keys[0]).expect("q8 entry path");
+    let q4_entry = store.entry_path(&keys[1]).expect("q4 entry path");
+    assert!(q8_entry.exists() && q4_entry.exists());
+
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{
+              "schemaVersion": 1,
+              "models": [{
+                "id": "tiered_model",
+                "name": "Tiered Model",
+                "type": "image",
+                "family": "z-image",
+                "downloads": [
+                  { "provider": "huggingface", "repo": "owner/tiered-model", "variant": "q8", "files": ["q8.safetensors"] },
+                  { "provider": "huggingface", "repo": "owner/tiered-model", "variant": "q4", "files": ["q4.safetensors"] }
+                ]
+              }]
+            }"#,
+    )
+    .expect("user models writes");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, _body) = request(
+        app,
+        "DELETE",
+        "/api/v1/models/tiered_model/variants/q8",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !q8_entry.exists(),
+        "the deleted tier's cached copy must be reconciled away even though its stored tier is \
+         upper-case and the route asked for the lower-case one"
+    );
+    assert!(
+        q4_entry.exists(),
+        "a sibling tier's cached copy must stay valid"
+    );
+    assert!(store
+        .lookup_complete(&keys[1])
+        .expect("sibling lookup succeeds")
+        .is_some());
 }

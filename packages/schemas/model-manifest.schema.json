@@ -604,6 +604,10 @@
           "autoDownload": { "type": "boolean" },
           "macOnly": { "type": "boolean" },
           "gated": { "type": "boolean" },
+          "componentOnly": {
+            "type": "boolean",
+            "description": "Installable component bundle loaded by owning routes (e.g. the InstantID face stack); never a routable `model` of any job. The capability matrix keys non-routability on this declaration."
+          },
           "credentialHost": { "type": "string" },
           "licenseUrl": { "type": "string", "format": "uri" },
           "nonCommercial": { "type": "boolean" },

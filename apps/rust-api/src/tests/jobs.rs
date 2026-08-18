@@ -283,12 +283,20 @@ async fn generic_jobs_route_rejects_generation_types_with_their_typed_route() {
 /// The other half of the guard: the job types the generic route legitimately serves keep
 /// working. `image_upscale` / `image_detail` are the real web callers (batch ops), and
 /// neither has a typed door — so the sc-12305 rejection must not touch them.
+///
+/// sc-19708: these payloads are no longer forwarded byte-identical — the model-source seam
+/// attaches the fixed utility/default model's catalog entry (the sc-18480 enrichment pattern),
+/// because the worker's pre-loader guard fails closed on a model-backed job with no carriers.
+/// The client's own fields must still pass through untouched.
 #[tokio::test]
 async fn generic_jobs_route_still_serves_non_generation_types() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
 
-    for job_type in ["image_upscale", "image_detail"] {
+    for (job_type, expected_model) in [
+        ("image_upscale", "real_esrgan"),
+        ("image_detail", "realvisxl"),
+    ] {
         let (status, body) = request(
             app.clone(),
             "POST",
@@ -306,9 +314,20 @@ async fn generic_jobs_route_still_serves_non_generation_types() {
             "{job_type} must still enqueue: {body}"
         );
         assert_eq!(
-            body["payload"],
-            json!({ "sourceAssetId": "asset-1" }),
-            "legacy raw payloads without a catalog model must remain unchanged"
+            body["payload"]["sourceAssetId"],
+            json!("asset-1"),
+            "the client's own payload fields must pass through unchanged"
+        );
+        let stamped = body["payload"]["modelManifestEntries"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{job_type} must carry its fixed model entry, got {body}"))
+            .iter()
+            .filter_map(|entry| entry.get("id").and_then(|id| id.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            stamped,
+            vec![expected_model],
+            "{job_type} must carry exactly its fixed utility/default model"
         );
     }
 }
