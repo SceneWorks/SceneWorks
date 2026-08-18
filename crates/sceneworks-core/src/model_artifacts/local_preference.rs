@@ -152,9 +152,18 @@ pub fn overlay_entries_for_artifact(
     Ok(entries)
 }
 
+#[derive(Debug)]
+struct HeldEntry {
+    entry: LocalArtifactOverlayEntry,
+    /// How many live scopes are serving this exact entry. Ownership is REFCOUNTED rather than
+    /// single-owner: two scopes may legitimately serve one shared component snapshot, and a
+    /// single-owner model would silently un-serve the other one the moment the first scope drops.
+    holders: usize,
+}
+
 #[derive(Debug, Default)]
 struct ActiveOverlay {
-    entries: Vec<LocalArtifactOverlayEntry>,
+    entries: Vec<HeldEntry>,
 }
 
 fn active() -> &'static Mutex<ActiveOverlay> {
@@ -187,74 +196,86 @@ impl Drop for ActiveLocalArtifacts {
     fn drop(&mut self) {
         let mut active = lock_active();
         for entry in self.entries.iter() {
-            if let Some(index) = active.entries.iter().position(|held| held == entry) {
+            let Some(index) = active
+                .entries
+                .iter()
+                .position(|held| &held.entry == entry)
+            else {
+                continue;
+            };
+            if active.entries[index].holders > 1 {
+                active.entries[index].holders -= 1;
+            } else {
                 active.entries.remove(index);
             }
         }
     }
 }
 
-/// Install a local-tier preference scope for `artifacts` (each of which the caller must already
-/// hold a runtime lease on).
+/// Install a local-tier preference scope over EXACTLY the snapshots the caller selected.
 ///
-/// Two bundles legitimately cover one shared snapshot — a text encoder used by two models is
-/// materialized into both. When a `(repository, revision)` pair is already being served, this
-/// installation adopts the serving bundle IF that bundle holds every file this one would have
-/// served for the pair, and otherwise fails closed: silently picking a bundle with a narrower file
-/// set is exactly how a load would be handed an incomplete snapshot. The caller then keeps that
-/// model on the source tier.
-pub fn prefer_local_artifacts(
-    artifacts: &[ResolvedModelArtifact],
+/// The caller — the worker's pre-loader guard — is the only layer that can see every model a job
+/// will load, so it is the layer that decides which `(repository, revision)` pairs may be served
+/// locally at all. This function therefore takes DECIDED entries rather than artifacts: a
+/// directory-level seam cannot ask "does this bundle hold what THIS caller needs" at lookup time,
+/// so a pair is either serveable for every consumer in the process or served to none of them.
+///
+/// A pair already served by a live scope is refcounted, and only when the serving entry is
+/// IDENTICAL. A different bundle claiming the same snapshot is refused outright: silently picking
+/// one is exactly how a load gets handed a snapshot verified for a different selection.
+pub fn prefer_local_snapshots(
+    entries: Vec<LocalArtifactOverlayEntry>,
 ) -> Result<ActiveLocalArtifacts, ArtifactContractError> {
     let mut requested: Vec<LocalArtifactOverlayEntry> = Vec::new();
-    for artifact in artifacts {
-        for entry in overlay_entries_for_artifact(artifact)? {
-            match requested
-                .iter()
-                .find(|held| held.repository == entry.repository && held.revision == entry.revision)
-            {
-                Some(existing) => ensure_covers(existing, &entry)?,
-                None => requested.push(entry),
-            }
-        }
-    }
-    let mut active = lock_active();
-    let mut installed = Vec::new();
-    for entry in requested {
-        match active
-            .entries
+    for entry in entries {
+        match requested
             .iter()
             .find(|held| held.repository == entry.repository && held.revision == entry.revision)
         {
-            // Already served by an active scope that covers everything this one needs: adopt it
-            // rather than installing a second claim on the same snapshot.
-            Some(existing) => ensure_covers(existing, &entry)?,
-            None => installed.push(entry),
+            Some(existing) if existing != &entry => return Err(conflicting_claim(&entry)),
+            Some(_) => continue,
+            None => requested.push(entry),
         }
     }
-    active.entries.extend(installed.iter().cloned());
+    let mut active = lock_active();
+    for entry in &requested {
+        if let Some(held) = active.entries.iter().find(|held| {
+            held.entry.repository == entry.repository && held.entry.revision == entry.revision
+        }) {
+            if &held.entry != entry {
+                return Err(conflicting_claim(entry));
+            }
+        }
+    }
+    for entry in &requested {
+        match active.entries.iter_mut().find(|held| &held.entry == entry) {
+            Some(held) => held.holders += 1,
+            None => active.entries.push(HeldEntry {
+                entry: entry.clone(),
+                holders: 1,
+            }),
+        }
+    }
     drop(active);
     Ok(ActiveLocalArtifacts {
-        entries: Arc::new(installed),
+        entries: Arc::new(requested),
     })
 }
 
-/// The serving bundle must hold every file the requested one would have served for the pair.
-fn ensure_covers(
-    serving: &LocalArtifactOverlayEntry,
-    requested: &LocalArtifactOverlayEntry,
-) -> Result<(), ArtifactContractError> {
-    if requested
-        .files
+fn conflicting_claim(entry: &LocalArtifactOverlayEntry) -> ArtifactContractError {
+    ArtifactContractError(format!(
+        "another resolved-local bundle already claims {}@{}",
+        entry.repository, entry.revision
+    ))
+}
+
+/// Whether this bundle holds every one of `files` (snapshot-relative) for its pair. A snapshot may
+/// only be served to consumers whose ENTIRE file requirement lives inside the bundle — the
+/// directory-level seam cannot re-ask that question once a path has been handed out.
+pub fn entry_covers(entry: &LocalArtifactOverlayEntry, files: &[PathBuf]) -> bool {
+    files
         .iter()
-        .all(|file| serving.files.binary_search(file).is_ok())
-    {
-        return Ok(());
-    }
-    Err(ArtifactContractError(format!(
-        "the bundle already serving {}@{} does not hold every file this artifact needs from it",
-        requested.repository, requested.revision
-    )))
+        .all(|file| entry.files.binary_search(file).is_ok())
 }
 
 /// The leased local snapshot for this exact immutable pair, if one is active AND still on disk.
