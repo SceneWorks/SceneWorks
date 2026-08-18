@@ -1145,6 +1145,113 @@ fn classify_probe_outcome(probe: Result<(), String>, gpu_id: &str) -> GpuHealth 
 /// `cuInit` against a wedged driver every poll turn.
 const GPU_HEALTH_RECHECK: Duration = Duration::from_secs(60);
 
+/// How often an idle worker runs a resolved-cache retention checkpoint (sc-19710). A pass walks
+/// every entry and re-verifies the source of anything it intends to evict, so it is deliberately
+/// far rarer than the poll interval; retention is a housekeeping activity, not a hot path.
+const RESOLVED_CACHE_RETENTION_INTERVAL: Duration = Duration::from_secs(600);
+
+/// Opens the resolved-cache retention driver when there is anything to drive.
+///
+/// The store is never created as a side effect: an opt-out install must not grow a managed cache
+/// root. A store that already exists is still reconciled even when the policy was since disabled,
+/// so entries materialized while it was on cannot be stranded by turning it off.
+fn resolved_cache_retention(
+    data_dir: &std::path::Path,
+) -> Option<sceneworks_core::model_artifacts::resolved_cache::ResolvedCacheRetention> {
+    use sceneworks_core::model_artifacts::resolved_cache::{
+        ResolvedCachePolicy, ResolvedCacheRetention, ResolvedCacheStore,
+    };
+
+    // Derived here rather than read from `Settings::resolved_cache`, which is `cfg(not(test))` and
+    // therefore absent from test builds. It is the same value: that field is itself populated by
+    // `from_env_or_safe_default`, which fails closed to the finite, disabled default.
+    let policy = ResolvedCachePolicy::from_env_or_safe_default();
+    let exists = data_dir.join("models").join("resolved").is_dir();
+    if !policy.enabled && !exists {
+        return None;
+    }
+    let store = match ResolvedCacheStore::open(data_dir) {
+        Ok(store) => store,
+        Err(error) => {
+            tracing::warn!(error = %error, "resolved-cache store unavailable; retention is skipped");
+            return None;
+        }
+    };
+    match ResolvedCacheRetention::new(store, policy) {
+        Ok(retention) => Some(retention),
+        Err(error) => {
+            tracing::warn!(error = %error, "resolved-cache retention policy is invalid; retention is skipped");
+            None
+        }
+    }
+}
+
+/// Starts one retention checkpoint on the blocking pool and returns its handle **without awaiting
+/// it**.
+///
+/// Retention is housekeeping and must never sit on the claim path: a sweep that evicts walks every
+/// entry and re-hashes each candidate's source, so awaiting one would make a job submitted just
+/// afterwards wait for the whole sweep, and awaiting the startup pass would delay the very first
+/// claim by a full recover-plus-retention cycle. Detaching is safe by construction — the eviction
+/// tombstone is durable, so a sweep cut short by process exit converges on the next pass rather
+/// than leaving a half-removed entry. The gating (policy check, store open) happens inside the
+/// blocking task too, so no filesystem work touches the async runtime.
+///
+/// Retention failures are never fatal: the cache is an optimization.
+fn spawn_retention_checkpoint(
+    data_dir: std::path::PathBuf,
+    startup: bool,
+) -> tokio::task::JoinHandle<()> {
+    use sceneworks_core::model_artifacts::resolved_cache::{
+        RetentionCheckpointOutcome, RetentionHold,
+    };
+
+    tokio::task::spawn_blocking(move || {
+        let Some(retention) = resolved_cache_retention(&data_dir) else {
+            return;
+        };
+        let now = sceneworks_core::time::now_unix_seconds().max(0) as u64;
+        let outcome = if startup {
+            retention.run_after_recovery(now)
+        } else {
+            retention.run_if_idle(true, now)
+        };
+        match outcome {
+            Ok(RetentionCheckpointOutcome::Ran(report)) => {
+                // Entries held because their authoritative source could not be verified are the
+                // half of "never strand silently" that eviction counts alone would hide: with both
+                // delete routes now reconciling, a held entry means a source that went away
+                // outside the API. It is deliberately only reported — a disconnected external
+                // library is a disconnect, never an uninstall, and must never trigger removal.
+                let unverified = report
+                    .retained
+                    .iter()
+                    .filter(|record| record.hold == RetentionHold::SourceUnverified)
+                    .count();
+                if !report.evicted.is_empty() || !report.failed.is_empty() || unverified != 0 {
+                    emit_event_value(
+                        Level::INFO,
+                        json!({
+                            "event": "resolved_cache_retention",
+                            "startup": startup,
+                            "evicted": report.evicted.len(),
+                            "failed": report.failed.len(),
+                            "sourceUnverified": unverified,
+                            "bytesBefore": report.complete_bytes_before,
+                            "bytesAfter": report.complete_bytes_after,
+                            "limitSatisfied": report.limit_satisfied,
+                        }),
+                    );
+                }
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(error = %error, startup, "resolved-cache retention checkpoint failed")
+            }
+        }
+    })
+}
+
 /// Re-run the CUDA probe for a worker that is currently unhealthy, and act on any change
 /// (sc-16260 AC 4).
 ///
@@ -1236,6 +1343,11 @@ pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
     // interval and re-advertises if the host is repaired underneath it. Seeded a full interval
     // out — the startup probe just ran, and re-running it immediately would say nothing new.
     let mut next_gpu_recheck = Instant::now() + GPU_HEALTH_RECHECK;
+    // sc-19710: the startup checkpoint recovers the store (finishing any eviction interrupted by a
+    // crash) and then enforces retention. It is started, never awaited — the first job claim must
+    // not queue behind a recover-plus-retention pass.
+    let mut retention_task = Some(spawn_retention_checkpoint(settings.data_dir.clone(), true));
+    let mut next_retention_checkpoint = Instant::now() + RESOLVED_CACHE_RETENTION_INTERVAL;
     loop {
         if !health.is_usable() && Instant::now() >= next_gpu_recheck {
             next_gpu_recheck = Instant::now() + GPU_HEALTH_RECHECK;
@@ -1261,7 +1373,28 @@ pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
             }
         };
         match claim {
-            Ok(None) => lock_failures = 0,
+            Ok(None) => {
+                lock_failures = 0;
+                // Claiming nothing is the proof of idleness the checkpoint requires: no job is in
+                // flight, so a sweep cannot compete with one. Every artifact lock a sweep takes is
+                // non-blocking, so an in-use model is skipped rather than waited on.
+                //
+                // The handle is polled, never awaited: this arm sits directly on the claim path,
+                // so the loop must come straight back round to claim the next job while a sweep is
+                // still running. A checkpoint is also skipped entirely while its predecessor is in
+                // flight, so slow sweeps cannot stack up.
+                if retention_task
+                    .as_ref()
+                    .is_some_and(tokio::task::JoinHandle::is_finished)
+                {
+                    retention_task = None;
+                }
+                if retention_task.is_none() && Instant::now() >= next_retention_checkpoint {
+                    next_retention_checkpoint = Instant::now() + RESOLVED_CACHE_RETENTION_INTERVAL;
+                    retention_task =
+                        Some(spawn_retention_checkpoint(settings.data_dir.clone(), false));
+                }
+            }
             Ok(Some(job)) => {
                 lock_failures = 0;
                 // Execute the claimed job WITHOUT racing (and dropping) the whole future against
