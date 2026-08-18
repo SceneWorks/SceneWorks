@@ -127,27 +127,44 @@ include!("tests/temp_fixture_guard.rs");
 /// enabled cannot be stranded by turning the cache off.
 #[test]
 fn resolved_cache_retention_is_opt_in_and_never_creates_the_store() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let data_dir = temp.path().join("data");
-    std::fs::create_dir_all(&data_dir).expect("data dir creates");
-    let resolved_root = data_dir.join("models").join("resolved");
+    // `resolved_cache_retention` reads the cache policy from the PROCESS environment, so the
+    // "disabled" half of this test only means anything while `SCENEWORKS_RESOLVED_CACHE_ENABLED`
+    // is pinned off. Pinning it through the shared `test_env` lock does both jobs at once: it
+    // states the precondition instead of inheriting whatever the process happens to have, and it
+    // excludes the concurrent env mutators (`with_local_cache` and friends) that would otherwise
+    // flip the policy to enabled mid-assertion. `.cargo/config.toml` does NOT set
+    // `RUST_TEST_THREADS`, so this suite really does run in parallel and the race is live.
+    crate::test_env::temp_env_vars(
+        &[(
+            sceneworks_core::model_artifacts::resolved_cache::RESOLVED_CACHE_ENABLED_ENV,
+            "0",
+        )],
+        || {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let data_dir = temp.path().join("data");
+            std::fs::create_dir_all(&data_dir).expect("data dir creates");
+            let resolved_root = data_dir.join("models").join("resolved");
 
-    assert!(
-        crate::resolved_cache_retention(&data_dir).is_none(),
-        "a disabled cache with no store has nothing to drive"
-    );
-    assert!(
-        !resolved_root.exists(),
-        "probing for retention must not create the managed cache root"
-    );
+            assert!(
+                crate::resolved_cache_retention(&data_dir).is_none(),
+                "a disabled cache with no store has nothing to drive"
+            );
+            assert!(
+                !resolved_root.exists(),
+                "probing for retention must not create the managed cache root"
+            );
 
-    drop(
-        sceneworks_core::model_artifacts::resolved_cache::ResolvedCacheStore::open(&data_dir)
-            .expect("store opens"),
-    );
-    assert!(
-        crate::resolved_cache_retention(&data_dir).is_some(),
-        "an existing store must still be reconciled after the policy is disabled"
+            drop(
+                sceneworks_core::model_artifacts::resolved_cache::ResolvedCacheStore::open(
+                    &data_dir,
+                )
+                .expect("store opens"),
+            );
+            assert!(
+                crate::resolved_cache_retention(&data_dir).is_some(),
+                "an existing store must still be reconciled after the policy is disabled"
+            );
+        },
     );
 }
 

@@ -97,7 +97,7 @@ pub fn huggingface_hub_cache_dir(data_dir: &Path) -> PathBuf {
 /// Typed authoritative model source library. Runtime and catalog compatibility helpers delegate
 /// to this value instead of reconstructing a configured Hugging Face root independently.
 pub fn model_source_library(data_dir: &Path) -> ArtifactSourceLibrary {
-    ArtifactSourceLibrary::new(huggingface_hub_cache_dir(data_dir))
+    ArtifactSourceLibrary::new_preferring_local(huggingface_hub_cache_dir(data_dir))
         .expect("the resolved Hugging Face source-library root is nonempty")
 }
 

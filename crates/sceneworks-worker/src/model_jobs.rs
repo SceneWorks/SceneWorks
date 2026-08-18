@@ -2915,8 +2915,20 @@ pub(crate) fn huggingface_receipt_weights_dir(
 ) -> Option<PathBuf> {
     // Path-only callers never read provenance, so they must not trigger a receipt write as a side
     // effect of locating weights. Repair belongs to the provenance consumer.
-    huggingface_receipt_weights(data_dir, repo, model_id, variant, ProvenanceRepair::Skip)
-        .map(|resolved| resolved.path)
+    let resolved =
+        huggingface_receipt_weights(data_dir, repo, model_id, variant, ProvenanceRepair::Skip)?;
+    // sc-19707: the receipt resolves and PROVES its install against the authoritative source
+    // (its tree stamp is a source-tree fact and must stay one); only the path handed to the loader
+    // is then served from a leased app-owned bundle covering that exact snapshot. Inert without an
+    // active lease.
+    let library = sceneworks_core::hf_home::model_source_library(data_dir);
+    Some(
+        sceneworks_core::model_artifacts::local_preference::redirect_source_library_path(
+            library.root(),
+            &resolved.path,
+        )
+        .unwrap_or(resolved.path),
+    )
 }
 
 #[cfg(any(target_os = "macos", feature = "backend-candle", test))]
@@ -3250,8 +3262,10 @@ fn resolve_huggingface_snapshot_dir(data_dir: &Path, repo: &str) -> Option<PathB
     }
     // Fallback: the cached snapshot with the most files, so an empty/partial one never wins over a
     // fully materialized sibling (the old "first dir wins" scan happily returned an empty snapshot).
-    std::fs::read_dir(&snapshots)
-        .ok()?
+    let from_source_library = std::fs::read_dir(&snapshots)
+        .ok()
+        .into_iter()
+        .flatten()
         .flatten()
         .map(|entry| entry.path())
         .filter(|path| path.is_dir())
@@ -3264,7 +3278,19 @@ fn resolve_huggingface_snapshot_dir(data_dir: &Path, repo: &str) -> Option<PathB
                 .discover_source_snapshot(repo, Some(revision))
                 .ok()
                 .map(|(_, path)| path)
-        })
+        });
+    if from_source_library.is_some() {
+        return from_source_library;
+    }
+    // Last resort (sc-19707): the configured library cannot name a revision at all — it is
+    // disconnected, or was never installed here. The typed resolver answers from a leased
+    // app-owned bundle when exactly one revision of this repository is being served, which is what
+    // keeps a complete local model loadable while the drive is unplugged. With no active lease it
+    // still returns nothing, so an uninstalled model keeps its established behavior.
+    resolver
+        .discover_source_snapshot(repo, None)
+        .ok()
+        .map(|(_, path)| path)
 }
 
 /// Short-circuiting presence probe for the hot `refs/main` path. Unlike
