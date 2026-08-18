@@ -226,7 +226,13 @@ test("the residual-bounded max-over-phases exemption is structural and keeps mar
     assert.ok(/not provider-wide|not a provider-wide/i.test(prose), `${name} doc rejects a provider-wide bypass`);
   }
 
-  assert.equal(derived.mlx.margins.estimateMargin, 0.10, "ratification does not reduce MLX margin");
+  // SC-18829's claim is NON-REDUCTION: the video ratification may not shrink the image-lane
+  // margins. The exact MLX value is owned by the sc-18094 derivation pin above (0.5040734… on the
+  // merged 89-record corpus) — re-pinning it here would just freeze the corpus twice.
+  assert.ok(
+    derived.mlx.margins.estimateMargin >= 0.10,
+    "ratification does not reduce MLX margin",
+  );
   assert.equal(derived.candle.margins.estimateMargin, 0.04, "ratification does not reduce candle margin");
   assert.match(runbook, /Admission-margin verdict \(SC-18829\): keep the ratified constants unchanged/);
   assert.match(runbook, /largest\s+adopted q8 `cross` residual is 0\.4438 GiB/);

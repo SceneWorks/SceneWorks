@@ -1,7 +1,7 @@
 {
   "schemaVersion": 8,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:db771095c060e4a89f85c68921dd6b6577527964f86f629e439aa38614f40d9e",
+    "sceneWorksRevision": "source-tree:d72b5ed66dd8ab0258058e6fe75357bf4724671e767fc3febcda29844aeedef2",
     "inferenceRevision": "bb3b314500b02bbb41431aa6beb5e03e4c0738f8",
     "sources": {
       "manifest": {
@@ -30,7 +30,7 @@
       },
       "videoRouteWan": {
         "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",
-        "sha256": "331c77cef72877687466c150d26864ca67382af4873c43e4d021b1acffce3ddd"
+        "sha256": "433287972eef09c31e3c7f708da05c7da7777a11537361dc649ad3bc2d0c5629"
       },
       "videoRouteLtx": {
         "path": "crates/sceneworks-worker/src/video_jobs/ltx.rs",
@@ -90,7 +90,7 @@
       },
       "engineCapabilitiesMlx": {
         "path": "config/engine-capabilities/capabilities.mlx.json",
-        "sha256": "385651e15fb9015b04819cbf6258b5f6bfac5f302b5ede1f66f3c43dcba575b5"
+        "sha256": "f5f1d4def772086ac6654f4eebf46e5ee7c28c2c3866a170cd4cacc410c5d246"
       },
       "engineCapabilitiesCandle": {
         "path": "config/engine-capabilities/capabilities.candle.json",
@@ -193,7 +193,7 @@
       "bespokeWaivers": 0,
       "mismatches": 0,
       "byLeg": {},
-      "unavailable": "engine capability facts for mlx are keyed to 717f43b5283d3449d9d19b7539045a82be1ef7bd, but Cargo pins bb3b314500b02bbb41431aa6beb5e03e4c0738f8"
+      "unavailable": "engine capability facts for candle are keyed to 717f43b5283d3449d9d19b7539045a82be1ef7bd, but Cargo pins bb3b314500b02bbb41431aa6beb5e03e4c0738f8"
     },
     "rung4Survey": {
       "story": 15969,

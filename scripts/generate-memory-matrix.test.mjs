@@ -62,7 +62,8 @@ async function memoryContractSource(name) {
 }
 
 test("control provider resolution uses one exact declaration and rejects ambiguity", () => {
-  const route = { engine: "z_image" };
+  // Real routes carry sc-18815's per-backend `engineFor`; the scalar stays for the alias checks.
+  const route = { engine: "z_image", engineFor: () => "z_image" };
   const legacy = { id: "z_image", candle: {} };
   assert.equal(providerFor(legacy, "candle", "control", route), "z_image");
 
