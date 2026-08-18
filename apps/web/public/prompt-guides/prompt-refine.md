@@ -8,7 +8,7 @@ When you click **Refine my prompt**, your current prompt and the selected model'
 
 ## Installation
 
-The refiner runs in-process on the native worker (MLX on macOS, candle on Windows/CUDA) and is **not** auto-downloaded. Install it once from the **Models** screen (it is also offered inline the first time you refine before it is present). It is about 16 GB — the stock bf16 checkpoint, downloaded and loaded as-is with no quantization — and downloads into the shared Hugging Face cache, so other tools reuse it.
+The refiner runs in-process on the native worker (MLX on macOS, candle on Windows/CUDA) and is **not** auto-downloaded. Install it once from the **Models** screen (it is also offered inline the first time you refine before it is present). It is 16.1 GB — the stock bf16 checkpoint, downloaded and loaded as-is with no quantization — and downloads into the shared Hugging Face cache, so other tools reuse it.
 
 ## Practical Notes
 

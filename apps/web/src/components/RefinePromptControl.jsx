@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Icon } from "./Icons.jsx";
 
-// Humanize a byte count to a "7.2 GB" label; null when the size is unknown.
+// Humanize a byte count to a "16.1 GB" label; null when the size is unknown.
 function formatGb(bytes) {
   if (!Number.isFinite(bytes) || bytes <= 0) {
     return null;
