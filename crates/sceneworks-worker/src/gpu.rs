@@ -919,8 +919,12 @@ fn parse_vm_stat_counts(output: &str) -> BTreeMap<String, u64> {
 /// raw `vm_stat` output. App Memory = anonymous pages minus the purgeable (cache)
 /// pages that can be reclaimed. `None` if the page size or any required counter is
 /// absent.
+///
+/// `pub(crate)` (sc-20571): [`crate::mlx_fit_gate`]'s blocking foreign-memory-reserve probe reuses
+/// this exact parser for MLX admission rather than duplicating it — the async heartbeat above and the
+/// blocking admission probe must agree on what "used" means, so there is only one parser to drift.
 #[cfg(target_os = "macos")]
-fn system_used_mb_from_vm_stat(output: &str) -> Option<u64> {
+pub(crate) fn system_used_mb_from_vm_stat(output: &str) -> Option<u64> {
     let page_size = parse_vm_stat_page_size(output)?;
     let counts = parse_vm_stat_counts(output);
     let anonymous = counts.get("Anonymous pages").copied()?;

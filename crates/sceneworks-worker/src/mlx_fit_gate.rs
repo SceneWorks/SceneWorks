@@ -3769,6 +3769,47 @@ fn evaluate_request_with_budget_using_bundle(
     Ok(evaluation)
 }
 
+/// Non-worker resident memory to withhold from admission, in bytes: everything system-wide `vm_stat`
+/// reports as used (App + Wired + Compressed — Activity Monitor's "Memory Used"), minus what this
+/// worker itself already accounts for via `committed_bytes`. On unified memory every other process —
+/// the desktop app, a browser, a concurrent `mlx-gen` real-weights run — draws from the SAME pool MLX
+/// allocates from, so its footprint must shrink the admitted ceiling exactly like this worker's own
+/// committed bytes already do.
+///
+/// sc-20571: without this, [`live_request_budget`]'s ceiling was effectively the machine's TOTAL
+/// unified memory minus only a flat, engine-independent reserve (2 GiB) — blind to whatever else was
+/// actually resident. A `basis=floor` estimate widened by the ~50% MLX estimate margin (already the
+/// conservative direction: it can only make an estimate HARDER to admit, never easier) still cleared
+/// that ceiling — 122.65 GiB admitted on a 128 GiB Mac that also had the desktop app, a browser, and a
+/// concurrent real-weights test resident — because the margin scales with the (possibly very wrong)
+/// estimate, not with what the host actually has free. This closes the gap on the ceiling side instead:
+/// the reserve now tracks live foreign usage rather than a constant nobody's other process respects.
+///
+/// Pure arithmetic so the policy is unit-testable without a live probe; saturates to zero rather than
+/// underflowing when the live reading undercounts this worker's own footprint (a stale or momentarily
+/// low sample must never manufacture a NEGATIVE reserve that widens the ceiling).
+pub(crate) fn foreign_reserve_bytes(system_used_bytes: Option<u64>, committed_bytes: u64) -> u64 {
+    system_used_bytes.map_or(0, |used| used.saturating_sub(committed_bytes))
+}
+
+/// Blocking system-wide "Memory Used" probe (`vm_stat`) for [`foreign_reserve_bytes`]'s live input.
+/// Reuses [`crate::gpu::system_used_mb_from_vm_stat`] — the same parser the async utilization
+/// heartbeat samples for telemetry — as a one-shot blocking call, matching
+/// [`probe_total_unified_memory_gib`]'s rationale: `live_request_budget` runs on the generator-cache
+/// thread, which is already blocking on the weight load, so a one-shot subprocess probe here is free.
+/// `None` off macOS or when the probe fails ⇒ zero foreign reserve ⇒ admission falls back to the
+/// pre-fix total-RAM-minus-flat-reserve ceiling rather than ever refusing without a signal (the same
+/// fail-open posture `resolve_budget`/`probe_total_unified_memory_gib` already take).
+#[cfg(target_os = "macos")]
+fn probe_system_used_bytes() -> Option<u64> {
+    let output = std::process::Command::new("vm_stat").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    crate::gpu::system_used_mb_from_vm_stat(&String::from_utf8_lossy(&output.stdout))
+        .map(|mb| mb * 1024 * 1024)
+}
+
 #[cfg(target_os = "macos")]
 pub(crate) fn live_request_budget(engine_id: &str) -> WorkerResult<MemoryBudget> {
     // Reclaim only allocator-cache buffers from prior geometries; live arrays (the cached weights)
@@ -3792,11 +3833,15 @@ pub(crate) fn live_request_budget(engine_id: &str) -> WorkerResult<MemoryBudget>
         let reserve = crate::fit_gate::legacy_unified_reserve(total_gib);
         (gib_to_bytes(total_gib), gib_to_bytes(reserve.gb))
     };
+    // sc-20571: fold in what else is actually resident on this host RIGHT NOW, on top of whichever
+    // flat/engine-derived reserve the branch above chose. Applied uniformly (both branches) since the
+    // "other processes are also using this machine" risk is host-scoped, not engine-scoped.
+    let foreign_reserve_bytes = foreign_reserve_bytes(probe_system_used_bytes(), committed_bytes);
     Ok(MemoryBudget {
         total_bytes,
         committed_bytes,
         reclaimable_bytes,
-        reserved_headroom_bytes,
+        reserved_headroom_bytes: reserved_headroom_bytes.saturating_add(foreign_reserve_bytes),
     })
 }
 
@@ -15364,6 +15409,50 @@ mod tests {
         );
         // No signal at all ⇒ no budget ⇒ gate no-ops.
         assert_eq!(resolve_budget(None, None), None);
+    }
+
+    /// sc-20571: `foreign_reserve_bytes` is the pure arithmetic behind
+    /// [`live_request_budget`]'s live ceiling fix — everything else already resident on the host,
+    /// minus what this worker itself accounts for via `committed_bytes`.
+    #[test]
+    fn foreign_reserve_bytes_is_live_used_minus_this_workers_own_committed() {
+        // No live signal ⇒ no reserve ⇒ falls back to the pre-fix ceiling rather than ever
+        // refusing without a probe (the same fail-open posture as `resolve_budget`).
+        assert_eq!(foreign_reserve_bytes(None, 0), 0);
+        assert_eq!(foreign_reserve_bytes(None, 40 * 1024 * 1024 * 1024), 0);
+
+        // System-wide used exceeds this worker's own committed bytes ⇒ the difference is what
+        // OTHER processes hold resident.
+        let system_used = 90 * 1024 * 1024 * 1024_u64;
+        let committed = 10 * 1024 * 1024 * 1024_u64;
+        assert_eq!(
+            foreign_reserve_bytes(Some(system_used), committed),
+            80 * 1024 * 1024 * 1024
+        );
+
+        // This worker's own committed bytes meet or exceed the live sample (a stale/racy read) ⇒
+        // saturate to zero, never manufacture a NEGATIVE reserve that would widen the ceiling.
+        assert_eq!(foreign_reserve_bytes(Some(5), 10 * 1024 * 1024 * 1024), 0);
+        assert_eq!(
+            foreign_reserve_bytes(Some(10 * 1024 * 1024 * 1024), 10 * 1024 * 1024 * 1024),
+            0
+        );
+    }
+
+    /// Mutation check: a `foreign_reserve_bytes` that ignored `system_used_bytes` entirely (always
+    /// returning 0, i.e. the pre-sc-20571 shape) must not report a positive reserve for a loaded
+    /// host — proving the live signal, not just `committed_bytes`, is what drives the result.
+    #[test]
+    fn zeroing_the_live_signal_would_flip_a_positive_reserve_to_zero() {
+        let system_used = Some(60 * 1024 * 1024 * 1024_u64);
+        let committed = 0_u64;
+        assert!(
+            foreign_reserve_bytes(system_used, committed) > 0,
+            "a fully idle worker on a 60 GiB-used host must still carry a foreign reserve"
+        );
+        // The mutated shape (`system_used_bytes` ignored) is exactly `foreign_reserve_bytes(None, committed)`,
+        // asserted to be zero above — restating it here ties the two assertions to the same guard.
+        assert_eq!(foreign_reserve_bytes(None, committed), 0);
     }
 
     #[test]

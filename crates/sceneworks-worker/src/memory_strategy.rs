@@ -1470,6 +1470,30 @@ mod tests {
         provider
     }
 
+    /// sc-20571: mirrors [`staged_only_provider`] for the opposite rung — only `Resident` implemented,
+    /// every other strategy disabled. Needed because `select_strategy` returns `Unverified` (not
+    /// `Reject`) whenever ANY implemented strategy's rung has no candidate at all, regardless of
+    /// whether a DIFFERENT rung's candidate is present but overflows — an all-strategies fixture like
+    /// `staged_only_provider` would report `Unverified` for a Resident-only candidate set instead of
+    /// the `Reject` the bernini reproduction needs.
+    fn resident_only_provider() -> MemoryProviderContract {
+        let mut provider = contract();
+        for strategy in [
+            MemoryStrategy::StagedResidency,
+            MemoryStrategy::BoundedDecode,
+            MemoryStrategy::BoundedAttention,
+            MemoryStrategy::BoundedTransformerResidency,
+        ] {
+            provider
+                .strategies
+                .iter_mut()
+                .find(|capability| capability.strategy == strategy)
+                .unwrap()
+                .support = MemoryStrategySupport::Missing;
+        }
+        provider
+    }
+
     #[test]
     fn canonical_predicted_peak_bytes_are_the_only_admission_number() {
         let mut staged = evidence(MemoryStrategy::StagedResidency);
@@ -2819,6 +2843,129 @@ mod tests {
         assert!(
             needed_gb > 8.0,
             "the reported requirement must carry the widening: {needed_gb}"
+        );
+    }
+
+    /// sc-20571 — production numbers from the bernini over-admission: a `basis=floor` (uncalibrated)
+    /// MLX candidate whose raw peak is 87,563,634,463 bytes (81.54 GiB), widened by
+    /// `MLX_ESTIMATE_MARGIN` to 122.65 GiB, on a 128 GiB Mac. The pre-fix ceiling was total RAM minus
+    /// only a flat, host-blind reserve — 122.65 GiB cleared it even though the Mac also had the
+    /// desktop app, a browser, and a concurrent real-weights run resident. `live_request_budget`
+    /// (`mlx_fit_gate.rs`) now folds a LIVE foreign-usage reserve into `reserved_headroom_gb`; this
+    /// exercises the selector with a `Budget` shaped like that fix's output on a loaded host and
+    /// proves the widened peak is refused once the ceiling reflects what is actually available.
+    #[test]
+    fn bernini_style_floor_estimate_is_refused_once_the_ceiling_reflects_live_foreign_usage() {
+        // Resident is the strategy the crash log recorded (`strategy=Resident`).
+        let mut provider = resident_only_provider();
+        provider.backend = MemoryBackendRealization::MlxMetal {
+            bounded_wired_residency: true,
+            lazy_or_mmap_materialization: true,
+            explicit_evaluation_and_synchronization: true,
+            cache_eviction: true,
+        };
+
+        const RAW_PEAK_BYTES: u64 = 87_563_634_463; // 81.54 GiB, from the production log line.
+                                                    // `estimate_evidence` — not the plain `evidence()` measured-cell helper — is the shape a
+                                                    // `basis=floor` estimate actually carries (ImplementedUnverified conformance, no observed
+                                                    // peak, parity not run): the same shape `generic_mlx_shared_observation` fabricates for the
+                                                    // uncalibrated resident baseline.
+        let mut resident = estimate_evidence(MemoryStrategy::Resident, &provider);
+        resident.key.backend = gen_core::MemoryBackend::Mlx;
+        rekey_composition(&mut resident, &provider);
+        resident.predicted_peak_bytes = RAW_PEAK_BYTES;
+
+        let mut scope = request();
+        scope.backend = "mlx";
+        let candidate = Candidate {
+            selection: MemorySelection {
+                strategy: MemoryStrategy::Resident,
+                parameters: Default::default(),
+                tier: tier(),
+            },
+            evidence: &resident,
+            closure_digest: INF,
+            basis: CandidateBasis::EstimateFloor,
+        };
+
+        // Shaped like `live_request_budget`'s output on the exact host from the incident: 128 GiB
+        // total, a 2 GiB flat legacy reserve, PLUS a ~20 GiB live foreign reserve for everything else
+        // resident (desktop app + browser + a concurrent MLX process) — the term `foreign_reserve_bytes`
+        // now contributes and the pre-fix ceiling never did.
+        let loaded_host_budget = Some(Budget {
+            available_gb: 128.0,
+            reclaimable_gb: 0.0,
+            total_gb: 128.0,
+            reserved_headroom_gb: 2.0 + 20.0,
+        });
+        let result = select_strategy(scope, &provider, loaded_host_budget, &[candidate]);
+        let Selection::Reject {
+            needed_gb,
+            available_gb,
+        } = result
+        else {
+            panic!(
+                "a floor estimate widened past what a loaded host actually has free must be \
+                 refused, not admitted: {result:?}"
+            );
+        };
+        // The refusal must be attributable to the WIDENED estimate, not the raw one — proving the
+        // margin still widens (grows the requirement), the conservative direction for a fatal lane.
+        let expected_widened_bytes = (RAW_PEAK_BYTES as f64 * (1.0 + MLX_ESTIMATE_MARGIN)).ceil();
+        assert_eq!(needed_gb, expected_widened_bytes / BYTES_PER_GIB);
+        assert!(
+            needed_gb > RAW_PEAK_BYTES as f64 / BYTES_PER_GIB,
+            "the refused requirement must exceed the raw 81.54 GiB peak: {needed_gb}"
+        );
+        assert_eq!(available_gb, 128.0 - 22.0);
+    }
+
+    /// Mutation check demanded by sc-20571: strip the live foreign-usage term back out of the
+    /// reserve (the exact pre-fix `reserved_headroom_gb`, flat 2 GiB only) and the SAME candidate
+    /// that was just refused is admitted — this is the production bug, reproduced. Proves the
+    /// foreign-reserve term is load-bearing rather than redundant with the margin.
+    #[test]
+    fn zeroing_the_live_foreign_reserve_reproduces_the_bernini_over_admission() {
+        let mut provider = resident_only_provider();
+        provider.backend = MemoryBackendRealization::MlxMetal {
+            bounded_wired_residency: true,
+            lazy_or_mmap_materialization: true,
+            explicit_evaluation_and_synchronization: true,
+            cache_eviction: true,
+        };
+
+        const RAW_PEAK_BYTES: u64 = 87_563_634_463;
+        let mut resident = estimate_evidence(MemoryStrategy::Resident, &provider);
+        resident.key.backend = gen_core::MemoryBackend::Mlx;
+        rekey_composition(&mut resident, &provider);
+        resident.predicted_peak_bytes = RAW_PEAK_BYTES;
+
+        let mut scope = request();
+        scope.backend = "mlx";
+        let candidate = Candidate {
+            selection: MemorySelection {
+                strategy: MemoryStrategy::Resident,
+                parameters: Default::default(),
+                tier: tier(),
+            },
+            evidence: &resident,
+            closure_digest: INF,
+            basis: CandidateBasis::EstimateFloor,
+        };
+
+        // Pre-fix shape: only the flat 2 GiB legacy reserve, blind to the desktop app / browser /
+        // concurrent MLX process actually resident on the machine.
+        let pre_fix_budget = Some(Budget {
+            available_gb: 128.0,
+            reclaimable_gb: 0.0,
+            total_gb: 128.0,
+            reserved_headroom_gb: 2.0,
+        });
+        let result = select_strategy(scope, &provider, pre_fix_budget, &[candidate]);
+        assert!(
+            matches!(result, Selection::Selected { .. }),
+            "characterizing the production bug: a total-RAM-blind ceiling admits the widened \
+             122.65 GiB estimate on a 128 GiB Mac: {result:?}"
         );
     }
 

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 8,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:93791c5ef403b00f582258b340e3a91e35b41c29043b8f8c83004026d1b43254",
+    "sceneWorksRevision": "source-tree:6080b6fc644dfb2776b5f0ef028d4201c96c600250ea3e16cb0bbaabc3c991f4",
     "inferenceRevision": "6f47e6707589158b89d0f238c5ef56be6f1bdd7a",
     "sources": {
       "manifest": {
@@ -58,11 +58,11 @@
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "5252ddee0639a01b6fb7c434d0cbc61ac10580415595d1491e40fc723115d965"
+        "sha256": "4356b5c5250beec25226e7eb32018bf679e84a34107eb19618c7ffc87583141e"
       },
       "memoryStrategy": {
         "path": "crates/sceneworks-worker/src/memory_strategy.rs",
-        "sha256": "3e20441cab965a68f30f0f790744d76d858e21841409b8eaad6dbeab278cd31f"
+        "sha256": "34c49d68ce8288ed9a77dfa4ebc5b701193ecc201f5fce23b11b4832674585ae"
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
