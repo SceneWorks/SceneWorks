@@ -3122,6 +3122,11 @@ mod download_receipt_tests {
             .unwrap_or_else(|| panic!("builtin entry {model_id} present"))
     }
 
+    // Writes each manifest `files` entry as a LITERAL path. That is fine for a concrete filename —
+    // the co-requisite-only test below seeds just the adapter and runs everywhere — but not for a
+    // glob entry: the shared Gemma encoder declares `gemma/*`, which `fs::write` rejects on Windows
+    // with `InvalidFilename` (OS error 123). Hence the Windows gate on [`seed_manifest_downloads`],
+    // which is the caller that seeds every entry including that one.
     fn seed_manifest_download(data_dir: &FsPath, download: &Value) {
         let repo = download.get("repo").and_then(Value::as_str).unwrap();
         let revision = download.get("revision").and_then(Value::as_str).unwrap();
@@ -3136,6 +3141,7 @@ mod download_receipt_tests {
         }
     }
 
+    #[cfg(not(windows))]
     fn seed_manifest_downloads(data_dir: &FsPath, model: &Value, include_co_requisites: bool) {
         for download in model
             .get("downloads")
@@ -3296,6 +3302,14 @@ mod download_receipt_tests {
     /// A previously shipped Windows/Linux install remains visible only as a cleanup tombstone. The
     /// tombstone cannot generate, download, repair, or update, but DELETE can reclaim both the dense
     /// checkpoint and its Eros-exclusive cond_safe adapter; once removed, the row disappears.
+    // Not runnable on Windows, and now SKIPPED there rather than failing: `seed_manifest_download`
+    // writes each `files` entry as a literal path, and the shared Gemma encoder's entry is the glob
+    // `gemma/*`, which `fs::write` rejects with `InvalidFilename` (OS error 123). The limitation was
+    // already documented on `size_refresh_tolerates_a_cleanup_tombstone_without_variants` above —
+    // its platform-neutral twin — but the tests themselves were left ungated, so every `cargo test`
+    // on a Windows dev box reported two red tests that CI (Linux/macOS) has always run green. The
+    // cfg is inactive on both CI platforms, so coverage there is unchanged.
+    #[cfg(not(windows))]
     #[tokio::test(flavor = "current_thread")]
     async fn ltx_eros_legacy_install_is_cleanup_only_and_reclaimable_off_macos() {
         let _env = isolate_hf_cache();
@@ -3529,6 +3543,8 @@ mod download_receipt_tests {
         assert!(!adapter_cache.exists(), "orphan adapter cache is reclaimed");
     }
 
+    // Skipped on Windows for the same `gemma/*` seeding reason as its sibling above.
+    #[cfg(not(windows))]
     #[tokio::test(flavor = "current_thread")]
     async fn ltx_eros_mixed_trash_failure_retains_a_retryable_cleanup_tombstone() {
         let _env = isolate_hf_cache();
