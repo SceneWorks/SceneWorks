@@ -6872,22 +6872,29 @@ mod tests {
         );
     }
 
-    /// sc-17153 — `synthesize_estimate_ladder` admits ONLY `Implemented` rungs, asserted at the
-    /// synthesis seam itself.
+    /// sc-17153 — `synthesize_estimate_ladder` emits NO candidate for a non-implemented rung,
+    /// asserted at the synthesis seam itself.
     ///
-    /// The sc-17153 pre-dispatch survey flagged this property as unverified. It IS enforced — the
-    /// `matches!(.., Some(MemoryStrategySupport::Implemented))` filter at the top of the loop — and
-    /// it is exercised end to end by the `Missing`-mutation arm of the sc-18096 admission test
-    /// above, but only through `evaluate`'s full reject path and only for `Missing`. This pins the
-    /// property directly, per non-implemented variant, with a control that proves each mutation is
-    /// the sole reason the candidate disappears:
+    /// The sc-17153 pre-dispatch survey flagged this property as unverified. What this pins is
+    /// the seam's BEHAVIOR, per non-implemented variant, with a control that proves each mutation
+    /// is the sole reason the candidate disappears:
     ///
     ///  * control: the fixture contract's implemented optimized rungs each synthesize a candidate
     ///    (floor basis — no measured bases are supplied), and its `Missing` rung 4 synthesizes
     ///    none;
     ///  * flipping one implemented rung to `Missing` removes exactly that rung's candidate;
-    ///  * flipping it to `StructurallyNotApplicable` removes it identically — the filter is a
-    ///    positive match on `Implemented`, not a denylist that a new variant could slip past.
+    ///  * flipping it to `StructurallyNotApplicable` removes it identically — positive-match
+    ///    semantics, not a denylist a new support variant could slip past.
+    ///
+    /// ⚠️ What this test does NOT isolate: WHICH layer refuses. The synthesis loop's explicit
+    /// `matches!(.., Some(MemoryStrategySupport::Implemented))` filter is redundant
+    /// defense-in-depth with `contract.validate_selection`, which also refuses a selection on a
+    /// non-implemented rung — deleting the filter outright leaves this test green because the
+    /// deeper check catches the same mutation (measured during sc-17153's review). The same
+    /// caveat applies to the sc-18096 `Missing`-mutation arm above, which reaches the seam only
+    /// through `evaluate`'s full reject path. Do not read either test as the guard that keeps
+    /// `validate_selection`'s refusal removable, or vice versa: the pinned property is the
+    /// behavior, and BOTH layers currently enforce it.
     #[test]
     fn synthesize_estimate_ladder_admits_only_implemented_rungs() {
         let generator = fixture_generator();
