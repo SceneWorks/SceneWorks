@@ -13637,19 +13637,49 @@
         "schedulers": ["default"]
       },
       "mlx": {
-        // MEASURED MLX peak is 52.81–53.07 GB across all three tiers (sc-17150 activity 19106),
-        // and activity 19121 attributes it precisely: the DENSE Qwen3-VL-32B text encoder, measured
-        // in isolation at 53.07 GB, which runs before the DiT loads and sets the process high-water.
-        // 96, not 64: the wired ceiling is `recommendedMaxWorkingSetSize` (~75 % of unified memory),
-        // so a 64 GB Mac offers ~48 GB and cannot hold a 53 GB peak; 96 GB offers ~72 GB and fits.
-        // Same derivation scail2_14b's 96 uses.
+        // 64 — the DERIVED floor for the DEFAULT (q4) tier (sc-17153), replacing a 96 that went
+        // stale the day sc-19120 merged. NOT a measured end-to-end ceiling: no per-tier
+        // calibration receipt exists for this family yet (`mlx.calibrations` is absent —
+        // deliberately, because inventing one here would read as evidence), and producing those
+        // receipts, each tier in its own process, belongs to epic 17137's single terminal
+        // measurement campaign. Until that lands, this scalar is the honest derivation OF today's
+        // measurements, not a measurement itself.
         //
-        // ⚠️ This is the honest floor TODAY, not a property of the model: people run MiniMax-H3 on
-        // 12 GB GPUs in ComfyUI by streaming blocks. Nothing here is on the memory ladder yet.
-        // sc-19120 (packed text-encoder tier) removes the larger half of the gap and sc-18662
-        // (rung-4 block streaming) the rest; sc-17153 owns the measured fit gate that replaces this
-        // scalar. Do NOT read 96 as intrinsic.
-        "minMemoryGb": 96,
+        // ⚠️ WHY 96 WAS WRONG. It priced the DENSE Qwen3-VL-32B text encoder's 53.07 GB isolation
+        // peak (sc-17150 activity 19121) — a stage the DEFAULT tier no longer runs. sc-19120's
+        // packed q4 conditioning stage measures 14.68 GB end to end (inference
+        // `mlx-gen-minimax-h3/src/memory_strategy.rs` + `tests/te_tier_generate_stages.rs`, read
+        // at the pinned `75d66db5`), so 96 over-gated the default tier by ~38 GB at the derivation
+        // geometry and locked the family off every sub-96 GB Mac for no measured reason.
+        //
+        // THE DERIVATION — max over the shipped q4 pipeline's stages at the LARGEST geometry this
+        // entry admits (the 1,032,192-px canvas at 14.375 s / 345 frames ≈ 104k packed rows;
+        // the writable-elements crossing near 260 frames is a memory cost, not a gate — inference
+        // `cost.rs` module docs):
+        //   * conditioning (packed q4 TE): 14.68 GB measured, geometry-invariant on the video axes;
+        //   * denoise: 11.63 GB q4 DiT resident (post AdaLN-evict, measured) + a compute-dtype
+        //     (bf16, tier-independent) transient that is LINEAR in packed rows — every tensor the
+        //     forward MATERIALIZES is linear in S (the SwiGLU projection is the widest; fused SDPA
+        //     streams the S² scores, `cost.rs`) — pinned by two points: ~1.1 GB at ~3.3k rows
+        //     (12.75 GB stage total, te_tier_generate_stages) and ≤12.6 GB at 37.8k rows (the bf16
+        //     sweep's 52.81 GB peak at 1344x768/124f minus the 40.43 GB bf16 resident; the stage
+        //     never broke the dense-TE mask, sc-17152 / activity 18976). Extrapolated to the
+        //     ~104k-row envelope top: ~35 GB transient ⇒ ~46.5 GB stage peak. THIS STAGE BINDS.
+        //   * decode: 5.77 GB measured at the small anchor; spatially tiled (rung 2, frozen
+        //     256/64 px pair), so growth is latent/output buffers (~4 GB at the top), far under
+        //     the denoise stage. The VAEs are untiered, so this is tier-independent.
+        // Wired ceiling is `recommendedMaxWorkingSetSize` (~75 % of unified memory): 46.5 / 0.75 ≈
+        // 62 ⇒ a 64 GB Mac (~48 GB ceiling) holds the whole admitted surface; a 48 GB Mac
+        // (~36 GB) does not at the envelope top. A blanket scalar cannot say "48 GB runs the
+        // smaller geometries" — that is the REQUEST-scoped fit gate's job, not this floor's.
+        //
+        // NOT priced in, on purpose: sc-18662's streamed rung-4 request (requestPeak 5.80 GB q4 at
+        // 124f/384x224, decode-bound) is measured at an inference revision this app does not pin —
+        // the shipped pipeline holds the whole q4 DiT resident through the denoise. When the pin
+        // moves and the terminal campaign measures per-tier receipts, this scalar and the
+        // rung4-applicability-survey's outOfMatrixFamilies["17137"] characterization get real
+        // numbers together.
+        "minMemoryGb": 64,
         "repo": "SceneWorks/minimax-h3-mlx",
         "limits": {
           "samplers": ["default"],
@@ -14101,9 +14131,16 @@
         "schedulers": ["default"]
       },
       "mlx": {
-        // Same peak, same derivation as `minimax_h3` — the text-encoder stage dominates and is
-        // shared, and the ref DiT is the same size as the base one at every tier.
-        "minMemoryGb": 96,
+        // Same floor, same derivation as `minimax_h3` (sc-17153) — the ref DiT partition is
+        // byte-identical to the base one at every tier, the packed q4 conditioning encoder is
+        // shared, and the geometry envelope is asserted equal by
+        // `both_minimax_h3_partitions_declare_one_geometry`, so the denoise-transient term that
+        // binds at the envelope top is the same. The reference presentation adds vision-tower
+        // work to the CONDITIONING stage only, which sits ~32 GB under the binding denoise stage
+        // even with generous headroom, so it cannot move the max. The old 96 priced the retired
+        // dense-TE stage — see the base entry's derivation comment for the full arithmetic and
+        // for what the terminal measurement campaign still owes both entries.
+        "minMemoryGb": 64,
         "repo": "SceneWorks/minimax-h3-mlx",
         "limits": {
           "samplers": ["default"],
