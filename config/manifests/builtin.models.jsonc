@@ -8047,13 +8047,14 @@
       "type": "image",
       // FLUX.2 first shipped through MLX and now also has native Candle/CUDA generation and edit
       // lanes off-Mac. There is still no Python/diffusers worker fallback; the adapter field names
-      // the MLX dispatch key while Candle routing owns its explicit native lanes. `macOnly` below is
-      // a legacy no-op label; backend availability comes from the routing and descriptor contracts.
+      // the MLX dispatch key while Candle routing owns its explicit native lanes. The legacy
+      // `macOnly: true` label was DROPPED here (sc-20530): only video entries and the id-pinned
+      // vision captioner read the flag, so on an image entry it was inert text that read as a
+      // platform contract. Backend availability comes from the routing and descriptor contracts.
       "adapter": "mlx_flux2",
       // Unified model: txt2img + edit (single reference image) via mflux's
       // Flux2Klein / Flux2KleinEdit variants.
       "capabilities": ["text_to_image", "image_to_image", "edit_image", "character_image"],
-      "macOnly": true,
       "downloads": [
         {
           // SceneWorks pre-quantized MLX turnkey (sc-8711, epic 8506): a public/ungated re-host of
@@ -8430,8 +8431,9 @@
       // Without a reference it runs plain text-to-image on par with the base
       // 9B — the cache simply doesn't engage (sc-2173), so the full
       // capability set is exposed rather than gating to character_image only.
+      // No `macOnly` label — dropped with the base 9B entry's (sc-20530); it is inert on an image
+      // entry and backend availability comes from the routing and descriptor contracts.
       "capabilities": ["text_to_image", "image_to_image", "edit_image", "character_image"],
-      "macOnly": true,
       "downloads": [
         {
           // SceneWorks pre-quantized MLX turnkey (sc-8711, epic 8506): public/ungated re-host of
@@ -8710,12 +8712,26 @@
       // local diffusers dir that borrows the VAE/text-encoder/tokenizer from the
       // base FLUX.2-klein-9B install (mlx.convertBaseRepo). sc-2235.
       "capabilities": ["text_to_image", "image_to_image", "edit_image", "character_image"],
-      "macOnly": true,
+      // No `macOnly` (sc-20529). For an IMAGE entry the flag is a no-op label — only video
+      // entries (`video_model_withdrawn_on_platform`) and the vision captioner read it — and
+      // here it was actively misleading: the FLUX.2-klein converter has a real candle twin
+      // (`runtime_cuda::providers::flux2::convert_and_assemble`, sc-7459), `POST
+      // /models/{id}/convert` is not platform-gated, and the catalog now surfaces this entry's
+      // conversion state on Windows/Linux (`CANDLE_NATIVE_CONVERTERS`). Availability is driven
+      // by the routing tables (`MLX_ROUTED_MODELS` / `CANDLE_ROUTED_MODELS`), not this flag —
+      // same posture as krea/lens/ideogram/boogu/sd3.5.
       "downloads": [
         {
           // Only the bf16 single-file transformer (the convert source). The repo
           // also hosts GGUF/fp8/fp4 quants we don't use — pulling just this file
           // avoids a ~73 GB whole-repo download.
+          //
+          // This is NOT the pinned-allow-list antipattern the whole-repo download
+          // rule forbids: the list IS the convert source, so it must name exactly
+          // one file. `files[0]` and `mlx.convertSourceFile` below are the same
+          // checkpoint by construction, and sceneworks-core's
+          // `convert_source_file_matches_its_download_allow_list` fails the build
+          // if the two spellings ever drift apart (sc-20529).
           "provider": "huggingface",
           "repo": "wikeeyang/Flux2-Klein-9B-True-V2",
           "revision": "9c9fe9880029a4e0c4af5ca7d86e83cdb83eea83",
@@ -8982,8 +8998,11 @@
       // Shares the `mlx_flux2` adapter + the `flux2` engine. On Apple Silicon it runs
       // on MLX (the pre-quantized Q4 dir below); off-Mac the **candle** (Windows/Linux
       // CUDA) lane now serves txt2img (epic 6564: `candle-gen-flux2` `flux2_dev`, sc-7457
-      // provider + sc-7458 worker wiring) — `macOnly` stays a no-op label mirroring klein,
-      // since candle availability is driven by the routing tables, not this flag. The
+      // provider + sc-7458 worker wiring). sc-20530 REMOVED the `macOnly: true` this entry
+      // carried, mirroring klein: on an image entry the flag is inert (only the video
+      // catalog-withdrawal contract and the id-pinned web vision captioner read it), and
+      // reading like a platform contract this candle-routed entry does not have is the
+      // whole cost of keeping it. Candle availability is driven by the routing tables. The
       // candle lane loads the dense diffusers snapshot and Q4-quantizes it at load (the
       // install-time convert + packed loader are MLX-only; off-Mac is download-and-go).
       // Image edit + reference (sc-5919/5922): reference image(s) condition via the
@@ -8994,7 +9013,6 @@
       // best-effort (skeleton-as-edit-image) below the strict `flux2_dev_control` tier.
       "adapter": "mlx_flux2",
       "capabilities": ["text_to_image", "edit_image", "character_image"],
-      "macOnly": true,
       "downloads": [
         {
           // SceneWorks pre-quantized MLX turnkey (sc-8513, epic 8506): a public/ungated re-host of
@@ -20761,6 +20779,17 @@
         {
           "provider": "huggingface",
           "repo": "TheDrummer/Anubis-Mini-8B-v1",
+          // Pinned (F-029) to `main` as of 2026-03-17. This is an unversioned community finetune
+          // repo with no declared license, and the sc-6550 bake-off established its caption/refine
+          // quality against THIS checkpoint — an upstream re-push would silently change what
+          // "Refine my prompt" and Ideogram's magic-prompt emit, with no signal in the catalog.
+          // Non-coRequisite entries MAY carry a revision (only coRequisites REQUIRE one, F-029
+          // sc-13659). The consumers are unaffected: the download lands in `snapshots/<sha>/` and
+          // the worker's repo-string resolve (`DEFAULT_REFINE_MODEL` -> `resolve_app_managed_model_dir`
+          // -> `huggingface_snapshot_dir`) falls back from the now-absent `refs/main` to the
+          // fully-materialized snapshot, the same shape the pinned `vision_caption_qwen3vl_8b`
+          // sibling already runs on.
+          "revision": "696f5b956f0511168d98cd32106299cebc3cc12b",
           "files": [],
           "estimatedSizeBytes": 16077901824
         }

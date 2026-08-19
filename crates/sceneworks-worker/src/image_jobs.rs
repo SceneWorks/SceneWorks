@@ -1479,6 +1479,20 @@ pub(crate) async fn run_image_generate_job(
         }
     }
 
+    // The candle twin of the gate above (sc-20529). An `edit_image` job on an UNCONVERTED
+    // convert-at-install model is claimed by no candle route at all — every `…_available` edit gate
+    // collapses the resolver's typed `Err` to `false`, and each terminal ladder arm excludes
+    // `mode == "edit_image"` — so it arrived here and completed with procedural stub output instead
+    // of the actionable "convert it first" refusal the t2i lanes already raise. Fail loudly with the
+    // SAME preflight message (sc-5099 no-silent-fallback). `None` for every other job, so ordinary
+    // stub models still stub.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    if !handled {
+        if let Some(gap) = candle_weights_gap(&request) {
+            return Err(WorkerError::InvalidPayload(gap));
+        }
+    }
+
     if !handled {
         if request.hires_fix.enabled {
             return Err(WorkerError::InvalidPayload(

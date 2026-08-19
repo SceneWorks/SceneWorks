@@ -4466,6 +4466,150 @@ fn native_converters_registry_contents_are_pinned() {
     );
 }
 
+/// sc-20529: `CANDLE_NATIVE_CONVERTERS` names the converters with a REAL off-macOS implementation,
+/// and it drives two user-visible behaviours — the worker's unconverted-model preflight and the
+/// API's off-Mac MLX status surfacing. Adding an id here claims an off-Mac convert lane exists;
+/// getting that wrong flips installed models to `missing` on Windows/Linux and refuses renders that
+/// work today (the Anima trap). Pin the set so every edit is deliberate.
+#[test]
+fn candle_native_converters_registry_contents_are_pinned() {
+    use std::collections::BTreeSet;
+    let expected: BTreeSet<&str> = ["flux2_klein_diffusers"].into_iter().collect();
+    let actual: BTreeSet<&str> = sceneworks_core::jobs_store::CANDLE_NATIVE_CONVERTERS
+        .iter()
+        .copied()
+        .collect();
+    assert_eq!(
+        actual, expected,
+        "CANDLE_NATIVE_CONVERTERS drifted from its pinned set — an id here asserts the worker has a \
+         non-macOS `convert_*` arm that is NOT the 'requires macOS' stub. Adding one without that \
+         arm makes the API report needs_conversion off-Mac for a model that can never be converted \
+         there; removing one silently reverts flux2_klein_9b_true_v2 to the sc-20529 failure"
+    );
+}
+
+/// Every off-Mac converter must also be a native converter: `CANDLE_NATIVE_CONVERTERS` is a
+/// SUBSET of `NATIVE_CONVERTERS`, never a parallel universe. An id in the former but not the latter
+/// would be rejected by `resolve_convert_plan`'s "Unknown MLX converter." fallback, so the API would
+/// advertise a convert affordance whose job fails on submit.
+#[test]
+fn candle_native_converters_are_a_subset_of_native_converters() {
+    for converter in sceneworks_core::jobs_store::CANDLE_NATIVE_CONVERTERS {
+        assert!(
+            sceneworks_core::jobs_store::NATIVE_CONVERTERS.contains(converter),
+            "'{converter}' is in CANDLE_NATIVE_CONVERTERS but not NATIVE_CONVERTERS — \
+             resolve_convert_plan has no arm for it, so the convert job would fail on submit"
+        );
+    }
+}
+
+/// sc-20529 derive-don't-duplicate guard. A convert-at-install model names its source checkpoint
+/// TWICE: once as `mlx.convertSourceFile` (what the converter reads) and once as the download
+/// entry's `files` allow-list (what gets fetched). These are the same file by construction — the
+/// single-file declaration exists precisely BECAUSE only the convert source is wanted out of a repo
+/// that also hosts unused GGUF/fp8/fp4 quants (`wikeeyang/Flux2-Klein-9B-True-V2` is ~73 GB whole,
+/// 18 GB for the one file). It is therefore NOT the pinned-allow-list antipattern the whole-repo
+/// download rule forbids.
+///
+/// What it IS exposed to is drift: editing one spelling and not the other yields a download that
+/// fetches a file the converter never reads, and a conversion that fails on a file that was never
+/// fetched — with no compile error and no test failure. This pins them together so the manifest
+/// cannot express the mismatch.
+///
+/// Two strengths, chosen by the manifest contract rather than by model id:
+///
+/// * **Every** convert-at-install entry: `files[0]` IS the convert source. Position matters — the
+///   allow-list's first entry is the primary artifact the converter reads; the rest (where present)
+///   are the companions it reads alongside. A `contains` check alone accepts a list that fetches
+///   the source as an afterthought behind unrelated files.
+/// * An entry that declares **`convertBaseRepo`** borrows its text encoder / VAE / tokenizer from a
+///   separately-installed base, so it has nothing else to fetch: its source-repo download must be
+///   EXACTLY the one convert source, which is what `flux2_klein_9b_true_v2`'s manifest comment
+///   claims ("it must name exactly one file") and what keeps the ~73 GB whole-repo pull off the
+///   wire. Entries with NO `convertBaseRepo` (Anima) are exempt by construction: their download IS
+///   the component bundle the converter reads (DiT + Qwen3 TE + VAE), so a longer list is correct
+///   there and asserting exactness would fail three shipped models.
+#[test]
+fn convert_source_file_matches_its_download_allow_list() {
+    let manifest = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| *contents)
+        .expect("builtin.models.jsonc is embedded in BUILTIN_MANIFESTS");
+    let parsed: Value =
+        serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(manifest))
+            .expect("builtin.models.jsonc parses after comment stripping");
+    let models = parsed
+        .get("models")
+        .and_then(Value::as_array)
+        .expect("manifest has a models array");
+    let mut checked = 0_usize;
+    for model in models {
+        let id = model.get("id").and_then(Value::as_str).unwrap_or_default();
+        let Some(mlx) = model.get("mlx").and_then(Value::as_object) else {
+            continue;
+        };
+        if mlx.get("requiresConversion").and_then(Value::as_bool) != Some(true) {
+            continue;
+        }
+        let (Some(source_repo), Some(source_file)) = (
+            mlx.get("convertSourceRepo").and_then(Value::as_str),
+            mlx.get("convertSourceFile").and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        // Only the download entries that target the CONVERT SOURCE repo are constrained. A model may
+        // legitimately declare sibling downloads from other repos (ltx_2_3_eros pulls its Gemma
+        // bundle and a distill LoRA), and those carry their own unrelated file lists.
+        for download in model
+            .get("downloads")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|download| download.get("repo").and_then(Value::as_str) == Some(source_repo))
+        {
+            let files: Vec<&str> = download
+                .get("files")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect();
+            // An EMPTY/absent list is the whole-repo download — the convert source is included by
+            // definition, so there is nothing to drift.
+            if files.is_empty() {
+                continue;
+            }
+            assert_eq!(
+                files.first().copied(),
+                Some(source_file),
+                "{id}: mlx.convertSourceFile '{source_file}' is not the FIRST entry of the \
+                 {source_repo} download files list {files:?} — the primary artifact the converter \
+                 reads must lead the allow-list, and it must be fetched at all. Keep the two \
+                 spellings identical (sc-20529)"
+            );
+            // A base-borrowing entry fetches its convert source and NOTHING else: the text
+            // encoder / VAE / tokenizer come from the separately-installed `convertBaseRepo`.
+            if mlx.contains_key("convertBaseRepo") {
+                assert_eq!(
+                    files,
+                    vec![source_file],
+                    "{id}: declares convertBaseRepo, so its {source_repo} download must be exactly \
+                     the one convert source — every other component is borrowed from the base. A \
+                     longer list silently widens the pull (the wikeeyang repo is ~73 GB whole) and \
+                     contradicts the manifest comment on this entry (sc-20529)"
+                );
+            }
+            checked += 1;
+        }
+    }
+    assert!(
+        checked > 0,
+        "expected at least one convert-at-install model with a pinned source-repo download list; \
+         if none remains, this guard has rotted into a no-op and should be removed deliberately"
+    );
+}
+
 #[test]
 fn mac_rust_supported_feature_gaps_point_at_their_spikes() {
     let store = store("oracle-feature-spikes");

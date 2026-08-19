@@ -2283,12 +2283,57 @@ fn video_job_type(mode: &str) -> JobType {
     }
 }
 
+/// Stamp the optional asset carriers the API sends on EVERY request of this family, in the shape it
+/// sends them when the user supplied none: an `Option<String>` carrier serializes as an explicit
+/// `null` and a `Vec<String>` carrier as `[]` (`ImageJobRequest` / `VideoJobRequest` in
+/// `apps/rust-api/src/dto.rs` — neither field carries `skip_serializing_if`). Only keys the probe
+/// left ABSENT are filled, so a probe that populates a carrier keeps its own value.
+///
+/// sc-20530 batch item A. The probes used to spell only the carriers a mode needs and leave the rest
+/// missing, which is an encoding NO production request ever has. That gap is what let the sc-20525
+/// defect class hide: a gate that read `null` as "malformed" enforce-failed every real SANA
+/// text-to-image submission while this matrix — probing with the key absent — reported the cell
+/// supported. Probing in the production encoding is what makes the matrix able to see that class.
+fn stamp_absent_optional_carriers(job_type: &JobType, payload: &mut Map<String, Value>) {
+    let (scalars, plurals): (&[&str], &[&str]) = match job_type {
+        JobType::ImageGenerate | JobType::ImageEdit => (
+            &["sourceAssetId", "referenceAssetId", "maskAssetId"],
+            &["referenceAssetIds"],
+        ),
+        JobType::VideoGenerate
+        | JobType::VideoExtend
+        | JobType::VideoBridge
+        | JobType::PersonReplace => (
+            &[
+                "sourceAssetId",
+                "lastFrameAssetId",
+                "sourceClipAssetId",
+                "bridgeRightClipAssetId",
+                "referenceClipAssetId",
+            ],
+            &["referenceAssetIds", "sourceClipAssetIds"],
+        ),
+        // Every other probed job type has a required-carrier request shape (VQA/interleave/detail)
+        // or no asset carriers at all; nothing to normalize.
+        _ => (&[], &[]),
+    };
+    for key in scalars {
+        payload.entry((*key).to_owned()).or_insert(Value::Null);
+    }
+    for key in plurals {
+        payload
+            .entry((*key).to_owned())
+            .or_insert_with(|| Value::Array(Vec::new()));
+    }
+}
+
 fn probe_job(job_type: JobType, model: &str, payload: Value) -> Result<JobSnapshot, String> {
     let mut payload = payload
         .as_object()
         .cloned()
         .ok_or_else(|| "probe payload must be an object".to_owned())?;
     payload.insert("model".to_owned(), Value::String(model.to_owned()));
+    stamp_absent_optional_carriers(&job_type, &mut payload);
     validate_probe_structure(&job_type, &payload)?;
     Ok(JobSnapshot {
         id: "capability-matrix-probe".to_owned(),
@@ -3242,6 +3287,79 @@ mod tests {
         let digest = live.sources.values_mut().next().unwrap();
         *digest = "0".repeat(64);
         assert!(checked_in_matrix_matches_live(checked_in, live).is_ok());
+    }
+
+    /// sc-20530 (adversarial review). `stamp_absent_optional_carriers` is the whole reason this
+    /// matrix can see the sc-20525 defect class — a gate that misreads the `null` the API stamps on
+    /// every unset optional carrier. It was completely unpinned when it landed: deleting the
+    /// function left every test in the crate green, because with sc-20525 merged no CELL value
+    /// moves. Cell drift therefore cannot witness it; the probe payload itself has to be asserted.
+    ///
+    /// The probe must carry the production encoding: an `Option<String>` carrier serializes as an
+    /// explicit `null` and a `Vec<String>` carrier as `[]` (`ImageJobRequest` / `VideoJobRequest`,
+    /// `apps/rust-api/src/dto.rs` — neither field carries `skip_serializing_if`).
+    #[test]
+    fn probes_carry_the_production_optional_carrier_encoding() {
+        let image = probe_job(
+            JobType::ImageGenerate,
+            "sana_1600m",
+            json!({ "mode": "text_to_image", "prompt": "p" }),
+        )
+        .expect("image probe is structurally valid");
+        for key in ["sourceAssetId", "referenceAssetId", "maskAssetId"] {
+            assert_eq!(
+                image.payload.get(key),
+                Some(&Value::Null),
+                "an image probe must stamp {key} as the explicit null production sends, not omit it"
+            );
+        }
+        assert_eq!(
+            image.payload.get("referenceAssetIds"),
+            Some(&Value::Array(Vec::new())),
+            "the plural image carrier is a Vec<String>, so production sends [] not null"
+        );
+
+        let video = probe_job(
+            JobType::VideoGenerate,
+            "wan_2_2",
+            json!({ "mode": "text_to_video", "prompt": "p" }),
+        )
+        .expect("video probe is structurally valid");
+        for key in [
+            "sourceAssetId",
+            "lastFrameAssetId",
+            "sourceClipAssetId",
+            "bridgeRightClipAssetId",
+            "referenceClipAssetId",
+        ] {
+            assert_eq!(
+                video.payload.get(key),
+                Some(&Value::Null),
+                "a video probe must stamp {key} as the explicit null production sends"
+            );
+        }
+        for key in ["referenceAssetIds", "sourceClipAssetIds"] {
+            assert_eq!(
+                video.payload.get(key),
+                Some(&Value::Array(Vec::new())),
+                "{key} is a Vec<String>, so production sends [] not null"
+            );
+        }
+
+        // A carrier the probe SUPPLIES is never overwritten — stamping is fill-the-absent only, or
+        // every conditioned probe in the matrix would silently degrade to an unconditioned one.
+        let edit = probe_job(
+            JobType::ImageEdit,
+            "sdxl",
+            json!({ "mode": "edit_image", "prompt": "p", "sourceAssetId": "asset_1" }),
+        )
+        .expect("edit probe is structurally valid");
+        assert_eq!(
+            edit.payload.get("sourceAssetId").and_then(Value::as_str),
+            Some("asset_1"),
+            "a probe-supplied carrier must survive the stamp"
+        );
+        assert_eq!(edit.payload.get("maskAssetId"), Some(&Value::Null));
     }
 
     #[test]

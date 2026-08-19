@@ -57,6 +57,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { canonicalSourceText, stripInertLines } from "./lib/source-revision.mjs";
 
@@ -649,7 +650,6 @@ function usage() {
 
 export async function main(argv = process.argv.slice(2)) {
   const { readFile, writeFile } = await import("node:fs/promises");
-  const { fileURLToPath } = await import("node:url");
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const value = (flag) => {
     const index = argv.indexOf(flag);
@@ -716,6 +716,13 @@ export async function main(argv = process.argv.slice(2)) {
   return 0;
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(new URL(import.meta.url).pathname)) {
+// `fileURLToPath`, NOT `new URL(import.meta.url).pathname` (matches
+// scripts/backfill-closure-digests.mjs). On Windows the raw pathname is `/D:/repos/...`, and
+// `path.resolve` reads that leading slash as a drive-relative root, producing `D:\D:\repos\...` —
+// which never equals `process.argv[1]`. The guard therefore never fired on Windows: the script
+// exited 0 having printed nothing and written nothing, and `bump-inference.mjs` ran it with
+// `stdio: "inherit"` and then failed several steps later on a closures file that was never
+// re-derived. Silent no-op, non-zero blame.
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   process.exitCode = await main();
 }

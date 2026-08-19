@@ -336,111 +336,232 @@ pub(crate) fn image_job_is_candle_eligible(job: &JobSnapshot) -> bool {
     image_job_candle_lane(job).is_some()
 }
 
-/// Per-model candle txt2img-eligibility, factored out of [`image_job_is_candle_eligible`] so the
-/// routing tests can probe it with synthetic payloads (parity with `image_request_mlx_eligible`).
-pub(crate) fn image_request_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
-    if !CANDLE_ROUTED_MODELS.contains(&model) {
-        return false;
+/// One check in the generic candle text-to-image gate, named so a refusal can be *reported* instead
+/// of merely counted (sc-20530). Declared in the order [`CANDLE_IMAGE_CHECKS`] applies them, which
+/// is by construction the order [`image_request_candle_eligible`] evaluates them — the gate has no
+/// second copy of the order that could drift from this one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CandleImageRefusal {
+    /// The family has no candle image lane at all (not in `CANDLE_ROUTED_MODELS`).
+    UnroutedFamily,
+    /// SANA carrier the specialized SANA lane owns or cannot consume.
+    SanaCarrier,
+    /// A reference-bearing mode reserved for a family's specialized lane.
+    ReferenceOnlyMode,
+    /// `mode == "edit_image"` (img2img / inpaint / outpaint).
+    EditMode,
+    /// A populated conditioning carrier (source / reference / references / mask).
+    ConditioningCarrier,
+    /// A user LoRA on a family that advertises no inference adapter slot.
+    UserLora,
+    /// `advanced.poses` — strict-pose ControlNet.
+    Poses,
+    /// `advanced.phases` — a multi-phase schedule.
+    Phases,
+    /// `advanced.mlxQuantize > 0` on a family that ships no packed tier.
+    QuantTier,
+}
+
+impl CandleImageRefusal {
+    /// A short phrase naming what the check refused, for "…and it is ALSO refused by X" wording in
+    /// [`classify_candle_image_gap`](crate::jobs_store::routing::gaps::classify_candle_image_gap).
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::UnroutedFamily => "no candle lane for this family",
+            Self::SanaCarrier => "a carrier the candle SANA lane cannot consume",
+            Self::ReferenceOnlyMode => "a reference-bearing mode this family reserves",
+            Self::EditMode => "mode edit_image",
+            Self::ConditioningCarrier => "a populated conditioning carrier",
+            Self::UserLora => "a user LoRA on an adapter-less family",
+            Self::Poses => "advanced.poses",
+            Self::Phases => "advanced.phases",
+            Self::QuantTier => "advanced.mlxQuantize",
+        }
     }
-    // sc-18475: the SANA specialized route above owns the only accepted reference shape. If the
-    // singular carrier is present but not a non-empty string, do not let it fall through as txt2img.
-    if matches!(model, "sana_1600m" | "sana_sprint_1600m")
-        && (payload
-            .get("referenceAssetId")
-            .is_some_and(|value| match value.as_str() {
-                Some(id) => id.trim().is_empty(),
-                None => true,
-            })
+}
+
+type CandleImageCheck = fn(&str, &Map<String, Value>) -> bool;
+
+/// **The** generic candle txt2img gate, as an ordered table: [`image_request_candle_eligible`] is
+/// "no entry refuses", and [`candle_image_first_refusal`] is "the first entry that does". Both the
+/// routing decision and the `candle_unsupported` wording therefore read the SAME order from the
+/// SAME list — the sc-20530 invariant ("the reported cause is the first check that actually
+/// refused") holds for every payload shape by construction, not by two hand-kept orders agreeing.
+///
+/// Adding a check means adding a variant, which makes the classifier's exhaustive `match` fail to
+/// compile until it has wording for it. Do not re-order casually: earlier entries mask later ones
+/// in both the refusal *and* the message.
+const CANDLE_IMAGE_CHECKS: &[(CandleImageRefusal, CandleImageCheck)] = &[
+    (CandleImageRefusal::SanaCarrier, candle_refuses_sana_carrier),
+    (
+        CandleImageRefusal::ReferenceOnlyMode,
+        candle_refuses_reference_only_mode,
+    ),
+    (CandleImageRefusal::EditMode, candle_refuses_edit_mode),
+    (
+        CandleImageRefusal::ConditioningCarrier,
+        candle_refuses_conditioning_carrier,
+    ),
+    (CandleImageRefusal::UserLora, candle_refuses_user_lora),
+    (CandleImageRefusal::Poses, candle_refuses_poses),
+    (CandleImageRefusal::Phases, candle_refuses_phases),
+    (CandleImageRefusal::QuantTier, candle_refuses_quant_tier),
+];
+
+/// sc-18475: the SANA specialized route above owns the only accepted reference shape. If the
+/// singular carrier is populated or malformed, do not let it fall through as txt2img.
+///
+/// sc-20525: this MUST use the same `has_nonempty_or_malformed_string` convention as
+/// `sana_has_unsupported_carrier` right below it. The original inline `match value.as_str()`
+/// returned "malformed" from its `None` arm, which `Value::Null` also lands in — and `null` is
+/// how the API normalizes every unset optional asset carrier before the job is stored, so it is
+/// the shape EVERY real text-to-image submission arrives in. Off-Mac that classified plain SANA
+/// t2i as a malformed conditioning shape and enforce-failed it `candle_unsupported`. Same defect
+/// class as sc-19712 F-1 on the MLX twin; sharing the helper is what stops the two SANA gates
+/// from drifting apart again.
+fn candle_refuses_sana_carrier(model: &str, payload: &Map<String, Value>) -> bool {
+    matches!(model, "sana_1600m" | "sana_sprint_1600m")
+        && (has_nonempty_or_malformed_string(payload, "referenceAssetId")
             || sana_has_unsupported_carrier(payload))
-    {
-        return false;
-    }
-    // These families' reference-bearing modes are owned exclusively by specialized routes above.
-    // If their carrier is blank/malformed or another shape check fails, never reinterpret the job as
-    // registered text-to-image and silently drop the user's conditioning intent.
-    let reference_only_mode = matches!(
+}
+
+/// The reference-bearing modes whose whole point is a conditioning image. Not every candle family
+/// reserves them — see [`candle_reserves_reference_only_modes`].
+pub(crate) fn candle_reference_only_mode(payload: &Map<String, Value>) -> bool {
+    matches!(
         payload.get("mode").and_then(Value::as_str),
         Some("reference" | "image_to_image" | "character_image" | "style_variations")
-    );
-    if reference_only_mode
-        && (matches!(
-            model,
-            "flux2_dev" | "flux2_klein_9b" | "flux2_klein_9b_kv" | "flux2_klein_9b_true_v2"
-        ) || matches!(
-            model,
-            "qwen_image_edit"
-                | "qwen_image_edit_2509"
-                | "qwen_image_edit_2511"
-                | "qwen_image_edit_2511_lightning"
-        ) || model.starts_with("sensenova_u1_8b"))
-    {
-        return false;
-    }
-    // Base (non-distilled, full-CFG) Z-Image txt2img (sc-8679, epic 8236): the candle `z_image` base
-    // generator (shift-6.0 / ~50-step / real CFG) is now a candle txt2img provider (`is_candle_engine`),
-    // so a plain (non-pose, non-edit) `z_image` job routes to the generic candle txt2img lane here — the
-    // base sibling of `z_image_turbo`. Its strict-pose control (`advanced.poses`) is still branched out by
-    // `zimage_control_candle_eligible` in `image_job_is_candle_eligible` BEFORE this gate; its edit shapes
-    // are rejected below with every other family. (The prior sc-8379 guard that hard-rejected base z_image
-    // here — because no candle txt2img provider existed — is retired now that one does.)
-    // img2img / inpaint / outpaint all arrive as `mode == "edit_image"` (+ a source); reject the
-    // whole edit family up front (the worker's `sdxl_sub_mode` keys off the same mode).
-    if payload.get("mode").and_then(Value::as_str) == Some("edit_image") {
-        return false;
-    }
-    // Any conditioning asset (img2img source, IP-Adapter reference, or inpaint mask) is refused by
-    // this base lane. Applies to EVERY candle family including Lens (pure T2I — no conditioning
-    // shapes in the Lens port).
-    if has_nonempty_string(payload, "sourceAssetId")
+    )
+}
+
+/// These families' reference-bearing modes are owned exclusively by specialized routes above.
+/// If their carrier is blank/malformed or another shape check fails, never reinterpret the job as
+/// registered text-to-image and silently drop the user's conditioning intent. Every OTHER candle
+/// family has no such specialized lane to protect, so it reaches the carrier check below on the
+/// same modes (sc-20530: the gap classifier must gate on this same predicate, or it blames a
+/// missing conditioning image on families the gate never refused for the mode at all).
+pub(crate) fn candle_reserves_reference_only_modes(model: &str) -> bool {
+    matches!(
+        model,
+        "flux2_dev" | "flux2_klein_9b" | "flux2_klein_9b_kv" | "flux2_klein_9b_true_v2"
+    ) || matches!(
+        model,
+        "qwen_image_edit"
+            | "qwen_image_edit_2509"
+            | "qwen_image_edit_2511"
+            | "qwen_image_edit_2511_lightning"
+    ) || model.starts_with("sensenova_u1_8b")
+}
+
+fn candle_refuses_reference_only_mode(model: &str, payload: &Map<String, Value>) -> bool {
+    candle_reference_only_mode(payload) && candle_reserves_reference_only_modes(model)
+}
+
+/// Base (non-distilled, full-CFG) Z-Image txt2img (sc-8679, epic 8236): the candle `z_image` base
+/// generator (shift-6.0 / ~50-step / real CFG) is now a candle txt2img provider (`is_candle_engine`),
+/// so a plain (non-pose, non-edit) `z_image` job routes to the generic candle txt2img lane here — the
+/// base sibling of `z_image_turbo`. Its strict-pose control (`advanced.poses`) is still branched out by
+/// `zimage_control_candle_eligible` in `image_job_is_candle_eligible` BEFORE this gate; its edit shapes
+/// are rejected below with every other family. (The prior sc-8379 guard that hard-rejected base z_image
+/// here — because no candle txt2img provider existed — is retired now that one does.)
+///
+/// img2img / inpaint / outpaint all arrive as `mode == "edit_image"` (+ a source); reject the whole
+/// edit family up front (the worker's `sdxl_sub_mode` keys off the same mode). Unconditional across
+/// families, unlike [`candle_refuses_reference_only_mode`] right above it.
+fn candle_refuses_edit_mode(_model: &str, payload: &Map<String, Value>) -> bool {
+    payload.get("mode").and_then(Value::as_str) == Some("edit_image")
+}
+
+/// Any conditioning asset (img2img source, IP-Adapter reference, or inpaint mask) is refused by
+/// this base lane. Applies to EVERY candle family including Lens (pure T2I — no conditioning
+/// shapes in the Lens port).
+fn candle_refuses_conditioning_carrier(_model: &str, payload: &Map<String, Value>) -> bool {
+    has_nonempty_string(payload, "sourceAssetId")
         || has_nonempty_string(payload, "referenceAssetId")
         || has_nonempty_string_array(payload, "referenceAssetIds")
         || has_nonempty_string(payload, "maskAssetId")
-    {
-        return false;
+}
+
+/// Adapter-capable families are derived from the same audited capability table as quant support.
+/// Some accept both adapters and Q4/Q8 (including Z-Image, Qwen, FLUX.2, SD3.5, Lens, Krea, and
+/// SDXL), while others accept only adapters or only quant. A quant value may select a pre-packed
+/// tier rather than request on-the-fly quantization; the gate intentionally covers both forms.
+/// The two capabilities remain decoupled and fail closed through their separate derived lists.
+pub(crate) fn candle_family_serves_lora(model: &str) -> bool {
+    CANDLE_QUANT_LORA_MODELS.contains(&model) || CANDLE_LORA_MODELS.contains(&model)
+}
+
+/// Twin of [`candle_family_serves_lora`] for packed/quantized tiers.
+pub(crate) fn candle_family_serves_quant(model: &str) -> bool {
+    CANDLE_QUANT_LORA_MODELS.contains(&model) || CANDLE_QUANT_MODELS.contains(&model)
+}
+
+/// LoRAs: not in the candle lane unless the audited family row advertises adapters.
+fn candle_refuses_user_lora(model: &str, payload: &Map<String, Value>) -> bool {
+    !candle_family_serves_lora(model) && has_nonempty_array(payload, "loras")
+}
+
+/// Strict-pose ControlNet (`advanced.poses`, object-shaped entries) is refused by this base lane.
+fn candle_refuses_poses(_model: &str, payload: &Map<String, Value>) -> bool {
+    has_nonempty_nested_array(payload, "advanced", "poses")
+}
+
+/// A multi-phase schedule (`advanced.phases`, the web Multi-Phase editor) is refused by this base
+/// lane: the candle txt2img lane renders one schedule, so honoring only the first phase would
+/// silently drop the rest of the user's intent.
+fn candle_refuses_phases(_model: &str, payload: &Map<String, Value>) -> bool {
+    has_nonempty_nested_array(payload, "advanced", "phases")
+}
+
+/// A quant/tier request (`advanced.mlxQuantize` > 0) is refused UNLESS the family advertises quant.
+/// The sc-3675/sc-5096 candle providers advertise `supported_quants: &[]` (dense bf16/fp16 only), so
+/// an explicit quant request can't be honored — refuse it rather than silently running dense
+/// (sc-5099). Lens (sc-5126), SD3.5 (sc-7880), Krea (sc-9607/sc-9983), the Ideogram/Boogu packed
+/// families (sc-9607), Qwen-Image (sc-11020), and Z-Image advertise Q4/Q8, so their quant requests
+/// stay on candle. For the packed families the `mlxQuantize` value is a turnkey tier-SELECT (which
+/// pre-quantized q4/q8 subdir to load), a no-op on the loader rather than a runtime quantize — but
+/// the gate is the same: quant-capable → stay.
+fn candle_refuses_quant_tier(model: &str, payload: &Map<String, Value>) -> bool {
+    !candle_family_serves_quant(model) && candle_request_wants_quant(payload)
+}
+
+/// The first [`CANDLE_IMAGE_CHECKS`] entry that refuses this request, short-circuiting exactly like
+/// the chain of early returns it replaced. `None` means the generic candle txt2img lane accepts it.
+pub(crate) fn candle_image_first_refusal(
+    model: &str,
+    payload: &Map<String, Value>,
+) -> Option<CandleImageRefusal> {
+    if !CANDLE_ROUTED_MODELS.contains(&model) {
+        return Some(CandleImageRefusal::UnroutedFamily);
     }
-    // Adapter-capable families are derived from the same audited capability table as quant support.
-    // Some accept both adapters and Q4/Q8 (including Z-Image, Qwen, FLUX.2, SD3.5, Lens, Krea, and
-    // SDXL), while others accept only adapters or only quant. A quant value may select a pre-packed
-    // tier rather than request on-the-fly quantization; the gate intentionally covers both forms.
-    // The two capabilities remain decoupled and fail closed through their separate derived lists.
-    let supports_lora =
-        CANDLE_QUANT_LORA_MODELS.contains(&model) || CANDLE_LORA_MODELS.contains(&model);
-    let supports_quant =
-        CANDLE_QUANT_LORA_MODELS.contains(&model) || CANDLE_QUANT_MODELS.contains(&model);
-    // LoRAs: not in the candle lane unless the audited family row advertises adapters.
-    if !supports_lora
-        && payload
-            .get("loras")
-            .and_then(Value::as_array)
-            .is_some_and(|loras| !loras.is_empty())
-    {
-        return false;
+    CANDLE_IMAGE_CHECKS
+        .iter()
+        .find(|(_, refuses)| refuses(model, payload))
+        .map(|(refusal, _)| *refusal)
+}
+
+/// EVERY [`CANDLE_IMAGE_CHECKS`] entry that refuses this request, in gate order. Routing only ever
+/// needs the first one; the gap classifier needs the rest so a remediation ("re-submit without X")
+/// is only promised when removing X is actually enough to route the request (sc-20530).
+pub(crate) fn candle_image_refusals(
+    model: &str,
+    payload: &Map<String, Value>,
+) -> Vec<CandleImageRefusal> {
+    if !CANDLE_ROUTED_MODELS.contains(&model) {
+        return vec![CandleImageRefusal::UnroutedFamily];
     }
-    // Strict-pose ControlNet (`advanced.poses`, object-shaped entries) is refused by this base lane.
-    let has_poses = payload
-        .get("advanced")
-        .and_then(Value::as_object)
-        .and_then(|advanced| advanced.get("poses"))
-        .and_then(Value::as_array)
-        .is_some_and(|poses| !poses.is_empty());
-    if has_poses {
-        return false;
-    }
-    if has_nonempty_nested_array(payload, "advanced", "phases") {
-        return false;
-    }
-    // A quant/tier request (`advanced.mlxQuantize` > 0) is refused UNLESS the family advertises quant.
-    // The sc-3675/sc-5096 candle providers advertise `supported_quants: &[]` (dense bf16/fp16 only), so
-    // an explicit quant request can't be honored — refuse it rather than silently running dense
-    // (sc-5099). Lens (sc-5126), SD3.5 (sc-7880), Krea (sc-9607/sc-9983), the Ideogram/Boogu packed
-    // families (sc-9607), Qwen-Image (sc-11020), and Z-Image advertise Q4/Q8, so their quant requests
-    // stay on candle. For the packed families
-    // the `mlxQuantize` value is a turnkey tier-SELECT (which pre-quantized q4/q8 subdir to load), a no-op
-    // on the loader rather than a runtime quantize — but the gate is the same: quant-capable → stay.
-    if !supports_quant && candle_request_wants_quant(payload) {
-        return false;
-    }
-    true
+    CANDLE_IMAGE_CHECKS
+        .iter()
+        .filter(|(_, refuses)| refuses(model, payload))
+        .map(|(refusal, _)| *refusal)
+        .collect()
+}
+
+/// Per-model candle txt2img-eligibility, factored out of [`image_job_is_candle_eligible`] so the
+/// routing tests can probe it with synthetic payloads (parity with `image_request_mlx_eligible`).
+/// Eligible ⇔ no [`CANDLE_IMAGE_CHECKS`] entry refuses.
+pub(crate) fn image_request_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
+    candle_image_first_refusal(model, payload).is_none()
 }
 
 /// Whether the request explicitly asks for on-the-fly quantization the candle backend can't do.
@@ -448,6 +569,16 @@ pub(crate) fn image_request_candle_eligible(model: &str, payload: &Map<String, V
 /// otherwise defaults quant from the manifest) — so a payload-level value `> 0` is a deliberate quant
 /// request. `<= 0` (dense) and absent both leave candle on its native dense path (sc-5099).
 pub(crate) fn candle_request_wants_quant(payload: &Map<String, Value>) -> bool {
+    candle_requested_quant_bits(payload).is_some()
+}
+
+/// The quant tier the request explicitly asks for, when it asks for one: `advanced.mlxQuantize`
+/// parsed as a positive bit width (`4` → q4). `None` covers absent, null, unparseable, and the
+/// `<= 0` dense encoding — exactly the cases [`candle_request_wants_quant`] calls "no quant
+/// request", which is defined in terms of this function so the two can never disagree. Split out
+/// for sc-20530: the gap classifier has to name the REQUESTED tier in the refusal message, and
+/// re-deriving it there is how the wording drifts from the gate that produced the refusal.
+pub(crate) fn candle_requested_quant_bits(payload: &Map<String, Value>) -> Option<i64> {
     payload
         .get("advanced")
         .and_then(Value::as_object)
@@ -457,7 +588,7 @@ pub(crate) fn candle_request_wants_quant(payload: &Map<String, Value>) -> bool {
                 .as_i64()
                 .or_else(|| value.as_str()?.trim().parse().ok())
         })
-        .is_some_and(|bits| bits > 0)
+        .filter(|bits| *bits > 0)
 }
 
 fn candle_request_wants_torch_quantization(payload: &Map<String, Value>) -> bool {

@@ -6,12 +6,13 @@ use serde_json::{Map, Value};
 
 use crate::contracts::{JobSnapshot, JobType};
 use crate::jobs_store::routing::candle::{
-    image_job_is_candle_eligible, image_request_candle_pose_reject,
-    training_job_is_candle_eligible, upscale_job_is_candle_eligible, video_job_is_candle_eligible,
-    video_upscale_job_is_candle_eligible, CANDLE_POSE_MODELS,
+    candle_image_refusals, candle_requested_quant_bits, image_job_is_candle_eligible,
+    model_has_candle_pose_lane, training_job_is_candle_eligible, upscale_job_is_candle_eligible,
+    video_job_is_candle_eligible, video_upscale_job_is_candle_eligible, CandleImageRefusal,
+    CANDLE_POSE_MODELS,
 };
 use crate::jobs_store::routing::catalog::{
-    CANDLE_ROUTED_MODELS, CANDLE_VIDEO_ROUTED_MODELS, MLX_ROUTED_MODELS, VIDEO_MLX_ROUTED_MODELS,
+    CANDLE_VIDEO_ROUTED_MODELS, MLX_ROUTED_MODELS, VIDEO_MLX_ROUTED_MODELS,
 };
 use crate::jobs_store::routing::mlx::{
     caption_job_is_mlx_eligible, job_is_mlx_eligible, training_job_is_mlx_eligible,
@@ -19,6 +20,9 @@ use crate::jobs_store::routing::mlx::{
     video_mode_is_mlx_eligible, video_upscale_job_is_mlx_eligible,
 };
 use crate::jobs_store::routing::SENSENOVA_MODEL_IDS;
+use crate::jobs_store::routing::{
+    has_malformed_optional_string, has_nonempty_string, has_nonempty_string_array,
+};
 
 /// True when *any* MLX-routing predicate (image/detail, video, or training) claims this
 /// job — the union an `mlx` worker would want. Used both to classify a claim for routing
@@ -574,46 +578,258 @@ pub fn candle_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
 }
 
 /// Name the precise gap for a candle-ineligible image job (sc-5502) — the candle-worded,
-/// candle-parity twin of [`classify_image_gap`]. The strict-pose-on-an-unwired-family case (the
-/// canonical sc-5968 silent-T2I trap) is named precisely; the rest report whether the model has no
-/// candle engine at all or is a candle txt2img family asked for a conditioned shape with no lane.
+/// candle-parity twin of [`classify_image_gap`].
+///
+/// **sc-20530.** This used to end in a single catch-all that listed five possible causes
+/// ("the requested edit / reference / inpaint / LoRA / quant shape") and identified none. The
+/// 2026-08-18 sweep rejected `chroma1_{base,flash,hd}`, `flux_dev` and `flux_schnell` with
+/// "conditioned shape on a txt2img candle family" for payloads that were plain
+/// `mode: "text_to_image"` with every carrier null and no LoRA or pose — the real cause was
+/// `advanced.mlxQuantize` on families that advertise `supported_quants: &[]`. The refusal itself is
+/// correct (candle refuses rather than silently running dense — sc-5099); only the wording was,
+/// sending triage after a conditioning bug that did not exist.
+///
+/// **The invariant, and how it is kept.** The reported cause is the FIRST check that actually
+/// refused, in `image_request_candle_eligible`'s own evaluation order. That is not maintained by
+/// hand here: the order comes from [`candle_image_refusals`], which walks the same
+/// `CANDLE_IMAGE_CHECKS` table the gate itself walks, so there is no second copy of the order to
+/// drift. The `match` below is exhaustive over [`CandleImageRefusal`], so a new gate check cannot
+/// land without wording — the classifier stops compiling until it has some. Remediation advice
+/// ("re-submit without X") is only offered when X is the ONLY check that refused; when other checks
+/// refuse too they are named, because "remove the quant tier and it routes" was measurably false
+/// for a payload that also carried `advanced.phases`.
+///
+/// **Classification only:** nothing here decides routing, and every branch returns an
+/// `UnsupportedReason` for a payload the gates had already refused.
 pub(crate) fn classify_candle_image_gap(payload: &Map<String, Value>) -> UnsupportedReason {
     let Some(model) = payload.get("model").and_then(Value::as_str) else {
         return UnsupportedReason::new(None, "image generation", "no model specified.", None);
     };
-    // The sc-5968 case generalized: a candle family with no strict-pose lane asked for poses —
-    // it would otherwise silently render an unconditioned image, so it is a hard gap off-Mac.
-    if image_request_candle_pose_reject(model, payload) {
-        let supported = CANDLE_POSE_MODELS.join(" / ");
+    let refusals = candle_image_refusals(model, payload);
+    let Some(&cause) = refusals.first() else {
+        // No check in the candle image gate refuses this payload, so nothing here can name a gap.
+        // Unreachable from `candle_supported` (an accepted payload is `Ok`), but reachable from a
+        // direct probe — and the honest answer is "this is not a conditioning gap".
         return UnsupportedReason::new(
             Some(model),
-            "strict-pose ControlNet",
-            &format!(
-                "this model has no candle strict-pose lane (candle serves strict pose for \
-                 {supported}); the pose request would otherwise silently render an unconditioned \
-                 image, so it is rejected off-Mac."
-            ),
-            Some("sc-5489"),
+            "candle-routed family refused an unconditioned request",
+            "this candle family is routed off-Mac and the request carries no reference / source / \
+             mask / LoRA / pose / phase / quant conditioning the candle image gate refuses, so no \
+             conditioning gap explains the refusal — some other shape check outside that gate \
+             declined it. Treat this as a routing defect worth filing rather than a missing engine \
+             feature.",
+            Some("sc-20530"),
         );
-    }
-    if !CANDLE_ROUTED_MODELS.contains(&model) {
-        return UnsupportedReason::new(
+    };
+    // "…and it is ALSO refused by X + Y", or empty when `cause` is the only refusal. Every
+    // remediation below is guarded on this being empty.
+    let also: String = {
+        let rest: Vec<&str> = refusals
+            .iter()
+            .skip(1)
+            .map(|refusal| refusal.label())
+            .collect();
+        if rest.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " This request is ALSO refused by {rest}, so removing only the cause named above \
+                 will not route it.",
+                rest = rest.join(" + ")
+            )
+        }
+    };
+    let mode = payload.get("mode").and_then(Value::as_str).unwrap_or("");
+    const SCALAR_CARRIERS: [&str; 3] = ["sourceAssetId", "referenceAssetId", "maskAssetId"];
+    let malformed: Vec<&str> = SCALAR_CARRIERS
+        .into_iter()
+        .filter(|key| has_malformed_optional_string(payload, key))
+        .collect();
+    let carriers: Vec<&str> = SCALAR_CARRIERS
+        .into_iter()
+        .filter(|key| has_nonempty_string(payload, key))
+        .chain(
+            has_nonempty_string_array(payload, "referenceAssetIds").then_some("referenceAssetIds"),
+        )
+        .collect();
+
+    match cause {
+        CandleImageRefusal::UnroutedFamily => UnsupportedReason::new(
             Some(model),
             "unsupported image model / shape",
             "this model (or its requested conditioning shape) has no candle/CUDA lane off-Mac \
              until its port lands.",
             Some("epic 3692"),
-        );
+        ),
+        // The SANA lane is the one place a MALFORMED carrier refuses on its own — everywhere else a
+        // number/bool/object where an asset id belongs reads as "absent" to the gate, so if such a
+        // payload is refused at all, something later in the table is what refused it and that is
+        // what gets reported (sc-20525's message must not promise "fix the carrier and it routes"
+        // for a request the carrier never blocked).
+        CandleImageRefusal::SanaCarrier if !malformed.is_empty() => UnsupportedReason::new(
+            Some(model),
+            "malformed conditioning carrier",
+            &format!(
+                "the request carries {names} in a shape that is neither an asset id string nor \
+                 null, so every candle lane fails it closed. This is a malformed payload, not a \
+                 missing candle lane.{remediation}{also}",
+                names = malformed.join(" / "),
+                remediation = if also.is_empty() {
+                    " The same request with a valid or absent carrier may well route."
+                } else {
+                    ""
+                }
+            ),
+            Some("sc-20525"),
+        ),
+        CandleImageRefusal::SanaCarrier => UnsupportedReason::new(
+            Some(model),
+            "conditioning carrier the candle SANA lane cannot consume",
+            &format!(
+                "the candle SANA lane consumes exactly one `referenceAssetId` and nothing else — \
+                 no source/mask, no plural reference set, no controls, no user LoRA, no pose or \
+                 phase schedule, and no quant tier. This request carries {carried}, so the lane \
+                 fails it closed rather than dropping the carrier and rendering a plain \
+                 text-to-image.{also}",
+                carried = if carriers.is_empty() {
+                    "one of those carriers".to_owned()
+                } else {
+                    carriers.join(" + ")
+                }
+            ),
+            Some("sc-18475"),
+        ),
+        // Gated on the SAME family predicate the gate uses: only the families that reserve these
+        // modes for a specialized lane refuse them here. On every other candle family the mode is
+        // NOT what refused, so blaming a missing conditioning image would be a fabricated cause.
+        CandleImageRefusal::ReferenceOnlyMode if carriers.is_empty() => UnsupportedReason::new(
+            Some(model),
+            "conditioning mode with no conditioning image",
+            &format!(
+                "the request declares mode {mode:?}, which needs a source/reference image, but \
+                 carries none — this family reserves that mode for its specialized candle lane, \
+                 which has no request to serve. Re-submit with the asset the mode requires, or as \
+                 plain text_to_image.{also}"
+            ),
+            Some("epic 5480"),
+        ),
+        CandleImageRefusal::ReferenceOnlyMode => UnsupportedReason::new(
+            Some(model),
+            "reference mode this candle family reserves for a specialized lane",
+            &format!(
+                "the request declares mode {mode:?} carrying {names}; this family's specialized \
+                 candle lane owns that mode and did not accept this request's shape, and the \
+                 generic text-to-image lane refuses the mode outright rather than silently \
+                 dropping the conditioning.{also}",
+                names = carriers.join(" + ")
+            ),
+            Some("epic 5480"),
+        ),
+        CandleImageRefusal::EditMode => UnsupportedReason::new(
+            Some(model),
+            "edit_image (img2img / inpaint / outpaint) with no candle edit lane on this family",
+            &format!(
+                "the request declares mode \"edit_image\"{carrying}; this candle family has no \
+                 img2img / inpaint / outpaint lane off-Mac, so the whole edit family is refused \
+                 here rather than reinterpreted as an unconditioned text-to-image.{also}",
+                carrying = if carriers.is_empty() {
+                    String::new()
+                } else {
+                    format!(" carrying {}", carriers.join(" + "))
+                }
+            ),
+            Some("epic 5480"),
+        ),
+        CandleImageRefusal::ConditioningCarrier => UnsupportedReason::new(
+            Some(model),
+            "conditioning carrier with no candle lane on this family",
+            &format!(
+                "the request carries {names} (mode {mode:?}); this candle family has no lane \
+                 that serves that conditioning shape off-Mac.{also}",
+                names = carriers.join(" + "),
+            ),
+            Some("epic 5480"),
+        ),
+        CandleImageRefusal::UserLora => UnsupportedReason::new(
+            Some(model),
+            "user LoRA on a candle family with no adapter lane",
+            &format!(
+                "this candle family advertises no inference adapter slot off-Mac, so a user LoRA / \
+                 LyCORIS cannot be folded onto it; the request is refused rather than rendered \
+                 with the adapter silently dropped.{remediation}{also}",
+                remediation = if also.is_empty() {
+                    " The same prompt without adapters routes to candle."
+                } else {
+                    ""
+                }
+            ),
+            Some("epic 5480"),
+        ),
+        // The sc-5968 case generalized: a candle family with no strict-pose lane asked for poses —
+        // it would otherwise silently render an unconditioned image, so it is a hard gap off-Mac.
+        // A family that DOES have a pose lane reaches here only when that specialized lane already
+        // refused the request's shape, so it gets its own wording rather than the "no lane" claim.
+        CandleImageRefusal::Poses if !model_has_candle_pose_lane(model) => {
+            let supported = CANDLE_POSE_MODELS.join(" / ");
+            UnsupportedReason::new(
+                Some(model),
+                "strict-pose ControlNet",
+                &format!(
+                    "this model has no candle strict-pose lane (candle serves strict pose for \
+                     {supported}); the pose request would otherwise silently render an \
+                     unconditioned image, so it is rejected off-Mac.{also}"
+                ),
+                Some("sc-5489"),
+            )
+        }
+        CandleImageRefusal::Poses => UnsupportedReason::new(
+            Some(model),
+            "strict-pose request this family's candle pose lane did not accept",
+            &format!(
+                "this model HAS a candle strict-pose lane, but it did not accept this request's \
+                 shape, and the generic text-to-image lane refuses any pose set rather than \
+                 silently rendering an unconditioned image.{also}"
+            ),
+            Some("sc-5489"),
+        ),
+        CandleImageRefusal::Phases => UnsupportedReason::new(
+            Some(model),
+            "multi-phase schedule (advanced.phases) with no candle lane on this family",
+            &format!(
+                "the request carries a multi-phase schedule (advanced.phases — the web \
+                 Multi-Phase editor); the candle text-to-image lane renders a single schedule, so \
+                 it is refused rather than silently collapsing every phase but the \
+                 first.{remediation}{also}",
+                remediation = if also.is_empty() {
+                    " This is NOT a conditioning gap: re-submit without advanced.phases and the \
+                     same request routes to candle."
+                } else {
+                    ""
+                }
+            ),
+            Some("epic 5480"),
+        ),
+        CandleImageRefusal::QuantTier => {
+            let bits = candle_requested_quant_bits(payload).unwrap_or_default();
+            UnsupportedReason::new(
+                Some(model),
+                &format!("q{bits} quant tier request on a dense-only candle family"),
+                &format!(
+                    "the request asks for q{bits} (advanced.mlxQuantize = {bits}), but this candle \
+                     family serves dense bf16/fp16 only — it ships no packed q4/q8 tier and does no \
+                     load-time quantization off-Mac. Candle refuses rather than silently rendering \
+                     dense at a tier you did not ask for (sc-5099).{remediation}{also}",
+                    remediation = if also.is_empty() {
+                        " This is NOT a conditioning gap: re-submit without advanced.mlxQuantize \
+                         and the same request routes to candle."
+                    } else {
+                        ""
+                    }
+                ),
+                Some("sc-5099"),
+            )
+        }
     }
-    // A candle txt2img family but a conditioned shape (edit / reference / inpaint / LoRA / quant)
-    // with no candle lane for it (the candle identity/control/edit lanes early-return `Ok`).
-    UnsupportedReason::new(
-        Some(model),
-        "conditioned shape on a txt2img candle family",
-        "this candle family serves text-to-image; the requested edit / reference / inpaint / LoRA / \
-         quant shape has no candle lane for it off-Mac.",
-        Some("epic 5480"),
-    )
 }
 
 /// Name the precise gap for a candle-ineligible `video_generate` job (sc-5502) — the candle-worded
@@ -839,6 +1055,44 @@ pub const NATIVE_CONVERTERS: &[&str] = &[
     "sd3_5_medium_quant",
     "anima_quant",
 ];
+
+/// The subset of [`NATIVE_CONVERTERS`] that has a REAL implementation **off macOS** — i.e. a candle
+/// (`backend-candle`) twin of the MLX converter, not the `Err("… requires macOS")` stub every other
+/// converter compiles to on Windows/Linux (`sceneworks-worker`'s `convert_*` cfg arms).
+///
+/// Today that is exactly one: `flux2_klein_diffusers`, whose candle twin
+/// (`runtime_cuda::providers::flux2::convert_and_assemble`, sc-7459) performs the same single-file →
+/// diffusers key remap as the macOS converter so `flux2_klein_9b_true_v2` installs + converts off-Mac.
+///
+/// This const exists because "does this model require a CONVERTED artifact here?" is a
+/// **per-platform** question, and answering it with [`NATIVE_CONVERTERS`] alone is wrong in a way
+/// that silently breaks a shipped model (sc-20529). Anima is the counter-example: `anima_base` /
+/// `anima_aesthetic` / `anima_turbo` all declare `mlx.requiresConversion` AND ship windows/linux
+/// downloads, but their `anima_quant` converter is macOS-only — off-Mac they legitimately load the
+/// raw `circlestone-labs/Anima` `split_files/` tree with NO converted dir and NO injected
+/// `modelPath` (see `sceneworks-worker`'s `resolve_weights_dir`). Treating them as
+/// "needs conversion" off-Mac would flip three installed models to missing and refuse renders that
+/// work today.
+///
+/// Drift guards (see their tests): the contents are pinned by
+/// `candle_native_converters_registry_contents_are_pinned`, and every id here must also be in
+/// [`NATIVE_CONVERTERS`] (`candle_native_converters_are_a_subset_of_native_converters`).
+pub const CANDLE_NATIVE_CONVERTERS: &[&str] = &["flux2_klein_diffusers"];
+
+/// Whether a model declaring `mlx.converter = converter` loads from a **converted artifact** on the
+/// platform this build targets, so an absent conversion is a hard, actionable install gap rather
+/// than a fall-through to the raw source snapshot.
+///
+/// macOS: every native converter produces the artifact the loader reads. Off macOS: only the
+/// converters in [`CANDLE_NATIVE_CONVERTERS`] do — everything else has no off-Mac convert lane, and
+/// its model either loads from a raw repo directly (Anima) or is macOS-only anyway (LTX).
+pub fn convert_artifact_required_here(converter: &str) -> bool {
+    if cfg!(target_os = "macos") {
+        NATIVE_CONVERTERS.contains(&converter)
+    } else {
+        CANDLE_NATIVE_CONVERTERS.contains(&converter)
+    }
+}
 
 /// `model_convert` is supported for the in-process Rust converters enumerated in
 /// [`NATIVE_CONVERTERS`] (FLUX.2-klein `flux2_klein_diffusers` sc-3136; LTX-2.3 `ltx_video` sc-3240;
