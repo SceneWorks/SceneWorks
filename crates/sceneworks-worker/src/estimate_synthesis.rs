@@ -46,7 +46,9 @@ use gen_core::{
     MemoryGeometry, MemoryNumericTier, MemoryParityContract, MemoryParityResult,
     MemoryProviderContract, MemorySelection, MemoryStrategy,
 };
-use sceneworks_core::memory_calibration::{Geometry as CalibrationGeometry, StrategyRung};
+use sceneworks_core::memory_calibration::{
+    Geometry as CalibrationGeometry, MeasurementLane, StrategyRung,
+};
 
 use crate::memory_strategy::{memory_mode_from_mode_key, CandidateBasis};
 
@@ -271,6 +273,24 @@ pub(crate) const CANDLE_LANE: EstimateLane = EstimateLane {
     failure_posture: FailurePosture::RecoverableError,
 };
 
+/// **The one place the two lane vocabularies are reconciled** (epic 19048 R4, sc-19056).
+///
+/// [`MeasurementLane`] is where a number was captured (it rides calibration evidence, the packaged
+/// video curves and the manifest fit blocks); [`gen_core::MemoryBackend`] is which engine is
+/// executing. They are separate types because `sceneworks-core` deliberately carries no gen-core
+/// dependency, and they answer different questions — but the R4 comparison is meaningless unless
+/// one maps onto the other, so the mapping lives here in the mechanism rather than being re-guessed
+/// at each producer.
+///
+/// Both arms are spelled out so a third lane cannot be added on one side without deciding what it
+/// is on the other.
+pub(crate) const fn lane_of(measured_on: MeasurementLane) -> gen_core::MemoryBackend {
+    match measured_on {
+        MeasurementLane::Mlx => gen_core::MemoryBackend::Mlx,
+        MeasurementLane::Candle => gen_core::MemoryBackend::Candle,
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // The measured basis
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -291,6 +311,20 @@ pub(crate) const CANDLE_LANE: EstimateLane = EstimateLane {
 /// gate need is captured here, so synthesis never re-reads the evidence bundle.
 #[derive(Clone, Debug)]
 pub(crate) struct MeasuredRungBasis {
+    /// **The lane this basis was MEASURED on** (epic 19048 R4, sc-19056).
+    ///
+    /// Every other field here is a number or an identity that reads identically on both backends —
+    /// a byte count, a geometry, a rung, a fingerprint string. Nothing in them says which GPU the
+    /// measurement came off, and the epic's settled position is that "measurements never transfer
+    /// across lanes". So the lane is carried explicitly and
+    /// [`synthesize_estimate_ladder`] refuses a basis whose lane is not the requesting lane's.
+    ///
+    /// The calibration-identity conjunct already in that filter is NOT this guard. A fingerprint is
+    /// a free-form provider string: two lanes publishing a same-named contract, or a candle capture
+    /// arm reusing an MLX arm's fingerprint (sc-19057 is adding exactly such an arm), collide on it
+    /// silently. And an ABI is deliberately lane-neutral — `MEMORY_CALIBRATION_ABI` is one number
+    /// for the whole repo. Neither can express "wrong GPU".
+    pub(crate) lane: gen_core::MemoryBackend,
     pub(crate) rung: StrategyRung,
     pub(crate) parameters: gen_core::MemoryStrategyParameters,
     pub(crate) engaged_composition: Vec<MemoryStrategy>,
@@ -843,7 +877,17 @@ pub(crate) fn synthesize_estimate_ladder(
             let fitted = bases
                 .iter()
                 .filter(|basis| {
-                    basis.rung == strategy_rung(strategy)
+                    // **R4 (sc-19056): a foreign lane's measurement is not a basis.** First
+                    // conjunct deliberately — it is the cheapest and the one whose failure is least
+                    // recoverable. An MLX allocator peak extrapolated into a CUDA admission (or the
+                    // reverse) is not "approximately right"; the two lanes measure different
+                    // hardware, different allocators and different residency semantics, which is
+                    // the whole reason this mechanism keeps per-lane coefficients under one law.
+                    //
+                    // Fail-closed means the basis is DROPPED, not silently rescaled: the rung falls
+                    // through to the weights+headroom floor below, which is this lane's own number.
+                    basis.lane == request.lane.backend
+                        && basis.rung == strategy_rung(strategy)
                         && basis.load_shape == contract.load_shape
                         && basis.engaged_composition == engaged
                         && contract.calibration.as_ref().is_some_and(|identity| {
@@ -1271,6 +1315,165 @@ mod tests {
             production_evidence_sha256: "sc19050-evidence".to_owned(),
             disposition: gen_core::MemoryDecodeQualityDisposition::Admitted,
         }
+    }
+
+    /// A contract with one Implemented optimized rung and a calibration identity, so a fitted basis
+    /// can actually bind. `BoundedAttention` rather than `BoundedDecode`: the attention rung takes
+    /// no decode-geometry policy, so the basis is not additionally gated by the tile-domain scope
+    /// the test above covers.
+    fn lane_fixture_contract() -> MemoryProviderContract {
+        let mut contract = MemoryProviderContract::compatibility_default(
+            "sc19056-lane",
+            gen_core::MemoryBackendRealization::MlxMetal {
+                bounded_wired_residency: true,
+                lazy_or_mmap_materialization: true,
+                explicit_evaluation_and_synchronization: true,
+                cache_eviction: true,
+            },
+        );
+        for capability in &mut contract.strategies {
+            if capability.strategy == MemoryStrategy::BoundedAttention {
+                capability.support = gen_core::MemoryStrategySupport::Implemented;
+                capability.parameters.attention_chunk_sizes = vec![256];
+            }
+        }
+        contract.calibration = Some(gen_core::MemoryCalibrationIdentity::new(
+            "sc19056-lane-fingerprint",
+            contract.load_shape,
+        ));
+        contract
+    }
+
+    /// A measured `BoundedAttention` cell at 1024², tagged with `lane`. Every phase peak is chosen
+    /// so the binding phase is DECODE both at the measured cell and after the 4x extrapolation
+    /// (conditioning is regressor-flat), which keeps
+    /// `ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE` satisfied — this test is about the lane
+    /// conjunct, so no other guard may be the thing that fires.
+    fn lane_basis(
+        contract: &MemoryProviderContract,
+        lane: gen_core::MemoryBackend,
+    ) -> Vec<MeasuredRungBasis> {
+        let engaged = contract.engaged_composition(MemoryStrategy::BoundedAttention);
+        let parameters =
+            floor_smallest_parameters(contract, &engaged).expect("the fixture rung has parameters");
+        let identity = contract.calibration.as_ref().expect("fixture calibration");
+        vec![MeasuredRungBasis {
+            lane,
+            rung: strategy_rung(MemoryStrategy::BoundedAttention),
+            parameters,
+            engaged_composition: engaged,
+            load_shape: contract.load_shape,
+            calibration_abi: identity.abi,
+            calibration_fingerprint: identity.fingerprint.clone(),
+            geometry: geometry(1024, 1024, 1),
+            conditioning_peak_bytes: 1 << 30,
+            denoise_peak_bytes: 2 << 30,
+            decode_peak_bytes: 3 << 30,
+            envelope_peak_bytes: 7 << 30,
+            record_id: "sc19056-lane-basis".to_owned(),
+        }]
+    }
+
+    fn lane_ladder(
+        contract: &MemoryProviderContract,
+        lane: EstimateLane,
+        bases: &[MeasuredRungBasis],
+    ) -> SynthesizedEstimateLadder {
+        synthesize_estimate_ladder(
+            &EstimateRequest {
+                lane,
+                contract,
+                tier: gen_core::MemoryNumericTier {
+                    precision: gen_core::Precision::Bf16,
+                    quant: None,
+                    component_precision_floors: &[],
+                },
+                mode_key: "text_to_image",
+                overlay: None,
+                // 2048²: voxel scale 4.0 against the 1024² basis, so a fitted candidate is
+                // numerically distinguishable from the floor rather than coincidentally equal.
+                geometry: request(2048, 2048, 1),
+                use_pid: false,
+                calibration_fingerprint: Some("sc19056-lane-fingerprint"),
+                headroom_bytes: 1 << 30,
+            },
+            bases,
+        )
+    }
+
+    /// **Epic 19048 R4 / sc-19056: the generic mechanism refuses a foreign lane's measured basis.**
+    ///
+    /// One basis, two requesting lanes, opposite outcomes — and the assertion is on the BASIS KIND
+    /// and the PEAK, not on presence. The MLX request extrapolates the MLX cell (7 GiB envelope x
+    /// voxel scale 4 = 28 GiB, `EstimateFittedCurve`); the candle request, handed the identical
+    /// bytes, refuses them and falls to its own weights+headroom floor (`EstimateFloor`) at a
+    /// different number. A reader that "fell back to the number anyway" would produce the fitted
+    /// peak on both lanes and fail here.
+    ///
+    /// The `_` in the middle is the control that makes this attributable: swapping ONLY the basis
+    /// tag flips the verdict, so the refusal is the lane conjunct and not the lane parameter set
+    /// (margins, posture, headroom) that also differs between `MLX_LANE` and `CANDLE_LANE`.
+    #[test]
+    fn a_foreign_lane_basis_is_refused_rather_than_extrapolated() {
+        let contract = lane_fixture_contract();
+        let mlx_bases = lane_basis(&contract, gen_core::MemoryBackend::Mlx);
+        let candle_bases = lane_basis(&contract, gen_core::MemoryBackend::Candle);
+
+        let native = lane_ladder(&contract, MLX_LANE, &mlx_bases);
+        assert_eq!(native.estimates.len(), 1);
+        assert_eq!(
+            native.estimates[0].basis,
+            CandidateBasis::EstimateFittedCurve
+        );
+        let fitted_peak = native.estimates[0].evidence.predicted_peak_bytes;
+        assert_eq!(fitted_peak, 28 << 30, "7 GiB envelope at voxel scale 4.0");
+
+        // Same bytes, same identity, same geometry — only the measurement lane differs.
+        let foreign = lane_ladder(&contract, MLX_LANE, &candle_bases);
+        assert_eq!(foreign.estimates.len(), 1);
+        assert_eq!(
+            foreign.estimates[0].basis,
+            CandidateBasis::EstimateFloor,
+            "a candle-measured cell must not seed an MLX extrapolation"
+        );
+        let floor_peak = foreign.estimates[0].evidence.predicted_peak_bytes;
+        assert_ne!(
+            floor_peak, fitted_peak,
+            "falling closed must reach a DIFFERENT number, not re-derive the foreign one"
+        );
+
+        // ...and symmetrically, so the guard is not an MLX-only accident.
+        let reverse = lane_ladder(&contract, CANDLE_LANE, &mlx_bases);
+        assert_eq!(
+            reverse.estimates[0].basis,
+            CandidateBasis::EstimateFloor,
+            "an MLX-measured cell must not seed a candle extrapolation"
+        );
+        let reverse_native = lane_ladder(&contract, CANDLE_LANE, &candle_bases);
+        assert_eq!(
+            reverse_native.estimates[0].basis,
+            CandidateBasis::EstimateFittedCurve,
+            "the candle lane still consumes its OWN basis — the guard is the lane, not a blanket \
+             refusal of fitted candidates on this lane"
+        );
+    }
+
+    /// [`lane_of`] is a bijection onto the lane constants, not merely total.
+    ///
+    /// A transposed arm would be invisible to the guard it feeds: every MLX basis would arrive
+    /// tagged candle, the R4 conjunct would compare candle to candle, and the refusal would never
+    /// fire — a silent hole rather than a failure. Graded against `MLX_LANE`/`CANDLE_LANE`'s own
+    /// backends, which [`the_fatal_lane_carries_the_wider_margin`] independently pins to the
+    /// gen-core variants, so this cannot be satisfied by transposing both sides together.
+    #[test]
+    fn the_measurement_lane_and_the_runtime_lane_map_onto_each_other() {
+        assert_eq!(lane_of(MeasurementLane::Mlx), MLX_LANE.backend);
+        assert_eq!(lane_of(MeasurementLane::Candle), CANDLE_LANE.backend);
+        assert_ne!(
+            lane_of(MeasurementLane::Mlx),
+            lane_of(MeasurementLane::Candle),
+            "a collapsing map would make every lane comparison trivially true"
+        );
     }
 
     /// The two lanes' postures and margins travel together: the fatal-abort lane is never the

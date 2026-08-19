@@ -26,6 +26,8 @@ use gen_core::MemoryStrategy;
 #[cfg(test)]
 use serde_json::Value;
 
+use sceneworks_core::memory_calibration::MeasurementLane;
+
 use crate::fit_gate::BYTES_PER_GIB;
 pub(crate) use crate::fit_gate::{resolve_offload, FitDecision};
 
@@ -491,6 +493,21 @@ fn krea_test_load_spec(tier: &str) -> gen_core::LoadSpec {
 /// observe. The identity itself is pinned bitwise over the real committed curves, not asserted
 /// against a default.
 ///
+/// ## The lane tag (sc-18812's sibling hazard, closed by sc-19056 / epic 19048 R4)
+///
+/// The three coefficients above are a backend-neutral FORM carrying lane-specific NUMBERS. That is
+/// not a hypothetical: `docs/generated/ltx-temporal-form-fit-sc-18810.json` emits objects of exactly
+/// this shape from MLX LTX captures, [`tests::ltx_cross_curve`] lifts them without adaptation, and
+/// [`tests::the_ltx_fitted_curve_round_trips_through_the_shipped_reader`] evaluates them through
+/// this very function. Nothing about the object says which GPU produced it. `expected_lane` is
+/// therefore a required argument rather than an ambient assumption: a curve that NAMES a lane is
+/// evaluated only by that lane's reader, and a mismatch (or an unrecognized lane spelling) fails the
+/// curve closed exactly as a malformed coefficient does.
+///
+/// An ABSENT `measurementLane` inherits the enclosing fit block's REQUIRED tag, which
+/// [`krea_rung_phase_peaks`] has already checked before it reaches any curve — so there is no
+/// untagged state, and the 36 shipped image curves need no per-curve migration.
+///
 /// A PRESENT `perMpxFrameGb` that `json_f64` cannot read still fails closed, and so does a
 /// negative or non-finite one. Only true absence is zero; a malformed value must not silently
 /// degrade a video curve into an image curve. "Unreadable" is `json_f64`'s notion, not JSON's:
@@ -512,7 +529,19 @@ fn krea_test_load_spec(tier: &str) -> gen_core::LoadSpec {
 /// decrease; the manifest names each such pair. `maxMeasuredPixels` remains 1024² because larger
 /// attention shapes have not been validated, so the curve is fitted within that bound rather than
 /// extrapolated beyond it.
-fn krea_phase_curve(phase: &JsonObject, geometry: CurveGeometry) -> Option<f64> {
+fn krea_phase_curve(
+    phase: &JsonObject,
+    geometry: CurveGeometry,
+    expected_lane: MeasurementLane,
+) -> Option<f64> {
+    if let Some(declared) = phase.get("measurementLane") {
+        // Present-but-foreign and present-but-unreadable both refuse. Only true ABSENCE inherits
+        // the container's tag — the same discipline `perMpxFrameGb` follows above, for the same
+        // reason: a value we cannot read must never degrade into a value we invent.
+        if MeasurementLane::from_key(declared.as_str()?)? != expected_lane {
+            return None;
+        }
+    }
     let fixed = phase.get("fixedGb").and_then(json_f64)?;
     let per_mpx = phase.get("perMpxGb").and_then(json_f64)?;
     let per_mpx_frame = match phase.get("perMpxFrameGb") {
@@ -537,6 +566,39 @@ fn krea_phase_curve(phase: &JsonObject, geometry: CurveGeometry) -> Option<f64> 
     let temporal_term =
         per_mpx_frame * geometry.pixels as f64 / 1_000_000.0 * f64::from(geometry.frames);
     Some(fixed + area_term + temporal_term)
+}
+
+/// **This module's own measurement lane** (epic 19048 R4, sc-19056).
+///
+/// Every reader in this file compiles only under
+/// `cfg(all(not(target_os = "macos"), feature = "backend-candle"))` and grades against an
+/// `nvidia-smi` budget, so the lane is a fact about the module, not a runtime choice. Named as data
+/// so the comparison below is a value comparison a test can flip, rather than a literal buried in a
+/// condition.
+pub(crate) const READER_MEASUREMENT_LANE: MeasurementLane = MeasurementLane::Candle;
+
+/// **The lane guard for a coefficient container** (epic 19048 R4, sc-19056).
+///
+/// `Some(lane)` only when the container declares a lane tag AND that lane is this reader's. Missing,
+/// malformed, and foreign all return `None`, which fails the whole fit closed: the caller abandons
+/// the optimized ladder and keeps its pre-existing floor, rather than pricing a render off numbers
+/// measured on other hardware.
+///
+/// Missing is refused rather than defaulted for the reason the epic's decision names — measurements
+/// never transfer across lanes, and the `candle` KEY this block hangs under is authored, not
+/// measured. An operator `user.models.jsonc` entry replaces the whole `candle` object wholesale
+/// (`apps/rust-api/src/manifest.rs::merge_entries_by_id`), so "it is under `candle`, therefore it
+/// was measured on candle" is precisely the inference this guard exists to stop. A legacy or
+/// third-party block that predates the tag degrades to the legacy scalar gate, which is the
+/// fail-closed direction; it never degrades to using the untagged numbers anyway.
+///
+/// This deliberately does NOT subsume the calibration handshake beside it. `calibrationAbi` /
+/// `calibrationFingerprint` / `inferenceClosureDigest` answer "is this measurement still current for
+/// this build"; a fingerprint is a free-form provider string two lanes can collide on, and the ABI
+/// is one repo-wide number. Neither can express "wrong GPU".
+fn container_measurement_lane(container: &Value) -> Option<MeasurementLane> {
+    let declared = MeasurementLane::from_key(container.get("measurementLane")?.as_str()?)?;
+    (declared == READER_MEASUREMENT_LANE).then_some(declared)
 }
 
 /// The typed materialization shape the shipped Krea Turbo curves were measured under (sc-17097).
@@ -589,6 +651,9 @@ fn krea_rung_phase_peaks(
     frames: u32,
 ) -> Option<KreaTurboPhasePeaks> {
     let turbo_fit = manifest_entry.get("candle")?.get("turboFit")?;
+    // R4 (sc-19056): establish the lane BEFORE reading a single coefficient, so a foreign block
+    // cannot influence the envelope bounds either.
+    let lane = container_measurement_lane(turbo_fit)?;
     let pixels = u64::from(width).checked_mul(u64::from(height))?;
     let max_measured_pixels = turbo_fit.get("maxMeasuredPixels")?.as_u64()?;
     if pixels > max_measured_pixels {
@@ -610,7 +675,7 @@ fn krea_rung_phase_peaks(
     let phase = |name: &str| {
         rung.get(name)
             .and_then(Value::as_object)
-            .and_then(|curve| krea_phase_curve(curve, geometry))
+            .and_then(|curve| krea_phase_curve(curve, geometry, lane))
     };
     Some(KreaTurboPhasePeaks {
         text_gb: phase("text")?,
@@ -719,6 +784,12 @@ pub(crate) fn krea_turbo_fit_with_runtime(
 
     let budget = budget?;
     let turbo_fit = manifest_entry.get("candle")?.get("turboFit")?;
+    // R4 (sc-19056): the lane handshake, ahead of the calibration handshake below because it is the
+    // cheaper and more fundamental question — "was this measured on our hardware at all" precedes
+    // "is it still current". A foreign or untagged block abandons the optimized ladder entirely
+    // (`None`), leaving `generate_candle_stream` on the legacy scalar gate rather than admitting a
+    // render against a peak nobody measured here.
+    container_measurement_lane(turbo_fit)?;
     let calibration_fingerprint = turbo_fit.get("calibrationFingerprint")?.as_str()?;
     let calibration_abi = turbo_fit.get("calibrationAbi")?.as_u64()? as u32;
     // sc-17097: calibration ABI 2 added the typed load shape, but this route never read it - the
@@ -2089,6 +2160,12 @@ fn video_weights_too_big_error(
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::collections::BTreeSet;
+
+    /// This module's lane, spelled once for the curve-reader call sites (sc-19056). Deliberately
+    /// the same value [`READER_MEASUREMENT_LANE`] carries rather than a second literal: a test that
+    /// hardcoded `Candle` would keep passing if the production constant were flipped.
+    const CANDLE: MeasurementLane = READER_MEASUREMENT_LANE;
 
     fn obj(value: Value) -> JsonObject {
         value.as_object().expect("object literal").clone()
@@ -2114,6 +2191,7 @@ mod tests {
                     // `builtin_krea_turbo_calibration_abi_tracks_the_pinned_provider` and
                     // `builtin_krea_turbo_resident_admission_passes_the_provider_handshake` are the
                     // tests that read the SHIPPED values, and neither patches anything.
+                    "measurementLane": "candle",
                     "calibrationAbi": gen_core::MEMORY_CALIBRATION_ABI,
                     "loadShape": "deferred_materialization",
                     "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
@@ -2358,7 +2436,7 @@ mod tests {
             let per_mpx = curve["perMpxGb"].as_f64().expect("perMpxGb");
             for pixels in [512 * 512_u64, 768 * 768, 1024 * 1024, 1_000_001, 3] {
                 let expected = fixed + per_mpx * pixels as f64 / 1_000_000.0;
-                let actual = krea_phase_curve(curve, CurveGeometry { pixels, frames: 1 })
+                let actual = krea_phase_curve(curve, CurveGeometry { pixels, frames: 1 }, CANDLE)
                     .expect("a shipped curve evaluates");
                 assert_eq!(
                     actual.to_bits(),
@@ -2369,8 +2447,9 @@ mod tests {
                 // ...and the temporal axis must be inert on a curve that declares no temporal
                 // coefficient, at every frame count, not merely at 1.
                 for frames in [1_u32, 2, 121, 297, 450] {
-                    let temporal = krea_phase_curve(curve, CurveGeometry { pixels, frames })
-                        .expect("a shipped curve evaluates at any frame count");
+                    let temporal =
+                        krea_phase_curve(curve, CurveGeometry { pixels, frames }, CANDLE)
+                            .expect("a shipped curve evaluates at any frame count");
                     assert_eq!(
                         temporal.to_bits(),
                         expected.to_bits(),
@@ -2393,7 +2472,8 @@ mod tests {
         }));
         let pixels = 1280 * 704_u64;
         let at = |frames: u32| {
-            krea_phase_curve(&curve, CurveGeometry { pixels, frames }).expect("curve evaluates")
+            krea_phase_curve(&curve, CurveGeometry { pixels, frames }, CANDLE)
+                .expect("curve evaluates")
         };
         let expected = |frames: u32| {
             2.5151564578656265
@@ -2442,7 +2522,8 @@ mod tests {
                     CurveGeometry {
                         pixels: 1_000_000,
                         frames: 1
-                    }
+                    },
+                    CANDLE
                 ),
                 None,
                 "a curve carrying perMpxFrameGb {bad} must not evaluate"
@@ -2456,7 +2537,8 @@ mod tests {
                 CurveGeometry {
                     pixels: 1_000_000,
                     frames: 1
-                }
+                },
+                CANDLE
             ),
             Some(1.0 + 2.0 + 0.25)
         );
@@ -2471,11 +2553,167 @@ mod tests {
                 CurveGeometry {
                     pixels: 1_000_000,
                     frames: 1
-                }
+                },
+                CANDLE
             ),
             Some(1.0 + 2.0 + 0.25),
             "a numeric string is readable, not malformed: the schema rejects the type, not this reader"
         );
+    }
+
+    /// **sc-19056 / epic 19048 R4, guard 1 of 3: a curve that names a foreign lane fails closed.**
+    ///
+    /// One coefficient set, three lane tags, and the pair of verdicts is what discriminates:
+    /// the same bytes evaluate under `candle` and refuse under `mlx`. A reader that ignored the tag
+    /// would return the identical number for both.
+    ///
+    /// Absence is the third case and is deliberately NOT a refusal here — it inherits the fit
+    /// block's required tag, which [`krea_rung_phase_peaks`] has already checked (guard 2). Stating
+    /// it out loud stops this test being read as "an untagged curve is rejected", which it is not.
+    #[test]
+    fn a_curve_tagged_with_a_foreign_lane_fails_closed() {
+        let tagged = |lane: Value| {
+            let mut curve = json!({ "fixedGb": 1.0, "perMpxGb": 2.0 });
+            curve["measurementLane"] = lane;
+            obj(curve)
+        };
+        let at = |curve: &JsonObject| {
+            krea_phase_curve(
+                curve,
+                CurveGeometry {
+                    pixels: 1_000_000,
+                    frames: 1,
+                },
+                CANDLE,
+            )
+        };
+        assert_eq!(
+            at(&tagged(json!("candle"))),
+            Some(3.0),
+            "our own lane's coefficients evaluate"
+        );
+        assert_eq!(
+            at(&obj(json!({ "fixedGb": 1.0, "perMpxGb": 2.0 }))),
+            Some(3.0),
+            "an untagged curve inherits the container tag, which the caller has already checked"
+        );
+        assert_eq!(
+            at(&tagged(json!("mlx"))),
+            None,
+            "an MLX-measured curve must not be priced on the candle lane"
+        );
+        // Unreadable is foreign: a lane we cannot name is not a lane we may assume is ours.
+        for bad in [
+            json!("Candle"),
+            json!("cuda"),
+            json!(""),
+            json!(null),
+            json!(1),
+        ] {
+            assert_eq!(
+                at(&tagged(bad.clone())),
+                None,
+                "measurementLane {bad} must not evaluate"
+            );
+        }
+    }
+
+    /// **Guard 1, on REAL foreign coefficients.**
+    ///
+    /// The synthetic case above proves the comparison; this proves it is pointed at the hazard the
+    /// story names. `docs/generated/ltx-temporal-form-fit-sc-18810.json` holds MLX-lane LTX
+    /// coefficients in exactly this reader's wire shape, and
+    /// [`the_ltx_fitted_curve_round_trips_through_the_shipped_reader`] shows them evaluating
+    /// correctly for the lane that measured them. Here the same three curves are handed to the
+    /// candle reader and every one refuses — with the MLX verdict asserted alongside so the refusal
+    /// is attributable to the lane and not to the coefficients being unreadable.
+    #[test]
+    fn an_mlx_fitted_curve_is_refused_by_the_candle_reader() {
+        let fit = ltx_temporal_fit();
+        let lane = ltx_fit_lane(&fit);
+        assert_eq!(
+            lane,
+            MeasurementLane::Mlx,
+            "this test's premise is that the sc-18810 fit is MLX evidence"
+        );
+        assert_ne!(lane, CANDLE, "...and that it is therefore foreign here");
+        let geometry = CurveGeometry {
+            pixels: 1280 * 704,
+            frames: 121,
+        };
+        for phase in ["text", "denoise", "decode"] {
+            let curve = ltx_cross_curve(&fit, phase);
+            let native = krea_phase_curve(&curve, geometry, lane)
+                .expect("the measuring lane still evaluates its own curve");
+            assert!(
+                native > 1.0,
+                "{phase}: the control must be a real prediction, not a degenerate zero"
+            );
+            assert_eq!(
+                krea_phase_curve(&curve, geometry, CANDLE),
+                None,
+                "{phase}: candle admission must refuse MLX-fitted coefficients, not price {native} \
+                 GiB off them"
+            );
+        }
+    }
+
+    /// **Guard 2 of 3: the fit BLOCK's lane tag, enforced before any coefficient is read.**
+    ///
+    /// Graded over the shipped manifest, so the admitting case is the real evidence rather than a
+    /// fixture. Every mutation removes only the lane tag — the calibration handshake, the closure
+    /// digest, the envelope bounds and all 36 curves stay exactly as shipped — so the refusal
+    /// cannot be attributed to anything else.
+    #[test]
+    fn a_fit_block_with_a_missing_or_foreign_lane_tag_refuses_every_rung() {
+        let peaks = |manifest: &JsonObject| {
+            krea_rung_phase_peaks(
+                manifest,
+                "q8",
+                MemoryStrategy::StagedResidency,
+                1024,
+                1024,
+                1,
+            )
+        };
+        let shipped = builtin_krea_turbo_manifest();
+        assert_eq!(
+            shipped["candle"]["turboFit"]["measurementLane"].as_str(),
+            Some("candle"),
+            "the shipped fit must declare the lane it was measured on"
+        );
+        let admitted = peaks(&shipped).expect("the shipped candle fit admits on the candle lane");
+        assert!(
+            admitted.peak_gb() > 1.0,
+            "the control must be a real predicted peak"
+        );
+
+        for (label, lane) in [
+            ("a foreign lane", Some(json!("mlx"))),
+            ("an unrecognized lane", Some(json!("cuda"))),
+            ("a non-string lane", Some(json!(true))),
+            ("no lane at all", None),
+        ] {
+            let mut mutated = builtin_krea_turbo_manifest();
+            let fit = mutated
+                .get_mut("candle")
+                .and_then(|candle| candle.get_mut("turboFit"))
+                .and_then(Value::as_object_mut)
+                .expect("turboFit");
+            match lane {
+                Some(value) => {
+                    fit.insert("measurementLane".to_owned(), value);
+                }
+                None => {
+                    fit.remove("measurementLane");
+                }
+            }
+            assert_eq!(
+                peaks(&mutated),
+                None,
+                "{label} must abandon the optimized ladder, not fall back to the numbers anyway"
+            );
+        }
     }
 
     /// A zero-frame geometry is nonsense, not a still. Pricing it as the bare intercept would
@@ -2489,7 +2727,8 @@ mod tests {
                 CurveGeometry {
                     pixels: 1_000_000,
                     frames: 0
-                }
+                },
+                CANDLE
             ),
             None
         );
@@ -2499,7 +2738,8 @@ mod tests {
                 CurveGeometry {
                     pixels: 1_000_000,
                     frames: 1
-                }
+                },
+                CANDLE
             ),
             Some(5.0)
         );
@@ -2590,8 +2830,34 @@ mod tests {
         .expect("the sc-18810 fit report parses")
     }
 
+    /// The lane every observation behind the sc-18810 fit was captured on, READ from the committed
+    /// report rather than assumed (sc-19056).
+    ///
+    /// Unanimity is asserted, not sampled: a fit mixing lanes would not be a lane-taggable curve at
+    /// all, and silently taking the first record's backend would hide exactly that.
+    fn ltx_fit_lane(fit: &Value) -> MeasurementLane {
+        let observations = fit["observations"].as_array().expect("observations");
+        let lanes: BTreeSet<&str> = observations
+            .iter()
+            .map(|observation| observation["backend"].as_str().expect("record backend"))
+            .collect();
+        assert_eq!(
+            lanes.len(),
+            1,
+            "a fit spanning {lanes:?} could not carry one measurement lane"
+        );
+        MeasurementLane::from_key(lanes.into_iter().next().expect("one lane"))
+            .expect("a recognized measurement lane")
+    }
+
     /// The `cross` coefficients for one phase, in MANIFEST WIRE SHAPE — exactly the object a
-    /// `phaseVramCurve` is, with no adaptation.
+    /// `phaseVramCurve` is, with no adaptation, INCLUDING its `measurementLane` (sc-19056).
+    ///
+    /// The lane is derived from the report's own records ([`ltx_fit_lane`]) rather than written in
+    /// here, so this fixture cannot claim a provenance the evidence does not carry. That is what
+    /// makes it usable as the foreign-lane case in
+    /// [`an_mlx_fitted_curve_is_refused_by_the_candle_reader`]: those are real MLX coefficients,
+    /// not a synthetic object with a lane string bolted on.
     ///
     /// Note that `fits[phase].q8.chosen` is the per-series RMSE winner and is NOT uniformly
     /// `cross` (text ranks `area_only` first, denoise ranks `latent_tokens` first). The schema
@@ -2606,9 +2872,14 @@ mod tests {
         assert_eq!(
             declared,
             ["fixedGb", "perMpxGb", "perMpxFrameGb"],
-            "{phase}: the fitted coefficient set must BE a phaseVramCurve, not merely resemble one"
+            "{phase}: the fitted COEFFICIENT set must BE a phaseVramCurve's, not merely resemble it"
         );
-        coefficients
+        let mut curve = coefficients;
+        curve.insert(
+            "measurementLane".to_owned(),
+            json!(ltx_fit_lane(fit).as_key()),
+        );
+        curve
     }
 
     /// WHY `cross` and not one of the four rivals, graded from the committed fit report rather
@@ -2742,6 +3013,9 @@ mod tests {
                         pixels: width * height,
                         frames,
                     },
+                    // The curve's OWN lane (sc-19056): these are MLX coefficients, so the MLX
+                    // reader is the only one entitled to evaluate them.
+                    ltx_fit_lane(&fit),
                 )
                 .expect("the fitted LTX curve evaluates through the shipped reader");
                 let observed = observation["activeGib"][phase]
@@ -2790,6 +3064,7 @@ mod tests {
                         .expect("phase")
                         .1,
                     geometry,
+                    ltx_fit_lane(&fit),
                 )
                 .expect("the fitted curve evaluates")
             };
@@ -3159,6 +3434,92 @@ mod tests {
             })
         ));
         assert!(matches!(fit(10.0), Some(KreaTurboFit::Reject { .. })));
+    }
+
+    /// **Guard 3 of 3: the admission ENTRY POINT refuses a foreign or untagged fit block.**
+    ///
+    /// [`krea_turbo_fit_with_runtime`] reads `turboFit` for a great deal more than the phase
+    /// curves — the calibration handshake, the load shape, `maxMeasuredPixels`, the evidence
+    /// records, the strategy parameters — and it answers on paths that never reach a curve at all.
+    /// The most important of those is the ENVELOPE decision: `maxMeasuredPixels` is read straight
+    /// off the block, so without a gate here a foreign block gets to say how far this lane may
+    /// extrapolate. The 2048² case below is exactly that path, and it is the one the container gate
+    /// inside [`krea_rung_phase_peaks`] cannot cover, because it returns before any rung is priced.
+    ///
+    /// `None` rather than `Unverified` is the verdict, and the difference is the point. An
+    /// `Unverified` fit still travels as an answer ABOUT this evidence — it is what an in-lane block
+    /// returns when the geometry is out of envelope. `None` means "this is not evidence I can read
+    /// at all", which drops the caller to the legacy scalar gate. Fail-closed is the second thing,
+    /// not the first.
+    #[test]
+    fn a_foreign_lane_fit_block_yields_no_krea_turbo_fit_at_all() {
+        let at = |manifest: &JsonObject, edge: u32, free_gb: f64| {
+            krea_turbo_fit(
+                manifest,
+                "q4",
+                edge,
+                edge,
+                Some(VramBudget {
+                    free_gb,
+                    total_gb: free_gb,
+                }),
+                true,
+            )
+        };
+        // Three controls spanning every arm this entry point can answer on, so no refusal below can
+        // be explained by a budget or a geometry: 40 GiB admits the unoptimized resident peak,
+        // 24 GiB forces an optimized rung, and 2048² is past `maxMeasuredPixels` and answers
+        // WITHOUT pricing a single curve.
+        let control = krea_fit_manifest();
+        assert!(
+            matches!(
+                at(&control, 1024, 40.0),
+                Some(KreaTurboFit::Resident { .. })
+            ),
+            "the roomy control: a candle-tagged fit admits resident"
+        );
+        assert!(
+            matches!(at(&control, 1024, 24.0), Some(KreaTurboFit::Fits { .. })),
+            "the constrained control: a candle-tagged fit selects an optimized rung"
+        );
+        assert!(
+            matches!(
+                at(&control, 2048, 40.0),
+                Some(KreaTurboFit::Unverified {
+                    reason: gen_core::MemoryEvidenceVerdict::OutOfEnvelope
+                })
+            ),
+            "the out-of-envelope control: an in-lane block still ANSWERS, it just answers unverified"
+        );
+
+        for (label, lane) in [
+            ("a foreign lane", Some(json!("mlx"))),
+            ("an unrecognized lane", Some(json!("candle "))),
+            ("no lane at all", None),
+        ] {
+            let mut manifest = krea_fit_manifest();
+            let block = manifest
+                .get_mut("candle")
+                .and_then(Value::as_object_mut)
+                .and_then(|candle| candle.get_mut("turboFit"))
+                .and_then(Value::as_object_mut)
+                .expect("turboFit");
+            match lane {
+                Some(value) => {
+                    block.insert("measurementLane".to_owned(), value);
+                }
+                None => {
+                    block.remove("measurementLane");
+                }
+            }
+            for (edge, free_gb) in [(1024, 40.0), (1024, 24.0), (2048, 40.0)] {
+                assert!(
+                    at(&manifest, edge, free_gb).is_none(),
+                    "{label} at {edge}px / {free_gb} GiB must produce no fit at all — not a verdict \
+                     derived from its numbers, and not an envelope bound taken on its word"
+                );
+            }
+        }
     }
 
     #[test]

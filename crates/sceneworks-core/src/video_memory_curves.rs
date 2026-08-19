@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::memory_calibration::StrategyRung;
+use crate::memory_calibration::{MeasurementLane, StrategyRung};
 
 pub const VIDEO_MEMORY_CURVE_SCHEMA_VERSION: u32 = 2;
 pub const PACKAGED_VIDEO_MEMORY_CURVES: &str =
@@ -78,21 +78,12 @@ pub struct VideoMemoryCurve {
     pub evidence: VideoCurveEvidenceSummary,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum VideoCurveBackend {
-    Mlx,
-    Candle,
-}
-
-impl VideoCurveBackend {
-    pub const fn as_key(self) -> &'static str {
-        match self {
-            Self::Mlx => "mlx",
-            Self::Candle => "candle",
-        }
-    }
-}
+/// The measurement lane this container is tagged with.
+///
+/// sc-19056 folded the enum this module used to define into [`MeasurementLane`], the one lane type
+/// epic 19048 R4 tags every coefficient container with. Same variants, same `snake_case` wire form,
+/// same `as_key`; the alias keeps this module's vocabulary while removing the second definition.
+pub type VideoCurveBackend = MeasurementLane;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

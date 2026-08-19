@@ -2018,6 +2018,12 @@ fn collect_estimate_bases(
                 _ => return None,
             };
             Some(MeasuredRungBasis {
+                // sc-19056: the lane is READ OFF THE RECORD, not restated from the query above.
+                // The two cannot differ today — `evidence_for` matches `record.backend` against
+                // `query.backend` — and that is exactly why deriving it costs nothing and asserting
+                // it would be a second declaration free to drift. What it buys is that a future
+                // edit widening this walk to other lanes tags each basis correctly by construction.
+                lane: crate::estimate_synthesis::lane_of(record.backend),
                 rung: binding.rung,
                 parameters: binding.selection_parameters,
                 engaged_composition: record
@@ -9854,6 +9860,7 @@ mod tests {
         // 12 GiB denoise and 5 GiB decode) — the exact shape of the corpus example behind the
         // constraint.
         let basis = MeasuredRungBasis {
+            lane: gen_core::MemoryBackend::Mlx,
             rung: StrategyRung::BoundedDecode,
             parameters: gen_core::MemoryStrategyParameters {
                 decode_tile_edge: Some(512),
