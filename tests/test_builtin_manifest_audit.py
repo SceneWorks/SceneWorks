@@ -1696,6 +1696,24 @@ def test_flux2_true_v2_manifest_install_time_conversion():
     assert mlx["quantize"] == 0
 
 
+def test_flux2_dev_carries_no_inert_mac_only_flag():
+    """sc-20530: `flux2_dev` is candle-routed off-Mac (epic 6564) AND MLX on Apple Silicon, so the
+    `macOnly: true` it used to carry was inert *and* misleading — the flag is read only by the video
+    catalog-withdrawal contract (`video_model_withdrawn_on_platform`, gated on `type == "video"`)
+    and by the id-pinned vision captioner in the web eligibility helpers, neither of which sees an
+    image entry with this id. Removed, not flipped to false, and pinned absent like the klein pair
+    so it cannot creep back. `flux2_klein_9b_true_v2` deliberately KEEPS its flag: that entry is an
+    install-time MLX conversion target with no candle lane.
+    """
+    model = next(
+        model
+        for model in _load_builtin_models_manifest()["models"]
+        if model["id"] == "flux2_dev"
+    )
+    assert model["type"] == "image"
+    assert "macOnly" not in model
+
+
 def test_flux2_klein_manifest_entries_present():
     # Both flux2_klein_9b and flux2_klein_9b_kv must be present in the
     # builtin manifest with the expected adapter + family + mlx block.

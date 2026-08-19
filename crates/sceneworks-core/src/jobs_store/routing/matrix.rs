@@ -3289,6 +3289,79 @@ mod tests {
         assert!(checked_in_matrix_matches_live(checked_in, live).is_ok());
     }
 
+    /// sc-20530 (adversarial review). `stamp_absent_optional_carriers` is the whole reason this
+    /// matrix can see the sc-20525 defect class — a gate that misreads the `null` the API stamps on
+    /// every unset optional carrier. It was completely unpinned when it landed: deleting the
+    /// function left every test in the crate green, because with sc-20525 merged no CELL value
+    /// moves. Cell drift therefore cannot witness it; the probe payload itself has to be asserted.
+    ///
+    /// The probe must carry the production encoding: an `Option<String>` carrier serializes as an
+    /// explicit `null` and a `Vec<String>` carrier as `[]` (`ImageJobRequest` / `VideoJobRequest`,
+    /// `apps/rust-api/src/dto.rs` — neither field carries `skip_serializing_if`).
+    #[test]
+    fn probes_carry_the_production_optional_carrier_encoding() {
+        let image = probe_job(
+            JobType::ImageGenerate,
+            "sana_1600m",
+            json!({ "mode": "text_to_image", "prompt": "p" }),
+        )
+        .expect("image probe is structurally valid");
+        for key in ["sourceAssetId", "referenceAssetId", "maskAssetId"] {
+            assert_eq!(
+                image.payload.get(key),
+                Some(&Value::Null),
+                "an image probe must stamp {key} as the explicit null production sends, not omit it"
+            );
+        }
+        assert_eq!(
+            image.payload.get("referenceAssetIds"),
+            Some(&Value::Array(Vec::new())),
+            "the plural image carrier is a Vec<String>, so production sends [] not null"
+        );
+
+        let video = probe_job(
+            JobType::VideoGenerate,
+            "wan_2_2",
+            json!({ "mode": "text_to_video", "prompt": "p" }),
+        )
+        .expect("video probe is structurally valid");
+        for key in [
+            "sourceAssetId",
+            "lastFrameAssetId",
+            "sourceClipAssetId",
+            "bridgeRightClipAssetId",
+            "referenceClipAssetId",
+        ] {
+            assert_eq!(
+                video.payload.get(key),
+                Some(&Value::Null),
+                "a video probe must stamp {key} as the explicit null production sends"
+            );
+        }
+        for key in ["referenceAssetIds", "sourceClipAssetIds"] {
+            assert_eq!(
+                video.payload.get(key),
+                Some(&Value::Array(Vec::new())),
+                "{key} is a Vec<String>, so production sends [] not null"
+            );
+        }
+
+        // A carrier the probe SUPPLIES is never overwritten — stamping is fill-the-absent only, or
+        // every conditioned probe in the matrix would silently degrade to an unconditioned one.
+        let edit = probe_job(
+            JobType::ImageEdit,
+            "sdxl",
+            json!({ "mode": "edit_image", "prompt": "p", "sourceAssetId": "asset_1" }),
+        )
+        .expect("edit probe is structurally valid");
+        assert_eq!(
+            edit.payload.get("sourceAssetId").and_then(Value::as_str),
+            Some("asset_1"),
+            "a probe-supplied carrier must survive the stamp"
+        );
+        assert_eq!(edit.payload.get("maskAssetId"), Some(&Value::Null));
+    }
+
     #[test]
     fn source_capture_contract_rejects_key_and_digest_shape_mutations() {
         let checked_in: BackendCapabilityMatrix = serde_json::from_str(CHECKED_IN).unwrap();
