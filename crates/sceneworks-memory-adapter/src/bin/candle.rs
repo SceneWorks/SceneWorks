@@ -2759,12 +2759,15 @@ fn run_wan(request: &Value) -> Result<Value, String> {
             "resolvedPathFingerprint": loadability_fingerprint(&repository, &revision, &tier),
         },
         // NB there is no top-level `output` block here, deliberately. The MLX LTX arm emits one, but
+        // the harness spreads this whole fragment into the record verbatim
+        // (`{...fragment, ...}` in scripts/memory-calibration-harness.mjs), and
         // `packages/schemas/memory-calibration.schema.json`'s record object is
-        // `additionalProperties: false` and declares no `output` property — the harness copies a
-        // fixed field set out of the fragment, so that block never reaches a record and its
-        // `firstFrameNondegenerate` claim is validated by nobody. The same facts are carried below,
-        // in `diagnostics.measurements`, which DOES land in the record and which the video-curve fit
-        // already reads.
+        // `additionalProperties: false` — any stray top-level key, `output` included, reds the
+        // schema check on the finished record, after the renders that produced it already burned.
+        // Omitting `output` is therefore load-bearing, not a filtered-out field: nothing here
+        // trims the fragment down. The `firstFrameNondegenerate` claim it would have carried is
+        // instead in `diagnostics.measurements` below, which DOES land in the record and which the
+        // video-curve fit already reads.
         "diagnostics": protocol::diagnostics(
             "memory-candle-adapter:wan2-2-ti2v-5b-video",
             "executed",

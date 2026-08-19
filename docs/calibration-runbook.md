@@ -1681,6 +1681,16 @@ non-collinear geometry points plus at least one held-out row, so if the lane bud
 row (`704x1280 f189`, the heaviest) may be dropped and the remaining five still fit. Dropping more
 than that makes the slice singular.
 
+**q8 runs from a separate copy of the plan, never an in-place edit.** The committed plan's
+`target.tier` must stay `q4` — `platform-review-contracts.test.mjs` pins every row's tier to
+`candleDefaults[0].variant`, so a committed q8 swap reds that gate. An in-place *uncommitted* swap
+is just as unusable: the harness stamps every record with each repository's dirty flag from `git
+status --porcelain`, which counts untracked changes, so editing the plan inside this checkout
+dirties SceneWorks and the whole q8 sweep is discarded at `check` (§5, and the `--output`/
+`--raw-log-dir` note above). Instead, copy `wan-candle-video-capture-plan.json` to a path OUTSIDE
+the checkout, swap `q4` → `q8` in that copy's `target.tier`, `name`, and `fixture` tokens, and point
+`--config` at the copy.
+
 **Cost is unmeasured on this lane — measure yours and report it, do not promise a number.** What is
 known: the shipped `candle.vramGbByTier` for this model was measured on an idle RTX PRO 6000 at
 `832x480 x 121` frames, 20 steps, CFG on (sc-13175), and the peak is the denoise attention transient
