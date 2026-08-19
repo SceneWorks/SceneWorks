@@ -13,9 +13,21 @@
  *
  *  2. **The decision baseline.** Admission decisions over a model x tier x geometry x budget
  *     corpus, committed as a diffable artifact. Later slices red on any decision change they did
- *     not enumerate and justify (epic requirement R6). Nothing here needs a GPU: the candle gate is
- *     a pure function of the manifest entry, the tier key and a synthetic `VramBudget`, exactly as
- *     `vram_gate.rs`'s own unit tests drive it.
+ *     not enumerate and justify (epic requirement R6).
+ *
+ *     **The decisions are NOT computed here.** They are read from
+ *     `docs/generated/candle-admission-decisions.json`, produced by
+ *     `crates/sceneworks-worker/src/candle_admission_decisions.rs` driving
+ *     `crates/sceneworks-worker/src/candle_scalar_gate.rs` â€” the functions the request actually
+ *     reaches. A baseline re-derived by the generator that writes it is circular: it reds when it
+ *     disagrees with itself and stays green while production drifts. Nothing needs a GPU either
+ *     way; the scalar gate is a pure function of the manifest entry, the tier key and a synthetic
+ *     `VramBudget`, which is why it was lifted out of the candle-only `vram_gate` module and can
+ *     now be driven from the ordinary `cargo test` lane.
+ *
+ *     The JS mirror further down this file is RETAINED as a readable statement of the same law and
+ *     is reconciled row-for-row against the Rust output by the test suite; it is no longer what the
+ *     artifact is built from.
  *
  * Usage:
  *   node scripts/generate-candle-admission-inventory.mjs             # regenerate the artifacts
@@ -118,8 +130,11 @@ export const SOURCE_PATHS = Object.freeze({
   // dispatch and `memory_route_registry.rs`'s rules are both keyed on.
   engines: "crates/sceneworks-worker/src/engines.rs",
 
-  // The admission surface itself.
+  // The admission surface itself. `candle_scalar_gate.rs` is the PURE half of the legacy scalar
+  // gate, lifted out of `vram_gate.rs` by sc-19049 so it compiles (and can therefore be driven by
+  // the Rust decision emitter) off a CUDA lane; `vram_gate.rs` re-exports every item.
   fitGate: "crates/sceneworks-worker/src/fit_gate.rs",
+  candleScalarGate: "crates/sceneworks-worker/src/candle_scalar_gate.rs",
   vramGate: "crates/sceneworks-worker/src/vram_gate.rs",
   candleMemoryStrategy: "crates/sceneworks-worker/src/candle_memory_strategy.rs",
   memoryRouteRegistry: "crates/sceneworks-worker/src/memory_route_registry.rs",
@@ -169,7 +184,9 @@ export const SOURCE_PATHS = Object.freeze({
 export const ADMISSION_MECHANISMS = Object.freeze([
   {
     id: "legacy_scalar_gate",
-    source: "vramGate",
+    // The pure arithmetic lives in `candle_scalar_gate.rs` since sc-19049; `vram_gate.rs`
+    // re-exports it, so every call site below is unchanged.
+    source: "candleScalarGate",
     definitionSymbols: Object.freeze([
       "predicted_peak_gb",
       "predicted_peak_gb_with_adapter_bytes",
@@ -374,17 +391,23 @@ const MODULE_KEYED_MECHANISMS = Object.freeze([
 /** The synthetic budgets the baseline gates against, in GB. `free_gb == total_gb` (a cold card). */
 export const BASELINE_BUDGETS_GB = Object.freeze([12, 24, 48, 96]);
 
-/** Image geometry corpus. Square rungs spanning the ladder the calibration plan uses. */
+/**
+ * Image geometry corpus. Square rungs spanning the ladder the calibration plan uses.
+ *
+ * There is no video geometry corpus any more. Every candle video route resolves to
+ * `not_evaluated` â€” the flat per-family fit errors take weight bytes measured off the resolved
+ * model dir â€” and a row that publishes no decision must not publish a coordinate either. The two
+ * clip lengths this file used to cross every video route with produced 0-of-N variance, which is
+ * the signature of a fabricated axis rather than a measured one.
+ *
+ * Kept in lockstep with `IMAGE_GEOMETRIES` in
+ * `crates/sceneworks-worker/src/candle_admission_decisions.rs`, which is what actually drives the
+ * gate; `generate-candle-admission-inventory.test.mjs` pins the two equal.
+ */
 export const BASELINE_IMAGE_GEOMETRIES = Object.freeze([
   Object.freeze({ width: 1024, height: 1024, frames: 1 }),
   Object.freeze({ width: 1536, height: 1536, frames: 1 }),
   Object.freeze({ width: 2048, height: 2048, frames: 1 }),
-]);
-
-/** Video geometry corpus: two clip lengths at two resolutions, so a frames term is visible. */
-export const BASELINE_VIDEO_GEOMETRIES = Object.freeze([
-  Object.freeze({ width: 768, height: 512, frames: 49 }),
-  Object.freeze({ width: 1280, height: 720, frames: 81 }),
 ]);
 
 function sha256(body) {
@@ -408,6 +431,38 @@ export async function readSources({ overrides = {} } = {}) {
     );
   }
   return { bodies, read };
+}
+
+/**
+ * The Rust-emitted decision artifact this generator CONSUMES.
+ *
+ * Deliberately NOT in [`SOURCE_PATHS`]. `SOURCE_PATHS` is the set of sources the inventory's facts
+ * are DERIVED from, and its hash is what makes the inventory go stale; this file is derived from the
+ * inventory (the emitter reads the route universe out of it), so fingerprinting it would close a
+ * loop â€” regenerate, hash, regenerate. It is instead identified by its own digest, recorded in the
+ * baseline's provenance, so a decision change is still visible in the committed diff and still fails
+ * `--check`.
+ */
+export const DECISIONS_PATH = "docs/generated/candle-admission-decisions.json";
+
+/**
+ * Read the Rust-emitted decisions. Produced by
+ * `SCENEWORKS_REGENERATE_CANDLE_ADMISSION=1 cargo test -p sceneworks-worker candle_admission_decisions`,
+ * which drives `crates/sceneworks-worker/src/candle_scalar_gate.rs` â€” the code the request actually
+ * reaches â€” rather than any re-implementation of it here.
+ */
+export async function readDecisions({ override } = {}) {
+  const raw =
+    override ?? canonicalSourceText(await readFile(path.join(ROOT, DECISIONS_PATH), "utf8"));
+  const parsed = JSON.parse(raw);
+  if (!Array.isArray(parsed.rows) || parsed.rows.length === 0) {
+    throw new Error(
+      `${DECISIONS_PATH} carries no decision rows. Produce it with ` +
+        "`SCENEWORKS_REGENERATE_CANDLE_ADMISSION=1 cargo test -p sceneworks-worker " +
+        "candle_admission_decisions`.",
+    );
+  }
+  return { ...parsed, digest: `sha256:${sha256(raw)}` };
 }
 
 /** `source-tree:<sha256>` over the semantic body of every declared source, NUL-joined in order. */
@@ -515,9 +570,206 @@ export function parseBespokeOverrideEngines(bodies) {
   return ids;
 }
 
+// -------------------------------------------------------------------------------------------------
+// Geometry-awareness, resolved PER GATE FUNCTION
+//
+// "Is this gate geometry-aware?" is a property of ONE function's signature, not of a mechanism. Two
+// mistakes are easy here and both were made before sc-19049's review:
+//
+//  1. **Unioning across a mechanism.** `flat_video_fit_error` names seven symbols. `svd_fit_error`
+//     and `mochi_fit_error` take `(frames, width, height)`; `wan_video_fit_error*`,
+//     `scail2_video_fit_error*` and `video_weights_fit_error` are deliberately resolution-blind. A
+//     union labels the wan/scail2/LTX routes geometry-aware on the strength of SVD's signature â€” a
+//     claim about a function those routes never call.
+//  2. **Scanning parameter TOKENS for `width:`.** Geometry also arrives inside a struct:
+//     `krea_control_fit::fit_ladder_for_entry_with_runtime` takes `geometry: MemoryGeometry` and
+//     `candle_memory_strategy::evaluate_shared_image` takes the same, while
+//     `VideoMemoryCurveBundle::evaluate` takes `query: VideoCurveQuery` whose `geometry` field is a
+//     `VideoCurveGeometry`. A token scan reports all three as geometry-blind, which is the exact
+//     inverse of the truth.
+//
+// So a symbol's axes are resolved from its parsed parameter list, with struct-typed parameters
+// resolved to their FIELDS â€” recursively, and from either the type's `struct` definition or a
+// struct-literal construction of it anywhere in the fingerprinted tree (`gen_core::MemoryGeometry`
+// is declared in the pinned inference dependency, but it is BUILT in `vram_gate.rs` and
+// `krea_control_fit.rs`, so its field set is recoverable from sources this artifact already hashes).
+// -------------------------------------------------------------------------------------------------
+
+/** Field names that carry request geometry. `pixels`/`voxels` are pre-multiplied forms of the same. */
+const GEOMETRY_FIELDS = Object.freeze(["width", "height", "frames", "pixels", "voxels"]);
+
+/** Rust primitives â€” a parameter of one of these types has no fields to resolve. */
+const SCALAR_TYPE = /^(?:bool|char|str|String|u8|u16|u32|u64|u128|usize|i8|i16|i32|i64|isize|f32|f64)$/;
+
+/** Split a Rust parameter/field list on TOP-LEVEL commas (generics and tuples nest). */
+function splitTopLevel(text) {
+  const parts = [];
+  let depth = 0;
+  let current = "";
+  for (const char of text) {
+    if ("<([{".includes(char)) depth += 1;
+    else if (">)]}".includes(char)) depth -= 1;
+    if (char === "," && depth <= 0) {
+      parts.push(current);
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  if (current.trim()) parts.push(current);
+  return parts.map((part) => part.trim()).filter(Boolean);
+}
+
 /**
- * Per-mechanism derived facts: the modules that call its entry symbols, and whether the gate is
- * geometry-aware â€” read off the entry symbol's own parameter list rather than declared here.
+ * Reduce a Rust type expression to the bare type NAME whose fields we might resolve: strip
+ * references, `mut`, lifetimes, `dyn`/`impl`, and unwrap the single-argument container generics that
+ * do not change the shape of the value (`Option`, `Box`, `Rc`, `Arc`, `Cow`).
+ */
+export function bareTypeName(type) {
+  let text = type
+    .replace(/\bdyn\b|\bimpl\b|\bmut\b/g, " ")
+    .replace(/&\s*'[a-z_][\w]*/g, " ")
+    .replace(/&/g, " ")
+    .trim();
+  for (let guard = 0; guard < 6; guard += 1) {
+    const wrapper = text.match(/^(Option|Box|Rc|Arc|Cow)\s*<([\s\S]*)>$/);
+    if (!wrapper) break;
+    text = wrapper[2].replace(/^\s*'[a-z_][\w]*\s*,\s*/, "").trim();
+  }
+  text = text.replace(/<[\s\S]*$/, "").trim();
+  const segments = text.split("::").filter(Boolean);
+  return segments.length ? segments[segments.length - 1].trim() : "";
+}
+
+/** Parse `name: Type` pairs out of a struct body or a parameter list. */
+function parseNamedFields(text) {
+  const fields = [];
+  for (const part of splitTopLevel(text)) {
+    const cleaned = part.replace(/#\[[\s\S]*?\]/g, "").replace(/\/\/[^\n]*/g, "");
+    const match = cleaned.match(/(?:pub(?:\s*\([^)]*\))?\s+)?([A-Za-z_]\w*)\s*:\s*([\s\S]+)$/);
+    if (!match) continue;
+    fields.push({ name: match[1], type: match[2].trim() });
+  }
+  return fields;
+}
+
+/**
+ * The field list of `typeName`, from its `struct` definition in a fingerprinted source or â€” for a
+ * type declared in the pinned inference dependency â€” from a struct-literal construction of it.
+ * `null` when neither exists, which the caller reports rather than silently reading as "no fields".
+ */
+export function resolveStructFields(bodies, typeName) {
+  if (!typeName || SCALAR_TYPE.test(typeName)) return null;
+  for (const [name, body] of Object.entries(bodies)) {
+    if (!SOURCE_PATHS[name].endsWith(".rs")) continue;
+    const definition = body.match(
+      new RegExp(`struct\\s+${typeName}\\s*(?:<[^>{]*>)?\\s*\\{([\\s\\S]*?)\\n\\}`),
+    );
+    if (definition) return { fields: parseNamedFields(definition[1]), via: "definition" };
+  }
+  for (const [name, body] of Object.entries(bodies)) {
+    if (!SOURCE_PATHS[name].endsWith(".rs")) continue;
+    const literal = body.match(new RegExp(`\\b${typeName}\\s*\\{([^{}]*)\\}`));
+    if (!literal) continue;
+    const named = parseNamedFields(literal[1]).map((field) => field.name);
+    // Shorthand initializers (`MemoryGeometry { width, height, .. }`) carry the field name alone.
+    const shorthand = splitTopLevel(literal[1])
+      .filter((part) => /^[A-Za-z_]\w*$/.test(part))
+      .map((part) => part.trim());
+    const fields = [...new Set([...named, ...shorthand])].map((field) => ({
+      name: field,
+      type: "",
+    }));
+    return fields.length ? { fields, via: "struct_literal" } : null;
+  }
+  return null;
+}
+
+/**
+ * The geometry axes a struct type carries, following nested geometry-bearing fields.
+ *
+ * `seen` is the CURRENT PATH, not a global visit log, and the bound is on DEPTH. A shared visit set
+ * bounded by size silently truncates a wide struct: `VideoCurveQuery` names four unrelated enums
+ * before its `geometry` field, so a five-entry global budget stops looking exactly one field early
+ * and reports the one geometry-aware gate in `sceneworks-core` as geometry-blind.
+ */
+function structGeometryAxes(bodies, typeName, depth = 0, seen = new Set()) {
+  if (depth > 3 || seen.has(typeName)) return { axes: new Set(), resolved: true };
+  const resolved = resolveStructFields(bodies, typeName);
+  if (!resolved) return { axes: new Set(), resolved: false };
+  const path = new Set([...seen, typeName]);
+  const axes = new Set();
+  for (const field of resolved.fields) {
+    if (GEOMETRY_FIELDS.includes(field.name)) axes.add(field.name);
+    const nested = bareTypeName(field.type);
+    if (!nested || SCALAR_TYPE.test(nested)) continue;
+    // A nested type that resolves to nothing is not a failure of THIS parameter — enums and opaque
+    // handles are expected. Only the parameter's own type failing to resolve is reportable.
+    for (const axis of structGeometryAxes(bodies, nested, depth + 1, path).axes) axes.add(axis);
+  }
+  return { axes, resolved: true };
+}
+
+/**
+ * Resolve ONE gate function's geometry-awareness. Returns the axes, how they were reached, and any
+ * parameter type that could not be resolved â€” published rather than silently read as "no geometry".
+ */
+export function resolveSymbolGeometry(bodies, sourceKey, symbol) {
+  const body = bodies[sourceKey];
+  if (!body) return null;
+  const signature = body.match(
+    new RegExp(`fn\\s+${symbol}\\s*(?:<[^>{(]*>)?\\s*\\(([\\s\\S]*?)\\)\\s*(?:->|\\{)`),
+  );
+  if (!signature) return null;
+
+  const axes = new Set();
+  const reachedVia = new Set();
+  const unresolved = [];
+  for (const parameter of parseNamedFields(signature[1])) {
+    const type = bareTypeName(parameter.type);
+    if (GEOMETRY_FIELDS.includes(parameter.name) && (!type || SCALAR_TYPE.test(type))) {
+      axes.add(parameter.name);
+      reachedVia.add("scalar_parameter");
+      continue;
+    }
+    if (!type || SCALAR_TYPE.test(type)) continue;
+    const { axes: structAxes, resolved } = structGeometryAxes(bodies, type);
+    if (!resolved) {
+      unresolved.push({ parameter: parameter.name, type });
+      // A parameter NAMED for geometry whose type cannot be resolved is the failure mode that
+      // produced this whole class of bug. Refuse rather than under-report it.
+      if (/geom/i.test(parameter.name)) {
+        throw new Error(
+          `${symbol}: parameter \`${parameter.name}: ${type}\` looks like request geometry, but ` +
+            `${type}'s fields could not be resolved from any fingerprinted source (no struct ` +
+            "definition and no struct-literal construction). Add the declaring or constructing " +
+            "source to SOURCE_PATHS; reporting the gate as geometry-blind would invert the truth.",
+        );
+      }
+      continue;
+    }
+    if (structAxes.size > 0) {
+      for (const axis of structAxes) axes.add(axis);
+      reachedVia.add(`struct_parameter:${parameter.name}:${type}`);
+    }
+  }
+
+  return {
+    symbol,
+    geometryAware: axes.size > 0,
+    geometryAxes: [...axes].sort(),
+    reachedVia: [...reachedVia].sort(),
+    unresolvedParameterTypes: unresolved,
+  };
+}
+
+/**
+ * Per-mechanism derived facts: the modules that call its entry symbols, and â€” per SYMBOL, never
+ * unioned â€” whether that gate function is geometry-aware.
+ *
+ * `geometryAware` at the mechanism level is retained only as "at least one of my symbols is", which
+ * is what the summary table reports. Route rows and baseline rows bind to `symbols[]` instead, so a
+ * `wan_video_fit_error` route is never labelled geometry-aware because `svd_fit_error` is.
  */
 export function deriveMechanismFacts(bodies) {
   const facts = [];
@@ -530,38 +782,76 @@ export function deriveMechanismFacts(bodies) {
         if (call.test(productionBody(body))) callers.add(name);
       }
     }
-    const definitionSource = mechanism.source ? bodies[mechanism.source] : null;
-    const geometryParameters = new Set();
-    let definitionsSeen = 0;
-    if (definitionSource) {
+    const symbols = [];
+    if (mechanism.source) {
       for (const symbol of mechanism.definitionSymbols) {
-        const definition = definitionSource.match(
-          new RegExp(`fn\\s+${symbol}\\s*(?:<[^>]*>)?\\s*\\(([\\s\\S]*?)\\)\\s*->`),
-        );
-        if (!definition) continue;
-        definitionsSeen += 1;
-        for (const axis of ["width", "height", "frames"]) {
-          if (new RegExp(`\\b${axis}\\s*:`).test(definition[1])) geometryParameters.add(axis);
-        }
+        const resolved = resolveSymbolGeometry(bodies, mechanism.source, symbol);
+        if (resolved) symbols.push(resolved);
       }
-      if (definitionsSeen === 0) {
+      if (symbols.length === 0) {
         throw new Error(
           `mechanism "${mechanism.id}": none of its definition symbols exist in ` +
             `${SOURCE_PATHS[mechanism.source]}. The taxonomy has drifted from the tree.`,
         );
       }
     }
+    const unionAxes = new Set(symbols.flatMap((entry) => entry.geometryAxes));
     facts.push({
       id: mechanism.id,
       summary: mechanism.summary,
       definedIn: mechanism.source ? SOURCE_PATHS[mechanism.source] : null,
       definitionSymbols: [...mechanism.definitionSymbols],
-      geometryAware: geometryParameters.size > 0,
-      geometryAxes: [...geometryParameters].sort(),
+      symbols,
+      // "Some symbol of this mechanism is geometry-aware" â€” a summary, NOT a per-route claim.
+      geometryAware: symbols.some((entry) => entry.geometryAware),
+      geometryAxes: [...unionAxes].sort(),
+      geometryAwareSymbols: symbols.filter((entry) => entry.geometryAware).map((e) => e.symbol),
+      geometryBlindSymbols: symbols.filter((entry) => !entry.geometryAware).map((e) => e.symbol),
       calledFrom: [...callers].sort().map((name) => SOURCE_PATHS[name]),
     });
   }
   return facts;
+}
+
+/**
+ * `gate label -> geometry fact`, keyed by the labels the Rust emitter stamps on every decision row.
+ * This is the join that lets `candle_admission_decisions.rs`'s `gate_is_geometry_aware` match be
+ * checked against a derivation instead of standing as a second hand-written claim: `buildBaseline`
+ * throws when the two disagree for any gate that appears in the decisions.
+ */
+export function deriveGateGeometry(mechanismFacts) {
+  const gates = new Map();
+  for (const mechanism of mechanismFacts) {
+    for (const entry of mechanism.symbols) {
+      const labels = [entry.symbol];
+      // The Rust side labels the scalar gate and the two module-owned gates by their module path.
+      if (entry.symbol === "load_plan") labels.push("candle_scalar_gate::load_plan");
+      if (entry.symbol === "fit_ladder_for_entry_with_runtime") {
+        labels.push("krea_control_fit::fit_ladder_for_entry_with_runtime");
+      }
+      if (entry.symbol === "decide") labels.push("conditioning_fit::decide");
+      for (const label of labels) {
+        gates.set(label, {
+          gate: label,
+          mechanism: mechanism.id,
+          definedIn: mechanism.definedIn,
+          geometryAware: entry.geometryAware,
+          geometryAxes: entry.geometryAxes,
+          reachedVia: entry.reachedVia,
+        });
+      }
+    }
+  }
+  // The sentinel the emitter uses for a route no gate is keyed to.
+  gates.set("none", {
+    gate: "none",
+    mechanism: "unreached",
+    definedIn: null,
+    geometryAware: false,
+    geometryAxes: [],
+    reachedVia: [],
+  });
+  return gates;
 }
 
 /** `IMAGE_MODEL_CAPS` / `VIDEO_MODEL_CAPS` rows, split by modality so a route knows its own axes. */
@@ -785,9 +1075,16 @@ export function parseVideoCurveLanes(videoMemoryCurvesData) {
 }
 
 // -------------------------------------------------------------------------------------------------
-// The candle legacy scalar gate, mirrored exactly. Every branch below is a line-for-line reading of
-// `vram_gate.rs`; the source fingerprint above is what forces this artifact to be regenerated (and
-// the mirror re-reviewed) the moment any of it changes.
+// The candle legacy scalar gate, MIRRORED. Every branch below is a line-for-line reading of
+// `crates/sceneworks-worker/src/candle_scalar_gate.rs`.
+//
+// This mirror does NOT produce the baseline any more â€” `candle_admission_decisions.rs` does, by
+// calling the Rust functions themselves. It is kept because a readable statement of the admission
+// law beside the inventory is worth having, and because a second independent implementation catches
+// a class of transcription error a single implementation cannot. It is only defensible while it is
+// CHECKED: `generate-candle-admission-inventory.test.mjs`'s "the JS gate mirror reproduces the
+// Rust-emitted decision for every evaluated row" reconciles the two coordinate by coordinate and
+// fails on any drift. Delete the mirror rather than let that test lapse.
 // -------------------------------------------------------------------------------------------------
 
 const NVFP4_TIER = "nvfp4";
@@ -1188,6 +1485,12 @@ export function buildInventory(bodies) {
       overrideOnlyRequestScopes: dispatch.overrideOnly,
     },
     mechanisms: mechanismFacts,
+    // `gate label -> geometry fact`, keyed by the labels the Rust emitter stamps on decision rows.
+    // Published so the baseline can bind each row's `geometrySensitive` to the gate that row's route
+    // actually reaches, instead of to whether ANY symbol of ANY mechanism it touches is geometry-aware.
+    gateGeometry: [...deriveGateGeometry(mechanismFacts).values()].sort((a, b) =>
+      a.gate.localeCompare(b.gate),
+    ),
     videoBindings,
     imageLaneBindings: laneBindings,
     routes,
@@ -1227,6 +1530,10 @@ export function buildInventory(bodies) {
  */
 function knownGaps({ curveLanes, routes }) {
   const missingFingerprint = [
+    // sc-19049 moved the scalar gate's arithmetic here out of `vram_gate.rs`, which the matrix DOES
+    // fingerprint. The matrix therefore no longer rotates on a change to the candle scalar gate at
+    // all, which makes closing this gap strictly more urgent than it was when it listed five files.
+    "crates/sceneworks-worker/src/candle_scalar_gate.rs",
     "crates/sceneworks-worker/src/candle_memory_strategy.rs",
     "crates/sceneworks-worker/src/video_admission.rs",
     "crates/sceneworks-worker/src/conditioning_fit.rs",
@@ -1239,11 +1546,14 @@ function knownGaps({ curveLanes, routes }) {
       owner: "sc-19059",
       severity: "high",
       detail:
-        "scripts/generate-memory-matrix.mjs's SOURCE_PATHS omits five files that decide candle " +
-        "admission, so a change to any of them leaves docs/generated/memory-matrix.json's " +
-        "source-tree revision unrotated and the matrix claims a currency it does not have. Adding " +
-        "them rotates the matrix fingerprint and forces a full regeneration, so epic 19048's " +
-        "terminal acceptance story owns the fix rather than every slice paying for it.",
+        `scripts/generate-memory-matrix.mjs's SOURCE_PATHS omits ${missingFingerprint.length} ` +
+        "files that decide candle admission, so a change to any of them leaves " +
+        "docs/generated/memory-matrix.json's source-tree revision unrotated and the matrix claims " +
+        "a currency it does not have. `candle_scalar_gate.rs` joined the list in sc-19049: the " +
+        "scalar gate's arithmetic moved there out of `vram_gate.rs`, which the matrix DOES " +
+        "fingerprint, so the matrix now rotates on none of the candle admission law. Adding them " +
+        "rotates the matrix fingerprint and forces a full regeneration, so epic 19048's terminal " +
+        "acceptance story owns the fix rather than every slice paying for it.",
       paths: missingFingerprint,
     },
     {
@@ -1270,6 +1580,27 @@ function knownGaps({ curveLanes, routes }) {
       paths: ["docs/generated/video-memory-curves.json"],
     },
     {
+      id: "candle-sequential-capability-needs-the-linked-candle-bundle",
+      owner: "sc-19050",
+      severity: "high",
+      detail:
+        "The candle txt2img gate's `sequential_capable` input is " +
+        "`mlx_fit_gate::engine_supports_sequential(engine_id)` â€” a query against the LINKED " +
+        "provider bundle's descriptor (sc-12130 forbids a second engine-id allowlist in the " +
+        "worker). The manifest's advisory `candle.supportsSequentialOffload` key is NOT that input " +
+        "and diverges from it in BOTH directions on the bundles that can be linked here (the MLX " +
+        "bundle answers true for sdxl/lens/krea_2_raw/krea_2_turbo/qwen_image_edit and friends " +
+        "where the manifest says false, and false for the six mage_flow ids where the manifest " +
+        "says true). The candle bundle needs a CUDA toolchain to link, so no CPU lane can resolve " +
+        "it; every evaluated baseline row therefore records the plan for BOTH values of the input " +
+        "rather than committing another bundle's answer. sc-19050, which extracts the shared " +
+        "prediction law, is where the capability becomes a first-class input.",
+      paths: [
+        "crates/sceneworks-worker/src/image_jobs/base.rs",
+        "crates/sceneworks-worker/src/mlx_fit_gate.rs",
+      ],
+    },
+    {
       id: "candle-image-admission-is-geometry-blind",
       owner: "sc-19054",
       severity: "high",
@@ -1285,72 +1616,117 @@ function knownGaps({ curveLanes, routes }) {
 }
 
 /**
- * Build the decision baseline: admission decisions over model x tier x geometry x budget.
+ * Build the decision baseline from the RUST-EMITTED decisions.
  *
- * ## Two resolutions, stated per row rather than blurred
+ * ## The candle rows are not computed here
  *
- * Candle rows are `evaluated`: every field is the output of the mirrored gate above, which is a
- * complete reading of the candle scalar path. MLX rows are `declared`: they record the floor the
- * manifest publishes and whether the model reaches the evidence ladder, but they do NOT re-derive
- * `mlx_fit_gate`'s estimate synthesis. Mirroring that here would fork the very prediction law
- * sc-19050 is about to extract into shared code â€” the fork, not the absence, is what would make a
- * later diff meaningless. Once sc-19050 lands, the MLX rows gain the same `evaluated` resolution
- * through the extracted module, and THAT slice's empty-diff obligation is against these rows.
+ * They are `docs/generated/candle-admission-decisions.json`, produced by
+ * `crates/sceneworks-worker/src/candle_admission_decisions.rs` driving
+ * `crates/sceneworks-worker/src/candle_scalar_gate.rs` â€” the functions the request actually reaches.
+ * This function joins each Rust row to the inventory context for the same route (mechanisms, shared
+ * selector verdict, whether the tier is advertised) and stamps the backend. The JS mirror further up
+ * this file is retained as a readable statement of the law, and
+ * `generate-candle-admission-inventory.test.mjs` reconciles it row-for-row against these decisions,
+ * so it cannot drift silently.
  *
- * MLX rows carry no geometry or budget axis, because a declared floor has no geometry response to
- * record; emitting one would fabricate a column of constants.
+ * ## Three resolutions, stated per row rather than blurred
+ *
+ * * **`evaluated`** â€” the row is the output of the gate that route reaches. Today that is the
+ *   legacy scalar gate, on the image routes whose base txt2img request lands there.
+ * * **`not_evaluated`** â€” the route reaches a DIFFERENT gate, and that gate needs an input no CPU
+ *   lane can produce (weight bytes measured off the resolved model dir, a runtime artifact probe, a
+ *   registered `MemoryProviderContract`). The row names the gate and the missing input, and carries
+ *   NO geometry or budget axis, because a decision that was never taken must not publish a
+ *   coordinate response. Stamping these with the scalar gate's answer â€” which is what this file did
+ *   before â€” records decisions their gates never produced.
+ * * **`declared`** (MLX) â€” the manifest floor and evidence-ladder reachability, without re-deriving
+ *   `mlx_fit_gate`'s estimate synthesis. Mirroring that here would fork the very prediction law
+ *   sc-19050 is about to extract into shared code; the fork, not the absence, is what would make a
+ *   later diff meaningless. Once sc-19050 lands these gain `evaluated` through the extracted module,
+ *   and THAT slice's empty-diff obligation is against these rows.
+ *
+ * ## `sequentialCapable` is enumerated, not resolved
+ *
+ * Production takes it from `mlx_fit_gate::engine_supports_sequential(engine_id)` â€” a query against
+ * the LINKED provider bundle's descriptor (sc-12130 explicitly forbids a second engine-id allowlist
+ * in the worker). The manifest's advisory `candle.supportsSequentialOffload` key is NOT that input,
+ * and reading it here produced hundreds of rows whose `loadPlan` flipped `reject`â†”`sequential` on
+ * tight budgets. The candle bundle can only be linked with a CUDA toolchain, so every evaluated row
+ * instead records the plan for BOTH values of the input; nothing is invented, and the day the
+ * capability resolves each row narrows to one branch â€” a visible, enumerable diff.
  */
-export function buildBaseline(bodies, inventory) {
+export function buildBaseline(bodies, inventory, decisions) {
   const entries = manifestEntries(bodies.manifest);
   const lanes = routedLanes({
     routingCatalog: bodies.routingCatalog,
     routingCandle: bodies.routingCandle,
     routingMlx: bodies.routingMlx,
   });
-  const headroomGb = parseHeadroomGb(bodies.fitGate);
   const { revision } = sourceRevisionOf(bodies);
 
-  const candleRows = [];
-  for (const route of inventory.routes) {
-    const entry = entries.get(route.modelId) ?? null;
-    const geometries =
-      route.modality === "video" ? BASELINE_VIDEO_GEOMETRIES : BASELINE_IMAGE_GEOMETRIES;
-    const sequentialCapable = route.evidence.supportsSequentialOffload;
-    for (const tier of TIER_ORDER) {
-      const neededGb = predictedPeakGb(entry, tier, headroomGb);
-      const sequentialGb = predictedSequentialPeakGb(entry, tier, headroomGb);
-      for (const geometry of geometries) {
-        for (const budgetGb of BASELINE_BUDGETS_GB) {
-          const budget = { freeGb: budgetGb, totalGb: budgetGb };
-          candleRows.push({
-            backend: "candle",
-            resolution: "evaluated",
-            modelId: route.modelId,
-            engineId: route.engineId,
-            modality: route.modality,
-            tier,
-            tierAdvertised: route.evidence.measuredTiers.includes(tier),
-            width: geometry.width,
-            height: geometry.height,
-            frames: geometry.frames,
-            budgetGb,
-            mechanisms: route.mechanisms,
-            sharedSelectorVia: route.sharedSelector.via,
-            predictedPeakGb: round(neededGb),
-            predictedSequentialPeakGb: round(sequentialGb),
-            sequentialCapable,
-            fitDecision: resolveOffload(fitDecision(neededGb, budget), sequentialCapable),
-            loadPlan: loadPlan(neededGb, sequentialGb, budget, sequentialCapable),
-            // The whole point of the baseline: today this is false for every row whose mechanism
-            // list does not contain a geometry-aware gate. sc-19054 flips it, visibly.
-            geometrySensitive: route.mechanisms.some((id) =>
-              inventory.mechanisms.find((mechanism) => mechanism.id === id)?.geometryAware,
-            ),
-          });
-        }
-      }
+  const routesById = new Map(inventory.routes.map((route) => [route.modelId, route]));
+  const gateGeometry = new Map(inventory.gateGeometry.map((gate) => [gate.gate, gate]));
+
+  // Every gate the emitter stamped must be a gate this generator independently resolved, and the two
+  // must AGREE about geometry-awareness. This is what stops `gate_is_geometry_aware`'s Rust match
+  // from becoming a second hand-written claim.
+  for (const row of decisions.rows) {
+    const gate = gateGeometry.get(row.gate);
+    if (!gate) {
+      throw new Error(
+        `the decision emitter stamped gate "${row.gate}" (route ${row.modelId}), which this ` +
+          "generator resolved no geometry fact for. Add its defining symbol to ADMISSION_MECHANISMS.",
+      );
+    }
+    if (gate.geometryAware !== row.geometrySensitive) {
+      throw new Error(
+        `gate "${row.gate}": the Rust emitter records geometrySensitive=${row.geometrySensitive} ` +
+          `but its signature resolves to geometryAware=${gate.geometryAware} ` +
+          `(axes ${JSON.stringify(gate.geometryAxes)}, via ${JSON.stringify(gate.reachedVia)}). ` +
+          "One of the two is wrong; they are not allowed to disagree.",
+      );
     }
   }
+
+  const candleRows = decisions.rows.map((row) => {
+    const route = routesById.get(row.modelId);
+    if (!route) {
+      throw new Error(
+        `the decisions carry a row for "${row.modelId}", which is not an inventory route`,
+      );
+    }
+    const shared = {
+      backend: "candle",
+      resolution: row.resolution,
+      modelId: row.modelId,
+      engineId: row.engineId ?? null,
+      modality: row.modality,
+      tier: row.tier,
+      tierAdvertised: route.evidence.measuredTiers.includes(row.tier),
+      gate: row.gate,
+      mechanisms: route.mechanisms,
+      sharedSelectorVia: route.sharedSelector.via,
+      geometrySensitive: row.geometrySensitive,
+      geometryAxes: gateGeometry.get(row.gate).geometryAxes,
+    };
+    if (row.resolution === "not_evaluated") {
+      return { ...shared, missingInput: row.missingInput };
+    }
+    return {
+      ...shared,
+      width: row.width,
+      height: row.height,
+      frames: row.frames,
+      budgetGb: row.budgetGb,
+      predictedPeakGb: row.predictedPeakGb,
+      predictedSequentialPeakGb: row.predictedSequentialPeakGb,
+      // Both branches of the registry-derived input. See the header note.
+      fitDecisionSequentialCapable: row.fitDecisionSequentialCapable,
+      fitDecisionSequentialIncapable: row.fitDecisionSequentialIncapable,
+      loadPlanSequentialCapable: row.loadPlanSequentialCapable,
+      loadPlanSequentialIncapable: row.loadPlanSequentialIncapable,
+    };
+  });
 
   const mlxIds = [...lanes.entries()]
     .filter(([, laneSet]) => laneSet.has("mlx"))
@@ -1376,27 +1752,56 @@ export function buildBaseline(bodies, inventory) {
     }
   }
 
+  const evaluated = candleRows.filter((row) => row.resolution === "evaluated");
+  const notEvaluated = candleRows.filter((row) => row.resolution === "not_evaluated");
+
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     generatedBy: "scripts/generate-candle-admission-inventory.mjs",
     story: "sc-19049",
-    generatedFrom: { sceneWorksRevision: revision },
+    generatedFrom: {
+      sceneWorksRevision: revision,
+      // The candle decisions are NOT derived here; this identifies the artifact they came from.
+      decisions: {
+        path: DECISIONS_PATH,
+        digest: decisions.digest,
+        producedBy: decisions.producedBy,
+        generatedBy: decisions.generatedBy,
+      },
+    },
     corpus: {
       tiers: [...TIER_ORDER],
       budgetsGb: [...BASELINE_BUDGETS_GB],
       imageGeometries: BASELINE_IMAGE_GEOMETRIES.map((geometry) => ({ ...geometry })),
-      videoGeometries: BASELINE_VIDEO_GEOMETRIES.map((geometry) => ({ ...geometry })),
       resolutions: {
-        candle: "evaluated â€” every field is the mirrored vram_gate decision for this coordinate",
-        mlx: "declared â€” manifest floors and evidence-ladder reachability; sc-19050 upgrades these to evaluated",
+        evaluated:
+          "the output of the gate this route reaches, emitted by " +
+          "crates/sceneworks-worker/src/candle_admission_decisions.rs driving candle_scalar_gate.rs",
+        not_evaluated:
+          "the route reaches a different gate whose inputs no CPU lane can produce; the row names " +
+          "the gate and the missing input, and publishes no geometry or budget axis",
+        declared:
+          "MLX â€” manifest floors and evidence-ladder reachability; sc-19050 upgrades these to evaluated",
       },
+      sequentialCapability: decisions.sequentialCapability,
     },
     summary: {
       candleRows: candleRows.length,
+      evaluatedCandleRows: evaluated.length,
+      notEvaluatedCandleRows: notEvaluated.length,
       mlxRows: mlxRows.length,
-      candlePlans: tally(candleRows, (row) => row.loadPlan),
-      candleDecisions: tally(candleRows, (row) => row.fitDecision),
+      candlePlansSequentialCapable: tally(evaluated, (row) => row.loadPlanSequentialCapable),
+      candlePlansSequentialIncapable: tally(evaluated, (row) => row.loadPlanSequentialIncapable),
+      candleDecisionsSequentialCapable: tally(
+        evaluated,
+        (row) => row.fitDecisionSequentialCapable,
+      ),
+      candleDecisionsSequentialIncapable: tally(
+        evaluated,
+        (row) => row.fitDecisionSequentialIncapable,
+      ),
       geometrySensitiveCandleRows: candleRows.filter((row) => row.geometrySensitive).length,
+      notEvaluatedByGate: tally(notEvaluated, (row) => row.gate),
     },
     candle: candleRows,
     mlx: mlxRows,
@@ -1456,7 +1861,12 @@ export function renderMarkdown(inventory) {
 
   lines.push("## Mechanisms");
   lines.push("");
-  lines.push("| mechanism | geometry-aware | axes | routes | defined in |");
+  lines.push(
+    "`geometry-aware` here means *at least one of this mechanism's symbols is*. It is a summary, not",
+    "a per-route claim â€” see the per-gate table below, which is what the baseline rows bind to.",
+  );
+  lines.push("");
+  lines.push("| mechanism | any symbol geometry-aware | axes | routes | defined in |");
   lines.push("| --- | :---: | --- | ---: | --- |");
   for (const mechanism of inventory.mechanisms) {
     lines.push(
@@ -1465,6 +1875,26 @@ export function renderMarkdown(inventory) {
       } | ${inventory.summary.byMechanism[mechanism.id]} | ${
         mechanism.definedIn ? `\`${mechanism.definedIn}\`` : "â€”"
       } |`,
+    );
+  }
+  lines.push("");
+
+  lines.push("## Geometry-awareness, per gate function");
+  lines.push("");
+  lines.push(
+    "Resolved from each gate's own parameter list, INCLUDING geometry that arrives inside a struct",
+    "parameter (`geometry: MemoryGeometry`, `query: VideoCurveQuery`) â€” a scan of the parameter",
+    "tokens sees none of those. Unioning these per mechanism is what previously labelled the",
+    "wan/scail2/LTX video routes geometry-aware on the strength of `svd_fit_error`'s signature.",
+  );
+  lines.push("");
+  lines.push("| gate | mechanism | geometry-aware | axes | reached via |");
+  lines.push("| --- | --- | :---: | --- | --- |");
+  for (const gate of inventory.gateGeometry) {
+    lines.push(
+      `| \`${gate.gate}\` | \`${gate.mechanism}\` | ${gate.geometryAware ? "yes" : "no"} | ${
+        gate.geometryAxes.length ? gate.geometryAxes.join(", ") : "â€”"
+      } | ${gate.reachedVia.length ? gate.reachedVia.map((via) => `\`${via}\``).join("<br>") : "â€”"} |`,
     );
   }
   lines.push("");
@@ -1527,10 +1957,10 @@ export function renderMarkdown(inventory) {
   return `${lines.join("\n")}\n`;
 }
 
-/** Render all three artifact bodies from a set of source bodies. */
-export function renderArtifacts(bodies) {
+/** Render all three artifact bodies from a set of source bodies plus the Rust-emitted decisions. */
+export function renderArtifacts(bodies, decisions) {
   const inventory = buildInventory(bodies);
-  const baseline = buildBaseline(bodies, inventory);
+  const baseline = buildBaseline(bodies, inventory, decisions);
   return {
     inventory,
     baseline,
@@ -1546,17 +1976,20 @@ export function renderArtifacts(bodies) {
  */
 export async function selfTest() {
   const { bodies } = await readSources();
+  const decisions = await readDecisions();
   const failures = [];
-  const expectFailure = (label, mutate) => {
+  const expectFailure = (label, mutate, mutateDecisions) => {
     let mutated;
+    let mutatedDecisions = decisions;
     try {
       mutated = { ...bodies, ...mutate() };
+      if (mutateDecisions) mutatedDecisions = mutateDecisions();
     } catch (error) {
       failures.push(`${label}: could not build the mutation (${error.message})`);
       return;
     }
     try {
-      renderArtifacts(mutated);
+      renderArtifacts(mutated, mutatedDecisions);
       failures.push(`${label}: the generator ACCEPTED a source it must reject`);
     } catch {
       /* expected */
@@ -1591,9 +2024,58 @@ export async function selfTest() {
     ),
   }));
 
+  // The guards the sc-19049 review asked for. The Rust emitter's `gate_is_geometry_aware` match may
+  // not stand as a second hand-written claim beside this file's derivation, and a decision row may
+  // not name a route or a gate nobody resolved.
+  expectFailure(
+    "a decision row whose geometrySensitive contradicts its gate's signature",
+    () => ({}),
+    () => ({
+      ...decisions,
+      rows: decisions.rows.map((row, index) =>
+        index === 0 ? { ...row, geometrySensitive: !row.geometrySensitive } : row,
+      ),
+    }),
+  );
+  expectFailure(
+    "a decision row for a model that is not an inventory route",
+    () => ({}),
+    () => ({
+      ...decisions,
+      rows: [...decisions.rows, { ...decisions.rows[0], modelId: "not_a_route" }],
+    }),
+  );
+  expectFailure(
+    "a decision row stamped with an unresolvable gate label",
+    () => ({}),
+    () => ({
+      ...decisions,
+      rows: decisions.rows.map((row, index) =>
+        index === 0 ? { ...row, gate: "some_gate_nobody_declared" } : row,
+      ),
+    }),
+  );
+  // Geometry hidden inside a struct parameter must not read as "geometry-blind": when the struct's
+  // fields become unresolvable the generator has to REFUSE, not silently downgrade the gate. This is
+  // the mutation that reproduces the original defect.
+  //
+  // The mutation removes every struct-LITERAL construction of `gen_core::MemoryGeometry` from the
+  // fingerprinted sources, leaving the `geometry: MemoryGeometry` parameters in place. That is
+  // exactly the state the type is in when nothing in this tree builds it: its fields become
+  // unrecoverable, and a generator that shrugged would report `fit_ladder_for_entry_with_runtime`
+  // and `evaluate_shared_image` as geometry-blind — the inverse of the truth.
+  expectFailure("a geometry struct parameter whose fields cannot be resolved", () => {
+    const dropLiterals = (body) => body.replaceAll("MemoryGeometry {", "UnbuiltGeometryLiteral {");
+    return Object.fromEntries(
+      Object.keys(SOURCE_PATHS)
+        .filter((name) => SOURCE_PATHS[name].endsWith(".rs"))
+        .map((name) => [name, dropLiterals(bodies[name])]),
+    );
+  });
+
   // A positive control: the unmutated tree must build.
   try {
-    renderArtifacts(bodies);
+    renderArtifacts(bodies, decisions);
   } catch (error) {
     failures.push(`the unmutated tree does not build: ${error.message}`);
   }
@@ -1601,7 +2083,7 @@ export async function selfTest() {
   if (failures.length > 0) {
     throw new Error(`self-test failed:\n  - ${failures.join("\n  - ")}`);
   }
-  return { checks: 6 };
+  return { checks: 10 };
 }
 
 async function main() {
@@ -1622,7 +2104,8 @@ async function main() {
   }
 
   const { bodies } = await readSources();
-  const rendered = renderArtifacts(bodies);
+  const decisions = await readDecisions();
+  const rendered = renderArtifacts(bodies, decisions);
 
   if (process.argv.includes("--check")) {
     const committed = await Promise.all(
@@ -1651,7 +2134,8 @@ async function main() {
   await writeFile(path.join(ROOT, OUTPUT_BASELINE_JSON), rendered.baselineJson, "utf8");
   console.log(
     `candle-admission: ${rendered.inventory.summary.candleRoutes} routes, ` +
-      `${rendered.baseline.summary.candleRows} evaluated candle decisions, ` +
+      `${rendered.baseline.summary.evaluatedCandleRows} evaluated candle decisions + ` +
+      `${rendered.baseline.summary.notEvaluatedCandleRows} recorded non-evaluated rows, ` +
       `${rendered.inventory.divergences.length} divergences.`,
   );
 }

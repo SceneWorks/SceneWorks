@@ -3,7 +3,7 @@
   "generatedBy": "scripts/generate-candle-admission-inventory.mjs",
   "story": "sc-19049",
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:32f7761916b986931c5c80f41308b66e9e6b85ee812a8be07d972d47eaf98f87",
+    "sceneWorksRevision": "source-tree:953aa55eb3f67b9eb2b79b2dbced6de2b3f659e53b01d9ad4e20f71e819f8d34",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -29,9 +29,13 @@
         "path": "crates/sceneworks-worker/src/fit_gate.rs",
         "sha256": "ac2b269221ecb55682a4100baffb8049962455be04bef5883de0cc88290bda2c"
       },
+      "candleScalarGate": {
+        "path": "crates/sceneworks-worker/src/candle_scalar_gate.rs",
+        "sha256": "56413798b657ad1ae00f571a3f0610f48ecf6303e52d468f223997fcc9864e47"
+      },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "e9013fd319929e18fb2ec196e2ba71ce59280fa38de3659984ef9bd33733cea5"
+        "sha256": "b808befc53a69ae747a61d184157f52690c0b84e12ca7a3c4d1003396e210447"
       },
       "candleMemoryStrategy": {
         "path": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
@@ -166,7 +170,7 @@
     {
       "id": "legacy_scalar_gate",
       "summary": "Per-tier manifest scalar (`candle.vramGbByTier` + headroom, else `candle.minMemoryGb`) compared to a live VRAM budget.",
-      "definedIn": "crates/sceneworks-worker/src/vram_gate.rs",
+      "definedIn": "crates/sceneworks-worker/src/candle_scalar_gate.rs",
       "definitionSymbols": [
         "predicted_peak_gb",
         "predicted_peak_gb_with_adapter_bytes",
@@ -175,10 +179,84 @@
         "sequential_overflow_gb",
         "load_plan"
       ],
+      "symbols": [
+        {
+          "symbol": "predicted_peak_gb",
+          "geometryAware": false,
+          "geometryAxes": [],
+          "reachedVia": [],
+          "unresolvedParameterTypes": [
+            {
+              "parameter": "manifest_entry",
+              "type": "JsonObject"
+            }
+          ]
+        },
+        {
+          "symbol": "predicted_peak_gb_with_adapter_bytes",
+          "geometryAware": false,
+          "geometryAxes": [],
+          "reachedVia": [],
+          "unresolvedParameterTypes": [
+            {
+              "parameter": "manifest_entry",
+              "type": "JsonObject"
+            }
+          ]
+        },
+        {
+          "symbol": "predicted_sequential_peak_gb",
+          "geometryAware": false,
+          "geometryAxes": [],
+          "reachedVia": [],
+          "unresolvedParameterTypes": [
+            {
+              "parameter": "manifest_entry",
+              "type": "JsonObject"
+            }
+          ]
+        },
+        {
+          "symbol": "predicted_sequential_peak_gb_with_adapter_bytes",
+          "geometryAware": false,
+          "geometryAxes": [],
+          "reachedVia": [],
+          "unresolvedParameterTypes": [
+            {
+              "parameter": "manifest_entry",
+              "type": "JsonObject"
+            }
+          ]
+        },
+        {
+          "symbol": "sequential_overflow_gb",
+          "geometryAware": false,
+          "geometryAxes": [],
+          "reachedVia": [],
+          "unresolvedParameterTypes": []
+        },
+        {
+          "symbol": "load_plan",
+          "geometryAware": false,
+          "geometryAxes": [],
+          "reachedVia": [],
+          "unresolvedParameterTypes": []
+        }
+      ],
       "geometryAware": false,
       "geometryAxes": [],
+      "geometryAwareSymbols": [],
+      "geometryBlindSymbols": [
+        "predicted_peak_gb",
+        "predicted_peak_gb_with_adapter_bytes",
+        "predicted_sequential_peak_gb",
+        "predicted_sequential_peak_gb_with_adapter_bytes",
+        "sequential_overflow_gb",
+        "load_plan"
+      ],
       "calledFrom": [
         "crates/sceneworks-worker/src/candle_memory_strategy.rs",
+        "crates/sceneworks-worker/src/candle_scalar_gate.rs",
         "crates/sceneworks-worker/src/image_jobs/base_admission.rs",
         "crates/sceneworks-worker/src/image_jobs/flux1_control_candle.rs",
         "crates/sceneworks-worker/src/image_jobs/flux2_control_candle.rs",
@@ -200,8 +278,40 @@
       "definitionSymbols": [
         "evaluate_shared_image"
       ],
-      "geometryAware": false,
-      "geometryAxes": [],
+      "symbols": [
+        {
+          "symbol": "evaluate_shared_image",
+          "geometryAware": true,
+          "geometryAxes": [
+            "frames",
+            "height",
+            "width"
+          ],
+          "reachedVia": [
+            "struct_parameter:geometry:MemoryGeometry"
+          ],
+          "unresolvedParameterTypes": [
+            {
+              "parameter": "manifest",
+              "type": "JsonObject"
+            },
+            {
+              "parameter": "cache_state",
+              "type": "MemoryCacheState"
+            }
+          ]
+        }
+      ],
+      "geometryAware": true,
+      "geometryAxes": [
+        "frames",
+        "height",
+        "width"
+      ],
+      "geometryAwareSymbols": [
+        "evaluate_shared_image"
+      ],
+      "geometryBlindSymbols": [],
       "calledFrom": [
         "crates/sceneworks-worker/src/image_jobs/flux1_control_candle.rs",
         "crates/sceneworks-worker/src/image_jobs/flux2_control_candle.rs",
@@ -221,8 +331,44 @@
       "definitionSymbols": [
         "evaluate_shared_bespoke_image"
       ],
-      "geometryAware": false,
-      "geometryAxes": [],
+      "symbols": [
+        {
+          "symbol": "evaluate_shared_bespoke_image",
+          "geometryAware": true,
+          "geometryAxes": [
+            "frames",
+            "height",
+            "width"
+          ],
+          "reachedVia": [
+            "struct_parameter:geometry:MemoryGeometry"
+          ],
+          "unresolvedParameterTypes": [
+            {
+              "parameter": "manifest",
+              "type": "JsonObject"
+            },
+            {
+              "parameter": "cache_state",
+              "type": "MemoryCacheState"
+            },
+            {
+              "parameter": "contract",
+              "type": "MemoryProviderContract"
+            }
+          ]
+        }
+      ],
+      "geometryAware": true,
+      "geometryAxes": [
+        "frames",
+        "height",
+        "width"
+      ],
+      "geometryAwareSymbols": [
+        "evaluate_shared_bespoke_image"
+      ],
+      "geometryBlindSymbols": [],
       "calledFrom": [
         "crates/sceneworks-worker/src/image_jobs/pulid_candle.rs"
       ]
@@ -234,8 +380,40 @@
       "definitionSymbols": [
         "evaluate_shared_image"
       ],
-      "geometryAware": false,
-      "geometryAxes": [],
+      "symbols": [
+        {
+          "symbol": "evaluate_shared_image",
+          "geometryAware": true,
+          "geometryAxes": [
+            "frames",
+            "height",
+            "width"
+          ],
+          "reachedVia": [
+            "struct_parameter:geometry:MemoryGeometry"
+          ],
+          "unresolvedParameterTypes": [
+            {
+              "parameter": "manifest",
+              "type": "JsonObject"
+            },
+            {
+              "parameter": "cache_state",
+              "type": "MemoryCacheState"
+            }
+          ]
+        }
+      ],
+      "geometryAware": true,
+      "geometryAxes": [
+        "frames",
+        "height",
+        "width"
+      ],
+      "geometryAwareSymbols": [
+        "evaluate_shared_image"
+      ],
+      "geometryBlindSymbols": [],
       "calledFrom": [
         "crates/sceneworks-worker/src/image_jobs/flux1_control_candle.rs",
         "crates/sceneworks-worker/src/image_jobs/flux2_control_candle.rs",
@@ -256,11 +434,52 @@
         "krea_turbo_fit_with_runtime",
         "krea_turbo_smaller_fit_with_runtime"
       ],
+      "symbols": [
+        {
+          "symbol": "krea_turbo_fit_with_runtime",
+          "geometryAware": true,
+          "geometryAxes": [
+            "height",
+            "width"
+          ],
+          "reachedVia": [
+            "scalar_parameter"
+          ],
+          "unresolvedParameterTypes": [
+            {
+              "parameter": "manifest_entry",
+              "type": "JsonObject"
+            }
+          ]
+        },
+        {
+          "symbol": "krea_turbo_smaller_fit_with_runtime",
+          "geometryAware": true,
+          "geometryAxes": [
+            "height",
+            "width"
+          ],
+          "reachedVia": [
+            "scalar_parameter"
+          ],
+          "unresolvedParameterTypes": [
+            {
+              "parameter": "manifest_entry",
+              "type": "JsonObject"
+            }
+          ]
+        }
+      ],
       "geometryAware": true,
       "geometryAxes": [
         "height",
         "width"
       ],
+      "geometryAwareSymbols": [
+        "krea_turbo_fit_with_runtime",
+        "krea_turbo_smaller_fit_with_runtime"
+      ],
+      "geometryBlindSymbols": [],
       "calledFrom": [
         "crates/sceneworks-worker/src/image_jobs/base.rs",
         "crates/sceneworks-worker/src/vram_gate.rs"
@@ -277,8 +496,92 @@
         "predicted_control_sequential_peak_gb",
         "incurred_peak_gb"
       ],
-      "geometryAware": false,
-      "geometryAxes": [],
+      "symbols": [
+        {
+          "symbol": "fit_ladder",
+          "geometryAware": false,
+          "geometryAxes": [],
+          "reachedVia": [],
+          "unresolvedParameterTypes": []
+        },
+        {
+          "symbol": "fit_ladder_for_entry_with_runtime",
+          "geometryAware": true,
+          "geometryAxes": [
+            "frames",
+            "height",
+            "width"
+          ],
+          "reachedVia": [
+            "struct_parameter:geometry:MemoryGeometry"
+          ],
+          "unresolvedParameterTypes": [
+            {
+              "parameter": "manifest_entry",
+              "type": "JsonObject"
+            },
+            {
+              "parameter": "contract",
+              "type": "MemoryProviderContract"
+            }
+          ]
+        },
+        {
+          "symbol": "predicted_control_peak_gb",
+          "geometryAware": false,
+          "geometryAxes": [],
+          "reachedVia": [],
+          "unresolvedParameterTypes": [
+            {
+              "parameter": "manifest_entry",
+              "type": "JsonObject"
+            }
+          ]
+        },
+        {
+          "symbol": "predicted_control_sequential_peak_gb",
+          "geometryAware": false,
+          "geometryAxes": [],
+          "reachedVia": [],
+          "unresolvedParameterTypes": [
+            {
+              "parameter": "manifest_entry",
+              "type": "JsonObject"
+            }
+          ]
+        },
+        {
+          "symbol": "incurred_peak_gb",
+          "geometryAware": false,
+          "geometryAxes": [],
+          "reachedVia": [],
+          "unresolvedParameterTypes": [
+            {
+              "parameter": "fit",
+              "type": "KreaControlFit"
+            },
+            {
+              "parameter": "manifest_entry",
+              "type": "JsonObject"
+            }
+          ]
+        }
+      ],
+      "geometryAware": true,
+      "geometryAxes": [
+        "frames",
+        "height",
+        "width"
+      ],
+      "geometryAwareSymbols": [
+        "fit_ladder_for_entry_with_runtime"
+      ],
+      "geometryBlindSymbols": [
+        "fit_ladder",
+        "predicted_control_peak_gb",
+        "predicted_control_sequential_peak_gb",
+        "incurred_peak_gb"
+      ],
       "calledFrom": [
         "crates/sceneworks-worker/src/image_jobs/conditioning_gate.rs",
         "crates/sceneworks-worker/src/image_jobs/krea_control_candle.rs"
@@ -293,8 +596,42 @@
         "admit",
         "conditioning_floor_gb"
       ],
+      "symbols": [
+        {
+          "symbol": "decide",
+          "geometryAware": false,
+          "geometryAxes": [],
+          "reachedVia": [],
+          "unresolvedParameterTypes": []
+        },
+        {
+          "symbol": "admit",
+          "geometryAware": false,
+          "geometryAxes": [],
+          "reachedVia": [],
+          "unresolvedParameterTypes": [
+            {
+              "parameter": "fit",
+              "type": "ConditioningFit"
+            }
+          ]
+        },
+        {
+          "symbol": "conditioning_floor_gb",
+          "geometryAware": false,
+          "geometryAxes": [],
+          "reachedVia": [],
+          "unresolvedParameterTypes": []
+        }
+      ],
       "geometryAware": false,
       "geometryAxes": [],
+      "geometryAwareSymbols": [],
+      "geometryBlindSymbols": [
+        "decide",
+        "admit",
+        "conditioning_floor_gb"
+      ],
       "calledFrom": [
         "crates/sceneworks-worker/src/image_jobs/conditioning_gate.rs",
         "crates/sceneworks-worker/src/image_jobs/detail.rs",
@@ -321,11 +658,105 @@
         "scail2_video_fit_error_with_adapter_bytes",
         "video_weights_fit_error"
       ],
+      "symbols": [
+        {
+          "symbol": "svd_fit_error",
+          "geometryAware": true,
+          "geometryAxes": [
+            "frames",
+            "height",
+            "width"
+          ],
+          "reachedVia": [
+            "scalar_parameter"
+          ],
+          "unresolvedParameterTypes": []
+        },
+        {
+          "symbol": "mochi_fit_error",
+          "geometryAware": true,
+          "geometryAxes": [
+            "frames",
+            "height",
+            "width"
+          ],
+          "reachedVia": [
+            "scalar_parameter"
+          ],
+          "unresolvedParameterTypes": []
+        },
+        {
+          "symbol": "wan_video_fit_error",
+          "geometryAware": false,
+          "geometryAxes": [],
+          "reachedVia": [],
+          "unresolvedParameterTypes": [
+            {
+              "parameter": "manifest_entry",
+              "type": "JsonObject"
+            }
+          ]
+        },
+        {
+          "symbol": "wan_video_fit_error_with_adapter_bytes",
+          "geometryAware": false,
+          "geometryAxes": [],
+          "reachedVia": [],
+          "unresolvedParameterTypes": [
+            {
+              "parameter": "manifest_entry",
+              "type": "JsonObject"
+            }
+          ]
+        },
+        {
+          "symbol": "scail2_video_fit_error",
+          "geometryAware": false,
+          "geometryAxes": [],
+          "reachedVia": [],
+          "unresolvedParameterTypes": [
+            {
+              "parameter": "manifest_entry",
+              "type": "JsonObject"
+            }
+          ]
+        },
+        {
+          "symbol": "scail2_video_fit_error_with_adapter_bytes",
+          "geometryAware": false,
+          "geometryAxes": [],
+          "reachedVia": [],
+          "unresolvedParameterTypes": [
+            {
+              "parameter": "manifest_entry",
+              "type": "JsonObject"
+            }
+          ]
+        },
+        {
+          "symbol": "video_weights_fit_error",
+          "geometryAware": false,
+          "geometryAxes": [],
+          "reachedVia": [],
+          "unresolvedParameterTypes": []
+        }
+      ],
       "geometryAware": true,
       "geometryAxes": [
         "frames",
         "height",
         "width"
+      ],
+      "geometryAwareSymbols": [
+        "svd_fit_error",
+        "mochi_fit_error"
+      ],
+      "geometryBlindSymbols": [
+        "wan_video_fit_error",
+        "wan_video_fit_error_with_adapter_bytes",
+        "scail2_video_fit_error",
+        "scail2_video_fit_error_with_adapter_bytes",
+        "video_weights_fit_error"
       ],
       "calledFrom": [
         "crates/sceneworks-worker/src/video_jobs/candle.rs",
@@ -339,8 +770,31 @@
       "definitionSymbols": [
         "evaluate"
       ],
-      "geometryAware": false,
-      "geometryAxes": [],
+      "symbols": [
+        {
+          "symbol": "evaluate",
+          "geometryAware": true,
+          "geometryAxes": [
+            "frames",
+            "height",
+            "width"
+          ],
+          "reachedVia": [
+            "struct_parameter:query:VideoCurveQuery"
+          ],
+          "unresolvedParameterTypes": []
+        }
+      ],
+      "geometryAware": true,
+      "geometryAxes": [
+        "frames",
+        "height",
+        "width"
+      ],
+      "geometryAwareSymbols": [
+        "evaluate"
+      ],
+      "geometryBlindSymbols": [],
       "calledFrom": [
         "crates/sceneworks-worker/src/video_admission.rs"
       ]
@@ -350,9 +804,306 @@
       "summary": "The router serves this model on the candle lane, but no admission gate keyed to it was found.",
       "definedIn": null,
       "definitionSymbols": [],
+      "symbols": [],
       "geometryAware": false,
       "geometryAxes": [],
+      "geometryAwareSymbols": [],
+      "geometryBlindSymbols": [],
       "calledFrom": []
+    }
+  ],
+  "gateGeometry": [
+    {
+      "gate": "admit",
+      "mechanism": "conditioning_fit",
+      "definedIn": "crates/sceneworks-worker/src/conditioning_fit.rs",
+      "geometryAware": false,
+      "geometryAxes": [],
+      "reachedVia": []
+    },
+    {
+      "gate": "candle_scalar_gate::load_plan",
+      "mechanism": "legacy_scalar_gate",
+      "definedIn": "crates/sceneworks-worker/src/candle_scalar_gate.rs",
+      "geometryAware": false,
+      "geometryAxes": [],
+      "reachedVia": []
+    },
+    {
+      "gate": "conditioning_fit::decide",
+      "mechanism": "conditioning_fit",
+      "definedIn": "crates/sceneworks-worker/src/conditioning_fit.rs",
+      "geometryAware": false,
+      "geometryAxes": [],
+      "reachedVia": []
+    },
+    {
+      "gate": "conditioning_floor_gb",
+      "mechanism": "conditioning_fit",
+      "definedIn": "crates/sceneworks-worker/src/conditioning_fit.rs",
+      "geometryAware": false,
+      "geometryAxes": [],
+      "reachedVia": []
+    },
+    {
+      "gate": "decide",
+      "mechanism": "conditioning_fit",
+      "definedIn": "crates/sceneworks-worker/src/conditioning_fit.rs",
+      "geometryAware": false,
+      "geometryAxes": [],
+      "reachedVia": []
+    },
+    {
+      "gate": "evaluate",
+      "mechanism": "video_memory_curve_bundle",
+      "definedIn": "crates/sceneworks-core/src/video_memory_curves.rs",
+      "geometryAware": true,
+      "geometryAxes": [
+        "frames",
+        "height",
+        "width"
+      ],
+      "reachedVia": [
+        "struct_parameter:query:VideoCurveQuery"
+      ]
+    },
+    {
+      "gate": "evaluate_shared_bespoke_image",
+      "mechanism": "shared_selector_bespoke_override",
+      "definedIn": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
+      "geometryAware": true,
+      "geometryAxes": [
+        "frames",
+        "height",
+        "width"
+      ],
+      "reachedVia": [
+        "struct_parameter:geometry:MemoryGeometry"
+      ]
+    },
+    {
+      "gate": "evaluate_shared_image",
+      "mechanism": "shared_selector_declaration_catch_all",
+      "definedIn": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
+      "geometryAware": true,
+      "geometryAxes": [
+        "frames",
+        "height",
+        "width"
+      ],
+      "reachedVia": [
+        "struct_parameter:geometry:MemoryGeometry"
+      ]
+    },
+    {
+      "gate": "fit_ladder",
+      "mechanism": "krea_control_fit",
+      "definedIn": "crates/sceneworks-worker/src/krea_control_fit.rs",
+      "geometryAware": false,
+      "geometryAxes": [],
+      "reachedVia": []
+    },
+    {
+      "gate": "fit_ladder_for_entry_with_runtime",
+      "mechanism": "krea_control_fit",
+      "definedIn": "crates/sceneworks-worker/src/krea_control_fit.rs",
+      "geometryAware": true,
+      "geometryAxes": [
+        "frames",
+        "height",
+        "width"
+      ],
+      "reachedVia": [
+        "struct_parameter:geometry:MemoryGeometry"
+      ]
+    },
+    {
+      "gate": "incurred_peak_gb",
+      "mechanism": "krea_control_fit",
+      "definedIn": "crates/sceneworks-worker/src/krea_control_fit.rs",
+      "geometryAware": false,
+      "geometryAxes": [],
+      "reachedVia": []
+    },
+    {
+      "gate": "krea_control_fit::fit_ladder_for_entry_with_runtime",
+      "mechanism": "krea_control_fit",
+      "definedIn": "crates/sceneworks-worker/src/krea_control_fit.rs",
+      "geometryAware": true,
+      "geometryAxes": [
+        "frames",
+        "height",
+        "width"
+      ],
+      "reachedVia": [
+        "struct_parameter:geometry:MemoryGeometry"
+      ]
+    },
+    {
+      "gate": "krea_turbo_fit_with_runtime",
+      "mechanism": "krea_turbo_fit",
+      "definedIn": "crates/sceneworks-worker/src/vram_gate.rs",
+      "geometryAware": true,
+      "geometryAxes": [
+        "height",
+        "width"
+      ],
+      "reachedVia": [
+        "scalar_parameter"
+      ]
+    },
+    {
+      "gate": "krea_turbo_smaller_fit_with_runtime",
+      "mechanism": "krea_turbo_fit",
+      "definedIn": "crates/sceneworks-worker/src/vram_gate.rs",
+      "geometryAware": true,
+      "geometryAxes": [
+        "height",
+        "width"
+      ],
+      "reachedVia": [
+        "scalar_parameter"
+      ]
+    },
+    {
+      "gate": "load_plan",
+      "mechanism": "legacy_scalar_gate",
+      "definedIn": "crates/sceneworks-worker/src/candle_scalar_gate.rs",
+      "geometryAware": false,
+      "geometryAxes": [],
+      "reachedVia": []
+    },
+    {
+      "gate": "mochi_fit_error",
+      "mechanism": "flat_video_fit_error",
+      "definedIn": "crates/sceneworks-worker/src/vram_gate.rs",
+      "geometryAware": true,
+      "geometryAxes": [
+        "frames",
+        "height",
+        "width"
+      ],
+      "reachedVia": [
+        "scalar_parameter"
+      ]
+    },
+    {
+      "gate": "none",
+      "mechanism": "unreached",
+      "definedIn": null,
+      "geometryAware": false,
+      "geometryAxes": [],
+      "reachedVia": []
+    },
+    {
+      "gate": "predicted_control_peak_gb",
+      "mechanism": "krea_control_fit",
+      "definedIn": "crates/sceneworks-worker/src/krea_control_fit.rs",
+      "geometryAware": false,
+      "geometryAxes": [],
+      "reachedVia": []
+    },
+    {
+      "gate": "predicted_control_sequential_peak_gb",
+      "mechanism": "krea_control_fit",
+      "definedIn": "crates/sceneworks-worker/src/krea_control_fit.rs",
+      "geometryAware": false,
+      "geometryAxes": [],
+      "reachedVia": []
+    },
+    {
+      "gate": "predicted_peak_gb",
+      "mechanism": "legacy_scalar_gate",
+      "definedIn": "crates/sceneworks-worker/src/candle_scalar_gate.rs",
+      "geometryAware": false,
+      "geometryAxes": [],
+      "reachedVia": []
+    },
+    {
+      "gate": "predicted_peak_gb_with_adapter_bytes",
+      "mechanism": "legacy_scalar_gate",
+      "definedIn": "crates/sceneworks-worker/src/candle_scalar_gate.rs",
+      "geometryAware": false,
+      "geometryAxes": [],
+      "reachedVia": []
+    },
+    {
+      "gate": "predicted_sequential_peak_gb",
+      "mechanism": "legacy_scalar_gate",
+      "definedIn": "crates/sceneworks-worker/src/candle_scalar_gate.rs",
+      "geometryAware": false,
+      "geometryAxes": [],
+      "reachedVia": []
+    },
+    {
+      "gate": "predicted_sequential_peak_gb_with_adapter_bytes",
+      "mechanism": "legacy_scalar_gate",
+      "definedIn": "crates/sceneworks-worker/src/candle_scalar_gate.rs",
+      "geometryAware": false,
+      "geometryAxes": [],
+      "reachedVia": []
+    },
+    {
+      "gate": "scail2_video_fit_error",
+      "mechanism": "flat_video_fit_error",
+      "definedIn": "crates/sceneworks-worker/src/vram_gate.rs",
+      "geometryAware": false,
+      "geometryAxes": [],
+      "reachedVia": []
+    },
+    {
+      "gate": "scail2_video_fit_error_with_adapter_bytes",
+      "mechanism": "flat_video_fit_error",
+      "definedIn": "crates/sceneworks-worker/src/vram_gate.rs",
+      "geometryAware": false,
+      "geometryAxes": [],
+      "reachedVia": []
+    },
+    {
+      "gate": "sequential_overflow_gb",
+      "mechanism": "legacy_scalar_gate",
+      "definedIn": "crates/sceneworks-worker/src/candle_scalar_gate.rs",
+      "geometryAware": false,
+      "geometryAxes": [],
+      "reachedVia": []
+    },
+    {
+      "gate": "svd_fit_error",
+      "mechanism": "flat_video_fit_error",
+      "definedIn": "crates/sceneworks-worker/src/vram_gate.rs",
+      "geometryAware": true,
+      "geometryAxes": [
+        "frames",
+        "height",
+        "width"
+      ],
+      "reachedVia": [
+        "scalar_parameter"
+      ]
+    },
+    {
+      "gate": "video_weights_fit_error",
+      "mechanism": "flat_video_fit_error",
+      "definedIn": "crates/sceneworks-worker/src/vram_gate.rs",
+      "geometryAware": false,
+      "geometryAxes": [],
+      "reachedVia": []
+    },
+    {
+      "gate": "wan_video_fit_error",
+      "mechanism": "flat_video_fit_error",
+      "definedIn": "crates/sceneworks-worker/src/vram_gate.rs",
+      "geometryAware": false,
+      "geometryAxes": [],
+      "reachedVia": []
+    },
+    {
+      "gate": "wan_video_fit_error_with_adapter_bytes",
+      "mechanism": "flat_video_fit_error",
+      "definedIn": "crates/sceneworks-worker/src/vram_gate.rs",
+      "geometryAware": false,
+      "geometryAxes": [],
+      "reachedVia": []
     }
   ],
   "videoBindings": [
@@ -2797,8 +3548,13 @@
       "unreached": 38
     },
     "geometryAwareMechanisms": [
+      "shared_selector_named_revision",
+      "shared_selector_bespoke_override",
+      "shared_selector_declaration_catch_all",
       "krea_turbo_fit",
-      "flat_video_fit_error"
+      "krea_control_fit",
+      "flat_video_fit_error",
+      "video_memory_curve_bundle"
     ],
     "packagedVideoCurveLanes": {
       "mlx": 1
@@ -3157,8 +3913,9 @@
       "id": "memory-matrix-source-paths-under-cover-candle-admission",
       "owner": "sc-19059",
       "severity": "high",
-      "detail": "scripts/generate-memory-matrix.mjs's SOURCE_PATHS omits five files that decide candle admission, so a change to any of them leaves docs/generated/memory-matrix.json's source-tree revision unrotated and the matrix claims a currency it does not have. Adding them rotates the matrix fingerprint and forces a full regeneration, so epic 19048's terminal acceptance story owns the fix rather than every slice paying for it.",
+      "detail": "scripts/generate-memory-matrix.mjs's SOURCE_PATHS omits 6 files that decide candle admission, so a change to any of them leaves docs/generated/memory-matrix.json's source-tree revision unrotated and the matrix claims a currency it does not have. `candle_scalar_gate.rs` joined the list in sc-19049: the scalar gate's arithmetic moved there out of `vram_gate.rs`, which the matrix DOES fingerprint, so the matrix now rotates on none of the candle admission law. Adding them rotates the matrix fingerprint and forces a full regeneration, so epic 19048's terminal acceptance story owns the fix rather than every slice paying for it.",
       "paths": [
+        "crates/sceneworks-worker/src/candle_scalar_gate.rs",
         "crates/sceneworks-worker/src/candle_memory_strategy.rs",
         "crates/sceneworks-worker/src/video_admission.rs",
         "crates/sceneworks-worker/src/conditioning_fit.rs",
@@ -3182,6 +3939,16 @@
       "detail": "sceneworks-core's lane-tagged VideoMemoryCurveBundle exists and fails closed on a foreign lane, but the packaged curve data covers {\"mlx\":1} â€” there are no candle curves at all, so every candle video route falls back to the weights+headroom lower bound.",
       "paths": [
         "docs/generated/video-memory-curves.json"
+      ]
+    },
+    {
+      "id": "candle-sequential-capability-needs-the-linked-candle-bundle",
+      "owner": "sc-19050",
+      "severity": "high",
+      "detail": "The candle txt2img gate's `sequential_capable` input is `mlx_fit_gate::engine_supports_sequential(engine_id)` â€” a query against the LINKED provider bundle's descriptor (sc-12130 forbids a second engine-id allowlist in the worker). The manifest's advisory `candle.supportsSequentialOffload` key is NOT that input and diverges from it in BOTH directions on the bundles that can be linked here (the MLX bundle answers true for sdxl/lens/krea_2_raw/krea_2_turbo/qwen_image_edit and friends where the manifest says false, and false for the six mage_flow ids where the manifest says true). The candle bundle needs a CUDA toolchain to link, so no CPU lane can resolve it; every evaluated baseline row therefore records the plan for BOTH values of the input rather than committing another bundle's answer. sc-19050, which extracts the shared prediction law, is where the capability becomes a first-class input.",
+      "paths": [
+        "crates/sceneworks-worker/src/image_jobs/base.rs",
+        "crates/sceneworks-worker/src/mlx_fit_gate.rs"
       ]
     },
     {

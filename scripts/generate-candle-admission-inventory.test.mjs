@@ -21,7 +21,7 @@ import {
   ADMISSION_MECHANISMS,
   BASELINE_BUDGETS_GB,
   BASELINE_IMAGE_GEOMETRIES,
-  BASELINE_VIDEO_GEOMETRIES,
+  DECISIONS_PATH,
   IMAGE_LANE_BINDINGS,
   OUTPUT_PATHS,
   SOURCE_PATHS,
@@ -38,15 +38,18 @@ import {
   parseRequestScopeDispatch,
   predictedPeakGb,
   predictedSequentialPeakGb,
+  readDecisions,
   readSources,
   renderArtifacts,
+  resolveSymbolGeometry,
   selfTest,
   sourceRevisionOf,
 } from "./generate-candle-admission-inventory.mjs";
 
 const sources = await readSources();
 const bodies = sources.bodies;
-const artifacts = renderArtifacts(bodies);
+const decisions = await readDecisions();
+const artifacts = renderArtifacts(bodies, decisions);
 
 async function committed(relative) {
   return canonicalSourceText(await readFile(new URL(`../${relative}`, import.meta.url), "utf8"));
@@ -106,7 +109,7 @@ test("the committed artifacts match a fresh build", async () => {
 });
 
 test("a rebuild from the same sources is byte-identical", () => {
-  const again = renderArtifacts(bodies);
+  const again = renderArtifacts(bodies, decisions);
   assert.equal(again.inventoryJson, artifacts.inventoryJson);
   assert.equal(again.baselineJson, artifacts.baselineJson);
   assert.equal(again.inventoryMarkdown, artifacts.inventoryMarkdown);
@@ -274,6 +277,20 @@ test("geometry awareness is read off the gate signatures, not declared", () => {
   assert.ok(byId.get("krea_turbo_fit").geometryAxes.includes("width"));
   assert.equal(byId.get("flat_video_fit_error").geometryAware, true);
   assert.ok(byId.get("flat_video_fit_error").geometryAxes.includes("frames"));
+  // Regression pin for the struct-parameter blind spot: these three take their geometry as
+  // `geometry: MemoryGeometry`, and a scan of the parameter tokens reported every one of them as
+  // geometry-blind — the inverse of the truth, on the three gates epic 19048 converges ONTO.
+  for (const id of [
+    "krea_control_fit",
+    "shared_selector_named_revision",
+    "shared_selector_bespoke_override",
+    "video_memory_curve_bundle",
+  ]) {
+    assert.equal(byId.get(id).geometryAware, true, `${id} must be geometry-aware`);
+    assert.deepEqual(byId.get(id).geometryAxes.includes("width"), true, id);
+  }
+  // ...and the conditioning overlay genuinely is not: `ConditioningFootprint` carries byte counts.
+  assert.equal(byId.get("conditioning_fit").geometryAware, false);
   // Every mechanism except the sentinel names a real definition site.
   for (const fact of facts) {
     if (fact.id === "unreached") {
@@ -449,50 +466,161 @@ test("load_plan is monotonic in the budget: reject -> sequential -> resident", (
 // The decision baseline
 // -------------------------------------------------------------------------------------------------
 
-test("the baseline covers the declared corpus exactly", () => {
-  const { baseline, inventory } = artifacts;
-  const imageRoutes = inventory.routes.filter((route) => route.modality === "image").length;
-  const videoRoutes = inventory.routes.filter((route) => route.modality === "video").length;
-  const expected =
-    (imageRoutes * BASELINE_IMAGE_GEOMETRIES.length + videoRoutes * BASELINE_VIDEO_GEOMETRIES.length) *
-    TIER_ORDER.length *
-    BASELINE_BUDGETS_GB.length;
-  assert.equal(baseline.candle.length, expected);
+test("the baseline is built from the Rust-emitted decisions, not re-derived here", () => {
+  const { baseline } = artifacts;
+  assert.equal(baseline.generatedFrom.decisions.path, DECISIONS_PATH);
+  assert.match(baseline.generatedFrom.decisions.digest, /^sha256:[0-9a-f]{64}$/);
+  // The producer must be the Rust module driving the real gate, named in the artifact itself.
+  assert.equal(
+    baseline.generatedFrom.decisions.producedBy.module,
+    "crates/sceneworks-worker/src/candle_admission_decisions.rs",
+  );
+  assert.equal(
+    baseline.generatedFrom.decisions.producedBy.gateModule,
+    "crates/sceneworks-worker/src/candle_scalar_gate.rs",
+  );
+  assert.equal(baseline.candle.length, decisions.rows.length);
   assert.equal(baseline.summary.candleRows, baseline.candle.length);
+});
+
+test("the evaluated corpus is exactly gate-reaching routes x tier x geometry x budget", () => {
+  const { baseline } = artifacts;
+  const evaluated = baseline.candle.filter((row) => row.resolution === "evaluated");
+  const notEvaluated = baseline.candle.filter((row) => row.resolution === "not_evaluated");
+  const evaluatedRoutes = new Set(evaluated.map((row) => row.modelId));
+  const notEvaluatedRoutes = new Set(notEvaluated.map((row) => row.modelId));
+
+  // Shape, not a frozen magic number: an evaluated route contributes the full cross product and a
+  // non-evaluated one contributes one row per tier and NO coordinate axes.
+  assert.equal(
+    evaluated.length,
+    evaluatedRoutes.size *
+      TIER_ORDER.length *
+      BASELINE_IMAGE_GEOMETRIES.length *
+      BASELINE_BUDGETS_GB.length,
+  );
+  assert.equal(notEvaluated.length, notEvaluatedRoutes.size * TIER_ORDER.length);
+  // Every candle route is in exactly one bucket, and every route is covered.
+  assert.equal(evaluatedRoutes.size + notEvaluatedRoutes.size, artifacts.inventory.routes.length);
+  for (const modelId of evaluatedRoutes) assert.ok(!notEvaluatedRoutes.has(modelId));
 
   const seen = new Set();
-  for (const row of baseline.candle) {
+  for (const row of evaluated) {
     const key = `${row.modelId}|${row.tier}|${row.width}x${row.height}x${row.frames}|${row.budgetGb}`;
     assert.ok(!seen.has(key), `duplicate baseline coordinate ${key}`);
     seen.add(key);
     assert.ok(TIER_ORDER.includes(row.tier));
     assert.ok(BASELINE_BUDGETS_GB.includes(row.budgetGb));
-    assert.equal(row.resolution, "evaluated");
   }
 });
 
-test("every baseline decision is reproducible from its own row", () => {
-  // The row records its inputs, so the decision it records must be the one those inputs produce.
-  // This is what makes a later slice's diff attributable rather than merely visible.
+test("a not_evaluated row names its gate and the input that gate needs, and publishes no axes", () => {
+  // The fix for the row class that used to claim `resolution: "evaluated"` with decision columns
+  // its actual gate never produced. A row that records no decision must not record a coordinate.
+  const notEvaluated = artifacts.baseline.candle.filter(
+    (row) => row.resolution === "not_evaluated",
+  );
+  assert.ok(notEvaluated.length > 0, "every candle route is now evaluated — update this test");
+  for (const row of notEvaluated) {
+    assert.ok(row.gate && row.gate.length > 0, `${row.modelId}: no gate named`);
+    assert.ok(
+      typeof row.missingInput === "string" && row.missingInput.length > 40,
+      `${row.modelId}: a not_evaluated row must justify itself`,
+    );
+    for (const axis of ["width", "height", "frames", "budgetGb"]) {
+      assert.ok(!(axis in row), `${row.modelId}: a not_evaluated row must not publish ${axis}`);
+    }
+    for (const column of [
+      "predictedPeakGb",
+      "loadPlanSequentialCapable",
+      "loadPlanSequentialIncapable",
+    ]) {
+      assert.ok(!(column in row), `${row.modelId}: a not_evaluated row must not publish ${column}`);
+    }
+  }
+  // Every video route is in this bucket — the flat fit errors read weight bytes off disk.
   for (const row of artifacts.baseline.candle) {
-    const budget = { freeGb: row.budgetGb, totalGb: row.budgetGb };
-    assert.equal(
-      row.fitDecision,
-      loadPlanDecision(row.predictedPeakGb, budget, row.sequentialCapable),
-      `${row.modelId}/${row.tier}/${row.budgetGb}: fitDecision is not reproducible`,
-    );
-    assert.equal(
-      row.loadPlan,
-      loadPlan(row.predictedPeakGb, row.predictedSequentialPeakGb, budget, row.sequentialCapable),
-      `${row.modelId}/${row.tier}/${row.budgetGb}: loadPlan is not reproducible`,
-    );
+    if (row.modality !== "video") continue;
+    assert.equal(row.resolution, "not_evaluated", `${row.modelId}: a video row cannot be evaluated`);
   }
 });
 
-function loadPlanDecision(needed, budget, sequentialCapable) {
-  const decision = fitDecision(needed, budget);
-  return decision === "too_big" && sequentialCapable ? "offload" : decision;
+test("the JS gate mirror reproduces the Rust-emitted decision for every evaluated row", () => {
+  // THE reconciliation. The mirror further up the generator is a readable statement of the law; the
+  // committed decisions are the output of `candle_scalar_gate.rs` itself. If the two disagree on any
+  // coordinate, the mirror has drifted and this fails — which is the property that makes keeping a
+  // JS mirror at all defensible.
+  const headroom = artifacts.inventory.constants.headroomGb;
+  const entries = new Map(
+    JSON.parse(stripJsoncComments(bodies.manifest)).models.map((model) => [model.id, model]),
+  );
+  let checked = 0;
+  for (const row of decisions.rows) {
+    if (row.resolution !== "evaluated") continue;
+    const entry = entries.get(row.modelId) ?? null;
+    const budget = { freeGb: row.budgetGb, totalGb: row.budgetGb };
+    const needed = predictedPeakGb(entry, row.tier, headroom);
+    const staged = predictedSequentialPeakGb(entry, row.tier, headroom);
+    const label = `${row.modelId}/${row.tier}/${row.budgetGb}`;
+    assert.equal(round(needed), row.predictedPeakGb, `${label}: predictedPeakGb`);
+    assert.equal(round(staged), row.predictedSequentialPeakGb, `${label}: predictedSequentialPeakGb`);
+    for (const [capable, fitKey, planKey] of [
+      [true, "fitDecisionSequentialCapable", "loadPlanSequentialCapable"],
+      [false, "fitDecisionSequentialIncapable", "loadPlanSequentialIncapable"],
+    ]) {
+      const decision = fitDecision(needed, budget);
+      const resolved = decision === "too_big" && capable ? "offload" : decision;
+      assert.equal(row[fitKey], resolved, `${label}: ${fitKey} drifted from the JS mirror`);
+      assert.equal(
+        row[planKey],
+        loadPlan(needed, staged, budget, capable),
+        `${label}: ${planKey} drifted from the JS mirror`,
+      );
+    }
+    checked += 1;
+  }
+  assert.ok(checked > 0, "no evaluated rows were reconciled");
+});
+
+function round(value) {
+  if (value === null || value === undefined || !Number.isFinite(value)) return null;
+  return Math.round(value * 1e6) / 1e6;
 }
+
+test("the JS corpus axes match the Rust emitter's, so neither side can halve the grid", () => {
+  assert.deepEqual(decisions.corpus.tiers, [...TIER_ORDER]);
+  assert.deepEqual(decisions.corpus.budgetsGb, [...BASELINE_BUDGETS_GB]);
+  assert.deepEqual(
+    decisions.corpus.imageGeometries,
+    BASELINE_IMAGE_GEOMETRIES.map((geometry) => ({ ...geometry })),
+  );
+});
+
+test("the sequential-capability input is the registry descriptor, never the manifest key", () => {
+  // The defect this replaces: `sequentialCapable` was read from `candle.supportsSequentialOffload`
+  // while production reads `mlx_fit_gate::engine_supports_sequential`, flipping loadPlan
+  // reject<->sequential on tight budgets for every route where the two disagree.
+  assert.equal(decisions.sequentialCapability.manifestKeyIsNotTheInput, true);
+  assert.match(decisions.sequentialCapability.productionInput, /engine_supports_sequential/);
+  for (const row of artifacts.baseline.candle) {
+    assert.ok(
+      !("sequentialCapable" in row),
+      `${row.modelId}: a resolved sequentialCapable column would be a fabricated input`,
+    );
+  }
+  // Both branches are enumerated, and they actually differ somewhere — an enumeration that
+  // collapsed to one answer everywhere would be recording nothing.
+  const evaluated = artifacts.baseline.candle.filter((row) => row.resolution === "evaluated");
+  assert.ok(
+    evaluated.some((row) => row.loadPlanSequentialCapable !== row.loadPlanSequentialIncapable),
+    "the two capability branches never differ — the enumeration is inert",
+  );
+  const gap = artifacts.inventory.knownGaps.find(
+    (entry) => entry.id === "candle-sequential-capability-needs-the-linked-candle-bundle",
+  );
+  assert.ok(gap, "the unresolved sequential-capability input is not recorded as a gap");
+  assert.equal(gap.owner, "sc-19050");
+});
 
 test("candle admission is geometry-blind today, and the baseline says so explicitly", () => {
   // The single most important property this baseline records. Every image route on the scalar gate
@@ -500,16 +628,124 @@ test("candle admission is geometry-blind today, and the baseline says so explici
   // when it does the diff is the deliverable.
   const byCoordinate = new Map();
   for (const row of artifacts.baseline.candle) {
-    if (row.geometrySensitive) continue;
+    if (row.resolution !== "evaluated" || row.geometrySensitive) continue;
     const key = `${row.modelId}|${row.tier}|${row.budgetGb}`;
     if (!byCoordinate.has(key)) byCoordinate.set(key, []);
     byCoordinate.get(key).push(row);
   }
   for (const [key, rows] of byCoordinate) {
-    const plans = new Set(rows.map((row) => row.loadPlan));
+    assert.equal(rows.length, BASELINE_IMAGE_GEOMETRIES.length, `${key}: geometry axis is missing`);
+    const plans = new Set(
+      rows.map((row) => `${row.loadPlanSequentialCapable}|${row.loadPlanSequentialIncapable}`),
+    );
     assert.equal(plans.size, 1, `${key}: a geometry-blind coordinate produced ${plans.size} plans`);
   }
   assert.ok(byCoordinate.size > 0, "no geometry-blind coordinates — the corpus is empty");
+});
+
+// -------------------------------------------------------------------------------------------------
+// Geometry-awareness is resolved PER GATE FUNCTION, including struct-wrapped geometry
+// -------------------------------------------------------------------------------------------------
+
+test("struct-wrapped geometry is seen, and per-symbol facts are never unioned across a mechanism", () => {
+  const gates = new Map(artifacts.inventory.gateGeometry.map((gate) => [gate.gate, gate]));
+
+  // A scan of the parameter TOKENS reports all three of these as geometry-blind: the geometry
+  // arrives inside `geometry: MemoryGeometry` (declared in the pinned inference dependency, but
+  // BUILT in fingerprinted sources) and inside `query: VideoCurveQuery`, whose `geometry` field is
+  // four fields deep behind four unrelated enums.
+  for (const symbol of [
+    "krea_control_fit::fit_ladder_for_entry_with_runtime",
+    "evaluate_shared_image",
+    "evaluate_shared_bespoke_image",
+    "evaluate",
+  ]) {
+    const gate = gates.get(symbol);
+    assert.ok(gate, `${symbol} has no resolved geometry fact`);
+    assert.equal(gate.geometryAware, true, `${symbol} must be geometry-aware`);
+    assert.ok(
+      gate.reachedVia.some((via) => via.startsWith("struct_parameter:")),
+      `${symbol}: geometry must be reached through a struct parameter, got ${gate.reachedVia}`,
+    );
+  }
+
+  // The mechanism-union defect: `flat_video_fit_error` names seven symbols, two of which take
+  // geometry scalars. The other five are deliberately resolution-blind and must say so.
+  for (const symbol of ["svd_fit_error", "mochi_fit_error"]) {
+    assert.equal(gates.get(symbol).geometryAware, true, symbol);
+    assert.deepEqual(gates.get(symbol).geometryAxes, ["frames", "height", "width"]);
+  }
+  for (const symbol of [
+    "wan_video_fit_error",
+    "wan_video_fit_error_with_adapter_bytes",
+    "scail2_video_fit_error",
+    "scail2_video_fit_error_with_adapter_bytes",
+    "video_weights_fit_error",
+  ]) {
+    assert.equal(
+      gates.get(symbol).geometryAware,
+      false,
+      `${symbol} is resolution-blind; a mechanism union labelled it aware from svd_fit_error`,
+    );
+  }
+  // And the scalar gate itself, which is the whole premise of sc-19054's recorded gap.
+  assert.equal(gates.get("candle_scalar_gate::load_plan").geometryAware, false);
+  assert.equal(gates.get("conditioning_fit::decide").geometryAware, false);
+
+  // The mechanism-level flag survives only as a summary, and it must be exactly "any symbol is".
+  for (const mechanism of artifacts.inventory.mechanisms) {
+    assert.equal(
+      mechanism.geometryAware,
+      mechanism.symbols.some((entry) => entry.geometryAware),
+      `${mechanism.id}: the mechanism flag is not the OR of its symbols`,
+    );
+  }
+  const videoMechanism = artifacts.inventory.mechanisms.find(
+    (mechanism) => mechanism.id === "flat_video_fit_error",
+  );
+  assert.ok(
+    videoMechanism.geometryAwareSymbols.length > 0 &&
+      videoMechanism.geometryBlindSymbols.length > 0,
+    "flat_video_fit_error must publish BOTH lists — that split is the whole point",
+  );
+});
+
+test("every decision row's geometrySensitive comes from the gate that route reaches", () => {
+  const gates = new Map(artifacts.inventory.gateGeometry.map((gate) => [gate.gate, gate]));
+  for (const row of artifacts.baseline.candle) {
+    const gate = gates.get(row.gate);
+    assert.ok(gate, `${row.modelId}: unresolved gate ${row.gate}`);
+    assert.equal(
+      row.geometrySensitive,
+      gate.geometryAware,
+      `${row.modelId}: geometrySensitive does not match its own gate ${row.gate}`,
+    );
+    assert.deepEqual(row.geometryAxes, gate.geometryAxes);
+  }
+  // No evaluated row may claim geometry sensitivity while publishing an axis it does not respond to
+  // — the 0-of-N-variance class this replaces.
+  for (const row of artifacts.baseline.candle) {
+    if (row.resolution !== "evaluated") continue;
+    assert.equal(row.geometrySensitive, false, `${row.modelId}: only the scalar gate is evaluated`);
+  }
+});
+
+test("a gate function's geometry facts are resolvable for every declared symbol", () => {
+  for (const mechanism of ADMISSION_MECHANISMS) {
+    if (!mechanism.source) continue;
+    for (const symbol of mechanism.definitionSymbols) {
+      const resolved = resolveSymbolGeometry(bodies, mechanism.source, symbol);
+      if (!resolved) continue;
+      // A parameter type that could not be resolved is PUBLISHED, never silently read as
+      // "no geometry". Any that appear must be non-geometry handles.
+      for (const unresolved of resolved.unresolvedParameterTypes) {
+        assert.ok(
+          !/geom/i.test(unresolved.parameter),
+          `${symbol}: geometry parameter ${unresolved.parameter} is unresolved`,
+        );
+      }
+    }
+  }
 });
 
 test("mlx baseline rows are declared-resolution and carry no fabricated geometry axis", () => {
@@ -520,12 +756,45 @@ test("mlx baseline rows are declared-resolution and carry no fabricated geometry
     assert.ok(TIER_ORDER.includes(row.tier));
   }
   assert.ok(artifacts.baseline.mlx.length > 0);
-  assert.match(artifacts.baseline.corpus.resolutions.mlx, /sc-19050/);
+  assert.match(artifacts.baseline.corpus.resolutions.declared, /sc-19050/);
 });
 
-test("the baseline is deterministic under a re-derivation from the same inventory", () => {
-  const again = buildBaseline(bodies, artifacts.inventory);
+test("the baseline is deterministic under a re-derivation from the same inputs", () => {
+  const again = buildBaseline(bodies, artifacts.inventory, decisions);
   assert.equal(JSON.stringify(again), JSON.stringify(artifacts.baseline));
+});
+
+test("the baseline refuses decisions that contradict the derived gate facts", () => {
+  // The reconciliation is a REFUSAL, not a report: the Rust emitter's `gate_is_geometry_aware` match
+  // may not stand as a second hand-written claim beside this file's signature-derived one.
+  assert.throws(
+    () =>
+      buildBaseline(bodies, artifacts.inventory, {
+        ...decisions,
+        rows: decisions.rows.map((row, index) =>
+          index === 0 ? { ...row, geometrySensitive: !row.geometrySensitive } : row,
+        ),
+      }),
+    /not allowed to disagree/,
+  );
+  assert.throws(
+    () =>
+      buildBaseline(bodies, artifacts.inventory, {
+        ...decisions,
+        rows: decisions.rows.map((row, index) =>
+          index === 0 ? { ...row, gate: "a_gate_nobody_resolved" } : row,
+        ),
+      }),
+    /resolved no geometry fact for/,
+  );
+  assert.throws(
+    () =>
+      buildBaseline(bodies, artifacts.inventory, {
+        ...decisions,
+        rows: [...decisions.rows, { ...decisions.rows[0], modelId: "not_a_route" }],
+      }),
+    /not an inventory route/,
+  );
 });
 
 // -------------------------------------------------------------------------------------------------

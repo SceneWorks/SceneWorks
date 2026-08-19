@@ -3,7 +3,10 @@ import { readFile, readdir } from "node:fs/promises";
 import test from "node:test";
 
 import { SOURCE_PATHS } from "./generate-memory-matrix.mjs";
-import { SOURCE_PATHS as CANDLE_ADMISSION_SOURCE_PATHS } from "./generate-candle-admission-inventory.mjs";
+import {
+  DECISIONS_PATH as CANDLE_ADMISSION_DECISIONS_PATH,
+  SOURCE_PATHS as CANDLE_ADMISSION_SOURCE_PATHS,
+} from "./generate-candle-admission-inventory.mjs";
 import { buildPlans as buildLtxPlans } from "./generate-ltx-sc18946-plan.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 
@@ -753,6 +756,11 @@ test("the pre-push derived-docs trigger covers every non-Rust source the matrix 
     ...Object.values(CANDLE_ADMISSION_SOURCE_PATHS),
     "scripts/generate-candle-admission-inventory.mjs",
     "scripts/lib/manifest-memory-declarations.mjs",
+    // sc-19049: the Rust-emitted decisions the baseline is BUILT FROM. Deliberately outside
+    // CANDLE_ADMISSION_SOURCE_PATHS (fingerprinting an artifact derived from the inventory would
+    // close a regenerate/hash loop), so it has to be listed here or an edit to the decisions would
+    // push a stale baseline and hear about it from `parity`.
+    CANDLE_ADMISSION_DECISIONS_PATH,
   ];
   for (const relative of derivedInputs) {
     if (rustArm.test(relative)) continue;
