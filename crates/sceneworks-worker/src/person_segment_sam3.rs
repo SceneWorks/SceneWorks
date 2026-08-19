@@ -34,6 +34,7 @@ use runtime_macos::providers::sam3::{
     VideoFrameOutput,
 };
 
+use crate::gpu_poison::{self, ContainedPanic, GpuPoisonState};
 use crate::person_segment_sam3_common::{
     check_segment_canceled, frame_mask_for_object, mask_to_frame, normalize_chw, paint_order,
     per_frame_masks, select_object, BoxNorm, Sam3FrameOutput, SegmentProgress, CANCEL_MESSAGE,
@@ -297,17 +298,23 @@ impl Sam3Executor {
 /// `Engine` error instead of killing the shared thread (which would strand every later click); the
 /// thread therefore survives job panics and only exits at worker shutdown. A dead thread or dropped
 /// reply is reported as an error rather than hanging the caller.
+///
+/// sc-20572 review: SAM3 drives MLX Metal same as the model-cache seam, so a panic here can be the
+/// SAME `SubmissionsIgnored` poisoning `cache_thread` classifies — but until this fix this seam
+/// discarded the panic payload entirely, so a poisoning first surfacing in a SAM3 click reported
+/// only the generic "thread panicked" message (burning smart-select clicks with no diagnosis until
+/// a later cache-seam job happened to latch it) and successful SAM3 runs never counted as this
+/// process having driven the GPU (biasing later scope discrimination toward `HostSuspected` even
+/// when this same process just did GPU work). The panic/classify/record logic now goes through the
+/// shared [`gpu_poison`] seam identically to `cache_thread::contained_panic_error`; the split into
+/// [`run_sam3_job_with_poison`] keeps that logic directly unit-testable against a local
+/// `GpuPoisonState`, the same way `cache_thread`'s tests drive `contained_panic_error` directly.
 fn run_on_sam3_thread<T: Send + 'static>(
     job: impl FnOnce() -> WorkerResult<T> + Send + 'static,
 ) -> WorkerResult<T> {
     let (reply_tx, reply_rx) = std::sync::mpsc::channel::<WorkerResult<T>>();
     let boxed: Sam3Job = Box::new(move || {
-        let outcome =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)).unwrap_or_else(|_| {
-                Err(WorkerError::Engine(
-                    "sam3 smart-select thread panicked".into(),
-                ))
-            });
+        let outcome = run_sam3_job_with_poison(job, gpu_poison::global());
         // The caller may have gone away (its task dropped); a closed reply channel is not an error.
         let _ = reply_tx.send(outcome);
     });
@@ -315,6 +322,60 @@ fn run_on_sam3_thread<T: Send + 'static>(
     reply_rx
         .recv()
         .map_err(|_| WorkerError::Engine("sam3 smart-select thread dropped the reply".into()))?
+}
+
+/// The synchronous body of a sam3-thread job (sc-20572 review): run `job`, contain any panic
+/// through the shared gpu-poison seam, and record successful GPU-driving work as evidence for
+/// later scope discrimination — the same contract `cache_thread`'s cache-seam jobs already keep.
+/// Split out of [`run_on_sam3_thread`] so it needs neither the executor thread nor a Metal device
+/// to test: it takes `poison` by reference instead of reading [`gpu_poison::global`] directly, so
+/// tests inject a local [`GpuPoisonState`] the way `cache_thread`'s tests drive
+/// `contained_panic_error` — no process-global latch touched, no GPU involved.
+fn run_sam3_job_with_poison<T>(
+    job: impl FnOnce() -> WorkerResult<T>,
+    poison: &GpuPoisonState,
+) -> WorkerResult<T> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)) {
+        Ok(result) => {
+            if result.is_ok() {
+                // sc-20572: proof this process can drive the GPU, mirroring the model-cache seam
+                // (`cache_thread::run_cached_with_access_after_cold_admission`). Without this, a
+                // successful SAM3-only session never contributes evidence and a poisoning that
+                // later surfaces elsewhere in the same process defaults to `HostSuspected`.
+                poison.note_gpu_work_completed();
+            }
+            result
+        }
+        Err(panic) => Err(sam3_panic_error(
+            crate::cache_thread::panic_message(panic.as_ref()),
+            poison,
+        )),
+    }
+}
+
+/// Turn a caught sam3-thread panic payload into the `WorkerError` this seam reports, classifying
+/// it through the shared gpu-poison seam exactly like `cache_thread::contained_panic_error`
+/// (sc-20572 review). A `SubmissionsIgnored` poisoning gets the same scoped, cascade-aware message
+/// the cache seam produces; anything else keeps SAM3's existing conservative surface — the raw
+/// panic payload is never echoed back to the caller, only the fixed "thread panicked" text, same
+/// as before this fix.
+fn sam3_panic_error(payload: String, poison: &GpuPoisonState) -> WorkerError {
+    match poison.record_contained_panic(&payload) {
+        ContainedPanic::PoisonedQueue { scope, message } => {
+            tracing::error!(
+                event = "mlx_command_queue_poisoned",
+                scope = scope.as_str(),
+                firstFailure = %poison.first_failure().unwrap_or_default(),
+                driverError = %payload,
+                "the GPU driver is ignoring this worker's Metal submissions during sam3 \
+                 smart-select; the worker cannot serve further jobs and is restarting"
+            );
+            WorkerError::Engine(message)
+        }
+        ContainedPanic::Unclassified => {
+            WorkerError::Engine("sam3 smart-select thread panicked".into())
+        }
+    }
 }
 
 /// Load the shared dense checkpoint into the process-wide [`WEIGHTS`] cache (poison-recovery) and run
@@ -820,6 +881,85 @@ mod tests {
             matches!(error, WorkerError::Engine(ref message) if message.contains("3x3") && message.contains("8 values"))
         );
     }
+
+    /// The exact payload mlx-rs hands the containment when the driver is refusing this process's
+    /// submissions — same shape `cache_thread`'s sibling test uses (2026-08-19 production log).
+    const IGNORED_SUBMISSION: &str = "called `Result::unwrap()` on an `Err` value: \
+                                      Exception(\"[METAL] Command buffer execution failed: Ignored \
+                                      (for causing prior/excessive GPU errors) \
+                                      (00000004:kIOGPUCommandBufferCallbackErrorSubmissionsIgnored)\")";
+
+    /// sc-20572 review: an ordinary SAM3 panic must keep its existing conservative surface — the
+    /// raw payload text is never echoed back to the caller, only the fixed "thread panicked"
+    /// message, exactly as before this fix. Driven against a local `GpuPoisonState` (no thread, no
+    /// Metal device) the same way `cache_thread::contained_panic_error` is tested directly.
+    #[test]
+    fn an_ordinary_sam3_panic_keeps_the_generic_message_and_does_not_latch() {
+        let poison = GpuPoisonState::new();
+        let outcome: WorkerResult<()> = run_sam3_job_with_poison(
+            || -> WorkerResult<()> { panic!("some internal mlx-gen-sam3 detail") },
+            &poison,
+        );
+        let Err(WorkerError::Engine(message)) = outcome else {
+            panic!("a contained panic must surface as an engine error");
+        };
+        assert_eq!(message, "sam3 smart-select thread panicked");
+        assert!(
+            !message.contains("mlx-gen-sam3 detail"),
+            "the raw panic payload must not be echoed back: {message}"
+        );
+        assert_eq!(poison.poisoned(), None);
+    }
+
+    /// sc-20572 review: a `SubmissionsIgnored` panic surfacing FIRST inside a SAM3 smart-select
+    /// click must be classified and latched through the same seam `cache_thread` uses — not
+    /// discarded into the generic "thread panicked" message that used to burn clicks with no
+    /// diagnosis until a later cache-seam job happened to latch it.
+    #[test]
+    fn a_poisoning_first_seen_on_the_sam3_thread_is_classified_and_latches() {
+        let poison = GpuPoisonState::new();
+        let outcome: WorkerResult<()> = run_sam3_job_with_poison(
+            || -> WorkerResult<()> { panic!("{IGNORED_SUBMISSION}") },
+            &poison,
+        );
+        let Err(WorkerError::Engine(message)) = outcome else {
+            panic!("a contained panic must surface as an engine error");
+        };
+        assert!(
+            message.contains("kIOGPUCommandBufferCallbackErrorSubmissionsIgnored"),
+            "{message}"
+        );
+        assert_eq!(
+            poison.poisoned(),
+            Some(gpu_poison::PoisonScope::HostSuspected),
+            "no prior GPU work was recorded on this thread"
+        );
+        assert_eq!(
+            poison.first_failure(),
+            None,
+            "the poisoning must not record itself as the first failure"
+        );
+    }
+
+    /// sc-20572 review: a successful SAM3 run must count as this process having driven the GPU,
+    /// same as a successful model-cache run — otherwise a poisoning that surfaces later in the same
+    /// process is misclassified `HostSuspected` even though this process demonstrably rendered.
+    #[test]
+    fn a_successful_sam3_run_marks_this_process_as_having_driven_the_gpu() {
+        let poison = GpuPoisonState::new();
+        let ok: WorkerResult<u32> = run_sam3_job_with_poison(|| Ok(42), &poison);
+        assert_eq!(ok.unwrap(), 42);
+
+        // Now classify a poisoning: because `note_gpu_work_completed` fired above, it must scope
+        // to `Process`, not `HostSuspected`.
+        let outcome: WorkerResult<()> = run_sam3_job_with_poison(
+            || -> WorkerResult<()> { panic!("{IGNORED_SUBMISSION}") },
+            &poison,
+        );
+        assert!(outcome.is_err());
+        assert_eq!(poison.poisoned(), Some(gpu_poison::PoisonScope::Process));
+    }
+
     // The checkpoint filenames now live in the shared module; the real-weights smokes below join them
     // onto a snapshot dir to build the model/tokenizer paths. `MASK_GRID` sizes the synthetic mask
     // fixtures (the production paths call it inside the shared `person_segment_sam3_common` helpers).

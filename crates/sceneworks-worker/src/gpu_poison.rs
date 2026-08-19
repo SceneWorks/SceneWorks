@@ -137,12 +137,20 @@ impl GpuPoisonState {
     /// that produced one owns the poisoning that follows. (A contained panic that had nothing to do
     /// with the GPU also sets it. That biases toward [`PoisonScope::Process`], the less alarming
     /// verdict, and it is corrected by the restart: the fresh process starts with no such history.)
+    ///
+    /// A `SubmissionsIgnored` payload is deliberately NEVER recorded as the first failure (review
+    /// finding, sc-20572): `first_failure` exists to answer "what actually explains the cascade",
+    /// and when the cascade IS the first thing this process saw there is no such explanation yet —
+    /// recording it here would make `first_failure()` (and the `firstFailure` event field, and the
+    /// refusal text) echo the poisoning back as its own cause, contradicting
+    /// `docs/observability.md`'s "empty when the ignored submission was the first thing it saw".
     pub(crate) fn record_contained_panic(&self, payload: &str) -> ContainedPanic {
-        let first_failure = self.record_first_failure(payload);
         if !is_submissions_ignored(payload) {
             self.drove_gpu.store(true, Ordering::SeqCst);
+            self.record_first_failure(payload);
             return ContainedPanic::Unclassified;
         }
+        let first_failure = self.first_failure();
         let observed = if self.drove_gpu.load(Ordering::SeqCst) {
             PoisonScope::Process
         } else {
@@ -189,14 +197,15 @@ impl GpuPoisonState {
             .clone()
     }
 
-    /// Store `payload` as the first contained failure if nothing is stored yet, and return whatever
-    /// is stored (which is `payload` itself on the first call).
-    fn record_first_failure(&self, payload: &str) -> Option<String> {
+    /// Store `payload` as the first contained failure if nothing is stored yet. Only called for
+    /// non-poison payloads (see [`Self::record_contained_panic`]) — a `SubmissionsIgnored` payload
+    /// must never land here, or it would become its own "first failure".
+    fn record_first_failure(&self, payload: &str) {
         let mut first = self
             .first_failure
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        Some(first.get_or_insert_with(|| payload.to_owned()).clone())
+        first.get_or_insert_with(|| payload.to_owned());
     }
 }
 
@@ -239,8 +248,9 @@ fn refusal_message(scope: PoisonScope, first_failure: Option<&str>) -> String {
 
 /// The user-facing error for the job that ran into the poisoning.
 ///
-/// `first_failure` is this process's first contained failure; it is surfaced only when it differs
-/// from `payload`, because that is exactly the case where the cascade is hiding the real cause.
+/// `first_failure` is this process's first contained failure — genuinely earlier than `payload`,
+/// never `payload` itself, because [`GpuPoisonState::record_contained_panic`] never records a
+/// `SubmissionsIgnored` payload as the first failure in the first place (sc-20572 review).
 fn poisoned_queue_message(
     scope: PoisonScope,
     first_failure: Option<&str>,
@@ -254,7 +264,7 @@ fn poisoned_queue_message(
          clear a poisoned command queue. ",
     );
     message.push_str(scope_remedy(scope));
-    match first_failure.filter(|first| *first != payload) {
+    match first_failure {
         Some(first) => {
             message.push_str(" The first failure in this worker process was: ");
             message.push_str(first);
@@ -371,6 +381,44 @@ mod tests {
             !message.contains("The first failure in this worker process was:"),
             "the ignored submission must not be presented as the cause of itself: {message}"
         );
+    }
+
+    /// sc-20572 review: when the ignored submission itself is the FIRST contained panic this
+    /// process ever saw, `first_failure()` must stay empty — not echo the poisoning back as its
+    /// own cause. This is the exact source the `mlx_command_queue_poisoned` event's `firstFailure`
+    /// field reads (`cache_thread::contained_panic_error`), so pinning it here pins the event too.
+    #[test]
+    fn first_contained_panic_being_the_poison_leaves_first_failure_empty() {
+        let state = GpuPoisonState::new();
+        poisoned_message(&state, IGNORED);
+        assert_eq!(
+            state.first_failure(),
+            None,
+            "a self-caused poisoning must not record itself as the first failure"
+        );
+        let refusal = state.refusal_message().expect("latched");
+        assert!(
+            !refusal.contains("The first failure in this worker process was:"),
+            "the refusal text must not blame the cascade on itself either: {refusal}"
+        );
+    }
+
+    /// sc-20572 review counterpart: a genuine EARLIER contained fault must still be surfaced, in
+    /// both `first_failure()` and the later-job refusal text (not just the per-job cascade
+    /// message, which `the_cascade_message_surfaces_the_first_failure_not_just_the_ignored_submission`
+    /// already covers).
+    #[test]
+    fn a_genuine_earlier_failure_is_surfaced_in_first_failure_and_refusal() {
+        let state = GpuPoisonState::new();
+        state.record_contained_panic(METAL_OOM);
+        poisoned_message(&state, IGNORED);
+        assert_eq!(state.first_failure().as_deref(), Some(METAL_OOM));
+        let refusal = state.refusal_message().expect("latched");
+        assert!(
+            refusal.contains("The first failure in this worker process was:"),
+            "{refusal}"
+        );
+        assert!(refusal.contains("41231237120 bytes"), "{refusal}");
     }
 
     #[test]

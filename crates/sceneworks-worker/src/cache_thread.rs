@@ -1194,6 +1194,44 @@ mod tests {
         assert_eq!(poison.poisoned(), Some(gpu_poison::PoisonScope::Process));
     }
 
+    /// sc-20572 review: pins the exact read `contained_panic_error` uses to build the
+    /// `mlx_command_queue_poisoned` event's `firstFailure` field
+    /// (`poison.first_failure().unwrap_or_default()`) — it must come back empty when the ignored
+    /// submission IS this process's first contained panic, matching `docs/observability.md`
+    /// ("empty when the ignored submission was the first thing it saw"), and must surface a
+    /// genuinely earlier fault when one exists.
+    #[test]
+    fn first_failure_emitted_on_the_event_is_empty_only_when_the_poisoning_is_the_first_thing_seen()
+    {
+        let poison = gpu_poison::GpuPoisonState::new();
+        let mut cache = CacheThread::<u32, DropProbe>::new(false);
+        cache.install(7, DropProbe(Arc::new(AtomicUsize::new(0))));
+
+        contained_panic_error(&mut cache, TEST_SEAM_MESSAGES, IGNORED_SUBMISSION, &poison);
+        assert_eq!(
+            poison.first_failure().unwrap_or_default(),
+            "",
+            "the event's firstFailure must be empty when the ignored submission was the first \
+             thing this process saw"
+        );
+
+        let poison = gpu_poison::GpuPoisonState::new();
+        let mut cache = CacheThread::<u32, DropProbe>::new(false);
+        cache.install(7, DropProbe(Arc::new(AtomicUsize::new(0))));
+        contained_panic_error(
+            &mut cache,
+            TEST_SEAM_MESSAGES,
+            "[metal::malloc] Attempting to allocate 41231237120 bytes",
+            &poison,
+        );
+        contained_panic_error(&mut cache, TEST_SEAM_MESSAGES, IGNORED_SUBMISSION, &poison);
+        assert_eq!(
+            poison.first_failure().unwrap_or_default(),
+            "[metal::malloc] Attempting to allocate 41231237120 bytes",
+            "a genuine earlier fault must still surface on the event"
+        );
+    }
+
     /// sc-20572 counterpart: everything that is NOT an ignored submission keeps the pre-existing
     /// containment exactly — evict the resident, report with the lane's own prefix, leave the
     /// worker able to claim the next job.
