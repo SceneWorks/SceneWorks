@@ -5363,25 +5363,10 @@ fn run_qwen_provider(request: &Value) -> Result<Value, String> {
 /// instead (see [`planned_ltx_capture`]). That gap is real and is reported rather than papered over —
 /// the audio stream's latent length is a function of fps, so two records with identical
 /// `{width, height, batch, frames}` can legitimately differ in peak.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct LtxGeometry {
-    width: u32,
-    height: u32,
-    frames: u32,
-    /// `1 + (frames - 1) / 8` — the LTX video VAE's causal temporal depth.
-    latent_frames: u32,
-}
-
-fn ltx_declared_resolutions() -> String {
-    LTX_RESOLUTIONS
-        .iter()
-        .map(|(width, height)| format!("{width}x{height}"))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
+type LtxGeometry = protocol::VideoGeometry;
 
 /// LTX's own geometry envelope, which REPLACES the image arms' `frames == 1` refusal for this arm
-/// alone. Three independent constraints, each from a stated source:
+/// alone. Four independent constraints, each from a stated source:
 ///
 /// * `limits.resolutions` — the five declared pairs (the catalog contract a real request can name).
 /// * `limits.requiresDimensionsMultipleOf` — 64, mirroring the engine's `SIZE_MULTIPLE`. Redundant
@@ -5389,65 +5374,69 @@ fn ltx_declared_resolutions() -> String {
 /// * the temporal lattice and envelope — `frames = 1 + 8k` (the engine's `validate_request` hard
 ///   reject) inside `[97, 449]`, the closed span the declared `durations x fps` cross product
 ///   produces through the shipped LTX frame ladder.
+/// * `batch == 1` — LTX's descriptor advertises `max_count: 1` and the arm renders exactly one clip.
+///
+/// LTX declares no `limits.maxPixels`, so the pair list is its only spatial bound.
 ///
 /// A still geometry (`frames == 1`) is on the lattice but below the envelope floor, so it is refused
 /// here too: this arm may not silently capture a single-frame record for a video model.
+///
+/// sc-19057 hoisted the checks themselves into [`protocol::validate_video_geometry`], the video
+/// counterpart of the `protocol::validate_still_geometry` hoist sc-18808 did for the image arms —
+/// the second video arm (`candle:wan2_2_ti2v_5b`) has a genuinely different envelope but the exact
+/// same five refusals, and a second private copy is how two arms drift into reporting different
+/// reasons for the same class of bad plan row. Every message is reproduced verbatim through the
+/// label and the two rationale strings below.
+///
+/// Two tests hold that wording, and it takes BOTH — this file compiles on exactly one host:
+///
+/// * `the_video_geometry_guard_reproduces_the_pinned_ltx_wording_on_every_axis`, in this crate's
+///   lib, asserts the full sentences with `assert_eq!` on every host — but against a HAND COPY of
+///   the fields below, which on its own could not notice this function changing.
+/// * `the shared video-geometry envelopes are transcribed verbatim into the always-compiled lib
+///   tests`, in `scripts/platform-review-contracts.test.mjs`, parses this literal out of the source,
+///   resolves the constants it names, and requires that copy to match field-for-field. It runs under
+///   `npm run check` on every PR, on any host.
+///
+/// The negative test in this file's own `ltx_tests` also asserts the full sentences rather than a
+/// substring, so a reworded refusal reds on the macOS lane as well.
+fn ltx_video_envelope() -> protocol::VideoGeometryEnvelope<'static> {
+    // The rationale below spells the stride out in prose, so a change to the constant that left the
+    // sentence behind would make the refusal message lie. Fail at compile time instead.
+    const _: () = assert!(
+        LTX_TEMPORAL_SCALE == 8,
+        "update the temporal rationale prose with the stride"
+    );
+    protocol::VideoGeometryEnvelope {
+        calibration_label: "MLX LTX-2.3 calibration",
+        resolutions: &LTX_RESOLUTIONS,
+        dimension_multiple: LTX_DIMENSION_MULTIPLE,
+        max_pixels: None,
+        temporal_scale: LTX_TEMPORAL_SCALE,
+        temporal_rationale: "the LTX video VAE is 8x causal in time",
+        frame_envelope: LTX_FRAME_ENVELOPE,
+        batch_rationale: "the provider advertises max_count 1",
+    }
+}
+
+/// The three-axis half of the guard, reached in production only through [`ltx_target_geometry`] —
+/// `protocol::video_target_geometry` reads the axes and applies the batch rule before delegating to
+/// the very same `protocol::validate_video_geometry` call this makes.
+///
+/// It is therefore `#[cfg(test)]`: after the sc-19057 hoist its only callers are the envelope tests
+/// below, and an un-gated function with no production caller is a hard `-D dead-code` error on the
+/// one lane that compiles this file. The candle video arm has no equivalent helper at all — its
+/// tests go through `validate_wan_target` — and this keeps the two arms' production shapes the same
+/// while leaving the axis-level tests able to name a geometry directly.
+#[cfg(test)]
 fn validate_ltx_geometry(width: u32, height: u32, frames: u32) -> Result<LtxGeometry, String> {
-    if !LTX_RESOLUTIONS.contains(&(width, height)) {
-        return Err(format!(
-            "MLX LTX-2.3 calibration requires one of the declared limits.resolutions ({}), got {width}x{height}",
-            ltx_declared_resolutions()
-        ));
-    }
-    if width % LTX_DIMENSION_MULTIPLE != 0 || height % LTX_DIMENSION_MULTIPLE != 0 {
-        return Err(format!(
-            "MLX LTX-2.3 calibration requires geometry divisible by {LTX_DIMENSION_MULTIPLE}, got {width}x{height}"
-        ));
-    }
-    if frames % LTX_TEMPORAL_SCALE != 1 {
-        return Err(format!(
-            "MLX LTX-2.3 calibration requires geometry.frames == 1 + {LTX_TEMPORAL_SCALE}k (the LTX \
-             video VAE is {LTX_TEMPORAL_SCALE}x causal in time), got {frames}"
-        ));
-    }
-    let (minimum, maximum) = LTX_FRAME_ENVELOPE;
-    if frames < minimum || frames > maximum {
-        return Err(format!(
-            "MLX LTX-2.3 calibration requires geometry.frames within the declared duration/fps \
-             envelope [{minimum}, {maximum}], got {frames}"
-        ));
-    }
-    Ok(LtxGeometry {
-        width,
-        height,
-        frames,
-        latent_frames: 1 + (frames - 1) / LTX_TEMPORAL_SCALE,
-    })
+    protocol::validate_video_geometry(&ltx_video_envelope(), width, height, frames)
 }
 
 /// Read the four declared geometry axes. Unlike the image arms this reads `frames` as a real value
-/// rather than asserting it away; `batch` is still pinned to 1 because LTX's descriptor advertises
-/// `max_count: 1` and the arm renders exactly one clip.
+/// rather than asserting it away.
 fn ltx_target_geometry(request: &Value) -> Result<LtxGeometry, String> {
-    let geometry = protocol::planned(request)?
-        .pointer("/target/geometry")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "planned.target.geometry must be an object".to_owned())?;
-    let axis = |name: &str| {
-        geometry
-            .get(name)
-            .and_then(Value::as_u64)
-            .and_then(|value| u32::try_from(value).ok())
-            .ok_or_else(|| format!("planned.target.geometry.{name} must fit u32"))
-    };
-    let batch = axis("batch")?;
-    if batch != 1 {
-        return Err(format!(
-            "MLX LTX-2.3 calibration requires geometry.batch == 1 (the provider advertises \
-             max_count 1), got {batch}"
-        ));
-    }
-    validate_ltx_geometry(axis("width")?, axis("height")?, axis("frames")?)
+    protocol::video_target_geometry(request, &ltx_video_envelope())
 }
 
 /// Defense-in-depth mirror of `validate_flux2_target`, plus the T2V-specific target shape. The
@@ -6732,6 +6721,22 @@ fn validate_diagnostic_audio(
     }
 }
 
+/// A clip whose first frame is a single flat colour is a decoder failure, not evidence.
+///
+/// sc-19057 review: the four `"firstFrameNondegenerate": true` sites in this file were hardcoded
+/// literals sitting near — but not wired to — an inline copy of this predicate, so the shape of the
+/// evidence did not show that anything had been measured. This is the same predicate the candle Wan
+/// arm's `wan_frame_is_nondegenerate` applies, named once here and used at every site, and each of
+/// those sites now emits the value it returned rather than a constant. A degenerate frame still
+/// ABORTS the capture, so a receipt can only ever carry `true` — the point is that it carries it
+/// because it was measured.
+fn ltx_frame_is_nondegenerate(frame: &Image) -> bool {
+    frame
+        .pixels
+        .first()
+        .is_some_and(|first| frame.pixels.iter().any(|channel| channel != first))
+}
+
 /// Maximum, mean, and root-mean-square absolute error over EVERY frame of two clips, in [0,1]
 /// units. Per-frame aggregation rather than a first-frame spot check: a temporal divergence that
 /// leaves frame 0 identical is exactly the failure a video determinism contract has to catch.
@@ -7026,7 +7031,7 @@ fn verify_ltx_bounded_warm_repeat(
     let first = warm
         .first()
         .ok_or_else(|| "SC-20318 warm repeat returned no frames".to_owned())?;
-    if first.pixels.is_empty() || first.pixels.iter().all(|pixel| *pixel == first.pixels[0]) {
+    if !ltx_frame_is_nondegenerate(first) {
         return Err("SC-20318 warm repeat returned a degenerate first frame".to_owned());
     }
     let (maximum_error, mean_error, rms_error) = video_max_mean_rms_abs(selected, &warm)?;
@@ -7917,7 +7922,8 @@ fn run_ltx_canary_for(request: &Value, profile: LtxCanaryProfile) -> Result<Valu
     let first = frames
         .first()
         .ok_or_else(|| "LTX safety canary returned no frames".to_owned())?;
-    if first.pixels.is_empty() || first.pixels.iter().all(|pixel| *pixel == first.pixels[0]) {
+    let first_frame_nondegenerate = ltx_frame_is_nondegenerate(first);
+    if !first_frame_nondegenerate {
         return Err("LTX safety canary returned a degenerate first frame".to_owned());
     }
     let peak_active = [conditioning.active, denoise.active, decode.active]
@@ -8008,7 +8014,9 @@ fn run_ltx_canary_for(request: &Value, profile: LtxCanaryProfile) -> Result<Valu
                 "channels": audio.map_or(0, |value| value.channels),
             },
             "frameTimelineSeconds": f64::from(profile.frames() - 1) / f64::from(profile.fps()),
-            "firstFrameNondegenerate": true,
+            // Measured above, not asserted: the canary aborts on a flat first frame, so this can
+            // only ever be `true` — but it is the value the predicate returned.
+            "firstFrameNondegenerate": first_frame_nondegenerate,
         },
         "capturedAt": protocol::captured_at(),
     }))
@@ -8263,7 +8271,8 @@ fn run_ltx_with_admission(
     let first = measured
         .first()
         .ok_or_else(|| "LTX-2.3 campaign render returned no first frame".to_owned())?;
-    if first.pixels.is_empty() || first.pixels.iter().all(|pixel| *pixel == first.pixels[0]) {
+    let first_frame_nondegenerate = ltx_frame_is_nondegenerate(first);
+    if !first_frame_nondegenerate {
         return Err("LTX-2.3 campaign render returned a degenerate first frame".to_owned());
     }
     let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
@@ -8554,7 +8563,9 @@ fn run_ltx_with_admission(
                 "sampleRate": audio.sample_rate,
                 "channels": audio.channels,
             },
-            "firstFrameNondegenerate": true,
+            // Measured above, not asserted: the render aborts on a flat first frame, so this can
+            // only ever be `true` — but it is the value the predicate returned.
+            "firstFrameNondegenerate": first_frame_nondegenerate,
         },
         "diagnostics": protocol::diagnostics(
             "memory-mlx-adapter:ltx-2-3-provider-contract-video",
@@ -8911,7 +8922,8 @@ fn run_ltx_bounded_carrier_proof(request: &Value) -> Result<Value, String> {
     let first = frames
         .first()
         .ok_or_else(|| "SC-20254 bounded carrier returned no frames".to_owned())?;
-    if first.pixels.is_empty() || first.pixels.iter().all(|pixel| *pixel == first.pixels[0]) {
+    let first_frame_nondegenerate = ltx_frame_is_nondegenerate(first);
+    if !first_frame_nondegenerate {
         return Err("SC-20254 bounded carrier returned a degenerate first frame".to_owned());
     }
     if [conditioning.active, denoise.active, decode.active].contains(&0) {
@@ -9015,7 +9027,9 @@ fn run_ltx_bounded_carrier_proof(request: &Value) -> Result<Value, String> {
             },
             "frameTimelineSeconds": f64::from(LTX_CAMPAIGN_ENTRY_FRAMES - 1)
                 / f64::from(LTX_CAMPAIGN_ENTRY_FPS),
-            "firstFrameNondegenerate": true,
+            // Measured above, not asserted: the carrier proof aborts on a flat first frame, so this
+            // can only ever be `true` — but it is the value the predicate returned.
+            "firstFrameNondegenerate": first_frame_nondegenerate,
         },
         "capturedAt": protocol::captured_at(),
     }))
@@ -11138,6 +11152,15 @@ mod ltx_tests {
         let tiled = validate_ltx_campaign_entry_fragment(&fragment)
             .expect_err("a tiled carrier cannot publish the untiled canonical row");
         assert!(tiled.contains("decodeTilingEngaged"), "{tiled}");
+
+        // sc-19057 review: the arm now emits this field from the measured predicate rather than
+        // from a literal, so the validator has something real to reject. Prove it rejects it.
+        fragment["diagnostics"]["measurements"][3]["value"] = json!(0);
+        validate_ltx_campaign_entry_fragment(&fragment).expect("restored exact carrier");
+        fragment["output"]["firstFrameNondegenerate"] = json!(false);
+        let flat = validate_ltx_campaign_entry_fragment(&fragment)
+            .expect_err("a degenerate first frame cannot publish the canonical row");
+        assert!(flat.contains("untiled full-A/V carrier"), "{flat}");
     }
 
     #[test]
@@ -11707,27 +11730,92 @@ mod ltx_tests {
     }
 
     /// The negative half of the envelope, mirroring the shape of the pinned image-arm negative test.
+    ///
+    /// sc-19057 review: these were substring assertions (`"1 + 8k"`, `"duration/fps envelope"`),
+    /// which is why the lib-side copy was the only thing holding the wording — a reworded rationale
+    /// or a relabelled arm passed here. They are full-sentence `assert_eq!`s now, so the macOS lane
+    /// catches a reword on its own, independent of the transcription gate.
     #[test]
     fn the_ltx_arm_rejects_out_of_envelope_geometry_with_a_named_reason() {
         for (width, height, frames, expected) in [
             // An undeclared resolution, including one that is 64-aligned and would otherwise render.
-            (1024, 1024, 97, "declared limits.resolutions"),
-            (800, 512, 97, "declared limits.resolutions"),
+            (
+                1024,
+                1024,
+                97,
+                "MLX LTX-2.3 calibration requires one of the declared limits.resolutions \
+                 (768x512, 512x768, 640x640, 1280x704, 704x1280), got 1024x1024",
+            ),
+            (
+                800,
+                512,
+                97,
+                "MLX LTX-2.3 calibration requires one of the declared limits.resolutions \
+                 (768x512, 512x768, 640x640, 1280x704, 704x1280), got 800x512",
+            ),
             // Off the temporal lattice the LTX VAE's 8x causal compression requires.
-            (768, 512, 96, "1 + 8k"),
-            (768, 512, 100, "1 + 8k"),
+            (
+                768,
+                512,
+                96,
+                "MLX LTX-2.3 calibration requires geometry.frames == 1 + 8k (the LTX video VAE is \
+                 8x causal in time), got 96",
+            ),
+            (
+                768,
+                512,
+                100,
+                "MLX LTX-2.3 calibration requires geometry.frames == 1 + 8k (the LTX video VAE is \
+                 8x causal in time), got 100",
+            ),
             // On the lattice but outside what a declared duration/fps pair can produce.
-            (768, 512, 1, "duration/fps envelope"),
-            (768, 512, 9, "duration/fps envelope"),
-            (768, 512, 457, "duration/fps envelope"),
+            (
+                768,
+                512,
+                1,
+                "MLX LTX-2.3 calibration requires geometry.frames within the declared duration/fps \
+                 envelope [97, 449], got 1",
+            ),
+            (
+                768,
+                512,
+                9,
+                "MLX LTX-2.3 calibration requires geometry.frames within the declared duration/fps \
+                 envelope [97, 449], got 9",
+            ),
+            (
+                768,
+                512,
+                457,
+                "MLX LTX-2.3 calibration requires geometry.frames within the declared duration/fps \
+                 envelope [97, 449], got 457",
+            ),
         ] {
             let error = validate_ltx_geometry(width, height, frames)
                 .expect_err("an out-of-envelope LTX geometry must be refused");
-            assert!(
-                error.contains(expected),
-                "{width}x{height} f{frames}: {error}"
-            );
+            assert_eq!(error, expected, "{width}x{height} f{frames}");
         }
+    }
+
+    /// The predicate every `firstFrameNondegenerate` field in this file is now emitted from — the
+    /// twin of `a_flat_first_frame_is_not_calibration_evidence` in the candle arm.
+    #[test]
+    fn a_flat_first_frame_is_not_calibration_evidence() {
+        assert!(!ltx_frame_is_nondegenerate(&Image {
+            width: 2,
+            height: 1,
+            pixels: vec![7; 6],
+        }));
+        assert!(!ltx_frame_is_nondegenerate(&Image {
+            width: 0,
+            height: 0,
+            pixels: Vec::new(),
+        }));
+        assert!(ltx_frame_is_nondegenerate(&Image {
+            width: 2,
+            height: 1,
+            pixels: vec![7, 7, 7, 7, 7, 8],
+        }));
     }
 
     /// A still geometry is on the temporal lattice (`1 % 8 == 1`), so it can only be caught by the
