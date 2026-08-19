@@ -984,9 +984,17 @@ mod tests {
         }
     }
 
-    /// The MLX LTX-2.3 envelope, transcribed from `bin/mlx.rs` so this crate can pin the wording
-    /// the hoist has to reproduce byte-for-byte. `bin/mlx.rs` only compiles on macOS with the `mlx`
-    /// feature, so without this the strings would be verified on exactly one host.
+    /// The MLX LTX-2.3 envelope, transcribed from `bin/mlx.rs` so this crate can pin — on EVERY
+    /// host — the exact sentences the shared guard emits for that arm.
+    ///
+    /// 🔴 A transcription proves nothing about the arm it was transcribed from: on its own this
+    /// function pins the GUARD's wording against a copy, and would stay green if `bin/mlx.rs`
+    /// reworded `temporal_rationale` or relabelled itself. What closes that gap is a separate,
+    /// always-run node gate — `the shared video-geometry envelopes are transcribed verbatim into
+    /// the always-compiled lib tests` in `scripts/platform-review-contracts.test.mjs` — which
+    /// parses `ltx_video_envelope()` out of `bin/mlx.rs`, resolves the constants it names, and
+    /// requires this copy to be field-for-field identical. The two together are what make the
+    /// pinned sentences a real contract, since `bin/mlx.rs` compiles on exactly one host.
     fn ltx_envelope() -> VideoGeometryEnvelope<'static> {
         VideoGeometryEnvelope {
             calibration_label: "MLX LTX-2.3 calibration",
@@ -1001,7 +1009,8 @@ mod tests {
     }
 
     /// The Candle Wan2.2 TI2V-5B envelope, transcribed from `bin/candle.rs` for the same reason —
-    /// that binary compiles only off macOS with the `candle` feature and a CUDA toolchain.
+    /// that binary compiles only off macOS with the `candle` feature and a CUDA toolchain — and
+    /// bound back to it by the same node gate named above.
     fn wan_envelope() -> VideoGeometryEnvelope<'static> {
         VideoGeometryEnvelope {
             calibration_label: "Candle Wan2.2 TI2V-5B calibration",
@@ -1010,7 +1019,10 @@ mod tests {
             max_pixels: Some(901_120),
             temporal_scale: 4,
             temporal_rationale: "the Wan z48 video VAE is 4x causal in time",
-            frame_envelope: (61, 189),
+            // The CAPTURABLE cadence only: `limits.fps` declares [16, 24] but the calibrated route
+            // executes 24 alone, so the 16 fps rungs (61, 77, 109, 125) are outside what this arm
+            // may capture. See `wan_frame_envelope()` in `bin/candle.rs`.
+            frame_envelope: (93, 189),
             batch_rationale: "the provider advertises max_count 1",
         }
     }
@@ -1117,12 +1129,19 @@ mod tests {
         assert_eq!(
             validate_video_geometry(&envelope, 832, 480, 193).unwrap_err(),
             "Candle Wan2.2 TI2V-5B calibration requires geometry.frames within the declared \
-             duration/fps envelope [61, 189], got 193"
+             duration/fps envelope [93, 189], got 193"
+        );
+        // 61 frames is a real product geometry — 4s at 16 fps — and is refused here anyway, because
+        // the calibrated route cannot execute the 16 fps cadence that reaches it.
+        assert_eq!(
+            validate_video_geometry(&envelope, 832, 480, 61).unwrap_err(),
+            "Candle Wan2.2 TI2V-5B calibration requires geometry.frames within the declared \
+             duration/fps envelope [93, 189], got 61"
         );
         assert_eq!(
             validate_video_geometry(&envelope, 832, 480, 1).unwrap_err(),
             "Candle Wan2.2 TI2V-5B calibration requires geometry.frames within the declared \
-             duration/fps envelope [61, 189], got 1"
+             duration/fps envelope [93, 189], got 1"
         );
         // The area cap is the one rule the resolution list does not already imply — reachable only
         // through an envelope that declares a pair above it, which is exactly the drift the cap

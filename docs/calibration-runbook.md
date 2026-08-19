@@ -1585,8 +1585,19 @@ Candle arm keeps its `frames == 1` refusal untouched.
 | spatial lattice | multiple of 32 | core's default floor; `wan_2_2` declares no `requiresDimensionsMultipleOf` |
 | area cap | 901 120 px | `limits.maxPixels`, enforced by the engine as `MAX_AREA_5B` |
 | temporal lattice | `frames = 1 + 4k` | the z48 VAE's `VAE_STRIDE_TEMPORAL` |
-| frame envelope | `[61, 189]` | derived over `durations [4,5,6,7,8] x fps [16,24]` through `wan_frame_count` |
+| frame envelope | `[93, 189]` | derived over `durations [4,5,6,7,8]` at the **capturable** cadence (24 fps) through `wan_frame_count` |
 | batch | 1 | the provider advertises `max_count 1` |
+
+🔴 **The frame envelope deliberately excludes the 16 fps rungs.** `61`, `77`, `109` and `125` are
+real product geometries — the 4s–8s clips at 16 fps — but 16 fps is the cadence the calibrated route
+refuses (next bullet), so no admissible plan row can produce them. Deriving the envelope over the
+full `durations x fps` cross product would have admitted `832x480 f61 fps24`, a geometry no product
+request can ask for, which is the same drift the fps refusal exists to prevent. The two rules now
+agree. It is still a closed *span*, not a set — `protocol::VideoGeometryEnvelope` carries an interval
+— so it also admits on-lattice counts between the rungs (`97`, `121`, …); the exact ladder membership
+of every committed plan row is bound separately, by `the Candle Wan arm's manifest constants match
+the shipped wan_2_2 limits` in `scripts/platform-review-contracts.test.mjs`. Write rows on the ladder:
+`93, 117, 141, 165, 189`.
 
 Three refusals are worth knowing before you write a row, because each one is a fact about the
 **calibrated route** rather than about the product:
@@ -1717,12 +1728,31 @@ wired into `npm run check` so it stays schema-valid:
    `docs/calibration/sc-19057/…` raw-receipt tree into the checkout.
 2. Add it to the `check:memory-calibration` chain in `package.json`, beside the LTX video record.
    Confirm the gate protects its **existence** by deleting the file and watching the check red.
-3. Feed it to the fitter. `scripts/fit-ltx-temporal-form.mjs` is backend-neutral — it reads
-   `record.backend`, `record.target.modelId` (→ `modelFamily` from the manifest),
+3. Feed it to the fitter. `scripts/fit-ltx-temporal-form.mjs` is backend-neutral **in its plumbing**
+   — it reads `record.backend`, `record.target.modelId` (→ `modelFamily` from the manifest),
    `record.repositories.inference.closureDigest`, and the `_role` labels from the committed plan —
    so it emits a `backend: "candle"` curve into `docs/generated/video-memory-curves.json` beside the
    existing MLX LTX one. That bundle currently contains exactly one curve and it is MLX; this is the
    producer gap this lane closes.
+
+   🔴 **Its REGRESSORS are not backend-neutral. Constrain the fit to the `cross` form on this lane.**
+   `latentTemporalDepth()` hardcodes LTX's `1 + (frames - 1) / 8` and `latentTokens()` LTX's `/32`
+   spatial factor, and `pointsFrom` recomputes both from the raw geometry rather than reading the
+   arm's own `latentTemporalDepth` diagnostic. Wan's z48 VAE is **4x** causal, so for a Wan record
+   the reported `tLat` is non-integral and physically meaningless, and every coefficient derived
+   from it (`latent_tokens`, and the `tLat`-dependent half of the reported spread) describes
+   nothing. Two consequences for the terminal-phase operator:
+
+   * Read and promote the `cross` candidate only — `fixedGb + perMpxGb*mpx + perMpxFrameGb*mpx*frames`.
+     That is what the six-row plan is designed for (two pixel counts x three frame counts, three fit
+     rows and two held-out), and it is the ONLY form the runtime reader evaluates:
+     `crates/sceneworks-core/src/video_memory_curves.rs` implements the affine cross form and nothing
+     else, so a winning `latent_tokens` fit could not be read back even if it were meaningful.
+   * Do **not** quote a `tLat`- or `latent_tokens`-derived number in the acceptance write-up. If the
+     fitter reports one as the winner, that is an artifact of the hardcoded LTX stride, not a result.
+
+   Teaching the fitter a per-model temporal stride is a real change and belongs in the fitter, not in
+   a capture story; until then this caveat is the binding.
 4. The consumer side is already wired: `video_admission.rs`'s `curve_backend` maps `VideoLane::Candle`
    to `VideoCurveBackend::Candle`, and `VideoMemoryCurveBundle::evaluate` fails closed on a foreign
    lane — so a candle reader picks up the candle curve and can never read the MLX coefficients.

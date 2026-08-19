@@ -3206,13 +3206,15 @@ mod tests {
     /// The Candle twin of the LTX ladder pin above (sc-19057). The `candle:wan2_2_ti2v_5b` capture
     /// arm (`crates/sceneworks-memory-adapter/src/bin/candle.rs`,
     /// `wan_frame_ladder_port_matches_the_transcribed_shipped_ladder`) PORTS `wan_frame_count`
-    /// rather than calling it, and derives its accepted frame envelope `[61, 189]` from the ends of
-    /// this table over `wan_2_2`'s declared `durations [4,5,6,7,8]` x `fps [16,24]`.
+    /// rather than calling it, and derives its accepted frame envelope `[93, 189]` from the ends of
+    /// this table over `wan_2_2`'s declared `durations [4,5,6,7,8]` at the one CAPTURABLE cadence,
+    /// 24 fps. The 16 fps rungs are in the table because the PRODUCT reaches them; they are outside
+    /// the capture envelope because `WanMemoryRequestScope::validate_request` refuses that cadence.
     ///
     /// That adapter binary compiles only off macOS with the `candle` feature and a CUDA toolchain,
     /// so its own copy of this table runs in one lane. This half runs under a plain `cargo test`,
     /// which is what makes a silent ladder change red somewhere a PR can see. If it reds, the
-    /// adapter's copy and its `[61, 189]` envelope must move with it.
+    /// adapter's copy and its `[93, 189]` envelope must move with it.
     #[test]
     fn wan_frame_count_matches_the_sc_19057_calibration_ladder() {
         for (duration, fps, expected) in [
@@ -3235,9 +3237,11 @@ mod tests {
             // Every reachable count is on the 1 + 4k lattice the z48 Wan VAE requires.
             assert_eq!(expected % 4, 1, "{duration}s at {fps}fps");
         }
-        // The ends the adapter derives its `[61, 189]` envelope from.
-        assert_eq!(wan_frame_count(4 * 16), 61);
+        // The ends the adapter derives its `[93, 189]` capture envelope from — both at 24 fps.
+        assert_eq!(wan_frame_count(4 * 24), 93);
         assert_eq!(wan_frame_count(8 * 24), 189);
+        // And the shortest 16 fps clip, which the product reaches and the capture arm refuses.
+        assert_eq!(wan_frame_count(4 * 16), 61);
     }
 
     #[test]

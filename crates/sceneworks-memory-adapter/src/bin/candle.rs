@@ -89,6 +89,16 @@ const WAN_TEMPORAL_SCALE: u32 = 4;
 /// which is a fact about the calibrated route rather than about the product — recorded here so a
 /// plan row that asks for it is refused with that sentence instead of dying inside the provider.
 const WAN_CALIBRATED_FPS: u32 = 24;
+/// The cadences [`wan_frame_envelope`] derives over — the capturable subset of [`WAN_FPS`], not the
+/// whole declared column.
+///
+/// sc-19057 review: deriving over the full `durations x fps` cross product admitted frame counts
+/// that only the refused 16 fps cadence reaches (61, 77, 109, 125), so a row like
+/// `832x480 f61 fps24` passed the geometry guard for a geometry no product request can produce —
+/// the same drift class the fps refusal exists to prevent. The envelope an arm validates against is
+/// a statement about what that arm may CAPTURE, so it is derived over the capturable cadence alone
+/// and the two rules now agree.
+const WAN_CAPTURABLE_FPS: [u32; 1] = [WAN_CALIBRATED_FPS];
 /// One fixed seed for every `candle:wan2_2_ti2v_5b` fixture
 /// (`wan2-2-ti2v-5b-candle-<tier>-<width>x<height>-f<frames>-fps<fps>-seed19057`).
 const WAN_SEED: u64 = 19057;
@@ -143,16 +153,24 @@ const fn wan_snapped_frame_count(raw_frames: u32) -> u32 {
     }
 }
 
-/// The closed frame envelope the declared `limits` can actually produce, derived over the FULL
-/// 10-cell `durations x fps` cross product through the ladder the product itself uses. Derived
-/// rather than written down so the bounds cannot drift away from the arrays above.
+/// The closed frame envelope this arm can actually CAPTURE: the declared `limits.durations` crossed
+/// with [`WAN_CAPTURABLE_FPS`], through the ladder the product itself uses. Derived rather than
+/// written down so the bounds cannot drift away from the arrays above.
+///
+/// It is deliberately NOT the full `durations x fps` product — see [`WAN_CAPTURABLE_FPS`]. It is
+/// still a SPAN and therefore still a superset of the five rungs `[93, 117, 141, 165, 189]` the
+/// capturable cadence actually reaches; the shared [`protocol::VideoGeometryEnvelope`] carries a
+/// closed interval rather than a set, and the exact ladder membership of every committed plan row
+/// is bound instead by `the Candle Wan arm's manifest constants match the shipped wan_2_2 limits`
+/// in `scripts/platform-review-contracts.test.mjs`.
 const fn wan_frame_envelope() -> (u32, u32) {
     let (mut minimum, mut maximum) = (u32::MAX, 0);
     let mut duration = 0;
     while duration < WAN_DURATIONS_SECONDS.len() {
         let mut fps = 0;
-        while fps < WAN_FPS.len() {
-            let frames = wan_snapped_frame_count(WAN_DURATIONS_SECONDS[duration] * WAN_FPS[fps]);
+        while fps < WAN_CAPTURABLE_FPS.len() {
+            let frames =
+                wan_snapped_frame_count(WAN_DURATIONS_SECONDS[duration] * WAN_CAPTURABLE_FPS[fps]);
             if frames < minimum {
                 minimum = frames;
             }
@@ -171,8 +189,8 @@ const WAN_FRAME_ENVELOPE: (u32, u32) = wan_frame_envelope();
 /// Wan's own geometry envelope, which REPLACES the image arms' `frames == 1` refusal for this arm
 /// alone. Five independent constraints, each from a stated source: the declared resolution pairs,
 /// the 32-px spatial lattice, the `limits.maxPixels` area cap the engine enforces as `MAX_AREA_5B`,
-/// the `1 + 4k` temporal lattice the z48 VAE requires, and the `[61, 189]` span the declared
-/// `durations x fps` cross product produces through the shipped Wan frame ladder.
+/// the `1 + 4k` temporal lattice the z48 VAE requires, and the `[93, 189]` span the declared
+/// durations produce at the one CAPTURABLE cadence through the shipped Wan frame ladder.
 ///
 /// A still geometry (`frames == 1`) is on the lattice but below the envelope floor, so it is refused
 /// here too: this arm may not silently capture a single-frame record for a video model.
@@ -519,15 +537,28 @@ fn wan_scenarios(
     ]))
 }
 
-/// The status a receipt with these outcomes is ENTITLED to, mirroring
-/// `memory-calibration-harness.mjs#validateRuntimeComplete` rather than guessing at it.
+/// The status a receipt with these outcomes is ENTITLED to, mirroring the two clauses of
+/// `memory-calibration-harness.mjs#validateRuntimeComplete` this arm can actually satisfy rather
+/// than guessing at the third.
 ///
 /// Runtime activation needs the four admission/loadability scenarios passed, a verified sweep range,
-/// and a lifecycle triple that is entirely `not_run`, parity-only (`warm_repeat` alone), or fully
-/// passed. Anything else is `gated`. Today this arm never executes cancel/error, so a zero-axis row
-/// reaches runtime activation through the parity-only branch and a bounded-decode row stays gated on
-/// its unverified range — both correct, and both derived rather than hardcoded so a later story that
-/// adds lifecycle injection flips the verdict without editing this function.
+/// and a lifecycle triple the harness accepts. The harness accepts three lifecycle shapes; this arm
+/// can emit two of them:
+///
+/// * entirely `not_run`, and
+/// * parity-only — `warm_repeat` passed, `cancel`/`error` `not_run`.
+///
+/// The harness's third shape, "fully passed", additionally requires `cleanupVerified == true` and
+/// `warmFollowUpPassed == true` on the `cancel` and `error` scenarios, and [`wan_scenarios`]'
+/// `settled` helper emits neither field — it has no lifecycle injection behind it to measure them
+/// from. sc-19057 review: this function previously carried a `lifecycle_passed` branch anyway, which
+/// would have promoted a receipt the harness then rejects. Nothing can reach it today, so it was not
+/// a live bug, but a mirror that mirrors a clause its own emitter cannot honour is worse than no
+/// mirror. A later story that adds cancel/error injection must extend `settled` with those two
+/// measured fields and add the branch back in the same change, so the two halves cannot separate.
+///
+/// So today a zero-axis row reaches runtime activation through the parity-only branch and a
+/// bounded-decode row stays gated on its unverified range — both derived rather than hardcoded.
 fn wan_receipt_status(outcomes: WanScenarioOutcomes, range_verified: bool) -> &'static str {
     let admitted = outcomes.loadability
         && outcomes.exact_fit
@@ -535,8 +566,7 @@ fn wan_receipt_status(outcomes: WanScenarioOutcomes, range_verified: bool) -> &'
         && outcomes.stale_evidence;
     let lifecycle_not_run = !outcomes.warm_repeat && !outcomes.cancel && !outcomes.error;
     let parity_only = outcomes.warm_repeat && !outcomes.cancel && !outcomes.error;
-    let lifecycle_passed = outcomes.warm_repeat && outcomes.cancel && outcomes.error;
-    if admitted && range_verified && (lifecycle_not_run || parity_only || lifecycle_passed) {
+    if admitted && range_verified && (lifecycle_not_run || parity_only) {
         "runtime_complete"
     } else {
         "gated"
@@ -2626,7 +2656,8 @@ fn run_wan(request: &Value) -> Result<Value, String> {
     let first = measured
         .first()
         .ok_or_else(|| format!("{WAN_PROVIDER} clip has no first frame"))?;
-    if !wan_frame_is_nondegenerate(first) {
+    let first_frame_nondegenerate = wan_frame_is_nondegenerate(first);
+    if !first_frame_nondegenerate {
         return Err(format!(
             "{WAN_PROVIDER} clip's first frame is a single flat colour; a degenerate decode is not \
              calibration evidence"
@@ -2753,9 +2784,15 @@ fn run_wan(request: &Value) -> Result<Value, String> {
                 ("outputFps", "count", u64::from(reported_fps)),
                 ("decodeTilingEngaged", "count", u64::from(decode_tiling_engaged)),
                 ("audioTrackDecoded", "count", 0),
-                // Measured, not asserted: the capture aborts above if the first frame is a single
-                // flat colour, so a record can only ever carry the 1.
-                ("firstFrameNondegenerate", "count", 1),
+                // Measured, not asserted: this is the value `wan_frame_is_nondegenerate` returned
+                // for the rendered first frame, and the capture aborts above when it is false — so
+                // a record can only ever carry the 1, and it carries it because it was measured
+                // rather than because a literal said so.
+                (
+                    "firstFrameNondegenerate",
+                    "count",
+                    u64::from(first_frame_nondegenerate),
+                ),
                 (
                     "negativeMutationMaximumErrorPer255",
                     "count",
@@ -3071,12 +3108,25 @@ mod tests {
                 "every ladder rung is on the 1 + 4k lattice"
             );
         }
-        assert_eq!(WAN_FRAME_ENVELOPE, (61, 189));
+        // The envelope spans the CAPTURABLE cadence only, so its floor is the shortest duration at
+        // 24 fps and not the 61-frame 4s-at-16fps rung in the table above. The 16 fps column stays
+        // in that table because it is a real product geometry the ladder port must still reproduce.
+        assert_eq!(WAN_FRAME_ENVELOPE, (93, 189));
         let (minimum, maximum) = WAN_FRAME_ENVELOPE;
-        assert_eq!(minimum, wan_snapped_frame_count(4 * 16));
-        assert_eq!(maximum, wan_snapped_frame_count(8 * 24));
+        assert_eq!(minimum, wan_snapped_frame_count(4 * WAN_CALIBRATED_FPS));
+        assert_eq!(maximum, wan_snapped_frame_count(8 * WAN_CALIBRATED_FPS));
+        assert_eq!(WAN_CAPTURABLE_FPS, [WAN_CALIBRATED_FPS]);
+        for fps in WAN_CAPTURABLE_FPS {
+            assert!(
+                WAN_FPS.contains(&fps),
+                "a capturable cadence must be shipped"
+            );
+        }
     }
 
+    /// Every frame count exercised here is a rung the CAPTURABLE 24 fps cadence actually reaches
+    /// (93 = 4s, 117 = 5s, 189 = 8s), so this cannot pass by admitting a geometry no product request
+    /// can produce — which is exactly what the pre-review envelope did with the 16 fps rungs.
     #[test]
     fn the_wan_arm_accepts_every_declared_resolution_across_the_frame_envelope() {
         for (width, height) in WAN_RESOLUTIONS {
@@ -3111,6 +3161,10 @@ mod tests {
             (832, 480, 1, "duration/fps envelope"),
             (832, 480, 5, "duration/fps envelope"),
             (832, 480, 193, "duration/fps envelope"),
+            // sc-19057 review: real product geometries (4s and 5s at 16 fps) that this arm still
+            // may not capture, because the cadence reaching them is the one the route refuses.
+            (832, 480, 61, "duration/fps envelope"),
+            (832, 480, 77, "duration/fps envelope"),
         ] {
             let request = json!({ "planned": wan_planned_case(width, height, frames, "q4", 24) });
             let error = validate_wan_target(&request)
@@ -3132,7 +3186,7 @@ mod tests {
         assert_eq!(
             error,
             "Candle Wan2.2 TI2V-5B calibration requires geometry.frames within the declared \
-             duration/fps envelope [61, 189], got 1"
+             duration/fps envelope [93, 189], got 1"
         );
         // ...and the multi-frame geometry the image arms refuse is exactly what this one accepts.
         let admitted = validate_wan_target(&json!({
@@ -3373,11 +3427,17 @@ mod tests {
         }
     }
 
-    /// The status law, mirroring `memory-calibration-harness.mjs#validateRuntimeComplete` rather
-    /// than restating a constant. Both verdicts are exercised, so this cannot pass by asserting a
+    /// The status law, mirroring the clauses of
+    /// `memory-calibration-harness.mjs#validateRuntimeComplete` this arm can honour rather than
+    /// restating a constant. Both verdicts are exercised, so this cannot pass by asserting a
     /// default the production path never reaches.
+    ///
+    /// The name is precise on purpose (sc-19057 review): the harness's third lifecycle shape —
+    /// "fully passed" — additionally requires `cleanupVerified`/`warmFollowUpPassed` on `cancel` and
+    /// `error`, and [`wan_scenarios`] emits neither, so this arm must NOT promote that shape. The
+    /// assertions below pin that it stays `gated`, and that the emitter really lacks those fields.
     #[test]
-    fn the_wan_receipt_status_mirrors_the_harness_runtime_activation_law() {
+    fn the_wan_receipt_status_mirrors_the_harness_law_for_the_shapes_this_arm_can_emit() {
         let admitted = WanScenarioOutcomes {
             loadability: true,
             exact_fit: true,
@@ -3400,7 +3460,10 @@ mod tests {
             ),
             "runtime_complete"
         );
-        // ... and so is a fully executed one.
+        // ... but a fully executed lifecycle is NOT, here. The harness would accept that shape only
+        // with `cleanupVerified`/`warmFollowUpPassed` on cancel and error, and `wan_scenarios` has
+        // no measurement to emit those from — so promoting it would produce a `runtime_complete`
+        // the harness then rejects. Fail closed instead.
         assert_eq!(
             wan_receipt_status(
                 WanScenarioOutcomes {
@@ -3410,9 +3473,9 @@ mod tests {
                 },
                 true
             ),
-            "runtime_complete"
+            "gated"
         );
-        // A half-executed lifecycle is not.
+        // The same for a half-executed lifecycle.
         assert_eq!(
             wan_receipt_status(
                 WanScenarioOutcomes {
@@ -3445,6 +3508,19 @@ mod tests {
             },
         ] {
             assert_eq!(wan_receipt_status(missing, true), "gated");
+        }
+
+        // The structural reason the "fully passed" clause is absent above: the emitter carries no
+        // field to satisfy it with. If a later story adds lifecycle injection, this reds and the
+        // branch and the emitter must be restored together.
+        let scenarios = wan_scenarios(admitted, 1, WAN_LIFECYCLE_BLOCKER).unwrap();
+        for name in ["cancel", "error"] {
+            let scenario = scenarios
+                .as_array()
+                .and_then(|items| items.iter().find(|item| item["name"] == json!(name)))
+                .unwrap_or_else(|| panic!("the {name} scenario must be emitted"));
+            assert!(scenario.get("cleanupVerified").is_none(), "{scenario}");
+            assert!(scenario.get("warmFollowUpPassed").is_none(), "{scenario}");
         }
     }
 
