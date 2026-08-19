@@ -100,6 +100,13 @@ mod credentials_ipc;
 // production seams are cfg'd out, so allow dead_code there (mirrors the generator_cache precedent).
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod cache_thread;
+// Metal command-queue poisoning (sc-20572): the detection, scope discrimination and containment for
+// `kIOGPUCommandBufferCallbackErrorSubmissionsIgnored` — the driver refusing a process's
+// submissions after prior GPU errors. Consulted by the model-cache seam (which is where the panic
+// is contained) and by the worker loop (which stops claiming and exits for a restart). All-targets
+// like `cache_thread`; only the macOS/MLX lane can actually produce the error.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod gpu_poison;
 // The single pre-loader model-source guard (sc-19708): every dispatched job's generic model
 // carriers are reduced to this platform's exact requirement closure and judged through the one
 // shared availability resolver before any handler constructs a loader.
@@ -1407,6 +1414,30 @@ pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
     let mut maintenance_task = Some(spawn_retention_checkpoint(settings.data_dir.clone(), true));
     let mut next_retention_checkpoint = Instant::now() + RESOLVED_CACHE_RETENTION_INTERVAL;
     loop {
+        // sc-20572: the GPU driver has started ignoring this process's Metal submissions. Nothing
+        // this worker can do in-process clears that — the cached generator was already left alone
+        // rather than uselessly reset, and every queued job is being refused untouched — so stop
+        // claiming and exit for the supervisor to restart the process, which is what actually
+        // recovered the measured incident. The scope shapes the reason text, not the action: see
+        // `gpu_poison` for why a host-suspected poisoning restarts too.
+        if let Some((scope, reason)) = gpu_poison::global().poisoned_status() {
+            tracing::error!(
+                event = "mlx_command_queue_poisoned_exit",
+                scope = scope.as_str(),
+                reason = %reason,
+                "exiting so this worker is restarted with a clean GPU context"
+            );
+            // Best-effort, and deliberately `Unhealthy` rather than `Offline`: the reason is what
+            // an operator reads off the worker row while the restart is in flight, and the API's
+            // `Unhealthy` backstop refuses any claim that races it.
+            let _ =
+                heartbeat_with_reason(&api, &settings, WorkerStatus::Unhealthy, None, Some(reason))
+                    .await;
+            // `Ok` so the supervisor reads a clean exit and simply respawns. The failing job has
+            // already posted its own terminal error; a non-zero exit would have the desktop
+            // supervisor attribute a SECOND, fabricated failure to it (sc-18182).
+            return Ok(());
+        }
         if !health.is_usable() && Instant::now() >= next_gpu_recheck {
             next_gpu_recheck = Instant::now() + GPU_HEALTH_RECHECK;
             recheck_gpu_health(&api, &settings, &mut health).await?;
