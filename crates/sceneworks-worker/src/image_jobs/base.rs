@@ -7420,9 +7420,23 @@ fn resolve_generic_lane_conditioning(
 /// need + the machine budget for the message). Uses the SAME `mlx_fit_gate` budget + footprint math
 /// the cold-load `apply_residency_policy` runs, so the seam's downtier and the cache's admission
 /// never disagree — which is why it takes the spec [`tier_probe_spec`] builds rather than a bare dir.
+///
+/// `live` is probed ONCE per request by the caller (sc-20571 review) — probing per candidate spawned
+/// one bounded `vm_stat` subprocess per tier — and `resident` is the request's one generator-cache
+/// attribution snapshot: when a candidate's probe spec holds the weights the cache is already
+/// serving warm, that entry's attributable bytes are credited so the tier is not charged twice for
+/// its own residency (`ResidentGeneratorAttribution::credit_for`; zero for every other candidate).
 #[cfg(target_os = "macos")]
-fn mlx_tier_fit(engine_id: &str, spec: &LoadSpec) -> TierFit {
-    match crate::mlx_fit_gate::decide_residency_for_spec(engine_id, spec) {
+fn mlx_tier_fit(
+    engine_id: &str,
+    spec: &LoadSpec,
+    live: crate::mlx_fit_gate::LiveHostMemory,
+    resident: Option<&crate::generator_cache::ResidentGeneratorAttribution>,
+) -> TierFit {
+    let own_resident_bytes =
+        resident.map_or(0, |attribution| attribution.credit_for(engine_id, spec));
+    match crate::mlx_fit_gate::decide_residency_for_spec(engine_id, spec, live, own_resident_bytes)
+    {
         crate::mlx_fit_gate::ResidencyOutcome::Resident
         | crate::mlx_fit_gate::ResidencyOutcome::Sequential => TierFit::Fits,
         crate::mlx_fit_gate::ResidencyOutcome::Reject {
@@ -7520,6 +7534,14 @@ async fn generate_stream(
     if !explicit_pick {
         if let Some(default_tier) = tier_key_from_resolved_dir(&weights_dir) {
             let floor = min_quality_floor(request);
+            // sc-20571 review: ONE host probe and ONE generator-cache attribution snapshot per
+            // request. Every candidate scores against the same live reading (no per-candidate
+            // `vm_stat` subprocess, no mid-loop skew), and a candidate whose weights are already
+            // warm-resident is credited its own bytes instead of being charged twice — the
+            // double-count that silently downtiered every warm repeat of a large model.
+            let live_host = crate::mlx_fit_gate::probe_live_host_memory();
+            let resident_attribution =
+                crate::generator_cache::resident_generator_attribution().await;
             let candidates: Vec<(&'static str, TierFit)> =
                 downtier_candidate_tiers(request, settings, default_tier, floor)
                     .into_iter()
@@ -7529,7 +7551,15 @@ async fn generate_stream(
                     .map(|(cand, dir)| {
                         let probe =
                             tier_probe_spec(engine_id, &dir, request, settings, &adapters)?;
-                        Ok((cand, mlx_tier_fit(engine_id, &probe)))
+                        Ok((
+                            cand,
+                            mlx_tier_fit(
+                                engine_id,
+                                &probe,
+                                live_host,
+                                resident_attribution.as_ref(),
+                            ),
+                        ))
                     })
                     .collect::<WorkerResult<Vec<_>>>()?;
             match choose_downtier(default_tier, &candidates) {
@@ -14481,8 +14511,20 @@ mod mlx_downtier_emulation_tests {
         // Unregistered engine ⇒ no footprint / not sequential-capable ⇒ resident-or-reject (te=0).
         let engine = "unregistered_downtier_probe";
         let probe = |dir: &PathBuf| LoadSpec::new(WeightsSource::Dir(dir.clone()));
-        let q8_fit = mlx_tier_fit(engine, &probe(&q8_dir));
-        let q4_fit = mlx_tier_fit(engine, &probe(&q4_dir));
+        // The emulated-cap decision is host-blind and cache-blind by design: no live probe (the
+        // knob IS the budget) and no resident credit (nothing of ours is resident in this test).
+        let q8_fit = mlx_tier_fit(
+            engine,
+            &probe(&q8_dir),
+            crate::mlx_fit_gate::LiveHostMemory::UNKNOWN,
+            None,
+        );
+        let q4_fit = mlx_tier_fit(
+            engine,
+            &probe(&q4_dir),
+            crate::mlx_fit_gate::LiveHostMemory::UNKNOWN,
+            None,
+        );
         assert!(
             matches!(q8_fit, TierFit::TooBig { .. }),
             "q8 (~23 GiB) must exceed the {cap} GB emulated budget: {q8_fit:?}"
