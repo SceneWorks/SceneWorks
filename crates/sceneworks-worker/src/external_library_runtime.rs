@@ -2616,6 +2616,34 @@ mod tests {
         });
     }
 
+    /// The real manifest written on Windows carries `paths.model` in VERBATIM (`\\?\C:\...`)
+    /// form — the model-import job canonicalizes the install dir before recording it. That is
+    /// the exact user-reported shape (kreamania_v5/v6), so pin it verbatim.
+    #[cfg(windows)]
+    #[test]
+    fn imported_entry_with_verbatim_install_path_clears_the_guard() {
+        let temp = TempDir::new().unwrap();
+        let settings = settings(temp.path().join("data"));
+        let library = temp.path().join("external-hf");
+        let mut entry = imported_entry(&settings.data_dir, "kreamania_v5");
+        let install = settings.data_dir.join("models/imports/kreamania_v5");
+        let verbatim = std::fs::canonicalize(&install).unwrap();
+        assert!(
+            verbatim.to_string_lossy().starts_with(r"\\?\"),
+            "canonicalize must produce the verbatim form this test exists to pin"
+        );
+        entry["paths"]["model"] = json!(verbatim);
+        let payload = json!({ "model": "kreamania_v5", "modelManifestEntry": entry })
+            .as_object()
+            .unwrap()
+            .clone();
+        with_library(&library, || {
+            RuntimeSourceGuard::begin(&JobType::ImageGenerate, &payload, &settings).unwrap_or_else(
+                |error| panic!("verbatim install path must clear the guard: {error}"),
+            );
+        });
+    }
+
     /// Reading only `source.path` must not become "read nothing": a `source.path` that escapes
     /// the app-managed roots is still a rejection, and a benign-looking `source` block never
     /// launders an entry whose real `paths` point outside.
