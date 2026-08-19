@@ -6,9 +6,12 @@
 //      reads, the committed files match a fresh build, and each derivation guard actually fails
 //      when the tree drifts under it. A hand-written inventory is stale on arrival; these tests are
 //      what make "generated" mean something.
-//   2. The mirrored candle gate arithmetic agrees with `vram_gate.rs` on the properties that gate
-//      has documented invariants for — the NVFP4 tier fallback, the declared-floor fallback, and
-//      `load_plan`'s monotonicity in the budget.
+//   2. The decisions come from the RUST GATE, not from this generator. The candle rows are read out
+//      of `docs/generated/candle-admission-decisions.json`, emitted by
+//      `crates/sceneworks-worker/src/candle_admission_decisions.rs` driving `candle_scalar_gate.rs`.
+//      The JS mirror that remains in the generator is reconciled against those rows coordinate by
+//      coordinate, and separately pinned on the properties the gate documents invariants for — the
+//      NVFP4 tier fallback, the declared-floor fallback, and `load_plan`'s budget monotonicity.
 
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";

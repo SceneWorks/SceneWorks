@@ -73,8 +73,10 @@
  *     `candle.memoryStrategyContract`; without one the request never enters the shared path at all.
  *   - **Which numbers does it use?** From the manifest `candle` block: `vramGbByTier` (a measured
  *     per-tier peak), `sequentialPeakGb`, `minMemoryGb` (a declared floor), `turboFit`, `control`.
- *   - **Is the gate geometry-aware?** From the gate function's own signature in `vram_gate.rs` â€”
- *     whether it takes `width`/`height`/`frames`. Not asserted in prose here; parsed.
+ *   - **Is the gate geometry-aware?** From EACH gate function's own signature, wherever it is
+ *     defined â€” whether it takes `width`/`height`/`frames`, as scalars OR inside a struct parameter
+ *     (`geometry: MemoryGeometry`, `query: VideoCurveQuery`). Resolved per SYMBOL and never unioned
+ *     across a mechanism. Not asserted in prose here; parsed.
  *
  * ## The `measured` flag is a BARE BOOLEAN, not an evidence class
  *
@@ -1610,7 +1612,9 @@ function knownGaps({ curveLanes, routes }) {
         "height or frames â€” a 1024x1024 and a 2048x2048 request are admitted identically. The " +
         "decision baseline records that explicitly (`geometrySensitive: false`) so the slice that " +
         "fixes it produces a visible, enumerable diff.",
-      paths: ["crates/sceneworks-worker/src/vram_gate.rs"],
+      // The gate to change is in candle_scalar_gate.rs since sc-19049; vram_gate.rs re-exports it
+      // and still owns the geometry-AWARE candle paths (the Krea turbo ladder, svd/mochi).
+      paths: ["crates/sceneworks-worker/src/candle_scalar_gate.rs"],
     },
   ];
 }

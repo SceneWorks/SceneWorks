@@ -3957,7 +3957,7 @@
       "severity": "high",
       "detail": "32 image routes are admitted by the per-tier scalar gate, whose signature takes no width, height or frames â€” a 1024x1024 and a 2048x2048 request are admitted identically. The decision baseline records that explicitly (`geometrySensitive: false`) so the slice that fixes it produces a visible, enumerable diff.",
       "paths": [
-        "crates/sceneworks-worker/src/vram_gate.rs"
+        "crates/sceneworks-worker/src/candle_scalar_gate.rs"
       ]
     }
   ]
