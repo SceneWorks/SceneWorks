@@ -774,6 +774,14 @@ pub(crate) fn spawn_gpu_telemetry(_config_dir: PathBuf) {}
 
 /// User-facing message strings for the generator cache seam, preserving the exact wording the worker
 /// emitted before the `cache_thread` extraction (sc-11191, F-019).
+///
+/// **`panic_reset` no longer covers every contained panic (sc-20572).** Both of its claims — that
+/// memory is the likely cause, and that resetting the cached generator dealt with it — are true only
+/// of a genuine FIRST failure. They were wrong, and actively misleading, for
+/// `kIOGPUCommandBufferCallbackErrorSubmissionsIgnored`: the driver refusing this process's
+/// submissions after earlier GPU errors, where no reset recovers anything and the worker has to
+/// restart. That class is now detected, scoped and worded separately in [`crate::gpu_poison`], and
+/// never reaches this prefix — which is why the prefix itself is unchanged.
 const GENERATOR_SEAM_MESSAGES: SeamMessages = SeamMessages {
     entry_missing: "Generator cache entry missing after load.",
     panic_reset: "MLX generation panicked and was contained (the engine likely ran out of memory; \

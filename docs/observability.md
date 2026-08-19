@@ -150,6 +150,44 @@ shared code) when it drops its resident generator after the idle timeout: `engin
 level. It correlates with the worker releasing cached GPU allocations (Metal/MLX or
 CUDA) before the next generation cold-loads weights again.
 
+### Poisoned Metal command queue — `mlx_command_queue_poisoned` / `mlx_command_queue_poisoned_exit` (Rust MLX worker, sc-20572)
+
+Emitted at **error** level when the macOS GPU driver starts refusing this worker
+process's Metal submissions and completes its command buffers with
+`kIOGPUCommandBufferCallbackErrorSubmissionsIgnored` — literally *"ignored for causing
+prior/excessive GPU errors"*. It is never the first error: something else already failed
+on that channel, so the event carries `firstFailure` (this process's first contained
+failure, which is what actually explains the cascade) alongside the raw `driverError`.
+
+`mlx_command_queue_poisoned` fires once, from one of two containment seams that classify
+a caught panic through the shared `gpu_poison` state: the model-cache containment seam
+(`cache_thread.rs`) for a cache-job panic, or the dedicated SAM3 smart-select thread
+(`person_segment_sam3.rs`'s `sam3_panic_error`, which logs its own "...during sam3
+smart-select" message) for a panic caught there. `mlx_command_queue_poisoned_exit` fires
+from the worker loop immediately afterwards, carrying the same reason as the `Unhealthy`
+heartbeat, just before the worker exits so its supervisor restarts it with a clean GPU
+context. Between the two, every queued job is refused **without** being handed to the
+GPU. It still fires only once per poisoning: the latch refuses any further cache or SAM3
+job outright, and the worker exits before another segment job can be claimed.
+
+| field | meaning |
+| --- | --- |
+| `scope` | `process` \| `host_suspected` — see below |
+| `firstFailure` | this process's first contained failure (empty when the ignored submission was the first thing it saw) |
+| `driverError` | the raw contained payload |
+| `reason` | (`_exit` only) the user-facing text also sent as the `Unhealthy` status reason |
+
+- `process` — the worker had already driven the GPU before the poisoning (a completed
+  cache run, or a contained fault of its own), so the refused submission channel is this
+  process's. The restart clears it and **no reboot is involved**.
+- `host_suspected` — the worker had completed no GPU work at all first, so the errors
+  being refused over predate it. It still restarts, because a fresh process that fails
+  identically is exactly the evidence for a host wedge. **Before concluding the host needs
+  a reboot, run the cross-process discriminator**: check whether a *different* MLX process
+  is completing GPU work. If one is, the scope is per-process after all; if every fresh
+  process fails, the GPU client class is wedged host-wide and only a reboot clears it.
+  `cargo test` passing proves nothing here — it passes under a host wedge too.
+
 ### Warm execution-policy decision — `generator_cache_warm_policy_decision` (Rust worker, sc-18317)
 
 Emitted once per request evaluation on a warm cache hit whose request asks for an

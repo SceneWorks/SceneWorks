@@ -632,6 +632,13 @@ async fn spawn_inprocess_utility_worker(
                 count,
                 "SceneWorks utility worker running in-process (loopback)"
             );
+            // sc-20572 review: these in-process loops share the same `gpu_poison::global()` latch
+            // as the standalone worker's `run_worker_loop`. If it ever latched here, each loop
+            // would read it as an `Ok(())` exit meant for an external process supervisor to
+            // restart — but there is no such supervisor for a tokio task in this process, so the
+            // loop would simply stop claiming jobs forever. Unreachable today: this API process
+            // runs no MLX cache jobs, so nothing here can ever record a `SubmissionsIgnored`
+            // poisoning in the first place. Left as a comment, not code, for that reason.
             tokio::spawn(async move { sceneworks_worker::run_worker_loop(settings).await })
         })
         .collect();

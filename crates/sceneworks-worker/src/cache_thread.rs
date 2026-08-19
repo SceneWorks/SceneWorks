@@ -32,6 +32,7 @@ use std::time::{Duration, SystemTime};
 
 use tokio::sync::oneshot;
 
+use crate::gpu_poison::{self, ContainedPanic, GpuPoisonState};
 use crate::{WorkerError, WorkerResult};
 
 /// A unit of work handed to a cache worker thread: a boxed closure that runs against the resident
@@ -359,6 +360,63 @@ pub(crate) struct SeamMessages {
     pub worker_dropped: &'static str,
 }
 
+/// Refuse a job outright when the GPU driver is already ignoring this process's submissions
+/// (sc-20572). `None` in the normal case, so this costs one uncontended mutex read per job.
+///
+/// This is the half that stops the burn. Once a poisoning is latched every queued job would hand
+/// the driver another command buffer it has already decided to ignore — which is exactly what
+/// produced ~8 identical failures over 2.5 minutes before libc++abi `abort()`ed the worker. The
+/// refusal happens before `load`/`run` are even entered, so no further Metal work is submitted
+/// while the worker winds down for its restart.
+fn refuse_if_poisoned(poison: &GpuPoisonState) -> Option<WorkerError> {
+    poison.refusal_message().map(WorkerError::Engine)
+}
+
+/// Turn a contained panic into the error this job reports, and decide what happens to the resident
+/// model (sc-20572).
+///
+/// Two distinct outcomes:
+///
+/// * **Ignored submissions** (`kIOGPUCommandBufferCallbackErrorSubmissionsIgnored`) — the resident
+///   model is deliberately LEFT IN PLACE and no backend cache release is attempted. Evicting is not
+///   a recovery for a poisoned command queue (it was measured reporting a successful reset before
+///   each of the identical failures that followed), and both the drop and the release would submit
+///   more Metal work into a channel the driver is refusing. The error text names the cascade, the
+///   scope and this process's first failure instead of guessing at memory.
+/// * **Anything else** — the pre-existing containment, unchanged: evict the resident (post-abort
+///   backend state really is suspect for an ordinary engine panic), release the backend cache, and
+///   report with the lane's own `panic_reset` prefix. The out-of-memory guess in that prefix is
+///   right for a genuine first failure, which is the only class that still reaches it.
+fn contained_panic_error<K, M>(
+    cache: &mut CacheThread<K, M>,
+    msgs: SeamMessages,
+    payload: &str,
+    poison: &GpuPoisonState,
+) -> WorkerError
+where
+    K: Clone + PartialEq,
+{
+    match poison.record_contained_panic(payload) {
+        ContainedPanic::PoisonedQueue { scope, message } => {
+            tracing::error!(
+                event = "mlx_command_queue_poisoned",
+                scope = scope.as_str(),
+                firstFailure = %poison.first_failure().unwrap_or_default(),
+                driverError = %payload,
+                "the GPU driver is ignoring this worker's Metal submissions; the worker cannot \
+                 serve further jobs and is restarting"
+            );
+            WorkerError::Engine(message)
+        }
+        ContainedPanic::Unclassified => {
+            if cache.evict().is_some() {
+                release_backend_cache_after_evict();
+            }
+            WorkerError::Engine(format!("{}: {}", msgs.panic_reset, payload))
+        }
+    }
+}
+
 /// Run `run` against the cached (or freshly-loaded) model for `key` on the dedicated cache `worker`
 /// thread, and await the result. The model lives on the worker thread — `load` builds it there and
 /// `run` executes there (so it may hold a `!Send` reference) — and only the `R` result crosses back.
@@ -414,10 +472,16 @@ where
 {
     let (reply_tx, reply_rx) = oneshot::channel::<WorkerResult<R>>();
     let job: CacheJob<K, M> = Box::new(move |cache: &mut CacheThread<K, M>| {
+        // sc-20572: never submit into a command queue the driver is already ignoring.
+        if let Some(error) = refuse_if_poisoned(gpu_poison::global()) {
+            let _ = reply_tx.send(Err(error));
+            return;
+        }
         // Contain a panic from inside the load/run so it fails THIS job with a clean error instead of
         // unwinding out of the shared cache thread and stopping every subsequent request (sc-6067).
-        // The cached model is evicted on panic — post-abort backend state is suspect, so the next
-        // job reloads fresh.
+        // The cached model is evicted on an ordinary panic — post-abort backend state is suspect, so
+        // the next job reloads fresh. An ignored-submission poisoning is the exception (sc-20572):
+        // see `contained_panic_error`.
         let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             cache.with_model_access_after_cold_admission(
                 key,
@@ -427,17 +491,20 @@ where
                 msgs.entry_missing,
             )
         })) {
-            Ok(result) => result,
-            Err(panic) => {
-                if cache.evict().is_some() {
-                    release_backend_cache_after_evict();
+            Ok(result) => {
+                if result.is_ok() {
+                    // sc-20572: proof this process can drive the GPU, which is what later
+                    // distinguishes a poisoning it caused from one that predates it.
+                    gpu_poison::global().note_gpu_work_completed();
                 }
-                Err(WorkerError::Engine(format!(
-                    "{}: {}",
-                    msgs.panic_reset,
-                    panic_message(panic.as_ref())
-                )))
+                result
             }
+            Err(panic) => Err(contained_panic_error(
+                cache,
+                msgs,
+                &panic_message(panic.as_ref()),
+                gpu_poison::global(),
+            )),
         };
         let _ = reply_tx.send(result);
     });
@@ -470,6 +537,11 @@ where
 {
     let (reply_tx, reply_rx) = oneshot::channel::<WorkerResult<R>>();
     let job: CacheJob<K, M> = Box::new(move |cache: &mut CacheThread<K, M>| {
+        // sc-20572: never submit into a command queue the driver is already ignoring.
+        if let Some(error) = refuse_if_poisoned(gpu_poison::global()) {
+            let _ = reply_tx.send(Err(error));
+            return;
+        }
         let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let request_active = || {
                 // A Tokio task can be aborted/dropped without first tripping its engine cancel
@@ -492,17 +564,19 @@ where
                 msgs.entry_missing,
             )
         })) {
-            Ok(result) => result,
-            Err(panic) => {
-                if cache.evict().is_some() {
-                    release_backend_cache_after_evict();
+            Ok(result) => {
+                if result.is_ok() {
+                    // sc-20572: proof this process can drive the GPU (see the sibling seam).
+                    gpu_poison::global().note_gpu_work_completed();
                 }
-                Err(WorkerError::Engine(format!(
-                    "{}: {}",
-                    msgs.panic_reset,
-                    panic_message(panic.as_ref())
-                )))
+                result
             }
+            Err(panic) => Err(contained_panic_error(
+                cache,
+                msgs,
+                &panic_message(panic.as_ref()),
+                gpu_poison::global(),
+            )),
         };
         let _ = reply_tx.send(result);
     });
@@ -1074,6 +1148,137 @@ mod tests {
         assert_eq!(
             Fingerprint::of(&dir.path().join("missing")),
             Fingerprint::Unavailable
+        );
+    }
+
+    /// The exact payload mlx-rs hands the containment when the driver is refusing this process's
+    /// submissions (2026-08-19 production log).
+    const IGNORED_SUBMISSION: &str = "called `Result::unwrap()` on an `Err` value: \
+                                      Exception(\"[METAL] Command buffer execution failed: Ignored \
+                                      (for causing prior/excessive GPU errors) \
+                                      (00000004:kIOGPUCommandBufferCallbackErrorSubmissionsIgnored)\")";
+
+    /// sc-20572. An ignored-submission poisoning must NOT be contained the way an ordinary engine
+    /// panic is: the resident model stays put (a reset is not a recovery here and only submits more
+    /// Metal work), and the message must stop claiming memory and a reset. Driven against a local
+    /// `GpuPoisonState` so the process-global latch is untouched — latching it here would refuse
+    /// every later job in this test binary, which is precisely the production behaviour being added.
+    #[test]
+    fn an_ignored_submission_panic_keeps_the_resident_and_reports_the_poisoning() {
+        let poison = gpu_poison::GpuPoisonState::new();
+        poison.note_gpu_work_completed();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut cache = CacheThread::<u32, DropProbe>::new(false);
+        cache.install(7, DropProbe(drops.clone()));
+
+        let error =
+            contained_panic_error(&mut cache, TEST_SEAM_MESSAGES, IGNORED_SUBMISSION, &poison);
+
+        let WorkerError::Engine(message) = error else {
+            panic!("a contained panic must surface as an engine error");
+        };
+        assert!(
+            !message.starts_with(TEST_SEAM_MESSAGES.panic_reset),
+            "the ignored submission must not inherit the reset-and-blame-memory prefix: {message}"
+        );
+        assert!(
+            message.contains("kIOGPUCommandBufferCallbackErrorSubmissionsIgnored"),
+            "{message}"
+        );
+        assert_eq!(
+            cache.resident_key(),
+            Some(&7),
+            "a poisoned command queue is not recovered by dropping the resident model"
+        );
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        assert_eq!(poison.poisoned(), Some(gpu_poison::PoisonScope::Process));
+    }
+
+    /// sc-20572 review: pins the exact read `contained_panic_error` uses to build the
+    /// `mlx_command_queue_poisoned` event's `firstFailure` field
+    /// (`poison.first_failure().unwrap_or_default()`) — it must come back empty when the ignored
+    /// submission IS this process's first contained panic, matching `docs/observability.md`
+    /// ("empty when the ignored submission was the first thing it saw"), and must surface a
+    /// genuinely earlier fault when one exists.
+    #[test]
+    fn first_failure_emitted_on_the_event_is_empty_only_when_the_poisoning_is_the_first_thing_seen()
+    {
+        let poison = gpu_poison::GpuPoisonState::new();
+        let mut cache = CacheThread::<u32, DropProbe>::new(false);
+        cache.install(7, DropProbe(Arc::new(AtomicUsize::new(0))));
+
+        contained_panic_error(&mut cache, TEST_SEAM_MESSAGES, IGNORED_SUBMISSION, &poison);
+        assert_eq!(
+            poison.first_failure().unwrap_or_default(),
+            "",
+            "the event's firstFailure must be empty when the ignored submission was the first \
+             thing this process saw"
+        );
+
+        let poison = gpu_poison::GpuPoisonState::new();
+        let mut cache = CacheThread::<u32, DropProbe>::new(false);
+        cache.install(7, DropProbe(Arc::new(AtomicUsize::new(0))));
+        contained_panic_error(
+            &mut cache,
+            TEST_SEAM_MESSAGES,
+            "[metal::malloc] Attempting to allocate 41231237120 bytes",
+            &poison,
+        );
+        contained_panic_error(&mut cache, TEST_SEAM_MESSAGES, IGNORED_SUBMISSION, &poison);
+        assert_eq!(
+            poison.first_failure().unwrap_or_default(),
+            "[metal::malloc] Attempting to allocate 41231237120 bytes",
+            "a genuine earlier fault must still surface on the event"
+        );
+    }
+
+    /// sc-20572 counterpart: everything that is NOT an ignored submission keeps the pre-existing
+    /// containment exactly — evict the resident, report with the lane's own prefix, leave the
+    /// worker able to claim the next job.
+    #[test]
+    fn an_ordinary_panic_still_evicts_and_keeps_the_existing_prefix() {
+        let poison = gpu_poison::GpuPoisonState::new();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut cache = CacheThread::<u32, DropProbe>::new(false);
+        cache.install(7, DropProbe(drops.clone()));
+
+        let error = contained_panic_error(
+            &mut cache,
+            TEST_SEAM_MESSAGES,
+            "[metal::malloc] Attempting to allocate 41231237120 bytes",
+            &poison,
+        );
+
+        let WorkerError::Engine(message) = error else {
+            panic!("a contained panic must surface as an engine error");
+        };
+        assert!(
+            message.starts_with(TEST_SEAM_MESSAGES.panic_reset),
+            "{message}"
+        );
+        assert!(cache.is_empty(), "an ordinary engine panic still evicts");
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            poison.poisoned(),
+            None,
+            "an ordinary panic must not make the worker refuse later jobs"
+        );
+        assert!(refuse_if_poisoned(&poison).is_none());
+    }
+
+    /// sc-20572: once a poisoning is latched, a later job is refused before `load`/`run` are
+    /// entered — the loop that burned ~8 jobs in 2.5 minutes cannot form.
+    #[test]
+    fn a_latched_poisoning_refuses_the_next_job_before_any_gpu_work() {
+        let poison = gpu_poison::GpuPoisonState::new();
+        assert!(refuse_if_poisoned(&poison).is_none(), "clean worker serves");
+        poison.record_contained_panic(IGNORED_SUBMISSION);
+        let Some(WorkerError::Engine(message)) = refuse_if_poisoned(&poison) else {
+            panic!("a latched poisoning must refuse the next job");
+        };
+        assert!(
+            message.contains("refused without touching the GPU"),
+            "{message}"
         );
     }
 
