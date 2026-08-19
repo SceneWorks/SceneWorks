@@ -80,6 +80,19 @@
       "sourceFileCount": 231,
       "lockedPackageCount": 242
     },
+    "candle:wan2_2_ti2v_5b": {
+      "crate": "crates/media/candle-gen/candle-gen-wan",
+      "digest": "d9cf9fb2e1fe9b0af37ac5bb790bd8d0a4fd6ba42fdd9a45e81867433ae633a5",
+      "closureCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core",
+        "crates/media/candle-gen/candle-gen",
+        "crates/media/candle-gen/candle-gen-wan",
+        "crates/media/candle-gen/vendor/candle-kernels"
+      ],
+      "sourceFileCount": 174,
+      "lockedPackageCount": 231
+    },
     "candle:z_image": {
       "crate": "crates/media/candle-gen/candle-gen-z-image",
       "digest": "210ba305684f71164306530c67944eab8f0fd2d596382b3ed9c39edc2f20fd02",

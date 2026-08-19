@@ -475,7 +475,7 @@ Each also honours an optional repository-secret override (`SCENEWORKS_QWEN_IMAGE
 `SCENEWORKS_Z_IMAGE_ROOT`, …), used only when it canonicalizes to a path ending in that lane's exact
 suffix.
 
-### Adapter environment — seven families, one per provider arm
+### Adapter environment — one family per provider arm
 
 The derivation rule: **each provider arm reads `SCENEWORKS_<ARTIFACT>_{REPOSITORY,REVISION,ROOT}`**,
 where `<ARTIFACT>` names the artifact family the arm loads, not the provider id verbatim
@@ -523,7 +523,7 @@ SCENEWORKS_FLUX2_REPOSITORY=SceneWorks/flux2-dev-mlx         # fixed; validated 
 SCENEWORKS_FLUX2_REVISION=<exact artifact revision>
 SCENEWORKS_FLUX2_ROOT=/abs/path/.../snapshots/<rev>/<tier>   # q4 | q8 — tier DERIVED from the plan target
 
-# memory-mlx-adapter — ltx_2_3   (sc-18808; the only VIDEO arm. FOUR vars, not three)
+# memory-mlx-adapter — ltx_2_3   (sc-18808; the MLX video arm. FOUR vars, not three)
 SCENEWORKS_LTX_REPOSITORY=SceneWorks/ltx-2.3-mlx             # fixed; validated against LTX_REPOSITORY
 SCENEWORKS_LTX_REVISION=<exact artifact revision>
 SCENEWORKS_LTX_ROOT=/abs/path/.../snapshots/<rev>/<tier>     # bf16 | q4 | q8, derived from the plan target
@@ -543,6 +543,13 @@ SCENEWORKS_MLX_WIRED_LIMIT_BYTES=<explicit wired-ceiling override>
 SCENEWORKS_KREA_REPOSITORY=SceneWorks/krea-2-turbo-mlx
 SCENEWORKS_KREA_REVISION=<exact artifact revision>
 SCENEWORKS_KREA_ROOT=/abs/path/.../snapshots/<rev>/q4
+
+# memory-candle-adapter — wan2_2_ti2v_5b   (sc-19057; the only candle VIDEO arm. See §12)
+SCENEWORKS_WAN_REPOSITORY=SceneWorks/wan2.2-ti2v-5b-candle  # fixed; validated against WAN_CANDLE_REPOSITORY
+SCENEWORKS_WAN_REVISION=<exact artifact revision>
+SCENEWORKS_WAN_ROOT=/abs/path/.../snapshots/<rev>/<tier>    # q4 | q8 ONLY — bf16 is the upstream
+# dense Wan-AI/Wan2.2-TI2V-5B-Diffusers snapshot, which carries no per-tier subdirectory for
+# validate_huggingface_snapshot_root to bind an artifact identity to, so that tier has no arm.
 ```
 
 All three of each family are **required** (`protocol::required_env`) — a missing one fails before
@@ -1538,3 +1545,228 @@ PR body, state:
 This subsystem is mutation-checked throughout — the harness refuses dirty repositories, refuses
 identity collisions, refuses laundered digests, and the generators refuse hand-edits. Expect a review
 that asks what would have failed if your change were wrong, and answer it in the PR body.
+
+## 12. The candle VIDEO lane — `candle:wan2_2_ti2v_5b` (sc-19057)
+
+> Provenance: the arm, its guards, its plan and this section were written and unit-tested off-GPU.
+> **The capture itself has NOT been run.** Per epic 18093's posture, measurement is a runbook rather
+> than a per-model story: this section is the runbook, and the capture is a terminal-phase dispatch
+> the epic coordinator performs once every code story has merged. A capture taken mid-epic
+> fingerprints source paths later stories change, and the harness aborts if the repository moves
+> under it (§5), so running it early wastes the lane rather than saving time.
+
+### 12a. What this lane is, and why it is Wan and not LTX
+
+`candle-gen-wan` is the **only** candle video crate that registers a `MemoryStrategyContract` at the
+pinned inference revision (`memory_strategy::MEMORY_REGISTRATION`, SC-19223): three Implemented rungs
+(`resident`, `staged_residency`, `bounded_decode`), a `PhaseEnvelope` formula over `FrameCount`,
+per-load-policy calibration identities, and a `MemoryMode::Other("text_to_video")` route gate.
+
+`candle-gen-ltx` registers none — no `memory_strategy.rs`, no `register_memory_strategy` call, and
+`config/rung4-applicability-survey.json` already records that (*"there is no `MemoryStrategyContract`
+impl in the crate at all"*). An LTX capture would therefore have no admission seam to interrogate and
+no calibration identity to bind, and would first need the provider contract built in `inference` — a
+two-repo pin-lockstep change. Verify that this still holds before assuming it:
+
+```bash
+git -C <inference-at-pin> grep -l memory_strategy_contract -- crates/media/candle-gen
+# expect: …/candle-gen-wan/src/lib.rs and …/candle-gen-wan/src/memory_strategy.rs, and NO -ltx entry
+```
+
+### 12b. The envelope this arm accepts, and what it refuses
+
+The arm validates Wan's own geometry envelope through `protocol::validate_video_geometry` — the video
+counterpart of the `validate_still_geometry` hoist sc-18808 did for the image arms. Every other
+Candle arm keeps its `frames == 1` refusal untouched.
+
+| axis | value | source |
+| --- | --- | --- |
+| resolutions | `832x480`, `1280x704`, `704x1280` | `limits.resolutions` |
+| spatial lattice | multiple of 32 | core's default floor; `wan_2_2` declares no `requiresDimensionsMultipleOf` |
+| area cap | 901 120 px | `limits.maxPixels`, enforced by the engine as `MAX_AREA_5B` |
+| temporal lattice | `frames = 1 + 4k` | the z48 VAE's `VAE_STRIDE_TEMPORAL` |
+| frame envelope | `[93, 189]` | derived over `durations [4,5,6,7,8]` at the **capturable** cadence (24 fps) through `wan_frame_count` |
+| batch | 1 | the provider advertises `max_count 1` |
+
+🔴 **The frame envelope deliberately excludes the 16 fps rungs.** `61`, `77`, `109` and `125` are
+real product geometries — the 4s–8s clips at 16 fps — but 16 fps is the cadence the calibrated route
+refuses (next bullet), so no admissible plan row can produce them. Deriving the envelope over the
+full `durations x fps` cross product would have admitted `832x480 f61 fps24`, a geometry no product
+request can ask for, which is the same drift the fps refusal exists to prevent. The two rules now
+agree. It is still a closed *span*, not a set — `protocol::VideoGeometryEnvelope` carries an interval
+— so it also admits on-lattice counts between the rungs (`97`, `121`, …); the exact ladder membership
+of every committed plan row is bound separately, by `the Candle Wan arm's manifest constants match
+the shipped wan_2_2 limits` in `scripts/platform-review-contracts.test.mjs`. Write rows on the ladder:
+`93, 117, 141, 165, 189`.
+
+Three refusals are worth knowing before you write a row, because each one is a fact about the
+**calibrated route** rather than about the product:
+
+- **fps must be 24.** `limits.fps` declares `[16, 24]`, but `WanMemoryRequestScope::validate_request`
+  rejects any cadence other than `DEFAULT_FPS`. The 16 fps column is shipped and not capturable; a
+  16 fps fixture is refused by name rather than dying inside the provider.
+- **q4 and q8 only.** `bf16` is the upstream dense `Wan-AI/Wan2.2-TI2V-5B-Diffusers` snapshot, which
+  has no per-tier subdirectory, so `validate_huggingface_snapshot_root` has nothing to bind an
+  artifact identity to and a bf16 record could not name the bytes it measured.
+- **`bounded_attention` / `bounded_transformer_residency` are Missing** in the pinned contract. A row
+  naming one is refused before the model load, not after it.
+
+`planned.target` carries BOTH ids and both are validated: `provider` is the engine id
+`wan2_2_ti2v_5b`, `modelId` is the builtin-catalog id `wan_2_2`. They genuinely differ on this lane
+(unlike `mlx:ltx_2_3`, where they coincide), and `scripts/fit-ltx-temporal-form.mjs` resolves
+`modelFamily` from the **catalog** id — a record carrying the engine id there makes the fit throw
+`model wan2_2_ti2v_5b is absent from builtin.models.jsonc` hours after the capture burned.
+
+### 12c. Preconditions
+
+1. **Weights.** `SceneWorks/wan2.2-ti2v-5b-candle` at the manifest revision, tier subdirectory on
+   disk. Confirm with the §4a tier listing; the manifest row is the authority for the revision.
+2. **Closure entry.** `candle:wan2_2_ti2v_5b` is already declared in
+   `config/inference-provider-closures.json` (sc-19057). `runProviderPlan` derives its digest eagerly
+   and fails closed with `lane "candle:wan2_2_ti2v_5b" has no entry` **before** the capture burns, so
+   confirm it survived any pin bump:
+
+   ```bash
+   node scripts/inference-closure-digest.mjs --repo <inference-at-pin> --check
+   ```
+3. **Clean checkouts at exact SHAs, in BOTH repositories** — §5. The harness re-probes after every
+   provider case and aborts on `repository HEAD or dirty state changed during provider execution`.
+4. **An idle GPU.** `VramProbe::start_rendered().assert_idle(1.0)` refuses to start against a card
+   already holding more than 1 GB. On this host the two RTX PRO 6000s are **also** the four
+   self-hosted CI runners, so take the runner tokens out of rotation (or dispatch through §12e) — a
+   co-tenant CI job both poisons the measurement and is degraded by it.
+
+Adapter environment — three variables, the same derivation rule as every other arm (§4):
+
+```bash
+# memory-candle-adapter — wan2_2_ti2v_5b   (sc-19057; the only candle VIDEO arm)
+SCENEWORKS_WAN_REPOSITORY=SceneWorks/wan2.2-ti2v-5b-candle   # fixed; validated against WAN_CANDLE_REPOSITORY
+SCENEWORKS_WAN_REVISION=<exact 40-hex artifact revision>
+SCENEWORKS_WAN_ROOT=/abs/path/.../snapshots/<rev>/<tier>     # q4 | q8, derived from the plan target
+```
+
+### 12d. The capture
+
+Build the adapter in the supported CUDA + host-compiler environment (MSVC 14.44 vcvars on this host),
+then run the harness against the **standalone** plan. The plan is deliberately not in
+`config/memory-calibration-plan.json`, for the reason sc-18808 established empirically: the matrix
+generator resolves its universe from `manifest.models.filter(m => m.type === "image")`, so a video
+row matches no coordinate and the check gate fails closed.
+
+```bash
+cargo build --release --locked -p sceneworks-memory-adapter \
+  --features candle --bin memory-candle-adapter
+
+node scripts/memory-calibration-harness.mjs run \
+  --config docs/calibration/sc-19057/wan-candle-video-capture-plan.json \
+  --backend candle \
+  --fresh-per-case \
+  --provider-command '["/abs/path/to/target/release/memory-candle-adapter.exe"]' \
+  --sceneworks-repo /abs/path/to/SceneWorks \
+  --inference-repo /abs/path/to/inference \
+  --raw-log-dir  /abs/path/OUTSIDE/the/repo/sc-19057-raw-receipts \
+  --source-path-prefix docs/calibration/sc-19057 \
+  --output /abs/path/OUTSIDE/the/repo/wan-candle-video-sc-19057.json
+```
+
+🔴 **`--output`, `--raw-log-dir` and any `--resume` path MUST be outside the checkout.** The harness
+stamps every record with each repository's `dirty` flag from `git status --porcelain`, **which counts
+untracked paths**, so a bundle written inside the tree dirties the very repository the record is
+attesting to and the whole sweep is discarded at the end (§5, §6). Resume an interrupted sweep by
+pointing `--resume` at the partial output — the runner atomically checkpoints after every successful
+provider response.
+
+Six rows, ordered cheapest-first. The three-coefficient cross form needs at least three distinct
+non-collinear geometry points plus at least one held-out row, so if the lane budget runs out the last
+row (`704x1280 f189`, the heaviest) may be dropped and the remaining five still fit. Dropping more
+than that makes the slice singular.
+
+**q8 runs from a separate copy of the plan, never an in-place edit.** The committed plan's
+`target.tier` must stay `q4` — `platform-review-contracts.test.mjs` pins every row's tier to
+`candleDefaults[0].variant`, so a committed q8 swap reds that gate. An in-place *uncommitted* swap
+is just as unusable: the harness stamps every record with each repository's dirty flag from `git
+status --porcelain`, which counts untracked changes, so editing the plan inside this checkout
+dirties SceneWorks and the whole q8 sweep is discarded at `check` (§5, and the `--output`/
+`--raw-log-dir` note above). Instead, copy `wan-candle-video-capture-plan.json` to a path OUTSIDE
+the checkout, swap `q4` → `q8` in that copy's `target.tier`, `name`, and `fixture` tokens, and point
+`--config` at the copy.
+
+**Cost is unmeasured on this lane — measure yours and report it, do not promise a number.** What is
+known: the shipped `candle.vramGbByTier` for this model was measured on an idle RTX PRO 6000 at
+`832x480 x 121` frames, 20 steps, CFG on (sc-13175), and the peak is the denoise attention transient
+rather than the decode. This arm renders at **2 steps** — the peak is per-step, so the ceiling is the
+same, but the wall clock is not comparable to that measurement. Each row is a cold model load plus
+two full clips (the measured render and its warm repeat).
+
+### 12e. Through the guarded dispatch
+
+There is no `run_memory_calibration`-style input for this lane on `windows-candle.yml` yet; the
+existing `run_five_rung_reference` input drives `candle:krea_2_turbo` only (§6b). Until one is added,
+run §12d directly on the CUDA host with the runner tokens paused. If you add the workflow input,
+mirror the existing one's shape: validate the artifact identity, resolve the snapshot root without
+printing it, check inference out at the exact `INFERENCE_PIN`, build the release adapter, run the
+harness, `check` the bundle, and upload it.
+
+### 12f. Verify the receipt before believing it
+
+```bash
+node scripts/memory-calibration-harness.mjs check \
+  --input /abs/path/OUTSIDE/the/repo/wan-candle-video-sc-19057.json
+```
+
+Then read the receipt rather than assuming it. The arm is built so that each of these is a measured
+claim, and each has a way to be wrong:
+
+| field | what it must say | what it means if it does not |
+| --- | --- | --- |
+| `status` | `runtime_complete` for the six zero-axis rows | a `gated` row means an admission scenario did not execute or the sweep range was not verified — read `scenarios[].reason` |
+| `scenarios.loadability` | `passed` | the arm only reaches this after a completed real load; `not_run` alongside any other `passed` scenario is refused structurally and cannot be emitted |
+| `scenarios.exact_fit` / `unknown_budget` / `stale_evidence` | `passed`, with `predictedBytes == effectiveBudgetBytes` | these interrogate `memory_strategy_safety_check` on the live generator; a failure aborts the capture rather than downgrading the receipt |
+| `scenarios.cancel` / `error` | `not_run`, carrying the named blocker | this arm executes no lifecycle injection; a `passed` here would be fabricated |
+| `quality.maximumError` etc. | inside 3/255, 1/255, 1.5/255 | the warm repeat is not deterministic — do not ingest |
+| `diagnostics.negativeMutation*Per255` | all three breaching the thresholds above | the thresholds are measuring nothing; the capture aborts rather than emitting this |
+| `diagnostics.decodeTilingEngaged` | `0` on a `staged_residency` row | `1` means bounded decode engaged and the emitted curve id will carry `tiled`, not `single_pass` |
+| `diagnostics.outputFps` | `24` | required by the fit; a mismatch against the request aborts the capture |
+| `diagnostics.firstFrameNondegenerate` | `1` | measured, not asserted — a flat first frame is a decoder failure and the capture aborts, so a record can only ever carry the 1 |
+
+### 12g. Where the numbers land
+
+The record is committed **standalone**, the `docs/generated/ltx-mlx-video-sc-18808.json` precedent, and
+wired into `npm run check` so it stays schema-valid:
+
+1. Copy the bundle to `docs/generated/wan-candle-video-sc-19057.json`, and its
+   `docs/calibration/sc-19057/…` raw-receipt tree into the checkout.
+2. Add it to the `check:memory-calibration` chain in `package.json`, beside the LTX video record.
+   Confirm the gate protects its **existence** by deleting the file and watching the check red.
+3. Feed it to the fitter. `scripts/fit-ltx-temporal-form.mjs` is backend-neutral **in its plumbing**
+   — it reads `record.backend`, `record.target.modelId` (→ `modelFamily` from the manifest),
+   `record.repositories.inference.closureDigest`, and the `_role` labels from the committed plan —
+   so it emits a `backend: "candle"` curve into `docs/generated/video-memory-curves.json` beside the
+   existing MLX LTX one. That bundle currently contains exactly one curve and it is MLX; this is the
+   producer gap this lane closes.
+
+   🔴 **Its REGRESSORS are not backend-neutral. Constrain the fit to the `cross` form on this lane.**
+   `latentTemporalDepth()` hardcodes LTX's `1 + (frames - 1) / 8` and `latentTokens()` LTX's `/32`
+   spatial factor, and `pointsFrom` recomputes both from the raw geometry rather than reading the
+   arm's own `latentTemporalDepth` diagnostic. Wan's z48 VAE is **4x** causal, so for a Wan record
+   the reported `tLat` is non-integral and physically meaningless, and every coefficient derived
+   from it (`latent_tokens`, and the `tLat`-dependent half of the reported spread) describes
+   nothing. Two consequences for the terminal-phase operator:
+
+   * Read and promote the `cross` candidate only — `fixedGb + perMpxGb*mpx + perMpxFrameGb*mpx*frames`.
+     That is what the six-row plan is designed for (two pixel counts x three frame counts, three fit
+     rows and two held-out), and it is the ONLY form the runtime reader evaluates:
+     `crates/sceneworks-core/src/video_memory_curves.rs` implements the affine cross form and nothing
+     else, so a winning `latent_tokens` fit could not be read back even if it were meaningful.
+   * Do **not** quote a `tLat`- or `latent_tokens`-derived number in the acceptance write-up. If the
+     fitter reports one as the winner, that is an artifact of the hardcoded LTX stride, not a result.
+
+   Teaching the fitter a per-model temporal stride is a real change and belongs in the fitter, not in
+   a capture story; until then this caveat is the binding.
+4. The consumer side is already wired: `video_admission.rs`'s `curve_backend` maps `VideoLane::Candle`
+   to `VideoCurveBackend::Candle`, and `VideoMemoryCurveBundle::evaluate` fails closed on a foreign
+   lane — so a candle reader picks up the candle curve and can never read the MLX coefficients.
+5. Regenerate the derived docs (§8) and re-run `npm run check`.
+
+Per-lane numbers only. Do **not** average, blend, or fall back across lanes: the whole point of the
+lane tag is that an MLX coefficient is not evidence about a CUDA card.

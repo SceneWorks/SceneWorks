@@ -1,7 +1,7 @@
 {
   "schemaVersion": 8,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:4a9c4f04274271ce34c496332069649d1e8abd97495bd20c0a50130d6e4a106f",
+    "sceneWorksRevision": "source-tree:95ce863ee524c1c37c738e18c987ea9aceef551a3d298613ae995347e10b2ff3",
     "inferenceRevision": "6f47e6707589158b89d0f238c5ef56be6f1bdd7a",
     "sources": {
       "manifest": {
@@ -58,15 +58,15 @@
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "f07023f71c2290d4524ca090bbdfd24e9c682c384c056ed53e5a819d56c86d57"
+        "sha256": "2c08abea8957753f9d4aa6b021c962b102403908b4b840650fd0a9240ec1f474"
       },
       "memoryStrategy": {
         "path": "crates/sceneworks-worker/src/memory_strategy.rs",
-        "sha256": "3e20441cab965a68f30f0f790744d76d858e21841409b8eaad6dbeab278cd31f"
+        "sha256": "34c49d68ce8288ed9a77dfa4ebc5b701193ecc201f5fce23b11b4832674585ae"
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "e9013fd319929e18fb2ec196e2ba71ce59280fa38de3659984ef9bd33733cea5"
+        "sha256": "b808befc53a69ae747a61d184157f52690c0b84e12ca7a3c4d1003396e210447"
       },
       "instantId": {
         "path": "crates/sceneworks-worker/src/image_jobs/instantid.rs",
@@ -82,7 +82,7 @@
       },
       "inferenceClosures": {
         "path": "config/inference-provider-closures.json",
-        "sha256": "e7217a41b0556c222702db9f577da9ad738029766ea886e43e371884799c7f6f"
+        "sha256": "366307cd904d35d32ab4b168832cf3dec6db57dd291432f49290480452a72ad2"
       },
       "rung4Survey": {
         "path": "config/rung4-applicability-survey.json",
