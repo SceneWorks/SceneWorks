@@ -344,6 +344,115 @@ impl LoadIdentity {
                 .collect(),
         })
     }
+
+    /// Whether this resident identity holds `spec`'s primary weights for `engine_id` — the match
+    /// behind the sc-20571-review per-request attributable-resident credit.
+    ///
+    /// Deliberately WEAKER than full [`LoadIdentity`] equality, and deliberately not a warm-hit
+    /// predicate. The per-request admission gates (the sc-10733 downtier chooser and the
+    /// imported-SDXL / Mage-Flow pre-gates) probe request-SHAPED specs: the downtier probe never
+    /// carries the final spec's quant/route fields, and the imported-SDXL gate runs before its
+    /// tokenizer component is attached — so full identity equality would never match and the credit
+    /// would never apply, re-creating the warm-repeat double-count. Matching on (engine, primary
+    /// weights source) is safe in BOTH error directions:
+    ///
+    /// - if the credited request is in fact a warm HIT, no load happens and no byte is added — the
+    ///   credit merely stopped the pre-gate from refusing a repeat the host already serves;
+    /// - if it is in fact a MISS (same weights, different adapters/quant advisory), the cache drops
+    ///   the resident entry before loading and the loader-seam gate re-runs with ZERO credit
+    ///   ([`crate::mlx_fit_gate::apply_residency_policy`]), which remains the conservative
+    ///   authority at the moment memory is actually allocated.
+    ///
+    /// So an over-generous match can never over-admit an actual load; only an under-generous one
+    /// (full equality) would re-open the sc-20571 double-count.
+    #[cfg(any(target_os = "macos", test))]
+    pub(crate) fn attributes_engine_weights(&self, engine_id: &str, spec: &LoadSpec) -> bool {
+        if self.engine_id != engine_id {
+            return false;
+        }
+        let resident_path = match &self.weights {
+            CacheWeightsSource::Dir(path, _, _) => path,
+            CacheWeightsSource::File(path, _) => path,
+        };
+        match &spec.weights {
+            WeightsSource::Dir(path) | WeightsSource::File(path) => resident_path == path,
+        }
+    }
+}
+
+/// The resident generator plus the backend bytes attributable to it RIGHT NOW — the input to the
+/// sc-20571-review per-request admission credit. Read via [`resident_generator_attribution`];
+/// applied via [`Self::credit_for`].
+#[cfg(any(target_os = "macos", test))]
+pub(crate) struct ResidentGeneratorAttribution {
+    identity: LoadIdentity,
+    /// Live backend-committed bytes above the entry's recorded pre-load external baseline — the
+    /// same "committed − external baseline" attribution `evaluate_request` credits on a warm cache,
+    /// computed on the cache thread so the reading and the entry are one consistent snapshot.
+    /// Unrelated process allocations (the baseline) stay OUT of this figure and therefore stay
+    /// charged on the admission ledger's available side.
+    attributable_bytes: u64,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl ResidentGeneratorAttribution {
+    /// The `own_resident_bytes` credit for gating `spec` on `engine_id`: the attributable bytes
+    /// when the resident identity holds this spec's weights ([`LoadIdentity::attributes_engine_weights`]),
+    /// zero otherwise — unrelated residents remain charged as foreign, mirroring
+    /// `evaluate_request`'s attributable-resident semantics.
+    pub(crate) fn credit_for(&self, engine_id: &str, spec: &LoadSpec) -> u64 {
+        if self.identity.attributes_engine_weights(engine_id, spec) {
+            self.attributable_bytes
+        } else {
+            0
+        }
+    }
+
+    /// Test constructor: the live path assembles this on the cache thread inside
+    /// [`resident_generator_attribution_on`]'s job.
+    #[cfg(test)]
+    pub(crate) fn for_tests(identity: LoadIdentity, attributable_bytes: u64) -> Self {
+        Self {
+            identity,
+            attributable_bytes,
+        }
+    }
+}
+
+/// Snapshot the resident generator's identity and attributable bytes for a per-request admission
+/// gate that runs BEFORE the cache lookup (sc-20571 review). `None` when nothing is resident or
+/// when the backend probe fails — both fail OPEN to a zero credit, which is the conservative
+/// pre-fix posture (the request may be refused, never over-admitted).
+///
+/// One cache-thread round trip per request. The job queues behind whatever the cache thread is
+/// serving — the same ordering the request's own generator job is about to take.
+#[cfg(target_os = "macos")]
+pub(crate) async fn resident_generator_attribution() -> Option<ResidentGeneratorAttribution> {
+    resident_generator_attribution_on(generator_worker()).await
+}
+
+/// [`resident_generator_attribution`] against an explicit worker — the seam the isolated cache
+/// tests drive. The attribution is computed inside the job, on the cache thread, so the committed
+/// reading ([`capture_backend_committed_bytes`], which clears the MLX allocator cache first exactly
+/// like `live_request_budget`) and the entry's baseline can never straddle a load.
+#[cfg(any(target_os = "macos", test))]
+async fn resident_generator_attribution_on(
+    worker: &mpsc::Sender<GeneratorJob>,
+) -> Option<ResidentGeneratorAttribution> {
+    let (reply_tx, reply_rx) =
+        tokio::sync::oneshot::channel::<Option<ResidentGeneratorAttribution>>();
+    let job: GeneratorJob = Box::new(move |cache| {
+        let attribution = cache.resident_entry().and_then(|(key, entry)| {
+            let committed_bytes = capture_backend_committed_bytes().ok()?;
+            Some(ResidentGeneratorAttribution {
+                identity: key.clone(),
+                attributable_bytes: committed_bytes.saturating_sub(entry.external_committed_bytes),
+            })
+        });
+        let _ = reply_tx.send(attribution);
+    });
+    worker.send(job).ok()?;
+    reply_rx.await.unwrap_or(None)
 }
 
 impl ExecutionPolicy {
@@ -3564,6 +3673,98 @@ mod tests {
         let (tx, rx) = mpsc::channel::<GeneratorJob>();
         let worker = thread::spawn(move || run_generator_cache_worker(rx, None));
         (tx, worker)
+    }
+
+    /// The sc-20571-review credit match: attributable bytes flow ONLY to a spec whose engine and
+    /// primary weights source the resident identity holds. A different engine on the same weights,
+    /// or the same engine on different weights, is a foreign resident and must stay charged
+    /// (credit 0) — that is what keeps `evaluate_request`'s "unrelated allocations remain charged"
+    /// semantics intact at the cold-load per-request gates.
+    #[test]
+    fn resident_attribution_credits_only_the_matching_engine_and_weights_source() {
+        let weights = tempfile::tempdir().expect("weights");
+        let other_weights = tempfile::tempdir().expect("other weights");
+        let spec = LoadSpec::new(WeightsSource::Dir(weights.path().to_path_buf()));
+        let attribution = ResidentGeneratorAttribution::for_tests(
+            LoadIdentity::from_load_spec("bernini", &spec),
+            42,
+        );
+
+        assert_eq!(attribution.credit_for("bernini", &spec), 42);
+        // The match is deliberately weaker than full identity: a request-shaped probe of the SAME
+        // engine + weights (extra adapter, so a full-identity comparison would fail) still earns
+        // the credit — the downtier probe and the imported-SDXL pre-tokenizer gate are exactly
+        // this shape. See `LoadIdentity::attributes_engine_weights` for why over-matching is safe
+        // (a true miss is re-gated with zero credit at the loader seam).
+        let adapter = weights.path().join("style.safetensors");
+        std::fs::write(&adapter, b"adapter").expect("adapter fixture");
+        let adapted = LoadSpec::new(WeightsSource::Dir(weights.path().to_path_buf()))
+            .with_adapters(vec![AdapterSpec::new(adapter, 0.75, AdapterKind::Lora)]);
+        assert_eq!(attribution.credit_for("bernini", &adapted), 42);
+
+        // Foreign residents stay charged.
+        assert_eq!(
+            attribution.credit_for("boogu", &spec),
+            0,
+            "same weights under a different engine is not this spec's residency"
+        );
+        let other = LoadSpec::new(WeightsSource::Dir(other_weights.path().to_path_buf()));
+        assert_eq!(
+            attribution.credit_for("bernini", &other),
+            0,
+            "same engine on different weights is not this spec's residency"
+        );
+    }
+
+    /// The attribution query itself, against an isolated cache worker: an empty cache yields no
+    /// attribution (⇒ zero credit, the conservative pre-fix posture), and once an entry is
+    /// resident the snapshot's identity attributes exactly that entry's spec. The attributable
+    /// figure is `committed − external baseline`; the unit seam's committed probe is pinned to 0,
+    /// so here it reads 0 — the VALUE arithmetic is covered by the pure
+    /// `cold_load_budget_for_live_host`/waterfall tests in `mlx_fit_gate`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn resident_attribution_query_reads_the_resident_entry() {
+        let weights = tempfile::tempdir().expect("weights");
+        let spec = LoadSpec::new(WeightsSource::Dir(weights.path().to_path_buf()));
+        let (tx, worker) = start_isolated_generator_worker();
+
+        assert!(
+            resident_generator_attribution_on(&tx).await.is_none(),
+            "an empty cache has nothing to attribute"
+        );
+
+        with_cached_generator_for_request_using_cold_admission_on(
+            tx.clone(),
+            "bernini",
+            spec.clone(),
+            "stub load",
+            cold_load_transaction(|| Ok(())),
+            |_id, _spec| Ok(stub_box()),
+            |_generator, _state, _policy, warm_policy, _external, _provider| {
+                warm_policy.decline(
+                    crate::execution_planner::ServedAsIsReason::RouteHasNoRequestScopedMemory,
+                );
+                Ok(())
+            },
+        )
+        .await
+        .expect("cold request");
+
+        let attribution = resident_generator_attribution_on(&tx)
+            .await
+            .expect("a resident entry yields an attribution");
+        assert!(
+            attribution.credit_for("bernini", &spec) == attribution.attributable_bytes,
+            "the snapshot attributes the resident spec itself"
+        );
+        assert_eq!(
+            attribution.credit_for("boogu", &spec),
+            0,
+            "and still refuses a foreign engine"
+        );
+
+        drop(tx);
+        worker.join().expect("isolated cache worker exits");
     }
 
     fn stub_box() -> Box<dyn Generator> {

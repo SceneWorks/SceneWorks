@@ -545,8 +545,24 @@ async fn generate_sdxl_imported_stream(
     if let Some(pid) = pid_weights {
         spec = spec.with_pid(pid.checkpoint, pid.gemma);
     }
+    // sc-20571 review: this gate runs per REQUEST, before the generator-cache lookup, so when this
+    // exact checkpoint is already warm-resident its own bytes sit inside the live `vm_stat` reading.
+    // Credit them (the cache's attributable-resident figure, matched on this engine + checkpoint
+    // file) so a warm repeat is not charged twice and refused on the host that just served it. A
+    // genuine cold load is re-gated with ZERO credit at the loader seam inside the cache
+    // (`apply_residency_policy`), which stays the conservative authority when memory is allocated.
     #[cfg(target_os = "macos")]
-    let spec = crate::mlx_fit_gate::apply_residency_policy(spec, descriptor.id)?;
+    let spec = {
+        let resident = crate::generator_cache::resident_generator_attribution().await;
+        let own_resident_bytes =
+            resident.map_or(0, |attribution| attribution.credit_for(descriptor.id, &spec));
+        crate::mlx_fit_gate::apply_residency_policy_on_live_host(
+            spec,
+            descriptor.id,
+            crate::mlx_fit_gate::probe_live_host_memory(),
+            own_resident_bytes,
+        )?
+    };
     #[cfg(target_os = "macos")]
     let spec = spec.with_component(
         "ldm_tokenizer",
