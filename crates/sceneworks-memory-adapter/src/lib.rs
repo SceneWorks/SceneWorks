@@ -19,6 +19,11 @@ pub const Z_IMAGE_REPOSITORY: &str = "SceneWorks/z-image-turbo-mlx";
 /// hard load-time requirement of the pinned provider, not a fallback, so a capture resolves TWO
 /// roots under this one repository: the numeric tier and `gemma`.
 pub const LTX_REPOSITORY: &str = "SceneWorks/ltx-2.3-mlx";
+/// The `candle:wan2_2_ti2v_5b` calibration artifact (sc-19057) — the FIRST candle video lane. The
+/// SceneWorks-hosted candle snapshot carries the packed `q4/` and `q8/` tier subdirectories the
+/// packed-detect loader reads; the dense `bf16` tier is the upstream `Wan-AI/Wan2.2-TI2V-5B-Diffusers`
+/// snapshot, which has no per-tier subdirectory and therefore no artifact identity this arm can bind.
+pub const WAN_CANDLE_REPOSITORY: &str = "SceneWorks/wan2.2-ti2v-5b-candle";
 pub const COMPARISON_OUTPUT_BIAS_PARAMETER: &str = "comparisonOutputBias";
 /// Persisted-JSON spellings of `gen_core::LoadShape`. Every emitted fragment must state the
 /// materialization shape its run actually used; the harness rejects a fragment that omits it, and
@@ -301,6 +306,148 @@ pub fn validate_still_geometry(request: &Value, calibration_label: &str) -> Resu
         }
     }
     Ok(())
+}
+
+/// The geometry a VIDEO calibration arm renders, including the latent temporal depth its VAE
+/// actually denoises over.
+///
+/// Deliberately the counterpart of [`validate_still_geometry`], not a replacement for it: an image
+/// arm asserts the frames axis away, a video arm has to validate it against a real envelope. Both
+/// halves live in this crate so a reader sees the whole per-arm contract in one place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VideoGeometry {
+    pub width: u32,
+    pub height: u32,
+    pub frames: u32,
+    /// `1 + (frames - 1) / temporal_scale` — the video VAE's causal temporal depth.
+    pub latent_frames: u32,
+}
+
+/// The declared envelope one video arm validates its geometry against.
+///
+/// Every field is a statement about a SPECIFIC model's shipped `limits` block plus its engine's own
+/// hard rules, so the struct carries the arm's label and rationales rather than the guard inventing
+/// wording. That is what lets two arms with genuinely different envelopes share one guard without
+/// either of them reporting the other's reason.
+pub struct VideoGeometryEnvelope<'a> {
+    /// How the arm names itself in every refusal, e.g. `"MLX LTX-2.3 calibration"`.
+    pub calibration_label: &'a str,
+    /// `limits.resolutions`, as `(width, height)` pairs.
+    pub resolutions: &'a [(u32, u32)],
+    /// `limits.requiresDimensionsMultipleOf`, or the core default floor when the manifest elides it.
+    pub dimension_multiple: u32,
+    /// `limits.maxPixels`, when the model declares one. `None` for a model whose resolution list is
+    /// its only spatial bound.
+    pub max_pixels: Option<u64>,
+    /// The engine's temporal lattice: the frame count must be `1 + temporal_scale * k`.
+    pub temporal_scale: u32,
+    /// Why that lattice exists, quoted into the refusal — e.g.
+    /// `"the LTX video VAE is 8x causal in time"`.
+    pub temporal_rationale: &'a str,
+    /// The closed `[minimum, maximum]` frame span the declared `durations x fps` cross product can
+    /// produce through the shipped frame ladder. Derived by the arm, never written down.
+    pub frame_envelope: (u32, u32),
+    /// Why the batch axis is pinned to 1, quoted into the refusal — e.g.
+    /// `"the provider advertises max_count 1"`.
+    pub batch_rationale: &'a str,
+}
+
+impl VideoGeometryEnvelope<'_> {
+    pub fn declared_resolutions(&self) -> String {
+        self.resolutions
+            .iter()
+            .map(|(width, height)| format!("{width}x{height}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+/// Validate the three spatial/temporal axes a video arm renders, in the order a reader debugging a
+/// refused plan row wants them: resolution, spatial lattice, area cap, temporal lattice, temporal
+/// envelope.
+///
+/// A still geometry (`frames == 1`) sits ON every temporal lattice — `1 % k == 1` for any `k` — so
+/// it can only be caught by the envelope floor. That is deliberate and load-bearing: a video arm
+/// must never be able to capture a single-frame record for a video model and call it evidence.
+pub fn validate_video_geometry(
+    envelope: &VideoGeometryEnvelope<'_>,
+    width: u32,
+    height: u32,
+    frames: u32,
+) -> Result<VideoGeometry, String> {
+    let label = envelope.calibration_label;
+    if envelope.temporal_scale == 0 {
+        return Err(format!(
+            "{label} declares a zero temporal scale, which describes no video VAE"
+        ));
+    }
+    if !envelope.resolutions.contains(&(width, height)) {
+        return Err(format!(
+            "{label} requires one of the declared limits.resolutions ({}), got {width}x{height}",
+            envelope.declared_resolutions()
+        ));
+    }
+    if width % envelope.dimension_multiple != 0 || height % envelope.dimension_multiple != 0 {
+        return Err(format!(
+            "{label} requires geometry divisible by {}, got {width}x{height}",
+            envelope.dimension_multiple
+        ));
+    }
+    if let Some(maximum) = envelope.max_pixels {
+        let area = u64::from(width) * u64::from(height);
+        if area > maximum {
+            return Err(format!(
+                "{label} requires width*height within the declared limits.maxPixels {maximum}, got {area}"
+            ));
+        }
+    }
+    if frames % envelope.temporal_scale != 1 {
+        return Err(format!(
+            "{label} requires geometry.frames == 1 + {}k ({}), got {frames}",
+            envelope.temporal_scale, envelope.temporal_rationale
+        ));
+    }
+    let (minimum, maximum) = envelope.frame_envelope;
+    if frames < minimum || frames > maximum {
+        return Err(format!(
+            "{label} requires geometry.frames within the declared duration/fps envelope \
+             [{minimum}, {maximum}], got {frames}"
+        ));
+    }
+    Ok(VideoGeometry {
+        width,
+        height,
+        frames,
+        latent_frames: 1 + (frames - 1) / envelope.temporal_scale,
+    })
+}
+
+/// Read the four declared geometry axes for a VIDEO arm. Unlike [`validate_still_geometry`] this
+/// reads `frames` as a real value rather than asserting it away; `batch` is still pinned to 1
+/// because every video provider this apparatus drives renders exactly one clip.
+pub fn video_target_geometry(
+    request: &Value,
+    envelope: &VideoGeometryEnvelope<'_>,
+) -> Result<VideoGeometry, String> {
+    let geometry = planned(request)?
+        .pointer("/target/geometry")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "planned.target.geometry must be an object".to_owned())?;
+    let axis = |name: &str| {
+        geometry
+            .get(name)
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| format!("planned.target.geometry.{name} must fit u32"))
+    };
+    let batch = axis("batch")?;
+    if batch != 1 {
+        return Err(format!(
+            "{} requires geometry.batch == 1 ({}), got {batch}",
+            envelope.calibration_label, envelope.batch_rationale
+        ));
+    }
+    validate_video_geometry(envelope, axis("width")?, axis("height")?, axis("frames")?)
 }
 
 /// The overlay this calibration target declares (`planned.target.overlay`) — `"none"`, `"lora"`,
@@ -835,6 +982,212 @@ mod tests {
                     ))
             );
         }
+    }
+
+    /// The MLX LTX-2.3 envelope, transcribed from `bin/mlx.rs` so this crate can pin — on EVERY
+    /// host — the exact sentences the shared guard emits for that arm.
+    ///
+    /// 🔴 A transcription proves nothing about the arm it was transcribed from: on its own this
+    /// function pins the GUARD's wording against a copy, and would stay green if `bin/mlx.rs`
+    /// reworded `temporal_rationale` or relabelled itself. What closes that gap is a separate,
+    /// always-run node gate — `the shared video-geometry envelopes are transcribed verbatim into
+    /// the always-compiled lib tests` in `scripts/platform-review-contracts.test.mjs` — which
+    /// parses `ltx_video_envelope()` out of `bin/mlx.rs`, resolves the constants it names, and
+    /// requires this copy to be field-for-field identical. The two together are what make the
+    /// pinned sentences a real contract, since `bin/mlx.rs` compiles on exactly one host.
+    fn ltx_envelope() -> VideoGeometryEnvelope<'static> {
+        VideoGeometryEnvelope {
+            calibration_label: "MLX LTX-2.3 calibration",
+            resolutions: &[(768, 512), (512, 768), (640, 640), (1280, 704), (704, 1280)],
+            dimension_multiple: 64,
+            max_pixels: None,
+            temporal_scale: 8,
+            temporal_rationale: "the LTX video VAE is 8x causal in time",
+            frame_envelope: (97, 449),
+            batch_rationale: "the provider advertises max_count 1",
+        }
+    }
+
+    /// The Candle Wan2.2 TI2V-5B envelope, transcribed from `bin/candle.rs` for the same reason —
+    /// that binary compiles only off macOS with the `candle` feature and a CUDA toolchain — and
+    /// bound back to it by the same node gate named above.
+    fn wan_envelope() -> VideoGeometryEnvelope<'static> {
+        VideoGeometryEnvelope {
+            calibration_label: "Candle Wan2.2 TI2V-5B calibration",
+            resolutions: &[(832, 480), (1280, 704), (704, 1280)],
+            dimension_multiple: 32,
+            max_pixels: Some(901_120),
+            temporal_scale: 4,
+            temporal_rationale: "the Wan z48 video VAE is 4x causal in time",
+            // The CAPTURABLE cadence only: `limits.fps` declares [16, 24] but the calibrated route
+            // executes 24 alone, so the 16 fps rungs (61, 77, 109, 125) are outside what this arm
+            // may capture. See `wan_frame_envelope()` in `bin/candle.rs`.
+            frame_envelope: (93, 189),
+            batch_rationale: "the provider advertises max_count 1",
+        }
+    }
+
+    fn video_request(width: u64, height: u64, batch: u64, frames: u64) -> Value {
+        json!({
+            "planned": {
+                "target": {
+                    "geometry": {
+                        "width": width, "height": height, "batch": batch, "frames": frames
+                    }
+                }
+            }
+        })
+    }
+
+    /// sc-19057: the video counterpart of
+    /// `still_geometry_guard_refuses_every_non_still_axis_and_reproduces_the_pinned_wording`.
+    ///
+    /// Every message is asserted with `assert_eq!` against the exact sentence the MLX LTX arm
+    /// emitted before the hoist, so a "tidy-up" of the shared guard's wording reds here rather than
+    /// silently changing what an operator reads when a multi-hour capture is refused.
+    #[test]
+    fn the_video_geometry_guard_reproduces_the_pinned_ltx_wording_on_every_axis() {
+        let envelope = ltx_envelope();
+        let geometry = validate_video_geometry(&envelope, 768, 512, 97).unwrap();
+        assert_eq!(
+            geometry,
+            VideoGeometry {
+                width: 768,
+                height: 512,
+                frames: 97,
+                latent_frames: 13,
+            }
+        );
+
+        assert_eq!(
+            validate_video_geometry(&envelope, 1024, 1024, 97).unwrap_err(),
+            "MLX LTX-2.3 calibration requires one of the declared limits.resolutions \
+             (768x512, 512x768, 640x640, 1280x704, 704x1280), got 1024x1024"
+        );
+        assert_eq!(
+            validate_video_geometry(&envelope, 768, 512, 96).unwrap_err(),
+            "MLX LTX-2.3 calibration requires geometry.frames == 1 + 8k (the LTX video VAE is 8x \
+             causal in time), got 96"
+        );
+        assert_eq!(
+            validate_video_geometry(&envelope, 768, 512, 457).unwrap_err(),
+            "MLX LTX-2.3 calibration requires geometry.frames within the declared duration/fps \
+             envelope [97, 449], got 457"
+        );
+        // A still geometry is ON the lattice (`1 % 8 == 1`); only the envelope floor catches it.
+        assert_eq!(
+            validate_video_geometry(&envelope, 768, 512, 1).unwrap_err(),
+            "MLX LTX-2.3 calibration requires geometry.frames within the declared duration/fps \
+             envelope [97, 449], got 1"
+        );
+        // The divisibility rule is redundant with the pair list for LTX, so reach it through an
+        // envelope whose declared pair is deliberately off its own lattice.
+        let off_lattice = VideoGeometryEnvelope {
+            resolutions: &[(768, 500)],
+            ..ltx_envelope()
+        };
+        assert_eq!(
+            validate_video_geometry(&off_lattice, 768, 500, 97).unwrap_err(),
+            "MLX LTX-2.3 calibration requires geometry divisible by 64, got 768x500"
+        );
+
+        assert_eq!(
+            video_target_geometry(&video_request(768, 512, 2, 97), &envelope).unwrap_err(),
+            "MLX LTX-2.3 calibration requires geometry.batch == 1 (the provider advertises \
+             max_count 1), got 2"
+        );
+        assert_eq!(
+            video_target_geometry(&video_request(768, 512, 1, 97), &envelope).unwrap(),
+            geometry
+        );
+    }
+
+    /// The Candle Wan half of the same guard: a different label, lattice, floor and — uniquely —
+    /// an area cap, all reported in the arm's own words.
+    #[test]
+    fn the_video_geometry_guard_reports_the_candle_wan_envelope_in_its_own_words() {
+        let envelope = wan_envelope();
+        assert_eq!(
+            validate_video_geometry(&envelope, 832, 480, 117).unwrap(),
+            VideoGeometry {
+                width: 832,
+                height: 480,
+                frames: 117,
+                latent_frames: 30,
+            }
+        );
+        assert_eq!(
+            validate_video_geometry(&envelope, 768, 512, 117).unwrap_err(),
+            "Candle Wan2.2 TI2V-5B calibration requires one of the declared limits.resolutions \
+             (832x480, 1280x704, 704x1280), got 768x512"
+        );
+        assert_eq!(
+            validate_video_geometry(&envelope, 832, 480, 118).unwrap_err(),
+            "Candle Wan2.2 TI2V-5B calibration requires geometry.frames == 1 + 4k (the Wan z48 \
+             video VAE is 4x causal in time), got 118"
+        );
+        assert_eq!(
+            validate_video_geometry(&envelope, 832, 480, 193).unwrap_err(),
+            "Candle Wan2.2 TI2V-5B calibration requires geometry.frames within the declared \
+             duration/fps envelope [93, 189], got 193"
+        );
+        // 61 frames is a real product geometry — 4s at 16 fps — and is refused here anyway, because
+        // the calibrated route cannot execute the 16 fps cadence that reaches it.
+        assert_eq!(
+            validate_video_geometry(&envelope, 832, 480, 61).unwrap_err(),
+            "Candle Wan2.2 TI2V-5B calibration requires geometry.frames within the declared \
+             duration/fps envelope [93, 189], got 61"
+        );
+        assert_eq!(
+            validate_video_geometry(&envelope, 832, 480, 1).unwrap_err(),
+            "Candle Wan2.2 TI2V-5B calibration requires geometry.frames within the declared \
+             duration/fps envelope [93, 189], got 1"
+        );
+        // The area cap is the one rule the resolution list does not already imply — reachable only
+        // through an envelope that declares a pair above it, which is exactly the drift the cap
+        // exists to refuse.
+        let oversized = VideoGeometryEnvelope {
+            resolutions: &[(1280, 1280)],
+            ..wan_envelope()
+        };
+        assert_eq!(
+            validate_video_geometry(&oversized, 1280, 1280, 117).unwrap_err(),
+            "Candle Wan2.2 TI2V-5B calibration requires width*height within the declared \
+             limits.maxPixels 901120, got 1638400"
+        );
+    }
+
+    /// The two guards are complements, not alternatives — the property the whole per-arm contract
+    /// rests on. An image arm's geometry must be refused by the video guard and vice versa, so
+    /// neither arm can be wired to the other's check and still look green.
+    #[test]
+    fn the_still_and_video_guards_refuse_each_other_geometries() {
+        let still = video_request(832, 480, 1, 1);
+        let video = video_request(832, 480, 1, 117);
+        let envelope = wan_envelope();
+
+        assert!(validate_still_geometry(&still, "Candle Krea base calibration").is_ok());
+        assert!(video_target_geometry(&still, &envelope).is_err());
+
+        assert!(video_target_geometry(&video, &envelope).is_ok());
+        assert_eq!(
+            validate_still_geometry(&video, "Candle Krea base calibration").unwrap_err(),
+            "Candle Krea base calibration requires geometry.frames == 1, got 117"
+        );
+    }
+
+    /// A malformed envelope must fail closed rather than divide by zero deriving the latent depth.
+    #[test]
+    fn a_zero_temporal_scale_envelope_is_refused_before_any_arithmetic() {
+        let broken = VideoGeometryEnvelope {
+            temporal_scale: 0,
+            ..wan_envelope()
+        };
+        assert_eq!(
+            validate_video_geometry(&broken, 832, 480, 117).unwrap_err(),
+            "Candle Wan2.2 TI2V-5B calibration declares a zero temporal scale, which describes no \
+             video VAE"
+        );
     }
 
     #[test]

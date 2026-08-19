@@ -2130,6 +2130,371 @@ test("the MLX LTX arm's manifest constants match the shipped ltx_2_3 limits", as
   );
 });
 
+// sc-19057. The Candle twin of the gate above, for the first candle VIDEO arm. Same reasoning: the
+// arm hand-copies the `wan_2_2` `limits` block and DERIVES its accepted frame envelope `[93, 189]`
+// from durations x the capturable cadence, so an unbound manifest edit would silently move what a
+// multi-hour CUDA capture admits. It also carries two checks the LTX gate has no analogue for:
+//
+//   * `wan_2_2` deliberately declares NO `requiresDimensionsMultipleOf` (core's default floor of 32
+//     already equals candle's `SIZE_MULTIPLE`), so this asserts the ELISION. Re-declaring a
+//     different stride there reds instead of silently widening the arm.
+//   * the catalog model id and the ENGINE id genuinely differ here, and the video-curve fit resolves
+//     `modelFamily` from the catalog id — so both constants are bound, to the manifest and to the
+//     engine respectively.
+test("the Candle Wan arm's manifest constants match the shipped wan_2_2 limits", async () => {
+  const manifest = JSON.parse(
+    stripJsoncComments(await source("config/manifests/builtin.models.jsonc")),
+  );
+  const adapter = await source("crates/sceneworks-memory-adapter/src/bin/candle.rs");
+
+  const rustConst = (name) => {
+    const start = adapter.indexOf(`const ${name}`);
+    assert.ok(start >= 0, `${name} must still exist in the Candle adapter`);
+    const equals = adapter.indexOf("=", start);
+    const end = adapter.indexOf(";", equals);
+    assert.ok(equals > start && end > equals, `${name} must be a simple const initializer`);
+    return adapter.slice(equals + 1, end).trim();
+  };
+  const rustTuples = (name) => JSON.parse(rustConst(name).replaceAll("(", "[").replaceAll(")", "]"));
+
+  const catalogId = JSON.parse(rustConst("WAN_MANIFEST_MODEL_ID"));
+  assert.equal(catalogId, "wan_2_2");
+  assert.equal(
+    JSON.parse(rustConst("WAN_PROVIDER")),
+    "wan2_2_ti2v_5b",
+    "WAN_PROVIDER is the candle-gen-wan ENGINE id, not the catalog id",
+  );
+  const model = manifest.models.find((entry) => entry.id === catalogId);
+  assert.ok(model, `builtin.models.jsonc must still declare ${catalogId}`);
+  assert.equal(model.type, "video", `${catalogId} must remain a video entry`);
+  const limits = model.limits;
+  assert.ok(limits, `${catalogId} must still declare a limits block`);
+
+  assert.deepEqual(
+    rustTuples("WAN_RESOLUTIONS"),
+    limits.resolutions.map((size) => size.split("x").map(Number)),
+    "WAN_RESOLUTIONS is a verbatim copy of limits.resolutions",
+  );
+  assert.deepEqual(
+    JSON.parse(rustConst("WAN_DURATIONS_SECONDS")),
+    limits.durations,
+    "WAN_DURATIONS_SECONDS is a verbatim copy of limits.durations",
+  );
+  assert.deepEqual(
+    JSON.parse(rustConst("WAN_FPS")),
+    limits.fps,
+    "WAN_FPS is a verbatim copy of limits.fps",
+  );
+  assert.equal(
+    Number(rustConst("WAN_MAX_PIXELS").replaceAll("_", "")),
+    limits.maxPixels,
+    "WAN_MAX_PIXELS is limits.maxPixels",
+  );
+  assert.equal(
+    limits.requiresDimensionsMultipleOf,
+    undefined,
+    "wan_2_2 deliberately elides the stride; core's default floor of 32 is the binding, so declaring one here means WAN_DIMENSION_MULTIPLE must be re-derived from it",
+  );
+  assert.equal(
+    Number(rustConst("WAN_DIMENSION_MULTIPLE")),
+    32,
+    "WAN_DIMENSION_MULTIPLE is core's default spatial floor, which equals candle SIZE_MULTIPLE",
+  );
+
+  // The one cadence the calibrated route can execute must still be a shipped one, and must still be
+  // this model's own default — otherwise the capture measures a geometry the product never renders.
+  const calibratedFps = Number(rustConst("WAN_CALIBRATED_FPS"));
+  assert.ok(limits.fps.includes(calibratedFps), "the calibrated cadence must remain shipped");
+  assert.equal(model.defaults.fps, calibratedFps, "the calibrated cadence is the shipped default");
+  assert.ok(
+    limits.resolutions.includes(model.defaults.resolution),
+    "the shipped default resolution must remain inside the declared envelope",
+  );
+
+  // ... and the envelope those inputs feed, recomputed here from the MANIFEST through the same
+  // floor-to-4k+1 ladder `sceneworks_core::video_request::wan_frame_count` implements, so a limits
+  // edit is caught as a changed ENVELOPE — what the arm actually admits — not merely as a changed
+  // constant.
+  //
+  // sc-19057 review: the cross product is taken over the CAPTURABLE cadence, not over all of
+  // `limits.fps`. `WanMemoryRequestScope::validate_request` refuses every cadence but the default,
+  // so the 16 fps rungs (61, 77, 109, 125) are geometries no admissible plan row can produce, and
+  // an envelope spanning them admitted `832x480 f61 fps24` — the exact drift the fps refusal exists
+  // to prevent.
+  const snap = (raw) => Math.max(Math.max(raw, 1) - ((Math.max(raw, 1) - 1) % 4), 5);
+  assert.equal(
+    rustConst("WAN_CAPTURABLE_FPS"),
+    "[WAN_CALIBRATED_FPS]",
+    "WAN_CAPTURABLE_FPS is the capturable subset of limits.fps, and today that is the calibrated cadence alone",
+  );
+  const reachable = limits.durations.map((duration) => snap(duration * calibratedFps));
+  assert.match(
+    adapter,
+    /const WAN_FRAME_ENVELOPE: \(u32, u32\) = wan_frame_envelope\(\);/,
+    "the frame envelope must stay DERIVED from the declared arrays, not written down",
+  );
+  const ladderTestAt = adapter.indexOf(
+    "fn wan_frame_ladder_port_matches_the_transcribed_shipped_ladder(",
+  );
+  assert.ok(ladderTestAt >= 0, "the Wan ladder port test must still exist");
+  assert.match(
+    adapter.slice(ladderTestAt, ladderTestAt + 2400),
+    new RegExp(
+      `assert_eq!\\(WAN_FRAME_ENVELOPE, \\(${Math.min(...reachable)}, ${Math.max(...reachable)}\\)\\)`,
+    ),
+    "the pinned envelope must equal the one the capturable cadence actually reaches",
+  );
+  // The narrowing is only meaningful if it actually moved the floor: the shortest clip the refused
+  // cadence reaches must now sit BELOW the envelope. (The envelope is a closed interval, not a set,
+  // so counts that fall between capturable rungs stay admissible — the plan-row ladder check further
+  // down is what binds the committed rows to the exact rungs.)
+  const refusedRungs = limits.durations.flatMap((duration) =>
+    limits.fps.filter((fps) => fps !== calibratedFps).map((fps) => snap(duration * fps)),
+  );
+  if (refusedRungs.length > 0) {
+    assert.ok(
+      Math.min(...refusedRungs) < Math.min(...reachable),
+      "the capture envelope floor must exclude the shortest clip only the refused cadence reaches",
+    );
+  }
+
+  // The capture plan measures the DEFAULT candle artifact variant, at a geometry and cadence the
+  // shipped limits actually reach.
+  const plan = JSON.parse(
+    await source("docs/calibration/sc-19057/wan-candle-video-capture-plan.json"),
+  );
+  const candleDefaults = model.downloads.filter(
+    (download) => download.default === true && (download.platforms ?? []).includes("windows"),
+  );
+  assert.equal(candleDefaults.length, 1, "Wan must retain exactly one default candle variant");
+  for (const provider of plan.providers) {
+    assert.equal(provider.backend, "candle");
+    assert.equal(provider.target.provider, "wan2_2_ti2v_5b");
+    assert.equal(provider.target.modelId, catalogId);
+    assert.equal(
+      provider.target.tier,
+      candleDefaults[0].variant,
+      "the sc-19057 plan measures the default candle artifact variant",
+    );
+    const { width, height, frames } = provider.target.geometry;
+    assert.ok(
+      limits.resolutions.includes(`${width}x${height}`),
+      `${provider.name} renders an undeclared resolution`,
+    );
+    assert.ok(reachable.includes(frames), `${provider.name} renders an unreachable frame count`);
+    assert.match(
+      provider.fixture,
+      new RegExp(`^wan2-2-ti2v-5b-candle-${provider.target.tier}-${width}x${height}-f${frames}-fps${calibratedFps}-seed\\d+$`),
+      `${provider.name} fixture must bind its tier, geometry and cadence`,
+    );
+  }
+  // Three coefficients need three independent geometry directions: with one pixel count the cross
+  // form is singular and the fit reports an unusable slice hours after the capture burned.
+  assert.ok(
+    new Set(plan.providers.map((provider) => provider.target.geometry.width * provider.target.geometry.height)).size >= 2,
+    "the sweep must span at least two pixel counts",
+  );
+  assert.ok(
+    new Set(plan.providers.map((provider) => provider.target.geometry.frames)).size >= 2,
+    "the sweep must span at least two frame counts",
+  );
+  assert.ok(
+    plan.providers.filter((provider) => provider._role === "fit").length >= 3,
+    "the cross form needs at least three fit points",
+  );
+  assert.ok(
+    plan.providers.some((provider) => (provider._role ?? "").startsWith("held_out")),
+    "fit-ltx-temporal-form.mjs discards a slice with no held-out residual",
+  );
+});
+
+// sc-19057: the first candle video lane needs a closure-table entry before a capture can carry a
+// currency term — `memory-calibration-harness.mjs` derives the digest eagerly and fails closed with
+// `lane "candle:wan2_2_ti2v_5b" has no entry` BEFORE the capture burns.
+test("the candle Wan video lane is declared in the inference closure table", async () => {
+  const closures = JSON.parse(await source("config/inference-provider-closures.json"));
+  const lane = closures.providers["candle:wan2_2_ti2v_5b"];
+  assert.ok(lane, "candle:wan2_2_ti2v_5b must be declared before its capture can be stamped");
+  assert.equal(lane.crate, "crates/media/candle-gen/candle-gen-wan");
+  assert.match(lane.digest, /^[0-9a-f]{64}$/, "the digest must be a derived sha256, never hand-written");
+  assert.ok(
+    lane.closureCrates.includes("crates/media/candle-gen/candle-gen-wan"),
+    "the closure must contain the crate that owns the memory-strategy contract",
+  );
+});
+
+// sc-19057 review. `crates/sceneworks-memory-adapter/src/lib.rs` pins the FULL refusal sentences of
+// the shared video-geometry guard with `assert_eq!`, on every host — but it builds each envelope
+// from a HAND-TRANSCRIBED copy of the arm's `protocol::VideoGeometryEnvelope` literal. A hand copy
+// cannot detect drift in the thing it copied: reword `temporal_rationale` in `bin/mlx.rs`, relabel
+// the arm, or move its frame envelope, and those tests stay green while the sentence an operator
+// reads when a multi-hour capture is refused quietly changes. That mattered because `bin/mlx.rs`
+// compiles on exactly one host (macOS + `mlx`) and `bin/candle.rs` on exactly one other (off-macOS
+// + `candle` + a CUDA toolchain) — the lib tests were advertised as the always-run cover and were
+// not covering the arms at all.
+//
+// This binds the copy to the original from the outside: parse each arm's struct literal, resolve
+// the constants it names, and require the lib copy to be field-for-field identical. `npm run check`
+// runs it on any host, so a reworded rationale reds on the PR rather than on one lane or nowhere.
+test("the shared video-geometry envelopes are transcribed verbatim into the always-compiled lib tests", async () => {
+  const [mlx, candle, lib] = await Promise.all([
+    source("crates/sceneworks-memory-adapter/src/bin/mlx.rs"),
+    source("crates/sceneworks-memory-adapter/src/bin/candle.rs"),
+    source("crates/sceneworks-memory-adapter/src/lib.rs"),
+  ]);
+
+  // `//` never appears inside any of these literals' strings, so a per-line strip is exact and keeps
+  // a doc-comment comma from being mistaken for a field separator.
+  const withoutLineComments = (text) =>
+    text
+      .split("\n")
+      .map((line) => line.replace(/\/\/.*$/, ""))
+      .join("\n");
+
+  /** The balanced `VideoGeometryEnvelope { .. }` literal returned by `fn <name>`, as field text. */
+  const envelopeFields = (text, fnName, what) => {
+    const fnAt = text.indexOf(`fn ${fnName}(`);
+    assert.ok(fnAt >= 0, `${what}: fn ${fnName} must still exist`);
+    const literalAt = text.indexOf("VideoGeometryEnvelope {", fnAt);
+    assert.ok(literalAt > fnAt, `${what}: ${fnName} must still return a struct literal`);
+    const open = text.indexOf("{", literalAt);
+    let depth = 0;
+    let close = -1;
+    for (let index = open; index < text.length; index += 1) {
+      if (text[index] === "{") depth += 1;
+      else if (text[index] === "}" && (depth -= 1) === 0) {
+        close = index;
+        break;
+      }
+    }
+    assert.ok(close > open, `${what}: ${fnName}'s struct literal is unbalanced`);
+
+    const body = withoutLineComments(text.slice(open + 1, close));
+    const fields = {};
+    let start = 0;
+    let nesting = 0;
+    let inString = false;
+    let escaped = false;
+    const push = (chunk) => {
+      const trimmed = chunk.trim();
+      if (!trimmed) return;
+      const colon = trimmed.indexOf(":");
+      assert.ok(colon > 0, `${what}: ${fnName} has a non-field entry ${JSON.stringify(trimmed)}`);
+      fields[trimmed.slice(0, colon).trim()] = trimmed.slice(colon + 1).trim();
+    };
+    for (let index = 0; index < body.length; index += 1) {
+      const character = body[index];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (character === "\\") escaped = true;
+        else if (character === '"') inString = false;
+        continue;
+      }
+      if (character === '"') inString = true;
+      else if ("([{".includes(character)) nesting += 1;
+      else if (")]}".includes(character)) nesting -= 1;
+      else if (character === "," && nesting === 0) {
+        push(body.slice(start, index));
+        start = index + 1;
+      }
+    }
+    push(body.slice(start));
+    return fields;
+  };
+
+  /** The initializer text of `const <name>` in the same file. */
+  const constInitializer = (text, name, what) => {
+    const at = text.indexOf(`const ${name}`);
+    assert.ok(at >= 0, `${what}: const ${name} must still exist`);
+    const equals = text.indexOf("=", at);
+    const end = text.indexOf(";", equals);
+    assert.ok(equals > at && end > equals, `${what}: const ${name} must be a simple initializer`);
+    return text.slice(equals + 1, end).trim();
+  };
+
+  /** Resolve one field's Rust source text to a comparable JSON value. */
+  const resolve = (raw, text, what, depth = 0) => {
+    assert.ok(depth < 8, `${what}: ${raw} did not resolve to a literal`);
+    let value = raw.trim();
+    if (value.startsWith("&")) value = value.slice(1).trim();
+    if (value === "None") return null;
+    const some = /^Some\(([\s\S]*)\)$/.exec(value);
+    if (some) return resolve(some[1], text, what, depth + 1);
+    // `\` + newline is Rust's line continuation and carries no characters into the string.
+    if (value.startsWith('"')) return JSON.parse(value.replace(/\\\s*\n\s*/g, ""));
+    // `(a, b)` and `[(a, b), ...]` become JSON by turning tuples into arrays.
+    if (value.startsWith("(")) value = `[${value.slice(1, -1)}]`;
+    if (value.startsWith("[")) {
+      return JSON.parse(value.replaceAll("(", "[").replaceAll(")", "]").replaceAll("_", ""));
+    }
+    if (/^[0-9]/.test(value)) return Number(value.replaceAll("_", ""));
+    return resolve(constInitializer(text, value, what), text, what, depth + 1);
+  };
+
+  const arms = [
+    {
+      what: "MLX LTX",
+      arm: mlx,
+      armFn: "ltx_video_envelope",
+      libFn: "ltx_envelope",
+      envelopeConst: "LTX_FRAME_ENVELOPE",
+      // The pinned pair these two tests already bind to builtin.models.jsonc, above.
+      pinnedIn: "fn ltx_frame_envelope_is_derived_from_the_declared_durations_and_fps(",
+    },
+    {
+      what: "Candle Wan",
+      arm: candle,
+      armFn: "wan_video_envelope",
+      libFn: "wan_envelope",
+      envelopeConst: "WAN_FRAME_ENVELOPE",
+      pinnedIn: "fn wan_frame_ladder_port_matches_the_transcribed_shipped_ladder(",
+    },
+  ];
+
+  for (const { what, arm, armFn, libFn, envelopeConst, pinnedIn } of arms) {
+    const armFields = envelopeFields(arm, armFn, what);
+    const libFields = envelopeFields(lib, libFn, `${what} lib copy`);
+    assert.deepEqual(
+      Object.keys(libFields).sort(),
+      Object.keys(armFields).sort(),
+      `${what}: the lib copy must declare exactly the arm's fields`,
+    );
+
+    for (const [field, raw] of Object.entries(armFields)) {
+      if (field === "frame_envelope") continue;
+      assert.deepEqual(
+        resolve(libFields[field], lib, `${what} lib copy`),
+        resolve(raw, arm, what),
+        `${what}: lib's transcribed ${field} must equal ${armFn}'s`,
+      );
+    }
+
+    // `frame_envelope` is a derived const (`ltx_frame_envelope()` / `wan_frame_envelope()`), so it
+    // has no literal to resolve. Bind the copy to the pair the arm's own derivation test pins —
+    // which the two manifest gates above already bind to the shipped `limits`.
+    assert.equal(armFields.frame_envelope, envelopeConst, `${what}: the arm must use ${envelopeConst}`);
+    const pinnedAt = arm.indexOf(pinnedIn);
+    assert.ok(pinnedAt >= 0, `${what}: the envelope derivation test must still exist`);
+    const pinned = new RegExp(`assert_eq!\\(${envelopeConst}, \\((\\d+), (\\d+)\\)\\)`).exec(
+      arm.slice(pinnedAt, pinnedAt + 2400),
+    );
+    assert.ok(pinned, `${what}: the derivation test must pin ${envelopeConst} to an explicit pair`);
+    assert.deepEqual(
+      resolve(libFields.frame_envelope, lib, `${what} lib copy`),
+      [Number(pinned[1]), Number(pinned[2])],
+      `${what}: lib's transcribed frame_envelope must equal the pinned derived envelope`,
+    );
+  }
+
+  // The transcriptions are only worth binding because something asserts the full sentences off them.
+  for (const pinned of [
+    "fn the_video_geometry_guard_reproduces_the_pinned_ltx_wording_on_every_axis(",
+    "fn the_video_geometry_guard_reports_the_candle_wan_envelope_in_its_own_words(",
+  ]) {
+    assert.ok(lib.includes(pinned), `the lib must still assert the pinned wording: ${pinned}`);
+  }
+});
+
 test("the LTX real-weight safety canary cannot relax or masquerade as campaign evidence", async () => {
   const [adapter, runner] = await Promise.all([
     source("crates/sceneworks-memory-adapter/src/bin/mlx.rs"),
