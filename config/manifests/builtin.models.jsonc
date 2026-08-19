@@ -8712,12 +8712,26 @@
       // local diffusers dir that borrows the VAE/text-encoder/tokenizer from the
       // base FLUX.2-klein-9B install (mlx.convertBaseRepo). sc-2235.
       "capabilities": ["text_to_image", "image_to_image", "edit_image", "character_image"],
-      "macOnly": true,
+      // No `macOnly` (sc-20529). For an IMAGE entry the flag is a no-op label — only video
+      // entries (`video_model_withdrawn_on_platform`) and the vision captioner read it — and
+      // here it was actively misleading: the FLUX.2-klein converter has a real candle twin
+      // (`runtime_cuda::providers::flux2::convert_and_assemble`, sc-7459), `POST
+      // /models/{id}/convert` is not platform-gated, and the catalog now surfaces this entry's
+      // conversion state on Windows/Linux (`CANDLE_NATIVE_CONVERTERS`). Availability is driven
+      // by the routing tables (`MLX_ROUTED_MODELS` / `CANDLE_ROUTED_MODELS`), not this flag —
+      // same posture as krea/lens/ideogram/boogu/sd3.5.
       "downloads": [
         {
           // Only the bf16 single-file transformer (the convert source). The repo
           // also hosts GGUF/fp8/fp4 quants we don't use — pulling just this file
           // avoids a ~73 GB whole-repo download.
+          //
+          // This is NOT the pinned-allow-list antipattern the whole-repo download
+          // rule forbids: the list IS the convert source, so it must name exactly
+          // one file. `files[0]` and `mlx.convertSourceFile` below are the same
+          // checkpoint by construction, and sceneworks-core's
+          // `convert_source_file_matches_its_download_allow_list` fails the build
+          // if the two spellings ever drift apart (sc-20529).
           "provider": "huggingface",
           "repo": "wikeeyang/Flux2-Klein-9B-True-V2",
           "revision": "9c9fe9880029a4e0c4af5ca7d86e83cdb83eea83",

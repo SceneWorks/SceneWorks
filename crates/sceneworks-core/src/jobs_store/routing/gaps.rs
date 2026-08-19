@@ -1056,6 +1056,44 @@ pub const NATIVE_CONVERTERS: &[&str] = &[
     "anima_quant",
 ];
 
+/// The subset of [`NATIVE_CONVERTERS`] that has a REAL implementation **off macOS** — i.e. a candle
+/// (`backend-candle`) twin of the MLX converter, not the `Err("… requires macOS")` stub every other
+/// converter compiles to on Windows/Linux (`sceneworks-worker`'s `convert_*` cfg arms).
+///
+/// Today that is exactly one: `flux2_klein_diffusers`, whose candle twin
+/// (`runtime_cuda::providers::flux2::convert_and_assemble`, sc-7459) performs the same single-file →
+/// diffusers key remap as the macOS converter so `flux2_klein_9b_true_v2` installs + converts off-Mac.
+///
+/// This const exists because "does this model require a CONVERTED artifact here?" is a
+/// **per-platform** question, and answering it with [`NATIVE_CONVERTERS`] alone is wrong in a way
+/// that silently breaks a shipped model (sc-20529). Anima is the counter-example: `anima_base` /
+/// `anima_aesthetic` / `anima_turbo` all declare `mlx.requiresConversion` AND ship windows/linux
+/// downloads, but their `anima_quant` converter is macOS-only — off-Mac they legitimately load the
+/// raw `circlestone-labs/Anima` `split_files/` tree with NO converted dir and NO injected
+/// `modelPath` (see `sceneworks-worker`'s `resolve_weights_dir`). Treating them as
+/// "needs conversion" off-Mac would flip three installed models to missing and refuse renders that
+/// work today.
+///
+/// Drift guards (see their tests): the contents are pinned by
+/// `candle_native_converters_registry_contents_are_pinned`, and every id here must also be in
+/// [`NATIVE_CONVERTERS`] (`candle_native_converters_are_a_subset_of_native_converters`).
+pub const CANDLE_NATIVE_CONVERTERS: &[&str] = &["flux2_klein_diffusers"];
+
+/// Whether a model declaring `mlx.converter = converter` loads from a **converted artifact** on the
+/// platform this build targets, so an absent conversion is a hard, actionable install gap rather
+/// than a fall-through to the raw source snapshot.
+///
+/// macOS: every native converter produces the artifact the loader reads. Off macOS: only the
+/// converters in [`CANDLE_NATIVE_CONVERTERS`] do — everything else has no off-Mac convert lane, and
+/// its model either loads from a raw repo directly (Anima) or is macOS-only anyway (LTX).
+pub fn convert_artifact_required_here(converter: &str) -> bool {
+    if cfg!(target_os = "macos") {
+        NATIVE_CONVERTERS.contains(&converter)
+    } else {
+        CANDLE_NATIVE_CONVERTERS.contains(&converter)
+    }
+}
+
 /// `model_convert` is supported for the in-process Rust converters enumerated in
 /// [`NATIVE_CONVERTERS`] (FLUX.2-klein `flux2_klein_diffusers` sc-3136; LTX-2.3 `ltx_video` sc-3240;
 /// FLUX.2-dev `flux2_dev_quant` sc-5921; the SD3.5 `sd3_5_*_quant` variants sc-7871; Anima
