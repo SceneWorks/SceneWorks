@@ -1232,7 +1232,32 @@ fn eviction_removal_never_follows_a_swapped_symlink_outside_the_root() {
 
     let report = store.enforce_retention(&policy(1, 1), FAR_FUTURE).unwrap();
     assert!(report.evicted.is_empty());
-    assert_eq!(report.failed.len(), 1);
+    // The swap has to be what the removal refused. An eviction that never reached the removal at
+    // all — the entry was held back, or it failed earlier — also leaves the sentinel alone and
+    // still lands in `failed`, so without this the assertions below pass for the wrong reason: the
+    // hook only runs inside `remove_entry_at`, so an entry path that is now a symlink is the
+    // witness that the removal stood on the swapped path and still refused to follow it. This is
+    // the same precondition trap that reddened
+    // `stale_cleanup_directory_swap_never_follows_an_external_symlink` on the hosted macOS lane;
+    // this test reaches its removable state through `materialize_complete` and `stamp_activity`,
+    // both checked, so only the witness was missing.
+    assert!(
+        std::fs::symlink_metadata(&entry)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the removal must have reached the swapped entry path: {report:?}"
+    );
+    // Which entry failed, not merely that something did.
+    assert_eq!(
+        report
+            .failed
+            .iter()
+            .map(|(cache_key, _)| cache_key.as_str())
+            .collect::<Vec<_>>(),
+        vec![candidate.cache_key.as_str()],
+        "the refusal's own text is the host's errno, so only the entry it names is pinned"
+    );
     assert_eq!(std::fs::read(&sentinel).unwrap(), b"untouched");
     assert!(external.is_dir());
     // The removal failed, so nothing may claim it completed: the audit trail records completed
