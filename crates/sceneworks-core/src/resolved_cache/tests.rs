@@ -66,6 +66,37 @@ fn source_snapshot(candidate: &PromotionCandidate) -> &Path {
     }
 }
 
+/// Park a fixture entry in the non-live state `cleanup_stale_staging` requires before it will
+/// touch a staging directory at all.
+///
+/// This is a PRECONDITION for the two directory-swap tests below, never their subject.
+/// `ResolvedCacheReservation::drop` records the interruption on a best-effort basis: it *warns*
+/// and leaves the entry `Materializing`, still owned by this live session, whenever its metadata
+/// write cannot complete — a transient open/read/write failure under the descriptor and IO
+/// pressure of a loaded hosted runner is the documented case (see the note on
+/// `ResolvedCacheStore::read_eviction_marker`, which was made descriptor-cheap for exactly this
+/// reason). `cleanup_stale_staging` then correctly *skips* the entry fail-closed and returns
+/// `Ok(0)`, the swap hook never runs, and a test that only asserts "the sweep returned an error"
+/// reads that skip as "the symlink was followed". That is what reddened
+/// `stale_cleanup_directory_swap_never_follows_an_external_symlink` on the hosted macOS lane.
+///
+/// Forcing the transition here costs no coverage: the drop-marks-interrupted contract is owned by
+/// `materialization::tests::stale_staging_cleanup_requires_artifact_and_session_authority` and by
+/// `reservation_is_exclusive_unrelated_keys_progress_and_drop_interrupts`, which assert it
+/// directly instead of inheriting it as setup.
+fn force_interrupted_reservation(store: &ResolvedCacheStore, cache_key: &str) {
+    store
+        .update_metadata(cache_key, |metadata| {
+            metadata.state = ResolvedCacheEntryState::Interrupted;
+            metadata.reservation_id = None;
+            metadata.reservation_owner = None;
+            metadata.session_id = None;
+            metadata.recovery_status = RecoveryStatus::InterruptedReservation;
+            Ok(())
+        })
+        .expect("the fixture entry must be parkable as an interrupted reservation");
+}
+
 #[cfg(unix)]
 #[test]
 fn stale_cleanup_directory_swap_never_follows_an_external_symlink() {
@@ -83,6 +114,7 @@ fn stale_cleanup_directory_swap_never_follows_an_external_symlink() {
     let staging = reservation.staging_path().to_owned();
     std::fs::write(staging.join("partial"), b"partial").unwrap();
     drop(reservation);
+    force_interrupted_reservation(&store, &candidate.cache_key);
 
     let external = scratch.path().join("external");
     std::fs::create_dir(&external).unwrap();
@@ -96,6 +128,18 @@ fn stale_cleanup_directory_swap_never_follows_an_external_symlink() {
     });
 
     assert!(store.cleanup_stale_staging().is_err());
+    // The swap has to be what the sweep refused. A sweep that never reached the removal at all
+    // (it skipped the entry, or failed earlier) also returns without deleting the sentinel, so
+    // without this the assertions below pass for the wrong reason: the hook only runs inside
+    // `remove_entry_at`, so a staging path that is now a symlink is the witness that the sweep
+    // stood on the swapped path and still refused to follow it.
+    assert!(
+        std::fs::symlink_metadata(&staging)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the removal must have reached the swapped staging path"
+    );
     assert_eq!(std::fs::read(&sentinel).unwrap(), b"untouched");
     assert!(external.is_dir());
     std::fs::remove_file(staging).unwrap();
@@ -292,6 +336,7 @@ fn stale_cleanup_directory_swap_never_follows_an_external_junction() {
     let staging = reservation.staging_path().to_owned();
     std::fs::write(staging.join("partial"), b"partial").unwrap();
     drop(reservation);
+    force_interrupted_reservation(&store, &candidate.cache_key);
 
     let external = scratch.path().join("external");
     std::fs::create_dir(&external).unwrap();
@@ -306,6 +351,15 @@ fn stale_cleanup_directory_swap_never_follows_an_external_junction() {
     });
 
     assert!(store.cleanup_stale_staging().is_err());
+    // The swap has to be what the sweep refused. A sweep that never reached the removal at all
+    // (it skipped the entry, or failed earlier) also returns without deleting the sentinel, so
+    // without this the assertions below pass for the wrong reason: the hook only runs inside
+    // `windows_confined_directory`, so a staging path that is now a reparse point is the witness
+    // that the sweep stood on the swapped path and still refused to follow it.
+    assert!(
+        metadata_is_reparse_point(&std::fs::symlink_metadata(&staging).unwrap()),
+        "the removal must have reached the swapped staging path"
+    );
     assert_eq!(std::fs::read(&sentinel).unwrap(), b"untouched");
     assert!(external.is_dir());
     std::fs::remove_dir(staging).unwrap();
