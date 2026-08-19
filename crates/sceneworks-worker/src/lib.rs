@@ -162,6 +162,31 @@ pub mod memory_route_registry;
 use gpu::*;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod candle_memory_strategy;
+// The PURE arithmetic of the candle legacy scalar admission gate, lifted out of `vram_gate` by
+// sc-19049 (epic 19048). Cross-platform on purpose: `vram_gate` is candle-lane-only, so leaving the
+// decision law behind that cfg meant the epic's decision baseline could only be produced by a
+// re-implementation in a Node generator — a second law that reds when it disagrees with itself, not
+// when it disagrees with production. Here, `candle_admission_decisions` drives the real functions on
+// the ordinary `cargo test` lane. Only candle call sites consume it, hence the dead-code allowance
+// on every other build (the same shape `mlx_fit_gate` and `fit_gate`'s dedicated-VRAM items use).
+//
+// Scoped to the lanes that HAVE an image pipeline (`any(macos, backend-candle)`) rather than to the
+// candle lane alone, which is the widening that matters: `image_jobs::tier_resolver::NVFP4_TIER` —
+// the tier identity this gate branches on — exists exactly on that set, and a second copy of it here
+// would be the duplicated tier vocabulary sc-15799 deleted. The practical effect is that the baseline
+// is driven by the macOS PR lane, not only by the self-hosted CUDA lane that PR-triggers on `main`.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg_attr(
+    any(target_os = "macos", not(feature = "backend-candle")),
+    allow(dead_code)
+)]
+mod candle_scalar_gate;
+// sc-19049's decision-baseline emitter/verifier. Test-only: it adds no production behavior. It drives
+// `candle_scalar_gate`'s real functions over the manifest corpus and reconciles the result against
+// the committed `docs/generated/candle-admission-decisions.json`, which is the artifact the Node
+// generator's baseline is BUILT FROM rather than independently re-derived.
+#[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
+mod candle_admission_decisions;
 mod fit_gate;
 // Margin constants derived from repeat-capture variance in the calibration evidence (sc-18094,
 // epic 18093). Consumed by the stale-closure widening (sc-18095) and estimate-backed admission

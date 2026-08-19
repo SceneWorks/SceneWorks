@@ -24,7 +24,10 @@ pub(crate) fn quant_int(value: &Value) -> Option<i64> {
 }
 
 /// Parse a JSON float from either a number or a trimmed numeric string.
-#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
+// sc-19049 widened this from the candle-lane cfg to the image-pipeline cfg: the candle scalar
+// admission gate's manifest reads moved to `crate::candle_scalar_gate`, which compiles wherever the
+// image pipeline does so the epic-19048 decision baseline can drive the real gate off a CUDA box.
+#[cfg(any(test, target_os = "macos", feature = "backend-candle"))]
 pub(crate) fn json_f64(value: &Value) -> Option<f64> {
     value
         .as_f64()

@@ -6720,4 +6720,165 @@ mod tests {
         );
         assert_eq!(provider_refused.load_shape, LoadShape::EagerMaterialization);
     }
+
+    // ---------------------------------------------------------------------------------------
+    // sc-19049: bind the generated candle admission inventory to the Rust route universe.
+    //
+    // `docs/generated/candle-admission-inventory.json` is derived by a Node generator, which is
+    // how every other Rust-derived doc in this tree is produced. That generator reads the routing
+    // catalog as TEXT; these tests read it as CODE. Agreement between the two readings is what
+    // makes the artifact trustworthy, and — more importantly for epic 19048 — a new candle route
+    // landing from epic 18472 reds HERE, on the ordinary `cargo test` lane, rather than waiting
+    // for someone to notice the inventory no longer covers it.
+    //
+    // Deliberately in THIS module and not behind the candle cfg: `vram_gate`, `krea_control_fit`
+    // and `candle_memory_strategy` are all `#[cfg(all(not(macos), backend-candle))]`, so a test
+    // placed beside them would run only on the self-hosted `windows-candle` lane. The route
+    // universe and the load-shape rules are compiled everywhere, so the reconciliation can be too.
+    // ---------------------------------------------------------------------------------------
+
+    const CANDLE_ADMISSION_INVENTORY: &str =
+        include_str!("../../../docs/generated/candle-admission-inventory.json");
+
+    fn candle_admission_inventory() -> Value {
+        serde_json::from_str(CANDLE_ADMISSION_INVENTORY)
+            .expect("docs/generated/candle-admission-inventory.json is not valid JSON")
+    }
+
+    fn inventory_routes(inventory: &Value) -> &Vec<Value> {
+        inventory["routes"]
+            .as_array()
+            .expect("the inventory publishes no routes array")
+    }
+
+    #[test]
+    fn generated_inventory_covers_every_candle_routed_image_model() {
+        let inventory = candle_admission_inventory();
+        let routes: std::collections::BTreeSet<&str> = inventory_routes(&inventory)
+            .iter()
+            .filter_map(|route| route["modelId"].as_str())
+            .collect();
+        let missing: Vec<&str> = sceneworks_core::jobs_store::candle_routed_image_models()
+            .iter()
+            .copied()
+            .filter(|model| !routes.contains(model))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "the routing catalog serves these models on the candle lane but the generated \
+             admission inventory has no row for them: {missing:?}. Run \
+             `npm run generate:candle-admission` and classify the new route."
+        );
+    }
+
+    #[test]
+    fn generated_inventory_route_ids_are_unique_and_catalog_backed() {
+        let inventory = candle_admission_inventory();
+        let mut seen = std::collections::BTreeSet::new();
+        for route in inventory_routes(&inventory) {
+            let model = route["modelId"]
+                .as_str()
+                .expect("an inventory route has no modelId");
+            assert!(seen.insert(model), "duplicate inventory route for {model}");
+            let modality = route["modality"]
+                .as_str()
+                .expect("an inventory route has no modality");
+            assert!(
+                matches!(modality, "image" | "video"),
+                "{model}: unknown modality {modality}"
+            );
+            if modality == "image" {
+                // `candle_routed_image_models()` is the UNCONDITIONED base txt2img set, which its
+                // own doc comment is explicit about. A conditioned lane can serve a model the
+                // column marks `candle_routed: false` — `instantid_realvisxl` is exactly that: it
+                // has no base txt2img candle route, only the bespoke `CandleImageLane::InstantId`
+                // one. So an image row is legitimate when EITHER oracle claims it, and an image row
+                // claimed by neither is the real defect (a route the inventory invented).
+                let base_routed =
+                    sceneworks_core::jobs_store::candle_routed_image_models().contains(&model);
+                let conditioned_lane = route["conditionedLanes"]
+                    .as_array()
+                    .is_some_and(|lanes| !lanes.is_empty());
+                assert!(
+                    base_routed || conditioned_lane,
+                    "{model} is recorded as a candle IMAGE route, but it is neither in \
+                     candle_routed_image_models() nor served by any CANDLE_IMAGE_ROUTES lane"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_candle_load_shape_rule_provider_is_recorded_as_reaching_the_shared_selector() {
+        // The two registries this epic has to converge. A provider with a load-shape rule here but
+        // no shared-selector verdict in the inventory is precisely the patchwork epic 19048 exists
+        // to remove, so the assertion is directional: rules must be COVERED, not that coverage
+        // implies a rule.
+        let inventory = candle_admission_inventory();
+        // Two kinds of coordinate carry a provider id: a routed model's engine, and an OVERLAY
+        // provider (`z_image_control`), which has a load-shape rule and a named request scope but
+        // no catalog row of its own because it is reached as an overlay on its base model's route.
+        let overlay_providers = inventory["overlayProviders"]
+            .as_array()
+            .expect("the inventory publishes no overlayProviders array");
+        let coordinates = inventory_routes(&inventory)
+            .iter()
+            .map(|route| (&route["engineId"], &route["sharedSelector"]))
+            .chain(
+                overlay_providers
+                    .iter()
+                    .map(|provider| (&provider["providerId"], &provider["sharedSelector"])),
+            );
+        let mut recorded: std::collections::BTreeMap<&str, bool> =
+            std::collections::BTreeMap::new();
+        for (id, selector) in coordinates {
+            let Some(id) = id.as_str() else { continue };
+            let reached = selector["reached"].as_bool().unwrap_or(false);
+            let entry = recorded.entry(id).or_insert(false);
+            *entry = *entry || reached;
+        }
+        let uncovered: Vec<&str> = RULES
+            .iter()
+            .filter(|rule| rule.backend == MemoryRouteBackend::Candle)
+            .map(|rule| rule.provider)
+            .filter(|provider| !recorded.get(provider).copied().unwrap_or(false))
+            .collect();
+        assert!(
+            uncovered.is_empty(),
+            "these candle providers declare a load-shape rule but no inventory route records them \
+             reaching the shared memory-strategy selector: {uncovered:?}"
+        );
+    }
+
+    #[test]
+    fn generated_inventory_declares_its_provenance() {
+        let inventory = candle_admission_inventory();
+        let revision = inventory["generatedFrom"]["sceneWorksRevision"]
+            .as_str()
+            .expect("the inventory carries no source revision");
+        assert!(
+            revision.starts_with("source-tree:") && revision.len() == "source-tree:".len() + 64,
+            "the inventory's source revision is not a source-tree sha256: {revision}"
+        );
+        assert_eq!(inventory["story"].as_str(), Some("sc-19049"));
+        // The mechanism taxonomy must be non-empty and must name a definition site for every
+        // mechanism except the explicit `unreached` sentinel; an inventory that classified every
+        // route as "unreached" would technically be complete and completely useless.
+        let mechanisms = inventory["mechanisms"]
+            .as_array()
+            .expect("the inventory publishes no mechanisms");
+        assert!(mechanisms.len() > 1);
+        for mechanism in mechanisms {
+            let id = mechanism["id"].as_str().expect("a mechanism has no id");
+            if id == "unreached" {
+                continue;
+            }
+            assert!(
+                mechanism["definedIn"]
+                    .as_str()
+                    .is_some_and(|p| !p.is_empty()),
+                "mechanism {id} names no definition site"
+            );
+        }
+    }
 }

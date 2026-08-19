@@ -412,8 +412,13 @@ describe("per-tier memory floor: headroom conversion", () => {
       resolve(process.cwd(), "../../crates/sceneworks-worker/src/fit_gate.rs"),
       "utf8",
     );
-    const vramGate = readFileSync(
-      resolve(process.cwd(), "../../crates/sceneworks-worker/src/vram_gate.rs"),
+    // sc-19049 moved `HEADROOM_GB`'s definition out of `vram_gate.rs` (candle-lane-only) into the
+    // cross-platform `candle_scalar_gate.rs`, so the decision baseline can drive the real gate off a
+    // CUDA box. `vram_gate` re-exports it, which is why `krea_control_fit`'s path below is unchanged.
+    // The property under test is unchanged too: the candle consumer DERIVES its reserve from
+    // `fit_gate`'s one policy constant instead of restating the number.
+    const scalarGate = readFileSync(
+      resolve(process.cwd(), "../../crates/sceneworks-worker/src/candle_scalar_gate.rs"),
       "utf8",
     );
     const kreaControl = readFileSync(
@@ -423,7 +428,11 @@ describe("per-tier memory floor: headroom conversion", () => {
     const owner = fitGate.match(/DEDICATED_VRAM_ALLOCATOR_SLACK_GB: f64 = ([0-9.]+);/);
     expect(owner, "Rust dedicated-VRAM policy constant").not.toBeNull();
     expect(Number(owner[1])).toBe(CANDLE_HEADROOM_GB);
-    expect(vramGate).toContain("crate::fit_gate::dedicated_vram_reserve().gb");
+    expect(scalarGate).toMatch(
+      /HEADROOM_GB: f64 = (?:crate::fit_gate::)?dedicated_vram_reserve\(\)\.gb;/,
+    );
+    // ...and never by restating the literal, which is the failure this test exists to catch.
+    expect(scalarGate).not.toMatch(/HEADROOM_GB: f64 = [0-9]/);
     expect(kreaControl).toContain("crate::vram_gate::HEADROOM_GB");
   });
 

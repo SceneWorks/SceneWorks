@@ -3,6 +3,10 @@ import { readFile, readdir } from "node:fs/promises";
 import test from "node:test";
 
 import { SOURCE_PATHS } from "./generate-memory-matrix.mjs";
+import {
+  DECISIONS_PATH as CANDLE_ADMISSION_DECISIONS_PATH,
+  SOURCE_PATHS as CANDLE_ADMISSION_SOURCE_PATHS,
+} from "./generate-candle-admission-inventory.mjs";
 import { buildPlans as buildLtxPlans } from "./generate-ltx-sc18946-plan.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 
@@ -710,6 +714,10 @@ test("the Rust gate verifies the generated docs derived from Rust sources", asyn
   for (const sub of [
     "check:memory-matrix",
     "check:tier-integrity",
+    // sc-19049: the candle admission inventory + decision baseline. Same shape as its two
+    // neighbours — it reads Rust sources, so a Rust-only change can stale it, so it belongs on the
+    // Rust gate and not only in `npm run check`.
+    "check:candle-admission",
   ]) {
     assert.match(scripts["check:rust-derived-docs"], new RegExp(`\\b${sub}\\b`), sub);
   }
@@ -741,6 +749,18 @@ test("the pre-push derived-docs trigger covers every non-Rust source the matrix 
   const derivedInputs = [
     ...Object.values(SOURCE_PATHS),
     "scripts/lib/memory-contract-reconciliation.mjs",
+    // sc-19049: the candle admission inventory hangs off the same gate and hashes its own source
+    // set, which overlaps the matrix's but is not a subset of it (the packaged video curves and the
+    // candle request-scope module are hashed here and nowhere else). Derived, not restated, for the
+    // same reason the matrix's list is.
+    ...Object.values(CANDLE_ADMISSION_SOURCE_PATHS),
+    "scripts/generate-candle-admission-inventory.mjs",
+    "scripts/lib/manifest-memory-declarations.mjs",
+    // sc-19049: the Rust-emitted decisions the baseline is BUILT FROM. Deliberately outside
+    // CANDLE_ADMISSION_SOURCE_PATHS (fingerprinting an artifact derived from the inventory would
+    // close a regenerate/hash loop), so it has to be listed here or an edit to the decisions would
+    // push a stale baseline and hear about it from `parity`.
+    CANDLE_ADMISSION_DECISIONS_PATH,
   ];
   for (const relative of derivedInputs) {
     if (rustArm.test(relative)) continue;
