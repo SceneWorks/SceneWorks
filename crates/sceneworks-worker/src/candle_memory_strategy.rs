@@ -634,6 +634,10 @@ fn collect_estimate_bases(
             let full = predicted.full()?;
             Some(crate::estimate_synthesis::MeasuredRungBasis {
                 rung,
+                // sc-19056 (epic 19048 R4): the lane this record was MEASURED on, carried from the
+                // record itself so the generic ladder's foreign-lane refusal grades it — never
+                // assumed from the requesting lane, exactly like the MLX collector.
+                lane: crate::estimate_synthesis::lane_of(record.backend),
                 parameters: selection_parameters,
                 engaged_composition: record
                     .strategy
@@ -2625,6 +2629,9 @@ mod tests {
         let identity = contract.calibration.as_ref().expect("probe identity");
         crate::estimate_synthesis::MeasuredRungBasis {
             rung: StrategyRung::StagedResidency,
+            // sc-19056: a candle-lane measurement for the candle request; the foreign-lane
+            // refusal has its own coverage in `estimate_synthesis`.
+            lane: gen_core::MemoryBackend::Candle,
             parameters: Default::default(),
             engaged_composition: contract.engaged_composition_for_selection(&selection),
             load_shape: contract.load_shape,
