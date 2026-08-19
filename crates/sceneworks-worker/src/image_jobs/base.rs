@@ -7571,10 +7571,15 @@ async fn generate_stream(
                     } else {
                         String::new()
                     };
+                    // sc-20571: `available_gb` comes from `mlx_tier_fit` → `decide_residency_for_spec`,
+                    // whose ceiling now subtracts live host residency, so it is what is free RIGHT
+                    // NOW rather than what the machine has. Say so, and name the action that moves
+                    // the number on a loaded host.
                     return Err(WorkerError::InvalidPayload(format!(
                         "{model} needs ~{needed} GB of unified memory even at the smallest installed \
-                         tier it can run ({tier}{weights_note}) but this machine has ~{available} GB. \
-                         Lower the output resolution or run on a Mac with more memory.",
+                         tier it can run ({tier}{weights_note}) but only ~{available} GB is safely \
+                         available right now. Close other apps or models holding memory, lower the \
+                         output resolution, or run on a Mac with more memory.",
                         model = request.model,
                         needed = needed_gb.round() as i64,
                         available = available_gb.round() as i64,
