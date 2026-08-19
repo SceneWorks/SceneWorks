@@ -60,6 +60,15 @@ const ALLOWED: &[(&str, usize, &str)] = &[
         "deliberate (sc-17707, named in the story): sc6139_i2v_pad_frame0.png is a debug artifact \
          a human opens after a real-weight probe run; a guard would delete it first",
     ),
+    (
+        "src/vram_gate.rs",
+        1,
+        "deliberate (sc-19053): the shared Krea fixture lives in a `static`, and statics never run \
+         `Drop` — its tempfile guard can never delete it, so every test process leaks one dir by \
+         construction. Fixture init therefore sweeps prior runs' stale `sceneworks-krea-memfix-*` \
+         leftovers; the shared temp ROOT is the sweep's subject, and the fixture itself still \
+         hangs off a tempfile guard.",
+    ),
 ];
 
 /// No test fixture may build a path under the shared temp root by hand.

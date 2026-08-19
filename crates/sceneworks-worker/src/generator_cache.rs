@@ -426,6 +426,22 @@ impl ResidentGeneratorAttribution {
 ///
 /// One cache-thread round trip per request. The job queues behind whatever the cache thread is
 /// serving — the same ordering the request's own generator job is about to take.
+///
+/// ## Deliberately cfg-DISJOINT from the CUDA lane's reclaimable pool — do not lift this cfg
+///
+/// This credit (`cfg(target_os = "macos")`) and `vram_gate`'s reclaimable-pool seeding
+/// (`cfg(all(not(target_os = "macos"), feature = "backend-candle"))`; `note_loaded_peak` /
+/// `with_reclaimable`, sc-11023 + the #2439 cached-base seeding) are the SAME accounting idea —
+/// "the resident model's bytes are not really unavailable" — implemented once per lane, and they
+/// must stay disjoint. The CUDA lane already folds the resident model into its budget as
+/// `free + reclaimable_pool` at the stock gates: an admitted load notes its peak into the pool,
+/// and every subsequent gate on that card predicts the free VRAM the imminent single-slot evict
+/// will produce. Lifting this per-request attributable-resident credit onto that lane would count
+/// the SAME resident bytes a second time — once inside the seeded pool and once as
+/// `own_resident_bytes` — widening the budget past physical VRAM and over-admitting toward the
+/// exact OOM both mechanisms exist to prevent. The MLX lane has no reclaimable pool (its budget is
+/// a live `vm_stat` reading that cannot tell the resident model from foreign use), which is why
+/// the credit is the correct — and only — de-duplication there.
 #[cfg(target_os = "macos")]
 pub(crate) async fn resident_generator_attribution() -> Option<ResidentGeneratorAttribution> {
     resident_generator_attribution_on(generator_worker()).await
