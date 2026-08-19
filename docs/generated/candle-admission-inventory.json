@@ -3,7 +3,7 @@
   "generatedBy": "scripts/generate-candle-admission-inventory.mjs",
   "story": "sc-19049",
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:876ec4f097a5352e0b48301c6d3a979232634c78d0185dac549fed403390c5cd",
+    "sceneWorksRevision": "source-tree:0906855e771272f9d94846f91d08c860167eeb2687793afc793749e04d02bb08",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -67,7 +67,7 @@
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "a34d9d47da8547186eb3c77aa578c76a73e481246d4a77bce276c2b03796aa6c"
+        "sha256": "911ca896abafb81c71a92a4baf7ec0792c9da9a7de63d1468825f53d34201d22"
       },
       "imageBaseAdmission": {
         "path": "crates/sceneworks-worker/src/image_jobs/base_admission.rs",
