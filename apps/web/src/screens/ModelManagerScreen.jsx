@@ -98,21 +98,30 @@ function formatTierSize(bytes) {
   return `${mb.toFixed(0)} MB`;
 }
 
-// MLX status text, keyed off the macOS catalog's mlxConversionState. Turnkey
-// ("ready") models fetch their MLX weights automatically on first generation;
-// convert-required models need the native checkpoint downloaded, then converted.
+// Conversion status text, keyed off the catalog's `mlxConversionState`. Turnkey ("ready") models
+// fetch their weights automatically on first generation; convert-required models need the native
+// checkpoint downloaded, then converted.
+//
+// DEVICE-NEUTRAL wording (sc-20529). These fields used to be emitted only on macOS, so the copy
+// named MLX outright. `apply_mac_and_mlx_fields` now also emits them on Windows/Linux for a
+// convert-at-install model whose converter has a real candle twin (`CANDLE_NATIVE_CONVERTERS` —
+// `flux2_klein_9b_true_v2` today), where "convert it to MLX" / "MLX weights installed" is simply
+// wrong: the candle converter writes a diffusers dir for CUDA. The conversion is the same user
+// action on both platforms, so the copy names the action rather than the backend and needs no
+// platform prop threaded through. The backend still shows up where it is accurate — the per-tier
+// panel and the MLX memory floor stay behind `macGatingActive`.
 function mlxStatusText(model) {
   switch (model.mlxConversionState) {
     case "ready":
       return model.mlxInstallState === "installed"
-        ? "MLX weights installed."
-        : "MLX weights download automatically on first generation.";
+        ? "Model weights installed."
+        : "Model weights download automatically on first generation.";
     case "needs_source":
-      return "Download the model first, then convert it to MLX.";
+      return "Download the model first, then convert it for this device.";
     case "needs_conversion":
-      return "Native checkpoint downloaded — ready to convert to MLX.";
+      return "Native checkpoint downloaded — ready to convert.";
     case "converted":
-      return "Converted to MLX and ready.";
+      return "Converted and ready.";
     default:
       return "";
   }
@@ -1427,7 +1436,9 @@ export function ModelManagerScreen() {
         {!cleanupOnly && mlxState ? (
           <div className="mlx-status">
             <div className="mlx-status-badges">
-              <span className="status-badge">MLX</span>
+              {/* sc-20529: device-neutral, like `mlxStatusText`. This block renders off-Mac too
+                  now (the candle convert lane), where an "MLX" chip mislabels a CUDA artifact. */}
+              <span className="status-badge">Conversion</span>
               {/* The model-level `mlx.minMemoryGb` is a single blanket floor = the HEAVIEST tier's
                   worst case (e.g. Wan A14B bf16, both MoE experts dense = 133 GB). Showing it
                   tier-agnostically over-warns quant-matrix models whose default/installed tier is q4
@@ -1449,7 +1460,7 @@ export function ModelManagerScreen() {
             {model.updateAvailable ? (
               <>
                 <p className="inline-warning">
-                  A newer checkpoint is available. Update re-downloads it and re-converts to MLX.
+                  A newer checkpoint is available. Update re-downloads it and re-converts it.
                 </p>
                 <button
                   disabled={
@@ -1477,10 +1488,10 @@ export function ModelManagerScreen() {
                 {convertJob
                   ? convertJob.status
                   : mlxState === "converted"
-                    ? "MLX ready"
+                    ? "Converted"
                     : failedConvert
-                      ? "Retry MLX Conversion"
-                      : "Convert to MLX"}
+                      ? "Retry Conversion"
+                      : "Convert"}
               </button>
             ) : null}
           </div>

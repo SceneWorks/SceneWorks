@@ -1579,6 +1579,130 @@ fn model_path_override(request: &ImageRequest) -> Option<String> {
     Some(raw_path.to_owned())
 }
 
+/// Typed, actionable preflight for a **convert-at-install** model whose conversion has not produced
+/// a local artifact yet (sc-20529).
+///
+/// Such a model is declared with `mlx.requiresConversion` + `mlx.converter`, and the API injects the
+/// converted dir as `modelPath` (`inject_converted_model_path`) once, and only once, the conversion
+/// has actually run. So a request with NO `modelPath` means there is no converted artifact — and the
+/// source repo it would otherwise fall back to is a bare single-file transformer
+/// with no `text_encoder/` / `vae/` / `tokenizer/`. Loading it produced a raw engine-level
+/// `"<label>: snapshot missing the text_encoder/ component directory (at …)"` from candle-gen's
+/// shared `loader.rs`, which names an internal path and tells the user nothing about what to do.
+///
+/// This turns that class into one typed [`WorkerError::InvalidPayload`] naming BOTH remedies: run
+/// the conversion, and install the base model whose text encoder / VAE / tokenizer the conversion
+/// borrows (`mlx.convertBaseRepo` + `mlx.convertBaseSubdir` — for `flux2_klein_9b_true_v2`,
+/// `SceneWorks/flux2-klein-9b-mlx` `bf16`). Keyed on the MANIFEST CONTRACT, never on a model id, so
+/// every present and future convert-at-install model inherits it.
+///
+/// **Platform-scoped on purpose.** The gate is [`convert_artifact_required_here`], not a bare
+/// `requiresConversion` read: Anima (`anima_base` / `anima_aesthetic` / `anima_turbo`) declares
+/// `requiresConversion` and ships windows/linux downloads, but its `anima_quant` converter is
+/// macOS-only — off-Mac those models legitimately resolve the raw `circlestone-labs/Anima`
+/// `split_files/` tree below with no `modelPath` at all. Refusing them here would break three
+/// models that render fine today.
+///
+/// **Self-contained on purpose.** The `modelPath` test lives INSIDE this function rather than in the
+/// caller, so the same verdict can be reached from two seams that see the request at different
+/// points: [`resolve_weights_dir`] (which reaches the loader) and [`candle_weights_gap`] (the
+/// stub fall-through, which never resolves weights at all — see its docs for why that second seam
+/// is required).
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn unconverted_model_preflight(request: &ImageRequest) -> WorkerResult<()> {
+    // An injected `modelPath` IS the converted artifact — nothing outstanding.
+    if model_path_override(request).is_some() {
+        return Ok(());
+    }
+    let Some(mlx) = request.model_manifest_entry.get("mlx") else {
+        return Ok(());
+    };
+    if mlx.get("requiresConversion").and_then(Value::as_bool) != Some(true) {
+        return Ok(());
+    }
+    let converter = mlx
+        .get("converter")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if !sceneworks_core::jobs_store::convert_artifact_required_here(converter) {
+        return Ok(());
+    }
+    let name = request
+        .model_manifest_entry
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(request.model.as_str());
+    // The base whose text encoder / VAE / tokenizer the conversion borrows. Named explicitly when
+    // the manifest declares it so the user knows the exact second install to make; the sentence is
+    // dropped rather than faked when it does not (a dir-sourced converter borrows nothing).
+    let base = mlx
+        .get("convertBaseRepo")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|repo| {
+            let tier = mlx
+                .get("convertBaseSubdir")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            match tier {
+                Some(tier) => format!(
+                    " It also requires the base model {repo} ({tier}) to be installed — the \
+                     conversion borrows that base's text encoder, VAE, and tokenizer, which the \
+                     single-file checkpoint does not contain."
+                ),
+                None => format!(
+                    " It also requires the base model {repo} to be installed — the conversion \
+                     borrows that base's text encoder, VAE, and tokenizer, which the single-file \
+                     checkpoint does not contain."
+                ),
+            }
+        })
+        .unwrap_or_default();
+    Err(WorkerError::InvalidPayload(format!(
+        "{name} has not been converted yet — convert it from the Model Manager before \
+         generating. It downloads as a transformer-only checkpoint, so there is nothing to load \
+         until the conversion assembles a complete local model.{base}"
+    )))
+}
+
+/// Fail-loud gate for the CANDLE stub fallback (sc-20529) — the off-Mac twin of [`mlx_weights_gap`],
+/// consulted by `run_image_generate_job` immediately before it would call `generate_stub_stream`.
+///
+/// [`unconverted_model_preflight`] fires from [`resolve_weights_dir`], which only runs once a route
+/// has CLAIMED the job. That is enough for `text_to_image` / `image_to_image` / `character_image` on
+/// an unconverted convert-at-install model: those modes reach the ladder's terminal
+/// `is_candle_engine(&request.model) && request.mode != "edit_image"` arm → `CandleTxt2Img` →
+/// `generate_candle_stream`, which resolves weights and propagates the typed error.
+///
+/// `edit_image` does NOT. `flux2_edit_candle_available` (and every sibling `…_available` weight
+/// gate) collapses a resolver `Err` to `false`, and every terminal arm of the ladder excludes
+/// `mode == "edit_image"` — so an unconverted `edit_image` job is claimed by NO route,
+/// `prepare_candle_image_route` returns `None`, and the job fell through to `generate_stub_stream`
+/// and COMPLETED with a procedural gradient. A silent stub in place of a typed refusal is exactly
+/// the no-silent-fallback posture sc-5099 forbids, and it is worse than the raw loader error it
+/// replaced: the user gets a plausible-looking asset instead of an error.
+///
+/// Returning the preflight's own message keeps ONE wording for the class — the dispatch seam and
+/// the loader seam cannot drift into two different explanations of the same missing conversion.
+/// `None` for every other job, so a model that legitimately stubs (test ids, unported families)
+/// stubs exactly as before.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) fn candle_weights_gap(request: &ImageRequest) -> Option<String> {
+    match unconverted_model_preflight(request) {
+        Ok(()) => None,
+        Err(WorkerError::InvalidPayload(message)) => Some(message),
+        // The preflight raises exactly one class; anything else would be a new variant whose
+        // wording has not been reviewed for this seam, so fall through to the existing behaviour
+        // rather than surfacing it as a stub-gap message.
+        Err(_) => None,
+    }
+}
+
 /// Resolve the weights snapshot directory: an explicit `modelPath` dir wins, else the
 /// HuggingFace cache snapshot for the model repo. `None` when the model is not a known
 /// engine family or its snapshot is absent. Available on the candle lane too (sc-5501): the
@@ -1600,6 +1724,11 @@ pub(crate) fn resolve_weights_dir(
         }
         return Ok(Some(dir));
     }
+    // No `modelPath` on a convert-at-install model means the conversion has not produced its local
+    // artifact. Refuse HERE with an actionable error rather than falling through to the raw
+    // single-file source snapshot, which loads no further than candle-gen's "snapshot missing the
+    // text_encoder/ component directory" (sc-20529).
+    unconverted_model_preflight(request)?;
     let Some(model) = mlx_model(&request.model) else {
         return Ok(None);
     };

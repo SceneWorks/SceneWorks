@@ -6112,6 +6112,35 @@ fn project_imported_operation_surface(
     }
 }
 
+/// True when this entry is a convert-at-install model that loads from a **converted artifact on the
+/// platform this build targets** — so its conversion state belongs in the catalog here (sc-20529).
+///
+/// The converter half is [`sceneworks_core::jobs_store::convert_artifact_required_here`], the SAME
+/// predicate the worker's unconverted-model preflight gates on. Re-implementing the
+/// converter-membership test here (the original shape of this function) put two copies of one
+/// platform rule on either side of the API/worker seam, where they can drift into an API that
+/// offers a convert affordance the worker refuses to honour, or the reverse.
+///
+/// Only the `requiresConversion` read stays local: it is a property of THIS catalog entry, not of
+/// the converter registry, and it is load-bearing — without it a turnkey model that merely names a
+/// converter would start reporting MLX status off-Mac.
+///
+/// Platform-aware, like the core helper: off macOS only `CANDLE_NATIVE_CONVERTERS` qualify, on macOS
+/// every native converter does (where the call site's `cfg!(target_os = "macos")` arm has already
+/// won anyway — macOS surfaces MLX status for every entry, convert-at-install or not).
+fn entry_requires_converted_artifact_here(object: &JsonObject) -> bool {
+    let Some(mlx) = object.get("mlx").and_then(Value::as_object) else {
+        return false;
+    };
+    if mlx.get("requiresConversion").and_then(Value::as_bool) != Some(true) {
+        return false;
+    }
+    mlx.get("converter")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .is_some_and(sceneworks_core::jobs_store::convert_artifact_required_here)
+}
+
 fn apply_mac_and_mlx_fields(object: &mut JsonObject, data_dir: &FsPath) {
     // Per-model quality FLOOR (sc-10731, epic 10721): surface the manifest `mlx.minQualityTier` as a
     // top-level `minQualityTier` so the web `defaultTierSelection` can clamp the DEFAULT generation tier
@@ -6154,7 +6183,22 @@ fn apply_mac_and_mlx_fields(object: &mut JsonObject, data_dir: &FsPath) {
     // A LOCAL DISK probe for MLX convert-output tier dirs, so it is a platform fact and must NOT go
     // through `generation::enqueue_backend`: keying it off `candle_required` would hide `mlxTiers`
     // and its per-tier state from the Studio on macOS for directories that are genuinely present.
-    let mlx_status = if cfg!(target_os = "macos") {
+    //
+    // Off macOS the probe is NARROWED, not skipped (sc-20529). A convert-at-install model whose
+    // converter has a real off-Mac (candle) implementation — `CANDLE_NATIVE_CONVERTERS`, today just
+    // `flux2_klein_diffusers` / `flux2_klein_9b_true_v2` — needs the same convert affordance and the
+    // same converted/needs_conversion/needs_source states on Windows and Linux that macOS gets: the
+    // candle converter (sc-7459) is real, `POST /models/{id}/convert` is not platform-gated, and
+    // `inject_converted_model_path` already reads the converted dir on every platform. Without these
+    // fields the Studio had no way to show that the conversion was still outstanding, so the model
+    // read as installed off its raw single-file download and failed at load.
+    //
+    // It stays NARROW deliberately. Probing every `requiresConversion` model off-Mac would flip
+    // Anima's three variants to `missing` there: `anima_quant` is macOS-only, and off-Mac Anima
+    // loads the raw `circlestone-labs/Anima` `split_files/` tree with no converted dir at all. The
+    // const is the contract that keeps those two cases apart.
+    let mlx_status = if cfg!(target_os = "macos") || entry_requires_converted_artifact_here(object)
+    {
         mlx_catalog_status(object, data_dir)
     } else {
         None
@@ -8811,6 +8855,145 @@ mod variant_install_tests {
             !status.update_available,
             "no convertSourceFile → never reports an update"
         );
+    }
+
+    /// sc-20529: which convert-at-install entries get MLX status surfaced. The converter half is
+    /// delegated to `sceneworks_core::jobs_store::convert_artifact_required_here` — the same
+    /// predicate the worker's preflight gates on — so this pins the DELEGATION (identical verdicts
+    /// on both sides of the API/worker seam) as well as the entry-shape half that stays local.
+    #[test]
+    fn converted_artifact_predicate_tracks_the_core_platform_rule() {
+        use sceneworks_core::jobs_store::convert_artifact_required_here;
+        let entry = |value: Value| value.as_object().unwrap().clone();
+
+        // flux2_klein_9b_true_v2: the candle converter exists (sc-7459), so the converted artifact
+        // is required on EVERY platform — this is the entry the whole story is about.
+        assert!(entry_requires_converted_artifact_here(&entry(json!({
+            "id": "flux2_klein_9b_true_v2",
+            "mlx": { "requiresConversion": true, "converter": "flux2_klein_diffusers" }
+        }))));
+
+        // Anima / LTX / the prequant converters are macOS-only, so off-Mac they require NO converted
+        // artifact: surfacing them there would report `missing` for models that legitimately load
+        // their raw source tree. On macOS every native converter does produce the artifact. Asserted
+        // against the core helper rather than a second hard-coded membership test — that duplication
+        // is exactly what this delegation removed.
+        for converter in [
+            "anima_quant",
+            "ltx_video",
+            "flux2_dev_quant",
+            "sd3_5_large_quant",
+        ] {
+            assert_eq!(
+                entry_requires_converted_artifact_here(&entry(json!({
+                    "id": "x",
+                    "mlx": { "requiresConversion": true, "converter": converter }
+                }))),
+                convert_artifact_required_here(converter),
+                "{converter}: the catalog predicate must agree with the core platform rule"
+            );
+        }
+        // …and off macOS that verdict is concretely `false` (the Anima trap, stated outright).
+        #[cfg(not(target_os = "macos"))]
+        assert!(!entry_requires_converted_artifact_here(&entry(json!({
+            "id": "anima_base",
+            "mlx": { "requiresConversion": true, "converter": "anima_quant" }
+        }))));
+
+        // The entry-shape half, which stays local: a turnkey that merely names a converter is not
+        // convert-at-install, even on macOS where the converter itself qualifies.
+        assert!(!entry_requires_converted_artifact_here(&entry(json!({
+            "id": "x",
+            "mlx": { "converter": "flux2_klein_diffusers" }
+        }))));
+
+        // No mlx block at all.
+        assert!(!entry_requires_converted_artifact_here(&entry(
+            json!({ "id": "x" })
+        )));
+    }
+
+    /// The off-Mac surfacing end-to-end (sc-20529): on EVERY platform, an unconverted
+    /// `flux2_klein_9b_true_v2` reports `needs_source`/`needs_conversion` and a converted one
+    /// reports `converted` + its path, so the Studio can offer the convert affordance and never
+    /// present the model as ready off its raw single-file download.
+    #[test]
+    fn convert_at_install_klein_reports_mlx_state_on_every_platform() {
+        let _env = isolate_hf_cache();
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let mut model = json!({
+            "id": "flux2_klein_9b_true_v2",
+            "name": "FLUX.2 [klein] 9B True V2",
+            "mlx": {
+                "requiresConversion": true,
+                "converter": "flux2_klein_diffusers",
+                "convertSourceRepo": "wikeeyang/Flux2-Klein-9B-True-V2",
+                "convertSourceFile": "Flux2-Klein-9B-True-v2-bf16.safetensors"
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        apply_mac_and_mlx_fields(&mut model, data_dir);
+        assert_eq!(
+            model.get("mlxConversionState").and_then(Value::as_str),
+            Some("needs_source"),
+            "an unconverted klein must report its conversion state on every platform"
+        );
+        assert_eq!(
+            model.get("mlxInstallState").and_then(Value::as_str),
+            Some("missing")
+        );
+
+        seed_converted(data_dir, "flux2_klein_9b_true_v2");
+        let mut model = model.clone();
+        model.remove("mlxConversionState");
+        apply_mac_and_mlx_fields(&mut model, data_dir);
+        assert_eq!(
+            model.get("mlxConversionState").and_then(Value::as_str),
+            Some("converted")
+        );
+        assert_eq!(
+            model.get("mlxInstallState").and_then(Value::as_str),
+            Some("installed")
+        );
+        assert!(model
+            .get("mlxConvertedPath")
+            .and_then(Value::as_str)
+            .is_some_and(|path| path.ends_with("flux2_klein_9b_true_v2")));
+    }
+
+    /// The Anima non-regression (sc-20529). Off macOS, Anima must keep reporting NO mlx status:
+    /// `anima_quant` is macOS-only, so off-Mac Anima loads the raw `circlestone-labs/Anima`
+    /// `split_files/` tree with no converted dir. Emitting `mlxInstallState: "missing"` there
+    /// would present three installed, working models as not installed.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn off_mac_anima_reports_no_mlx_conversion_state() {
+        let _env = isolate_hf_cache();
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let mut model = json!({
+            "id": "anima_base",
+            "mlx": {
+                "requiresConversion": true,
+                "converter": "anima_quant",
+                "convertSourceRepo": "circlestone-labs/Anima"
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        apply_mac_and_mlx_fields(&mut model, data_dir);
+        assert!(
+            model.get("mlxInstallState").is_none(),
+            "off-Mac Anima has no converted artifact by design — reporting an MLX install state \
+             would flip three working models to missing"
+        );
+        assert!(model.get("mlxConversionState").is_none());
     }
 
     #[test]

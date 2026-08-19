@@ -51,7 +51,8 @@ pub use routing::catalog::{
     MAC_NOT_AVAILABLE_LABEL, MLX_ROUTED_TRAINING_KERNELS,
 };
 pub use routing::gaps::{
-    candle_supported, mac_rust_supported, UnsupportedReason, NATIVE_CONVERTERS,
+    candle_supported, convert_artifact_required_here, mac_rust_supported, UnsupportedReason,
+    CANDLE_NATIVE_CONVERTERS, NATIVE_CONVERTERS,
 };
 pub use routing::matrix::{backend_capability_matrix, BackendCapabilityMatrix};
 pub use routing::{

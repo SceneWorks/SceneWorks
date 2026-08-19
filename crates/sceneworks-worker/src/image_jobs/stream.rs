@@ -612,7 +612,9 @@ where
 /// can't be resolved (partially deleted HF cache, stale refs, missing
 /// modelPath). None when the model isn't engine-backed (the stub is its
 /// intended path) or the weights resolve. MLX-only (uses `mlx_model` + the macOS
-/// `resolve_weights_dir`); the candle lane has no equivalent stub-gap check.
+/// `resolve_weights_dir`); the candle lane's narrower twin is `candle_weights_gap`
+/// (base.rs, sc-20529), which covers the unconverted convert-at-install class only —
+/// candle has no general tier-completeness probe to mirror the arm above.
 #[cfg(target_os = "macos")]
 pub(crate) fn mlx_weights_gap(request: &ImageRequest, settings: &Settings) -> Option<String> {
     let model = mlx_model(&request.model)?;

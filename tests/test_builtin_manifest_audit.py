@@ -1674,7 +1674,11 @@ def test_flux2_true_v2_manifest_install_time_conversion():
         for model in _load_builtin_models_manifest()["models"]
         if model["id"] == "flux2_klein_9b_true_v2"
     )
-    assert model["macOnly"] is True
+    # sc-20529: `macOnly` is REMOVED, not flipped. For an image entry the flag is a no-op label
+    # (only video entries and the vision captioner read it), and the FLUX.2-klein converter has a
+    # real candle twin (sc-7459), so claiming macOS-only contradicted the shipped off-Mac convert
+    # lane. Availability is driven by the routing tables, not this flag.
+    assert "macOnly" not in model
     assert model["adapter"] == "mlx_flux2"
     # Only the bf16 single-file is pulled (not the whole 73 GB repo).
     assert model["downloads"][0]["files"] == ["Flux2-Klein-9B-True-v2-bf16.safetensors"]
