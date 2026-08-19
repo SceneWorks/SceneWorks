@@ -100,6 +100,13 @@ pub(crate) fn with_reclaimable(budget: VramBudget, reclaimable_gb: f64) -> VramB
 /// is pinned to one card, but keying is defensive + explicit). It only ever grows (monotonic MAX), and
 /// [`with_reclaimable`] clamps the credit to `total_gb`, so a later gate can only under-credit, never
 /// over-admit — the safety that holds whether an evict frees to the driver or pools in-process.
+///
+/// Deliberately cfg-DISJOINT from the MLX lane's sc-20571 per-request attributable-resident credit
+/// (`generator_cache::resident_generator_attribution`, `cfg(target_os = "macos")`): this pool is
+/// the CUDA lane's whole accounting for "the resident model's bytes are not really unavailable",
+/// seeded at every admitted load (including the #2439 cached-base lane). Adding that credit here on
+/// top of the seeded pool would count the same resident bytes twice and over-admit toward OOM —
+/// see the block comment on `resident_generator_attribution` before lifting either cfg.
 fn reclaimable_pool_store() -> &'static std::sync::Mutex<std::collections::HashMap<String, f64>> {
     static STORE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, f64>>> =
         std::sync::OnceLock::new();
@@ -425,6 +432,31 @@ impl KreaRuntimeEvidenceContext {
 /// the encoder and tokenizer contracts. An empty path therefore no longer represents a valid source.
 /// Keep the tests on the real lookup seam with a structurally truthful fixture; no model tensor is
 /// materialized and no memory evidence is measured or rewritten here.
+///
+/// ## Windows disk discipline (StorageFull incident, 2026-08-19)
+///
+/// "Sparse" above is only true by default on APFS/ext4. On NTFS a `set_len()`-extended file is
+/// FULLY ALLOCATED unless the file is explicitly marked sparse or compressed — and
+/// `gen_core_testkit::write_encoder_contract_fixture` ends with a multi-gigabyte `set_len` (the
+/// encoder's dense logical size, which must stay: the weight-bytes gates read it). Two mitigations
+/// below, both load-bearing:
+///
+/// 1. Every multi-megabyte `.safetensors` the testkit writes is converted to a SPARSE file right
+///    after its tier is written ([`sparsify_fixture_weights_tail`]): `fsutil sparse setflag` +
+///    `setrange` over the never-written tail past the safetensors header deallocates it while the
+///    logical size — and every byte the header actually stores — stays exactly as written. This is
+///    the no-`unsafe` route to `FSCTL_SET_SPARSE` (the workspace forbids `unsafe`), and it must be
+///    a POST-pass: pre-setting the sparse flag would not survive the testkit's `File::create` /
+///    `CREATE_ALWAYS` (resets attributes), and NTFS COMPRESSION was measured NOT to help — a
+///    compressed file's `set_len` tail still allocates in full (verified 2026-08-19: 22 inherited-
+///    compressed fixture files, 23.5 GB logical, 23.5 GB on disk). Each tier's file is briefly
+///    fully allocated between the testkit's `set_len` and the sparse pass; that transient is
+///    bounded by the largest single encoder file and never accumulates.
+/// 2. The fixture lives in a `static` for process-wide reuse, and statics never run `Drop` — the
+///    `TempDir` guard can never delete it, so every test process leaves one directory behind by
+///    construction. Initialization therefore sweeps prior runs' leftovers, recognized by the
+///    distinctive prefix and only when old enough that no concurrently running test process could
+///    still be using them. Best-effort: a locked or vanished entry is someone else's live run.
 #[cfg(test)]
 fn krea_test_artifact_root(tier: &str) -> std::path::PathBuf {
     struct Fixture {
@@ -432,9 +464,34 @@ fn krea_test_artifact_root(tier: &str) -> std::path::PathBuf {
         root: std::path::PathBuf,
     }
 
+    const FIXTURE_PREFIX: &str = "sceneworks-krea-memfix-";
+
     static FIXTURE: std::sync::OnceLock<Fixture> = std::sync::OnceLock::new();
     let fixture = FIXTURE.get_or_init(|| {
-        let temp = tempfile::tempdir().expect("Krea memory-contract fixture root");
+        let temp_root = std::env::temp_dir();
+        if let Ok(entries) = std::fs::read_dir(&temp_root) {
+            let stale_before =
+                std::time::SystemTime::now() - std::time::Duration::from_secs(24 * 60 * 60);
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let Some(name) = name.to_str() else { continue };
+                if !name.starts_with(FIXTURE_PREFIX) {
+                    continue;
+                }
+                let is_stale = entry
+                    .metadata()
+                    .and_then(|metadata| metadata.modified())
+                    .map(|modified| modified < stale_before)
+                    .unwrap_or(false);
+                if is_stale {
+                    let _ = std::fs::remove_dir_all(entry.path());
+                }
+            }
+        }
+        let temp = tempfile::Builder::new()
+            .prefix(FIXTURE_PREFIX)
+            .tempdir()
+            .expect("Krea memory-contract fixture root");
         let root = temp.path().to_path_buf();
         let contract = crate::inference_runtime::media_encoder_contract("krea_2_turbo")
             .expect("Krea encoder contract");
@@ -445,6 +502,9 @@ fn krea_test_artifact_root(tier: &str) -> std::path::PathBuf {
                 contract,
             )
             .expect("write sparse Krea encoder fixture");
+            // Per tier, not once at the end: the transient full allocation (doc comment above) is
+            // then bounded by ONE tier's encoder file rather than all three.
+            sparsify_fixture_weights_tail(&tier_root.join("text_encoder"));
             if let Some(bits) = bits {
                 let transformer = tier_root.join("transformer");
                 std::fs::create_dir_all(&transformer).expect("Krea transformer fixture dir");
@@ -466,6 +526,76 @@ fn krea_test_artifact_root(tier: &str) -> std::path::PathBuf {
     );
     fixture.root.join(tier)
 }
+
+/// Deallocate the never-written tail of every sizeable `.safetensors` fixture under `dir` while
+/// preserving its logical length and its written safetensors header — see the Windows disk
+/// discipline note on [`krea_test_artifact_root`]. Best-effort: on failure (non-NTFS temp volume,
+/// missing `fsutil`) the fixture still works, it just costs its full logical size on disk, so say
+/// so rather than failing the test process.
+#[cfg(all(test, windows))]
+fn sparsify_fixture_weights_tail(dir: &std::path::Path) {
+    use std::io::Read as _;
+
+    // The NTFS sparse deallocation granularity; keep the header's final partial unit allocated.
+    const SPARSE_UNIT: u64 = 64 * 1024;
+
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(std::ffi::OsStr::to_str) != Some("safetensors") {
+            continue;
+        }
+        let Ok(mut file) = std::fs::File::open(&path) else {
+            continue;
+        };
+        let mut header_len = [0_u8; 8];
+        if file.read_exact(&mut header_len).is_err() {
+            continue;
+        }
+        let Ok(metadata) = file.metadata() else {
+            continue;
+        };
+        drop(file);
+        // Everything past `8 + header_json_len` is the testkit's `set_len` tail: logically zeros,
+        // never written, and safe to deallocate.
+        let written_end = 8_u64.saturating_add(u64::from_le_bytes(header_len));
+        let keep = written_end.div_ceil(SPARSE_UNIT) * SPARSE_UNIT;
+        let total = metadata.len();
+        if total <= keep {
+            continue;
+        }
+        let fsutil = |args: &[&str]| {
+            std::process::Command::new("fsutil")
+                .args(args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+        };
+        let path_text = path.to_string_lossy().into_owned();
+        if !(fsutil(&["sparse", "setflag", &path_text])
+            && fsutil(&[
+                "sparse",
+                "setrange",
+                &path_text,
+                &keep.to_string(),
+                &(total - keep).to_string(),
+            ]))
+        {
+            eprintln!(
+                "krea_test_artifact_root: could not sparsify {}; the fixture keeps its full \
+                 {total}-byte allocation on this filesystem",
+                path.display()
+            );
+        }
+    }
+}
+
+/// Non-Windows: `set_len` past EOF is already sparse on APFS/ext4 — nothing to do.
+#[cfg(all(test, not(windows)))]
+fn sparsify_fixture_weights_tail(_dir: &std::path::Path) {}
 
 #[cfg(test)]
 fn krea_test_load_spec(tier: &str) -> gen_core::LoadSpec {
