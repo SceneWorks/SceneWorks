@@ -1,11 +1,11 @@
 {
   "_comment": "Per-provider inference compile-closure digests (sc-17774). Calibration currency compares a record's captured closureDigest against the entry here for the SAME provider, so a change to one model's code path can no longer demote another's. Regenerate on every inference pin bump: node scripts/inference-closure-digest.mjs --repo <inference> --write. Derivation, and what this unit deliberately does NOT see, are documented in scripts/inference-closure-digest.mjs.",
   "digestVersion": "inference-closure-digest v3",
-  "inferenceRevision": "2d762d3312ac96c4feda8f89e35ee967e7700751",
+  "inferenceRevision": "6f47e6707589158b89d0f238c5ef56be6f1bdd7a",
   "providers": {
     "candle:flux1_dev": {
       "crate": "crates/media/candle-gen/candle-gen-flux",
-      "digest": "66a6948acd60910c1936067ebc09182167157a9d8696fb979faffb5bc8f61b78",
+      "digest": "37bef71810d27723e3fa87552cbc36858c6474350ef9dae051e03e0446345ee8",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -15,12 +15,12 @@
         "crates/media/candle-gen/candle-gen-sdxl",
         "crates/media/candle-gen/vendor/candle-kernels"
       ],
-      "sourceFileCount": 217,
+      "sourceFileCount": 218,
       "lockedPackageCount": 241
     },
     "candle:flux1_schnell": {
       "crate": "crates/media/candle-gen/candle-gen-flux",
-      "digest": "afec3059038ccda650cb3fb7901142dc4b167a82f142e06c803b94d4e43a1355",
+      "digest": "8c01e40205195ea00a539c62166c357af44d804621cb67ed695c6ab9c4de36e9",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -30,7 +30,7 @@
         "crates/media/candle-gen/candle-gen-sdxl",
         "crates/media/candle-gen/vendor/candle-kernels"
       ],
-      "sourceFileCount": 217,
+      "sourceFileCount": 218,
       "lockedPackageCount": 241
     },
     "candle:flux2_dev": {
@@ -184,7 +184,7 @@
     },
     "mlx:sdxl": {
       "crate": "crates/media/mlx-gen/mlx-gen-sdxl",
-      "digest": "d6657bd5c876c713e553a5d0189a92d1534d2a1ff65ae29eac9f8a9a33dbffdb",
+      "digest": "c086d79022201980bd97e8aea5ac00153ec85b14b49cf409568dedb9e4aed323",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
@@ -192,7 +192,7 @@
         "crates/media/mlx-gen/mlx-gen-pid",
         "crates/media/mlx-gen/mlx-gen-sdxl"
       ],
-      "sourceFileCount": 154,
+      "sourceFileCount": 155,
       "lockedPackageCount": 172
     },
     "mlx:wan2_2_ti2v_5b": {
