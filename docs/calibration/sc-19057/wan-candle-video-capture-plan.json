@@ -1,0 +1,226 @@
+{
+  "_comment": "sc-19057 standalone capture plan for the FIRST candle video lane, candle:wan2_2_ti2v_5b. Deliberately NOT in config/memory-calibration-plan.json, for the reason sc-18808 established empirically for mlx:ltx_2_3: generate-memory-matrix.mjs resolves its coordinate universe from manifest.models.filter(m => m.type === \"image\"), so a video plan row matches no coordinate and assertCalibrationPlanTargetsResolvedCoordinates fails the check gate closed. Drive it with: node scripts/memory-calibration-harness.mjs run --config docs/calibration/sc-19057/wan-candle-video-capture-plan.json --backend candle --fresh-per-case --provider-command '[\"<target>/release/memory-candle-adapter.exe\"]' --sceneworks-repo <repo> --inference-repo <inference-at-pin> --raw-log-dir <OUTSIDE the repo> --output <OUTSIDE the repo>.json. Full procedure, environment and verification: docs/calibration-runbook.md section 12.",
+  "_targetFamily": "candle-gen-wan is the ONLY candle video crate that registers a MemoryStrategyContract at inference 6f47e670 (memory_strategy::MEMORY_REGISTRATION, SC-19223). candle-gen-ltx registers none at all, so an LTX capture would have no admission seam to interrogate and no calibration identity to bind. See the sc-19057 header comment in crates/sceneworks-memory-adapter/src/bin/candle.rs.",
+  "_geometry": "Six rows spanning TWO pixel counts x THREE frame counts, so the three-coefficient cross form (fixed + per-mpx + per-mpx-frame) is identifiable: with one pixel count the design matrix is rank 2 and fit-ltx-temporal-form.mjs reports a singular slice. Rows are ordered cheapest-first; the fitter needs at least three distinct non-collinear geometry points plus at least one held-out row, so the last row may be dropped if the lane budget is exceeded and the remaining five still fit.",
+  "_cadence": "fps is fixed at 24 on every row. limits.fps declares [16, 24], but WanMemoryRequestScope::validate_request rejects any cadence other than DEFAULT_FPS, so the 16 fps column is shipped and not capturable. The arm refuses a 16 fps fixture by name rather than letting it die inside the provider.",
+  "_tier": "q4 is the default:true candle download variant for windows/linux and the tier minMemoryGb 14 gates. q8 is a second campaign against the same plan with the tier and fixture tokens swapped; bf16 is out of scope because that tier is the upstream dense Wan-AI/Wan2.2-TI2V-5B-Diffusers snapshot, which carries no per-tier subdirectory for validate_huggingface_snapshot_root to bind an artifact identity to.",
+  "_evidenceScope": "authoritative, matching the mlx:ltx_2_3 video precedent (docs/generated/ltx-mlx-video-sc-18808.json) so the two video lanes are directly comparable. sc-18808's review left open whether a first-of-its-kind video record is entitled to that over \"candidate\"; the answer taken here is that it is, because the receipt carries executed admission scenarios rather than a blocked seam.",
+  "providers": [
+    {
+      "name": "candle-wan-2-2-ti2v-5b-q4-832x480-f93",
+      "_role": "fit",
+      "_latentTemporalDepth": 24,
+      "_outputPixels": 399360,
+      "_outputVoxels": 37140480,
+      "evidenceScope": "authoritative",
+      "backend": "candle",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "wan2_2_ti2v_5b",
+        "modelId": "wan_2_2",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 832,
+          "height": 480,
+          "batch": 1,
+          "frames": 93
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1",
+      "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f93-fps24-seed19057",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-wan-2-2-ti2v-5b-q4-832x480-f141",
+      "_role": "fit",
+      "_latentTemporalDepth": 36,
+      "_outputPixels": 399360,
+      "_outputVoxels": 56309760,
+      "evidenceScope": "authoritative",
+      "backend": "candle",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "wan2_2_ti2v_5b",
+        "modelId": "wan_2_2",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 832,
+          "height": 480,
+          "batch": 1,
+          "frames": 141
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1",
+      "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f141-fps24-seed19057",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-wan-2-2-ti2v-5b-q4-832x480-f189",
+      "_role": "held_out",
+      "_latentTemporalDepth": 48,
+      "_outputPixels": 399360,
+      "_outputVoxels": 75479040,
+      "evidenceScope": "authoritative",
+      "backend": "candle",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "wan2_2_ti2v_5b",
+        "modelId": "wan_2_2",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 832,
+          "height": 480,
+          "batch": 1,
+          "frames": 189
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1",
+      "fixture": "wan2-2-ti2v-5b-candle-q4-832x480-f189-fps24-seed19057",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-wan-2-2-ti2v-5b-q4-1280x704-f93",
+      "_role": "fit",
+      "_latentTemporalDepth": 24,
+      "_outputPixels": 901120,
+      "_outputVoxels": 83804160,
+      "evidenceScope": "authoritative",
+      "backend": "candle",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "wan2_2_ti2v_5b",
+        "modelId": "wan_2_2",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 93
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1",
+      "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f93-fps24-seed19057",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-wan-2-2-ti2v-5b-q4-1280x704-f141",
+      "_role": "held_out",
+      "_latentTemporalDepth": 36,
+      "_outputPixels": 901120,
+      "_outputVoxels": 127057920,
+      "evidenceScope": "authoritative",
+      "backend": "candle",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "wan2_2_ti2v_5b",
+        "modelId": "wan_2_2",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 141
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1",
+      "fixture": "wan2-2-ti2v-5b-candle-q4-1280x704-f141-fps24-seed19057",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "candle-wan-2-2-ti2v-5b-q4-704x1280-f189",
+      "_role": "fit",
+      "_latentTemporalDepth": 48,
+      "_outputPixels": 901120,
+      "_outputVoxels": 170311680,
+      "evidenceScope": "authoritative",
+      "backend": "candle",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "wan2_2_ti2v_5b",
+        "modelId": "wan_2_2",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 704,
+          "height": 1280,
+          "batch": 1,
+          "frames": 189
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1",
+      "fixture": "wan2-2-ti2v-5b-candle-q4-704x1280-f189-fps24-seed19057",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    }
+  ]
+}

@@ -5363,25 +5363,10 @@ fn run_qwen_provider(request: &Value) -> Result<Value, String> {
 /// instead (see [`planned_ltx_capture`]). That gap is real and is reported rather than papered over —
 /// the audio stream's latent length is a function of fps, so two records with identical
 /// `{width, height, batch, frames}` can legitimately differ in peak.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct LtxGeometry {
-    width: u32,
-    height: u32,
-    frames: u32,
-    /// `1 + (frames - 1) / 8` — the LTX video VAE's causal temporal depth.
-    latent_frames: u32,
-}
-
-fn ltx_declared_resolutions() -> String {
-    LTX_RESOLUTIONS
-        .iter()
-        .map(|(width, height)| format!("{width}x{height}"))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
+type LtxGeometry = protocol::VideoGeometry;
 
 /// LTX's own geometry envelope, which REPLACES the image arms' `frames == 1` refusal for this arm
-/// alone. Three independent constraints, each from a stated source:
+/// alone. Four independent constraints, each from a stated source:
 ///
 /// * `limits.resolutions` — the five declared pairs (the catalog contract a real request can name).
 /// * `limits.requiresDimensionsMultipleOf` — 64, mirroring the engine's `SIZE_MULTIPLE`. Redundant
@@ -5389,65 +5374,48 @@ fn ltx_declared_resolutions() -> String {
 /// * the temporal lattice and envelope — `frames = 1 + 8k` (the engine's `validate_request` hard
 ///   reject) inside `[97, 449]`, the closed span the declared `durations x fps` cross product
 ///   produces through the shipped LTX frame ladder.
+/// * `batch == 1` — LTX's descriptor advertises `max_count: 1` and the arm renders exactly one clip.
+///
+/// LTX declares no `limits.maxPixels`, so the pair list is its only spatial bound.
 ///
 /// A still geometry (`frames == 1`) is on the lattice but below the envelope floor, so it is refused
 /// here too: this arm may not silently capture a single-frame record for a video model.
+///
+/// sc-19057 hoisted the checks themselves into [`protocol::validate_video_geometry`], the video
+/// counterpart of the `protocol::validate_still_geometry` hoist sc-18808 did for the image arms —
+/// the second video arm (`candle:wan2_2_ti2v_5b`) has a genuinely different envelope but the exact
+/// same five refusals, and a second private copy is how two arms drift into reporting different
+/// reasons for the same class of bad plan row. Every message is reproduced verbatim through the
+/// label and the two rationale strings, and pinned by
+/// `the_video_geometry_guard_reproduces_the_pinned_ltx_wording_on_every_axis` in this crate's lib —
+/// which matters here specifically because `bin/mlx.rs` compiles on exactly one host.
+fn ltx_video_envelope() -> protocol::VideoGeometryEnvelope<'static> {
+    // The rationale below spells the stride out in prose, so a change to the constant that left the
+    // sentence behind would make the refusal message lie. Fail at compile time instead.
+    const _: () = assert!(
+        LTX_TEMPORAL_SCALE == 8,
+        "update the temporal rationale prose with the stride"
+    );
+    protocol::VideoGeometryEnvelope {
+        calibration_label: "MLX LTX-2.3 calibration",
+        resolutions: &LTX_RESOLUTIONS,
+        dimension_multiple: LTX_DIMENSION_MULTIPLE,
+        max_pixels: None,
+        temporal_scale: LTX_TEMPORAL_SCALE,
+        temporal_rationale: "the LTX video VAE is 8x causal in time",
+        frame_envelope: LTX_FRAME_ENVELOPE,
+        batch_rationale: "the provider advertises max_count 1",
+    }
+}
+
 fn validate_ltx_geometry(width: u32, height: u32, frames: u32) -> Result<LtxGeometry, String> {
-    if !LTX_RESOLUTIONS.contains(&(width, height)) {
-        return Err(format!(
-            "MLX LTX-2.3 calibration requires one of the declared limits.resolutions ({}), got {width}x{height}",
-            ltx_declared_resolutions()
-        ));
-    }
-    if width % LTX_DIMENSION_MULTIPLE != 0 || height % LTX_DIMENSION_MULTIPLE != 0 {
-        return Err(format!(
-            "MLX LTX-2.3 calibration requires geometry divisible by {LTX_DIMENSION_MULTIPLE}, got {width}x{height}"
-        ));
-    }
-    if frames % LTX_TEMPORAL_SCALE != 1 {
-        return Err(format!(
-            "MLX LTX-2.3 calibration requires geometry.frames == 1 + {LTX_TEMPORAL_SCALE}k (the LTX \
-             video VAE is {LTX_TEMPORAL_SCALE}x causal in time), got {frames}"
-        ));
-    }
-    let (minimum, maximum) = LTX_FRAME_ENVELOPE;
-    if frames < minimum || frames > maximum {
-        return Err(format!(
-            "MLX LTX-2.3 calibration requires geometry.frames within the declared duration/fps \
-             envelope [{minimum}, {maximum}], got {frames}"
-        ));
-    }
-    Ok(LtxGeometry {
-        width,
-        height,
-        frames,
-        latent_frames: 1 + (frames - 1) / LTX_TEMPORAL_SCALE,
-    })
+    protocol::validate_video_geometry(&ltx_video_envelope(), width, height, frames)
 }
 
 /// Read the four declared geometry axes. Unlike the image arms this reads `frames` as a real value
-/// rather than asserting it away; `batch` is still pinned to 1 because LTX's descriptor advertises
-/// `max_count: 1` and the arm renders exactly one clip.
+/// rather than asserting it away.
 fn ltx_target_geometry(request: &Value) -> Result<LtxGeometry, String> {
-    let geometry = protocol::planned(request)?
-        .pointer("/target/geometry")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "planned.target.geometry must be an object".to_owned())?;
-    let axis = |name: &str| {
-        geometry
-            .get(name)
-            .and_then(Value::as_u64)
-            .and_then(|value| u32::try_from(value).ok())
-            .ok_or_else(|| format!("planned.target.geometry.{name} must fit u32"))
-    };
-    let batch = axis("batch")?;
-    if batch != 1 {
-        return Err(format!(
-            "MLX LTX-2.3 calibration requires geometry.batch == 1 (the provider advertises \
-             max_count 1), got {batch}"
-        ));
-    }
-    validate_ltx_geometry(axis("width")?, axis("height")?, axis("frames")?)
+    protocol::video_target_geometry(request, &ltx_video_envelope())
 }
 
 /// Defense-in-depth mirror of `validate_flux2_target`, plus the T2V-specific target shape. The

@@ -2110,6 +2110,177 @@ test("the MLX LTX arm's manifest constants match the shipped ltx_2_3 limits", as
   );
 });
 
+// sc-19057. The Candle twin of the gate above, for the first candle VIDEO arm. Same reasoning: the
+// arm hand-copies the `wan_2_2` `limits` block and DERIVES its accepted frame envelope `[61, 189]`
+// from durations x fps, so an unbound manifest edit would silently move what a multi-hour CUDA
+// capture admits. It also carries two checks the LTX gate has no analogue for:
+//
+//   * `wan_2_2` deliberately declares NO `requiresDimensionsMultipleOf` (core's default floor of 32
+//     already equals candle's `SIZE_MULTIPLE`), so this asserts the ELISION. Re-declaring a
+//     different stride there reds instead of silently widening the arm.
+//   * the catalog model id and the ENGINE id genuinely differ here, and the video-curve fit resolves
+//     `modelFamily` from the catalog id — so both constants are bound, to the manifest and to the
+//     engine respectively.
+test("the Candle Wan arm's manifest constants match the shipped wan_2_2 limits", async () => {
+  const manifest = JSON.parse(
+    stripJsoncComments(await source("config/manifests/builtin.models.jsonc")),
+  );
+  const adapter = await source("crates/sceneworks-memory-adapter/src/bin/candle.rs");
+
+  const rustConst = (name) => {
+    const start = adapter.indexOf(`const ${name}`);
+    assert.ok(start >= 0, `${name} must still exist in the Candle adapter`);
+    const equals = adapter.indexOf("=", start);
+    const end = adapter.indexOf(";", equals);
+    assert.ok(equals > start && end > equals, `${name} must be a simple const initializer`);
+    return adapter.slice(equals + 1, end).trim();
+  };
+  const rustTuples = (name) => JSON.parse(rustConst(name).replaceAll("(", "[").replaceAll(")", "]"));
+
+  const catalogId = JSON.parse(rustConst("WAN_MANIFEST_MODEL_ID"));
+  assert.equal(catalogId, "wan_2_2");
+  assert.equal(
+    JSON.parse(rustConst("WAN_PROVIDER")),
+    "wan2_2_ti2v_5b",
+    "WAN_PROVIDER is the candle-gen-wan ENGINE id, not the catalog id",
+  );
+  const model = manifest.models.find((entry) => entry.id === catalogId);
+  assert.ok(model, `builtin.models.jsonc must still declare ${catalogId}`);
+  assert.equal(model.type, "video", `${catalogId} must remain a video entry`);
+  const limits = model.limits;
+  assert.ok(limits, `${catalogId} must still declare a limits block`);
+
+  assert.deepEqual(
+    rustTuples("WAN_RESOLUTIONS"),
+    limits.resolutions.map((size) => size.split("x").map(Number)),
+    "WAN_RESOLUTIONS is a verbatim copy of limits.resolutions",
+  );
+  assert.deepEqual(
+    JSON.parse(rustConst("WAN_DURATIONS_SECONDS")),
+    limits.durations,
+    "WAN_DURATIONS_SECONDS is a verbatim copy of limits.durations",
+  );
+  assert.deepEqual(
+    JSON.parse(rustConst("WAN_FPS")),
+    limits.fps,
+    "WAN_FPS is a verbatim copy of limits.fps",
+  );
+  assert.equal(
+    Number(rustConst("WAN_MAX_PIXELS").replaceAll("_", "")),
+    limits.maxPixels,
+    "WAN_MAX_PIXELS is limits.maxPixels",
+  );
+  assert.equal(
+    limits.requiresDimensionsMultipleOf,
+    undefined,
+    "wan_2_2 deliberately elides the stride; core's default floor of 32 is the binding, so declaring one here means WAN_DIMENSION_MULTIPLE must be re-derived from it",
+  );
+  assert.equal(
+    Number(rustConst("WAN_DIMENSION_MULTIPLE")),
+    32,
+    "WAN_DIMENSION_MULTIPLE is core's default spatial floor, which equals candle SIZE_MULTIPLE",
+  );
+
+  // ... and the envelope those inputs feed, recomputed here from the MANIFEST through the same
+  // floor-to-4k+1 ladder `sceneworks_core::video_request::wan_frame_count` implements, so a limits
+  // edit is caught as a changed ENVELOPE — what the arm actually admits — not merely as a changed
+  // constant.
+  const snap = (raw) => Math.max(Math.max(raw, 1) - ((Math.max(raw, 1) - 1) % 4), 5);
+  const reachable = limits.durations.flatMap((duration) =>
+    limits.fps.map((fps) => snap(duration * fps)),
+  );
+  assert.match(
+    adapter,
+    /const WAN_FRAME_ENVELOPE: \(u32, u32\) = wan_frame_envelope\(\);/,
+    "the frame envelope must stay DERIVED from the declared arrays, not written down",
+  );
+  const ladderTestAt = adapter.indexOf(
+    "fn wan_frame_ladder_port_matches_the_transcribed_shipped_ladder(",
+  );
+  assert.ok(ladderTestAt >= 0, "the Wan ladder port test must still exist");
+  assert.match(
+    adapter.slice(ladderTestAt, ladderTestAt + 1600),
+    new RegExp(
+      `assert_eq!\\(WAN_FRAME_ENVELOPE, \\(${Math.min(...reachable)}, ${Math.max(...reachable)}\\)\\)`,
+    ),
+    "the pinned envelope must equal the one the shipped limits actually reach",
+  );
+
+  // The one cadence the calibrated route can execute must still be a shipped one, and must still be
+  // this model's own default — otherwise the capture measures a geometry the product never renders.
+  const calibratedFps = Number(rustConst("WAN_CALIBRATED_FPS"));
+  assert.ok(limits.fps.includes(calibratedFps), "the calibrated cadence must remain shipped");
+  assert.equal(model.defaults.fps, calibratedFps, "the calibrated cadence is the shipped default");
+  assert.ok(
+    limits.resolutions.includes(model.defaults.resolution),
+    "the shipped default resolution must remain inside the declared envelope",
+  );
+
+  // The capture plan measures the DEFAULT candle artifact variant, at a geometry and cadence the
+  // shipped limits actually reach.
+  const plan = JSON.parse(
+    await source("docs/calibration/sc-19057/wan-candle-video-capture-plan.json"),
+  );
+  const candleDefaults = model.downloads.filter(
+    (download) => download.default === true && (download.platforms ?? []).includes("windows"),
+  );
+  assert.equal(candleDefaults.length, 1, "Wan must retain exactly one default candle variant");
+  for (const provider of plan.providers) {
+    assert.equal(provider.backend, "candle");
+    assert.equal(provider.target.provider, "wan2_2_ti2v_5b");
+    assert.equal(provider.target.modelId, catalogId);
+    assert.equal(
+      provider.target.tier,
+      candleDefaults[0].variant,
+      "the sc-19057 plan measures the default candle artifact variant",
+    );
+    const { width, height, frames } = provider.target.geometry;
+    assert.ok(
+      limits.resolutions.includes(`${width}x${height}`),
+      `${provider.name} renders an undeclared resolution`,
+    );
+    assert.ok(reachable.includes(frames), `${provider.name} renders an unreachable frame count`);
+    assert.match(
+      provider.fixture,
+      new RegExp(`^wan2-2-ti2v-5b-candle-${provider.target.tier}-${width}x${height}-f${frames}-fps${calibratedFps}-seed\\d+$`),
+      `${provider.name} fixture must bind its tier, geometry and cadence`,
+    );
+  }
+  // Three coefficients need three independent geometry directions: with one pixel count the cross
+  // form is singular and the fit reports an unusable slice hours after the capture burned.
+  assert.ok(
+    new Set(plan.providers.map((provider) => provider.target.geometry.width * provider.target.geometry.height)).size >= 2,
+    "the sweep must span at least two pixel counts",
+  );
+  assert.ok(
+    new Set(plan.providers.map((provider) => provider.target.geometry.frames)).size >= 2,
+    "the sweep must span at least two frame counts",
+  );
+  assert.ok(
+    plan.providers.filter((provider) => provider._role === "fit").length >= 3,
+    "the cross form needs at least three fit points",
+  );
+  assert.ok(
+    plan.providers.some((provider) => (provider._role ?? "").startsWith("held_out")),
+    "fit-ltx-temporal-form.mjs discards a slice with no held-out residual",
+  );
+});
+
+// sc-19057: the first candle video lane needs a closure-table entry before a capture can carry a
+// currency term — `memory-calibration-harness.mjs` derives the digest eagerly and fails closed with
+// `lane "candle:wan2_2_ti2v_5b" has no entry` BEFORE the capture burns.
+test("the candle Wan video lane is declared in the inference closure table", async () => {
+  const closures = JSON.parse(await source("config/inference-provider-closures.json"));
+  const lane = closures.providers["candle:wan2_2_ti2v_5b"];
+  assert.ok(lane, "candle:wan2_2_ti2v_5b must be declared before its capture can be stamped");
+  assert.equal(lane.crate, "crates/media/candle-gen/candle-gen-wan");
+  assert.match(lane.digest, /^[0-9a-f]{64}$/, "the digest must be a derived sha256, never hand-written");
+  assert.ok(
+    lane.closureCrates.includes("crates/media/candle-gen/candle-gen-wan"),
+    "the closure must contain the crate that owns the memory-strategy contract",
+  );
+});
+
 test("the LTX real-weight safety canary cannot relax or masquerade as campaign evidence", async () => {
   const [adapter, runner] = await Promise.all([
     source("crates/sceneworks-memory-adapter/src/bin/mlx.rs"),
