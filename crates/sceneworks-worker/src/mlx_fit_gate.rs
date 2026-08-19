@@ -62,7 +62,40 @@ use crate::{WorkerError, WorkerResult};
 
 const REQUEST_EVIDENCE_REVISION: &str = "sc-15507-request-scope-v1";
 const INFERENCE_CONTRACT_REVISION: &str = "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82";
-const MAGE_CALIBRATION_FINGERPRINT: &str = "mage-flow-generation-peak-v1";
+/// The mage-flow calibration identity this file's request estimator is paired with.
+///
+/// sc-20570: this used to be the SceneWorks literal `mage-flow-generation-peak-v1`, which no
+/// loaded provider could ever publish — the MLX mage crate declares
+/// `mage-flow-mlx-shared-ladder-2026-08-03-v1` — so the pairing check refused every mage request.
+/// The expectation is now READ FROM the provider crate whose estimator it authorizes
+/// (`providers::mage::memory::{generation_peak_gb, production_safe_budget_gb}` are called from
+/// [`request_total_peak_bytes`] and [`live_request_budget`]), so a provider-side rename moves both
+/// sides together instead of bricking the route.
+#[cfg(target_os = "macos")]
+const MAGE_CALIBRATION_FINGERPRINT: &str =
+    runtime_macos::providers::mage::model::MEMORY_CALIBRATION_FINGERPRINT;
+/// Off-Mac mirror of the constant above.
+///
+/// `mlx-gen-mage` compiles only on macOS, so off-Mac there is nothing to derive from — and no MLX
+/// mage provider to admit either. The value exists so the cross-platform request-selector tests
+/// still model the production shape. macOS is authority:
+/// `mage_calibration_expectation_is_read_from_the_provider_crate` fails the Mac test suite (this
+/// box is also the `nax-macos` CI runner) if this mirror ever disagrees with the provider crate.
+#[cfg(any(test, not(target_os = "macos")))]
+const MAGE_CALIBRATION_FINGERPRINT_OFF_MAC_MIRROR: &str =
+    "mage-flow-mlx-shared-ladder-2026-08-03-v1";
+#[cfg(not(target_os = "macos"))]
+const MAGE_CALIBRATION_FINGERPRINT: &str = MAGE_CALIBRATION_FINGERPRINT_OFF_MAC_MIRROR;
+
+/// Whether the loaded provider is the calibration identity the mage-flow request estimator was
+/// measured under. A mismatch costs the request its verified claim (see the degrade site in
+/// [`evaluate_request_with_budget_using_bundle`]); it is never grounds for refusing the request.
+fn mage_estimator_is_paired(contract: &MemoryProviderContract) -> bool {
+    contract.calibration.as_ref().is_some_and(|identity| {
+        identity.abi == gen_core::MEMORY_CALIBRATION_ABI
+            && identity.fingerprint == MAGE_CALIBRATION_FINGERPRINT
+    })
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -3228,6 +3261,44 @@ fn evaluate_request_with_budget_using_bundle(
             lower_alternative: None,
         };
     }
+    // sc-20570: mage-flow is the one route whose request peak and budget are quoted by the
+    // PROVIDER's own analytic estimator (`request_total_peak_bytes` and `live_request_budget` call
+    // `providers::mage::memory::{generation_peak_gb, production_safe_budget_gb}`) rather than this
+    // file's generic model. That estimator is only authorized by the calibration identity it was
+    // measured under, so an unpaired identity must not carry a verified claim — but it must not
+    // brick the route either. This used to `return Err`, which made mage the only engine that
+    // hard-failed on a calibration-identity mismatch; a provider-side rename therefore refused
+    // EVERY mage request instead of costing it its evidence. Degrade exactly like the generic
+    // identity check above.
+    if plan.engine_id.starts_with("mage_flow") && !mage_estimator_is_paired(contract) {
+        let loaded_abi_display = contract
+            .calibration
+            .as_ref()
+            .map_or_else(|| "none".to_string(), |identity| identity.abi.to_string());
+        tracing::warn!(
+            event = "mlx_mage_calibration_unpaired",
+            route = plan.engine_id,
+            model = plan.model_id,
+            expected_abi = gen_core::MEMORY_CALIBRATION_ABI,
+            expected_fingerprint = MAGE_CALIBRATION_FINGERPRINT,
+            loaded_abi = loaded_abi_display.as_str(),
+            loaded_fingerprint = contract
+                .calibration
+                .as_ref()
+                .map_or("none", |identity| identity.fingerprint.as_str()),
+            "loaded mage provider calibration is not the identity this estimator was paired with; \
+             degrading to the legacy estimate ladder"
+        );
+        admission = AdmissionRoute {
+            path: AdmissionPath::Legacy,
+            fallback_reason: Some(LegacyAdmissionReason::StaleIdentity),
+            evidence: Vec::new(),
+            estimate_bases: Vec::new(),
+            evidence_revision: None,
+            process_limit_bytes: None,
+            lower_alternative: None,
+        };
+    }
     // The selector and provider request context must use the same evidence-derived foreign demand
     // as the fail-closed precheck and the request-scoped MLX ceiling. Otherwise a covered request
     // with existing committed memory could be admitted against the legacy 2 GiB reserve even though
@@ -3245,22 +3316,6 @@ fn evaluate_request_with_budget_using_bundle(
         count = inputs.count.max(1),
         "selected MLX memory-admission path"
     );
-    if plan.engine_id.starts_with("mage_flow")
-        && !matches!(
-            contract.calibration.as_ref(),
-            Some(identity)
-                if identity.abi == gen_core::MEMORY_CALIBRATION_ABI
-                    && identity.fingerprint == MAGE_CALIBRATION_FINGERPRINT
-        )
-    {
-        return Err(WorkerError::InvalidPayload(format!(
-            "{} loaded provider calibration does not match ABI {} / fingerprint {}; refusing \
-             request admission against an unpaired estimator",
-            plan.engine_id,
-            gen_core::MEMORY_CALIBRATION_ABI,
-            MAGE_CALIBRATION_FINGERPRINT
-        )));
-    }
     // The caller estimates the base-model pipeline. Let the provider's canonical contract seam add
     // any separately declared auxiliary networks before either fit selection or warm-cache credit.
     // Exact evidence already describes the whole request peak and therefore remains authoritative.
@@ -15013,9 +15068,12 @@ mod tests {
         assert_eq!(add_post_load_external_delta(u64::MAX - 1, 0, 10), u64::MAX);
     }
 
+    /// sc-20570: a mage-flow provider that declares NO calibration identity at all is still
+    /// unpaired with this file's estimator, and still must not be refused. Before the fix this
+    /// arm returned `Err`, which is how a production `mage_flow_base` request died.
     #[test]
-    fn mage_resident_path_requires_the_provider_calibration_handshake() {
-        let error = evaluate_request_with_budget(
+    fn mage_resident_path_admits_an_unpaired_provider_on_the_legacy_ladder() {
+        let evaluation = evaluate_request_with_budget(
             &request_generator(None),
             &request_plan(),
             &request_inputs(512, 512, 1),
@@ -15031,11 +15089,149 @@ mod tests {
             0,
             &[],
         )
-        .unwrap_err()
-        .to_string();
+        .expect("an unpaired mage provider must degrade, not refuse the request");
         assert!(
-            error.contains(MAGE_CALIBRATION_FINGERPRINT),
-            "the production Resident path must compare the loaded provider fingerprint: {error}"
+            !mage_estimator_is_paired(&MemoryProviderContract::compatibility_default(
+                "mage_flow",
+                MemoryBackendRealization::MlxMetal {
+                    bounded_wired_residency: true,
+                    lazy_or_mmap_materialization: true,
+                    explicit_evaluation_and_synchronization: true,
+                    cache_eviction: true,
+                },
+            )),
+            "precondition: a contract with no calibration identity is unpaired, so the arm above \
+             is the degrade path and not a vacuous pass"
+        );
+        assert_eq!(
+            evaluation.process_limit_bytes, None,
+            "an unpaired estimator must not claim a verified record's request-scoped ceiling"
+        );
+    }
+
+    /// sc-20570 — the constant this file compares against must be READ FROM the provider crate it
+    /// authorizes, not restated. The bug was a SceneWorks literal (`mage-flow-generation-peak-v1`)
+    /// that no `mlx-gen-mage` build could ever publish, so every mage request was refused.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mage_calibration_expectation_is_read_from_the_provider_crate() {
+        assert_eq!(
+            MAGE_CALIBRATION_FINGERPRINT,
+            runtime_macos::providers::mage::model::MEMORY_CALIBRATION_FINGERPRINT,
+            "the expectation must track the provider crate, not a SceneWorks literal"
+        );
+        assert_eq!(
+            MAGE_CALIBRATION_FINGERPRINT_OFF_MAC_MIRROR, MAGE_CALIBRATION_FINGERPRINT,
+            "the off-Mac mirror drifted from the provider crate; update it so the cross-platform \
+             request-selector tests keep modelling the production shape"
+        );
+    }
+
+    /// The fixture evidence lane relabelled onto one chosen calibration identity, so a mage route
+    /// can reach the Evidence path in a cross-platform test. Both the RECORD and the BINDING carry
+    /// the identity: `EvidenceBundle::evidence_for` compares them, so relabelling only one side
+    /// would make every arm below fall to Legacy for an unrelated reason.
+    fn mage_fixture_bundle(fingerprint: &str) -> EvidenceBundle {
+        let mut bundle = fixture_bundle();
+        for record in &mut bundle.records {
+            record.target.provider = "mage_flow".to_owned();
+            record.calibration_fingerprint = fingerprint.to_owned();
+        }
+        bundle
+    }
+
+    fn mage_fixture_plan(fingerprint: &str) -> MlxRequestPlan {
+        let mut plan = fixture_plan();
+        plan.engine_id = "mage_flow";
+        let MlxCalibrationConfig::Valid(calibration) = &mut plan.calibration else {
+            panic!("the fixture plan opts in to calibration");
+        };
+        for binding in &mut calibration.bindings {
+            binding.provider = "mage_flow".to_owned();
+            binding.query.fingerprint = fingerprint.to_owned();
+        }
+        plan
+    }
+
+    fn mage_fixture_generator(fingerprint: &str) -> RequestGenerator {
+        let mut generator = fixture_generator();
+        generator.descriptor.id = "mage_flow";
+        let contract = generator.contract.as_mut().expect("fixture contract");
+        // The selector's structural filter requires `resolved_route == contract.provider_id`, so a
+        // contract still calling itself `fixture_provider` would exclude every candidate as
+        // `Invalid` and both arms would refuse for a reason that has nothing to do with pairing.
+        contract.provider_id = "mage_flow".to_owned();
+        contract.calibration = Some(gen_core::MemoryCalibrationIdentity::new(
+            fingerprint,
+            gen_core::LoadShape::EagerMaterialization,
+        ));
+        generator
+    }
+
+    fn evaluate_mage_fixture(fingerprint: &str) -> WorkerResult<MlxRequestEvaluation> {
+        evaluate_request_with_budget_using_bundle(
+            &mage_fixture_generator(fingerprint),
+            &mage_fixture_plan(fingerprint),
+            &fixture_inputs(1024, 1024),
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
+            fixture_budget(64.0),
+            gib_to_bytes(9.0),
+            0,
+            &[],
+            Some(&mage_fixture_bundle(fingerprint)),
+            Some(&|_backend: &str, _provider: &str| Some(FIXTURE_CLOSURE_DIGEST.to_owned())),
+        )
+    }
+
+    /// sc-20570, the pairing seam itself. Both arms run the SAME evaluation with the SAME evidence
+    /// lane; only the calibration identity differs, and in BOTH arms the contract agrees with its
+    /// own evidence — so the generic identity check twenty lines earlier passes either way and the
+    /// mage degrade is the only thing that can separate them.
+    ///
+    /// The renamed arm is the post-rename world the bug came from: the provider moves to a new
+    /// fingerprint and re-captures evidence under it, so nothing is internally inconsistent — the
+    /// SceneWorks estimator is simply no longer the one that was measured. That must cost the
+    /// request its verified claim, never the request itself.
+    #[test]
+    fn a_renamed_mage_calibration_identity_degrades_instead_of_refusing() {
+        let paired = evaluate_mage_fixture(MAGE_CALIBRATION_FINGERPRINT)
+            .expect("the paired identity is admitted");
+        assert!(
+            paired.process_limit_bytes.is_some(),
+            "precondition: the paired identity must reach the Evidence path, or the renamed arm \
+             below proves nothing"
+        );
+
+        let renamed = evaluate_mage_fixture("mage-flow-mlx-shared-ladder-renamed-v9")
+            .expect("a renamed provider identity must degrade, not refuse the request");
+        assert_eq!(
+            renamed.process_limit_bytes, None,
+            "an unpaired estimator must be demoted to the legacy estimate ladder"
+        );
+    }
+
+    /// The pairing predicate rejects an ABI move as well as a rename — a same-named identity at a
+    /// different calibration ABI is not the estimator's measurement either.
+    #[test]
+    fn mage_pairing_requires_both_the_live_abi_and_the_provider_fingerprint() {
+        let mut contract = mage_request_contract();
+        assert!(mage_estimator_is_paired(&contract));
+
+        let identity = contract.calibration.as_mut().expect("fixture identity");
+        identity.abi = gen_core::MEMORY_CALIBRATION_ABI + 1;
+        assert!(
+            !mage_estimator_is_paired(&contract),
+            "an ABI move must break the pairing"
+        );
+
+        let identity = contract.calibration.as_mut().expect("fixture identity");
+        identity.abi = gen_core::MEMORY_CALIBRATION_ABI;
+        identity.fingerprint = "mage-flow-generation-peak-v1".to_owned();
+        assert!(
+            !mage_estimator_is_paired(&contract),
+            "the retired SceneWorks literal is not a provider identity"
         );
     }
 
