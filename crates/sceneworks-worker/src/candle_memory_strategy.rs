@@ -8,7 +8,13 @@
 //! manifest `vramGbByTier`/`sequentialPeakGb` rows plus the standard headroom, never a promised
 //! unmeasured saving — graded by the shared selector behind the candle estimate margin
 //! (`crate::ladder_margin_policy::CANDLE_ESTIMATE_MARGIN`; CUDA OOM is a recoverable `Err`, so the
-//! margin is looser than MLX's). Any eligible measured candidate at the same rung supersedes the
+//! margin is looser than MLX's). Since sc-19053 (epic 19048 R1/R3) a rung with an identity-matched,
+//! closure-current measured record at ANOTHER geometry gets a FITTED-BASIS estimate instead of the
+//! floor, synthesized by the backend-generic mechanism
+//! ([`crate::estimate_synthesis::synthesize_estimate_ladder`]) exactly as MLX's are — a measured
+//! 1024² record now prices a 1536² request, geometry-scaled over the voxel regressor. The evidence
+//! hierarchy per rung is fitted basis → manifest-row floor; nothing here restates the prediction
+//! law. Any eligible measured candidate at the same rung supersedes the
 //! estimate, so measured-current admission is byte-for-byte unchanged; an UNCERTIFIED artifact
 //! gets no floors at all (the manifest rows describe the certified bytes, not an imported
 //! checkpoint) and keeps its resident-estimate-only behavior.
@@ -260,6 +266,42 @@ fn evidence_provider(engine_id: &str) -> &str {
     engine_id.strip_suffix("_control").unwrap_or(engine_id)
 }
 
+/// The identity axes of a packaged calibration binding — everything except geometry. Split out of
+/// [`binding_matches_request`] (sc-19053) because the fitted-basis collector needs the SAME identity
+/// conjuncts with the OPPOSITE geometry requirement (a basis is a cell that does NOT match the
+/// request's geometry).
+fn binding_identity_matches(
+    item: &JsonObject<String, Value>,
+    provider: &str,
+    tier: &str,
+    mode: &str,
+    overlay: &str,
+) -> bool {
+    text(item, "provider") == Some(provider)
+        && text(item, "tier") == Some(tier)
+        && text(item, "mode") == Some(mode)
+        && text(item, "overlay") == Some(overlay)
+}
+
+/// The calibration cell geometry a packaged binding names, or `None` when any axis is absent or
+/// non-integral (fail closed: a binding that cannot state its geometry can neither be exact
+/// evidence nor an extrapolation basis).
+fn binding_geometry(item: &JsonObject<String, Value>) -> Option<CalibrationGeometry> {
+    let item_geometry = item.get("geometry")?.as_object()?;
+    let axis = |key: &str| {
+        item_geometry
+            .get(key)
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+    };
+    Some(CalibrationGeometry {
+        width: axis("width")?,
+        height: axis("height")?,
+        batch: axis("batch")?,
+        frames: axis("frames")?,
+    })
+}
+
 fn binding_matches_request(
     item: &JsonObject<String, Value>,
     provider: &str,
@@ -268,27 +310,14 @@ fn binding_matches_request(
     overlay: &str,
     geometry: MemoryGeometry,
 ) -> bool {
-    if text(item, "provider") != Some(provider)
-        || text(item, "tier") != Some(tier)
-        || text(item, "mode") != Some(mode)
-        || text(item, "overlay") != Some(overlay)
-    {
-        return false;
-    }
-    let Some(item_geometry) = item.get("geometry").and_then(Value::as_object) else {
-        return false;
-    };
-    ["width", "height", "batch", "frames"]
-        .into_iter()
-        .zip([
-            geometry.width,
-            geometry.height,
-            geometry.batch,
-            geometry.frames,
-        ])
-        .all(|(key, expected)| {
-            item_geometry.get(key).and_then(Value::as_u64) == Some(u64::from(expected))
-        })
+    binding_identity_matches(item, provider, tier, mode, overlay)
+        && binding_geometry(item)
+            == Some(CalibrationGeometry {
+                width: geometry.width,
+                height: geometry.height,
+                batch: geometry.batch,
+                frames: geometry.frames,
+            })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -468,6 +497,227 @@ fn account_for_runtime_overlay_bytes(
             .predicted_peak_bytes
             .saturating_add(runtime_overlay_bytes);
     }
+}
+
+/// Collect the verified measured cells a candle fitted-basis estimate may extrapolate from
+/// (sc-19053, epic 19048 R1/R3 — the candle sibling of `mlx_fit_gate::collect_estimate_bases`):
+/// packaged `candle.calibrations` bindings of this provider/tier/mode/overlay whose GEOMETRY does
+/// not match the request but differs only in the axes the mechanism's regressor spans
+/// ([`crate::estimate_synthesis::basis_geometry_is_scalable`]), resolved to their own verified
+/// records at their own geometry. The per-phase peaks ride along so the binding-phase constraint
+/// can be applied at synthesis time.
+///
+/// The gates, and why each exists:
+///
+/// * **Closure-CURRENT capture only** (`inferenceClosureDigest == expected_closure_digest`): a
+///   stale-closure record may keep serving its own exact cell behind the sc-18095 stale margin,
+///   but it may never SEED an extrapolation — the estimate margin was derived over same-closure
+///   re-capture variance and no derivation covers closure drift stacked under an extrapolation
+///   (see [`crate::estimate_synthesis::MeasuredRungBasis`]). An empty expected digest (an
+///   undeclared lane) collects nothing: fail closed, nobody derived what code the measurements
+///   were taken against. As of this pin every packaged candle record is closure-stale, so this
+///   collector returns no bases on the shipped corpus and the shipped decision surface is
+///   byte-identical — the fitted candidates the story enumerates materialize when the sc-19057
+///   capture arm re-lands records under the live pin.
+/// * **Verified record, quality passed, per-phase peaks present**: the same evidence grade the
+///   exact measured path requires. A runtime-overall-only record has no per-phase triple for the
+///   `ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE` constraint to inspect, so it cannot be a
+///   basis.
+/// * **Records only, never scalars**: the manifest's `vramGbByTier`/`sequentialPeakGb` rows —
+///   whether their epic-18472 `measured` flag says `true` or `false` — are floor inputs consumed
+///   by [`synthesize_estimate_floors`], never extrapolation seeds. The evidence-class marker for a
+///   seed is "a verified calibration record exists", not a manifest boolean.
+///
+/// The calibration-identity comparison against the LOADED contract deliberately does NOT live
+/// here: [`crate::estimate_synthesis::synthesize_estimate_ladder`] applies it per candidate, so a
+/// drifted provider is refused by the one mechanism-level gate rather than by a second lane-local
+/// copy of it.
+#[allow(clippy::too_many_arguments)]
+fn collect_estimate_bases(
+    manifest: &JsonObject<String, Value>,
+    model_id: &str,
+    runtime_provider: &str,
+    tier: &str,
+    mode: &RequestModeBinding,
+    overlay: &str,
+    geometry: MemoryGeometry,
+    expected_closure_digest: &str,
+) -> Vec<crate::estimate_synthesis::MeasuredRungBasis> {
+    if expected_closure_digest.is_empty() {
+        return Vec::new();
+    }
+    let evidence_provider = evidence_provider(runtime_provider);
+    let Ok(BundleLoad::Ready(bundle)) = sceneworks_core::memory_calibration::load_packaged_bundle()
+    else {
+        return Vec::new();
+    };
+    let Some(bindings) = manifest
+        .get("candle")
+        .and_then(|value| value.get("calibrations"))
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    let request_cell = CalibrationGeometry {
+        width: geometry.width,
+        height: geometry.height,
+        batch: geometry.batch,
+        frames: geometry.frames,
+    };
+    bindings
+        .iter()
+        .filter_map(|value| {
+            let item = value.as_object()?;
+            if !binding_identity_matches(
+                item,
+                evidence_provider,
+                tier,
+                &mode.calibration_key,
+                overlay,
+            ) {
+                return None;
+            }
+            let basis_geometry = binding_geometry(item)?;
+            if !crate::estimate_synthesis::basis_geometry_is_scalable(basis_geometry, request_cell)
+            {
+                return None;
+            }
+            let rung = text(item, "rung").and_then(rung)?;
+            let parameters = item
+                .get("parameters")
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            let declared_engaged = match item.get("engagedRungs") {
+                None => None,
+                Some(Value::Array(values)) => Some(
+                    values
+                        .iter()
+                        .map(|value| {
+                            value
+                                .as_str()
+                                .and_then(crate::memory_strategy::rung_from_key)
+                        })
+                        .collect::<Option<Vec<_>>>()?,
+                ),
+                Some(_) => return None,
+            };
+            let engaged_rungs =
+                crate::memory_strategy::engaged_composition(rung, declared_engaged.as_deref())
+                    .ok()?;
+            let selection_parameters = parse_parameters(&engaged_rungs, &parameters)?;
+            let calibration = binding(item)?;
+            if calibration.inference_closure_digest != expected_closure_digest {
+                return None;
+            }
+            let query = EvidenceQuery {
+                backend: CalibrationBackend::Candle,
+                model_id: model_id.to_owned(),
+                provider: evidence_provider.to_owned(),
+                tier: tier.to_owned(),
+                mode: mode.calibration_key.clone(),
+                overlay: overlay.to_owned(),
+                geometry: basis_geometry,
+                rung,
+                parameters,
+                calibration: calibration.clone(),
+            };
+            let EvidenceVerdict::Verified(record) = bundle.evidence_for(&query) else {
+                return None;
+            };
+            if record.quality.result != Some(QualityResult::Passed) {
+                return None;
+            }
+            let RequiredNullable::Value(predicted) = &record.predicted_peak_bytes else {
+                return None;
+            };
+            let full = predicted.full()?;
+            Some(crate::estimate_synthesis::MeasuredRungBasis {
+                rung,
+                parameters: selection_parameters,
+                engaged_composition: record
+                    .strategy
+                    .engaged_rungs
+                    .iter()
+                    .copied()
+                    .map(crate::estimate_synthesis::evidence_strategy)
+                    .collect(),
+                load_shape: crate::memory_strategy::load_shape_from_receipt(record.load_shape),
+                calibration_abi: calibration.abi,
+                calibration_fingerprint: calibration.fingerprint,
+                geometry: basis_geometry,
+                conditioning_peak_bytes: full.conditioning,
+                denoise_peak_bytes: full.denoise,
+                decode_peak_bytes: full.decode,
+                // The candle admission envelope IS the record's overall predicted peak — the same
+                // number `verified_candidates` admits the exact cell at.
+                envelope_peak_bytes: full.overall,
+                record_id: record.id.clone(),
+            })
+        })
+        .collect()
+}
+
+/// **The candle image lane's binder onto the generic mechanism's FITTED arm** (sc-19053, epic
+/// 19048 R1/R3 — the mirror of `mlx_fit_gate::synthesize_estimate_ladder`'s hand-off).
+///
+/// Everything this function does is supply candle's own parameters —
+/// [`crate::estimate_synthesis::CANDLE_LANE`] (backend, tracing label, the derived
+/// `CANDLE_ESTIMATE_MARGIN`, and the recoverable-`Err` failure posture that is *why* that margin
+/// is the narrower one) and candle's headroom law (`vram_gate::HEADROOM_GB`, the same reserve
+/// every measured candle gate charges) — and then hand off. The prediction law (extrapolation over
+/// the voxel regressor, the calibration-identity gate, and the
+/// `ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE` constraint) lives ONLY in
+/// [`crate::estimate_synthesis::synthesize_estimate_ladder`].
+///
+/// Only the fitted-basis candidates are kept. The generic ladder's weights+headroom floor arm is
+/// deliberately discarded: this lane's floor law is the manifest-row floor
+/// ([`synthesize_estimate_floors`], sc-18097's staged-row / resident-clamp split), and swapping it
+/// for the asset-facts floor would move decisions this story does not enumerate. A rung whose
+/// fitted extrapolation is refused (phase flip, identity drift, invalid selection) therefore falls
+/// back to exactly the manifest-row floor it had before this story.
+fn synthesize_fitted_estimates(
+    contract: &gen_core::MemoryProviderContract,
+    tier: MemoryNumericTier,
+    mode: &RequestModeBinding,
+    overlay: Option<&str>,
+    geometry: MemoryGeometry,
+    use_pid: bool,
+    bases: &[crate::estimate_synthesis::MeasuredRungBasis],
+) -> Vec<(MemorySelection, MemoryEvidence)> {
+    if bases.is_empty() {
+        // Pure fast-path: with no basis the ladder can emit no fitted candidate, and the floor arm
+        // it would also compute is discarded here anyway.
+        return Vec::new();
+    }
+    let ladder = crate::estimate_synthesis::synthesize_estimate_ladder(
+        &crate::estimate_synthesis::EstimateRequest {
+            lane: crate::estimate_synthesis::CANDLE_LANE,
+            contract,
+            tier,
+            mode_key: &mode.scope_key,
+            overlay,
+            geometry,
+            use_pid,
+            calibration_fingerprint: contract
+                .calibration
+                .as_ref()
+                .map(|identity| identity.fingerprint.as_str()),
+            headroom_bytes: (crate::vram_gate::HEADROOM_GB * BYTES_PER_GIB).ceil() as u64,
+        },
+        bases,
+    );
+    ladder
+        .estimates
+        .into_iter()
+        .filter(|estimate| {
+            matches!(
+                estimate.basis,
+                crate::memory_strategy::CandidateBasis::EstimateFittedCurve
+            )
+        })
+        .map(|estimate| (estimate.selection, estimate.evidence))
+        .collect()
 }
 
 /// Synthesize an estimate-floor candidate for every implemented optimized rung (sc-18097, epic
@@ -714,6 +964,7 @@ pub(crate) fn evaluate_shared_image(
         provider_mode_override.as_deref(),
         contract_override,
         None,
+        None,
     )
 }
 
@@ -761,6 +1012,7 @@ pub(crate) fn evaluate_shared_bespoke_image(
         None,
         Some(contract),
         Some(PULID_FLUX_REQUEST_EVIDENCE_REVISION),
+        None,
     )
 }
 
@@ -787,6 +1039,11 @@ fn evaluate_shared_image_inner(
     provider_mode_override: Option<&str>,
     contract_override: Option<gen_core::MemoryProviderContract>,
     request_evidence_revision_override: Option<&'static str>,
+    // Test seam for the fitted-basis arm (sc-19053): `None` collects bases from the packaged
+    // evidence bundle (`collect_estimate_bases`); `Some` substitutes synthetic bases so the
+    // consumption path can be exercised without re-capturing hardware evidence. Both production
+    // entry points pass `None`.
+    estimate_bases_override: Option<Vec<crate::estimate_synthesis::MeasuredRungBasis>>,
 ) -> WorkerResult<Option<CandleMemoryEvaluation>> {
     let request_evidence_revision = request_evidence_revision_override.unwrap_or(match engine_id {
         "z_image" | "z_image_turbo" | "z_image_control" | "z_image_turbo_control" => {
@@ -942,6 +1199,55 @@ fn evaluate_shared_image_inner(
     // recoverable does not make a wrong prediction safe. An uncertified artifact therefore keeps
     // its resident-estimate-only behavior, byte-for-byte as before this story. The sibling control
     // lane gates its floors the same way (`krea_control_fit.rs`, `runtime_verified`).
+    // The resident candidate is a live estimate, not a calibrated record, so it carries the live
+    // digest and is never staled by this gate. Computed before synthesis because the fitted-basis
+    // collector's closure-currency gate compares against this same digest.
+    let live_closure_digest = sceneworks_core::memory_calibration::packaged_closure_digest(
+        "candle",
+        evidence_provider(engine_id),
+    )
+    .unwrap_or_default();
+    // sc-19053 (epic 19048 R1/R3): fitted-basis estimate candidates through the generic mechanism —
+    // an identity-matched measured cell at another geometry, extrapolated over the voxel regressor,
+    // graded by the shared selector behind CANDLE_ESTIMATE_MARGIN exactly as MLX's are. Gated on
+    // `artifact_is_certified` like every other evidence-derived candidate on this lane: the
+    // packaged records describe the certified bytes.
+    let mut fitted = if artifact_is_certified {
+        let collected;
+        let bases = match &estimate_bases_override {
+            Some(bases) => bases.as_slice(),
+            None => {
+                collected = collect_estimate_bases(
+                    manifest,
+                    model_id,
+                    engine_id,
+                    tier_key,
+                    &mode,
+                    exact_overlay,
+                    geometry,
+                    &live_closure_digest,
+                );
+                collected.as_slice()
+            }
+        };
+        synthesize_fitted_estimates(
+            &contract,
+            tier,
+            &mode,
+            provider_overlay,
+            geometry,
+            use_pid,
+            bases,
+        )
+    } else {
+        Vec::new()
+    };
+    // A fitted extrapolation scales a record measured on the certified overlay fixture; the actual
+    // request's adapters can be larger, so reserve them exactly as the exact measured candidates do
+    // above (the resident estimate already includes these bytes and is not adjusted twice).
+    for (_, item) in &mut fitted {
+        account_for_runtime_overlay_bytes(std::slice::from_mut(item), runtime_overlay_bytes);
+    }
     let synthesized = if artifact_is_certified {
         synthesize_estimate_floors(
             engine_id,
@@ -956,19 +1262,23 @@ fn evaluate_shared_image_inner(
             runtime_overlay_bytes,
             request_evidence_revision,
         )
+        .into_iter()
+        // The mechanism's per-rung preference order (epic 19048 evidence hierarchy): a rung with a
+        // fitted-basis candidate does not also carry its floor — the generic ladder's own fitted
+        // arm `continue`s past the floor for exactly this reason. Keeping both would let the floor
+        // admit a request the better evidence predicts will not fit.
+        .filter(|(selection, _)| {
+            !fitted
+                .iter()
+                .any(|(fitted_selection, _)| fitted_selection.strategy == selection.strategy)
+        })
+        .collect()
     } else {
         Vec::new()
     };
-    let capacity = verified.len() + synthesized.len() + 1;
+    let capacity = verified.len() + synthesized.len() + fitted.len() + 1;
     let mut selections = Vec::with_capacity(capacity);
     let mut evidence = Vec::with_capacity(capacity);
-    // The resident candidate is a live estimate, not a calibrated record, so it carries the live
-    // digest and is never staled by this gate.
-    let live_closure_digest = sceneworks_core::memory_calibration::packaged_closure_digest(
-        "candle",
-        evidence_provider(engine_id),
-    )
-    .unwrap_or_default();
     let mut candidate_digests = Vec::with_capacity(capacity);
     // Index-aligned basis axis (sc-18097): the synthesized floors carry their estimate basis;
     // the resident live estimate and every packaged record stay `Measured`.
@@ -986,6 +1296,14 @@ fn evaluate_shared_image_inner(
         });
         evidence.push(item);
         candidate_bases.push(crate::memory_strategy::CandidateBasis::Measured);
+    }
+    for (selection, item) in &fitted {
+        selections.push(*selection);
+        evidence.push(item);
+        // A fitted candidate exists only when its basis record is closure-CURRENT (the collector's
+        // gate), so it rides the live digest by construction.
+        candidate_digests.push(live_closure_digest.clone());
+        candidate_bases.push(crate::memory_strategy::CandidateBasis::EstimateFittedCurve);
     }
     for (selection, item) in &synthesized {
         selections.push(*selection);
@@ -1041,6 +1359,10 @@ fn evaluate_shared_image_inner(
         (&resident, false)
     } else if let Some(item) = verified.iter().find(|item| matches_selection(item)) {
         (item, false)
+    } else if let Some((_, item)) = fitted.iter().find(|(_, item)| matches_selection(item)) {
+        // sc-19053: a fitted-basis estimate was selected — legacy-scoped telemetry, exactly like
+        // the floors (an extrapolation has no measured harness version to claim either).
+        (item, true)
     } else if let Some((_, item)) = synthesized.iter().find(|(_, item)| matches_selection(item)) {
         // sc-18097: a synthesized floor was selected — legacy-scoped telemetry below, exactly like
         // the resident estimate (no measured harness version to claim).
@@ -1315,6 +1637,7 @@ mod tests {
             MemoryCacheState::Cold,
             Some("edit_image"),
             Some(contract),
+            None,
             None,
         )
         .expect("selector evaluation")
@@ -2048,6 +2371,7 @@ mod tests {
             None,
             Some(contract),
             None,
+            None,
         )
         .expect("weights-free Lens selector")
         .expect("the staged estimate fits while resident does not");
@@ -2235,6 +2559,453 @@ mod tests {
             "a staging-free deep rung must be graded at the resident clamp, not admitted on the \
              staged working-set row"
         );
+    }
+
+    const GIB: u64 = 1024 * 1024 * 1024;
+
+    /// A conformant staged-only contract with a calibration identity, for probing the sc-19053
+    /// fitted-basis arm in isolation: exactly one optimized rung (StagedResidency), so every
+    /// admission below is attributable to that rung's fitted-vs-floor hierarchy and nothing else.
+    fn fitted_probe_contract() -> gen_core::MemoryProviderContract {
+        let mut contract = gen_core::MemoryProviderContract::compatibility_default(
+            "z_image_turbo",
+            gen_core::MemoryBackendRealization::CandleCuda {
+                device_residency: true,
+                host_backed_weights: true,
+                host_to_device_block_materialization: true,
+                block_materialization: gen_core::MemoryWindowMaterialization::DeviceFormatTransfer,
+            },
+        );
+        for capability in &mut contract.strategies {
+            capability.support = if matches!(
+                capability.strategy,
+                MemoryStrategy::Resident | MemoryStrategy::StagedResidency
+            ) {
+                gen_core::MemoryStrategySupport::Implemented
+            } else {
+                gen_core::MemoryStrategySupport::Missing
+            };
+        }
+        // Staging IS phase-scoped residency; see the sibling fixture's note on `conformance_errors`.
+        contract.lifecycle = gen_core::MemoryLifecycleCapabilities {
+            phases: vec![
+                gen_core::MemoryPhase::Conditioning,
+                gen_core::MemoryPhase::Denoise,
+                gen_core::MemoryPhase::Decode,
+            ],
+            synchronized_phase_release: true,
+            ..contract.lifecycle
+        };
+        contract.calibration = Some(gen_core::MemoryCalibrationIdentity::new(
+            "sc-19053-fitted-probe-v1",
+            contract.load_shape,
+        ));
+        assert!(
+            contract.conformance_errors().is_empty(),
+            "the fitted probe must be a shape a real provider could declare: {:?}",
+            contract.conformance_errors()
+        );
+        contract
+    }
+
+    /// A synthetic verified measured cell at 1024² for [`fitted_probe_contract`]'s staged rung —
+    /// the identity-matched basis the generic mechanism may extrapolate from.
+    fn fitted_probe_basis(
+        contract: &gen_core::MemoryProviderContract,
+        conditioning: u64,
+        denoise: u64,
+        decode: u64,
+        envelope: u64,
+    ) -> crate::estimate_synthesis::MeasuredRungBasis {
+        let selection = MemorySelection {
+            strategy: MemoryStrategy::StagedResidency,
+            parameters: Default::default(),
+            tier: numeric_tier("z_image_turbo", "q4").expect("q4 tier"),
+        };
+        let identity = contract.calibration.as_ref().expect("probe identity");
+        crate::estimate_synthesis::MeasuredRungBasis {
+            rung: StrategyRung::StagedResidency,
+            parameters: Default::default(),
+            engaged_composition: contract.engaged_composition_for_selection(&selection),
+            load_shape: contract.load_shape,
+            calibration_abi: identity.abi,
+            calibration_fingerprint: identity.fingerprint.clone(),
+            geometry: CalibrationGeometry {
+                width: 1024,
+                height: 1024,
+                batch: 1,
+                frames: 1,
+            },
+            conditioning_peak_bytes: conditioning,
+            denoise_peak_bytes: denoise,
+            decode_peak_bytes: decode,
+            envelope_peak_bytes: envelope,
+            record_id: "imc-sc19053-fitted-probe".to_owned(),
+        }
+    }
+
+    /// sc-19053 headline (epic 19048 R1/R3): with a synthetic measured 1024² cell present, a 2048²
+    /// request gains a FITTED estimate through the generic mechanism — extrapolated over the voxel
+    /// regressor (×4 area ⇒ ×4 peak, exactly), graded behind the candle estimate margin — and the
+    /// rung's manifest-row floor is superseded, not merely outbid.
+    ///
+    /// Mutation coverage, all through the one entry point:
+    ///  * breaking the curve evaluation (`extrapolation_scale` / the `scaled` closure in
+    ///    `estimate_synthesis`) flips the 12.0 GiB exactness assertion red;
+    ///  * zeroing `CANDLE_ESTIMATE_MARGIN` flips the reject arm red (the raw peak fits there);
+    ///  * dropping the fitted-supersedes-floor suppression flips BOTH reject arms red (the 4.5 GiB
+    ///    manifest floor would admit at each budget).
+    #[test]
+    fn a_measured_cell_at_another_geometry_seeds_a_fitted_estimate_through_the_generic_module() {
+        let manifest = json!({
+            "candle": {
+                "vramGbByTier": { "q4": 30.0 },
+                "sequentialPeakGb": { "q4": 2.5 },
+                "supportsSequentialOffload": true
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("missing-z-image-q4")));
+        let geometry = MemoryGeometry {
+            width: 2048,
+            height: 2048,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        };
+        let contract = fitted_probe_contract();
+        // Measured binding phase is Decode (ties go later); ×4 voxel scaling keeps conditioning
+        // flat and scales denoise/decode, so the extrapolated binding stays Decode and the fitted
+        // candidate is emitted at envelope × 4 = 12 GiB exactly.
+        let basis = fitted_probe_basis(&contract, GIB, 2 * GIB, 3 * GIB, 3 * GIB);
+        let evaluate = |free_gb: f64| {
+            evaluate_shared_image_inner(
+                "z_image_turbo",
+                "z_image_turbo",
+                &spec,
+                true,
+                &manifest,
+                "q4",
+                "text_to_image",
+                None,
+                None,
+                geometry,
+                false,
+                false,
+                false,
+                false,
+                Some(VramBudget {
+                    free_gb,
+                    total_gb: 96.0,
+                }),
+                Some(32.0),
+                0,
+                MemoryCacheState::Cold,
+                None,
+                Some(fitted_probe_contract()),
+                None,
+                Some(vec![basis.clone()]),
+            )
+            .expect("fitted probe evaluation")
+        };
+
+        const SELECTOR_RESERVE_GB: f64 = 2.0;
+        let fitted_gb = 12.0;
+        let widened_gb = fitted_gb * (1.0 + crate::ladder_margin_policy::CANDLE_ESTIMATE_MARGIN);
+
+        // Admission arm: the widened fitted estimate fits where the 32 GiB resident estimate does
+        // not, and the selected peak is the EXTRAPOLATION, not the 4.5 GiB manifest floor.
+        let admitted = evaluate(widened_gb + SELECTOR_RESERVE_GB + 0.3)
+            .expect("the fitted estimate must admit where resident cannot");
+        assert_eq!(
+            admitted.context.selection.strategy,
+            MemoryStrategy::StagedResidency
+        );
+        assert!(
+            (admitted.predicted_peak_gb - fitted_gb).abs() < 1e-9,
+            "the fitted peak must be the basis envelope scaled by the exact voxel ratio (got {})",
+            admitted.predicted_peak_gb
+        );
+        assert!(
+            admitted
+                .memory
+                .expect("optimized selection carries memory")
+                .stage_residency
+        );
+        assert_eq!(
+            admitted.context.evidence_revision, Z_IMAGE_REQUEST_EVIDENCE_REVISION,
+            "a fitted admission is estimate-scoped in telemetry, like the floors"
+        );
+
+        // Margin + hierarchy arm: just below the WIDENED fitted peak the raw peak still fits
+        // (kills a zeroed margin) and the superseded 4.5 GiB floor must not resurface.
+        assert!(
+            fitted_gb + SELECTOR_RESERVE_GB < widened_gb + SELECTOR_RESERVE_GB - 0.1,
+            "the reject budget must sit between the raw and widened peaks to discriminate"
+        );
+        assert!(
+            evaluate(widened_gb + SELECTOR_RESERVE_GB - 0.1).is_none(),
+            "a fitted estimate must be graded at its WIDENED peak, and the manifest floor it \
+             supersedes must not admit in its place"
+        );
+
+        // Suppression arm at the floor's own admission window: with a fitted candidate present the
+        // rung's floor is GONE, so a budget that fits only the floor refuses.
+        let floor_gb = 2.5 + crate::vram_gate::HEADROOM_GB;
+        let floor_window_gb = floor_gb
+            * (1.0 + crate::ladder_margin_policy::CANDLE_ESTIMATE_MARGIN)
+            + SELECTOR_RESERVE_GB
+            + 0.3;
+        assert!(
+            evaluate(floor_window_gb).is_none(),
+            "fitted supersedes floor: better evidence says 12 GiB, so the 4.5 GiB floor must not \
+             admit this request"
+        );
+
+        // Fall-through arm: a basis whose extrapolation FLIPS the binding phase (measured
+        // Conditioning-bound; ×4 moves the peak onto Decode) is refused by the pinned sc-18094
+        // constraint, and the rung falls back to exactly the sc-18097 manifest floor.
+        let flipped = fitted_probe_basis(&contract, 10 * GIB, 2 * GIB, 3 * GIB, 10 * GIB);
+        let fallback = evaluate_shared_image_inner(
+            "z_image_turbo",
+            "z_image_turbo",
+            &spec,
+            true,
+            &manifest,
+            "q4",
+            "text_to_image",
+            None,
+            None,
+            geometry,
+            false,
+            false,
+            false,
+            false,
+            Some(VramBudget {
+                free_gb: floor_window_gb,
+                total_gb: 96.0,
+            }),
+            Some(32.0),
+            0,
+            MemoryCacheState::Cold,
+            None,
+            Some(fitted_probe_contract()),
+            None,
+            Some(vec![flipped]),
+        )
+        .expect("phase-flip fallback evaluation")
+        .expect("a refused fitted extrapolation must fall back to the manifest floor");
+        assert_eq!(
+            fallback.context.selection.strategy,
+            MemoryStrategy::StagedResidency
+        );
+        assert!(
+            (fallback.predicted_peak_gb - floor_gb).abs() < 1e-6,
+            "the fall-through peak must be the sc-18097 manifest floor (got {})",
+            fallback.predicted_peak_gb
+        );
+    }
+
+    /// sc-19053, the false-green killer for the empty-diff claim: at THIS pin every packaged candle
+    /// record is closure-stale, so the fitted-basis collector yields nothing on the shipped corpus
+    /// and the whole lane's decision is byte-identical to the legacy floor ladder. Three arms:
+    ///
+    ///  1. the collector against the LIVE closure digest returns no bases (and against the
+    ///     records' own captured digest returns all five rungs, envelope-matched to the exact
+    ///     measured candidates — so the currency gate, and only the currency gate, is what
+    ///     withholds them; dropping that conjunct flips the first assertion red);
+    ///  2. manifest scalar rows — epic 18472 `measured: false` — are never extrapolation seeds;
+    ///  3. the production evaluation (bases collected from the packaged bundle) is EXACTLY the
+    ///     forced-no-bases evaluation across the budget axis.
+    ///
+    /// When sc-19057's capture arm re-lands current-closure candle records, arm 1/3 go red HERE:
+    /// that is epic 19048 R6 doing its job — enumerate and justify the new fitted admissions, then
+    /// update this pin alongside the ledger.
+    #[test]
+    fn stale_closure_records_never_seed_and_absent_bases_reproduce_the_legacy_decision() {
+        let source = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .map(|(_, source)| *source)
+            .expect("embedded model manifest");
+        let stripped = sceneworks_core::jsonc::strip_jsonc_comments(source);
+        let root: Value = serde_json::from_str(&stripped).expect("model manifest parses");
+        let manifest = root["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .find(|model| model["id"] == "flux_dev")
+            .expect("FLUX dev model")
+            .as_object()
+            .expect("model object")
+            .clone();
+        let mode = request_mode("flux1_dev", "text_to_image");
+        let geometry = MemoryGeometry {
+            width: 1536,
+            height: 1536,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        };
+
+        // Arm 1: currency. The live lane digest yields nothing; the captured digest yields the
+        // five packaged rungs, each envelope-matched to the exact measured candidate at 1024².
+        let live_digest =
+            sceneworks_core::memory_calibration::packaged_closure_digest("candle", "flux1_dev")
+                .expect("declared candle:flux1_dev closure");
+        let bases = collect_estimate_bases(
+            &manifest,
+            "flux_dev",
+            "flux1_dev",
+            "q4",
+            &mode,
+            "none",
+            geometry,
+            &live_digest,
+        );
+        assert!(
+            bases.is_empty(),
+            "every packaged candle record is closure-stale at this pin; a basis here means either \
+             re-captured evidence landed (update this pin WITH the decision ledger) or the \
+             closure-currency gate was dropped: {bases:?}"
+        );
+        let captured_digest = manifest["candle"]["calibrations"][0]["inferenceClosureDigest"]
+            .as_str()
+            .expect("captured closure digest")
+            .to_owned();
+        assert_ne!(captured_digest, live_digest);
+        let bases = collect_estimate_bases(
+            &manifest,
+            "flux_dev",
+            "flux1_dev",
+            "q4",
+            &mode,
+            "none",
+            geometry,
+            &captured_digest,
+        );
+        assert_eq!(
+            bases.len(),
+            5,
+            "with the captured digest all five packaged rungs must collect — only currency \
+             withholds them"
+        );
+        let exact = verified_candidates(
+            &manifest,
+            "flux_dev",
+            "flux1_dev",
+            "q4",
+            &mode,
+            "none",
+            MemoryGeometry {
+                width: 1024,
+                height: 1024,
+                ..geometry
+            },
+            &mut Vec::new(),
+        )
+        .expect("packaged FLUX dev evidence");
+        assert_eq!(exact.len(), 5);
+        for basis in &bases {
+            assert_eq!(basis.geometry.width, 1024);
+            assert_eq!(basis.geometry.height, 1024);
+            let sibling = exact
+                .iter()
+                .find(|candidate| {
+                    candidate.key.strategy
+                        == crate::estimate_synthesis::evidence_strategy(basis.rung)
+                })
+                .expect("every basis has an exact sibling");
+            assert_eq!(
+                basis.envelope_peak_bytes, sibling.predicted_peak_bytes,
+                "the basis envelope must be the SAME number the exact cell admits at"
+            );
+        }
+
+        // Arm 2: scalar rows are floors only — never a seed, whatever their `measured` flag says.
+        // The evidence-class marker for a seed is a verified calibration record, not a manifest
+        // boolean (epic 18472; do not invent a parallel marker).
+        let scalars_only = json!({
+            "candle": {
+                "measured": false,
+                "vramGbByTier": { "q4": 6.0 },
+                "sequentialPeakGb": { "q4": 2.5 },
+                "supportsSequentialOffload": true
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        assert!(
+            collect_estimate_bases(
+                &scalars_only,
+                "flux_dev",
+                "flux1_dev",
+                "q4",
+                &mode,
+                "none",
+                geometry,
+                &captured_digest,
+            )
+            .is_empty(),
+            "manifest scalars must never seed an extrapolation"
+        );
+
+        // Arm 3: the no-evidence identity. Production collection == forced-no-bases, across the
+        // budget axis, on the real registered contract. This is the shipped-decision-surface pin.
+        let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("missing-flux-dev-q4")));
+        let resident_peak =
+            crate::vram_gate::predicted_peak_gb(&manifest, "q4").expect("measured q4 row");
+        let evaluate =
+            |free_gb: f64, bases: Option<Vec<crate::estimate_synthesis::MeasuredRungBasis>>| {
+                evaluate_shared_image_inner(
+                    "flux1_dev",
+                    "flux_dev",
+                    &spec,
+                    true,
+                    &manifest,
+                    "q4",
+                    "text_to_image",
+                    None,
+                    None,
+                    geometry,
+                    false,
+                    false,
+                    false,
+                    false,
+                    Some(VramBudget {
+                        free_gb,
+                        total_gb: 96.0,
+                    }),
+                    Some(resident_peak),
+                    0,
+                    MemoryCacheState::Cold,
+                    None,
+                    None,
+                    None,
+                    bases,
+                )
+                .expect("FLUX dev evaluation")
+                .map(|evaluation| {
+                    (
+                        evaluation.context.selection.strategy,
+                        evaluation.context.predicted_peak_bytes,
+                        evaluation.context.calibration_fingerprint.clone(),
+                        evaluation.context.evidence_revision.clone(),
+                        evaluation.memory.is_some(),
+                    )
+                })
+            };
+        for free_gb in [7.0, 16.0, 24.0, 48.0, 96.0] {
+            assert_eq!(
+                evaluate(free_gb, None),
+                evaluate(free_gb, Some(Vec::new())),
+                "with zero collectable bases the production path must reproduce the legacy \
+                 decision EXACTLY (free_gb={free_gb})"
+            );
+        }
     }
 
     /// An uncertified (imported / community) FLUX identity artifact never reaches an optimized
@@ -2462,6 +3233,7 @@ mod tests {
                 MemoryCacheState::Cold,
                 None,
                 Some(composition_probe_contract(true, false)),
+                None,
                 None,
             )
             .expect("request-axis evaluation")

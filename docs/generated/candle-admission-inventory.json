@@ -3,7 +3,7 @@
   "generatedBy": "scripts/generate-candle-admission-inventory.mjs",
   "story": "sc-19049",
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:26f648c590ee46b0a1748a3cc97476e550e34983b045e6ef6bf4ee5be5d43943",
+    "sceneWorksRevision": "source-tree:4a1fd44da45d5f09891bd1c5b63dccc73f190be39c5b02c4a2b88eefada5e2a8",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -35,11 +35,11 @@
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "022a0a108e9fac0f1992938f87a6508ba29870b48091b9d6559c8f9f577ade5d"
+        "sha256": "063e03415609cbb1452705bc01866168a6ea8a40ecd857ca0738aab065441544"
       },
       "candleMemoryStrategy": {
         "path": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
-        "sha256": "fd72a878c426be8d947021dcc5274e12d930f2d0ef7e5c57c3526686027b9f99"
+        "sha256": "557553159fa7bee95cea2953aa3076d3e727b1507e4e7a77f03ef52c1d1ed09e"
       },
       "memoryRouteRegistry": {
         "path": "crates/sceneworks-worker/src/memory_route_registry.rs",
