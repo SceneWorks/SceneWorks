@@ -79,8 +79,8 @@ const MAGE_CALIBRATION_FINGERPRINT: &str =
 /// `mlx-gen-mage` compiles only on macOS, so off-Mac there is nothing to derive from — and no MLX
 /// mage provider to admit either. The value exists so the cross-platform request-selector tests
 /// still model the production shape. macOS is authority:
-/// `mage_calibration_expectation_is_read_from_the_provider_crate` fails the Mac build (this box is
-/// also the `nax-macos` CI runner) if this mirror ever disagrees with the provider crate.
+/// `mage_calibration_expectation_is_read_from_the_provider_crate` fails the Mac test suite (this
+/// box is also the `nax-macos` CI runner) if this mirror ever disagrees with the provider crate.
 #[cfg(any(test, not(target_os = "macos")))]
 const MAGE_CALIBRATION_FINGERPRINT_OFF_MAC_MIRROR: &str =
     "mage-flow-mlx-shared-ladder-2026-08-03-v1";
@@ -3271,16 +3271,17 @@ fn evaluate_request_with_budget_using_bundle(
     // EVERY mage request instead of costing it its evidence. Degrade exactly like the generic
     // identity check above.
     if plan.engine_id.starts_with("mage_flow") && !mage_estimator_is_paired(contract) {
+        let loaded_abi_display = contract
+            .calibration
+            .as_ref()
+            .map_or_else(|| "none".to_string(), |identity| identity.abi.to_string());
         tracing::warn!(
             event = "mlx_mage_calibration_unpaired",
             route = plan.engine_id,
             model = plan.model_id,
             expected_abi = gen_core::MEMORY_CALIBRATION_ABI,
             expected_fingerprint = MAGE_CALIBRATION_FINGERPRINT,
-            loaded_abi = contract
-                .calibration
-                .as_ref()
-                .map_or(0, |identity| identity.abi),
+            loaded_abi = loaded_abi_display.as_str(),
             loaded_fingerprint = contract
                 .calibration
                 .as_ref()
