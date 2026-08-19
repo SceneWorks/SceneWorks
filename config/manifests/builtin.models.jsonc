@@ -20765,6 +20765,17 @@
         {
           "provider": "huggingface",
           "repo": "TheDrummer/Anubis-Mini-8B-v1",
+          // Pinned (F-029) to `main` as of 2026-03-17. This is an unversioned community finetune
+          // repo with no declared license, and the sc-6550 bake-off established its caption/refine
+          // quality against THIS checkpoint — an upstream re-push would silently change what
+          // "Refine my prompt" and Ideogram's magic-prompt emit, with no signal in the catalog.
+          // Non-coRequisite entries MAY carry a revision (only coRequisites REQUIRE one, F-029
+          // sc-13659). The consumers are unaffected: the download lands in `snapshots/<sha>/` and
+          // the worker's repo-string resolve (`DEFAULT_REFINE_MODEL` -> `resolve_app_managed_model_dir`
+          // -> `huggingface_snapshot_dir`) falls back from the now-absent `refs/main` to the
+          // fully-materialized snapshot, the same shape the pinned `vision_caption_qwen3vl_8b`
+          // sibling already runs on.
+          "revision": "696f5b956f0511168d98cd32106299cebc3cc12b",
           "files": [],
           "estimatedSizeBytes": 16077901824
         }
