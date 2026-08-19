@@ -13480,6 +13480,30 @@ fn drive_minimax_h3_arm_in_project(
     request: &VideoRequest,
     project_path: &Path,
 ) -> WorkerResult<(DecodedVideo, Value)> {
+    drive_minimax_h3_arm_in_project_with_env(
+        tier_root,
+        base_root,
+        probe,
+        request,
+        project_path,
+        &[],
+    )
+}
+
+/// [`drive_minimax_h3_arm_in_project`] with extra env vars pinned in the SAME
+/// [`crate::test_env::temp_env_vars`] scope. The env lock is NOT reentrant, so a test that needs
+/// e.g. [`crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV`] (the sc-17153 fit-gate coupling tripwire) must
+/// thread it through here rather than wrapping the harness in a second `temp_env_var`, which would
+/// self-deadlock.
+#[cfg(target_os = "macos")]
+fn drive_minimax_h3_arm_in_project_with_env(
+    tier_root: &Path,
+    base_root: &Path,
+    probe: &ArmProbe,
+    request: &VideoRequest,
+    project_path: &Path,
+    extra_env: &[(&str, &str)],
+) -> WorkerResult<(DecodedVideo, Value)> {
     let settings = Settings {
         data_dir: minimax_h3_data_dir(tier_root),
         ..offline_settings()
@@ -13488,35 +13512,34 @@ fn drive_minimax_h3_arm_in_project(
     let loader = probe.loader();
     let hf_cache = tier_root.join("unused-hf-cache");
     let project_path = project_path.to_path_buf();
-    crate::test_env::temp_env_vars(
-        &[
-            ("HF_HUB_CACHE", hf_cache.to_str().expect("utf-8 hub")),
-            (
-                crate::video_jobs::minimax_h3::MINIMAX_H3_TIER_DIR_ENV,
-                tier_root.to_str().expect("utf-8 tier root"),
-            ),
-            (
-                crate::video_jobs::minimax_h3::MINIMAX_H3_BASE_DIR_ENV,
-                base_root.to_str().expect("utf-8 base root"),
-            ),
-        ],
-        || {
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .expect("test runtime builds")
-                .block_on(crate::video_jobs::minimax_h3::generate_minimax_h3_using(
-                    &ApiClient::new(&settings),
-                    &settings,
-                    &job,
-                    request,
-                    &project_path,
-                    "minimax_h3",
-                    "mlx",
-                    loader,
-                ))
-        },
-    )
+    let mut env: Vec<(&str, &str)> = vec![
+        ("HF_HUB_CACHE", hf_cache.to_str().expect("utf-8 hub")),
+        (
+            crate::video_jobs::minimax_h3::MINIMAX_H3_TIER_DIR_ENV,
+            tier_root.to_str().expect("utf-8 tier root"),
+        ),
+        (
+            crate::video_jobs::minimax_h3::MINIMAX_H3_BASE_DIR_ENV,
+            base_root.to_str().expect("utf-8 base root"),
+        ),
+    ];
+    env.extend_from_slice(extra_env);
+    crate::test_env::temp_env_vars(&env, || {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime builds")
+            .block_on(crate::video_jobs::minimax_h3::generate_minimax_h3_using(
+                &ApiClient::new(&settings),
+                &settings,
+                &job,
+                request,
+                &project_path,
+                "minimax_h3",
+                "mlx",
+                loader,
+            ))
+    })
 }
 
 /// sc-17159 → sc-19508 (epic 17137) — a MiniMax-H3 job NEVER degrades to a procedural fake clip.
@@ -14666,6 +14689,121 @@ fn generate_minimax_h3_using_hands_the_engine_the_lattice_count_and_the_staged_t
          structurally-identical DiT partitions ran"
     );
     assert_eq!(raw_settings["realModelInference"], json!(true));
+}
+
+/// sc-17153 — the fit-gate COUPLING tripwire: the MiniMax-H3 load path runs through the generic
+/// pre-load admission gate, and that gate reads the PER-TIER bytes the load actually stages.
+///
+/// The mirror of the Wan lane's `wan_candle_blocks_drive_the_video_fit_gate_and_reject` /
+/// `mochi_preflight_rejects_the_5s_default_on_a_64gb_mac` pattern, for the seam H3 actually has:
+/// this family adds NO per-family gate code — `mlx_fit_gate::apply_residency_policy` is generic and
+/// runs on the generator cache's cold-load path (`generator_cache.rs`), pricing the staged
+/// `components["transformer"]` / `components["text_encoder"]` dirs because they resolve OUTSIDE
+/// `spec.weights` (`spec_component_bytes`, sc-15154). That coupling is exactly what `minMemoryGb`'s
+/// honesty rests on (the blanket floor gates visibility; THIS gate is the per-tier admission), and
+/// nothing pinned it for H3: delete the `apply_residency_policy` call on the cold-load path, or
+/// stage the tier inside `spec.weights` where the component scan skips it, and every other H3 test
+/// stays green while a 66 GB bf16 load sails onto a 16 GB Mac and MLX SIGKILLs the worker.
+///
+/// Both halves run at the SAME emulated 16 GB budget, so what splits them is ONLY the staged
+/// tier's on-disk bytes — which is the coupling claim:
+///  * a q4 DiT at its real hosted size (18.78 GB — the manifest's exact `estimatedSizeBytes`,
+///    sparse on disk) must be REFUSED with the gate's actionable message, BEFORE the loader runs
+///    (18.78 GB staged weights alone exceed the 16 − 2 GB reserve ceiling, so not even the
+///    sc-12179 weights-floor admission can rescue it);
+///  * the same arm, same budget, with a small tier is ADMITTED and reaches the engine — proving
+///    the refusal above is byte-driven, not a blanket family reject.
+#[cfg(target_os = "macos")]
+#[test]
+fn minimax_h3_load_path_is_coupled_to_the_per_tier_admission_bytes() {
+    // The q4 base-partition bytes the manifest hosts (`config/manifests/builtin.models.jsonc`,
+    // `files: ["q4/transformer/*"]`). The gate prices the STAGED partition — `transformer_ref` is
+    // resolved by the engine as a sibling and is deliberately not staged, so it is not inflated.
+    const MINIMAX_H3_Q4_DIT_BYTES: u64 = 18_780_109_783;
+
+    let tiers = minimax_h3_tier_root(
+        "mm_fitgate_big_",
+        &["q4"],
+        &["transformer", "transformer_ref"],
+    );
+    let partition = tiers.path().join("q4").join("transformer");
+    let shards: Vec<std::path::PathBuf> = std::fs::read_dir(&partition)
+        .expect("fixture partition")
+        .filter_map(|entry| Some(entry.ok()?.path()))
+        .filter(|path| path.extension().is_some_and(|ext| ext == "safetensors"))
+        .collect();
+    assert!(
+        !shards.is_empty(),
+        "the fixture partition must carry shards to inflate"
+    );
+    let per_shard = MINIMAX_H3_Q4_DIT_BYTES / shards.len() as u64;
+    let remainder = MINIMAX_H3_Q4_DIT_BYTES % shards.len() as u64;
+    for (index, shard) in shards.iter().enumerate() {
+        let len = per_shard + u64::from(index == 0) * remainder;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(shard)
+            .expect("open shard")
+            .set_len(len)
+            .expect("sparse-inflate shard to the hosted size");
+    }
+    let base = minimax_h3_base_root("mm_fitgate_base_");
+    let probe = ArmProbe::default();
+    let request = minimax_h3_request("minimax_h3", json!({}));
+    let project = tiers.path().join("unused-project");
+    let message = match drive_minimax_h3_arm_in_project_with_env(
+        tiers.path(),
+        base.path(),
+        &probe,
+        &request,
+        &project,
+        &[(crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, "16")],
+    ) {
+        Ok(_) => panic!(
+            "an 18.78 GB staged q4 DiT cannot fit a 16 GB Mac even one component at a time — \
+             admitting it is the wired-overcommit SIGKILL the pre-load gate exists to prevent"
+        ),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        message.contains("minimax_h3"),
+        "the refusal names the model: {message}"
+    );
+    assert!(
+        message.contains("unified memory"),
+        "the refusal is the fit gate's actionable message, not a loader error: {message}"
+    );
+    assert!(
+        !probe.loaded(),
+        "the gate must refuse BEFORE `inference_runtime::load` allocates — a post-load refusal \
+         cannot exist, because MLX's default error handler is exit(-1)"
+    );
+
+    // The admit half: same budget, small tier ⇒ the decision flips on the tier bytes alone and the
+    // arm reaches the engine. Without this, the reject half would stay green against a gate that
+    // blanket-refuses the family.
+    let small_tiers = minimax_h3_tier_root(
+        "mm_fitgate_small_",
+        &["q4"],
+        &["transformer", "transformer_ref"],
+    );
+    let small_base = minimax_h3_base_root("mm_fitgate_small_base_");
+    let small_probe = ArmProbe::default();
+    let small_project = small_tiers.path().join("unused-project");
+    drive_minimax_h3_arm_in_project_with_env(
+        small_tiers.path(),
+        small_base.path(),
+        &small_probe,
+        &request,
+        &small_project,
+        &[(crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, "16")],
+    )
+    .expect("a tier whose staged bytes fit the same 16 GB budget must be admitted");
+    assert!(
+        small_probe.loaded(),
+        "the admitted load must actually reach the loader — the pair proves the gate is coupled \
+         to the per-tier bytes, not to the family id"
+    );
 }
 
 /// sc-19120 / sc-19506 — the ARM puts the packed text encoder on the `LoadSpec`, and leaves the key

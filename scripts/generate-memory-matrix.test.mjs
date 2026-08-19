@@ -20,6 +20,8 @@ import {
   buildStoryBackendScope,
   isImplemented,
   isPublishableCell,
+  memoryCharacterization,
+  OUT_OF_MATRIX_CELL_STATES,
   plannedCellIds,
   RUNG4_APPLICABILITIES,
   RUNG4_IMPLEMENTATIONS,
@@ -2424,6 +2426,9 @@ test("the MiniMax-H3 record is validated on every generation, not merely stored"
   const notImplemented = (survey) => {
     h3(survey).backends.mlx.contractSupport = "missing";
     h3(survey).backends.mlx.implementation = "none";
+    // sc-17153: `state` must agree with `contractSupport` under isImplemented(), so the
+    // precondition flips it too — keeping the field under test the sole variable, as before.
+    h3(survey).backends.mlx.state = "Missing";
   };
   {
     const control = await surveyFixture();
@@ -2463,6 +2468,73 @@ test("the MiniMax-H3 record is validated on every generation, not merely stored"
   await surveyRejects((survey) => {
     delete h3(survey).backends.mlx.evidence;
   }, /must cite at least one source/);
+});
+
+test("the out-of-matrix record carries the cell's two distinct claims, and each is validated (sc-17153)", async () => {
+  // The positive half: the shipped record parses through the real generator with both claims
+  // present, in the cell vocabulary, and the CODE claim classifies through the shared predicate —
+  // the same `isImplemented()` every coverage surface uses — rather than by string comparison.
+  const survey = await surveyFixture();
+  const mlx = h3(survey).backends.mlx;
+  const candle = h3(survey).backends.candle;
+  assert.equal(mlx.state, "Implemented/unverified");
+  assert.equal(candle.state, "Missing");
+  assert.ok(isImplemented(mlx.state), "the MLX code claim classifies as implemented");
+  assert.ok(!isImplemented(candle.state), "the candle code claim classifies as not implemented");
+  for (const backend of [mlx, candle]) {
+    assert.ok(OUT_OF_MATRIX_CELL_STATES.includes(backend.state));
+    // Structure now, numbers at the terminal campaign: zero SceneWorks calibration receipts exist
+    // for this family, so the PEAKS claim must derive to `unmeasured` — and must say so honestly.
+    assert.deepEqual(
+      {
+        status: backend.memoryCharacterization.status,
+        measuredGeometries: backend.memoryCharacterization.measuredGeometries,
+        coveredPixelBound: backend.memoryCharacterization.coveredPixelBound,
+      },
+      memoryCharacterization(backend.memoryCharacterization.measuredGeometries),
+    );
+    assert.equal(backend.memoryCharacterization.status, "unmeasured");
+  }
+  // "Which is which" is stated honestly per backend: MLX names the terminal campaign as the owner
+  // of the numbers; candle names why it must stay unmeasured (its state is not implemented).
+  assert.match(mlx.memoryCharacterization.reason, /terminal/i);
+  assert.match(candle.memoryCharacterization.reason, /not implemented/i);
+  await buildMatrix({ publish: false, sourceOverrides: { rung4Survey: JSON.stringify(survey) } });
+
+  // Each guard mutated ALONE, through the real generator — the same path `--check` takes.
+  await surveyRejects((mutated) => {
+    delete h3(mutated).backends.mlx.state;
+  }, /unknown state/);
+  await surveyRejects((mutated) => {
+    // A receipt-backed state on a contract that does not implement the rung: the two claims
+    // describe one contract and must agree UNDER THE PREDICATE (both `Verified` and
+    // `Implemented/unverified` are implemented states, so either would contradict candle).
+    h3(mutated).backends.candle.state = "Verified";
+  }, /disagrees with contractSupport/);
+  await surveyRejects((mutated) => {
+    h3(mutated).backends.mlx.state = "Missing";
+  }, /disagrees with contractSupport/);
+  await surveyRejects((mutated) => {
+    delete h3(mutated).backends.mlx.memoryCharacterization;
+  }, /memoryCharacterization with a non-empty reason is required/);
+  await surveyRejects((mutated) => {
+    h3(mutated).backends.mlx.memoryCharacterization.reason = "";
+  }, /memoryCharacterization with a non-empty reason is required/);
+  await surveyRejects((mutated) => {
+    // Asserting a status the geometries do not support: `point` with zero measured geometries is
+    // exactly the drift the derivation rule exists to refuse.
+    h3(mutated).backends.mlx.memoryCharacterization.status = "point";
+  }, /does not derive from its measuredGeometries/);
+  await surveyRejects((mutated) => {
+    // A single geometry DOES derive `point` — so this mutation isolates the other rule: peaks on
+    // a non-implemented state are refused, mirroring the published matrix's own cell rule.
+    h3(mutated).backends.candle.memoryCharacterization = {
+      ...h3(mutated).backends.candle.memoryCharacterization,
+      status: "point",
+      measuredGeometries: ["384x224"],
+      coveredPixelBound: null,
+    };
+  }, /while the state is not implemented/);
 });
 
 test("every remaining out-of-matrix throw site is mutated on its own (sc-18664 review)", async () => {

@@ -6872,6 +6872,93 @@ mod tests {
         );
     }
 
+    /// sc-17153 — `synthesize_estimate_ladder` emits NO candidate for a non-implemented rung,
+    /// asserted at the synthesis seam itself.
+    ///
+    /// The sc-17153 pre-dispatch survey flagged this property as unverified. What this pins is
+    /// the seam's BEHAVIOR, per non-implemented variant, with a control that proves each mutation
+    /// is the sole reason the candidate disappears:
+    ///
+    ///  * control: the fixture contract's implemented optimized rungs each synthesize a candidate
+    ///    (floor basis — no measured bases are supplied), and its `Missing` rung 4 synthesizes
+    ///    none;
+    ///  * flipping one implemented rung to `Missing` removes exactly that rung's candidate;
+    ///  * flipping it to `StructurallyNotApplicable` removes it identically — positive-match
+    ///    semantics, not a denylist a new support variant could slip past.
+    ///
+    /// ⚠️ What this test does NOT isolate: WHICH layer refuses. The synthesis loop's explicit
+    /// `matches!(.., Some(MemoryStrategySupport::Implemented))` filter is redundant
+    /// defense-in-depth with `contract.validate_selection`, which also refuses a selection on a
+    /// non-implemented rung — deleting the filter outright leaves this test green because the
+    /// deeper check catches the same mutation (measured during sc-17153's review). The same
+    /// caveat applies to the sc-18096 `Missing`-mutation arm above, which reaches the seam only
+    /// through `evaluate`'s full reject path. Do not read either test as the guard that keeps
+    /// `validate_selection`'s refusal removable, or vice versa: the pinned property is the
+    /// behavior, and BOTH layers currently enforce it.
+    #[test]
+    fn synthesize_estimate_ladder_admits_only_implemented_rungs() {
+        let generator = fixture_generator();
+        let contract = generator.contract.as_ref().expect("fixture contract");
+        let plan = fixture_plan();
+        let geometry = MemoryGeometry {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        };
+        let strategies = |contract: &MemoryProviderContract| -> Vec<MemoryStrategy> {
+            synthesize_estimate_ladder(contract, &plan, "text_to_image", None, geometry, None, &[])
+                .iter()
+                .map(|estimate| estimate.selection.strategy)
+                .collect()
+        };
+
+        // Control: every implemented optimized rung gets a floor candidate; the resident baseline
+        // is deliberately absent (it exists on every legacy route already) and the fixture's
+        // Missing rung 4 is never synthesized.
+        let control = strategies(contract);
+        assert_eq!(
+            control,
+            vec![
+                MemoryStrategy::StagedResidency,
+                MemoryStrategy::BoundedDecode,
+                MemoryStrategy::BoundedAttention,
+            ],
+            "the fixture's implemented rungs, and only those, are estimate-admissible"
+        );
+
+        for support in [
+            gen_core::MemoryStrategySupport::Missing,
+            gen_core::MemoryStrategySupport::StructurallyNotApplicable {
+                reason: "sc-17153 mutation: the architecture lacks what the rung optimizes"
+                    .to_owned(),
+            },
+        ] {
+            let mut mutated = contract.clone();
+            mutated
+                .strategies
+                .iter_mut()
+                .find(|capability| capability.strategy == MemoryStrategy::BoundedDecode)
+                .expect("bounded decode capability")
+                .support = support.clone();
+            let survivors = strategies(&mutated);
+            assert!(
+                !survivors.contains(&MemoryStrategy::BoundedDecode),
+                "a rung declared {support:?} must synthesize no candidate"
+            );
+            assert_eq!(
+                survivors,
+                vec![
+                    MemoryStrategy::StagedResidency,
+                    MemoryStrategy::BoundedAttention,
+                ],
+                "the mutation removes exactly the de-implemented rung — the other implemented \
+                 rungs keep their floor candidates, so the control pair isolates the filter"
+            );
+        }
+    }
+
     #[test]
     fn manifest_reader_distinguishes_absent_valid_unproven_and_malformed_opt_in() {
         let spec = fixture_spec(gen_core::Quant::Q4, "packed-q4");

@@ -1,12 +1,12 @@
 {
   "schemaVersion": 7,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:c86c40dcb92965896a5bbb240ba81bf3b39b351de8355069b1a138cbaa3e203d",
+    "sceneWorksRevision": "source-tree:70807d7a6139cc86fdf5b1bd17a80115ea7fa7306855c77abaa0c4259912e4e8",
     "inferenceRevision": "75d66db50543ac288deb278853d0f0b432f92c5c",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "35c51971904060c798a1c0b9213bc9e95bea7dced9802a4a7190601e927caf43"
+        "sha256": "d7b598ae9f0888a81abd2659d30004ad986d7fc17404e7e06bc86e0cc188584a"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -30,7 +30,7 @@
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "aab359b1f84f5660b74a82fe617c3d95703c352db00bac4601efde85b493a25e"
+        "sha256": "0c7893ce9b4bee7069e1ee6e66d30187e56a1caa8c9d934ba488a264c5324fa7"
       },
       "memoryStrategy": {
         "path": "crates/sceneworks-worker/src/memory_strategy.rs",
@@ -58,7 +58,7 @@
       },
       "rung4Survey": {
         "path": "config/rung4-applicability-survey.json",
-        "sha256": "b387dbe0b8377d382fc45208e1f99638894c87f4188122097820a6c174919852"
+        "sha256": "48e0cff7a7c8260a6c0cc8a6401c770d0d1e81ea9332291dd19fe717e02c9f87"
       },
       "rung4ContractPrerequisites": {
         "path": "config/rung4-contract-prerequisites.json",

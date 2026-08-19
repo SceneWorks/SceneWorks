@@ -902,6 +902,22 @@ export const RUNG4_CONTRACT_SUPPORT = Object.freeze([
 export const RUNG4_CONTRACT_REVISION_PATTERN = /^[0-9a-f]{9,40}$/;
 
 /**
+ * The published matrix cell's `state` vocabulary, restated once for the out-of-matrix records
+ * (sc-17153). An out-of-matrix family cannot hold a cell, but it CAN and MUST carry the cell's two
+ * distinct claims — `state` (the rung WORKS: a code claim) and `memoryCharacterization` (the rung's
+ * PEAKS are known: an evidence claim) — because collapsing them is exactly the SC-16060 failure the
+ * cell vocabulary exists to prevent. Consumers classify `state` through `isImplemented()`, never by
+ * string comparison; `parseOutOfMatrixRung4Families` enforces both claims below.
+ */
+export const OUT_OF_MATRIX_CELL_STATES = Object.freeze([
+  "Implemented/unverified",
+  "Runtime verified",
+  "Verified",
+  "Missing",
+  "Structurally N/A",
+]);
+
+/**
  * The prerequisite claim this survey may not carry again (sc-18664).
  *
  * Rung 4's only shared prerequisite is `LoadShape::DeferredMaterialization`
@@ -1177,6 +1193,62 @@ export function parseOutOfMatrixRung4Families(parsed, { familyGroups } = {}) {
             `${at}: rung 4 applies to a stack but the contract does not implement it — record contractSource and contractReason, or the gap reads as an unexplained hole`,
           );
         }
+      }
+      // sc-17153 — the record carries the SAME two distinct claims a published matrix cell does,
+      // in the cell vocabulary, so the day this family gains a lane the move into `families` is a
+      // relocation rather than a re-derivation. Both claims validated on every generation:
+      //
+      //   `state`                  — the CODE claim. Classified through the shared
+      //                              `isImplemented()` predicate, never by string comparison, and
+      //                              required to AGREE with `contractSupport` through that
+      //                              predicate: an `Implemented/unverified` record whose contract
+      //                              does not implement the rung (or the reverse) is a
+      //                              contradiction, not a nuance.
+      //   `memoryCharacterization` — the PEAKS claim. `status` and `coveredPixelBound` are DERIVED
+      //                              from `measuredGeometries` by the shared
+      //                              `memoryCharacterization()` helper, exactly as the family
+      //                              verdict is derived from its stacks above — asserting them
+      //                              independently is how a record drifts. A characterization on a
+      //                              non-implemented state is refused, mirroring the published
+      //                              cell rule (`memoryCharacterization is … on … measured
+      //                              geometries` in `validateMatrix`).
+      if (!OUT_OF_MATRIX_CELL_STATES.includes(verdict.state)) {
+        throw new Error(
+          `${at}: unknown state ${JSON.stringify(verdict.state)} — an out-of-matrix record carries the matrix cell's own state vocabulary (sc-17153)`,
+        );
+      }
+      if (isImplemented(verdict.state) !== (verdict.contractSupport === "implemented")) {
+        throw new Error(
+          `${at}: state ${JSON.stringify(verdict.state)} disagrees with contractSupport ${JSON.stringify(verdict.contractSupport)} under isImplemented() — the two claims describe one contract`,
+        );
+      }
+      const characterization = verdict.memoryCharacterization;
+      if (
+        !characterization ||
+        typeof characterization.reason !== "string" ||
+        characterization.reason.length === 0
+      ) {
+        throw new Error(
+          `${at}: memoryCharacterization with a non-empty reason is required — the record must say what is measured and what the terminal campaign still owes (sc-17153)`,
+        );
+      }
+      const derivedCharacterization = memoryCharacterization(
+        characterization.measuredGeometries ?? [],
+      );
+      const declaredCharacterization = {
+        status: characterization.status,
+        measuredGeometries: characterization.measuredGeometries,
+        coveredPixelBound: characterization.coveredPixelBound,
+      };
+      if (JSON.stringify(declaredCharacterization) !== JSON.stringify(derivedCharacterization)) {
+        throw new Error(
+          `${at}: memoryCharacterization ${JSON.stringify(declaredCharacterization)} does not derive from its measuredGeometries (${JSON.stringify(derivedCharacterization)}) — status and coveredPixelBound follow from the geometries, they are not separate claims`,
+        );
+      }
+      if (characterization.status !== "unmeasured" && !isImplemented(verdict.state)) {
+        throw new Error(
+          `${at}: memoryCharacterization is ${characterization.status} while the state is not implemented — a rung that does not work cannot have characterized peaks`,
+        );
       }
       records.set(`${group}:${backend}`, verdict);
     }
