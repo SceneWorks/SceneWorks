@@ -1700,6 +1700,24 @@ def test_flux2_true_v2_manifest_install_time_conversion():
     assert mlx["quantize"] == 0
 
 
+def test_flux2_dev_carries_no_inert_mac_only_flag():
+    """sc-20530: `flux2_dev` is candle-routed off-Mac (epic 6564) AND MLX on Apple Silicon, so the
+    `macOnly: true` it used to carry was inert *and* misleading — the flag is read only by the video
+    catalog-withdrawal contract (`video_model_withdrawn_on_platform`, gated on `type == "video"`)
+    and by the id-pinned vision captioner in the web eligibility helpers, neither of which sees an
+    image entry with this id. Removed, not flipped to false, and pinned absent like the klein pair
+    so it cannot creep back (sc-20529 removed `macOnly` from `flux2_klein_9b_true_v2` too — see
+    `test_flux2_true_v2_manifest_install_time_conversion` above).
+    """
+    model = next(
+        model
+        for model in _load_builtin_models_manifest()["models"]
+        if model["id"] == "flux2_dev"
+    )
+    assert model["type"] == "image"
+    assert "macOnly" not in model
+
+
 def test_flux2_klein_manifest_entries_present():
     # Both flux2_klein_9b and flux2_klein_9b_kv must be present in the
     # builtin manifest with the expected adapter + family + mlx block.
@@ -1711,7 +1729,12 @@ def test_flux2_klein_manifest_entries_present():
         model = models[model_id]
         assert model["adapter"] == "mlx_flux2", model_id
         assert model["family"] == "flux2-klein", model_id
-        assert model["macOnly"] is True, model_id
+        # sc-20530: `macOnly` is REMOVED from both entries, not flipped to false. The flag is read
+        # only by the video catalog-withdrawal contract (`video_model_withdrawn_on_platform`, which
+        # requires `type == "video"`) and by the id-pinned vision captioner in the web eligibility
+        # helpers, so on an image entry it never gated anything — it only read like a platform
+        # contract these candle-routed entries do not have. Pinned absent so it cannot creep back.
+        assert "macOnly" not in model, model_id
         # sc-8711 (epic 8506): re-hosted as a public, ungated SceneWorks MLX quant-matrix
         # turnkey (q4/q8/bf16), so the entry is `gated: false` with no credentialHost — the
         # FLUX Non-Commercial LICENSE.md travels with the weights.

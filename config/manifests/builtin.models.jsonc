@@ -8047,13 +8047,14 @@
       "type": "image",
       // FLUX.2 first shipped through MLX and now also has native Candle/CUDA generation and edit
       // lanes off-Mac. There is still no Python/diffusers worker fallback; the adapter field names
-      // the MLX dispatch key while Candle routing owns its explicit native lanes. `macOnly` below is
-      // a legacy no-op label; backend availability comes from the routing and descriptor contracts.
+      // the MLX dispatch key while Candle routing owns its explicit native lanes. The legacy
+      // `macOnly: true` label was DROPPED here (sc-20530): only video entries and the id-pinned
+      // vision captioner read the flag, so on an image entry it was inert text that read as a
+      // platform contract. Backend availability comes from the routing and descriptor contracts.
       "adapter": "mlx_flux2",
       // Unified model: txt2img + edit (single reference image) via mflux's
       // Flux2Klein / Flux2KleinEdit variants.
       "capabilities": ["text_to_image", "image_to_image", "edit_image", "character_image"],
-      "macOnly": true,
       "downloads": [
         {
           // SceneWorks pre-quantized MLX turnkey (sc-8711, epic 8506): a public/ungated re-host of
@@ -8430,8 +8431,9 @@
       // Without a reference it runs plain text-to-image on par with the base
       // 9B — the cache simply doesn't engage (sc-2173), so the full
       // capability set is exposed rather than gating to character_image only.
+      // No `macOnly` label — dropped with the base 9B entry's (sc-20530); it is inert on an image
+      // entry and backend availability comes from the routing and descriptor contracts.
       "capabilities": ["text_to_image", "image_to_image", "edit_image", "character_image"],
-      "macOnly": true,
       "downloads": [
         {
           // SceneWorks pre-quantized MLX turnkey (sc-8711, epic 8506): public/ungated re-host of
@@ -8996,8 +8998,11 @@
       // Shares the `mlx_flux2` adapter + the `flux2` engine. On Apple Silicon it runs
       // on MLX (the pre-quantized Q4 dir below); off-Mac the **candle** (Windows/Linux
       // CUDA) lane now serves txt2img (epic 6564: `candle-gen-flux2` `flux2_dev`, sc-7457
-      // provider + sc-7458 worker wiring) — `macOnly` stays a no-op label mirroring klein,
-      // since candle availability is driven by the routing tables, not this flag. The
+      // provider + sc-7458 worker wiring). sc-20530 REMOVED the `macOnly: true` this entry
+      // carried, mirroring klein: on an image entry the flag is inert (only the video
+      // catalog-withdrawal contract and the id-pinned web vision captioner read it), and
+      // reading like a platform contract this candle-routed entry does not have is the
+      // whole cost of keeping it. Candle availability is driven by the routing tables. The
       // candle lane loads the dense diffusers snapshot and Q4-quantizes it at load (the
       // install-time convert + packed loader are MLX-only; off-Mac is download-and-go).
       // Image edit + reference (sc-5919/5922): reference image(s) condition via the
@@ -9008,7 +9013,6 @@
       // best-effort (skeleton-as-edit-image) below the strict `flux2_dev_control` tier.
       "adapter": "mlx_flux2",
       "capabilities": ["text_to_image", "edit_image", "character_image"],
-      "macOnly": true,
       "downloads": [
         {
           // SceneWorks pre-quantized MLX turnkey (sc-8513, epic 8506): a public/ungated re-host of

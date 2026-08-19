@@ -86,6 +86,12 @@ The fix is one predicate. It was written, verified, and then **deliberately with
 PR** — see "why it is not here" below. The campaign was run with it applied locally; without it no
 SANA job can be claimed at all.
 
+> **Superseded by sc-20525** (historical record — do not apply the patch below as written).
+> `sana_reference_carrier_is_absent_or_usable` no longer exists: sc-20525 replaced it, and the
+> candle twin that had the same defect, with the shared `has_malformed_optional_string` helper in
+> `crates/sceneworks-core/src/jobs_store/routing.rs`. The diagnosis in this section stands; only the
+> named function does not.
+
 ```rust
 // crates/sceneworks-core/src/jobs_store/routing/mlx.rs
 // in sana_mlx_eligible, replacing:
