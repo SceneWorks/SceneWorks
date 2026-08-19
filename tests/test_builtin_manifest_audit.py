@@ -2016,6 +2016,77 @@ def test_schema_admits_the_temporal_coefficient_additively():
         assert mutated(mutate), f"{label} must be rejected by the schema"
 
 
+def test_schema_requires_a_lane_tag_on_the_fit_block_and_admits_one_per_curve():
+    """sc-19056 / epic 19048 R4: coefficient containers name the lane they were measured on.
+
+    The reader-side refusals live in ``crates/sceneworks-worker/src/vram_gate.rs``
+    (``a_curve_tagged_with_a_foreign_lane_fails_closed``,
+    ``a_fit_block_with_a_missing_or_foreign_lane_tag_refuses_every_rung``,
+    ``a_foreign_lane_fit_block_yields_no_krea_turbo_fit_at_all``). This is the SCHEMA half: what an
+    author may write at all. Four claims, in the two directions that matter.
+
+    1. The shipped manifest validates, and it carries the tag. That is the migration claim - the one
+       committed instance (``krea_2_turbo.candle.turboFit``) is candle-measured, so tagging it
+       ``candle`` restates measured fact rather than making a new claim.
+    2. Dropping the tag from the fit block is REJECTED. The tag is required rather than
+       optional-defaulting-to-candle because the ``candle`` key the block hangs under is authored,
+       not measured, and an operator ``user.models.jsonc`` entry replaces that whole object.
+    3. Adding a per-curve tag is accepted without a schema bump, so a curve lifted from another
+       lane's fit report can carry its provenance rather than shedding it.
+    4. Any lane spelling outside the closed set is rejected at BOTH levels - the block and the
+       curve. ``cuda``/``CANDLE``/``metal`` are the plausible near-misses.
+    """
+    manifest = _load_builtin_models_manifest()
+    schema = _load_schema(SCHEMA_PATH)
+    validator = jsonschema.Draft202012Validator(schema)
+    krea_index = next(
+        index
+        for index, model in enumerate(manifest["models"])
+        if model["id"] == "krea_2_turbo"
+    )
+    assert not list(validator.iter_errors(manifest)), "the shipped manifest must still validate"
+
+    def fit_of(candidate):
+        return candidate["models"][krea_index]["candle"]["turboFit"]
+
+    def curve_of(candidate):
+        return fit_of(candidate)["phaseCurvesByTier"]["q8"]["threeStage"]["decode"]
+
+    def mutated(mutate):
+        candidate = copy.deepcopy(manifest)
+        mutate(candidate)
+        return list(validator.iter_errors(candidate))
+
+    shipped_fit = fit_of(manifest)
+    assert shipped_fit["measurementLane"] == "candle", (
+        "every evidenceRecord under this block declares loadability.backend == candle, so the "
+        "block's own lane tag must say the same"
+    )
+    assert {record["loadability"]["backend"] for record in shipped_fit["evidenceRecords"]} == {
+        "candle"
+    }, "the tag must restate the records' own measured lane, not assert a new one"
+
+    assert mutated(
+        lambda candidate: fit_of(candidate).pop("measurementLane")
+    ), "a fit block with no measurement lane must be rejected"
+
+    assert not mutated(
+        lambda candidate: curve_of(candidate).update({"measurementLane": "candle"})
+    ), "tagging an individual curve must not require a schema bump"
+
+    for lane in ("cuda", "CANDLE", "metal", "", None, 1):
+        assert mutated(
+            lambda candidate, lane=lane: fit_of(candidate).update({"measurementLane": lane})
+        ), f"fit-block lane {lane!r} must be rejected by the schema"
+        assert mutated(
+            lambda candidate, lane=lane: curve_of(candidate).update({"measurementLane": lane})
+        ), f"per-curve lane {lane!r} must be rejected by the schema"
+
+    assert mutated(
+        lambda candidate: curve_of(candidate).update({"measurementlane": "candle"})
+    ), "a misspelled per-curve lane must be rejected, not silently ignored"
+
+
 def _tiers_declaring_a_temporal_curve(turbo_fit: dict) -> set:
     """Tiers whose committed phase curves carry ``perMpxFrameGb`` on any rung or phase."""
     declaring = set()

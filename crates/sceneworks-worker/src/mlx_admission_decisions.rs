@@ -204,6 +204,11 @@ fn bases_for(
             continue;
         };
         bases.push(MeasuredRungBasis {
+            // This artifact reconstructs the MLX lane's decisions, so its synthetic bases are MLX
+            // bases (sc-19056). Stamping the requesting lane keeps the R4 conjunct satisfied and
+            // the recorded decisions byte-identical; `foreign_identity` above remains the knob for
+            // exercising the calibration-drift arm, which is a DIFFERENT gate.
+            lane: gen_core::MemoryBackend::Mlx,
             rung: strategy_rung(strategy),
             parameters,
             engaged_composition: engaged,

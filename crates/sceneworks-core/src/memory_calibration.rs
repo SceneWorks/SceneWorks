@@ -271,12 +271,55 @@ pub enum EvidenceScope {
     Fixture,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+/// **The measurement lane a number was captured on** (epic 19048 R4, sc-19056).
+///
+/// Epic 19048's settled position is that the two backends converge on one prediction *mechanism*
+/// with **per-lane coefficients**: "measurements never transfer across lanes". This enum is the
+/// one type that says which lane a measurement belongs to, so every container that carries fitted
+/// or measured numbers can name its lane and every reader can refuse a foreign one.
+///
+/// It is deliberately ONE type rather than a per-container spelling. Before sc-19056 there were
+/// two identical `{Mlx, Candle}` enums in this crate alone — this one (as `Backend`, on calibration
+/// evidence records) and `video_memory_curves::VideoCurveBackend` — with the same `snake_case` wire
+/// form and no way for the compiler to notice if they drifted apart. Both names are retained as
+/// aliases so the wire format and every call site are unchanged; there is now exactly one
+/// definition.
+///
+/// `gen_core::MemoryBackend` is the RUNTIME lane (which engine is executing), and stays separate:
+/// this crate deliberately has no gen-core dependency, and the two answer different questions —
+/// "where was this measured" versus "where are we running". Admission is exactly the place those
+/// two must be compared rather than conflated, which is what the R4 readers do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Backend {
+pub enum MeasurementLane {
     Mlx,
     Candle,
 }
+
+impl MeasurementLane {
+    /// The canonical wire key. Identical to the serde representation — asserted, not assumed, by
+    /// `the_lane_key_and_the_wire_form_agree`.
+    pub const fn as_key(self) -> &'static str {
+        match self {
+            Self::Mlx => "mlx",
+            Self::Candle => "candle",
+        }
+    }
+
+    /// Parse a wire key. `None` for anything else, including a differently-cased or padded
+    /// spelling: an unrecognized lane is a foreign lane, and the whole point of R4 is that those
+    /// fail closed rather than being guessed at.
+    pub fn from_key(key: &str) -> Option<Self> {
+        match key {
+            "mlx" => Some(Self::Mlx),
+            "candle" => Some(Self::Candle),
+            _ => None,
+        }
+    }
+}
+
+/// The spelling calibration evidence records use for [`MeasurementLane`] (`EvidenceRecord.backend`).
+pub type Backend = MeasurementLane;
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -2469,11 +2512,49 @@ mod tests {
     use super::{
         load_bundle, load_packaged_bundle, Backend, BundleLoad, BundleLoadError,
         CalibrationBinding, EvidenceBundle, EvidenceQuery, EvidenceVerdict, Geometry, LoadShapeKey,
-        MlxAdmissionEnvelope, ObservedMemory, PredictedPeakBytes, RecordStatus, RequiredNullable,
-        SourceSessionKind, StaleBundleReason, StaleEvidenceReason, StrategyRung,
+        MeasurementLane, MlxAdmissionEnvelope, ObservedMemory, PredictedPeakBytes, RecordStatus,
+        RequiredNullable, SourceSessionKind, StaleBundleReason, StaleEvidenceReason, StrategyRung,
         MEMORY_CALIBRATION_ABI, MEMORY_CALIBRATION_SCHEMA_VERSION,
         PACKAGED_MEMORY_CALIBRATION_EVIDENCE,
     };
+
+    /// sc-19056: the lane key, the serde wire form and the parser are ONE thing.
+    ///
+    /// `as_key` is what a producer writes and what an error message quotes; the serde
+    /// representation is what a persisted record carries; `from_key` is what every reader parses
+    /// with. A test that only round-tripped `from_key(as_key(x))` would pass with all three drifted
+    /// to the same wrong spelling, so the serde form is compared against the key rather than
+    /// against a literal, and the closed set is pinned so a third variant cannot be added without
+    /// deciding what every existing reader does with it.
+    #[test]
+    fn the_lane_key_and_the_wire_form_agree() {
+        for lane in [MeasurementLane::Mlx, MeasurementLane::Candle] {
+            let wire = serde_json::to_value(lane).expect("a lane serializes");
+            assert_eq!(wire, json!(lane.as_key()));
+            assert_eq!(MeasurementLane::from_key(lane.as_key()), Some(lane));
+            assert_eq!(
+                serde_json::from_value::<MeasurementLane>(wire).expect("a lane deserializes"),
+                lane
+            );
+        }
+        assert_eq!(
+            MeasurementLane::from_key("mlx"),
+            Some(MeasurementLane::Mlx),
+            "the calibration bundle's own spelling must parse"
+        );
+        // Near-misses are foreign lanes, not lenient spellings of ours.
+        for unknown in ["Mlx", "CANDLE", "cuda", "metal", "candle ", ""] {
+            assert_eq!(
+                MeasurementLane::from_key(unknown),
+                None,
+                "{unknown} must not resolve to a lane"
+            );
+        }
+        // The historic spelling is the same type, so a record's backend and a curve's lane tag can
+        // never disagree by construction.
+        let record_backend: Backend = MeasurementLane::Candle;
+        assert_eq!(record_backend, MeasurementLane::Candle);
+    }
 
     fn phase(value: u64) -> Value {
         json!({
