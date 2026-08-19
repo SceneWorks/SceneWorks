@@ -1595,8 +1595,13 @@ function knownGaps({ curveLanes, routes }) {
         "where the manifest says false, and false for the six mage_flow ids where the manifest " +
         "says true). The candle bundle needs a CUDA toolchain to link, so no CPU lane can resolve " +
         "it; every evaluated baseline row therefore records the plan for BOTH values of the input " +
-        "rather than committing another bundle's answer. sc-19050, which extracts the shared " +
-        "prediction law, is where the capability becomes a first-class input.",
+        "rather than committing another bundle's answer. CORRECTED by sc-19050: the extracted " +
+        "mechanism does NOT consume this input and cannot resolve it. Staged residency reaches " +
+        "the shared mechanism as a CONTRACT-DECLARED rung, not as a gate-level boolean, so the " +
+        "capability stays an input of `candle_scalar_gate::load_plan` alone. It becomes a " +
+        "first-class input only when that route stops using the scalar gate (sc-19053/sc-19054), " +
+        "and OBSERVING it still requires a CUDA-linked bundle either way — a toolchain blocker, " +
+        "not a code one.",
       paths: [
         "crates/sceneworks-worker/src/image_jobs/base.rs",
         "crates/sceneworks-worker/src/mlx_fit_gate.rs",
@@ -1785,7 +1790,14 @@ export function buildBaseline(bodies, inventory, decisions) {
           "the route reaches a different gate whose inputs no CPU lane can produce; the row names " +
           "the gate and the missing input, and publishes no geometry or budget axis",
         declared:
-          "MLX â€” manifest floors and evidence-ladder reachability; sc-19050 upgrades these to evaluated",
+          "MLX â€” manifest floors and evidence-ladder reachability. sc-19050 verified these CANNOT " +
+          "become `evaluated` here: the synthesis floor is a pure function of " +
+          "`MemoryProviderContract::asset_facts`, and every weights-free contract builder in the " +
+          "pinned inference bundle injects ZERO asset facts by contract, while production fills " +
+          "them from real stats. No committed table backfills them. sc-19050 instead emits " +
+          "`docs/generated/mlx-estimate-synthesis-decisions.json` from the real mechanism over the " +
+          "shipped MLX contract universe, ENUMERATING the asset facts it cannot resolve — the same " +
+          "posture this baseline takes for `sequentialCapable`.",
       },
       sequentialCapability: decisions.sequentialCapability,
     },

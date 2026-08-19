@@ -194,7 +194,21 @@ mod candle_scalar_gate;
 // generator's baseline is BUILT FROM rather than independently re-derived.
 #[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
 mod candle_admission_decisions;
+// sc-19050's MLX-side decision baseline emitter/verifier — the other half of sc-19049's. Test-only:
+// it adds no production behavior. macOS-only because its corpus is the LINKED MLX bundle's
+// weights-free memory-contract surfaces, so the artifact would be a different document on a lane
+// that links a different bundle (or none). The committed artifact was emitted by the PRE-extraction
+// gate; this module re-derives it from `estimate_synthesis` and the empty diff is sc-19050's proof.
 mod fit_gate;
+#[cfg(all(test, target_os = "macos"))]
+mod mlx_admission_decisions;
+// The backend-generic two-basis estimate synthesis mechanism (sc-19050, epic 19048 R1): the fitted
+// extrapolation from identity-matched measured cells, the weights+headroom floor, the geometry axes,
+// and the one binding-phase argmax all three lanes ask. Cross-platform on purpose — it is the seam
+// the MLX image gate, the video gate and the candle floor arm all bind onto, and a per-platform copy
+// is precisely what R1 forbids. `MLX_LANE`/`CANDLE_LANE` carry each backend's margin and failure
+// posture as data rather than as a branch.
+mod estimate_synthesis;
 // Margin constants derived from repeat-capture variance in the calibration evidence (sc-18094,
 // epic 18093). Consumed by the stale-closure widening (sc-18095) and estimate-backed admission
 // (sc-18096/18097) follow-ups; pinned to `scripts/derive-ladder-margins.mjs` by

@@ -319,6 +319,8 @@ test("the fingerprint covers every declared source, and the artifact publishes t
     "engineCapabilitiesCandle",
     "engineCapabilitiesMlx",
     "engines",
+    // sc-19050: the extracted backend-generic estimate-synthesis mechanism.
+    "estimateSynthesis",
     "imageRouting",
     // sc-17774: `inferenceCompatibility` left with the flux2-only artifact audit; the per-provider
     // closure digests that replaced it are declared here instead, for every lane.
@@ -346,6 +348,7 @@ test("the fingerprint covers every declared source, and the artifact publishes t
   assert.deepEqual(Object.keys(RUST_SOURCE_PATHS).sort(), [
     "cargo",
     "engines",
+    "estimateSynthesis",
     "imageRouting",
     "instantId",
     "memoryStrategy",
