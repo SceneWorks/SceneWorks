@@ -3,7 +3,7 @@
   "generatedBy": "scripts/generate-candle-admission-inventory.mjs",
   "story": "sc-19049",
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:953aa55eb3f67b9eb2b79b2dbced6de2b3f659e53b01d9ad4e20f71e819f8d34",
+    "sceneWorksRevision": "source-tree:876ec4f097a5352e0b48301c6d3a979232634c78d0185dac549fed403390c5cd",
     "decisions": {
       "path": "docs/generated/candle-admission-decisions.json",
       "digest": "sha256:29867597c6ad4c952873c4f2ad6f61cf5958e24fc2f47a79b9d2473b298949dc",
@@ -57,7 +57,7 @@
     "resolutions": {
       "evaluated": "the output of the gate this route reaches, emitted by crates/sceneworks-worker/src/candle_admission_decisions.rs driving candle_scalar_gate.rs",
       "not_evaluated": "the route reaches a different gate whose inputs no CPU lane can produce; the row names the gate and the missing input, and publishes no geometry or budget axis",
-      "declared": "MLX â€” manifest floors and evidence-ladder reachability; sc-19050 upgrades these to evaluated"
+      "declared": "MLX â€” manifest floors and evidence-ladder reachability. sc-19050 verified these CANNOT become `evaluated` here: the synthesis floor is a pure function of `MemoryProviderContract::asset_facts`, and every weights-free contract builder in the pinned inference bundle injects ZERO asset facts by contract, while production fills them from real stats. No committed table backfills them. sc-19050 instead emits `docs/generated/mlx-estimate-synthesis-decisions.json` from the real mechanism over the shipped MLX contract universe, ENUMERATING the asset facts it cannot resolve — the same posture this baseline takes for `sequentialCapable`."
     },
     "sequentialCapability": {
       "productionInput": "crate::mlx_fit_gate::engine_supports_sequential(engine_id) (image_jobs/base.rs, sc-12130)",

@@ -3324,6 +3324,10 @@ export const SOURCE_PATHS = Object.freeze({
   videoRouteKreaRealtime: "crates/sceneworks-worker/src/video_jobs/krea_realtime.rs",
   videoRouteCandle: "crates/sceneworks-worker/src/video_jobs/candle.rs",
   mlxFitGate: "crates/sceneworks-worker/src/mlx_fit_gate.rs",
+  // sc-19050: the two-basis estimate synthesis moved OUT of `mlx_fit_gate.rs` into this module, so
+  // without this entry the prediction law the matrix's memory numbers depend on would stop rotating
+  // the fingerprint the day it was extracted — a hole created by the extraction itself.
+  estimateSynthesis: "crates/sceneworks-worker/src/estimate_synthesis.rs",
   memoryStrategy: "crates/sceneworks-worker/src/memory_strategy.rs",
   vramGate: "crates/sceneworks-worker/src/vram_gate.rs",
   instantId: "crates/sceneworks-worker/src/image_jobs/instantid.rs",

@@ -470,44 +470,6 @@ fn account_for_runtime_overlay_bytes(
     }
 }
 
-/// The smallest declared value for every numeric knob the engaged composition requires — the most
-/// deeply bounding parameters the provider publishes, which keeps the true runtime transient as
-/// far below the floor's unreduced peak as the provider allows (sc-18097, the candle mirror of the
-/// MLX gate's helper from sc-18096). `None` when a required knob has no declared range: such a
-/// selection cannot be validated, so no estimate candidate is synthesized for the rung.
-fn estimate_floor_parameters(
-    contract: &gen_core::MemoryProviderContract,
-    engaged: &[MemoryStrategy],
-) -> Option<gen_core::MemoryStrategyParameters> {
-    let smallest = |strategy: MemoryStrategy,
-                    pick: fn(&gen_core::MemoryParameterRanges) -> &Vec<u32>|
-     -> Option<Option<u32>> {
-        if !engaged.contains(&strategy) {
-            return Some(None);
-        }
-        pick(&contract.capability(strategy)?.parameters)
-            .iter()
-            .copied()
-            .min()
-            .map(Some)
-    };
-    Some(gen_core::MemoryStrategyParameters {
-        decode_tile_edge: smallest(MemoryStrategy::BoundedDecode, |ranges| {
-            &ranges.decode_tile_edges
-        })?,
-        decode_overlap: smallest(MemoryStrategy::BoundedDecode, |ranges| {
-            &ranges.decode_overlaps
-        })?,
-        attention_chunk_size: smallest(MemoryStrategy::BoundedAttention, |ranges| {
-            &ranges.attention_chunk_sizes
-        })?,
-        transformer_window_size: smallest(MemoryStrategy::BoundedTransformerResidency, |ranges| {
-            &ranges.transformer_window_sizes
-        })?,
-        transformer_window_component: None,
-    })
-}
-
 /// Synthesize an estimate-floor candidate for every implemented optimized rung (sc-18097, epic
 /// 18093 R1b — the candle mirror of `mlx_fit_gate::synthesize_estimate_ladder`'s floor arm).
 ///
@@ -567,7 +529,13 @@ fn synthesize_estimate_floors(
             continue;
         }
         let engaged = contract.engaged_composition(strategy);
-        let Some(parameters) = estimate_floor_parameters(contract, &engaged) else {
+        // sc-19050: the candle mirror of the MLX helper is gone — both lanes now read the ONE
+        // parameter law in `estimate_synthesis`, which is what epic 19048 R1 means by "defined once
+        // at the mechanism level". Byte-identical: the deleted copy was character-for-character the
+        // same function.
+        let Some(parameters) =
+            crate::estimate_synthesis::floor_smallest_parameters(contract, &engaged)
+        else {
             continue;
         };
         let selection = MemorySelection {

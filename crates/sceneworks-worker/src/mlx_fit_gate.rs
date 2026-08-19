@@ -38,13 +38,12 @@ use gen_core::StagedResidencyAvailability;
 use gen_core::{
     GenerationMemory, LoadShapeDeclarationResult, LoadSpec, MemoryBackend,
     MemoryBackendRealization, MemoryBudget, MemoryCacheState, MemoryConformanceState,
-    MemoryDecodeArtifactIdentity, MemoryDecodeGeometryPolicy, MemoryDecodePolicyQuery,
-    MemoryDecodeQualityDisposition, MemoryDecodeQualityFixture, MemoryDecodeQualityRuntimeIdentity,
-    MemoryEvidence, MemoryEvidenceDimensions, MemoryEvidenceKey, MemoryEvidenceVerdict,
-    MemoryGeometry, MemoryMode, MemoryNumericTier, MemoryOptimizationAuthority,
-    MemoryParityContract, MemoryParityResult, MemoryProviderContract, MemoryRunContext,
-    MemorySelection, MemoryStrategy, OffloadPolicy, PerComponentBytes, Precision, Quant,
-    TransformerComponent, WeightsSource,
+    MemoryDecodeArtifactIdentity, MemoryDecodeGeometryPolicy, MemoryDecodeQualityDisposition,
+    MemoryDecodeQualityFixture, MemoryDecodeQualityRuntimeIdentity, MemoryEvidence,
+    MemoryEvidenceDimensions, MemoryEvidenceKey, MemoryEvidenceVerdict, MemoryGeometry, MemoryMode,
+    MemoryNumericTier, MemoryOptimizationAuthority, MemoryParityContract, MemoryParityResult,
+    MemoryProviderContract, MemoryRunContext, MemorySelection, MemoryStrategy, OffloadPolicy,
+    PerComponentBytes, Precision, Quant, TransformerComponent, WeightsSource,
 };
 use sceneworks_core::memory_calibration::{
     Backend as CalibrationBackend, BundleLoad, CalibrationBinding, EvidenceBundle, EvidenceQuery,
@@ -54,14 +53,20 @@ use sceneworks_core::memory_calibration::{
 use serde::Deserialize;
 use serde_json::{Map as JsonObject, Value};
 
+#[cfg(test)]
+use gen_core::MemoryDecodePolicyQuery;
+
+use crate::estimate_synthesis::{
+    basis_geometry_is_scalable, evidence_strategy,
+    synthesize_estimate_ladder as synthesize_generic_estimate_ladder, DecodeQualityRequestDecision,
+    EstimateRequest, MeasuredRungBasis, SynthesizedEstimateLadder, INFERENCE_CONTRACT_REVISION,
+    MLX_LANE, REQUEST_EVIDENCE_REVISION,
+};
 use crate::fit_gate::resolve_offload;
 pub(crate) use crate::fit_gate::FitDecision;
 use crate::memory_strategy::memory_mode_from_mode_key;
 use crate::model_jobs::ResolvedArtifactProvenance;
 use crate::{WorkerError, WorkerResult};
-
-const REQUEST_EVIDENCE_REVISION: &str = "sc-15507-request-scope-v1";
-const INFERENCE_CONTRACT_REVISION: &str = "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82";
 /// The mage-flow calibration identity this file's request estimator is paired with.
 ///
 /// sc-20570: this used to be the SceneWorks literal `mage-flow-generation-peak-v1`, which no
@@ -1195,46 +1200,6 @@ struct VerifiedGeometryAlternative {
     engaged_composition: Vec<MemoryStrategy>,
 }
 
-/// One verified measured cell usable as the extrapolation basis for a fitted-curve estimate
-/// (sc-18096): same provider, tier, mode, and overlay as the request, artifact-current AND
-/// closure-current binding, but a DIFFERENT geometry — the cell the request itself could not be
-/// admitted on.
-///
-/// Closure-current is a deliberate restriction, not an oversight: `MLX_ESTIMATE_MARGIN` was
-/// derived to cover extrapolation error on top of same-closure re-capture variance
-/// (`crates/sceneworks-worker/src/ladder_margin_policy.rs`). A stale-closure record already carries
-/// its own corpus-derived drift allowance on the MEASURED path; stacking that drift under an
-/// extrapolation would spend the estimate margin twice, and no derivation covers the sum — so a
-/// stale record may keep serving its own cell behind the stale margin (sc-18095) but may not seed
-/// an extrapolated estimate.
-///
-/// Everything the extrapolation, the binding-phase constraint, and the loaded-provider identity
-/// gate need is captured here, so the synthesis step never re-reads the bundle.
-#[derive(Clone, Debug)]
-struct MeasuredRungBasis {
-    rung: StrategyRung,
-    parameters: gen_core::MemoryStrategyParameters,
-    engaged_composition: Vec<MemoryStrategy>,
-    load_shape: gen_core::LoadShape,
-    /// The calibration identity the basis binding was measured under. `synthesize_estimate_ladder`
-    /// requires it to equal the LOADED contract's identity: a provider whose estimator drifted
-    /// from the packaged records must not receive fitted candidates built from them (sc-18096
-    /// review). This gate cannot be left to the `carries_verified_claim` demotion, which only
-    /// fires when the route carries a verified claim (`Evidence` path or a named lower
-    /// alternative) — bases ride on legacy routes where neither may hold.
-    calibration_abi: u32,
-    calibration_fingerprint: String,
-    geometry: CalibrationGeometry,
-    /// Per-phase predicted peaks from the measured record, in canonical phase order
-    /// (conditioning, denoise, decode). The binding phase is their argmax.
-    conditioning_peak_bytes: u64,
-    denoise_peak_bytes: u64,
-    decode_peak_bytes: u64,
-    /// The measured admission envelope peak the extrapolated estimate scales.
-    envelope_peak_bytes: u64,
-    record_id: String,
-}
-
 #[derive(Clone, Debug)]
 struct AdmissionRoute {
     path: AdmissionPath,
@@ -1581,16 +1546,6 @@ fn stronger_fallback_reason(
         candidate
     } else {
         current
-    }
-}
-
-fn evidence_strategy(rung: StrategyRung) -> MemoryStrategy {
-    match rung {
-        StrategyRung::Resident => MemoryStrategy::Resident,
-        StrategyRung::StagedResidency => MemoryStrategy::StagedResidency,
-        StrategyRung::BoundedDecode => MemoryStrategy::BoundedDecode,
-        StrategyRung::BoundedAttention => MemoryStrategy::BoundedAttention,
-        StrategyRung::BoundedTransformerResidency => MemoryStrategy::BoundedTransformerResidency,
     }
 }
 
@@ -2017,6 +1972,11 @@ fn evidence_admission_route(
 /// own geometry. The per-phase peaks ride along so the binding-phase constraint can be applied at
 /// synthesis time. See [`MeasuredRungBasis`] for why a stale-closure record is not a legitimate
 /// extrapolation basis even though it remains admissible for its own cell.
+///
+/// The MLX BINDING TABLE walk stays here — `MlxCalibrationBinding` is this lane's own type — while
+/// the two things that are mechanism law both live in [`crate::estimate_synthesis`]: which geometry
+/// axes an extrapolation may span ([`basis_geometry_is_scalable`]) and the shape of a basis
+/// ([`MeasuredRungBasis`]).
 fn collect_estimate_bases(
     bundle: &EvidenceBundle,
     plan: &MlxRequestPlan,
@@ -2032,11 +1992,7 @@ fn collect_estimate_bases(
             binding.query.inference_closure_digest == expected_closure_digest
                 && binding.mode == mode_key
                 && binding.overlay == overlay
-                && binding.geometry != request_cell_geometry
-                // A phase curve extrapolates over output AREA; a different batch or frame count is
-                // a different workload shape, not a scalable geometry.
-                && binding.geometry.batch == request_cell_geometry.batch
-                && binding.geometry.frames == request_cell_geometry.frames
+                && basis_geometry_is_scalable(binding.geometry, request_cell_geometry)
         })
         .filter_map(|binding| {
             let query = EvidenceQuery {
@@ -2085,473 +2041,17 @@ fn collect_estimate_bases(
         .collect()
 }
 
-/// One estimate-backed candidate synthesized for an implemented-but-unmeasured rung (sc-18096).
-#[derive(Clone, Debug)]
-struct SynthesizedEstimate {
-    selection: MemorySelection,
-    evidence: MemoryEvidence,
-    basis: crate::memory_strategy::CandidateBasis,
-    decode_quality: DecodeQualityRequestDecision,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum DecodeQualityRequestDecision {
-    NotDeclared,
-    NotEngaged {
-        strategy: MemoryStrategy,
-    },
-    Admitted {
-        strategy: MemoryStrategy,
-        tile_edge: u32,
-        overlap: u32,
-        evidence_sha256: String,
-    },
-    Refused {
-        strategy: MemoryStrategy,
-        tile_edge: Option<u32>,
-        overlap: Option<u32>,
-        evidence_sha256: Option<String>,
-        reason: String,
-    },
-    Unmeasured {
-        strategy: MemoryStrategy,
-        reason: String,
-    },
-}
-
-#[derive(Clone, Debug)]
-struct EstimateParameterCandidate {
-    parameters: gen_core::MemoryStrategyParameters,
-    decode_quality: DecodeQualityRequestDecision,
-}
-
-#[derive(Default)]
-struct SynthesizedEstimateLadder {
-    estimates: Vec<SynthesizedEstimate>,
-    decode_quality_decisions: Vec<DecodeQualityRequestDecision>,
-}
-
-const fn strategy_rung(strategy: MemoryStrategy) -> StrategyRung {
-    match strategy {
-        MemoryStrategy::Resident => StrategyRung::Resident,
-        MemoryStrategy::StagedResidency => StrategyRung::StagedResidency,
-        MemoryStrategy::BoundedDecode => StrategyRung::BoundedDecode,
-        MemoryStrategy::BoundedAttention => StrategyRung::BoundedAttention,
-        MemoryStrategy::BoundedTransformerResidency => StrategyRung::BoundedTransformerResidency,
-    }
-}
-
-/// The canonical measurement phases, in ladder order, used for the binding-phase comparison.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum EstimatePhase {
-    Conditioning,
-    Denoise,
-    Decode,
-}
-
-/// The phase carrying the peak of a `(conditioning, denoise, decode)` triple. Ties resolve to the
-/// LATER phase deterministically; the comparison below only ever contrasts two triples scaled by
-/// the same per-phase rule, so tie handling cannot manufacture a flip on its own.
-fn binding_phase(conditioning: u64, denoise: u64, decode: u64) -> EstimatePhase {
-    let mut phase = EstimatePhase::Conditioning;
-    let mut peak = conditioning;
-    if denoise >= peak {
-        phase = EstimatePhase::Denoise;
-        peak = denoise;
-    }
-    if decode >= peak {
-        phase = EstimatePhase::Decode;
-    }
-    phase
-}
-
-/// Fabricated evidence for a synthesized estimate candidate, following the
-/// [`generic_mlx_shared_observation`] / [`resident_evidence`] pattern: `ImplementedUnverified`
-/// conformance, no observed peak, parity not run — the record claims exactly what an estimate can
-/// claim and nothing more. The selector's estimate-scoped eligibility wrap (sc-18096,
-/// `memory_strategy::candidate_exclusion`) is what admits it.
-/// `backend` is a parameter rather than a constant because sc-18814 routes the VIDEO lane through
-/// this same shape on both backends; every image caller here passes [`MemoryBackend::Mlx`], which
-/// is what the field was hardcoded to before.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn estimate_evidence(
-    contract: &MemoryProviderContract,
-    backend: gen_core::MemoryBackend,
-    tier: MemoryNumericTier,
-    mode: &str,
-    overlay: Option<&str>,
-    geometry: MemoryGeometry,
-    selection: MemorySelection,
-    predicted_peak_bytes: u64,
-    calibration_fingerprint: Option<&str>,
-) -> MemoryEvidence {
-    MemoryEvidence {
-        key: MemoryEvidenceKey {
-            resolved_route: contract.provider_id.clone(),
-            backend,
-            tier,
-            load_shape: contract.load_shape,
-            mode: memory_mode_from_mode_key(mode),
-            overlay: overlay.map(str::to_owned),
-            geometry,
-            strategy: selection.strategy,
-            engaged_composition: contract.engaged_composition_for_selection(&selection),
-            parameters: selection.parameters,
-        },
-        conformance: MemoryConformanceState::ImplementedUnverified,
-        dimensions: MemoryEvidenceDimensions {
-            static_implementation: MemoryEvidenceVerdict::Satisfied,
-            declared_calibration: MemoryEvidenceVerdict::Missing,
-            historical_verification: MemoryEvidenceVerdict::Missing,
-            current_environment_verification: MemoryEvidenceVerdict::Missing,
-            canonical_route_loadability: MemoryEvidenceVerdict::Unverified,
-            exact_strategy_parameters: MemoryEvidenceVerdict::Satisfied,
-        },
-        calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
-        calibration_fingerprint: calibration_fingerprint.unwrap_or_default().to_owned(),
-        sceneworks_revision: REQUEST_EVIDENCE_REVISION.to_owned(),
-        inference_revision: INFERENCE_CONTRACT_REVISION.to_owned(),
-        harness_version: String::new(),
-        predicted_peak_bytes,
-        observed_peak_bytes: None,
-        parity: MemoryParityContract::Exact,
-        parity_result: MemoryParityResult::NotRun,
-    }
-}
-
-/// The floor's per-rung WEIGHTS term, derived only from the provider contract's own declarations
-/// (sc-18096). Nothing here is a tuned coefficient:
+/// **The MLX lane's binder onto the generic mechanism** (sc-19050, epic 19048 R1).
 ///
-/// * `StagedResidency` engaged ⇒ the co-residency drop the rung exists for: the resident working
-///   set is the larger of the conditioning stack and everything else, exactly the
-///   `staged_weights_gb` split the load-time gate has always used.
-/// * `BoundedTransformerResidency` engaged ⇒ the transformer's declared bytes leave the resident
-///   floor: the rung windows them, and the window slice plus scratch is carried by the headroom
-///   term and the estimate margin, not by a guessed window fraction.
-/// * Rungs 2 and 3 bound TRANSIENTS, not weights, so they take no weights reduction here — and
-///   deliberately no transient reduction either, because no measured basis for one exists on an
-///   unmeasured cell. Their floor equals rung 1's, which keeps them selectable without ever
-///   promising an unmeasured saving.
-/// * Auxiliary components (control branches, adapter stacks, …) stay resident unless the contract
-///   itself declares them `bounded_by` a rung the composition engages.
-pub(crate) fn estimate_floor_weights_bytes(
-    contract: &MemoryProviderContract,
-    engaged: &[MemoryStrategy],
-) -> u64 {
-    let facts = contract.asset_facts;
-    let conditioning = facts.conditioning_bytes;
-    let mut heavy = facts.base_bytes.saturating_sub(conditioning);
-    if engaged.contains(&MemoryStrategy::BoundedTransformerResidency) {
-        heavy = heavy.saturating_sub(facts.transformer_bytes);
-    }
-    let base = if engaged.contains(&MemoryStrategy::StagedResidency) {
-        conditioning.max(heavy)
-    } else {
-        conditioning.saturating_add(heavy)
-    };
-    let auxiliary = contract
-        .resident_components()
-        .iter()
-        .filter(|component| component.kind.is_auxiliary())
-        .filter(|component| match component.bounded_by {
-            Some(bounding) => !engaged.contains(&bounding),
-            None => true,
-        })
-        .fold(0_u64, |total, component| {
-            total.saturating_add(component.resident_bytes)
-        });
-    base.saturating_add(auxiliary)
-}
-
-/// The smallest declared value for every numeric knob the engaged composition requires — the most
-/// deeply bounding parameters the provider publishes, which keeps the true runtime transient as
-/// far below the floor's unreduced headroom charge as the provider allows. `None` when a required
-/// knob has no declared range: such a selection cannot be validated, so no candidate is
-/// synthesized for the rung.
-/// The smallest declared value for every numeric knob the engaged composition requires — the most
-/// deeply bounding parameters the provider publishes, which keeps the true runtime transient as
-/// far below the floor's unreduced headroom charge as the provider allows. `None` when a required
-/// knob has no declared range: such a selection cannot be validated, so no candidate is
-/// synthesized for the rung. This is the video-lane floor shape (`video_admission`); the image
-/// lane's per-candidate builder below carries decode-quality decisions the video lane has no use
-/// for.
-pub(crate) fn estimate_floor_smallest_parameters(
-    contract: &MemoryProviderContract,
-    engaged: &[MemoryStrategy],
-) -> Option<gen_core::MemoryStrategyParameters> {
-    let smallest = |strategy: MemoryStrategy,
-                    pick: fn(&gen_core::MemoryParameterRanges) -> &Vec<u32>|
-     -> Option<Option<u32>> {
-        if !engaged.contains(&strategy) {
-            return Some(None);
-        }
-        pick(&contract.capability(strategy)?.parameters)
-            .iter()
-            .copied()
-            .min()
-            .map(Some)
-    };
-    Some(gen_core::MemoryStrategyParameters {
-        decode_tile_edge: smallest(MemoryStrategy::BoundedDecode, |ranges| {
-            &ranges.decode_tile_edges
-        })?,
-        decode_overlap: smallest(MemoryStrategy::BoundedDecode, |ranges| {
-            &ranges.decode_overlaps
-        })?,
-        attention_chunk_size: smallest(MemoryStrategy::BoundedAttention, |ranges| {
-            &ranges.attention_chunk_sizes
-        })?,
-        transformer_window_size: smallest(MemoryStrategy::BoundedTransformerResidency, |ranges| {
-            &ranges.transformer_window_sizes
-        })?,
-        transformer_window_component: None,
-    })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn estimate_floor_parameters(
-    contract: &MemoryProviderContract,
-    engaged: &[MemoryStrategy],
-    strategy: MemoryStrategy,
-    tier: MemoryNumericTier,
-    mode_key: &str,
-    overlay: Option<&str>,
-    geometry: MemoryGeometry,
-    use_pid: bool,
-) -> (
-    Vec<EstimateParameterCandidate>,
-    Vec<DecodeQualityRequestDecision>,
-) {
-    let smallest = |strategy: MemoryStrategy,
-                    pick: fn(&gen_core::MemoryParameterRanges) -> &Vec<u32>|
-     -> Option<Option<u32>> {
-        if !engaged.contains(&strategy) {
-            return Some(None);
-        }
-        pick(&contract.capability(strategy)?.parameters)
-            .iter()
-            .copied()
-            .min()
-            .map(Some)
-    };
-    let Some(attention_chunk_size) = smallest(MemoryStrategy::BoundedAttention, |ranges| {
-        &ranges.attention_chunk_sizes
-    }) else {
-        return (
-            Vec::new(),
-            vec![DecodeQualityRequestDecision::Refused {
-                strategy,
-                tile_edge: None,
-                overlap: None,
-                evidence_sha256: None,
-                reason: "required attention chunk range is empty".to_owned(),
-            }],
-        );
-    };
-    let Some(transformer_window_size) =
-        smallest(MemoryStrategy::BoundedTransformerResidency, |ranges| {
-            &ranges.transformer_window_sizes
-        })
-    else {
-        return (
-            Vec::new(),
-            vec![DecodeQualityRequestDecision::Refused {
-                strategy,
-                tile_edge: None,
-                overlap: None,
-                evidence_sha256: None,
-                reason: "required transformer window range is empty".to_owned(),
-            }],
-        );
-    };
-    let base_parameters = gen_core::MemoryStrategyParameters {
-        decode_tile_edge: None,
-        decode_overlap: None,
-        attention_chunk_size,
-        transformer_window_size,
-        transformer_window_component: None,
-    };
-    if !engaged.contains(&MemoryStrategy::BoundedDecode) {
-        return (
-            vec![EstimateParameterCandidate {
-                parameters: base_parameters,
-                decode_quality: DecodeQualityRequestDecision::NotEngaged { strategy },
-            }],
-            Vec::new(),
-        );
-    }
-    let Some(decode) = contract.capability(MemoryStrategy::BoundedDecode) else {
-        return (
-            Vec::new(),
-            vec![DecodeQualityRequestDecision::Refused {
-                strategy,
-                tile_edge: None,
-                overlap: None,
-                evidence_sha256: None,
-                reason: "bounded decode capability is absent".to_owned(),
-            }],
-        );
-    };
-    if decode.parameters.decode_geometry_policies.is_empty() {
-        if contract.decode_geometry_policy_authoritative {
-            let refusal = DecodeQualityRequestDecision::Refused {
-                strategy,
-                tile_edge: None,
-                overlap: None,
-                evidence_sha256: None,
-                reason: "bounded decode has a declared quality scope but no applicable row for the loaded tier/load shape"
-                    .to_owned(),
-            };
-            // The decode rung itself has no exact authority. A higher independent rung retains its
-            // own estimate with decode omitted, so request-selection-aware engagement cannot
-            // accidentally resurrect the route-blind tile domain.
-            let candidates = (strategy != MemoryStrategy::BoundedDecode)
-                .then_some(EstimateParameterCandidate {
-                    parameters: base_parameters,
-                    decode_quality: DecodeQualityRequestDecision::NotEngaged { strategy },
-                })
-                .into_iter()
-                .collect();
-            return (candidates, vec![refusal]);
-        }
-        let pair = if let Some(routes) = &contract.pid_decode_routes {
-            let route = if use_pid { &routes.pid } else { &routes.native };
-            route
-                .tile_edges
-                .iter()
-                .copied()
-                .min()
-                .zip(Some(route.tile_overlap))
-        } else {
-            decode
-                .parameters
-                .decode_tile_edges
-                .iter()
-                .copied()
-                .min()
-                .zip(decode.parameters.decode_overlaps.iter().copied().min())
-        };
-        let Some((tile_edge, overlap)) = pair else {
-            return (
-                Vec::new(),
-                vec![DecodeQualityRequestDecision::Refused {
-                    strategy,
-                    tile_edge: None,
-                    overlap: None,
-                    evidence_sha256: None,
-                    reason: "legacy bounded decode has no complete edge/overlap pair".to_owned(),
-                }],
-            );
-        };
-        let mut parameters = base_parameters;
-        parameters.decode_tile_edge = Some(tile_edge);
-        parameters.decode_overlap = Some(overlap);
-        return (
-            vec![EstimateParameterCandidate {
-                parameters,
-                decode_quality: DecodeQualityRequestDecision::NotDeclared,
-            }],
-            Vec::new(),
-        );
-    }
-
-    let query = MemoryDecodePolicyQuery {
-        tier,
-        load_shape: contract.load_shape,
-        mode_key,
-        overlay,
-        geometry,
-        use_pid,
-    };
-    let rows = match contract.decode_geometry_policies_for_request(query) {
-        Ok(rows) => rows,
-        Err(error) => {
-            return (
-                Vec::new(),
-                vec![DecodeQualityRequestDecision::Refused {
-                    strategy,
-                    tile_edge: None,
-                    overlap: None,
-                    evidence_sha256: None,
-                    reason: error.to_string(),
-                }],
-            )
-        }
-    };
-    let mut rows = rows;
-    rows.sort_by_key(|policy| (policy.tile_edge, policy.overlap));
-    let mut candidates = Vec::new();
-    let mut decisions = Vec::new();
-    for policy in rows {
-        match &policy.disposition {
-            MemoryDecodeQualityDisposition::Admitted => {
-                let mut parameters = base_parameters;
-                parameters.decode_tile_edge = Some(policy.tile_edge);
-                parameters.decode_overlap = Some(policy.overlap);
-                candidates.push(EstimateParameterCandidate {
-                    parameters,
-                    decode_quality: DecodeQualityRequestDecision::Admitted {
-                        strategy,
-                        tile_edge: policy.tile_edge,
-                        overlap: policy.overlap,
-                        evidence_sha256: policy.production_evidence_sha256.clone(),
-                    },
-                });
-            }
-            MemoryDecodeQualityDisposition::Refused { reason } => {
-                decisions.push(DecodeQualityRequestDecision::Refused {
-                    strategy,
-                    tile_edge: Some(policy.tile_edge),
-                    overlap: Some(policy.overlap),
-                    evidence_sha256: Some(policy.production_evidence_sha256.clone()),
-                    reason: reason.clone(),
-                });
-            }
-        }
-    }
-    if candidates.is_empty() {
-        if decisions.is_empty() {
-            decisions.push(DecodeQualityRequestDecision::Unmeasured {
-                strategy,
-                reason: format!(
-                    "no exact production-latent row for {}x{} load_shape={:?} mode={} overlay={overlay:?} use_pid={use_pid}",
-                    geometry.width, geometry.height, contract.load_shape, mode_key,
-                ),
-            });
-        }
-        // Bounded decode itself cannot exist without an admitted pair. A higher independent rung
-        // keeps its own parameters and omits decode so selection-aware engagement excludes rung 2.
-        if strategy != MemoryStrategy::BoundedDecode {
-            candidates.push(EstimateParameterCandidate {
-                parameters: base_parameters,
-                decode_quality: DecodeQualityRequestDecision::NotEngaged { strategy },
-            });
-        }
-    }
-    (candidates, decisions)
-}
-
-/// Synthesize estimate-backed candidates for every optimized rung the provider contract marks
-/// `Implemented` (sc-18096, epic 18093 R1a). Called only on legacy admission routes — a covered
-/// cell is authorized by its exact measured ladder and gets no synthetic sibling.
+/// Everything this function does is supply MLX's own parameters —
+/// [`crate::estimate_synthesis::MLX_LANE`] (backend, tracing label, the derived MLX estimate margin,
+/// and the fatal-abort failure posture that is *why* that margin is the wider one) and MLX's
+/// headroom law ([`MlxRequestPlan::generic_headroom_bytes`], the exact same headroom convention the
+/// resident baseline charges, so only the weights term differs per rung) — and then hand off. The
+/// prediction law itself lives in [`crate::estimate_synthesis::synthesize_estimate_ladder`].
 ///
-/// Peak source per rung, in preference order:
-///
-/// 1. **Fitted curve** — a verified measured cell of the same provider/tier/mode/overlay at a
-///    different geometry ([`MeasuredRungBasis`]), extrapolated over output area: the conditioning
-///    peak is area-flat (text encoding does not grow with the render target) while denoise,
-///    decode, and the admission envelope scale by the area ratio, floored at 1.0 so a
-///    smaller-than-measured request never predicts below the measurement. Gated by
-///    [`crate::ladder_margin_policy::ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE`]: if the
-///    extrapolated triple's binding phase differs from the measured cell's, the fitted candidate
-///    is NOT emitted (no per-phase variance re-derivation exists) and the rung falls back to the
-///    floor, whose no-measured-basis path the constraint's scope sentence explicitly exempts.
-/// 2. **Weights + headroom floor** — [`estimate_floor_weights_bytes`] plus the exact same
-///    fixed-reserve + area-scaled headroom the resident baseline charges
-///    ([`MlxRequestPlan::generic_headroom_bytes`]).
-///
-/// The MLX-conservative estimate margin is NOT applied here — the selector owns margin widening
-/// (`memory_strategy::select_strategy`), exactly as it owns the sc-18095 stale widening.
+/// Called only on legacy admission routes: a covered cell is authorized by its exact measured
+/// ladder and gets no synthetic sibling.
 #[allow(clippy::too_many_arguments)]
 fn synthesize_estimate_ladder(
     contract: &MemoryProviderContract,
@@ -2563,202 +2063,20 @@ fn synthesize_estimate_ladder(
     calibration_fingerprint: Option<&str>,
     bases: &[MeasuredRungBasis],
 ) -> SynthesizedEstimateLadder {
-    use crate::ladder_margin_policy::ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE;
-    use crate::memory_strategy::CandidateBasis;
-
-    let request_area = f64::from(geometry.width) * f64::from(geometry.height);
-    let mut ladder = SynthesizedEstimateLadder::default();
-    for strategy in MemoryStrategy::ALL {
-        if strategy == MemoryStrategy::Resident {
-            // The resident baseline candidate already exists on every legacy route.
-            continue;
-        }
-        if !matches!(
-            contract.capability(strategy).map(|cap| &cap.support),
-            Some(gen_core::MemoryStrategySupport::Implemented)
-        ) {
-            continue;
-        }
-        let declared_engaged = contract.engaged_composition(strategy);
-        let (parameter_candidates, decisions) = estimate_floor_parameters(
+    synthesize_generic_estimate_ladder(
+        &EstimateRequest {
+            lane: MLX_LANE,
             contract,
-            &declared_engaged,
-            strategy,
-            plan.tier,
+            tier: plan.tier,
             mode_key,
             overlay,
             geometry,
             use_pid,
-        );
-        ladder.decode_quality_decisions.extend(decisions);
-
-        for parameter_candidate in parameter_candidates {
-            let floor_selection = MemorySelection {
-                strategy,
-                parameters: parameter_candidate.parameters,
-                tier: plan.tier,
-            };
-            let engaged = contract.engaged_composition_for_selection(&floor_selection);
-
-            // 1. Fitted-curve basis: the closest measured geometry below the request, else the
-            //    smallest above it (whose clamp-at-1.0 scaling degenerates to the measurement itself).
-            //    The basis must have been measured under the LOADED provider's exact calibration
-            //    identity: a drifted estimator invalidates the measured numbers as an extrapolation
-            //    seed, and this is the only gate on legacy routes (the `carries_verified_claim`
-            //    demotion never fires without a verified claim on the route). A contract with no
-            //    calibration identity gets no fitted candidates at all — fail closed.
-            //
-            //    The load-shape conjunct compares CONTRACT shape only — deliberately, and unlike the
-            //    Evidence-path filter's measured-candidate leg, which also compares `identity
-            //    .load_shape` (sc-18251). An estimate-basis candidate is graded downstream by the
-            //    estimate wrap of `optimized_eligibility`, which short-circuits at the conformance
-            //    gate's `Unverified` BEFORE the identity load-shape comparison ever runs, so the
-            //    identity's shape is never consulted for an estimate. Adding the conjunct here would
-            //    be stricter than the gate this filter anticipates.
-            let fitted = bases
-                .iter()
-                .filter(|basis| {
-                    basis.rung == strategy_rung(strategy)
-                        && basis.load_shape == contract.load_shape
-                        && basis.engaged_composition == engaged
-                        && contract.calibration.as_ref().is_some_and(|identity| {
-                            identity.abi == basis.calibration_abi
-                                && identity.fingerprint == basis.calibration_fingerprint
-                        })
-                })
-                .max_by_key(|basis| {
-                    let area = u64::from(basis.geometry.width) * u64::from(basis.geometry.height);
-                    let below = area as f64 <= request_area;
-                    // Rank every below-request basis above every above-request one; among "below" take
-                    // the largest area, among "above" the smallest.
-                    (below, if below { area as i128 } else { -(area as i128) })
-                })
-                .and_then(|basis| {
-                    let mut parameters = basis.parameters;
-                    parameters.decode_tile_edge = parameter_candidate.parameters.decode_tile_edge;
-                    parameters.decode_overlap = parameter_candidate.parameters.decode_overlap;
-                    let selection = MemorySelection {
-                        strategy,
-                        parameters,
-                        tier: plan.tier,
-                    };
-                    if contract.validate_selection(&selection).is_err() {
-                        return None;
-                    }
-                    let measured_area =
-                        f64::from(basis.geometry.width) * f64::from(basis.geometry.height);
-                    let scale = (request_area / measured_area).max(1.0);
-                    let scaled = |bytes: u64| {
-                        (bytes as f64 * scale).ceil().clamp(0.0, u64::MAX as f64) as u64
-                    };
-                    let measured_binding = binding_phase(
-                        basis.conditioning_peak_bytes,
-                        basis.denoise_peak_bytes,
-                        basis.decode_peak_bytes,
-                    );
-                    let extrapolated_binding = binding_phase(
-                        basis.conditioning_peak_bytes,
-                        scaled(basis.denoise_peak_bytes),
-                        scaled(basis.decode_peak_bytes),
-                    );
-                    if ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE
-                        && extrapolated_binding != measured_binding
-                    {
-                        // The pinned sc-18094 constraint: the corpus shows a 17.14% per-phase
-                        // re-capture spread that no margin in the policy absorbs, so an extrapolation
-                        // that moves the request peak onto a different phase than the one measured is
-                        // refused rather than margined. The rung falls back to the floor path below.
-                        tracing::info!(
-                            route = contract.provider_id,
-                            backend = "mlx",
-                            ?strategy,
-                            basis_record = basis.record_id,
-                            measured_binding_phase = ?measured_binding,
-                            extrapolated_binding_phase = ?extrapolated_binding,
-                            "fitted-curve estimate rejected: extrapolation flips the binding phase \
-                             (ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE)"
-                        );
-                        return None;
-                    }
-                    let predicted_peak_bytes = scaled(basis.envelope_peak_bytes);
-                    tracing::info!(
-                        route = contract.provider_id,
-                        backend = "mlx",
-                        ?strategy,
-                        basis_record = basis.record_id,
-                        basis_geometry =
-                            format!("{}x{}", basis.geometry.width, basis.geometry.height),
-                        raw_peak_bytes = predicted_peak_bytes,
-                        area_scale = scale,
-                        "synthesized fitted-curve estimate candidate from a measured cell"
-                    );
-                    Some(SynthesizedEstimate {
-                        selection,
-                        evidence: estimate_evidence(
-                            contract,
-                            gen_core::MemoryBackend::Mlx,
-                            plan.tier,
-                            mode_key,
-                            overlay,
-                            geometry,
-                            selection,
-                            predicted_peak_bytes,
-                            calibration_fingerprint,
-                        ),
-                        basis: CandidateBasis::EstimateFittedCurve,
-                        decode_quality: parameter_candidate.decode_quality.clone(),
-                    })
-                });
-            if let Some(candidate) = fitted {
-                ladder
-                    .decode_quality_decisions
-                    .push(candidate.decode_quality.clone());
-                ladder.estimates.push(candidate);
-                continue;
-            }
-
-            // 2. Weights + headroom floor — no measured basis, so the binding-phase constraint does
-            //    not gate it (scope sentence on the constraint's doc).
-            let selection = MemorySelection {
-                strategy,
-                parameters: parameter_candidate.parameters,
-                tier: plan.tier,
-            };
-            if contract.validate_selection(&selection).is_err() {
-                continue;
-            }
-            let predicted_peak_bytes = estimate_floor_weights_bytes(contract, &engaged)
-                .saturating_add(plan.generic_headroom_bytes(geometry));
-            tracing::info!(
-                route = contract.provider_id,
-                backend = "mlx",
-                ?strategy,
-                raw_peak_bytes = predicted_peak_bytes,
-                "synthesized weights+headroom floor estimate candidate"
-            );
-            let candidate = SynthesizedEstimate {
-                selection,
-                evidence: estimate_evidence(
-                    contract,
-                    gen_core::MemoryBackend::Mlx,
-                    plan.tier,
-                    mode_key,
-                    overlay,
-                    geometry,
-                    selection,
-                    predicted_peak_bytes,
-                    calibration_fingerprint,
-                ),
-                basis: CandidateBasis::EstimateFloor,
-                decode_quality: parameter_candidate.decode_quality,
-            };
-            ladder
-                .decode_quality_decisions
-                .push(candidate.decode_quality.clone());
-            ladder.estimates.push(candidate);
-        }
-    }
-    ladder
+            calibration_fingerprint,
+            headroom_bytes: plan.generic_headroom_bytes(geometry),
+        },
+        bases,
+    )
 }
 
 /// Select the largest strictly lower, same-aspect geometry backed by a current exact record that
@@ -8241,6 +7559,73 @@ mod tests {
             ),
         ];
         (bundle, plan)
+    }
+
+    /// The MLX binding walk asks the MECHANISM which geometries an extrapolation may span
+    /// (sc-19050, epic 19048 R1) — it does not carry its own copy of the axis law.
+    ///
+    /// Written because the delegation is otherwise invisible: on today's image lane every binding
+    /// and every request is `batch = 1, frames = 1`, so replacing
+    /// `basis_geometry_is_scalable(binding, request)` with a bare `binding != request` survives the
+    /// entire suite. It is the sc-18829 FRAMES axis and the batch axis the weaker expression drops,
+    /// and this is where they are held.
+    #[test]
+    fn the_basis_walk_applies_the_shared_scalable_axis_law() {
+        let (bundle, plan) = fixture_ladder();
+        let MlxCalibrationConfig::Valid(calibration) = &plan.calibration else {
+            panic!("fixture calibration");
+        };
+        let matches: Vec<&MlxCalibrationBinding> = calibration.bindings.iter().collect();
+        let digest = fixture_closure_digest();
+        let collect = |geometry: CalibrationGeometry| {
+            collect_estimate_bases(
+                &bundle,
+                &plan,
+                &matches,
+                "text_to_image",
+                "none",
+                geometry,
+                &digest,
+            )
+        };
+        // Same batch and frames, larger area: the 1024 squared cells ARE legitimate bases.
+        let scalable = CalibrationGeometry {
+            width: 2048,
+            height: 2048,
+            batch: 1,
+            frames: 1,
+        };
+        assert!(
+            !collect(scalable).is_empty(),
+            "the scalable-axis fixture produced no basis, so the off-axis assertions below would \
+             be vacuous"
+        );
+        // A different frame count or batch is a different workload SHAPE, never a scalable
+        // geometry — no per-axis term has been fitted for either.
+        for off_axis in [
+            CalibrationGeometry {
+                frames: 2,
+                ..scalable
+            },
+            CalibrationGeometry {
+                batch: 2,
+                ..scalable
+            },
+        ] {
+            assert!(
+                collect(off_axis).is_empty(),
+                "{off_axis:?} differs from the measured cells on an axis the regressor does not \
+                 span, so it must not seed a fitted estimate"
+            );
+        }
+        // And the request's own cell is exact evidence, not a basis.
+        assert!(collect(CalibrationGeometry {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            frames: 1,
+        })
+        .is_empty());
     }
 
     #[test]

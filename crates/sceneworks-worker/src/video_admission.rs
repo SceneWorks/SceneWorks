@@ -17,7 +17,7 @@
 //! its three residual-bounded affine cross laws
 //! (`fixed + perMpx*mpx + perMpxFrame*mpx*frames + maxResidual`). Every curve mismatch —
 //! including geometry outside the measured area-by-voxel hull — falls back to the established
-//! [`crate::mlx_fit_gate::estimate_floor_weights_bytes`] plus activation-headroom lower bound,
+//! [`crate::estimate_synthesis::floor_weights_bytes`] plus activation-headroom lower bound,
 //! strengthened when the selected provider exports a larger decode working-set profile. Requested
 //! rows key `gen_core::MemoryGeometry` to the real clip length; synthetic cap rows key it to the cap
 //! they evaluate. The eventual provider run context still receives the actual request geometry,
@@ -25,8 +25,8 @@
 
 use gen_core::tiling::VideoDecodeMemoryProfile;
 use gen_core::{
-    MemoryBackend, MemoryBudget, MemoryCacheState, MemoryGeometry, MemoryNumericTier,
-    MemoryProviderContract, MemoryRunContext, MemorySelection, MemoryStrategy, OffloadPolicy,
+    MemoryBudget, MemoryCacheState, MemoryGeometry, MemoryNumericTier, MemoryProviderContract,
+    MemoryRunContext, MemorySelection, MemoryStrategy, OffloadPolicy,
 };
 use sceneworks_core::memory_calibration::StrategyRung;
 use sceneworks_core::video_memory_curves::{
@@ -277,13 +277,18 @@ impl<'a> LadderVideoSelector<'a> {
         selector
     }
 
-    /// The gen-core backend this lane grades under. Exhaustive on [`VideoLane`] so a new lane
-    /// cannot compile without choosing one — the same posture
-    /// `memory_strategy::stale_measured_margin` takes on [`MemoryBackend`].
-    pub(crate) const fn backend(&self) -> MemoryBackend {
+    /// The estimate lane this video request synthesizes under (sc-19050).
+    ///
+    /// Exhaustive on [`VideoLane`] so a new lane cannot compile without choosing one — the same
+    /// posture `memory_strategy::stale_measured_margin` takes on [`MemoryBackend`]. Returning the
+    /// mechanism's own [`crate::estimate_synthesis::EstimateLane`] rather than a bare
+    /// [`MemoryBackend`] is what makes the video gate a genuine two-lane consumer of the shared
+    /// parameters: the backend identity, the derived estimate margin, and the failure posture that
+    /// explains it all travel together instead of being re-chosen per call site.
+    pub(crate) const fn lane(&self) -> crate::estimate_synthesis::EstimateLane {
         match self.identity.lane {
-            VideoLane::Mlx => MemoryBackend::Mlx,
-            VideoLane::Candle => MemoryBackend::Candle,
+            VideoLane::Mlx => crate::estimate_synthesis::MLX_LANE,
+            VideoLane::Candle => crate::estimate_synthesis::CANDLE_LANE,
         }
     }
 }
@@ -295,12 +300,12 @@ impl<'a> LadderVideoSelector<'a> {
 /// derived on every call and never cached, and no code here may assume a model has "a" binding
 /// phase. This is the MLX-side answer to the question `KreaTurboPhasePeaks::binding_phase()`
 /// answers on the candle side.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum VideoBindingPhase {
-    Conditioning,
-    Denoise,
-    Decode,
-}
+///
+/// sc-19050: this IS [`crate::estimate_synthesis::BindingPhase`], re-exported under the name this
+/// module's callers already use. It was a hand-copied enum with a hand-copied argmax, documented as
+/// "mirroring" the MLX gate's — a promise three copies cannot keep. There is now one type, one
+/// rule, and no relabelling `match` for a later edit to get wrong.
+pub(crate) use crate::estimate_synthesis::BindingPhase as VideoBindingPhase;
 
 /// The per-phase peaks one rung's prediction is made of.
 ///
@@ -338,19 +343,18 @@ impl PhasePeaks {
         peak
     }
 
-    /// Which phase binds AT THIS GEOMETRY. Ties resolve to the LATER phase, matching
-    /// `mlx_fit_gate::binding_phase` so the two never disagree on the same triple.
-    pub(crate) const fn binding_phase(self) -> VideoBindingPhase {
-        let mut phase = VideoBindingPhase::Conditioning;
-        let mut peak = self.conditioning_bytes;
-        if self.denoise_bytes >= peak {
-            phase = VideoBindingPhase::Denoise;
-            peak = self.denoise_bytes;
-        }
-        if self.decode_bytes >= peak {
-            phase = VideoBindingPhase::Decode;
-        }
-        phase
+    /// Which phase binds AT THIS GEOMETRY, with ties to the LATER phase.
+    ///
+    /// sc-19050: this used to be a hand-copied mirror of `mlx_fit_gate::binding_phase`, documented
+    /// as "so the two never disagree" — a promise three copies cannot keep. The rule now has one
+    /// implementation ([`crate::estimate_synthesis::binding_phase`]) and this method only relabels
+    /// its answer in the video lane's vocabulary.
+    pub(crate) fn binding_phase(self) -> VideoBindingPhase {
+        crate::estimate_synthesis::binding_phase(
+            self.conditioning_bytes,
+            self.denoise_bytes,
+            self.decode_bytes,
+        )
     }
 }
 
@@ -365,7 +369,7 @@ fn floor_phase_peaks(
     engaged: &[MemoryStrategy],
     headroom_bytes: u64,
 ) -> PhasePeaks {
-    let floor = crate::mlx_fit_gate::estimate_floor_weights_bytes(contract, engaged)
+    let floor = crate::estimate_synthesis::floor_weights_bytes(contract, engaged)
         .saturating_add(headroom_bytes);
     PhasePeaks {
         conditioning_bytes: floor,
@@ -400,7 +404,7 @@ fn profiled_floor_phase_peaks(
     let Some(resolved) = resolved else {
         return (generic, None);
     };
-    let weights = crate::mlx_fit_gate::estimate_floor_weights_bytes(selector.contract, engaged);
+    let weights = crate::estimate_synthesis::floor_weights_bytes(selector.contract, engaged);
     let Some(profiled) = resolved
         .profile
         .checked_composed_peak(weights, selector.contract.asset_facts.decoder_bytes)
@@ -513,7 +517,7 @@ fn fitted_or_floor_phase_peaks<'a>(
     }
     let selection = MemorySelection {
         strategy,
-        parameters: crate::mlx_fit_gate::estimate_floor_smallest_parameters(
+        parameters: crate::estimate_synthesis::floor_smallest_parameters(
             selector.contract,
             engaged,
         )
@@ -549,7 +553,7 @@ fn video_memory_geometry(geometry: VideoAdmissionGeometry, reference_count: u32)
 impl VideoStrategySelector for LadderVideoSelector<'_> {
     fn select(&mut self, geometry: VideoAdmissionGeometry) -> VideoRungSelection {
         let memory_geometry = video_memory_geometry(geometry, self.identity.reference_count);
-        let backend = self.backend();
+        let backend = self.lane().backend;
         let calibration_fingerprint = self
             .contract
             .calibration
@@ -579,7 +583,7 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
         for strategy in MemoryStrategy::ALL {
             let engaged = self.contract.engaged_composition(strategy);
             let Some(parameters) =
-                crate::mlx_fit_gate::estimate_floor_smallest_parameters(self.contract, &engaged)
+                crate::estimate_synthesis::floor_smallest_parameters(self.contract, &engaged)
             else {
                 continue;
             };
@@ -612,7 +616,7 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
             if strategy == MemoryStrategy::Resident {
                 self.resident_floors.push((geometry, predicted_peak_bytes));
             }
-            let evidence = crate::mlx_fit_gate::estimate_evidence(
+            let evidence = crate::estimate_synthesis::estimate_evidence(
                 self.contract,
                 backend,
                 self.identity.tier,

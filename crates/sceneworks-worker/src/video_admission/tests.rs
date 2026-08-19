@@ -1187,7 +1187,7 @@ fn the_image_lanes_estimate_evidence_still_keys_to_mlx() {
         parameters: gen_core::MemoryStrategyParameters::default(),
         tier: tier(),
     };
-    let evidence = crate::mlx_fit_gate::estimate_evidence(
+    let evidence = crate::estimate_synthesis::estimate_evidence(
         &contract,
         gen_core::MemoryBackend::Mlx,
         tier(),
@@ -1209,7 +1209,7 @@ fn the_image_lanes_estimate_evidence_still_keys_to_mlx() {
 
     // ...and the video lane can key to Candle, so the parameter is genuinely load-bearing rather
     // than a constant with extra steps.
-    let candle = crate::mlx_fit_gate::estimate_evidence(
+    let candle = crate::estimate_synthesis::estimate_evidence(
         &contract,
         gen_core::MemoryBackend::Candle,
         tier(),
@@ -1404,7 +1404,8 @@ fn the_candle_lane_selects_end_to_end_against_a_candle_contract() {
             18 * GIB,
             0,
         )
-        .backend(),
+        .lane()
+        .backend,
         gen_core::MemoryBackend::Candle
     );
 
@@ -1470,7 +1471,8 @@ fn each_lane_keys_its_evidence_to_its_own_backend() {
             18 * GIB,
             0,
         )
-        .backend()
+        .lane()
+        .backend
     };
     assert_eq!(selector(VideoLane::Mlx), gen_core::MemoryBackend::Mlx);
     assert_eq!(selector(VideoLane::Candle), gen_core::MemoryBackend::Candle);
@@ -1612,7 +1614,7 @@ fn the_floor_is_phase_uniform_and_its_peak_is_the_unchanged_scalar() {
     let contract = fixture_contract(20, 4, &[MemoryStrategy::StagedResidency]);
     let engaged = contract.engaged_composition(MemoryStrategy::StagedResidency);
     let peaks = floor_phase_peaks(&contract, &engaged, 18 * GIB);
-    let scalar = crate::mlx_fit_gate::estimate_floor_weights_bytes(&contract, &engaged)
+    let scalar = crate::estimate_synthesis::floor_weights_bytes(&contract, &engaged)
         .saturating_add(18 * GIB);
     assert_eq!(peaks.peak_bytes(), scalar);
     assert_eq!(peaks.conditioning_bytes, scalar);

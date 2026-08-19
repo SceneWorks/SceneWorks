@@ -3,7 +3,7 @@
   "generatedBy": "scripts/generate-candle-admission-inventory.mjs",
   "story": "sc-19049",
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:953aa55eb3f67b9eb2b79b2dbced6de2b3f659e53b01d9ad4e20f71e819f8d34",
+    "sceneWorksRevision": "source-tree:876ec4f097a5352e0b48301c6d3a979232634c78d0185dac549fed403390c5cd",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -35,11 +35,11 @@
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "b808befc53a69ae747a61d184157f52690c0b84e12ca7a3c4d1003396e210447"
+        "sha256": "022a0a108e9fac0f1992938f87a6508ba29870b48091b9d6559c8f9f577ade5d"
       },
       "candleMemoryStrategy": {
         "path": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
-        "sha256": "06cd8d4b03661bde82f63f664bd04b2369acb3d07e334e18b9c1ef8de580bdda"
+        "sha256": "fd72a878c426be8d947021dcc5274e12d930f2d0ef7e5c57c3526686027b9f99"
       },
       "memoryRouteRegistry": {
         "path": "crates/sceneworks-worker/src/memory_route_registry.rs",
@@ -55,7 +55,7 @@
       },
       "videoAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
-        "sha256": "06a52e8dc5a71a003e383d4ec8c9294ccf9ffafaf10040a6a7c9b30f8b539317"
+        "sha256": "0b0341817f56a96bf942148f8f3cbf331c67de8334ea14da38b3961c999a3d65"
       },
       "videoMemoryCurves": {
         "path": "crates/sceneworks-core/src/video_memory_curves.rs",
@@ -3945,7 +3945,7 @@
       "id": "candle-sequential-capability-needs-the-linked-candle-bundle",
       "owner": "sc-19050",
       "severity": "high",
-      "detail": "The candle txt2img gate's `sequential_capable` input is `mlx_fit_gate::engine_supports_sequential(engine_id)` â€” a query against the LINKED provider bundle's descriptor (sc-12130 forbids a second engine-id allowlist in the worker). The manifest's advisory `candle.supportsSequentialOffload` key is NOT that input and diverges from it in BOTH directions on the bundles that can be linked here (the MLX bundle answers true for sdxl/lens/krea_2_raw/krea_2_turbo/qwen_image_edit and friends where the manifest says false, and false for the six mage_flow ids where the manifest says true). The candle bundle needs a CUDA toolchain to link, so no CPU lane can resolve it; every evaluated baseline row therefore records the plan for BOTH values of the input rather than committing another bundle's answer. sc-19050, which extracts the shared prediction law, is where the capability becomes a first-class input.",
+      "detail": "The candle txt2img gate's `sequential_capable` input is `mlx_fit_gate::engine_supports_sequential(engine_id)` â€” a query against the LINKED provider bundle's descriptor (sc-12130 forbids a second engine-id allowlist in the worker). The manifest's advisory `candle.supportsSequentialOffload` key is NOT that input and diverges from it in BOTH directions on the bundles that can be linked here (the MLX bundle answers true for sdxl/lens/krea_2_raw/krea_2_turbo/qwen_image_edit and friends where the manifest says false, and false for the six mage_flow ids where the manifest says true). The candle bundle needs a CUDA toolchain to link, so no CPU lane can resolve it; every evaluated baseline row therefore records the plan for BOTH values of the input rather than committing another bundle's answer. CORRECTED by sc-19050: the extracted mechanism does NOT consume this input and cannot resolve it. Staged residency reaches the shared mechanism as a CONTRACT-DECLARED rung, not as a gate-level boolean, so the capability stays an input of `candle_scalar_gate::load_plan` alone. It becomes a first-class input only when that route stops using the scalar gate (sc-19053/sc-19054), and OBSERVING it still requires a CUDA-linked bundle either way — a toolchain blocker, not a code one.",
       "paths": [
         "crates/sceneworks-worker/src/image_jobs/base.rs",
         "crates/sceneworks-worker/src/mlx_fit_gate.rs"
