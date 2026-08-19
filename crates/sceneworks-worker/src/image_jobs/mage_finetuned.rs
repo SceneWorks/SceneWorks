@@ -352,8 +352,22 @@ async fn generate_mage_finetuned_stream(
         [transformer.config, transformer.weights],
         "Fine-tuned Mage-Flow source preparation failed",
     )?;
+    // sc-20571 review: per-request pre-gate, before the cache lookup — credit this fine-tune's own
+    // attributable bytes when its transformer dir is the warm-resident entry, so a repeat is not
+    // charged twice (needed = weights + headroom AND available = live minus its own weights). The
+    // loader seam inside the cache re-gates any genuine cold load with zero credit.
     #[cfg(target_os = "macos")]
-    let spec = crate::mlx_fit_gate::apply_residency_policy(spec, descriptor.id)?;
+    let spec = {
+        let resident = crate::generator_cache::resident_generator_attribution().await;
+        let own_resident_bytes =
+            resident.map_or(0, |attribution| attribution.credit_for(descriptor.id, &spec));
+        crate::mlx_fit_gate::apply_residency_policy_on_live_host(
+            spec,
+            descriptor.id,
+            crate::mlx_fit_gate::probe_live_host_memory(),
+            own_resident_bytes,
+        )?
+    };
     // Candle's pre-load floor is the LoadSpec's own bytes (the trained DiT plus both staged shared
     // components) — the same seam the imported-SDXL lane admits on.
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]

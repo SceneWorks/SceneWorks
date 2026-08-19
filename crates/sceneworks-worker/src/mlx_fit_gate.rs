@@ -3278,6 +3278,14 @@ fn probe_system_used_bytes() -> Option<u64> {
     crate::gpu::system_used_mb_from_vm_stat(&stdout).map(|mb| mb * 1024 * 1024)
 }
 
+/// No `vm_stat` off macOS ⇒ no live signal ⇒ the ceilings that consume it keep their pre-sc-20571
+/// shape. Needed because the LOAD-time cold-load gate ([`decide_residency_for_spec`]) compiles on
+/// every platform, unlike the macOS-only [`live_request_budget`].
+#[cfg(not(target_os = "macos"))]
+fn probe_system_used_bytes() -> Option<u64> {
+    None
+}
+
 /// Thin shell: probe, then hand everything to [`compose_live_request_budget`], which owns the policy.
 #[cfg(target_os = "macos")]
 pub(crate) fn live_request_budget(engine_id: &str) -> WorkerResult<MemoryBudget> {
@@ -4182,6 +4190,102 @@ pub(crate) enum ResidencyOutcome {
     },
 }
 
+/// What the host actually looked like when the cold-load gate ran (sc-20571, cold-load route).
+///
+/// Both fields are `Option` because both probes fail open: off macOS, or when `sysctl` / `vm_stat`
+/// cannot be read, there is no live signal and the ceiling falls back byte-for-byte to its pre-fix
+/// shape rather than refusing on a guess. [`LiveHostMemory::UNKNOWN`] is that no-signal value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LiveHostMemory {
+    /// The machine's physical unified memory (`sysctl hw.memsize`) — NOT the possibly capped or
+    /// derated admission ceiling. It is what makes the host-scoped `system_used_bytes` reading
+    /// comparable to a budget that may already sit below physical memory.
+    pub machine_total_bytes: Option<u64>,
+    /// System-wide "Memory Used" (`vm_stat`'s App + Wired + Compressed — Activity Monitor's figure).
+    pub system_used_bytes: Option<u64>,
+}
+
+impl LiveHostMemory {
+    /// No live signal: the ceiling keeps its pre-sc-20571 total-RAM shape.
+    ///
+    /// Deliberately `#[cfg(test)]`. Production reaches the no-signal shape only by the probes
+    /// themselves failing (or by being off macOS), never by a caller opting out — so a future edit
+    /// that wanted to hand the waterfall a blind budget would have to write the two `None`s out by
+    /// hand rather than deleting one call and staying green.
+    #[cfg(test)]
+    pub(crate) const UNKNOWN: Self = Self {
+        machine_total_bytes: None,
+        system_used_bytes: None,
+    };
+}
+
+/// Shrink the LOAD-time budget to what is actually available on this host right now (sc-20571).
+///
+/// The cold-load waterfall's ceiling was the machine's TOTAL unified memory — `resolve_budget`
+/// returns `hw.memsize` (or the `MLX_MEMORY_CAP` emulation) and every layer below compared against
+/// it directly, so nothing subtracted what was already resident. That is the same defect sc-20571
+/// fixed for the per-request path in [`live_request_budget`], on the route the incident actually
+/// took: `bernini`'s image and video handlers never reach `evaluate_request`, only this waterfall
+/// (telemetry `route:"generic_mlx_cold_load"`), which is why the incident's exact estimate
+/// (`raw_peak_bytes = 87_563_634_463`, widened to 122.65 GiB) was admitted on a 128 GiB Mac whose
+/// desktop app, browser and a concurrent real-weights test were all resident — and why it still
+/// admitted identically on an idle vs. a loaded host after that fix
+/// (<https://github.com/SceneWorks/SceneWorks/pull/2437#issuecomment-5345589210>).
+///
+/// The reserve itself is [`live_foreign_reserve_bytes`] — the SAME pure policy the fixed
+/// per-request path uses, deliberately called rather than re-derived, so the two ceilings can never
+/// disagree about what "already resident" means (including its derate clamp, which keeps a
+/// `MLX_MEMORY_CAP` ceiling from being charged twice for the share it has already given away).
+///
+/// `own_resident_bytes` is the caller's statement of how much of the live reading is THIS spec's
+/// own model, already resident in this process — the cold-load mirror of `evaluate_request`'s
+/// attributable-resident credit (sc-20571 review). The host-scoped `vm_stat` reading cannot tell a
+/// foreign process's memory from a model this worker itself is holding warm, so without the credit
+/// a warm repeat of a large model charges its own weights twice — once as the load's `needed` and
+/// once inside the foreign reserve — and is refused or downtiered until eviction, on the very host
+/// state that just served it. The two call-site classes fix the value differently:
+///
+/// - the generator cache's LOADER seams pass **zero**
+///   ([`COLD_LOADER_SEAM_OWN_RESIDENT_BYTES`]): they run only on a cache MISS, immediately before
+///   `crate::inference_runtime::load` allocates, after the previous resident entry (if any) has
+///   already been dropped — so no byte of the live reading is this load's own model, and every
+///   live byte is genuinely unavailable. (Known and accepted conservatism: the just-dropped
+///   generator's buffers may still sit in the MLX allocator cache, which `vm_stat` counts even
+///   though `generator_cache::capture_backend_committed_bytes` clears it moments later. That errs
+///   toward refusal, which is the correct direction for a lane whose failure mode is a poisoned
+///   Metal submission queue and a SIGABRTed worker rather than a catchable error.)
+/// - the PER-REQUEST sites (the sc-10733 downtier chooser and the imported-SDXL / Mage-Flow
+///   fine-tune pre-gates) run BEFORE the generator-cache lookup, so when the probed spec's model is
+///   already warm-resident its own bytes are inside the live reading. They pass
+///   [`crate::generator_cache::ResidentGeneratorAttribution::credit_for`]'s figure — the resident
+///   entry's live committed bytes above its recorded pre-load external baseline, and only when the
+///   resident identity is the probed spec's own — so unrelated process allocations remain charged,
+///   exactly as `evaluate_request` keeps them charged on the available side.
+///
+/// Saturating in both directions: a stale or momentarily low reading, or an over-stated credit,
+/// can never WIDEN the ceiling past the budget (the credit is additionally clamped to the spec's
+/// own charged bytes in [`decide_residency_with_headroom`], mirroring `evaluate_request`'s
+/// `total_resident_bytes` envelope clamp).
+pub(crate) fn cold_load_budget_for_live_host(
+    budget: Option<MlxMemoryBudget>,
+    live: LiveHostMemory,
+    own_resident_bytes: u64,
+) -> Option<MlxMemoryBudget> {
+    let budget = budget?;
+    let total_bytes = gib_to_bytes(budget.total_gb);
+    let foreign = live_foreign_reserve_bytes(
+        total_bytes,
+        live.machine_total_bytes,
+        live.system_used_bytes,
+        // See the doc comment: bytes the caller proved are this spec's own resident model are the
+        // ONLY live bytes accounted for elsewhere; everything else stays charged.
+        own_resident_bytes,
+    );
+    Some(MlxMemoryBudget {
+        total_gb: total_bytes.saturating_sub(foreign) as f64 / BYTES_PER_GIB,
+    })
+}
+
 /// The pure residency decision: given the model's whole-model + text-encoder on-disk bytes, the
 /// (possibly emulated) budget, and whether the provider stages components, choose Resident /
 /// Sequential / Reject (sc-10839). No IO, no globals — the live [`apply_residency_policy`] resolves
@@ -4197,6 +4301,32 @@ pub(crate) fn decide_residency(
         total_bytes,
         te_bytes,
         budget,
+        LiveHostMemory::UNKNOWN,
+        0,
+        sequential_capable,
+        HEADROOM_GB,
+    )
+}
+
+/// [`decide_residency`] against a stated live host (sc-20571) — the seam the cold-load
+/// live-availability tests drive, so they exercise the REAL waterfall (all three layers plus the
+/// fold) rather than a re-implementation of it. `own_resident_bytes` is the per-request
+/// attributable-resident credit (sc-20571 review); loader-seam-shaped scenarios pass `0`.
+#[cfg(test)]
+pub(crate) fn decide_residency_on_live_host(
+    total_bytes: u64,
+    te_bytes: u64,
+    budget: Option<MlxMemoryBudget>,
+    live: LiveHostMemory,
+    own_resident_bytes: u64,
+    sequential_capable: bool,
+) -> ResidencyOutcome {
+    decide_residency_with_headroom(
+        total_bytes,
+        te_bytes,
+        budget,
+        live,
+        own_resident_bytes,
         sequential_capable,
         HEADROOM_GB,
     )
@@ -4206,9 +4336,24 @@ fn decide_residency_with_headroom(
     total_bytes: u64,
     te_bytes: u64,
     budget: Option<MlxMemoryBudget>,
+    live: LiveHostMemory,
+    own_resident_bytes: u64,
     sequential_capable: bool,
     headroom_gb: f64,
 ) -> ResidencyOutcome {
+    // sc-20571 (cold-load route): the LOAD-BEARING wiring. Every layer below — the peak check, the
+    // staged-peak overflow check, and the `weights_floor_load_admission` floor — compares against
+    // this one budget, so folding live availability in here (rather than at each comparison) is
+    // what makes all three honor it. `live` is threaded through the signature deliberately: a
+    // caller cannot resolve a budget for this waterfall without saying what it knows about the
+    // host, so forgetting the fold is a visible `UNKNOWN`, not an omission.
+    //
+    // The own-residency credit is clamped to the spec's own charged bytes (sc-20571 review): the
+    // credit exists to stop a warm-resident model's weights from being charged twice, so it can
+    // never exceed what this decision charges for them — the cold-load mirror of
+    // `evaluate_request`'s `.min(contract.total_resident_bytes())` envelope clamp. An over-stated
+    // credit (a mis-attributed reading) therefore cannot manufacture ceiling out of foreign bytes.
+    let budget = cold_load_budget_for_live_host(budget, live, own_resident_bytes.min(total_bytes));
     let peak = decide_residency_by_peak_with_headroom(
         total_bytes,
         te_bytes,
@@ -4469,7 +4614,44 @@ fn with_selected_sequential_shape(engine_id: &str, spec: LoadSpec) -> LoadSpec {
 ///
 /// `engine_id` is both the [`engine_supports_sequential`] key and the human-facing model name in the
 /// rejection message.
+///
+/// This entry is the generator cache's LOADER seam (miss-only): it probes the live host itself,
+/// once per cold load, and claims **no** own-residency credit
+/// ([`COLD_LOADER_SEAM_OWN_RESIDENT_BYTES`]) — on a miss the previous resident entry has already
+/// been dropped, so nothing in the live reading is this load's own model. Per-request callers that
+/// run BEFORE the cache lookup use [`apply_residency_policy_on_live_host`] with the resident
+/// attribution credit instead (sc-20571 review).
 pub(crate) fn apply_residency_policy(spec: LoadSpec, engine_id: &str) -> WorkerResult<LoadSpec> {
+    apply_residency_policy_on_live_host(
+        spec,
+        engine_id,
+        probe_live_host_memory(),
+        COLD_LOADER_SEAM_OWN_RESIDENT_BYTES,
+    )
+}
+
+/// The own-residency credit the generator cache's LOADER seams claim: **zero**, by contract.
+///
+/// Those seams run only on a cache MISS, after the previous resident entry has been dropped and
+/// immediately before `crate::inference_runtime::load` allocates — the incoming weights land on top
+/// of everything the live probe still sees, so crediting any of it would over-admit the exact
+/// over-commit sc-20571 exists to prevent. The sc-20571 review verified zero as correct here while
+/// requiring the attributable-resident credit at the per-request sites; a test pins this constant
+/// so the two contracts cannot silently swap.
+pub(crate) const COLD_LOADER_SEAM_OWN_RESIDENT_BYTES: u64 = 0;
+
+/// [`apply_residency_policy`] for the PER-REQUEST pre-gates (sc-20571 review): the imported-SDXL and
+/// Mage-Flow fine-tune handlers gate a request-shaped spec BEFORE the generator-cache lookup, so a
+/// warm-resident repeat of the same model sees its own weights inside the live `vm_stat` reading.
+/// The caller probes the host once and passes the resident attribution credit
+/// ([`crate::generator_cache::ResidentGeneratorAttribution::credit_for`]) so those bytes are not
+/// charged twice — see [`cold_load_budget_for_live_host`].
+pub(crate) fn apply_residency_policy_on_live_host(
+    spec: LoadSpec,
+    engine_id: &str,
+    live: LiveHostMemory,
+    own_resident_bytes: u64,
+) -> WorkerResult<LoadSpec> {
     if spec.prepared_file_pins().is_prepared() {
         spec.validate_prepared_file_pins().map_err(|error| {
             crate::classify_engine_error("MLX residency source validation failed", error)
@@ -4481,9 +4663,9 @@ pub(crate) fn apply_residency_policy(spec: LoadSpec, engine_id: &str) -> WorkerR
         return Ok(spec);
     }
     let outcome = if spec.prepared_file_pins().is_prepared() {
-        try_decide_residency_for_spec(engine_id, &spec)?
+        try_decide_residency_for_spec(engine_id, &spec, live, own_resident_bytes)?
     } else {
-        decide_residency_for_spec(engine_id, &spec)
+        decide_residency_for_spec(engine_id, &spec, live, own_resident_bytes)
     };
     match outcome {
         ResidencyOutcome::Resident => Ok(spec),
@@ -4731,7 +4913,19 @@ fn packed_quant_bits(root: &std::path::Path, component: &str) -> Option<i64> {
 /// capability downtier (sc-10733) can evaluate a candidate tier's fit at the base.rs seam WITHOUT
 /// building the final spec twice. Same budget + component-byte + sequential-capability inputs the live
 /// gate uses, so the seam's downtier choice and the cache's admission never disagree.
-pub(crate) fn decide_residency_for_spec(engine_id: &str, spec: &LoadSpec) -> ResidencyOutcome {
+///
+/// `live` is caller-probed (sc-20571 review): the downtier chooser scores several candidate tiers
+/// per request, and probing inside this function spawned one bounded `vm_stat` subprocess per
+/// candidate. Probing once at the request boundary also means every candidate is scored against the
+/// SAME host snapshot, so the chooser cannot be skewed by the reading moving mid-loop.
+/// `own_resident_bytes` is the per-request attributable-resident credit — see
+/// [`cold_load_budget_for_live_host`] for who passes what.
+pub(crate) fn decide_residency_for_spec(
+    engine_id: &str,
+    spec: &LoadSpec,
+    live: LiveHostMemory,
+    own_resident_bytes: u64,
+) -> ResidencyOutcome {
     let budget = resolve_budget(probe_total_unified_memory_gib(), mlx_memory_cap_gb());
     let (total_bytes, te_bytes, headroom) = spec_component_bytes(engine_id, spec);
     // The LOAD-time gate is resolution-blind, so it budgets the family's whole flat allowance and
@@ -4740,6 +4934,8 @@ pub(crate) fn decide_residency_for_spec(engine_id: &str, spec: &LoadSpec) -> Res
         total_bytes,
         te_bytes,
         budget,
+        live,
+        own_resident_bytes,
         engine_supports_sequential(engine_id),
         headroom.total_gb,
     )
@@ -4748,6 +4944,8 @@ pub(crate) fn decide_residency_for_spec(engine_id: &str, spec: &LoadSpec) -> Res
 fn try_decide_residency_for_spec(
     engine_id: &str,
     spec: &LoadSpec,
+    live: LiveHostMemory,
+    own_resident_bytes: u64,
 ) -> WorkerResult<ResidencyOutcome> {
     let budget = resolve_budget(probe_total_unified_memory_gib(), mlx_memory_cap_gb());
     let (total_bytes, te_bytes, headroom) = spec_component_bytes_checked(engine_id, spec)?;
@@ -4755,9 +4953,27 @@ fn try_decide_residency_for_spec(
         total_bytes,
         te_bytes,
         budget,
+        live,
+        own_resident_bytes,
         engine_supports_sequential(engine_id),
         headroom.total_gb,
     ))
+}
+
+/// Thin probe shell for [`cold_load_budget_for_live_host`] (sc-20571): reads the same two live
+/// signals the fixed per-request path reads, via the same functions
+/// ([`probe_total_unified_memory_bytes`], [`probe_system_used_bytes`]) — no second `sysctl`/`vm_stat`
+/// parser. Both fail open to `None`, and off macOS both are `None` by construction, so a non-Mac
+/// build keeps the pre-fix ceiling exactly.
+///
+/// `pub(crate)` so per-request callers (the sc-10733 downtier chooser, the imported-SDXL and
+/// Mage-Flow fine-tune pre-gates) probe ONCE per request and thread the snapshot through
+/// (sc-20571 review), instead of this being re-probed per residency decision.
+pub(crate) fn probe_live_host_memory() -> LiveHostMemory {
+    LiveHostMemory {
+        machine_total_bytes: probe_total_unified_memory_bytes(),
+        system_used_bytes: probe_system_used_bytes(),
+    }
 }
 
 /// The residency outcome for a candidate tier's WEIGHTS DIR — a bare-`Dir` convenience over
@@ -4772,7 +4988,7 @@ pub(crate) fn residency_for_dir(
     weights_dir: &std::path::Path,
 ) -> ResidencyOutcome {
     let spec = LoadSpec::new(WeightsSource::Dir(weights_dir.to_path_buf()));
-    decide_residency_for_spec(engine_id, &spec)
+    decide_residency_for_spec(engine_id, &spec, probe_live_host_memory(), 0)
 }
 
 /// The on-disk WEIGHT bytes (GiB) a `spec` loads — the weights half of the number
@@ -4804,10 +5020,15 @@ fn too_big_error(
         ),
         None => String::new(),
     };
+    // sc-20571: `available_gb` is no longer "what this machine HAS" — since the cold-load ceiling
+    // subtracts live host residency, it is what is safely available RIGHT NOW. The wording says so,
+    // and names closing other memory holders first, because on a loaded host that is the action
+    // that actually changes the number.
     WorkerError::InvalidPayload(format!(
         "{model_label} needs ~{needed} GB of unified memory{staged_note} (model weights plus \
-         headroom for activations and the OS) but this machine has ~{available} GB. Choose a \
-         smaller quant tier, lower the output resolution, or run on a Mac with more memory.",
+         headroom for activations and the OS) but only ~{available} GB is safely available right \
+         now. Close other apps or models holding memory, choose a smaller quant tier, lower the \
+         output resolution, or run on a Mac with more memory.",
         needed = needed_gb.round() as i64,
         available = available_gb.round() as i64,
     ))
@@ -16183,6 +16404,353 @@ mod tests {
             decide_residency(total, te, None, true),
             ResidencyOutcome::Resident
         );
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // sc-20571 (cold-load route): the LOAD-time waterfall's ceiling must reflect live availability
+    // -----------------------------------------------------------------------------------------
+    //
+    // PR #2437 fixed the per-request path (`live_request_budget` → `select_strategy`). Coordinator
+    // device verification then proved the incident's own route never reaches it: `bernini`'s image
+    // and video handlers only reach this waterfall (telemetry `route:"generic_mlx_cold_load"`), and
+    // the incident's exact estimate admitted IDENTICALLY on an idle vs. a ~35 GiB-loaded host —
+    // https://github.com/SceneWorks/SceneWorks/pull/2437#issuecomment-5345589210
+    //
+    // These drive the REAL waterfall (`decide_residency_with_headroom` — the peak layer, the
+    // staged-overflow layer and the `weights_floor_load_admission` floor, in that order) through
+    // `decide_residency_on_live_host`, not a re-implementation of it.
+
+    /// The incident's Σ-weights figure: `raw_peak_bytes` from the 2026-08-19 bernini cold-load log
+    /// line (81.55 GiB), which `generic_mlx_shared_observation` reports as `predicted_peak_bytes`
+    /// and the estimate margin widened to the admitted 122.65 GiB.
+    const BERNINI_INCIDENT_WEIGHT_BYTES: u64 = 87_563_634_463;
+    /// The incident host: `hw.memsize` = 128.00 GiB.
+    const INCIDENT_MACHINE_TOTAL_BYTES: u64 = 128 * 1024 * 1024 * 1024;
+
+    fn incident_live_host(used_gib: u64) -> LiveHostMemory {
+        LiveHostMemory {
+            machine_total_bytes: Some(INCIDENT_MACHINE_TOTAL_BYTES),
+            system_used_bytes: Some(used_gib * 1024 * 1024 * 1024),
+        }
+    }
+
+    /// The story's requirement on the route the incident actually took: a cold load whose predicted
+    /// peak exceeds what is LIVE-available is refused, where before it was admitted against total
+    /// RAM. Needed = 81.55 GiB weights + `HEADROOM_GB` = 99.55 GiB against a 128 GiB Mac.
+    ///
+    /// This is the wiring-removal guard: delete the `cold_load_budget_for_live_host` fold from
+    /// `decide_residency_with_headroom` and the loaded-host leg admits `Resident`, reproducing the
+    /// production over-admission.
+    #[test]
+    fn bernini_cold_load_estimate_is_refused_once_the_ceiling_reflects_live_host_residency() {
+        for sequential_capable in [false, true] {
+            // ~50 GiB of foreign residency (the ballast level at which device verification saw the
+            // fixed per-request path refuse) ⇒ ceiling 78 GiB, under which neither the peak layer
+            // (99.55 needed) nor the weights floor (81.55 GiB of bare weights vs 78 − 2 = 76) fits.
+            let outcome = decide_residency_on_live_host(
+                BERNINI_INCIDENT_WEIGHT_BYTES,
+                0,
+                Some(MlxMemoryBudget { total_gb: 128.0 }),
+                incident_live_host(50),
+                0,
+                sequential_capable,
+            );
+            let ResidencyOutcome::Reject {
+                needed_gb,
+                available_gb,
+                ..
+            } = outcome
+            else {
+                panic!("a 99.55 GiB cold load must not be admitted with ~50 GiB already resident, got {outcome:?}");
+            };
+            // The refusal is actionable: it names what the load needs and what is actually free,
+            // and `available_gb` tracks the LIVE ceiling rather than `hw.memsize`.
+            assert!(
+                (needed_gb - (BERNINI_INCIDENT_WEIGHT_BYTES as f64 / BYTES_PER_GIB + HEADROOM_GB))
+                    .abs()
+                    < 0.01,
+                "needed names weights + headroom: {needed_gb}"
+            );
+            assert!(
+                (available_gb - 78.0).abs() < 0.01,
+                "available is the live ceiling (128 − 50), not total RAM: {available_gb}"
+            );
+            let WorkerError::InvalidPayload(message) =
+                too_big_error("bernini", needed_gb, available_gb, None)
+            else {
+                panic!("expected InvalidPayload");
+            };
+            assert!(message.contains("100"), "names the need: {message}");
+            assert!(message.contains("78"), "names what is free: {message}");
+            assert!(
+                message.contains("safely available right now"),
+                "says the number is live, not the machine's size: {message}"
+            );
+        }
+    }
+
+    /// The mutation companion / characterization of the production bug: the SAME candidate against
+    /// the pre-fix ceiling shape (no live signal ⇒ total RAM) is ADMITTED — which is exactly what
+    /// the 2026-08-19 log recorded, and what device verification reproduced on a loaded host.
+    #[test]
+    fn without_a_live_signal_the_bernini_cold_load_is_admitted_exactly_as_it_was_in_production() {
+        assert_eq!(
+            decide_residency_on_live_host(
+                BERNINI_INCIDENT_WEIGHT_BYTES,
+                0,
+                Some(MlxMemoryBudget { total_gb: 128.0 }),
+                LiveHostMemory::UNKNOWN,
+                0,
+                false,
+            ),
+            ResidencyOutcome::Resident,
+            "no live signal must fail OPEN to the pre-fix behavior, never refuse on a guess"
+        );
+    }
+
+    /// Negative control + preserved semantics: the same load on an idle host still admits, and the
+    /// three-layer waterfall is otherwise untouched — in the band where the peak layer rejects but
+    /// the bare weights still fit the legacy floor, the floor still rescues the load exactly as it
+    /// did before. Only the ceiling those layers compare against moved.
+    #[test]
+    fn the_cold_load_waterfall_keeps_admitting_what_still_fits_the_live_host() {
+        let budget = Some(MlxMemoryBudget { total_gb: 128.0 });
+
+        // Idle-ish host (~20 GiB used, this Mac's ambient) ⇒ ceiling 108 ≥ 99.55 needed: the PEAK
+        // layer itself admits, no floor rescue involved.
+        assert_eq!(
+            decide_residency_on_live_host(
+                BERNINI_INCIDENT_WEIGHT_BYTES,
+                0,
+                budget,
+                incident_live_host(20),
+                0,
+                false,
+            ),
+            ResidencyOutcome::Resident
+        );
+
+        // Middle band (~30 GiB used ⇒ ceiling 98): the peak layer rejects (99.55 > 98) but the bare
+        // 81.55 GiB of weights still fit 98 − 2, so `weights_floor_load_admission` admits — the
+        // sc-12179 "never wall-reject a machine that used to work" floor, unchanged.
+        assert_eq!(
+            decide_residency_on_live_host(
+                BERNINI_INCIDENT_WEIGHT_BYTES,
+                0,
+                budget,
+                incident_live_host(30),
+                0,
+                false,
+            ),
+            ResidencyOutcome::Resident
+        );
+        // ...and its sequential sibling still selects staged residency rather than rejecting.
+        assert_eq!(
+            decide_residency_on_live_host(
+                BERNINI_INCIDENT_WEIGHT_BYTES,
+                0,
+                budget,
+                incident_live_host(30),
+                0,
+                true,
+            ),
+            ResidencyOutcome::Sequential
+        );
+    }
+
+    /// The probe shell is wired to BOTH live signals (sc-20571). Asserts presence, never values, so
+    /// it is machine-independent: on macOS both probes must return something (`sysctl hw.memsize`
+    /// and `vm_stat` are always readable there), so replacing either with `None` — the mutation
+    /// that would silently restore the total-RAM ceiling — goes red here. Off macOS both are `None`
+    /// by construction and the pre-fix ceiling is the correct, asserted behavior.
+    #[test]
+    fn the_cold_load_probe_shell_reads_both_live_signals() {
+        let live = probe_live_host_memory();
+        if cfg!(target_os = "macos") {
+            assert!(
+                live.machine_total_bytes.is_some_and(|bytes| bytes > 0),
+                "macOS must probe hw.memsize for the cold-load ceiling"
+            );
+            assert!(
+                live.system_used_bytes.is_some_and(|bytes| bytes > 0),
+                "macOS must probe vm_stat 'Memory Used' for the cold-load ceiling"
+            );
+        } else {
+            assert_eq!(live, LiveHostMemory::UNKNOWN);
+        }
+    }
+
+    /// The ceiling arithmetic itself, in isolation: it reuses the per-request path's
+    /// `live_foreign_reserve_bytes` (derate clamp and saturation included) rather than deriving a
+    /// second policy, and it never WIDENS a budget.
+    #[test]
+    fn cold_load_budget_shrinks_by_live_host_residency_and_never_widens() {
+        let gib = 1024 * 1024 * 1024_u64;
+        let budget = Some(MlxMemoryBudget { total_gb: 128.0 });
+
+        // No budget at all ⇒ still no budget (the gate no-ops; a live reading cannot invent one).
+        assert_eq!(
+            cold_load_budget_for_live_host(None, incident_live_host(50), 0),
+            None
+        );
+        // No live signal, or no machine total ⇒ the budget is returned unchanged (fail open).
+        assert_eq!(
+            cold_load_budget_for_live_host(budget, LiveHostMemory::UNKNOWN, 0),
+            budget
+        );
+        assert_eq!(
+            cold_load_budget_for_live_host(
+                budget,
+                LiveHostMemory {
+                    machine_total_bytes: None,
+                    system_used_bytes: Some(50 * gib),
+                },
+                0,
+            ),
+            budget
+        );
+        // Live residency shrinks it one-for-one.
+        assert_eq!(
+            cold_load_budget_for_live_host(budget, incident_live_host(50), 0),
+            Some(MlxMemoryBudget { total_gb: 78.0 })
+        );
+        // An own-residency credit (sc-20571 review) is subtracted from the live reading BEFORE the
+        // reserve is derived — 30 of the 50 GiB are the probed spec's own resident model, so only
+        // the 20 foreign GiB are withheld. Same `live_foreign_reserve_bytes` `committed` semantics
+        // as the fixed per-request path.
+        assert_eq!(
+            cold_load_budget_for_live_host(budget, incident_live_host(50), 30 * gib),
+            Some(MlxMemoryBudget { total_gb: 108.0 })
+        );
+        // A DERATED ceiling (an `MLX_MEMORY_CAP=96` smaller-Mac emulation on the same 128 GiB Mac)
+        // is not charged twice for the 32 GiB it already gave up: 20 GiB of foreign residency sits
+        // inside that share, so nothing further is withheld.
+        let capped = Some(MlxMemoryBudget { total_gb: 96.0 });
+        assert_eq!(
+            cold_load_budget_for_live_host(capped, incident_live_host(20), 0),
+            capped
+        );
+        // Only the excess beyond the derated share is withheld (50 − 32 = 18).
+        assert_eq!(
+            cold_load_budget_for_live_host(capped, incident_live_host(50), 0),
+            Some(MlxMemoryBudget { total_gb: 78.0 })
+        );
+        // Saturating: a reading larger than the whole machine floors the budget at zero rather
+        // than wrapping into an enormous one.
+        assert_eq!(
+            cold_load_budget_for_live_host(budget, incident_live_host(200), 0),
+            Some(MlxMemoryBudget { total_gb: 0.0 })
+        );
+        // ...and a credit larger than the live reading only zeroes the reserve; it can never widen
+        // the ceiling past the budget itself.
+        assert_eq!(
+            cold_load_budget_for_live_host(budget, incident_live_host(50), u64::MAX),
+            budget
+        );
+    }
+
+    /// The sc-20571-review MAJOR finding, at the real waterfall: a warm-resident repeat of the same
+    /// model must admit exactly as its first admission did. Before the attributable-resident credit,
+    /// the repeat's own materialized weights sat inside `vm_stat` "used" with nothing subtracted, so
+    /// the model was charged twice — `needed = weights + headroom` AND `available = total − ambient
+    /// − its own weights` — and every warm repeat of a large model on a live host was refused (or
+    /// silently downtiered) until eviction.
+    ///
+    /// This is the mutation guard for the credit wiring: force `own_resident_bytes` back to `0` in
+    /// `decide_residency_with_headroom`'s fold (or make the per-request sites' resident match
+    /// always-false, which produces the same `0`) and the `credited` leg goes red.
+    #[test]
+    fn warm_resident_repeat_admits_exactly_as_the_first_admission_did() {
+        let gib = 1024 * 1024 * 1024_u64;
+        let budget = Some(MlxMemoryBudget { total_gb: 128.0 });
+        let ambient_used = 20 * gib;
+
+        // First admission: idle-ish host (20 GiB ambient), nothing of ours resident yet.
+        let first = decide_residency_on_live_host(
+            BERNINI_INCIDENT_WEIGHT_BYTES,
+            0,
+            budget,
+            LiveHostMemory {
+                machine_total_bytes: Some(INCIDENT_MACHINE_TOTAL_BYTES),
+                system_used_bytes: Some(ambient_used),
+            },
+            0,
+            false,
+        );
+        assert_eq!(first, ResidencyOutcome::Resident, "first admission fits");
+
+        // Warm repeat: the same host, but the model's own 81.55 GiB have materialized into the
+        // host-scoped reading. Same ambient foreign load — nothing else changed.
+        let warm_host = LiveHostMemory {
+            machine_total_bytes: Some(INCIDENT_MACHINE_TOTAL_BYTES),
+            system_used_bytes: Some(ambient_used + BERNINI_INCIDENT_WEIGHT_BYTES),
+        };
+
+        // The double-count this fix removes: with no credit the repeat is REFUSED on the very host
+        // state that just served it (ceiling 128 − 20 − 81.55 ≈ 26.45 GiB < the 81.55 GiB floor).
+        assert!(
+            matches!(
+                decide_residency_on_live_host(
+                    BERNINI_INCIDENT_WEIGHT_BYTES,
+                    0,
+                    budget,
+                    warm_host,
+                    0,
+                    false,
+                ),
+                ResidencyOutcome::Reject { .. }
+            ),
+            "characterizes the bug: an uncredited warm repeat charges its own weights twice"
+        );
+
+        // Crediting exactly the resident model's attributable bytes restores the first admission's
+        // ceiling (128 − 20 = 108 GiB), so the repeat admits IDENTICALLY.
+        assert_eq!(
+            decide_residency_on_live_host(
+                BERNINI_INCIDENT_WEIGHT_BYTES,
+                0,
+                budget,
+                warm_host,
+                BERNINI_INCIDENT_WEIGHT_BYTES,
+                false,
+            ),
+            first,
+            "a warm-resident repeat must admit exactly as the first admission did"
+        );
+    }
+
+    /// The credit's envelope clamp (sc-20571 review): the waterfall caps `own_resident_bytes` at
+    /// the spec's own charged bytes — the cold-load mirror of `evaluate_request`'s
+    /// `.min(contract.total_resident_bytes())` — so a mis-attributed or over-stated credit cannot
+    /// launder FOREIGN residency into ceiling. Here the whole 128 GiB machine is in use; an
+    /// unbounded credit would restore the full 128 GiB ceiling and admit, while the clamped credit
+    /// leaves 128 − (128 − 81.55) ≈ 81.55 GiB, under both the peak layer and the weights floor.
+    #[test]
+    fn own_residency_credit_is_clamped_to_the_specs_own_charged_bytes() {
+        assert!(
+            matches!(
+                decide_residency_on_live_host(
+                    BERNINI_INCIDENT_WEIGHT_BYTES,
+                    0,
+                    Some(MlxMemoryBudget { total_gb: 128.0 }),
+                    incident_live_host(128),
+                    u64::MAX,
+                    false,
+                ),
+                ResidencyOutcome::Reject { .. }
+            ),
+            "a credit beyond the spec's own charge must not admit against a fully used host"
+        );
+    }
+
+    /// The generator cache's LOADER seams keep `own_resident_bytes = 0`, by contract (sc-20571
+    /// review): they run miss-only, after the previous resident entry was dropped, so nothing in
+    /// the live reading is the incoming load's own model. Pinned so the loader-seam and
+    /// per-request contracts cannot silently swap — if this constant moves, the admission ledger
+    /// in [`cold_load_budget_for_live_host`]'s doc is wrong and the change needs its own review.
+    #[test]
+    fn the_generator_cache_loader_seam_claims_no_own_residency_credit() {
+        assert_eq!(COLD_LOADER_SEAM_OWN_RESIDENT_BYTES, 0);
     }
 
     /// Decision 1's existing 8 GiB policy guard, preserved byte-for-byte through sc-18096: the

@@ -271,6 +271,15 @@ where
         self.entry.is_none()
     }
 
+    /// The resident entry — key and model — if any. Runs on the cache thread (jobs are the only
+    /// callers), so the borrow can never observe a half-installed entry. Added for the sc-20571
+    /// per-request attributable-resident credit, which needs the resident identity AND its recorded
+    /// pre-load baseline in one consistent read.
+    #[cfg(any(target_os = "macos", test))]
+    pub(crate) fn resident_entry(&self) -> Option<(&K, &M)> {
+        self.entry.as_ref().map(|entry| (&entry.key, &entry.model))
+    }
+
     /// The resident entry's key, if any. Test/introspection helper.
     #[cfg(test)]
     pub(crate) fn resident_key(&self) -> Option<&K> {
