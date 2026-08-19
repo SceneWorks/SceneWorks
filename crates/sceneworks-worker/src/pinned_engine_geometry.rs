@@ -370,6 +370,15 @@ const BY_DESIGN_PRE_FILTERS: &[&str] = &["wan", "ltx", "chroma"];
 /// fix, this test goes red telling the reader to delete the entry — the ledger cannot rot into a
 /// permanent hole, and the pin bump cannot silently leave a stale exception behind.
 ///
+/// That claim holds only because the *other* rot path is closed too. The inverted assertion runs
+/// only for a model the sweep actually PROBES, and `unprobed` is a silent transition: a pin bump
+/// that renamed one of these provider ids, or dropped its registration, would take the engine out of
+/// the sweep and leave the entry sitting here forever with a green lane. Three assertions at the end
+/// of [`every_calibration_scoped_image_gate_admits_a_shipped_manifest_cell`] close that: every entry
+/// must still be the engine of a shipped image model (lane-independent, off `MODEL_TABLE`); an entry
+/// this lane's bundle registers must end up probed; and the per-lane probed census must match
+/// [`EXPECTED_PROBED_IMAGE_MODELS`] / cover [`REQUIRED_PROBED_IMAGE_MODELS`].
+///
 /// * `sensenova_u1_8b` / `sensenova_u1_8b_fast` — sc-20569. Fixed by inference PR #699
 ///   (`0f9808e42`, merge of `18876051e`), which is NOT an ancestor of the pinned
 ///   `6f47e6707589158b89d0f238c5ef56be6f1bdd7a`. All six shipped SenseNova product ids advertise the
@@ -380,6 +389,175 @@ const BY_DESIGN_PRE_FILTERS: &[&str] = &["wan", "ltx", "chroma"];
 /// defect was a partial narrowing (counts 2/4 and the other three resolutions), which is a real bug
 /// — fixed upstream — but not the empty-intersection class this test asserts.
 const PINNED_ENGINE_GATE_DEFECTS: &[&str] = &["sensenova_u1_8b", "sensenova_u1_8b_fast"];
+
+/// Shipped image models that ARE gate-bearing but that this sweep cannot reach, named here rather
+/// than left as a silent hole in the census.
+///
+/// Both run the **bespoke lane**: they have no [`crate::engines::MODEL_TABLE`] row, so
+/// [`crate::engines::engine_id_for_model`] returns `None` and the sweep below records them as
+/// `unprobed` before it ever consults the registry. Their engine ids are not the SceneWorks model id
+/// either — they are per-lane private constants inside the `include!`d, `cfg`-gated job modules
+/// (`image_jobs/instantid.rs`'s `INSTANTID_ENGINE` = `mlx_instantid` / `candle_instantid`;
+/// `image_jobs/pulid.rs`'s `PULID_ENGINE_ID` = `pulid_flux` vs `image_jobs/pulid_candle.rs`'s
+/// `PULID_CANDLE_ENGINE` = `candle_pulid_flux`) — so reaching them means teaching this module a
+/// second, lane-split id map for two models, and then landing two never-before-probed models on the
+/// hosted macOS lane sight-unseen (MLX does not build on the Windows box this was written from).
+/// That trade was judged worse than an explicit, self-expiring exclusion.
+///
+/// `mlx-gen-pulid` does carry a calibration-scoped 1024x1024 / batch-1 envelope, and both manifests
+/// advertise `1024x1024` with `count` including 1, so neither is believed to be in the sc-20569
+/// empty-intersection class today — but that is reasoning, not a measurement, which is exactly why
+/// the exclusion is named instead of assumed.
+///
+/// The exclusion cannot outlive its reason: [`bespoke_lane_exclusion_still_has_no_model_table_row`]
+/// goes RED the moment either id GAINS a `MODEL_TABLE` row, because at that point the sweep can
+/// resolve its engine and the entry must be deleted rather than kept.
+const KNOWN_UNSWEPT_GATE_BEARING_MODELS: &[&str] = &["instantid_realvisxl", "pulid_flux_dev"];
+
+/// [`KNOWN_UNSWEPT_GATE_BEARING_MODELS`] is excused only because the bespoke lane gives it no
+/// `MODEL_TABLE` row. The day either model gains one, the sweep CAN reach it — so fail here and make
+/// the reader delete the entry instead of leaving a stale hole behind.
+#[test]
+fn bespoke_lane_exclusion_still_has_no_model_table_row() {
+    for id in KNOWN_UNSWEPT_GATE_BEARING_MODELS {
+        assert!(
+            EXPECTED_IMAGE_IDS.contains(id),
+            "{id} is excluded from the sc-20573 sweep but is no longer a shipped image model — \
+             drop it from KNOWN_UNSWEPT_GATE_BEARING_MODELS"
+        );
+        assert_eq!(
+            crate::engines::engine_id_for_model(id),
+            None,
+            "{id} now has a MODEL_TABLE row, so `engine_id_for_model` resolves it and the \
+             envelope ∩ manifest sweep can probe it like every other engine-backed family. DELETE \
+             {id:?} from KNOWN_UNSWEPT_GATE_BEARING_MODELS — the exclusion existed only for the \
+             bespoke lane's missing row (sc-20573)."
+        );
+    }
+}
+
+/// The EXACT set of shipped image models the off-mac `backend-candle` lane probes, as measured on
+/// the pinned CUDA bundle (`cargo test -p sceneworks-worker --features backend-candle --lib
+/// pinned_engine_geometry -- --nocapture`, 2026-08-19, inference rev `6f47e6707`).
+///
+/// This is the vacuity guard with teeth. `!probed.is_empty()` stayed green after 21 of these 22 fell
+/// out of the sweep; set equality does not. It is a TRIPWIRE, not a spec — the same idiom as
+/// [`EXPECTED_IMAGE_IDS`]. A provider that legitimately gains or loses a weights-free gate+fixture
+/// pair in a pin bump moves this list *deliberately*, in the same commit, with the census on stderr
+/// as the evidence. What it forbids is that movement happening silently.
+///
+/// Everything else on this lane is `unprobed` for one structural reason: `candle-gen-*` publishes no
+/// weights-free gate+fixture pair for it (sensenova, sdxl, sana, sd3, chroma, kolors, anima, boogu,
+/// ideogram, bernini) or the model has no `MODEL_TABLE` row at all (see
+/// [`KNOWN_UNSWEPT_GATE_BEARING_MODELS`]).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const EXPECTED_PROBED_IMAGE_MODELS: &[&str] = &[
+    "flux2_dev",
+    "flux2_klein_9b",
+    "flux2_klein_9b_kv",
+    "flux2_klein_9b_true_v2",
+    "flux_dev",
+    "flux_schnell",
+    "krea_2_raw",
+    "krea_2_turbo",
+    "lens",
+    "lens_turbo",
+    "mage_flow",
+    "mage_flow_base",
+    "mage_flow_edit",
+    "mage_flow_edit_base",
+    "mage_flow_edit_turbo",
+    "mage_flow_turbo",
+    "qwen_image",
+    "qwen_image_edit_2511",
+    "qwen_image_edit_2511_lightning",
+    "z_image",
+    "z_image_edit",
+    "z_image_turbo",
+];
+
+/// Candle lane: exact set equality against the measured census.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn assert_probe_census(
+    probed: &BTreeSet<&str>,
+    unprobed: &BTreeMap<&str, &'static str>,
+    gate_count: usize,
+    behavior_count: usize,
+) {
+    let expected: BTreeSet<&str> = EXPECTED_PROBED_IMAGE_MODELS.iter().copied().collect();
+    assert_eq!(
+        *probed, expected,
+        "sc-20573: this lane's probed census moved. The bundle publishes {gate_count} memory \
+         registrations and {behavior_count} behavior registrations. A model that DISAPPEARED from \
+         the census stopped being covered (a renamed provider id, or a registration that no longer \
+         publishes a weights-free gate+fixture pair) — that is the silent-coverage-loss this guard \
+         exists for, and it is the same rot path that would hollow out \
+         PINNED_ENGINE_GATE_DEFECTS. A model that APPEARED is new coverage: confirm it, then add it \
+         here in the same commit. Unprobed: {unprobed:?}"
+    );
+}
+
+/// Models the macOS/MLX lane MUST probe. Deliberately a FLOOR, not the exact census.
+///
+/// The exact mlx census cannot be measured from the Windows dev box this guard was extended on —
+/// MLX does not build there at all — and an mlx census derived by reading `mlx-gen-*` registration
+/// sources would be a guess whose only failure mode is reddening the hosted macOS lane on a change
+/// that broke nothing. So the mlx lane asserts the part that is PROVABLE off-Mac instead:
+///
+/// * these six SenseNova ids must be probed. All six resolve (via `MODEL_TABLE`) to the two engines
+///   in [`PINNED_ENGINE_GATE_DEFECTS`], `mlx-gen-sensenova` registers both a `MemoryRegistration`
+///   and a `MemoryBehaviorRegistration` for each, its fixtures come from gen-core's shared
+///   `standard_memory_behavior_context` (fixed at 1024x1024 / batch 1), and the engine's own
+///   `registered_safety_check(... &fixtures[0].context) == Accept` test pins that the gate admits
+///   them unmodified. So `probe_count > 0` holds by construction at the pinned rev;
+/// * plus the lane-local ledger-presence assertion in the caller, which is what makes the inverted
+///   "must STILL violate" assertion non-vacuous.
+///
+/// **To tighten this to set equality** (preferred, and cheap): run the macOS lane once with
+/// `cargo test -p sceneworks-worker --lib pinned_engine_geometry -- --nocapture`, paste the printed
+/// census here, and switch this lane's [`assert_probe_census`] to the candle lane's `assert_eq!`.
+#[cfg(target_os = "macos")]
+const REQUIRED_PROBED_IMAGE_MODELS: &[&str] = &[
+    "sensenova_u1_8b",
+    "sensenova_u1_8b_fast",
+    "sensenova_u1_8b_infographic_v2",
+    "sensenova_u1_8b_infographic_v2_fast",
+    "sensenova_u1_8b_infographic_v3",
+    "sensenova_u1_8b_infographic_v3_fast",
+];
+
+/// macOS lane: the documented weaker form — a required floor rather than set equality (see
+/// [`REQUIRED_PROBED_IMAGE_MODELS`] for why, and for how to tighten it).
+#[cfg(target_os = "macos")]
+fn assert_probe_census(
+    probed: &BTreeSet<&str>,
+    unprobed: &BTreeMap<&str, &'static str>,
+    gate_count: usize,
+    behavior_count: usize,
+) {
+    // `contains(*id)` (not `contains(id)`) so the lookup borrows as `str` and does not force the
+    // set's element lifetime to unify with `&'static str`.
+    let missing: Vec<&str> = REQUIRED_PROBED_IMAGE_MODELS
+        .iter()
+        .copied()
+        .filter(|id| !probed.contains(*id))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "sc-20573: {missing:?} must be probed on the MLX lane but were not. The bundle publishes \
+         {gate_count} memory registrations and {behavior_count} behavior registrations; either a \
+         provider id was renamed, or a registration stopped publishing a weights-free \
+         gate+fixture pair. Coverage vanished silently — which is also how \
+         PINNED_ENGINE_GATE_DEFECTS would rot into a permanent hole. Unprobed: {unprobed:?}"
+    );
+    assert!(
+        probed.len() >= REQUIRED_PROBED_IMAGE_MODELS.len(),
+        "sc-20573: the MLX lane probed only {} image models, below the {} this lane is required to \
+         cover. Unprobed: {unprobed:?}",
+        probed.len(),
+        REQUIRED_PROBED_IMAGE_MODELS.len(),
+    );
+}
 
 /// Assert the shipped image set is exactly [`EXPECTED_IMAGE_IDS`] and return each entry's `limits`
 /// object keyed by id.
@@ -402,6 +580,20 @@ fn shipped_image_limits() -> BTreeMap<String, Value> {
         shipped, expected,
         "an image model was added/removed/renamed in builtin.models.jsonc — update \
          EXPECTED_IMAGE_IDS (sc-20573); do not let it go unchecked"
+    );
+    // The set comparison above collapses a DUPLICATE id — two manifest entries sharing one id
+    // compare equal to the single expected entry, and the later one silently wins the map below.
+    // The video sibling has always counted (`models.len() == EXPECTED_VIDEO_IDS.len()`); count here
+    // too so the image lane cannot be fooled by the same shape.
+    assert_eq!(
+        models.len(),
+        EXPECTED_IMAGE_IDS.len(),
+        "builtin.models.jsonc declares {} image entries against {} EXPECTED_IMAGE_IDS while the two \
+         ID SETS agree — so one side carries a DUPLICATE id, which the set comparison above cannot \
+         see. Remove it; two manifest entries under one id also make the catalog's own lookup \
+         order-dependent (sc-20573)",
+        models.len(),
+        EXPECTED_IMAGE_IDS.len(),
     );
     models
         .iter()
@@ -533,8 +725,14 @@ fn every_calibration_scoped_image_gate_admits_a_shipped_manifest_cell() {
 
     // Census, so a lane that covers nothing is visible rather than vacuously green.
     let mut probed: BTreeSet<&str> = BTreeSet::new();
+    // The ENGINE ids behind `probed`. The ledger below is keyed by engine, so proving it still bites
+    // needs the engine census, not the model census.
+    let mut probed_engines: BTreeSet<&str> = BTreeSet::new();
     let mut unprobed: BTreeMap<&str, &'static str> = BTreeMap::new();
-    let mut failures: Vec<String> = Vec::new();
+    // `(engine_id, rendered failure line)`. The engine id is kept STRUCTURED rather than recovered
+    // from the rendered line: the by-design pre-filter below keys off it, and a gate's refusal
+    // `reason` is free prose that can mention any other family's name.
+    let mut failures: Vec<(&'static str, String)> = Vec::new();
     let mut retired_ledger_entries: Vec<String> = Vec::new();
 
     let shipped_limits = shipped_image_limits();
@@ -614,6 +812,7 @@ fn every_calibration_scoped_image_gate_admits_a_shipped_manifest_cell() {
             continue;
         }
         probed.insert(id);
+        probed_engines.insert(engine_id);
 
         let ledgered = PINNED_ENGINE_GATE_DEFECTS.contains(&engine_id);
         match (&admitted, ledgered) {
@@ -624,14 +823,18 @@ fn every_calibration_scoped_image_gate_admits_a_shipped_manifest_cell() {
                  landed in the pinned rev — DELETE {engine_id:?} from PINNED_ENGINE_GATE_DEFECTS \
                  (sc-20573)"
             )),
-            (None, false) => failures.push(format!(
-                "{id} (engine {engine_id}): the pinned engine's admission gate refuses EVERY \
-                 advertised cell — {} resolutions x {} counts x {} authorities, all rejected. The \
-                 model is bricked for all product traffic (the sc-20569 class). First refusals: {}",
-                resolutions.len(),
-                counts.len(),
-                ADMISSION_AUTHORITIES.len(),
-                refusals.join(" | ")
+            (None, false) => failures.push((
+                engine_id,
+                format!(
+                    "{id} (engine {engine_id}): the pinned engine's admission gate refuses EVERY \
+                     advertised cell — {} resolutions x {} counts x {} authorities, all rejected. \
+                     The model is bricked for all product traffic (the sc-20569 class). First \
+                     refusals: {}",
+                    resolutions.len(),
+                    counts.len(),
+                    ADMISSION_AUTHORITIES.len(),
+                    refusals.join(" | ")
+                ),
             )),
         }
     }
@@ -644,11 +847,66 @@ fn every_calibration_scoped_image_gate_admits_a_shipped_manifest_cell() {
         unprobed.len(),
     );
 
+    // ── M1: the ledger cannot rot, and coverage cannot vanish ────────────────────────────────
+    //
+    // These run BEFORE the intersection verdict below, because the verdict is only as trustworthy as
+    // the ledger it consults: a rotted entry silently converts a real refusal into an expected one.
+    //
+    // They exist because `unprobed` is a SILENT transition: a model that stops resolving to a
+    // registered provider is simply skipped, and every downstream assertion about it becomes
+    // vacuous. A pin bump that renames a ledgered provider id, or drops its registration, would
+    // therefore turn PINNED_ENGINE_GATE_DEFECTS into a permanent hole with a green lane.
+
+    // (1) Lane-independent anchor: every ledger entry must still name the engine of a shipped image
+    // model. MODEL_TABLE is all-targets data, so this bites on BOTH lanes and catches a rename that
+    // drops the entry off the registry everywhere at once.
+    let ledger_engines: BTreeSet<&str> = EXPECTED_IMAGE_IDS
+        .iter()
+        .filter_map(|id| crate::engines::engine_id_for_model(id))
+        .collect();
+    for engine in PINNED_ENGINE_GATE_DEFECTS {
+        assert!(
+            ledger_engines.contains(engine),
+            "PINNED_ENGINE_GATE_DEFECTS names {engine:?}, which is no longer the engine of ANY \
+             shipped image model. The ledger has rotted: either the engine id was renamed (point \
+             the entry at the new id) or the family was retired (delete the entry). Leaving it \
+             would silently retire the inverted assertion that makes the ledger self-expiring \
+             (sc-20573)."
+        );
+    }
+
+    // (2) Lane-local: an entry whose engine IS registered in this lane's bundle must have been
+    // probed. Without this, a registration that stops publishing a gate+fixture pair would take the
+    // ledgered engine out of the sweep entirely — and the "they must STILL violate" assertion would
+    // stop running with nothing going red.
+    for engine in PINNED_ENGINE_GATE_DEFECTS {
+        if !gates.contains_key(engine) {
+            // Not in THIS lane's bundle (the ledger is written against the MLX bundle's SenseNova
+            // gate; `candle-gen-sensenova` publishes no memory registration at all). Covered by (1)
+            // above and by the other lane.
+            continue;
+        }
+        assert!(
+            probed_engines.contains(engine),
+            "PINNED_ENGINE_GATE_DEFECTS names {engine:?} and this lane's bundle DOES register it, \
+             but no shipped model routed to it was probed — so its inverted \"must still violate\" \
+             assertion did not run and the ledger entry is dead weight. Either the provider stopped \
+             publishing a weights-free gate+fixture pair, or no shipped model maps to it any more. \
+             Fix the registration or delete the entry; do not leave a silently vacuous ledger \
+             (sc-20573). Probed engines: {probed_engines:?}. Unprobed: {unprobed:?}"
+        );
+    }
+
     // A refusal from one of the sweep's by-design families is not an ordinary failure: it means the
     // 2026-08-19 audit's classification no longer holds, and the fix is to re-audit rather than to
     // widen or waive the assertion. Say so instead of burying it in the generic list.
+    //
+    // Matched against the STRUCTURED engine id, never the rendered line: the line carries the gate's
+    // own refusal `reason`, which is free prose. A SenseNova refusal that happens to name "wan" or
+    // "ltx" while explaining a route would otherwise swap in this re-audit message and send the
+    // reader to audit a gate that never failed.
     for family in BY_DESIGN_PRE_FILTERS {
-        if let Some(failure) = failures.iter().find(|line| line.contains(family)) {
+        if let Some((_, failure)) = failures.iter().find(|(engine, _)| engine.contains(family)) {
             panic!(
                 "{failure}\n\nEpic 19048's route-gate defect-class sweep (epic comment \
                  activity-20582, 2026-08-19) classified the {family:?} gate as BY DESIGN, not a \
@@ -658,23 +916,29 @@ fn every_calibration_scoped_image_gate_admits_a_shipped_manifest_cell() {
         }
     }
 
+    let rendered_failures: Vec<&str> = failures.iter().map(|(_, line)| line.as_str()).collect();
     assert!(
         failures.is_empty() && retired_ledger_entries.is_empty(),
         "sc-20573 envelope ∩ manifest intersection ({} probed on this lane; the census is on \
          stderr, run with --nocapture):\n  EMPTY INTERSECTIONS:\n    {}\n  STALE LEDGER \
          ENTRIES:\n    {}",
         probed.len(),
-        failures.join("\n    "),
+        rendered_failures.join("\n    "),
         retired_ledger_entries.join("\n    "),
     );
 
-    assert!(
-        !probed.is_empty(),
-        "sc-20573: no image model was probed on this lane, so the intersection check is vacuous. \
-         The linked bundle publishes {} memory registrations and {} behavior registrations; either \
-         the bundle stopped composing or `engine_id_for_model` no longer agrees with the registry's \
-         provider ids. Unprobed: {unprobed:?}",
-        gates.len(),
-        behaviors.len(),
-    );
+    // The bespoke-lane models must stay accounted for as UNPROBED rather than quietly disappearing
+    // from the census in either direction (see KNOWN_UNSWEPT_GATE_BEARING_MODELS).
+    for id in KNOWN_UNSWEPT_GATE_BEARING_MODELS {
+        assert!(
+            unprobed.contains_key(*id),
+            "{id} is declared unsweepable (bespoke lane, no MODEL_TABLE row) but the census does \
+             not list it as unprobed. If the sweep can now reach it, delete it from \
+             KNOWN_UNSWEPT_GATE_BEARING_MODELS (sc-20573). Unprobed: {unprobed:?}"
+        );
+    }
+
+    // (3) Per-lane expected-probed census — the real vacuity guard. `!probed.is_empty()` would stay
+    // green after 21 of 22 models fell out of the sweep.
+    assert_probe_census(&probed, &unprobed, gates.len(), behaviors.len());
 }
