@@ -1,0 +1,3197 @@
+{
+  "schemaVersion": 1,
+  "generatedBy": "scripts/generate-candle-admission-inventory.mjs",
+  "story": "sc-19049",
+  "generatedFrom": {
+    "sceneWorksRevision": "source-tree:32f7761916b986931c5c80f41308b66e9e6b85ee812a8be07d972d47eaf98f87",
+    "sources": {
+      "manifest": {
+        "path": "config/manifests/builtin.models.jsonc",
+        "sha256": "050ae45ce25362ce246eeddc53a892502452e7abd03dc8a2a0447097de851179"
+      },
+      "routingCatalog": {
+        "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
+        "sha256": "6567129d5cf9c089a6124669efbfde93c4032701b235b01bb9c9f727e42933cb"
+      },
+      "routingCandle": {
+        "path": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
+        "sha256": "d54eaeb777184d0f0610177bfa00c8d9b2ea7a95eddfeb6353d2b1e6d91ff49d"
+      },
+      "routingMlx": {
+        "path": "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
+        "sha256": "45c1cff1dbd1effd7fbb33d0018f8fe40fb777a7d0db6a35ead6201e5b5551a0"
+      },
+      "engines": {
+        "path": "crates/sceneworks-worker/src/engines.rs",
+        "sha256": "18723bf5627c782c09ddb730b846f744dfe4bba7fd9adac3d37e7bfd6937e265"
+      },
+      "fitGate": {
+        "path": "crates/sceneworks-worker/src/fit_gate.rs",
+        "sha256": "ac2b269221ecb55682a4100baffb8049962455be04bef5883de0cc88290bda2c"
+      },
+      "vramGate": {
+        "path": "crates/sceneworks-worker/src/vram_gate.rs",
+        "sha256": "e9013fd319929e18fb2ec196e2ba71ce59280fa38de3659984ef9bd33733cea5"
+      },
+      "candleMemoryStrategy": {
+        "path": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
+        "sha256": "06cd8d4b03661bde82f63f664bd04b2369acb3d07e334e18b9c1ef8de580bdda"
+      },
+      "memoryRouteRegistry": {
+        "path": "crates/sceneworks-worker/src/memory_route_registry.rs",
+        "sha256": "c47af43cbfe315312800ecbd15b5ce75552f06fb9965a79292ede1d65242efa1"
+      },
+      "kreaControlFit": {
+        "path": "crates/sceneworks-worker/src/krea_control_fit.rs",
+        "sha256": "1b492498e33e6c6f141647f0db3f4ac5981cfae61eda916705b4db0604784a58"
+      },
+      "conditioningFit": {
+        "path": "crates/sceneworks-worker/src/conditioning_fit.rs",
+        "sha256": "ecba884d260e1abbf0702e76929b7d0ad53ea8a513f296a4ed3a9a683625f33b"
+      },
+      "videoAdmission": {
+        "path": "crates/sceneworks-worker/src/video_admission.rs",
+        "sha256": "06a52e8dc5a71a003e383d4ec8c9294ccf9ffafaf10040a6a7c9b30f8b539317"
+      },
+      "videoMemoryCurves": {
+        "path": "crates/sceneworks-core/src/video_memory_curves.rs",
+        "sha256": "560c0f9ebf3126d348ad49a642878b9c56b12e391ba92061cd823e206e74f833"
+      },
+      "videoMemoryCurvesData": {
+        "path": "docs/generated/video-memory-curves.json",
+        "sha256": "bf550cbc938aaa4a9ab5d721eafe8102d86e74e94cc076e5813bd7ef0faf44f8"
+      },
+      "imageRouting": {
+        "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
+        "sha256": "a34d9d47da8547186eb3c77aa578c76a73e481246d4a77bce276c2b03796aa6c"
+      },
+      "imageBaseAdmission": {
+        "path": "crates/sceneworks-worker/src/image_jobs/base_admission.rs",
+        "sha256": "8d38761fb02bffae36efb87b2cfed5bd9a14360c2253167d81fa9d7976d98d46"
+      },
+      "imageConditioningGate": {
+        "path": "crates/sceneworks-worker/src/image_jobs/conditioning_gate.rs",
+        "sha256": "e4f4aa75a9cfe7e164c44e3dd63e8e2352ae3b9aa2ccec37de2032c1c64a459e"
+      },
+      "imageStrictControl": {
+        "path": "crates/sceneworks-worker/src/image_jobs/candle_strict_control.rs",
+        "sha256": "3289ad8dbfac8f92549ee9f661383ce1413fe2a072501eb742d51feb13f21fbb"
+      },
+      "imageFlux1Control": {
+        "path": "crates/sceneworks-worker/src/image_jobs/flux1_control_candle.rs",
+        "sha256": "dffe3219528f75418fe996bb8eb331793120ccee231421e064ed7708c8e955c3"
+      },
+      "imageFlux2Control": {
+        "path": "crates/sceneworks-worker/src/image_jobs/flux2_control_candle.rs",
+        "sha256": "1d5cadea3902b4df736f7fdcb055e73ecd42153899ad5d74fe99c802b5b16f4d"
+      },
+      "imageFlux2Edit": {
+        "path": "crates/sceneworks-worker/src/image_jobs/flux2_edit_candle.rs",
+        "sha256": "0a2977aafebddcdbd13c756a95733943261f79d3afbd85cbd5e13cb1fd7793a5"
+      },
+      "imageFluxIpAdapter": {
+        "path": "crates/sceneworks-worker/src/image_jobs/flux_ipadapter.rs",
+        "sha256": "9e88b6663c39dd2c7a4f5ab198ca8af5687db9a2f1cf4aa8b3e0ed86c54eb4dc"
+      },
+      "imageKolorsControl": {
+        "path": "crates/sceneworks-worker/src/image_jobs/kolors_control.rs",
+        "sha256": "48e6831d3a8d3fdb8c71a869a92dade7d512d748bae6708b7cc4790ffe8c5c9f"
+      },
+      "imageQwenControl": {
+        "path": "crates/sceneworks-worker/src/image_jobs/qwen_control.rs",
+        "sha256": "c195c0af5c29eb9099514829ad183a226d5578eb6dc15e5684eaf428023c4a80"
+      },
+      "imageKreaControl": {
+        "path": "crates/sceneworks-worker/src/image_jobs/krea_control_candle.rs",
+        "sha256": "8c77f8b21ca478e3017e154bdc46e13df7ed5cab439cf3c4a5df1b4066410070"
+      },
+      "imageKreaEdit": {
+        "path": "crates/sceneworks-worker/src/image_jobs/krea_edit_candle.rs",
+        "sha256": "5f634dba68211a2f23cf8dfd4b50f3169af345e57c8298db93d88f453e7ceda3"
+      },
+      "imageKreaMultiphase": {
+        "path": "crates/sceneworks-worker/src/image_jobs/krea_multiphase.rs",
+        "sha256": "d81ae98774baf56da4dfcf6dcd569bb832a5f25a8db091f5ebb571b0620319a6"
+      },
+      "imageQwenEdit": {
+        "path": "crates/sceneworks-worker/src/image_jobs/qwen_edit_candle.rs",
+        "sha256": "c2cedbbe3ecf4c9c9913649938692c6e4278250d0dbd1573443655de81acc4ff"
+      },
+      "imageZimageControl": {
+        "path": "crates/sceneworks-worker/src/image_jobs/zimage_control.rs",
+        "sha256": "81b8a4abd5a73918c946eb99689d39348ed74f092fae47ac7b4c421c14a7ccd6"
+      },
+      "imageInstantId": {
+        "path": "crates/sceneworks-worker/src/image_jobs/instantid.rs",
+        "sha256": "c67034885d08166ac14e724f5108a31206864743954f9fa14712d3007d4a4c88"
+      },
+      "imagePulid": {
+        "path": "crates/sceneworks-worker/src/image_jobs/pulid_candle.rs",
+        "sha256": "0949a34a5f9758cd430aa386d01acb09fd624cb898d8f444d5d4b122c1c216f4"
+      },
+      "imageDetail": {
+        "path": "crates/sceneworks-worker/src/image_jobs/detail.rs",
+        "sha256": "83a23dcc197a6f8fda35f61e74be89f5840e4bdcc56ac5c01ae59c066466c538"
+      },
+      "videoRouteCandle": {
+        "path": "crates/sceneworks-worker/src/video_jobs/candle.rs",
+        "sha256": "2b6af0c5b3c8e240eb378ccd0aac9549d399a5fe0c35947d861d262cf05ecf9c"
+      }
+    }
+  },
+  "constants": {
+    "headroomGb": 2,
+    "requestScopeConstants": {
+      "DECLARATION_REQUEST_EVIDENCE_REVISION": "sc-18456-candle-declaration-request-scope-v1",
+      "FLUX1_REQUEST_EVIDENCE_REVISION": "sc-15823-candle-flux1-request-scope-v1",
+      "FLUX2_DEV_REQUEST_EVIDENCE_REVISION": "sc-15833-candle-flux2-dev-request-scope-v1",
+      "FLUX2_KLEIN_REQUEST_EVIDENCE_REVISION": "sc-15831-candle-flux2-klein-request-scope-v1",
+      "MAGE_FLOW_REQUEST_EVIDENCE_REVISION": "sc-15813-candle-mage-flow-request-scope-v1",
+      "PULID_FLUX_REQUEST_EVIDENCE_REVISION": "sc-15839-candle-pulid-flux-request-scope-v1",
+      "QWEN_IMAGE_REQUEST_EVIDENCE_REVISION": "sc-15817-candle-qwen-image-request-scope-v1",
+      "Z_IMAGE_REQUEST_EVIDENCE_REVISION": "sc-15815-candle-z-image-request-scope-v1"
+    },
+    "catchAllRequestScope": {
+      "constant": "DECLARATION_REQUEST_EVIDENCE_REVISION",
+      "value": "sc-18456-candle-declaration-request-scope-v1"
+    },
+    "overrideOnlyRequestScopes": [
+      {
+        "constant": "PULID_FLUX_REQUEST_EVIDENCE_REVISION",
+        "value": "sc-15839-candle-pulid-flux-request-scope-v1"
+      }
+    ]
+  },
+  "mechanisms": [
+    {
+      "id": "legacy_scalar_gate",
+      "summary": "Per-tier manifest scalar (`candle.vramGbByTier` + headroom, else `candle.minMemoryGb`) compared to a live VRAM budget.",
+      "definedIn": "crates/sceneworks-worker/src/vram_gate.rs",
+      "definitionSymbols": [
+        "predicted_peak_gb",
+        "predicted_peak_gb_with_adapter_bytes",
+        "predicted_sequential_peak_gb",
+        "predicted_sequential_peak_gb_with_adapter_bytes",
+        "sequential_overflow_gb",
+        "load_plan"
+      ],
+      "geometryAware": false,
+      "geometryAxes": [],
+      "calledFrom": [
+        "crates/sceneworks-worker/src/candle_memory_strategy.rs",
+        "crates/sceneworks-worker/src/image_jobs/base_admission.rs",
+        "crates/sceneworks-worker/src/image_jobs/flux1_control_candle.rs",
+        "crates/sceneworks-worker/src/image_jobs/flux2_control_candle.rs",
+        "crates/sceneworks-worker/src/image_jobs/flux2_edit_candle.rs",
+        "crates/sceneworks-worker/src/image_jobs/flux_ipadapter.rs",
+        "crates/sceneworks-worker/src/image_jobs/krea_edit_candle.rs",
+        "crates/sceneworks-worker/src/image_jobs/krea_multiphase.rs",
+        "crates/sceneworks-worker/src/image_jobs/pulid_candle.rs",
+        "crates/sceneworks-worker/src/image_jobs/qwen_edit_candle.rs",
+        "crates/sceneworks-worker/src/image_jobs/base.rs",
+        "crates/sceneworks-worker/src/image_jobs/zimage_control.rs",
+        "crates/sceneworks-worker/src/vram_gate.rs"
+      ]
+    },
+    {
+      "id": "shared_selector_named_revision",
+      "summary": "The shared memory-strategy selector, entered under an engine-id-keyed `*_REQUEST_EVIDENCE_REVISION` scope.",
+      "definedIn": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
+      "definitionSymbols": [
+        "evaluate_shared_image"
+      ],
+      "geometryAware": false,
+      "geometryAxes": [],
+      "calledFrom": [
+        "crates/sceneworks-worker/src/image_jobs/flux1_control_candle.rs",
+        "crates/sceneworks-worker/src/image_jobs/flux2_control_candle.rs",
+        "crates/sceneworks-worker/src/image_jobs/flux2_edit_candle.rs",
+        "crates/sceneworks-worker/src/image_jobs/flux_ipadapter.rs",
+        "crates/sceneworks-worker/src/image_jobs/krea_edit_candle.rs",
+        "crates/sceneworks-worker/src/image_jobs/krea_multiphase.rs",
+        "crates/sceneworks-worker/src/image_jobs/qwen_edit_candle.rs",
+        "crates/sceneworks-worker/src/image_jobs/base.rs",
+        "crates/sceneworks-worker/src/image_jobs/zimage_control.rs"
+      ]
+    },
+    {
+      "id": "shared_selector_bespoke_override",
+      "summary": "The shared selector entered with a caller-supplied `request_evidence_revision_override`, bypassing the engine-id match.",
+      "definedIn": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
+      "definitionSymbols": [
+        "evaluate_shared_bespoke_image"
+      ],
+      "geometryAware": false,
+      "geometryAxes": [],
+      "calledFrom": [
+        "crates/sceneworks-worker/src/image_jobs/pulid_candle.rs"
+      ]
+    },
+    {
+      "id": "shared_selector_declaration_catch_all",
+      "summary": "The shared selector reached through the sc-18456 catch-all arm, scoped by the provider's manifest `candle.memoryStrategyContract`.",
+      "definedIn": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
+      "definitionSymbols": [
+        "evaluate_shared_image"
+      ],
+      "geometryAware": false,
+      "geometryAxes": [],
+      "calledFrom": [
+        "crates/sceneworks-worker/src/image_jobs/flux1_control_candle.rs",
+        "crates/sceneworks-worker/src/image_jobs/flux2_control_candle.rs",
+        "crates/sceneworks-worker/src/image_jobs/flux2_edit_candle.rs",
+        "crates/sceneworks-worker/src/image_jobs/flux_ipadapter.rs",
+        "crates/sceneworks-worker/src/image_jobs/krea_edit_candle.rs",
+        "crates/sceneworks-worker/src/image_jobs/krea_multiphase.rs",
+        "crates/sceneworks-worker/src/image_jobs/qwen_edit_candle.rs",
+        "crates/sceneworks-worker/src/image_jobs/base.rs",
+        "crates/sceneworks-worker/src/image_jobs/zimage_control.rs"
+      ]
+    },
+    {
+      "id": "krea_turbo_fit",
+      "summary": "krea_2_turbo's bespoke declared phase curves (`candle.turboFit.phaseCurvesByTier`), the one geometry-aware candle image path today.",
+      "definedIn": "crates/sceneworks-worker/src/vram_gate.rs",
+      "definitionSymbols": [
+        "krea_turbo_fit_with_runtime",
+        "krea_turbo_smaller_fit_with_runtime"
+      ],
+      "geometryAware": true,
+      "geometryAxes": [
+        "height",
+        "width"
+      ],
+      "calledFrom": [
+        "crates/sceneworks-worker/src/image_jobs/base.rs",
+        "crates/sceneworks-worker/src/vram_gate.rs"
+      ]
+    },
+    {
+      "id": "krea_control_fit",
+      "summary": "The Krea ControlNet overlay's own fit module.",
+      "definedIn": "crates/sceneworks-worker/src/krea_control_fit.rs",
+      "definitionSymbols": [
+        "fit_ladder",
+        "fit_ladder_for_entry_with_runtime",
+        "predicted_control_peak_gb",
+        "predicted_control_sequential_peak_gb",
+        "incurred_peak_gb"
+      ],
+      "geometryAware": false,
+      "geometryAxes": [],
+      "calledFrom": [
+        "crates/sceneworks-worker/src/image_jobs/conditioning_gate.rs",
+        "crates/sceneworks-worker/src/image_jobs/krea_control_candle.rs"
+      ]
+    },
+    {
+      "id": "conditioning_fit",
+      "summary": "The shared conditioning-overlay fit module used by the strict-control lanes.",
+      "definedIn": "crates/sceneworks-worker/src/conditioning_fit.rs",
+      "definitionSymbols": [
+        "decide",
+        "admit",
+        "conditioning_floor_gb"
+      ],
+      "geometryAware": false,
+      "geometryAxes": [],
+      "calledFrom": [
+        "crates/sceneworks-worker/src/image_jobs/conditioning_gate.rs",
+        "crates/sceneworks-worker/src/image_jobs/detail.rs",
+        "crates/sceneworks-worker/src/image_jobs/flux2_control_candle.rs",
+        "crates/sceneworks-worker/src/image_jobs/instantid.rs",
+        "crates/sceneworks-worker/src/image_jobs/kolors_control.rs",
+        "crates/sceneworks-worker/src/image_jobs/krea_control_candle.rs",
+        "crates/sceneworks-worker/src/image_jobs/pulid_candle.rs",
+        "crates/sceneworks-worker/src/image_jobs/qwen_control.rs",
+        "crates/sceneworks-worker/src/image_jobs/candle_strict_control.rs",
+        "crates/sceneworks-worker/src/image_jobs/zimage_control.rs"
+      ]
+    },
+    {
+      "id": "flat_video_fit_error",
+      "summary": "Flat per-model video fit errors, one bespoke function per family.",
+      "definedIn": "crates/sceneworks-worker/src/vram_gate.rs",
+      "definitionSymbols": [
+        "svd_fit_error",
+        "mochi_fit_error",
+        "wan_video_fit_error",
+        "wan_video_fit_error_with_adapter_bytes",
+        "scail2_video_fit_error",
+        "scail2_video_fit_error_with_adapter_bytes",
+        "video_weights_fit_error"
+      ],
+      "geometryAware": true,
+      "geometryAxes": [
+        "frames",
+        "height",
+        "width"
+      ],
+      "calledFrom": [
+        "crates/sceneworks-worker/src/video_jobs/candle.rs",
+        "crates/sceneworks-worker/src/vram_gate.rs"
+      ]
+    },
+    {
+      "id": "video_memory_curve_bundle",
+      "summary": "Epic 18803's shared, lane-tagged video curve container in `sceneworks-core`. Fails closed on a foreign lane.",
+      "definedIn": "crates/sceneworks-core/src/video_memory_curves.rs",
+      "definitionSymbols": [
+        "evaluate"
+      ],
+      "geometryAware": false,
+      "geometryAxes": [],
+      "calledFrom": [
+        "crates/sceneworks-worker/src/video_admission.rs"
+      ]
+    },
+    {
+      "id": "unreached",
+      "summary": "The router serves this model on the candle lane, but no admission gate keyed to it was found.",
+      "definedIn": null,
+      "definitionSymbols": [],
+      "geometryAware": false,
+      "geometryAxes": [],
+      "calledFrom": []
+    }
+  ],
+  "videoBindings": [
+    {
+      "engineId": "svd_xt",
+      "symbol": "svd_fit_error",
+      "offMatch": false
+    },
+    {
+      "engineId": "mochi_1",
+      "symbol": "mochi_fit_error",
+      "offMatch": false
+    },
+    {
+      "engineId": "wan2_2_ti2v_5b",
+      "symbol": "wan_video_fit_error_with_adapter_bytes",
+      "offMatch": false
+    },
+    {
+      "engineId": "wan2_2_t2v_14b",
+      "symbol": "wan_video_fit_error_with_adapter_bytes",
+      "offMatch": false
+    },
+    {
+      "engineId": "wan2_2_i2v_14b",
+      "symbol": "wan_video_fit_error_with_adapter_bytes",
+      "offMatch": false
+    },
+    {
+      "engineId": "ltx_2_3_distilled",
+      "symbol": "video_weights_fit_error",
+      "offMatch": false
+    },
+    {
+      "engineId": "scail2_14b",
+      "symbol": "scail2_video_fit_error_with_adapter_bytes",
+      "offMatch": true
+    },
+    {
+      "engineId": "wan_2_2_vace_fun_14b",
+      "symbol": "video_weights_fit_error",
+      "offMatch": true
+    }
+  ],
+  "imageLaneBindings": [
+    {
+      "lane": "InstantId",
+      "module": "crates/sceneworks-worker/src/image_jobs/instantid.rs",
+      "models": [
+        "instantid_realvisxl"
+      ],
+      "mechanisms": [
+        "conditioning_fit"
+      ],
+      "allMechanisms": [
+        "conditioning_fit"
+      ]
+    },
+    {
+      "lane": "Flux2Edit",
+      "module": "crates/sceneworks-worker/src/image_jobs/flux2_edit_candle.rs",
+      "models": [
+        "flux2_dev",
+        "flux2_klein_9b",
+        "flux2_klein_9b_kv",
+        "flux2_klein_9b_true_v2"
+      ],
+      "mechanisms": [],
+      "allMechanisms": [
+        "legacy_scalar_gate",
+        "shared_selector_declaration_catch_all",
+        "shared_selector_named_revision"
+      ]
+    },
+    {
+      "lane": "QwenEdit",
+      "module": "crates/sceneworks-worker/src/image_jobs/qwen_edit_candle.rs",
+      "models": [
+        "qwen_image_edit",
+        "qwen_image_edit_2509",
+        "qwen_image_edit_2511",
+        "qwen_image_edit_2511_lightning"
+      ],
+      "mechanisms": [],
+      "allMechanisms": [
+        "legacy_scalar_gate",
+        "shared_selector_declaration_catch_all",
+        "shared_selector_named_revision"
+      ]
+    },
+    {
+      "lane": "KreaEdit",
+      "module": "crates/sceneworks-worker/src/image_jobs/krea_edit_candle.rs",
+      "models": [
+        "krea_2_raw",
+        "krea_2_turbo"
+      ],
+      "mechanisms": [],
+      "allMechanisms": [
+        "legacy_scalar_gate",
+        "shared_selector_declaration_catch_all",
+        "shared_selector_named_revision"
+      ]
+    },
+    {
+      "lane": "FluxIpAdapter",
+      "module": "crates/sceneworks-worker/src/image_jobs/flux_ipadapter.rs",
+      "models": [
+        "flux_dev",
+        "flux_schnell"
+      ],
+      "mechanisms": [],
+      "allMechanisms": [
+        "legacy_scalar_gate",
+        "shared_selector_declaration_catch_all",
+        "shared_selector_named_revision"
+      ]
+    },
+    {
+      "lane": "QwenControl",
+      "module": "crates/sceneworks-worker/src/image_jobs/qwen_control.rs",
+      "models": [
+        "qwen_image"
+      ],
+      "mechanisms": [
+        "conditioning_fit"
+      ],
+      "allMechanisms": [
+        "conditioning_fit"
+      ]
+    },
+    {
+      "lane": "KolorsControl",
+      "module": "crates/sceneworks-worker/src/image_jobs/kolors_control.rs",
+      "models": [
+        "kolors"
+      ],
+      "mechanisms": [
+        "conditioning_fit"
+      ],
+      "allMechanisms": [
+        "conditioning_fit"
+      ]
+    },
+    {
+      "lane": "ZImageControl",
+      "module": "crates/sceneworks-worker/src/image_jobs/zimage_control.rs",
+      "models": [
+        "z_image",
+        "z_image_turbo"
+      ],
+      "mechanisms": [
+        "conditioning_fit"
+      ],
+      "allMechanisms": [
+        "conditioning_fit",
+        "legacy_scalar_gate",
+        "shared_selector_declaration_catch_all",
+        "shared_selector_named_revision"
+      ]
+    },
+    {
+      "lane": "Flux1Control",
+      "module": "crates/sceneworks-worker/src/image_jobs/flux1_control_candle.rs",
+      "models": [
+        "flux_dev"
+      ],
+      "mechanisms": [],
+      "allMechanisms": [
+        "legacy_scalar_gate",
+        "shared_selector_declaration_catch_all",
+        "shared_selector_named_revision"
+      ]
+    },
+    {
+      "lane": "Flux2Control",
+      "module": "crates/sceneworks-worker/src/image_jobs/flux2_control_candle.rs",
+      "models": [
+        "flux2_dev"
+      ],
+      "mechanisms": [
+        "conditioning_fit"
+      ],
+      "allMechanisms": [
+        "conditioning_fit",
+        "legacy_scalar_gate",
+        "shared_selector_declaration_catch_all",
+        "shared_selector_named_revision"
+      ]
+    },
+    {
+      "lane": "KreaControl",
+      "module": "crates/sceneworks-worker/src/image_jobs/krea_control_candle.rs",
+      "models": [
+        "krea_2_turbo"
+      ],
+      "mechanisms": [
+        "conditioning_fit",
+        "krea_control_fit"
+      ],
+      "allMechanisms": [
+        "conditioning_fit",
+        "krea_control_fit"
+      ]
+    },
+    {
+      "lane": "Pulid",
+      "module": "crates/sceneworks-worker/src/image_jobs/pulid_candle.rs",
+      "models": [
+        "pulid_flux_dev"
+      ],
+      "mechanisms": [
+        "conditioning_fit",
+        "shared_selector_bespoke_override"
+      ],
+      "allMechanisms": [
+        "conditioning_fit",
+        "legacy_scalar_gate",
+        "shared_selector_bespoke_override"
+      ]
+    }
+  ],
+  "routes": [
+    {
+      "modelId": "anima_aesthetic",
+      "engineId": "anima_aesthetic",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": false,
+      "conditionedLanes": [],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": false,
+        "via": null,
+        "evidenceRevision": null
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "unreached"
+      ],
+      "evidence": {
+        "hasCandleBlock": false,
+        "measured": null,
+        "measuredTiers": [],
+        "sequentialTiers": [],
+        "minMemoryGb": null,
+        "supportsSequentialOffload": false,
+        "declaresProviderContract": false,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "anima_base",
+      "engineId": "anima_base",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": false,
+      "conditionedLanes": [],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": false,
+        "via": null,
+        "evidenceRevision": null
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "unreached"
+      ],
+      "evidence": {
+        "hasCandleBlock": false,
+        "measured": null,
+        "measuredTiers": [],
+        "sequentialTiers": [],
+        "minMemoryGb": null,
+        "supportsSequentialOffload": false,
+        "declaresProviderContract": false,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "anima_turbo",
+      "engineId": "anima_turbo",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": false,
+      "conditionedLanes": [],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": false,
+        "via": null,
+        "evidenceRevision": null
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "unreached"
+      ],
+      "evidence": {
+        "hasCandleBlock": false,
+        "measured": null,
+        "measuredTiers": [],
+        "sequentialTiers": [],
+        "minMemoryGb": null,
+        "supportsSequentialOffload": false,
+        "declaresProviderContract": false,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "bernini",
+      "engineId": null,
+      "modality": "video",
+      "manifestEntry": true,
+      "loadShapeRule": false,
+      "conditionedLanes": [],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": false,
+        "via": null,
+        "evidenceRevision": null
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "unreached"
+      ],
+      "evidence": {
+        "hasCandleBlock": false,
+        "measured": null,
+        "measuredTiers": [],
+        "sequentialTiers": [],
+        "minMemoryGb": null,
+        "supportsSequentialOffload": false,
+        "declaresProviderContract": false,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "bernini_image",
+      "engineId": "bernini",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": false,
+      "conditionedLanes": [
+        "BerniniEdit"
+      ],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": false,
+        "via": null,
+        "evidenceRevision": null
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "unreached"
+      ],
+      "evidence": {
+        "hasCandleBlock": false,
+        "measured": null,
+        "measuredTiers": [],
+        "sequentialTiers": [],
+        "minMemoryGb": null,
+        "supportsSequentialOffload": false,
+        "declaresProviderContract": false,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "boogu_image",
+      "engineId": "boogu_image",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": false,
+      "conditionedLanes": [
+        "BooguImg2Img"
+      ],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": false,
+        "via": null,
+        "evidenceRevision": null
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "legacy_scalar_gate"
+      ],
+      "evidence": {
+        "hasCandleBlock": true,
+        "measured": true,
+        "measuredTiers": [
+          "bf16",
+          "q4",
+          "q8"
+        ],
+        "sequentialTiers": [],
+        "minMemoryGb": 44,
+        "supportsSequentialOffload": false,
+        "declaresProviderContract": false,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "boogu_image_edit",
+      "engineId": "boogu_image_edit",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": false,
+      "conditionedLanes": [
+        "BooguEdit"
+      ],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": false,
+        "via": null,
+        "evidenceRevision": null
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "unreached"
+      ],
+      "evidence": {
+        "hasCandleBlock": false,
+        "measured": null,
+        "measuredTiers": [],
+        "sequentialTiers": [],
+        "minMemoryGb": null,
+        "supportsSequentialOffload": false,
+        "declaresProviderContract": false,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "boogu_image_turbo",
+      "engineId": "boogu_image_turbo",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": false,
+      "conditionedLanes": [
+        "BooguImg2Img"
+      ],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": false,
+        "via": null,
+        "evidenceRevision": null
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "legacy_scalar_gate"
+      ],
+      "evidence": {
+        "hasCandleBlock": true,
+        "measured": true,
+        "measuredTiers": [
+          "bf16",
+          "q4",
+          "q8"
+        ],
+        "sequentialTiers": [],
+        "minMemoryGb": 44,
+        "supportsSequentialOffload": false,
+        "declaresProviderContract": false,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "chroma1_base",
+      "engineId": "chroma1_base",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": false,
+      "conditionedLanes": [],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": false,
+        "via": null,
+        "evidenceRevision": null
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "unreached"
+      ],
+      "evidence": {
+        "hasCandleBlock": false,
+        "measured": null,
+        "measuredTiers": [],
+        "sequentialTiers": [],
+        "minMemoryGb": null,
+        "supportsSequentialOffload": false,
+        "declaresProviderContract": false,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "chroma1_flash",
+      "engineId": "chroma1_flash",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": false,
+      "conditionedLanes": [],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": false,
+        "via": null,
+        "evidenceRevision": null
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "unreached"
+      ],
+      "evidence": {
+        "hasCandleBlock": false,
+        "measured": null,
+        "measuredTiers": [],
+        "sequentialTiers": [],
+        "minMemoryGb": null,
+        "supportsSequentialOffload": false,
+        "declaresProviderContract": false,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "chroma1_hd",
+      "engineId": "chroma1_hd",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": false,
+      "conditionedLanes": [],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": false,
+        "via": null,
+        "evidenceRevision": null
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "unreached"
+      ],
+      "evidence": {
+        "hasCandleBlock": false,
+        "measured": null,
+        "measuredTiers": [],
+        "sequentialTiers": [],
+        "minMemoryGb": null,
+        "supportsSequentialOffload": false,
+        "declaresProviderContract": false,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "flux2_dev",
+      "engineId": "flux2_dev",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": true,
+      "conditionedLanes": [
+        "Flux2Control",
+        "Flux2Edit"
+      ],
+      "overlayLanes": [
+        "Flux2Control",
+        "Flux2Edit"
+      ],
+      "sharedSelector": {
+        "reached": true,
+        "via": "named_revision",
+        "evidenceRevision": "sc-15833-candle-flux2-dev-request-scope-v1"
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "conditioning_fit",
+        "legacy_scalar_gate",
+        "shared_selector_named_revision"
+      ],
+      "evidence": {
+        "hasCandleBlock": true,
+        "measured": false,
+        "measuredTiers": [
+          "q4",
+          "q8"
+        ],
+        "sequentialTiers": [
+          "q4",
+          "q8"
+        ],
+        "minMemoryGb": 48,
+        "supportsSequentialOffload": true,
+        "declaresProviderContract": true,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "flux2_klein_9b",
+      "engineId": "flux2_klein_9b",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": true,
+      "conditionedLanes": [
+        "Flux2Edit"
+      ],
+      "overlayLanes": [
+        "Flux2Edit"
+      ],
+      "sharedSelector": {
+        "reached": true,
+        "via": "named_revision",
+        "evidenceRevision": "sc-15831-candle-flux2-klein-request-scope-v1"
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "legacy_scalar_gate",
+        "shared_selector_named_revision"
+      ],
+      "evidence": {
+        "hasCandleBlock": true,
+        "measured": true,
+        "measuredTiers": [
+          "bf16",
+          "q4",
+          "q8"
+        ],
+        "sequentialTiers": [
+          "bf16",
+          "q4",
+          "q8"
+        ],
+        "minMemoryGb": 25,
+        "supportsSequentialOffload": true,
+        "declaresProviderContract": true,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "flux2_klein_9b_kv",
+      "engineId": "flux2_klein_9b",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": true,
+      "conditionedLanes": [
+        "Flux2Edit"
+      ],
+      "overlayLanes": [
+        "Flux2Edit"
+      ],
+      "sharedSelector": {
+        "reached": true,
+        "via": "named_revision",
+        "evidenceRevision": "sc-15831-candle-flux2-klein-request-scope-v1"
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "shared_selector_named_revision"
+      ],
+      "evidence": {
+        "hasCandleBlock": true,
+        "measured": null,
+        "measuredTiers": [],
+        "sequentialTiers": [],
+        "minMemoryGb": null,
+        "supportsSequentialOffload": true,
+        "declaresProviderContract": false,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "flux2_klein_9b_true_v2",
+      "engineId": "flux2_klein_9b",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": true,
+      "conditionedLanes": [
+        "Flux2Edit"
+      ],
+      "overlayLanes": [
+        "Flux2Edit"
+      ],
+      "sharedSelector": {
+        "reached": true,
+        "via": "named_revision",
+        "evidenceRevision": "sc-15831-candle-flux2-klein-request-scope-v1"
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "shared_selector_named_revision"
+      ],
+      "evidence": {
+        "hasCandleBlock": true,
+        "measured": null,
+        "measuredTiers": [],
+        "sequentialTiers": [],
+        "minMemoryGb": null,
+        "supportsSequentialOffload": true,
+        "declaresProviderContract": false,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "flux_dev",
+      "engineId": "flux1_dev",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": true,
+      "conditionedLanes": [
+        "Flux1Control",
+        "FluxIpAdapter"
+      ],
+      "overlayLanes": [
+        "Flux1Control",
+        "FluxIpAdapter"
+      ],
+      "sharedSelector": {
+        "reached": true,
+        "via": "named_revision",
+        "evidenceRevision": "sc-15823-candle-flux1-request-scope-v1"
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "legacy_scalar_gate",
+        "shared_selector_named_revision"
+      ],
+      "evidence": {
+        "hasCandleBlock": true,
+        "measured": true,
+        "measuredTiers": [
+          "q4",
+          "q8"
+        ],
+        "sequentialTiers": [
+          "q4",
+          "q8"
+        ],
+        "minMemoryGb": 24,
+        "supportsSequentialOffload": true,
+        "declaresProviderContract": true,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "flux_schnell",
+      "engineId": "flux1_schnell",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": true,
+      "conditionedLanes": [
+        "FluxIpAdapter"
+      ],
+      "overlayLanes": [
+        "FluxIpAdapter"
+      ],
+      "sharedSelector": {
+        "reached": true,
+        "via": "named_revision",
+        "evidenceRevision": "sc-15823-candle-flux1-request-scope-v1"
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "legacy_scalar_gate",
+        "shared_selector_named_revision"
+      ],
+      "evidence": {
+        "hasCandleBlock": true,
+        "measured": false,
+        "measuredTiers": [
+          "q4",
+          "q8"
+        ],
+        "sequentialTiers": [
+          "q4",
+          "q8"
+        ],
+        "minMemoryGb": 24,
+        "supportsSequentialOffload": true,
+        "declaresProviderContract": true,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "ideogram_4",
+      "engineId": "ideogram_4",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": false,
+      "conditionedLanes": [
+        "IdeogramEdit",
+        "IdeogramImg2Img"
+      ],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": false,
+        "via": null,
+        "evidenceRevision": null
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "legacy_scalar_gate"
+      ],
+      "evidence": {
+        "hasCandleBlock": true,
+        "measured": true,
+        "measuredTiers": [
+          "bf16",
+          "q4",
+          "q8"
+        ],
+        "sequentialTiers": [],
+        "minMemoryGb": 46,
+        "supportsSequentialOffload": false,
+        "declaresProviderContract": false,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "ideogram_4_turbo",
+      "engineId": "ideogram_4_turbo",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": false,
+      "conditionedLanes": [
+        "IdeogramEdit",
+        "IdeogramImg2Img"
+      ],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": false,
+        "via": null,
+        "evidenceRevision": null
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "legacy_scalar_gate"
+      ],
+      "evidence": {
+        "hasCandleBlock": true,
+        "measured": true,
+        "measuredTiers": [
+          "bf16",
+          "q4",
+          "q8"
+        ],
+        "sequentialTiers": [],
+        "minMemoryGb": 30,
+        "supportsSequentialOffload": false,
+        "declaresProviderContract": false,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "illustrious_xl_v1",
+      "engineId": "sdxl",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": false,
+      "conditionedLanes": [
+        "SdxlEdit",
+        "SdxlIpAdapter"
+      ],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": false,
+        "via": null,
+        "evidenceRevision": null
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "unreached"
+      ],
+      "evidence": {
+        "hasCandleBlock": false,
+        "measured": null,
+        "measuredTiers": [],
+        "sequentialTiers": [],
+        "minMemoryGb": null,
+        "supportsSequentialOffload": false,
+        "declaresProviderContract": false,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "illustrious_xl_v2",
+      "engineId": "sdxl",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": false,
+      "conditionedLanes": [
+        "SdxlEdit",
+        "SdxlIpAdapter"
+      ],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": false,
+        "via": null,
+        "evidenceRevision": null
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "unreached"
+      ],
+      "evidence": {
+        "hasCandleBlock": false,
+        "measured": null,
+        "measuredTiers": [],
+        "sequentialTiers": [],
+        "minMemoryGb": null,
+        "supportsSequentialOffload": false,
+        "declaresProviderContract": false,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "instantid_realvisxl",
+      "engineId": null,
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": false,
+      "conditionedLanes": [
+        "InstantId"
+      ],
+      "overlayLanes": [
+        "InstantId"
+      ],
+      "sharedSelector": {
+        "reached": false,
+        "via": null,
+        "evidenceRevision": null
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "conditioning_fit"
+      ],
+      "evidence": {
+        "hasCandleBlock": false,
+        "measured": null,
+        "measuredTiers": [],
+        "sequentialTiers": [],
+        "minMemoryGb": null,
+        "supportsSequentialOffload": false,
+        "declaresProviderContract": false,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "kolors",
+      "engineId": "kolors",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": false,
+      "conditionedLanes": [
+        "KolorsControl",
+        "KolorsEdit",
+        "KolorsIpAdapter"
+      ],
+      "overlayLanes": [
+        "KolorsControl"
+      ],
+      "sharedSelector": {
+        "reached": false,
+        "via": null,
+        "evidenceRevision": null
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "conditioning_fit",
+        "legacy_scalar_gate"
+      ],
+      "evidence": {
+        "hasCandleBlock": true,
+        "measured": true,
+        "measuredTiers": [
+          "bf16",
+          "q4",
+          "q8"
+        ],
+        "sequentialTiers": [],
+        "minMemoryGb": 29,
+        "supportsSequentialOffload": false,
+        "declaresProviderContract": false,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "krea_2_raw",
+      "engineId": "krea_2_raw",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": false,
+      "conditionedLanes": [
+        "KreaEdit",
+        "KreaImg2Img"
+      ],
+      "overlayLanes": [
+        "KreaEdit"
+      ],
+      "sharedSelector": {
+        "reached": true,
+        "via": "declaration_catch_all",
+        "evidenceRevision": "sc-18456-candle-declaration-request-scope-v1"
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "legacy_scalar_gate",
+        "shared_selector_declaration_catch_all"
+      ],
+      "evidence": {
+        "hasCandleBlock": true,
+        "measured": false,
+        "measuredTiers": [
+          "bf16",
+          "q4",
+          "q8"
+        ],
+        "sequentialTiers": [],
+        "minMemoryGb": 32,
+        "supportsSequentialOffload": false,
+        "declaresProviderContract": true,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "krea_2_turbo",
+      "engineId": "krea_2_turbo",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": false,
+      "conditionedLanes": [
+        "KreaControl",
+        "KreaEdit",
+        "KreaImg2Img"
+      ],
+      "overlayLanes": [
+        "KreaControl",
+        "KreaEdit"
+      ],
+      "sharedSelector": {
+        "reached": true,
+        "via": "declaration_catch_all",
+        "evidenceRevision": "sc-18456-candle-declaration-request-scope-v1"
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "conditioning_fit",
+        "krea_control_fit",
+        "krea_turbo_fit",
+        "legacy_scalar_gate",
+        "shared_selector_declaration_catch_all"
+      ],
+      "evidence": {
+        "hasCandleBlock": true,
+        "measured": true,
+        "measuredTiers": [
+          "bf16",
+          "int8-convrot",
+          "q4",
+          "q8"
+        ],
+        "sequentialTiers": [
+          "bf16",
+          "int8-convrot",
+          "q4",
+          "q8"
+        ],
+        "minMemoryGb": 32,
+        "supportsSequentialOffload": false,
+        "declaresProviderContract": true,
+        "declaresTurboFit": true,
+        "declaresControlFit": true
+      }
+    },
+    {
+      "modelId": "lens",
+      "engineId": "lens",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": true,
+      "conditionedLanes": [],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": true,
+        "via": "declaration_catch_all",
+        "evidenceRevision": "sc-18456-candle-declaration-request-scope-v1"
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "shared_selector_declaration_catch_all"
+      ],
+      "evidence": {
+        "hasCandleBlock": true,
+        "measured": null,
+        "measuredTiers": [],
+        "sequentialTiers": [],
+        "minMemoryGb": null,
+        "supportsSequentialOffload": false,
+        "declaresProviderContract": true,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "lens_turbo",
+      "engineId": "lens_turbo",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": true,
+      "conditionedLanes": [],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": true,
+        "via": "declaration_catch_all",
+        "evidenceRevision": "sc-18456-candle-declaration-request-scope-v1"
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "legacy_scalar_gate",
+        "shared_selector_declaration_catch_all"
+      ],
+      "evidence": {
+        "hasCandleBlock": true,
+        "measured": false,
+        "measuredTiers": [
+          "bf16",
+          "q4",
+          "q8"
+        ],
+        "sequentialTiers": [],
+        "minMemoryGb": 44,
+        "supportsSequentialOffload": true,
+        "declaresProviderContract": true,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "ltx_2_3",
+      "engineId": "ltx_2_3_distilled",
+      "modality": "video",
+      "manifestEntry": true,
+      "loadShapeRule": false,
+      "conditionedLanes": [],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": false,
+        "via": null,
+        "evidenceRevision": null
+      },
+      "videoFitSymbol": "video_weights_fit_error",
+      "mechanisms": [
+        "flat_video_fit_error"
+      ],
+      "evidence": {
+        "hasCandleBlock": false,
+        "measured": null,
+        "measuredTiers": [],
+        "sequentialTiers": [],
+        "minMemoryGb": null,
+        "supportsSequentialOffload": false,
+        "declaresProviderContract": false,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "mage_flow",
+      "engineId": "mage_flow",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": true,
+      "conditionedLanes": [],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": true,
+        "via": "named_revision",
+        "evidenceRevision": "sc-15813-candle-mage-flow-request-scope-v1"
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "legacy_scalar_gate",
+        "shared_selector_named_revision"
+      ],
+      "evidence": {
+        "hasCandleBlock": true,
+        "measured": false,
+        "measuredTiers": [
+          "bf16",
+          "q4",
+          "q8"
+        ],
+        "sequentialTiers": [],
+        "minMemoryGb": 17,
+        "supportsSequentialOffload": true,
+        "declaresProviderContract": true,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "mage_flow_base",
+      "engineId": "mage_flow_base",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": true,
+      "conditionedLanes": [],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": true,
+        "via": "named_revision",
+        "evidenceRevision": "sc-15813-candle-mage-flow-request-scope-v1"
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "legacy_scalar_gate",
+        "shared_selector_named_revision"
+      ],
+      "evidence": {
+        "hasCandleBlock": true,
+        "measured": false,
+        "measuredTiers": [
+          "bf16",
+          "q4",
+          "q8"
+        ],
+        "sequentialTiers": [],
+        "minMemoryGb": 17,
+        "supportsSequentialOffload": true,
+        "declaresProviderContract": true,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "mage_flow_edit",
+      "engineId": "mage_flow_edit",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": true,
+      "conditionedLanes": [
+        "MageEdit"
+      ],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": true,
+        "via": "named_revision",
+        "evidenceRevision": "sc-15813-candle-mage-flow-request-scope-v1"
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "legacy_scalar_gate",
+        "shared_selector_named_revision"
+      ],
+      "evidence": {
+        "hasCandleBlock": true,
+        "measured": false,
+        "measuredTiers": [
+          "bf16",
+          "q4",
+          "q8"
+        ],
+        "sequentialTiers": [],
+        "minMemoryGb": 17,
+        "supportsSequentialOffload": true,
+        "declaresProviderContract": true,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "mage_flow_edit_base",
+      "engineId": "mage_flow_edit_base",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": true,
+      "conditionedLanes": [
+        "MageEdit"
+      ],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": true,
+        "via": "named_revision",
+        "evidenceRevision": "sc-15813-candle-mage-flow-request-scope-v1"
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "legacy_scalar_gate",
+        "shared_selector_named_revision"
+      ],
+      "evidence": {
+        "hasCandleBlock": true,
+        "measured": false,
+        "measuredTiers": [
+          "bf16",
+          "q4",
+          "q8"
+        ],
+        "sequentialTiers": [],
+        "minMemoryGb": 17,
+        "supportsSequentialOffload": true,
+        "declaresProviderContract": true,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "mage_flow_edit_turbo",
+      "engineId": "mage_flow_edit_turbo",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": true,
+      "conditionedLanes": [
+        "MageEdit"
+      ],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": true,
+        "via": "named_revision",
+        "evidenceRevision": "sc-15813-candle-mage-flow-request-scope-v1"
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "legacy_scalar_gate",
+        "shared_selector_named_revision"
+      ],
+      "evidence": {
+        "hasCandleBlock": true,
+        "measured": false,
+        "measuredTiers": [
+          "bf16",
+          "q4",
+          "q8"
+        ],
+        "sequentialTiers": [],
+        "minMemoryGb": 17,
+        "supportsSequentialOffload": true,
+        "declaresProviderContract": true,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "mage_flow_turbo",
+      "engineId": "mage_flow_turbo",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": true,
+      "conditionedLanes": [],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": true,
+        "via": "named_revision",
+        "evidenceRevision": "sc-15813-candle-mage-flow-request-scope-v1"
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "legacy_scalar_gate",
+        "shared_selector_named_revision"
+      ],
+      "evidence": {
+        "hasCandleBlock": true,
+        "measured": false,
+        "measuredTiers": [
+          "bf16",
+          "q4",
+          "q8"
+        ],
+        "sequentialTiers": [],
+        "minMemoryGb": 17,
+        "supportsSequentialOffload": true,
+        "declaresProviderContract": true,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "mochi_1",
+      "engineId": "mochi_1",
+      "modality": "video",
+      "manifestEntry": false,
+      "loadShapeRule": false,
+      "conditionedLanes": [],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": false,
+        "via": null,
+        "evidenceRevision": null
+      },
+      "videoFitSymbol": "mochi_fit_error",
+      "mechanisms": [
+        "flat_video_fit_error"
+      ],
+      "evidence": {
+        "hasCandleBlock": false,
+        "measured": null,
+        "measuredTiers": [],
+        "sequentialTiers": [],
+        "minMemoryGb": null,
+        "supportsSequentialOffload": false,
+        "declaresProviderContract": false,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "pulid_flux_dev",
+      "engineId": null,
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": false,
+      "conditionedLanes": [
+        "Pulid"
+      ],
+      "overlayLanes": [
+        "Pulid"
+      ],
+      "sharedSelector": {
+        "reached": true,
+        "via": "bespoke_override",
+        "evidenceRevision": "sc-15839-candle-pulid-flux-request-scope-v1"
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "conditioning_fit",
+        "shared_selector_bespoke_override"
+      ],
+      "evidence": {
+        "hasCandleBlock": true,
+        "measured": null,
+        "measuredTiers": [],
+        "sequentialTiers": [],
+        "minMemoryGb": null,
+        "supportsSequentialOffload": true,
+        "declaresProviderContract": false,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "qwen_image",
+      "engineId": "qwen_image",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": true,
+      "conditionedLanes": [
+        "QwenControl"
+      ],
+      "overlayLanes": [
+        "QwenControl"
+      ],
+      "sharedSelector": {
+        "reached": true,
+        "via": "named_revision",
+        "evidenceRevision": "sc-15817-candle-qwen-image-request-scope-v1"
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "conditioning_fit",
+        "legacy_scalar_gate",
+        "shared_selector_named_revision"
+      ],
+      "evidence": {
+        "hasCandleBlock": true,
+        "measured": true,
+        "measuredTiers": [
+          "bf16",
+          "q4",
+          "q8"
+        ],
+        "sequentialTiers": [
+          "bf16",
+          "q4",
+          "q8"
+        ],
+        "minMemoryGb": 56,
+        "supportsSequentialOffload": true,
+        "declaresProviderContract": true,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "qwen_image_edit",
+      "engineId": "qwen_image_edit",
+      "modality": "image",
+      "manifestEntry": false,
+      "loadShapeRule": true,
+      "conditionedLanes": [
+        "QwenEdit"
+      ],
+      "overlayLanes": [
+        "QwenEdit"
+      ],
+      "sharedSelector": {
+        "reached": true,
+        "via": "named_revision",
+        "evidenceRevision": "sc-15817-candle-qwen-image-request-scope-v1"
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "shared_selector_named_revision"
+      ],
+      "evidence": {
+        "hasCandleBlock": false,
+        "measured": null,
+        "measuredTiers": [],
+        "sequentialTiers": [],
+        "minMemoryGb": null,
+        "supportsSequentialOffload": false,
+        "declaresProviderContract": false,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "qwen_image_edit_2509",
+      "engineId": "qwen_image_edit",
+      "modality": "image",
+      "manifestEntry": false,
+      "loadShapeRule": true,
+      "conditionedLanes": [
+        "QwenEdit"
+      ],
+      "overlayLanes": [
+        "QwenEdit"
+      ],
+      "sharedSelector": {
+        "reached": true,
+        "via": "named_revision",
+        "evidenceRevision": "sc-15817-candle-qwen-image-request-scope-v1"
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "shared_selector_named_revision"
+      ],
+      "evidence": {
+        "hasCandleBlock": false,
+        "measured": null,
+        "measuredTiers": [],
+        "sequentialTiers": [],
+        "minMemoryGb": null,
+        "supportsSequentialOffload": false,
+        "declaresProviderContract": false,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "qwen_image_edit_2511",
+      "engineId": "qwen_image_edit",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": true,
+      "conditionedLanes": [
+        "QwenEdit"
+      ],
+      "overlayLanes": [
+        "QwenEdit"
+      ],
+      "sharedSelector": {
+        "reached": true,
+        "via": "named_revision",
+        "evidenceRevision": "sc-15817-candle-qwen-image-request-scope-v1"
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "legacy_scalar_gate",
+        "shared_selector_named_revision"
+      ],
+      "evidence": {
+        "hasCandleBlock": true,
+        "measured": true,
+        "measuredTiers": [
+          "bf16",
+          "q4",
+          "q8"
+        ],
+        "sequentialTiers": [
+          "bf16",
+          "q4",
+          "q8"
+        ],
+        "minMemoryGb": 59,
+        "supportsSequentialOffload": true,
+        "declaresProviderContract": true,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "qwen_image_edit_2511_lightning",
+      "engineId": "qwen_image_edit",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": true,
+      "conditionedLanes": [
+        "QwenEdit"
+      ],
+      "overlayLanes": [
+        "QwenEdit"
+      ],
+      "sharedSelector": {
+        "reached": true,
+        "via": "named_revision",
+        "evidenceRevision": "sc-15817-candle-qwen-image-request-scope-v1"
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "legacy_scalar_gate",
+        "shared_selector_named_revision"
+      ],
+      "evidence": {
+        "hasCandleBlock": true,
+        "measured": true,
+        "measuredTiers": [
+          "bf16",
+          "q4",
+          "q8"
+        ],
+        "sequentialTiers": [
+          "bf16",
+          "q4",
+          "q8"
+        ],
+        "minMemoryGb": 59,
+        "supportsSequentialOffload": true,
+        "declaresProviderContract": false,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "realvisxl",
+      "engineId": "sdxl",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": false,
+      "conditionedLanes": [
+        "SdxlEdit",
+        "SdxlIpAdapter"
+      ],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": false,
+        "via": null,
+        "evidenceRevision": null
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "unreached"
+      ],
+      "evidence": {
+        "hasCandleBlock": false,
+        "measured": null,
+        "measuredTiers": [],
+        "sequentialTiers": [],
+        "minMemoryGb": null,
+        "supportsSequentialOffload": false,
+        "declaresProviderContract": false,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "realvisxl_lightning",
+      "engineId": "sdxl",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": false,
+      "conditionedLanes": [],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": false,
+        "via": null,
+        "evidenceRevision": null
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "unreached"
+      ],
+      "evidence": {
+        "hasCandleBlock": false,
+        "measured": null,
+        "measuredTiers": [],
+        "sequentialTiers": [],
+        "minMemoryGb": null,
+        "supportsSequentialOffload": false,
+        "declaresProviderContract": false,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "sana_1600m",
+      "engineId": "sana_1600m",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": false,
+      "conditionedLanes": [
+        "SanaImg2Img"
+      ],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": false,
+        "via": null,
+        "evidenceRevision": null
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "unreached"
+      ],
+      "evidence": {
+        "hasCandleBlock": false,
+        "measured": null,
+        "measuredTiers": [],
+        "sequentialTiers": [],
+        "minMemoryGb": null,
+        "supportsSequentialOffload": false,
+        "declaresProviderContract": false,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "sana_sprint_1600m",
+      "engineId": "sana_sprint_1600m",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": false,
+      "conditionedLanes": [
+        "SanaImg2Img"
+      ],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": false,
+        "via": null,
+        "evidenceRevision": null
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "unreached"
+      ],
+      "evidence": {
+        "hasCandleBlock": false,
+        "measured": null,
+        "measuredTiers": [],
+        "sequentialTiers": [],
+        "minMemoryGb": null,
+        "supportsSequentialOffload": false,
+        "declaresProviderContract": false,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "scail2_14b",
+      "engineId": null,
+      "modality": "video",
+      "manifestEntry": true,
+      "loadShapeRule": false,
+      "conditionedLanes": [],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": false,
+        "via": null,
+        "evidenceRevision": null
+      },
+      "videoFitSymbol": "scail2_video_fit_error_with_adapter_bytes",
+      "mechanisms": [
+        "flat_video_fit_error"
+      ],
+      "evidence": {
+        "hasCandleBlock": true,
+        "measured": true,
+        "measuredTiers": [
+          "bf16"
+        ],
+        "sequentialTiers": [],
+        "minMemoryGb": 105,
+        "supportsSequentialOffload": false,
+        "declaresProviderContract": false,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "sd3_5_large",
+      "engineId": "sd3_5_large",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": false,
+      "conditionedLanes": [
+        "Sd3Img2Img"
+      ],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": false,
+        "via": null,
+        "evidenceRevision": null
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "legacy_scalar_gate"
+      ],
+      "evidence": {
+        "hasCandleBlock": true,
+        "measured": true,
+        "measuredTiers": [
+          "bf16",
+          "q4"
+        ],
+        "sequentialTiers": [],
+        "minMemoryGb": 48,
+        "supportsSequentialOffload": false,
+        "declaresProviderContract": false,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "sd3_5_large_turbo",
+      "engineId": "sd3_5_large_turbo",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": false,
+      "conditionedLanes": [
+        "Sd3Img2Img"
+      ],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": false,
+        "via": null,
+        "evidenceRevision": null
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "legacy_scalar_gate"
+      ],
+      "evidence": {
+        "hasCandleBlock": true,
+        "measured": false,
+        "measuredTiers": [
+          "bf16",
+          "q4"
+        ],
+        "sequentialTiers": [],
+        "minMemoryGb": 48,
+        "supportsSequentialOffload": false,
+        "declaresProviderContract": false,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "sd3_5_medium",
+      "engineId": "sd3_5_medium",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": false,
+      "conditionedLanes": [
+        "Sd3Img2Img"
+      ],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": false,
+        "via": null,
+        "evidenceRevision": null
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "legacy_scalar_gate"
+      ],
+      "evidence": {
+        "hasCandleBlock": true,
+        "measured": false,
+        "measuredTiers": [
+          "bf16",
+          "q4"
+        ],
+        "sequentialTiers": [],
+        "minMemoryGb": 36,
+        "supportsSequentialOffload": false,
+        "declaresProviderContract": false,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "sdxl",
+      "engineId": "sdxl",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": false,
+      "conditionedLanes": [
+        "SdxlEdit",
+        "SdxlIpAdapter"
+      ],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": false,
+        "via": null,
+        "evidenceRevision": null
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "unreached"
+      ],
+      "evidence": {
+        "hasCandleBlock": false,
+        "measured": null,
+        "measuredTiers": [],
+        "sequentialTiers": [],
+        "minMemoryGb": null,
+        "supportsSequentialOffload": false,
+        "declaresProviderContract": false,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "sensenova_u1_8b",
+      "engineId": "sensenova_u1_8b",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": false,
+      "conditionedLanes": [
+        "SenseNovaEdit"
+      ],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": false,
+        "via": null,
+        "evidenceRevision": null
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "legacy_scalar_gate"
+      ],
+      "evidence": {
+        "hasCandleBlock": true,
+        "measured": true,
+        "measuredTiers": [
+          "bf16",
+          "q4",
+          "q8"
+        ],
+        "sequentialTiers": [],
+        "minMemoryGb": 16,
+        "supportsSequentialOffload": false,
+        "declaresProviderContract": false,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "sensenova_u1_8b_fast",
+      "engineId": "sensenova_u1_8b_fast",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": false,
+      "conditionedLanes": [
+        "SenseNovaEdit"
+      ],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": false,
+        "via": null,
+        "evidenceRevision": null
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "legacy_scalar_gate"
+      ],
+      "evidence": {
+        "hasCandleBlock": true,
+        "measured": true,
+        "measuredTiers": [
+          "bf16",
+          "q4",
+          "q8"
+        ],
+        "sequentialTiers": [],
+        "minMemoryGb": 16,
+        "supportsSequentialOffload": false,
+        "declaresProviderContract": false,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "sensenova_u1_8b_infographic_v2",
+      "engineId": "sensenova_u1_8b",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": false,
+      "conditionedLanes": [
+        "SenseNovaEdit"
+      ],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": false,
+        "via": null,
+        "evidenceRevision": null
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "legacy_scalar_gate"
+      ],
+      "evidence": {
+        "hasCandleBlock": true,
+        "measured": true,
+        "measuredTiers": [
+          "bf16",
+          "q4",
+          "q8"
+        ],
+        "sequentialTiers": [],
+        "minMemoryGb": 16,
+        "supportsSequentialOffload": false,
+        "declaresProviderContract": false,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "sensenova_u1_8b_infographic_v2_fast",
+      "engineId": "sensenova_u1_8b_fast",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": false,
+      "conditionedLanes": [
+        "SenseNovaEdit"
+      ],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": false,
+        "via": null,
+        "evidenceRevision": null
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "legacy_scalar_gate"
+      ],
+      "evidence": {
+        "hasCandleBlock": true,
+        "measured": true,
+        "measuredTiers": [
+          "bf16",
+          "q4",
+          "q8"
+        ],
+        "sequentialTiers": [],
+        "minMemoryGb": 16,
+        "supportsSequentialOffload": false,
+        "declaresProviderContract": false,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "sensenova_u1_8b_infographic_v3",
+      "engineId": "sensenova_u1_8b",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": false,
+      "conditionedLanes": [
+        "SenseNovaEdit"
+      ],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": false,
+        "via": null,
+        "evidenceRevision": null
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "legacy_scalar_gate"
+      ],
+      "evidence": {
+        "hasCandleBlock": true,
+        "measured": true,
+        "measuredTiers": [
+          "bf16",
+          "q4",
+          "q8"
+        ],
+        "sequentialTiers": [],
+        "minMemoryGb": 16,
+        "supportsSequentialOffload": false,
+        "declaresProviderContract": false,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "sensenova_u1_8b_infographic_v3_fast",
+      "engineId": "sensenova_u1_8b_fast",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": false,
+      "conditionedLanes": [
+        "SenseNovaEdit"
+      ],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": false,
+        "via": null,
+        "evidenceRevision": null
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "legacy_scalar_gate"
+      ],
+      "evidence": {
+        "hasCandleBlock": true,
+        "measured": true,
+        "measuredTiers": [
+          "bf16",
+          "q4",
+          "q8"
+        ],
+        "sequentialTiers": [],
+        "minMemoryGb": 16,
+        "supportsSequentialOffload": false,
+        "declaresProviderContract": false,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "svd",
+      "engineId": "svd_xt",
+      "modality": "video",
+      "manifestEntry": true,
+      "loadShapeRule": false,
+      "conditionedLanes": [],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": false,
+        "via": null,
+        "evidenceRevision": null
+      },
+      "videoFitSymbol": "svd_fit_error",
+      "mechanisms": [
+        "flat_video_fit_error"
+      ],
+      "evidence": {
+        "hasCandleBlock": false,
+        "measured": null,
+        "measuredTiers": [],
+        "sequentialTiers": [],
+        "minMemoryGb": null,
+        "supportsSequentialOffload": false,
+        "declaresProviderContract": false,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "wan_2_2",
+      "engineId": "wan2_2_ti2v_5b",
+      "modality": "video",
+      "manifestEntry": true,
+      "loadShapeRule": false,
+      "conditionedLanes": [],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": false,
+        "via": null,
+        "evidenceRevision": null
+      },
+      "videoFitSymbol": "wan_video_fit_error_with_adapter_bytes",
+      "mechanisms": [
+        "flat_video_fit_error"
+      ],
+      "evidence": {
+        "hasCandleBlock": true,
+        "measured": true,
+        "measuredTiers": [
+          "bf16",
+          "q4",
+          "q8"
+        ],
+        "sequentialTiers": [],
+        "minMemoryGb": 14,
+        "supportsSequentialOffload": false,
+        "declaresProviderContract": false,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "wan_2_2_i2v_14b",
+      "engineId": "wan2_2_i2v_14b",
+      "modality": "video",
+      "manifestEntry": true,
+      "loadShapeRule": false,
+      "conditionedLanes": [],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": false,
+        "via": null,
+        "evidenceRevision": null
+      },
+      "videoFitSymbol": "wan_video_fit_error_with_adapter_bytes",
+      "mechanisms": [
+        "flat_video_fit_error"
+      ],
+      "evidence": {
+        "hasCandleBlock": true,
+        "measured": true,
+        "measuredTiers": [
+          "bf16",
+          "q4",
+          "q8"
+        ],
+        "sequentialTiers": [],
+        "minMemoryGb": 24,
+        "supportsSequentialOffload": false,
+        "declaresProviderContract": false,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "wan_2_2_t2v_14b",
+      "engineId": "wan2_2_t2v_14b",
+      "modality": "video",
+      "manifestEntry": true,
+      "loadShapeRule": false,
+      "conditionedLanes": [],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": false,
+        "via": null,
+        "evidenceRevision": null
+      },
+      "videoFitSymbol": "wan_video_fit_error_with_adapter_bytes",
+      "mechanisms": [
+        "flat_video_fit_error"
+      ],
+      "evidence": {
+        "hasCandleBlock": true,
+        "measured": true,
+        "measuredTiers": [
+          "bf16",
+          "q4",
+          "q8"
+        ],
+        "sequentialTiers": [],
+        "minMemoryGb": 24,
+        "supportsSequentialOffload": false,
+        "declaresProviderContract": false,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "z_image",
+      "engineId": "z_image",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": true,
+      "conditionedLanes": [
+        "ZImageControl",
+        "ZImageImg2Img"
+      ],
+      "overlayLanes": [
+        "ZImageControl"
+      ],
+      "sharedSelector": {
+        "reached": true,
+        "via": "named_revision",
+        "evidenceRevision": "sc-15815-candle-z-image-request-scope-v1"
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "conditioning_fit",
+        "legacy_scalar_gate",
+        "shared_selector_named_revision"
+      ],
+      "evidence": {
+        "hasCandleBlock": true,
+        "measured": true,
+        "measuredTiers": [
+          "bf16",
+          "q4",
+          "q8"
+        ],
+        "sequentialTiers": [
+          "bf16",
+          "q4",
+          "q8"
+        ],
+        "minMemoryGb": 30,
+        "supportsSequentialOffload": true,
+        "declaresProviderContract": true,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "z_image_edit",
+      "engineId": "z_image_turbo",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": true,
+      "conditionedLanes": [
+        "ZImageEdit"
+      ],
+      "overlayLanes": [],
+      "sharedSelector": {
+        "reached": true,
+        "via": "named_revision",
+        "evidenceRevision": "sc-15815-candle-z-image-request-scope-v1"
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "shared_selector_named_revision"
+      ],
+      "evidence": {
+        "hasCandleBlock": true,
+        "measured": null,
+        "measuredTiers": [],
+        "sequentialTiers": [],
+        "minMemoryGb": null,
+        "supportsSequentialOffload": false,
+        "declaresProviderContract": true,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    },
+    {
+      "modelId": "z_image_turbo",
+      "engineId": "z_image_turbo",
+      "modality": "image",
+      "manifestEntry": true,
+      "loadShapeRule": true,
+      "conditionedLanes": [
+        "ZImageControl",
+        "ZImageEdit",
+        "ZImageIdentity",
+        "ZImageImg2Img"
+      ],
+      "overlayLanes": [
+        "ZImageControl"
+      ],
+      "sharedSelector": {
+        "reached": true,
+        "via": "named_revision",
+        "evidenceRevision": "sc-15815-candle-z-image-request-scope-v1"
+      },
+      "videoFitSymbol": null,
+      "mechanisms": [
+        "conditioning_fit",
+        "legacy_scalar_gate",
+        "shared_selector_named_revision"
+      ],
+      "evidence": {
+        "hasCandleBlock": true,
+        "measured": true,
+        "measuredTiers": [
+          "bf16",
+          "q4",
+          "q8"
+        ],
+        "sequentialTiers": [
+          "bf16",
+          "q4",
+          "q8"
+        ],
+        "minMemoryGb": 40,
+        "supportsSequentialOffload": true,
+        "declaresProviderContract": true,
+        "declaresTurboFit": false,
+        "declaresControlFit": false
+      }
+    }
+  ],
+  "overlayProviders": [
+    {
+      "providerId": "z_image_control",
+      "loadShapeRule": true,
+      "sharedSelector": {
+        "reached": true,
+        "via": "named_revision",
+        "evidenceRevision": "sc-15815-candle-z-image-request-scope-v1"
+      },
+      "baseModels": [
+        "z_image"
+      ]
+    },
+    {
+      "providerId": "z_image_turbo_control",
+      "loadShapeRule": true,
+      "sharedSelector": {
+        "reached": true,
+        "via": "named_revision",
+        "evidenceRevision": "sc-15815-candle-z-image-request-scope-v1"
+      },
+      "baseModels": [
+        "z_image_turbo"
+      ]
+    }
+  ],
+  "summary": {
+    "candleRoutes": 63,
+    "imageRoutes": 55,
+    "videoRoutes": 8,
+    "byMechanism": {
+      "legacy_scalar_gate": 32,
+      "shared_selector_named_revision": 20,
+      "shared_selector_bespoke_override": 1,
+      "shared_selector_declaration_catch_all": 4,
+      "krea_turbo_fit": 1,
+      "krea_control_fit": 1,
+      "conditioning_fit": 8,
+      "flat_video_fit_error": 7,
+      "video_memory_curve_bundle": 0,
+      "unreached": 16
+    },
+    "sharedSelector": {
+      "namedRevision": 20,
+      "declarationCatchAll": 4,
+      "bespokeOverride": 1,
+      "unreached": 38
+    },
+    "geometryAwareMechanisms": [
+      "krea_turbo_fit",
+      "flat_video_fit_error"
+    ],
+    "packagedVideoCurveLanes": {
+      "mlx": 1
+    },
+    "advisoryCandleBlocksWithoutRoute": [
+      "acestep_v15_turbo",
+      "chatterbox_tts",
+      "chatterbox_ve",
+      "kokoro_82m",
+      "moss_sfx_v2",
+      "moss_tts_realtime",
+      "moss_ttsd_v05",
+      "openvoice_v2",
+      "wan_2_2_vace_fun_14b"
+    ],
+    "imageLanesWithoutAdmissionBinding": [
+      "BerniniEdit",
+      "BooguEdit",
+      "BooguImg2Img",
+      "IdeogramEdit",
+      "IdeogramImg2Img",
+      "KolorsEdit",
+      "KolorsIpAdapter",
+      "KreaImg2Img",
+      "MageEdit",
+      "SanaImg2Img",
+      "Sd3Img2Img",
+      "SdxlEdit",
+      "SdxlIpAdapter",
+      "SenseNovaEdit",
+      "ZImageEdit",
+      "ZImageIdentity",
+      "ZImageImg2Img"
+    ],
+    "overlayProviders": 2
+  },
+  "divergences": [
+    {
+      "kind": "image_lane_without_admission_binding",
+      "modelId": "lane:BerniniEdit",
+      "detail": "this conditioned candle image lane has no handler module bound in IMAGE_LANE_BINDINGS, so its overlay-specific admission (if any) is not enumerated â€” only the engine-keyed and manifest-keyed mechanisms are reported for the models it serves"
+    },
+    {
+      "kind": "image_lane_without_admission_binding",
+      "modelId": "lane:BooguEdit",
+      "detail": "this conditioned candle image lane has no handler module bound in IMAGE_LANE_BINDINGS, so its overlay-specific admission (if any) is not enumerated â€” only the engine-keyed and manifest-keyed mechanisms are reported for the models it serves"
+    },
+    {
+      "kind": "image_lane_without_admission_binding",
+      "modelId": "lane:BooguImg2Img",
+      "detail": "this conditioned candle image lane has no handler module bound in IMAGE_LANE_BINDINGS, so its overlay-specific admission (if any) is not enumerated â€” only the engine-keyed and manifest-keyed mechanisms are reported for the models it serves"
+    },
+    {
+      "kind": "image_lane_without_admission_binding",
+      "modelId": "lane:IdeogramEdit",
+      "detail": "this conditioned candle image lane has no handler module bound in IMAGE_LANE_BINDINGS, so its overlay-specific admission (if any) is not enumerated â€” only the engine-keyed and manifest-keyed mechanisms are reported for the models it serves"
+    },
+    {
+      "kind": "image_lane_without_admission_binding",
+      "modelId": "lane:IdeogramImg2Img",
+      "detail": "this conditioned candle image lane has no handler module bound in IMAGE_LANE_BINDINGS, so its overlay-specific admission (if any) is not enumerated â€” only the engine-keyed and manifest-keyed mechanisms are reported for the models it serves"
+    },
+    {
+      "kind": "image_lane_without_admission_binding",
+      "modelId": "lane:KolorsEdit",
+      "detail": "this conditioned candle image lane has no handler module bound in IMAGE_LANE_BINDINGS, so its overlay-specific admission (if any) is not enumerated â€” only the engine-keyed and manifest-keyed mechanisms are reported for the models it serves"
+    },
+    {
+      "kind": "image_lane_without_admission_binding",
+      "modelId": "lane:KolorsIpAdapter",
+      "detail": "this conditioned candle image lane has no handler module bound in IMAGE_LANE_BINDINGS, so its overlay-specific admission (if any) is not enumerated â€” only the engine-keyed and manifest-keyed mechanisms are reported for the models it serves"
+    },
+    {
+      "kind": "image_lane_without_admission_binding",
+      "modelId": "lane:KreaImg2Img",
+      "detail": "this conditioned candle image lane has no handler module bound in IMAGE_LANE_BINDINGS, so its overlay-specific admission (if any) is not enumerated â€” only the engine-keyed and manifest-keyed mechanisms are reported for the models it serves"
+    },
+    {
+      "kind": "image_lane_without_admission_binding",
+      "modelId": "lane:MageEdit",
+      "detail": "this conditioned candle image lane has no handler module bound in IMAGE_LANE_BINDINGS, so its overlay-specific admission (if any) is not enumerated â€” only the engine-keyed and manifest-keyed mechanisms are reported for the models it serves"
+    },
+    {
+      "kind": "image_lane_without_admission_binding",
+      "modelId": "lane:SanaImg2Img",
+      "detail": "this conditioned candle image lane has no handler module bound in IMAGE_LANE_BINDINGS, so its overlay-specific admission (if any) is not enumerated â€” only the engine-keyed and manifest-keyed mechanisms are reported for the models it serves"
+    },
+    {
+      "kind": "image_lane_without_admission_binding",
+      "modelId": "lane:Sd3Img2Img",
+      "detail": "this conditioned candle image lane has no handler module bound in IMAGE_LANE_BINDINGS, so its overlay-specific admission (if any) is not enumerated â€” only the engine-keyed and manifest-keyed mechanisms are reported for the models it serves"
+    },
+    {
+      "kind": "image_lane_without_admission_binding",
+      "modelId": "lane:SdxlEdit",
+      "detail": "this conditioned candle image lane has no handler module bound in IMAGE_LANE_BINDINGS, so its overlay-specific admission (if any) is not enumerated â€” only the engine-keyed and manifest-keyed mechanisms are reported for the models it serves"
+    },
+    {
+      "kind": "image_lane_without_admission_binding",
+      "modelId": "lane:SdxlIpAdapter",
+      "detail": "this conditioned candle image lane has no handler module bound in IMAGE_LANE_BINDINGS, so its overlay-specific admission (if any) is not enumerated â€” only the engine-keyed and manifest-keyed mechanisms are reported for the models it serves"
+    },
+    {
+      "kind": "image_lane_without_admission_binding",
+      "modelId": "lane:SenseNovaEdit",
+      "detail": "this conditioned candle image lane has no handler module bound in IMAGE_LANE_BINDINGS, so its overlay-specific admission (if any) is not enumerated â€” only the engine-keyed and manifest-keyed mechanisms are reported for the models it serves"
+    },
+    {
+      "kind": "image_lane_without_admission_binding",
+      "modelId": "lane:ZImageEdit",
+      "detail": "this conditioned candle image lane has no handler module bound in IMAGE_LANE_BINDINGS, so its overlay-specific admission (if any) is not enumerated â€” only the engine-keyed and manifest-keyed mechanisms are reported for the models it serves"
+    },
+    {
+      "kind": "image_lane_without_admission_binding",
+      "modelId": "lane:ZImageIdentity",
+      "detail": "this conditioned candle image lane has no handler module bound in IMAGE_LANE_BINDINGS, so its overlay-specific admission (if any) is not enumerated â€” only the engine-keyed and manifest-keyed mechanisms are reported for the models it serves"
+    },
+    {
+      "kind": "image_lane_without_admission_binding",
+      "modelId": "lane:ZImageImg2Img",
+      "detail": "this conditioned candle image lane has no handler module bound in IMAGE_LANE_BINDINGS, so its overlay-specific admission (if any) is not enumerated â€” only the engine-keyed and manifest-keyed mechanisms are reported for the models it serves"
+    },
+    {
+      "kind": "routed_without_manifest_entry",
+      "modelId": "mochi_1",
+      "detail": "the router serves a candle lane for this id, but the builtin manifest has no entry, so no declared number and no provider contract can be read for it"
+    },
+    {
+      "kind": "routed_without_manifest_entry",
+      "modelId": "qwen_image_edit",
+      "detail": "the router serves a candle lane for this id, but the builtin manifest has no entry, so no declared number and no provider contract can be read for it"
+    },
+    {
+      "kind": "routed_without_manifest_entry",
+      "modelId": "qwen_image_edit_2509",
+      "detail": "the router serves a candle lane for this id, but the builtin manifest has no entry, so no declared number and no provider contract can be read for it"
+    },
+    {
+      "kind": "shared_selector_unreached",
+      "modelId": "anima_aesthetic",
+      "detail": "no named request scope for engine \"anima_aesthetic\" and no candle.memoryStrategyContract"
+    },
+    {
+      "kind": "shared_selector_unreached",
+      "modelId": "anima_base",
+      "detail": "no named request scope for engine \"anima_base\" and no candle.memoryStrategyContract"
+    },
+    {
+      "kind": "shared_selector_unreached",
+      "modelId": "anima_turbo",
+      "detail": "no named request scope for engine \"anima_turbo\" and no candle.memoryStrategyContract"
+    },
+    {
+      "kind": "shared_selector_unreached",
+      "modelId": "bernini",
+      "detail": "no named request scope for engine \"<unrouted>\" and no candle.memoryStrategyContract"
+    },
+    {
+      "kind": "shared_selector_unreached",
+      "modelId": "bernini_image",
+      "detail": "no named request scope for engine \"bernini\" and no candle.memoryStrategyContract"
+    },
+    {
+      "kind": "shared_selector_unreached",
+      "modelId": "boogu_image",
+      "detail": "no named request scope for engine \"boogu_image\" and no candle.memoryStrategyContract"
+    },
+    {
+      "kind": "shared_selector_unreached",
+      "modelId": "boogu_image_edit",
+      "detail": "no named request scope for engine \"boogu_image_edit\" and no candle.memoryStrategyContract"
+    },
+    {
+      "kind": "shared_selector_unreached",
+      "modelId": "boogu_image_turbo",
+      "detail": "no named request scope for engine \"boogu_image_turbo\" and no candle.memoryStrategyContract"
+    },
+    {
+      "kind": "shared_selector_unreached",
+      "modelId": "chroma1_base",
+      "detail": "no named request scope for engine \"chroma1_base\" and no candle.memoryStrategyContract"
+    },
+    {
+      "kind": "shared_selector_unreached",
+      "modelId": "chroma1_flash",
+      "detail": "no named request scope for engine \"chroma1_flash\" and no candle.memoryStrategyContract"
+    },
+    {
+      "kind": "shared_selector_unreached",
+      "modelId": "chroma1_hd",
+      "detail": "no named request scope for engine \"chroma1_hd\" and no candle.memoryStrategyContract"
+    },
+    {
+      "kind": "shared_selector_unreached",
+      "modelId": "ideogram_4",
+      "detail": "no named request scope for engine \"ideogram_4\" and no candle.memoryStrategyContract"
+    },
+    {
+      "kind": "shared_selector_unreached",
+      "modelId": "ideogram_4_turbo",
+      "detail": "no named request scope for engine \"ideogram_4_turbo\" and no candle.memoryStrategyContract"
+    },
+    {
+      "kind": "shared_selector_unreached",
+      "modelId": "illustrious_xl_v1",
+      "detail": "no named request scope for engine \"sdxl\" and no candle.memoryStrategyContract"
+    },
+    {
+      "kind": "shared_selector_unreached",
+      "modelId": "illustrious_xl_v2",
+      "detail": "no named request scope for engine \"sdxl\" and no candle.memoryStrategyContract"
+    },
+    {
+      "kind": "shared_selector_unreached",
+      "modelId": "instantid_realvisxl",
+      "detail": "no named request scope for engine \"<unrouted>\" and no candle.memoryStrategyContract"
+    },
+    {
+      "kind": "shared_selector_unreached",
+      "modelId": "kolors",
+      "detail": "no named request scope for engine \"kolors\" and no candle.memoryStrategyContract"
+    },
+    {
+      "kind": "shared_selector_unreached",
+      "modelId": "ltx_2_3",
+      "detail": "no named request scope for engine \"ltx_2_3_distilled\" and no candle.memoryStrategyContract"
+    },
+    {
+      "kind": "shared_selector_unreached",
+      "modelId": "mochi_1",
+      "detail": "no named request scope for engine \"mochi_1\" and no candle.memoryStrategyContract"
+    },
+    {
+      "kind": "shared_selector_unreached",
+      "modelId": "realvisxl",
+      "detail": "no named request scope for engine \"sdxl\" and no candle.memoryStrategyContract"
+    },
+    {
+      "kind": "shared_selector_unreached",
+      "modelId": "realvisxl_lightning",
+      "detail": "no named request scope for engine \"sdxl\" and no candle.memoryStrategyContract"
+    },
+    {
+      "kind": "shared_selector_unreached",
+      "modelId": "sana_1600m",
+      "detail": "no named request scope for engine \"sana_1600m\" and no candle.memoryStrategyContract"
+    },
+    {
+      "kind": "shared_selector_unreached",
+      "modelId": "sana_sprint_1600m",
+      "detail": "no named request scope for engine \"sana_sprint_1600m\" and no candle.memoryStrategyContract"
+    },
+    {
+      "kind": "shared_selector_unreached",
+      "modelId": "scail2_14b",
+      "detail": "no named request scope for engine \"<unrouted>\" and no candle.memoryStrategyContract"
+    },
+    {
+      "kind": "shared_selector_unreached",
+      "modelId": "sd3_5_large",
+      "detail": "no named request scope for engine \"sd3_5_large\" and no candle.memoryStrategyContract"
+    },
+    {
+      "kind": "shared_selector_unreached",
+      "modelId": "sd3_5_large_turbo",
+      "detail": "no named request scope for engine \"sd3_5_large_turbo\" and no candle.memoryStrategyContract"
+    },
+    {
+      "kind": "shared_selector_unreached",
+      "modelId": "sd3_5_medium",
+      "detail": "no named request scope for engine \"sd3_5_medium\" and no candle.memoryStrategyContract"
+    },
+    {
+      "kind": "shared_selector_unreached",
+      "modelId": "sdxl",
+      "detail": "no named request scope for engine \"sdxl\" and no candle.memoryStrategyContract"
+    },
+    {
+      "kind": "shared_selector_unreached",
+      "modelId": "sensenova_u1_8b",
+      "detail": "no named request scope for engine \"sensenova_u1_8b\" and no candle.memoryStrategyContract"
+    },
+    {
+      "kind": "shared_selector_unreached",
+      "modelId": "sensenova_u1_8b_fast",
+      "detail": "no named request scope for engine \"sensenova_u1_8b_fast\" and no candle.memoryStrategyContract"
+    },
+    {
+      "kind": "shared_selector_unreached",
+      "modelId": "sensenova_u1_8b_infographic_v2",
+      "detail": "no named request scope for engine \"sensenova_u1_8b\" and no candle.memoryStrategyContract"
+    },
+    {
+      "kind": "shared_selector_unreached",
+      "modelId": "sensenova_u1_8b_infographic_v2_fast",
+      "detail": "no named request scope for engine \"sensenova_u1_8b_fast\" and no candle.memoryStrategyContract"
+    },
+    {
+      "kind": "shared_selector_unreached",
+      "modelId": "sensenova_u1_8b_infographic_v3",
+      "detail": "no named request scope for engine \"sensenova_u1_8b\" and no candle.memoryStrategyContract"
+    },
+    {
+      "kind": "shared_selector_unreached",
+      "modelId": "sensenova_u1_8b_infographic_v3_fast",
+      "detail": "no named request scope for engine \"sensenova_u1_8b_fast\" and no candle.memoryStrategyContract"
+    },
+    {
+      "kind": "shared_selector_unreached",
+      "modelId": "svd",
+      "detail": "no named request scope for engine \"svd_xt\" and no candle.memoryStrategyContract"
+    },
+    {
+      "kind": "shared_selector_unreached",
+      "modelId": "wan_2_2",
+      "detail": "no named request scope for engine \"wan2_2_ti2v_5b\" and no candle.memoryStrategyContract"
+    },
+    {
+      "kind": "shared_selector_unreached",
+      "modelId": "wan_2_2_i2v_14b",
+      "detail": "no named request scope for engine \"wan2_2_i2v_14b\" and no candle.memoryStrategyContract"
+    },
+    {
+      "kind": "shared_selector_unreached",
+      "modelId": "wan_2_2_t2v_14b",
+      "detail": "no named request scope for engine \"wan2_2_t2v_14b\" and no candle.memoryStrategyContract"
+    },
+    {
+      "kind": "shared_selector_via_catch_all",
+      "modelId": "krea_2_raw",
+      "detail": "reaches the selector only through DECLARATION_REQUEST_EVIDENCE_REVISION, with no engine-keyed evidence revision"
+    },
+    {
+      "kind": "shared_selector_via_catch_all",
+      "modelId": "krea_2_turbo",
+      "detail": "reaches the selector only through DECLARATION_REQUEST_EVIDENCE_REVISION, with no engine-keyed evidence revision"
+    },
+    {
+      "kind": "shared_selector_via_catch_all",
+      "modelId": "lens",
+      "detail": "reaches the selector only through DECLARATION_REQUEST_EVIDENCE_REVISION, with no engine-keyed evidence revision"
+    },
+    {
+      "kind": "shared_selector_via_catch_all",
+      "modelId": "lens_turbo",
+      "detail": "reaches the selector only through DECLARATION_REQUEST_EVIDENCE_REVISION, with no engine-keyed evidence revision"
+    },
+    {
+      "kind": "video_route_without_fit_gate",
+      "modelId": "bernini",
+      "detail": "the routing catalog serves a candle video lane for this id, but candle_video_engine_id produces no engine for it and no flat fit error is bound to it, so none of the enumerated admission gates covers this route"
+    }
+  ],
+  "knownGaps": [
+    {
+      "id": "memory-matrix-source-paths-under-cover-candle-admission",
+      "owner": "sc-19059",
+      "severity": "high",
+      "detail": "scripts/generate-memory-matrix.mjs's SOURCE_PATHS omits five files that decide candle admission, so a change to any of them leaves docs/generated/memory-matrix.json's source-tree revision unrotated and the matrix claims a currency it does not have. Adding them rotates the matrix fingerprint and forces a full regeneration, so epic 19048's terminal acceptance story owns the fix rather than every slice paying for it.",
+      "paths": [
+        "crates/sceneworks-worker/src/candle_memory_strategy.rs",
+        "crates/sceneworks-worker/src/video_admission.rs",
+        "crates/sceneworks-worker/src/conditioning_fit.rs",
+        "crates/sceneworks-worker/src/krea_control_fit.rs",
+        "crates/sceneworks-core/src/video_memory_curves.rs"
+      ]
+    },
+    {
+      "id": "measured-flag-is-a-bare-boolean",
+      "owner": "sc-19053",
+      "severity": "medium",
+      "detail": "The manifest carries `measured: true|false` at <model>.candle, .candle.turboFit and .candle.control. There is no evidenceClass/evidence_class field anywhere in the tree, so epic 19048 R3's 'adopt epic 18472's evidence-class flag' has no producer to adopt yet; a boolean cannot distinguish a fitted curve from a single measured point from a declared floor.",
+      "paths": [
+        "config/manifests/builtin.models.jsonc"
+      ]
+    },
+    {
+      "id": "zero-candle-video-memory-curves-packaged",
+      "owner": "sc-19057",
+      "severity": "high",
+      "detail": "sceneworks-core's lane-tagged VideoMemoryCurveBundle exists and fails closed on a foreign lane, but the packaged curve data covers {\"mlx\":1} â€” there are no candle curves at all, so every candle video route falls back to the weights+headroom lower bound.",
+      "paths": [
+        "docs/generated/video-memory-curves.json"
+      ]
+    },
+    {
+      "id": "candle-image-admission-is-geometry-blind",
+      "owner": "sc-19054",
+      "severity": "high",
+      "detail": "32 image routes are admitted by the per-tier scalar gate, whose signature takes no width, height or frames â€” a 1024x1024 and a 2048x2048 request are admitted identically. The decision baseline records that explicitly (`geometrySensitive: false`) so the slice that fixes it produces a visible, enumerable diff.",
+      "paths": [
+        "crates/sceneworks-worker/src/vram_gate.rs"
+      ]
+    }
+  ]
+}
