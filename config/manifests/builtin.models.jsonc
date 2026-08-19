@@ -6604,6 +6604,16 @@
           // `loadShape` is the ABI-2 axis made load-bearing on this route. The worker used to take the
           // shape from the provider alone, so the axis did no work here; it now compares this declared
           // shape against the provider identity and refuses a fit measured under the other one.
+          //
+          // sc-19056 (epic 19048 R4) adds `measurementLane`. Every cell below was captured on an
+          // RTX PRO 6000 Blackwell through candle/CUDA - each evidenceRecord already says so in its
+          // own `loadability.backend` - so tagging the block `candle` restates measured fact and
+          // changes no number. What it adds is the REFUSAL: `krea_turbo_fit_with_runtime` compares
+          // this against its own lane and abandons the whole optimized ladder if they differ,
+          // instead of inferring the lane from the `candle` key this block happens to sit under.
+          // That key is authored, and an operator `user.models.jsonc` entry replaces the whole
+          // `candle` object wholesale, so position is not evidence.
+          "measurementLane": "candle",
           "calibrationAbi": 3,
           "loadShape": "deferred_materialization",
           "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",

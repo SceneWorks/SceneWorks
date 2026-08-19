@@ -3,11 +3,11 @@
   "generatedBy": "scripts/generate-candle-admission-inventory.mjs",
   "story": "sc-19049",
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:0906855e771272f9d94846f91d08c860167eeb2687793afc793749e04d02bb08",
+    "sceneWorksRevision": "source-tree:eddec7c05a968fd021dcab020498faad816e343b2945360ec929cefebad56fd0",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "050ae45ce25362ce246eeddc53a892502452e7abd03dc8a2a0447097de851179"
+        "sha256": "2279d5251a9acb73d3415acbe1be39e500b239d6e5d1b82041dc71b8105032a2"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -35,7 +35,7 @@
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "022a0a108e9fac0f1992938f87a6508ba29870b48091b9d6559c8f9f577ade5d"
+        "sha256": "d99b6d3f53b6d34a809bc729c830b66cf1e89807e55719aa2f5bf7dedd3bec19"
       },
       "candleMemoryStrategy": {
         "path": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
@@ -59,7 +59,7 @@
       },
       "videoMemoryCurves": {
         "path": "crates/sceneworks-core/src/video_memory_curves.rs",
-        "sha256": "560c0f9ebf3126d348ad49a642878b9c56b12e391ba92061cd823e206e74f833"
+        "sha256": "fee44ba64f2cf0ca9819f4d1d9f1025a38f567c88f92f4da3c58290997ecfa7f"
       },
       "videoMemoryCurvesData": {
         "path": "docs/generated/video-memory-curves.json",
