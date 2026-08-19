@@ -118,7 +118,8 @@ fn reject_message(
     let evidence = if catalog_evidence {
         "the per-tier catalog peak (including headroom)"
     } else {
-        "at least the uncataloged load's on-disk weights plus headroom; activations are not measured"
+        "a floor from the uncataloged load's on-disk weights plus headroom (activations are not \
+         measured)"
     };
     WorkerError::InvalidPayload(format!(
         "{model}{tier} cannot run through the {lane} lane: {evidence} needs ~{} GB of VRAM, but GPU \
@@ -563,6 +564,29 @@ mod tests {
             crate::vram_gate::load_plan(Some(12.0), None, Some(stale_historical), false),
             LoadPlan::Resident,
             "precondition: the stale global high-water would have over-admitted"
+        );
+    }
+
+    #[test]
+    fn cataloged_reject_message_is_the_full_grammatical_sentence() {
+        let error = reject_message("bernini_image", "candle", Some("q4"), 84.0, 77.0, "0", true);
+        assert_eq!(
+            error.to_string(),
+            "bernini_image at the q4 tier cannot run through the candle lane: the per-tier catalog \
+             peak (including headroom) needs ~84 GB of VRAM, but GPU 0 has ~77 GB available. Select \
+             a smaller checkpoint/tier or use a GPU with more VRAM."
+        );
+    }
+
+    #[test]
+    fn uncataloged_reject_message_is_the_full_grammatical_sentence() {
+        let error = reject_message("bernini_image", "candle", None, 84.0, 77.0, "0", false);
+        assert_eq!(
+            error.to_string(),
+            "bernini_image cannot run through the candle lane: a floor from the uncataloged load's \
+             on-disk weights plus headroom (activations are not measured) needs ~84 GB of VRAM, but \
+             GPU 0 has ~77 GB available. Select a smaller checkpoint/tier or use a GPU with more \
+             VRAM."
         );
     }
 

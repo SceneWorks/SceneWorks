@@ -9,11 +9,11 @@ use crate::jobs_store::routing::catalog::{
     MLX_ROUTED_TRAINING_KERNELS, VIDEO_MLX_ROUTED_MODELS,
 };
 use crate::jobs_store::routing::{
-    conditioned_reference_count, has_malformed_optional_nested_number, has_nonempty_array,
-    has_nonempty_nested_array, has_nonempty_or_malformed_array,
-    has_nonempty_or_malformed_nested_array, has_nonempty_or_malformed_string, has_nonempty_string,
-    has_nonnull_or_malformed_nested_carrier, krea_edit_has_unsupported_carrier,
-    SENSENOVA_MODEL_IDS,
+    conditioned_reference_count, has_malformed_optional_nested_number,
+    has_malformed_optional_string, has_nonempty_array, has_nonempty_nested_array,
+    has_nonempty_or_malformed_array, has_nonempty_or_malformed_nested_array,
+    has_nonempty_or_malformed_string, has_nonempty_string, has_nonnull_or_malformed_nested_carrier,
+    krea_edit_has_unsupported_carrier, SENSENOVA_MODEL_IDS,
 };
 
 /// Epic 3018 routing — does this image job belong on the in-process Rust MLX
@@ -611,9 +611,19 @@ pub(crate) fn sd3_5_mlx_eligible(payload: &Map<String, Value>) -> bool {
 /// share this gate. Edit, control, multiple-reference, adapter, pose, phase, and malformed unsupported
 /// carriers are rejected instead of being silently ignored. This keeps `model_mac_support`'s
 /// `features.edit` false (it probes with `mode: edit_image`). Off-Mac no MLX worker registers.
+///
+/// The singular reference is OPTIONAL on this one gate — the engine serves plain text-to-image AND
+/// singular-reference latent-init img2img — so only a malformed non-string carrier may fail closed
+/// ([`has_malformed_optional_string`]). The distinction that matters is `null`: the API normalizes
+/// every unset optional asset carrier to an explicit `null` before the job is stored, and an earlier
+/// `.map(..).unwrap_or(true)` form handled only the MISSING key, so every real text-to-image
+/// submission read as "not a valid reference" and no MLX worker would claim it (sc-19712 F-1,
+/// observed live). sc-20525 finished the job: the replacement still rejected a BLANK string, which
+/// contradicted both its own doc and the worker's convention that a blank asset id is absent, and
+/// left the Mac lane disagreeing with the Candle twin on the same payload.
 pub(crate) fn sana_mlx_eligible(payload: &Map<String, Value>) -> bool {
     payload.get("mode").and_then(Value::as_str) != Some("edit_image")
-        && sana_reference_carrier_is_absent_or_usable(payload)
+        && !has_malformed_optional_string(payload, "referenceAssetId")
         && !has_nonempty_or_malformed_string(payload, "sourceAssetId")
         && !["referenceAssetIds", "controls", "controlnets"]
             .iter()
@@ -633,23 +643,6 @@ pub(crate) fn sana_mlx_eligible(payload: &Map<String, Value>) -> bool {
         .any(|key| has_nonnull_or_malformed_nested_carrier(payload, "advanced", key))
         && !sana_has_malformed_quant_carrier(payload)
         && !has_nonempty_or_malformed_array(payload, "loras")
-}
-
-/// SANA's optional single-reference carrier. Reference is OPTIONAL here — the engine serves plain
-/// text-to-image as well as singular-reference latent-init img2img — so "no reference" must be
-/// eligible however the caller expressed it. The distinction that matters is `null`: the API
-/// normalizes every unset optional asset carrier to an explicit `null` before the job is stored.
-/// The previous `.map(..).unwrap_or(true)` form handled only the MISSING key, so every real
-/// text-to-image submission read as "not a valid reference" and no MLX worker would claim it
-/// (sc-19712 F-1, observed live). A malformed non-string still fails closed. This matches the
-/// routing-wide convention stated on [`has_nonempty_or_malformed_string`]: missing, `null`, and a
-/// blank string are all the product-level "not supplied" representation.
-fn sana_reference_carrier_is_absent_or_usable(payload: &Map<String, Value>) -> bool {
-    match payload.get("referenceAssetId") {
-        None | Some(Value::Null) => true,
-        Some(Value::String(value)) => !value.trim().is_empty(),
-        Some(_) => false,
-    }
 }
 
 /// Mirror the worker's `quant_int` request contract without treating an invalid explicit override as

@@ -343,14 +343,18 @@ pub(crate) fn image_request_candle_eligible(model: &str, payload: &Map<String, V
         return false;
     }
     // sc-18475: the SANA specialized route above owns the only accepted reference shape. If the
-    // singular carrier is present but not a non-empty string, do not let it fall through as txt2img.
+    // singular carrier is populated or malformed, do not let it fall through as txt2img.
+    //
+    // sc-20525: this MUST use the same `has_nonempty_or_malformed_string` convention as
+    // `sana_has_unsupported_carrier` right below it. The original inline `match value.as_str()`
+    // returned "malformed" from its `None` arm, which `Value::Null` also lands in — and `null` is
+    // how the API normalizes every unset optional asset carrier before the job is stored, so it is
+    // the shape EVERY real text-to-image submission arrives in. Off-Mac that classified plain SANA
+    // t2i as a malformed conditioning shape and enforce-failed it `candle_unsupported`. Same defect
+    // class as sc-19712 F-1 on the MLX twin; sharing the helper is what stops the two SANA gates
+    // from drifting apart again.
     if matches!(model, "sana_1600m" | "sana_sprint_1600m")
-        && (payload
-            .get("referenceAssetId")
-            .is_some_and(|value| match value.as_str() {
-                Some(id) => id.trim().is_empty(),
-                None => true,
-            })
+        && (has_nonempty_or_malformed_string(payload, "referenceAssetId")
             || sana_has_unsupported_carrier(payload))
     {
         return false;

@@ -280,6 +280,10 @@ fn sana_variants_accept_single_reference_img2img_and_reject_malformed_shapes() {
             // submission arrives in. Reading it as "not a valid reference" made the job
             // unclaimable by any MLX worker.
             json!({ "referenceAssetId": null, "prompt": "p" }),
+            // sc-20525: a BLANK id is the same "not supplied" encoding — the worker already treats
+            // it as absent, and the Candle twin routes it to plain txt2img. Failing it closed here
+            // only made the same payload unclaimable on Mac.
+            json!({ "referenceAssetId": " ", "prompt": "p" }),
             json!({
                 "referenceAssetId": "reference-1",
                 "controls": null,
@@ -311,7 +315,8 @@ fn sana_variants_accept_single_reference_img2img_and_reject_malformed_shapes() {
             json!({ "mode": "edit_image", "sourceAssetId": "source-1" }),
             json!({ "referenceAssetIds": ["reference-1"] }),
             json!({ "referenceAssetId": 7 }),
-            json!({ "referenceAssetId": " " }),
+            json!({ "referenceAssetId": { "id": "reference-1" } }),
+            json!({ "referenceAssetId": ["reference-1"] }),
             json!({ "referenceAssetId": "reference-1", "sourceAssetId": "source-1" }),
             json!({ "referenceAssetId": "reference-1", "maskAssetId": "mask-1" }),
             json!({ "referenceAssetId": "reference-1", "loras": [{ "id": "lora-1" }] }),

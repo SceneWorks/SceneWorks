@@ -192,6 +192,22 @@ pub(crate) fn normalize_app_managed_model_path(
     if raw_path.is_empty() {
         return Err(WorkerError::InvalidPayload(format!("{label} is required.")));
     }
+    normalize_app_managed_model_entry_path(settings, Path::new(raw_path), label)
+}
+
+/// `Path`-valued sibling of [`normalize_app_managed_model_path`], for callers that already hold a
+/// built `PathBuf` rather than a payload string (sc-20524: the data-dir anchoring of a manifest
+/// entry's provenance path). Such a caller must NOT round-trip through `to_string_lossy` to reach
+/// the `&str` form — a non-UTF-8 component becomes U+FFFD there, and the confinement check would
+/// then judge a path that is not the one the caller holds.
+pub(crate) fn normalize_app_managed_model_entry_path(
+    settings: &Settings,
+    raw_path: &Path,
+    label: &str,
+) -> WorkerResult<PathBuf> {
+    if raw_path.as_os_str().is_empty() {
+        return Err(WorkerError::InvalidPayload(format!("{label} is required.")));
+    }
     // Canonicalize the input and allow either the lexical or canonical form of each
     // root, so a symlink/`..` can't slip past the confinement check (sc-8877 / F-075),
     // matching `normalize_app_managed_lora_path` (same roots).
@@ -210,13 +226,10 @@ pub(crate) fn normalize_app_managed_model_path(
     // roots come only from the process env (never a payload — a LAN caller, epic 4484, cannot
     // widen the allow-list), and the list is empty by default and on macOS, so confinement is
     // unchanged for every install that has not opted in. Both lexical + canonical forms are added.
-    let confined =
-        sceneworks_core::model_artifacts::confine_artifact_path(Path::new(raw_path), &roots)
-            .map_err(|_| {
-                WorkerError::InvalidPayload(format!(
-                    "{label} must be inside an app-managed directory."
-                ))
-            })?;
+    let confined = sceneworks_core::model_artifacts::confine_artifact_path(raw_path, &roots)
+        .map_err(|_| {
+            WorkerError::InvalidPayload(format!("{label} must be inside an app-managed directory."))
+        })?;
     // sc-19707: a model directory the API already resolved to a concrete source-library path
     // (training base models, captioners, analyzers) is served from the leased app-owned bundle
     // when one covers that exact snapshot. Purely a read redirect inside the app data dir, applied

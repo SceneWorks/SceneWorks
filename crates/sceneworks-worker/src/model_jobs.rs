@@ -6178,6 +6178,63 @@ mod co_requisite_tests {
         );
     }
 
+    /// A repository installed ONLY at a pinned `snapshots/<40-hex>` — no `refs/main` — still
+    /// resolves through the UNPINNED repo-string seam every native LLM consumer uses.
+    ///
+    /// This is the production shape of a manifest download that carries a `revision` (F-029):
+    /// `download_snapshot_into_cache` writes the receipt pointer as `refs/<revision>`, so a pinned
+    /// install leaves `refs/main` ABSENT. The consumers, however, resolve by repo string with no
+    /// revision at all — `prompt_refine_jobs` (`DEFAULT_REFINE_MODEL`), `caption_jobs`,
+    /// `dataset_analysis_jobs` — so the pin's correctness depends entirely on the scan arm below
+    /// finding the 40-hex snapshot after the `refs/main` read fails.
+    ///
+    /// The neighbouring mutable-name test exercises the OTHER branch of
+    /// `discover_installed_snapshot_path` (a non-immutable directory name is admitted as an
+    /// installed path); an immutable name is delegated to `discover_snapshot` instead, so a pinned
+    /// install would go unguarded without this case. Asserted through
+    /// `resolve_app_managed_model_dir`, the seam the jobs actually call, not just the inner
+    /// resolver — a pinned model that resolves inwardly but is rejected at the job seam is still a
+    /// model that cannot load.
+    #[test]
+    fn snapshot_resolution_finds_a_pinned_install_that_has_no_refs_main() {
+        let _env = isolate_hf_cache();
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        let repo = "TheDrummer/Anubis-Mini-8B-v1";
+        let revision = "696f5b956f0511168d98cd32106299cebc3cc12b";
+        let repo_dir =
+            huggingface_repo_cache_path(data_dir.path(), repo).expect("repo cache path resolves");
+        let snapshot = repo_dir.join("snapshots").join(revision);
+        std::fs::create_dir_all(&snapshot).expect("snapshot dir");
+        std::fs::write(snapshot.join("config.json"), b"{}").expect("write config");
+        std::fs::write(
+            snapshot.join("model-00001-of-00004.safetensors"),
+            b"weights",
+        )
+        .expect("write weight");
+        // The receipt pointer a PINNED download leaves — named by the revision, never `main`.
+        std::fs::create_dir_all(repo_dir.join("refs")).expect("create refs");
+        std::fs::write(repo_dir.join("refs").join(revision), revision).expect("write refs/<rev>");
+        assert!(
+            !repo_dir.join("refs").join("main").exists(),
+            "the fixture must reproduce a pinned install: no refs/main"
+        );
+
+        assert_eq!(
+            resolve_huggingface_snapshot_dir(data_dir.path(), repo)
+                .expect("a pinned install is installed, so resolution must succeed"),
+            snapshot,
+        );
+        assert_eq!(
+            crate::paths::resolve_app_managed_model_dir(
+                &settings_at(data_dir.path().to_path_buf()),
+                repo,
+                "prompt-refine model path",
+            )
+            .expect("the job seam must resolve a pinned install"),
+            snapshot,
+        );
+    }
+
     #[test]
     fn present_co_requisites_resolve_to_a_component_map_matching_the_descriptor() {
         let _env = isolate_hf_cache();

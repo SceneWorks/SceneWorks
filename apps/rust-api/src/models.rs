@@ -2598,6 +2598,12 @@ fn receipt_files_present(
                     .filter(|snapshot| {
                         snapshot_tier_is_loadable(snapshot, &receipt.files, family_complete)
                     })
+                    // A backfill records whatever it FOUND, so a receipt can name a shard index plus
+                    // only the shards that happened to land. Every recorded index must still resolve
+                    // to a complete shard set on disk, or this receipt is laundering an interrupted
+                    // download into "installed" (sc-20526). Stat-only: the index paths are already in
+                    // the receipt, so this costs no directory walk.
+                    .filter(|snapshot| listed_shard_indexes_are_complete(snapshot, &receipt.files))
                     .collect::<Vec<_>>();
                 receipt
                     .revision
@@ -2626,6 +2632,105 @@ fn model_family_tier_predicate(model: &Value) -> Option<fn(&FsPath) -> bool> {
             .unwrap_or_default(),
         model.get("id").and_then(Value::as_str).unwrap_or_default(),
     )
+}
+
+/// Whether a receipt entry is PROVABLY torn: every cached snapshot that holds one of the shard
+/// indexes the entry recorded is missing at least one shard that index names, and no snapshot holds
+/// a complete set (sc-20526).
+///
+/// Deliberately positive-evidence only. A receipt whose repo cache is gone, whose files simply are
+/// not where this box expects them, or that records no shard index at all is left ALONE — read-side
+/// validation already refuses to count such a receipt as installed, and silently deleting a receipt
+/// on ambiguous evidence would destroy the relocation proof an external-library install depends on.
+fn receipt_entry_is_provably_torn(entry: &Value, data_dir: &FsPath) -> bool {
+    if entry.get("backfilled").and_then(Value::as_bool) != Some(true) {
+        return false;
+    }
+    let Some(repo) = entry.get("repo").and_then(Value::as_str) else {
+        return false;
+    };
+    let indexes = entry
+        .get("resolvedFiles")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|file| file.ends_with(sceneworks_core::safetensors::SAFETENSORS_INDEX_SUFFIX))
+        .collect::<Vec<_>>();
+    if indexes.is_empty() {
+        return false;
+    }
+    let Some(root) = huggingface_repo_cache_path(data_dir, repo) else {
+        return false;
+    };
+    let mut saw_torn = false;
+    for snapshot in crate::huggingface_snapshot_dirs(&root) {
+        let present = indexes
+            .iter()
+            .filter(|file| path_is_readable_file(&snapshot.join(file)))
+            .collect::<Vec<_>>();
+        if present.is_empty() {
+            continue;
+        }
+        // One complete snapshot is enough: cached revisions are alternatives, and a re-download
+        // lands beside the torn revision it replaces rather than deleting it.
+        if present.len() == indexes.len()
+            && listed_shard_indexes_are_complete(
+                &snapshot,
+                &indexes
+                    .iter()
+                    .map(|file| (*file).to_owned())
+                    .collect::<Vec<_>>(),
+            )
+        {
+            return false;
+        }
+        saw_torn = true;
+    }
+    saw_torn
+}
+
+/// Repair receipts that a pre-sc-20526 backfill minted over a partially downloaded tier.
+///
+/// The offending shape is `backfilled: true` with a shard index whose `weight_map` names files that
+/// were never downloaded — the receipt recorded the partial on-disk set as if it were complete, and
+/// nothing invalidated it, so affected users needed a manual delete. Dropping the entry here lets the
+/// next scan re-backfill honestly (the backfill writer early-outs while ANY receipt for the model
+/// survives) and heals every other receipt consumer, since they all read this one file.
+///
+/// Cost: one small JSON read per managed model directory plus a stat per recorded index and shard.
+/// It runs on the catalog sweep, never on the per-job hot path.
+fn repair_torn_backfilled_receipts(managed_path: &FsPath, data_dir: &FsPath) {
+    let entries = receipt_entries(managed_path);
+    if entries.is_empty()
+        || !entries
+            .iter()
+            .any(|entry| receipt_entry_is_provably_torn(entry, data_dir))
+    {
+        return;
+    }
+    let _write_guard = RECEIPT_BACKFILL_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Re-read under the lock: a concurrent backfill may have rewritten the file.
+    let kept = receipt_entries(managed_path)
+        .into_iter()
+        .filter(|entry| !receipt_entry_is_provably_torn(entry, data_dir))
+        .collect::<Vec<_>>();
+    let receipt_path = managed_path.join(".sceneworks-download-complete.json");
+    let Some(first) = kept.first().cloned() else {
+        // Every entry was a false-complete: the model is not installed, so the receipt must go
+        // rather than linger as a bare marker `model_is_installed` would still honour.
+        let _ = std::fs::remove_file(&receipt_path);
+        return;
+    };
+    let mut receipt = first;
+    if let Some(object) = receipt.as_object_mut() {
+        object.insert("receipts".to_owned(), Value::Array(kept));
+    }
+    let _ = serde_json::to_vec_pretty(&receipt)
+        .ok()
+        .and_then(|bytes| std::fs::write(&receipt_path, bytes).ok());
 }
 
 fn backfill_current_receipt(
@@ -2662,6 +2767,15 @@ fn backfill_current_receipt(
             }
             let resolved = snapshot_files(&snapshot).into_iter()
                 .filter(|file| allow_pattern_matches(file, &files)).collect::<Vec<_>>();
+            // Record only a file set that SATISFIES what the repo declares, never merely what was
+            // found (sc-20526). A `<tier>/*` glob and a whole-repo fetch declare no per-file claim,
+            // so the sharded-safetensors indexes IN the resolved set are the workable ground truth:
+            // every shard their `weight_map` names must be on disk. Otherwise this would mint a
+            // "complete" receipt for a tier missing ~4 GB of its text encoder (lens_turbo bf16) and
+            // that receipt would then keep the model reading installed through the usable-stale path.
+            if !listed_shard_indexes_are_complete(&snapshot, &resolved) {
+                return None;
+            }
             // Record WHICH snapshot these files were read from (sc-19712 F-5). A revision-less
             // receipt makes its whole repository unserveable from the resolved cache — there is no
             // pair to compare coverage against — so a backfilled install silently dropped out of
@@ -3582,6 +3696,521 @@ mod download_receipt_tests {
         assert!(state.installed);
     }
 
+    /// sc-20526 fixture: a diffusers quant tier whose text encoder is SHARDED. `present_shards`
+    /// selects which of the three declared shards actually landed, so the same builder produces both
+    /// the interrupted download and the genuinely complete tier.
+    fn write_sharded_diffusers_tier(snapshot: &FsPath, tier: &str, present_shards: &[u32]) {
+        let tier_dir = snapshot.join(tier);
+        std::fs::create_dir_all(&tier_dir).unwrap();
+        std::fs::write(
+            tier_dir.join("model_index.json"),
+            serde_json::to_vec(&json!({
+                "_class_name": "LensPipeline",
+                "text_encoder": ["transformers", "Qwen3Model"],
+                "transformer": ["diffusers", "LensTransformer2DModel"],
+                "vae": ["diffusers", "AutoencoderKL"],
+                "scheduler": ["diffusers", "FlowMatchEulerDiscreteScheduler"],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        for (component, weights) in [
+            ("transformer", "diffusion_pytorch_model.safetensors"),
+            ("vae", "diffusion_pytorch_model.safetensors"),
+        ] {
+            let dir = tier_dir.join(component);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("config.json"), b"{}").unwrap();
+            std::fs::write(dir.join(weights), b"weights").unwrap();
+        }
+        let scheduler = tier_dir.join("scheduler");
+        std::fs::create_dir_all(&scheduler).unwrap();
+        std::fs::write(scheduler.join("scheduler_config.json"), b"{}").unwrap();
+
+        let encoder = tier_dir.join("text_encoder");
+        std::fs::create_dir_all(&encoder).unwrap();
+        std::fs::write(encoder.join("config.json"), b"{}").unwrap();
+        std::fs::write(
+            encoder.join("model.safetensors.index.json"),
+            serde_json::to_vec(&json!({"weight_map": {
+                "model.embed_tokens.weight": "model-00001-of-00003.safetensors",
+                "model.layers.0.self_attn.q_proj.weight": "model-00002-of-00003.safetensors",
+                "lm_head.weight": "model-00003-of-00003.safetensors",
+            }}))
+            .unwrap(),
+        )
+        .unwrap();
+        for shard in present_shards {
+            std::fs::write(
+                encoder.join(format!("model-0000{shard}-of-00003.safetensors")),
+                b"shard",
+            )
+            .unwrap();
+        }
+    }
+
+    fn sharded_tier_model(repo: &str, tier: &str) -> Value {
+        json!({
+            "id": "lens_turbo",
+            "downloads": [{
+                "provider": "huggingface", "repo": repo,
+                "variant": tier, "files": [format!("{tier}/*")]
+            }]
+        })
+    }
+
+    /// sc-20526 (AC 1, AC 6): the lens_turbo bf16 shape. The tier's `<tier>/*` glob matches, its
+    /// `model_index.json` is present, and `text_encoder/` holds a real `.safetensors` — so every
+    /// pre-existing check passed — yet the index names three shards and only the LAST one landed.
+    /// `model.embed_tokens.weight` lives in shard 1, so the load died with "cannot find tensor".
+    /// Backfill must refuse to mint a receipt, and the tier must read not-installed but repairable.
+    #[test]
+    fn backfill_refuses_a_partially_downloaded_sharded_tier() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let repo = "SceneWorks/lens-turbo-mlx";
+        let snapshot = huggingface_repo_cache_path(data_dir, repo)
+            .unwrap()
+            .join("snapshots/rev-a");
+        write_sharded_diffusers_tier(&snapshot, "bf16", &[3]);
+        let model = sharded_tier_model(repo, "bf16");
+
+        let state = install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
+        assert!(
+            !state.installed,
+            "a tier missing 2 of 3 text-encoder shards must not read installed"
+        );
+        assert!(
+            state.cache_incomplete,
+            "it must surface as repairable/re-downloadable, not merely absent"
+        );
+        assert!(
+            state
+                .missing_required_files
+                .iter()
+                .any(|file| file.contains("model-00001-of-00003.safetensors")),
+            "the absent shard must be named: {:?}",
+            state.missing_required_files
+        );
+        let marker = data_dir
+            .join("models")
+            .join(safe_download_dir(repo))
+            .join(".sceneworks-download-complete.json");
+        assert!(
+            !marker.exists(),
+            "backfill must not launder an interrupted download into a complete receipt"
+        );
+
+        // Mutation check: the two missing shards arriving flips every assertion above, proving the
+        // check discriminates on shard completeness rather than rejecting sharded tiers wholesale.
+        for shard in [1, 2] {
+            std::fs::write(
+                snapshot.join(format!(
+                    "bf16/text_encoder/model-0000{shard}-of-00003.safetensors"
+                )),
+                b"shard",
+            )
+            .unwrap();
+        }
+        let state = install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
+        assert!(state.installed, "a genuinely complete tier must pass");
+        assert!(!state.cache_incomplete);
+        let receipt: Value = serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+        assert_eq!(receipt["backfilled"], true);
+        assert!(
+            receipt["resolvedFiles"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|file| file.as_str()
+                    == Some("bf16/text_encoder/model-00001-of-00003.safetensors")),
+            "the honest receipt records the full shard set"
+        );
+    }
+
+    /// sc-20526 (AC 3, AC 4, AC 6): an ALREADY-WRITTEN false-complete receipt — `backfilled: true`
+    /// with `resolvedFiles` listing the index plus only the shards that happened to land. This is
+    /// exactly what shipped to affected users. The next scan must invalidate it (no "usable stale"
+    /// install) AND repair the file, so nobody has to delete it by hand.
+    #[test]
+    fn existing_false_complete_receipt_is_invalidated_and_repaired() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let repo = "SceneWorks/lens-turbo-mlx";
+        let snapshot = huggingface_repo_cache_path(data_dir, repo)
+            .unwrap()
+            .join("snapshots/rev-a");
+        write_sharded_diffusers_tier(&snapshot, "bf16", &[3]);
+        let model = sharded_tier_model(repo, "bf16");
+
+        let managed = data_dir.join("models").join(safe_download_dir(repo));
+        let marker = managed.join(".sceneworks-download-complete.json");
+        std::fs::create_dir_all(&managed).unwrap();
+        let torn_entry = json!({
+            "schemaVersion": 2, "repo": repo, "modelId": "lens_turbo", "variant": "bf16",
+            "manifestFiles": ["bf16/*"],
+            "resolvedFiles": [
+                "bf16/model_index.json",
+                "bf16/text_encoder/config.json",
+                "bf16/text_encoder/model-00003-of-00003.safetensors",
+                "bf16/text_encoder/model.safetensors.index.json",
+            ],
+            "backfilled": true,
+        });
+        std::fs::write(&marker, serde_json::to_vec(&torn_entry).unwrap()).unwrap();
+
+        let state = install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
+        assert!(
+            !state.installed,
+            "a receipt whose recorded files all exist must still not resurrect a torn shard set"
+        );
+        assert!(
+            !marker.exists(),
+            "the false-complete receipt must be repaired away so the install self-heals"
+        );
+
+        // A receipt for a tier that IS complete survives the same sweep untouched.
+        write_sharded_diffusers_tier(&snapshot, "q4", &[1, 2, 3]);
+        let sound = json!({
+            "schemaVersion": 2, "repo": repo, "modelId": "lens_turbo", "variant": "q4",
+            "manifestFiles": ["q4/*"],
+            "resolvedFiles": [
+                "q4/model_index.json",
+                "q4/text_encoder/model-00001-of-00003.safetensors",
+                "q4/text_encoder/model-00002-of-00003.safetensors",
+                "q4/text_encoder/model-00003-of-00003.safetensors",
+                "q4/text_encoder/model.safetensors.index.json",
+            ],
+            "backfilled": true,
+        });
+        let seeded_files = sound["resolvedFiles"].clone();
+        std::fs::write(&marker, serde_json::to_vec(&sound).unwrap()).unwrap();
+        let q4 = sharded_tier_model(repo, "q4");
+        assert!(install_state_for(model_download_context(&q4).unwrap(), &q4, data_dir).installed);
+        // IDENTITY, not mere existence. `marker.exists()` alone proves nothing here: the tier is
+        // complete, so a receipt deleted by an over-eager repair would be re-backfilled inside the
+        // same call and the file would be back before the assertion ran. A re-backfill records the
+        // full WALKED set (model_index, transformer, vae, scheduler, …), so the seeded five entries
+        // surviving verbatim is what proves the sound receipt was never touched.
+        let after: Value = serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+        assert_eq!(
+            after["resolvedFiles"], seeded_files,
+            "repair must be positive-evidence only — a sound receipt is never deleted (nor \
+             re-minted from a walk, which would list the transformer/vae/scheduler files too)"
+        );
+        assert_eq!(after["manifestFiles"], json!(["q4/*"]));
+    }
+
+    /// sc-20526 (AC 2): a WHOLE-REPO download (empty `files`) declares no per-file claim, so "some
+    /// payload landed" used to be the only signal. The repo's own shard index is the ground truth.
+    #[test]
+    fn whole_repo_install_validates_its_shard_index() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let repo = "owner/whole-repo-sharded";
+        let snapshot = huggingface_repo_cache_path(data_dir, repo)
+            .unwrap()
+            .join("snapshots/rev-a");
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::write(snapshot.join("config.json"), b"{}").unwrap();
+        std::fs::write(
+            snapshot.join("model.safetensors.index.json"),
+            serde_json::to_vec(&json!({"weight_map": {
+                "a": "model-00001-of-00002.safetensors",
+                "b": "model-00002-of-00002.safetensors",
+            }}))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(snapshot.join("model-00002-of-00002.safetensors"), b"shard").unwrap();
+        let model = json!({
+            "id": "whole-repo-model",
+            "downloads": [{ "provider": "huggingface", "repo": repo }]
+        });
+
+        let state = install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
+        assert!(!state.installed, "half a shard set is not an install");
+        assert!(state
+            .missing_required_files
+            .iter()
+            .any(|file| file.contains("model-00001-of-00002.safetensors")));
+
+        std::fs::write(snapshot.join("model-00001-of-00002.safetensors"), b"shard").unwrap();
+        assert!(
+            install_state_for(model_download_context(&model).unwrap(), &model, data_dir).installed,
+            "a complete whole-repo shard set must pass"
+        );
+    }
+
+    /// sc-20526 (AC 1) — the shard guard INSIDE `backfill_current_receipt`, standing on its own.
+    ///
+    /// `backfill_refuses_a_partially_downloaded_sharded_tier` cannot witness it: that tier is
+    /// diffusers, so `diffusers_snapshot_health` already drives `cache_installed` false and
+    /// `install_state_for` never enters the backfill at all — delete the guard and that test still
+    /// passes. The guard's reachable lane is a tier that declares NO `model_index.json`: a flat
+    /// explicit-`files` filter whose every pattern is satisfied reads cache-installed, so backfill IS
+    /// entered, and only `listed_shard_indexes_are_complete` over the resolved set stands between an
+    /// index naming a never-downloaded shard and a receipt claiming that set is complete. (The
+    /// cache-health badge for an explicit-file filter is deliberately left as it was — the user
+    /// declared those files and they are all there — so this fixture is the guard alone.)
+    #[test]
+    fn backfill_refuses_a_flat_tier_whose_shard_index_is_torn() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let repo = "owner/flat-sharded";
+        let snapshot = huggingface_repo_cache_path(data_dir, repo)
+            .unwrap()
+            .join("snapshots/rev-a");
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::write(snapshot.join("config.json"), b"{}").unwrap();
+        std::fs::write(
+            snapshot.join("model.safetensors.index.json"),
+            serde_json::to_vec(&json!({"weight_map": {
+                "model.embed_tokens.weight": "model-00001-of-00002.safetensors",
+                "lm_head.weight": "model-00002-of-00002.safetensors",
+            }}))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(snapshot.join("model-00002-of-00002.safetensors"), b"shard").unwrap();
+        let model = json!({
+            "id": "flat_sharded",
+            "downloads": [{
+                "provider": "huggingface", "repo": repo,
+                "files": ["config.json", "model.safetensors.index.json", "*.safetensors"]
+            }]
+        });
+        let marker = data_dir
+            .join("models")
+            .join(safe_download_dir(repo))
+            .join(".sceneworks-download-complete.json");
+
+        let state = install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
+        assert!(
+            state.installed,
+            "fixture precondition: every declared pattern is present, so cache health reads \
+             installed and the backfill lane is genuinely entered"
+        );
+        assert!(
+            !marker.exists(),
+            "backfill must refuse to record a set whose own shard index names a file that never \
+             landed — nothing else on this lane is watching"
+        );
+
+        // Mutation check: the absent shard arriving lets the SAME call mint the receipt, proving the
+        // guard discriminates on shard completeness rather than never writing for this shape.
+        std::fs::write(snapshot.join("model-00001-of-00002.safetensors"), b"shard").unwrap();
+        assert!(
+            install_state_for(model_download_context(&model).unwrap(), &model, data_dir).installed
+        );
+        let receipt: Value = serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+        assert_eq!(receipt["backfilled"], true);
+        assert!(
+            receipt["resolvedFiles"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|file| file.as_str() == Some("model-00001-of-00002.safetensors")),
+            "the honest receipt records the full shard set"
+        );
+    }
+
+    /// sc-20526 (AC 3) — the shard filter in `receipt_files_present`, with repair kept out of the way.
+    ///
+    /// `existing_false_complete_receipt_is_invalidated_and_repaired` deletes the receipt before the
+    /// read side ever runs, so it cannot witness that filter. Here a SECOND cached revision holds the
+    /// same index with a complete shard set, which is precisely the evidence
+    /// `receipt_entry_is_provably_torn` treats as "not provably torn" — the receipt SURVIVES the
+    /// sweep. It still must not count: the only revision holding every file the receipt RECORDED is
+    /// the torn one (rev-a), and the complete revision (rev-b) is missing `config.json`, so no single
+    /// snapshot satisfies both the recorded set and that set's own index.
+    #[test]
+    fn torn_receipt_surviving_repair_is_still_refused_by_the_read_side() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let repo = "owner/two-revision-sharded";
+        let root = huggingface_repo_cache_path(data_dir, repo).unwrap();
+        let index_json = serde_json::to_vec(&json!({"weight_map": {
+            "model.embed_tokens.weight": "model-00001-of-00002.safetensors",
+            "lm_head.weight": "model-00002-of-00002.safetensors",
+        }}))
+        .unwrap();
+
+        // rev-a: exactly what the receipt recorded — and its index names a shard that never landed.
+        let torn = root.join("snapshots/rev-a");
+        std::fs::create_dir_all(&torn).unwrap();
+        std::fs::write(torn.join("config.json"), b"{}").unwrap();
+        std::fs::write(torn.join("model.safetensors.index.json"), &index_json).unwrap();
+        std::fs::write(torn.join("model-00002-of-00002.safetensors"), b"shard").unwrap();
+
+        // rev-b: a COMPLETE shard set, but no `config.json` — so it can never satisfy this receipt.
+        // Its existence is what makes the entry not *provably* torn, so repair leaves the file alone.
+        let sound = root.join("snapshots/rev-b");
+        std::fs::create_dir_all(&sound).unwrap();
+        std::fs::write(sound.join("model.safetensors.index.json"), &index_json).unwrap();
+        for shard in [1, 2] {
+            std::fs::write(
+                sound.join(format!("model-0000{shard}-of-00002.safetensors")),
+                b"shard",
+            )
+            .unwrap();
+        }
+
+        // `tokenizer.json` exists in no revision, so the cache-health lane reads NOT installed and
+        // the receipt is the only thing that could still call this model installed.
+        let model = json!({
+            "id": "two_revision_sharded",
+            "downloads": [{
+                "provider": "huggingface", "repo": repo,
+                "files": ["config.json", "model.safetensors.index.json", "tokenizer.json"]
+            }]
+        });
+        let managed = data_dir.join("models").join(safe_download_dir(repo));
+        std::fs::create_dir_all(&managed).unwrap();
+        let marker = managed.join(".sceneworks-download-complete.json");
+        let seeded = serde_json::to_vec(&json!({
+            "schemaVersion": 2, "repo": repo, "modelId": "two_revision_sharded",
+            "variant": "default",
+            "manifestFiles": ["config.json", "model.safetensors.index.json", "tokenizer.json"],
+            "resolvedFiles": [
+                "config.json",
+                "model.safetensors.index.json",
+                "model-00002-of-00002.safetensors",
+            ],
+            "backfilled": true,
+        }))
+        .unwrap();
+        std::fs::write(&marker, &seeded).unwrap();
+
+        let state = install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
+        assert_eq!(
+            std::fs::read(&marker).ok().as_deref(),
+            Some(seeded.as_slice()),
+            "fixture precondition: a complete sibling revision makes this entry NOT provably torn, \
+             so repair must leave it byte-identical — the read side has to do the refusing"
+        );
+        assert!(
+            !state.installed,
+            "the revision holding every recorded file is the torn one, so a surviving receipt must \
+             not be honoured as a usable-stale install"
+        );
+
+        // Mutation check: the absent shard landing in rev-a makes the SAME surviving receipt
+        // legitimately count, proving the refusal keys on shard completeness, not on the receipt.
+        std::fs::write(torn.join("model-00001-of-00002.safetensors"), b"shard").unwrap();
+        assert!(
+            install_state_for(model_download_context(&model).unwrap(), &model, data_dir).installed,
+            "a receipt whose recorded index IS complete in the revision holding its files counts"
+        );
+    }
+
+    /// sc-20526 (AC 4) — the hard constraint on repair: PROVABLY torn, never merely unverifiable.
+    ///
+    /// A backfilled, index-bearing receipt whose repo cache is not on this box at all (weights moved
+    /// into an external library, or a data dir restored without its HF cache) carries no evidence of
+    /// tearing. Deleting it would destroy the relocation proof an external-library install depends
+    /// on, and read-side validation already refuses to count it — so it must survive untouched.
+    /// Flipping `saw_torn`'s initial value to `true` turns "no evidence" into "delete it".
+    #[test]
+    fn repair_leaves_a_backfilled_receipt_whose_repo_cache_is_absent() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let repo = "owner/relocated-to-external-library";
+        let managed = data_dir.join("models").join(safe_download_dir(repo));
+        std::fs::create_dir_all(&managed).unwrap();
+        let marker = managed.join(".sceneworks-download-complete.json");
+        let seeded = serde_json::to_vec(&json!({
+            "schemaVersion": 2, "repo": repo, "modelId": "relocated", "variant": "bf16",
+            "manifestFiles": ["bf16/*"],
+            "resolvedFiles": [
+                "bf16/text_encoder/model-00003-of-00003.safetensors",
+                "bf16/text_encoder/model.safetensors.index.json",
+            ],
+            "backfilled": true,
+        }))
+        .unwrap();
+        std::fs::write(&marker, &seeded).unwrap();
+        assert!(
+            huggingface_repo_cache_path(data_dir, repo).is_some_and(|root| !root.exists()),
+            "fixture precondition: no repo cache at all, so nothing can be proven about the shards"
+        );
+
+        repair_torn_backfilled_receipts(&managed, data_dir);
+
+        assert_eq!(
+            std::fs::read(&marker).ok().as_deref(),
+            Some(seeded.as_slice()),
+            "an absent repo cache is not evidence of tearing — the receipt must survive byte-identical"
+        );
+    }
+
+    /// sc-20526 (AC 4), the second no-evidence shape: the repo cache IS here, but not one cached
+    /// revision holds the index the receipt recorded (a revision bump, or a cache pruned of this
+    /// tier). Nothing can be read off disk, so nothing is proven and the receipt stays.
+    #[test]
+    fn repair_leaves_a_backfilled_receipt_whose_index_is_in_no_snapshot() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let repo = "owner/index-not-cached";
+        let snapshot = huggingface_repo_cache_path(data_dir, repo)
+            .unwrap()
+            .join("snapshots/rev-a");
+        std::fs::create_dir_all(snapshot.join("q4")).unwrap();
+        std::fs::write(snapshot.join("q4/model_index.json"), b"{}").unwrap();
+        std::fs::write(snapshot.join("q4/some.safetensors"), b"weights").unwrap();
+
+        let managed = data_dir.join("models").join(safe_download_dir(repo));
+        std::fs::create_dir_all(&managed).unwrap();
+        let marker = managed.join(".sceneworks-download-complete.json");
+        let seeded = serde_json::to_vec(&json!({
+            "schemaVersion": 2, "repo": repo, "modelId": "index_not_cached", "variant": "bf16",
+            "manifestFiles": ["bf16/*"],
+            "resolvedFiles": [
+                "bf16/text_encoder/model-00003-of-00003.safetensors",
+                "bf16/text_encoder/model.safetensors.index.json",
+            ],
+            "backfilled": true,
+        }))
+        .unwrap();
+        std::fs::write(&marker, &seeded).unwrap();
+
+        repair_torn_backfilled_receipts(&managed, data_dir);
+
+        assert_eq!(
+            std::fs::read(&marker).ok().as_deref(),
+            Some(seeded.as_slice()),
+            "a recorded index that is in NO snapshot proves nothing — the receipt must survive \
+             byte-identical"
+        );
+
+        // Mutation check: the index arriving with a shard missing IS proof, and the same call now
+        // removes the entry — so the survival above is a decision about evidence, not inaction.
+        let encoder = snapshot.join("bf16/text_encoder");
+        std::fs::create_dir_all(&encoder).unwrap();
+        std::fs::write(
+            encoder.join("model.safetensors.index.json"),
+            serde_json::to_vec(&json!({"weight_map": {
+                "model.embed_tokens.weight": "model-00001-of-00003.safetensors",
+                "lm_head.weight": "model-00003-of-00003.safetensors",
+            }}))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(encoder.join("model-00003-of-00003.safetensors"), b"shard").unwrap();
+        repair_torn_backfilled_receipts(&managed, data_dir);
+        assert!(
+            !marker.exists(),
+            "a recorded index that IS on disk and names a missing shard is provably torn"
+        );
+    }
+
     #[test]
     fn complete_pre_receipt_install_is_backfilled_and_protected_after_rename() {
         let _env = isolate_hf_cache(); // seed/resolve under the tempdir, never a dev's real HF cache (sc-13835)
@@ -4334,6 +4963,10 @@ fn install_state_for(
         // NOT independently mark it installed (sc-9909): a stale .sceneworks-download-complete.json
         // left by an empty download would otherwise read the whole model as installed while every tier
         // reads missing. Single-variant models keep the repo-level managed contract.
+        // sc-20526: drop any receipt a pre-fix backfill minted over a partially downloaded tier
+        // BEFORE it is read, so an affected install self-heals on the next scan instead of needing a
+        // manual delete — and so the backfill below can re-record the tier honestly.
+        repair_torn_backfilled_receipts(&managed_path, data_dir);
         let receipt_file_sets = receipt_file_sets(
             &managed_path,
             &download_context.repo,
@@ -7051,10 +7684,30 @@ pub(crate) fn huggingface_cache_health(
             }
             continue;
         }
+        // A whole-repo (empty `files`) fetch of a non-diffusers repo declares no per-file claim, so
+        // "some payload landed" was the only signal. That accepts an interrupted sharded download as
+        // installed. The repo's own `*.safetensors.index.json` files are the declared set for their
+        // shards, so validate them here (sc-20526).
+        //
+        // Cost, stated honestly: ONE snapshot walk per candidate snapshot, whose result answers both
+        // the payload question and the index hunt. This lane previously short-circuited on a
+        // `config.json` stat and walked nothing, so a `config.json`-bearing snapshot now pays a walk
+        // it did not pay before. That walk is not removable by making it lazy: FINDING the indexes is
+        // the check, and the check must run before this returns `installed`. What each index then
+        // costs is one small JSON read plus a stat per distinct shard — no hashing, no header parse,
+        // no tensor read. The whole lane runs on the install/catalog sweep, never per job.
+        let files_on_disk = snapshot_files(&snapshot);
         if path_is_readable_file(&snapshot.join("config.json"))
-            || snapshot_has_payload_file(&snapshot)
+            || snapshot_has_payload_file_in(&files_on_disk)
         {
-            return HuggingFaceCacheHealth::installed();
+            let torn = torn_shard_indexes_in(&snapshot, &files_on_disk);
+            if torn.is_empty() {
+                return HuggingFaceCacheHealth::installed();
+            }
+            if best_missing.is_empty() || torn.len() < best_missing.len() {
+                best_missing = torn;
+            }
+            continue;
         }
         if best_missing.is_empty() {
             best_missing.push("model_index.json".to_owned());
@@ -7270,10 +7923,21 @@ fn diffusers_snapshot_health(snapshot: &FsPath) -> HuggingFaceCacheHealth {
             if !path_is_valid_json_object(&snapshot.join(format!("{component}/config.json"))) {
                 missing.push(format!("{component}/config.json"));
             }
-            if !diffusers_component_has_weight_file(snapshot, component) {
+            // ONE listing of the component directory, asked two questions below (sc-20526).
+            let component_entries = diffusers_component_entries(snapshot, component);
+            if !diffusers_component_has_weight_file_in(&component_entries) {
                 missing.push(format!("{component}/<weights>"));
             } else if is_mage && !diffusers_component_safetensors_are_valid(snapshot, component) {
                 missing.push(format!("{component}/<weights> (malformed safetensors)"));
+            } else {
+                // A sharded component holds "a weight file" as soon as ONE shard landed. The
+                // component's own index declares the rest, so an interrupted download is only
+                // visible by comparing `weight_map` against disk (sc-20526).
+                for shard in
+                    component_missing_shards_in(&snapshot.join(component), &component_entries)
+                {
+                    missing.push(format!("{component}/{shard}"));
+                }
             }
         } else if is_mage && component == "tokenizer" {
             // Mage's Qwen3-VL AutoProcessor is a logical `tokenizer` component in model_index.json,
@@ -7341,25 +8005,79 @@ fn diffusers_component_has_valid_config_file(snapshot: &FsPath, component: &str)
         .unwrap_or(false)
 }
 
-fn diffusers_component_has_weight_file(snapshot: &FsPath, component: &str) -> bool {
-    let component_dir = snapshot.join(component);
-    let Ok(entries) = std::fs::read_dir(component_dir) else {
-        return false;
+/// Every non-hidden readable entry directly inside a diffusers component directory.
+///
+/// The weight-file probe and the shard-index probe ask different questions of the SAME listing, so
+/// the health loop reads the directory once and hands the result to both (sc-20526). Threading the
+/// list is what makes the "one `read_dir` per component" cost claim true rather than aspirational.
+fn diffusers_component_entries(snapshot: &FsPath, component: &str) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(snapshot.join(component)) else {
+        return Vec::new();
     };
-    entries.flatten().any(|entry| {
-        let path = entry.path();
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| !is_hidden_file(path) && path_is_readable_file(path))
+        .collect()
+}
+
+fn diffusers_component_has_weight_file_in(entries: &[PathBuf]) -> bool {
+    entries.iter().any(|path| {
         let name = path
             .file_name()
             .and_then(|value| value.to_str())
             .unwrap_or_default()
             .to_ascii_lowercase();
-        !is_hidden_file(&path)
-            && path_is_readable_file(&path)
-            && (name.ends_with(".safetensors")
-                || name.ends_with(".bin")
-                || name.ends_with(".msgpack")
-                || name.ends_with(".gguf"))
+        name.ends_with(".safetensors")
+            || name.ends_with(".bin")
+            || name.ends_with(".msgpack")
+            || name.ends_with(".gguf")
     })
+}
+
+/// Shards that a component directory's `*.safetensors.index.json` files name but that are not on
+/// disk, reported relative to the component (sc-20526).
+///
+/// A sharded component satisfies [`diffusers_component_has_weight_file_in`] as soon as ONE shard
+/// landed, so an interrupted download left `model.safetensors.index.json` + the last shard and read
+/// "installed" — then died at the first forward pass with `cannot find tensor
+/// model.embed_tokens.weight` (lens_turbo bf16). The index IS the declared file set for a sharded
+/// component, so comparing it against disk is the workable ground truth even when the manifest
+/// declares only a `<tier>/*` glob or a whole-repo fetch.
+///
+/// Cost: no directory read at all — `entries` is the listing
+/// [`diffusers_component_entries`] already spent for the weight-file probe — plus one small JSON
+/// read per index and a stat per distinct shard. No hashing, no header parse, no tensor read.
+fn component_missing_shards_in(dir: &FsPath, entries: &[PathBuf]) -> Vec<String> {
+    let mut missing = Vec::new();
+    for path in entries
+        .iter()
+        .filter(|path| sceneworks_core::safetensors::is_safetensors_index_path(path))
+    {
+        missing.extend(sceneworks_core::safetensors::missing_indexed_shards(
+            dir, path,
+        ));
+    }
+    missing.sort();
+    missing.dedup();
+    missing
+}
+
+/// Whether every `*.safetensors.index.json` NAMED IN `files` (snapshot-relative paths, as a receipt's
+/// `resolvedFiles` or a backfill's resolved set records them) has all of its shards on disk.
+///
+/// This is the receipt-lane half of the shard check and costs nothing beyond a stat per shard: the
+/// file list is already in hand, so no directory walk is needed to find the indexes (sc-20526).
+fn listed_shard_indexes_are_complete(snapshot: &FsPath, files: &[String]) -> bool {
+    files
+        .iter()
+        .filter(|file| file.ends_with(sceneworks_core::safetensors::SAFETENSORS_INDEX_SUFFIX))
+        .all(|file| {
+            let path = snapshot.join(file);
+            path.parent().is_some_and(|dir| {
+                sceneworks_core::safetensors::indexed_shards_are_present(dir, &path)
+            })
+        })
 }
 
 fn diffusers_component_safetensors_are_valid(snapshot: &FsPath, component: &str) -> bool {
@@ -7395,8 +8113,12 @@ fn safetensors_header_is_valid(path: &FsPath) -> bool {
         && serde_json::from_slice::<Value>(&header).is_ok_and(|value| value.is_object())
 }
 
-fn snapshot_has_payload_file(snapshot: &FsPath) -> bool {
-    snapshot_files(snapshot).into_iter().any(|path| {
+/// Whether an already-walked snapshot file list holds anything that is not documentation/artwork.
+///
+/// Takes the list rather than the directory so the whole-repo health probe walks once and reuses the
+/// result for both the payload question and the shard-index validation (sc-20526).
+fn snapshot_has_payload_file_in(files: &[String]) -> bool {
+    files.iter().any(|path| {
         let lower = path.to_ascii_lowercase();
         !lower.ends_with(".md")
             && !lower.ends_with(".png")
@@ -7404,6 +8126,29 @@ fn snapshot_has_payload_file(snapshot: &FsPath) -> bool {
             && !lower.ends_with(".jpeg")
             && !lower.ends_with(".gitattributes")
     })
+}
+
+/// Snapshot-relative shard paths that a `*.safetensors.index.json` in `files` names but that are not
+/// on disk. Takes the already-walked file list so no extra directory traversal is spent (sc-20526).
+fn torn_shard_indexes_in(snapshot: &FsPath, files: &[String]) -> Vec<String> {
+    let mut missing = files
+        .iter()
+        .filter(|file| file.ends_with(sceneworks_core::safetensors::SAFETENSORS_INDEX_SUFFIX))
+        .flat_map(|file| {
+            let path = snapshot.join(file);
+            let dir = path.parent().map(FsPath::to_path_buf).unwrap_or_default();
+            let prefix = match file.rsplit_once('/') {
+                Some((parent, _)) => format!("{parent}/"),
+                None => String::new(),
+            };
+            sceneworks_core::safetensors::missing_indexed_shards(&dir, &path)
+                .into_iter()
+                .map(move |shard| format!("{prefix}{shard}"))
+        })
+        .collect::<Vec<_>>();
+    missing.sort();
+    missing.dedup();
+    missing
 }
 
 /// Every readable file under `snapshot`, snapshot-relative, `/`-separated.
