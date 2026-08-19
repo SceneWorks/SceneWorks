@@ -203,23 +203,13 @@ pub(crate) struct CurveGeometry {
 /// decode overtakes text between 11,904 and 14,080 latent tokens — so "which phase binds" is a
 /// per-geometry question, not a per-model constant. sc-18829 needs to ask it of a geometry it has
 /// no record for, which is exactly what a curve can answer and a record cannot.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum BindingPhase {
-    Text,
-    Denoise,
-    Decode,
-}
-
-impl BindingPhase {
-    /// The phase index (0 text, 1 denoise, 2 decode) the sc-18097 comparison seam is written in.
-    pub(crate) fn index(self) -> u8 {
-        match self {
-            Self::Text => 0,
-            Self::Denoise => 1,
-            Self::Decode => 2,
-        }
-    }
-}
+///
+/// sc-19050: this is no longer a lane-local enum with a lane-local argmax. It IS
+/// [`crate::estimate_synthesis::BindingPhase`], re-exported under the name this module's callers
+/// already use. A lane-local alias would need a relabelling `match`, and a relabelling `match` is
+/// something a future edit can get wrong on a lane whose tests this repo's macOS host cannot even
+/// compile — so there is deliberately no mapping here to get wrong. `Text` reads as `Conditioning`.
+pub(crate) use crate::estimate_synthesis::BindingPhase;
 
 /// Per-phase prediction for one Krea Turbo rung at the requested geometry.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -256,17 +246,14 @@ impl KreaTurboPhasePeaks {
     /// largest of the three by orders of magnitude. Every figure here is graded from the committed
     /// artifact rather than from this comment, by the test
     /// `the_adopted_form_is_the_only_accurate_one_that_extends_the_shipped_curve`.
+    ///
+    /// sc-19050: the argmax itself is no longer written here. It is
+    /// [`crate::estimate_synthesis::binding_phase`], the single implementation all three lanes ask;
+    /// this method only relabels its answer in the Krea ladder's vocabulary (`Text` for the phase
+    /// the mechanism calls `Conditioning`). The comparison is still on `f64` GB — the generic rule
+    /// is generic in the magnitude type precisely so this lane did not have to convert.
     pub(crate) fn binding_phase(self) -> BindingPhase {
-        let mut phase = BindingPhase::Text;
-        let mut peak = self.text_gb;
-        if self.denoise_gb >= peak {
-            phase = BindingPhase::Denoise;
-            peak = self.denoise_gb;
-        }
-        if self.decode_gb >= peak {
-            phase = BindingPhase::Decode;
-        }
-        phase
+        crate::estimate_synthesis::binding_phase(self.text_gb, self.denoise_gb, self.decode_gb)
     }
 }
 
@@ -2813,7 +2800,10 @@ mod tests {
             }
         };
         // 768x512 x 241 output frames = 11,904 latent tokens.
-        assert_eq!(peaks_at(768, 512, 241).binding_phase(), BindingPhase::Text);
+        assert_eq!(
+            peaks_at(768, 512, 241).binding_phase(),
+            BindingPhase::Conditioning
+        );
         // 1280x704 x 121 output frames = 14,080 latent tokens.
         assert_eq!(
             peaks_at(1280, 704, 121).binding_phase(),
@@ -2836,14 +2826,17 @@ mod tests {
             denoise_gb: denoise,
             decode_gb: decode,
         };
-        assert_eq!(peaks(9.0, 1.0, 1.0).binding_phase(), BindingPhase::Text);
+        assert_eq!(
+            peaks(9.0, 1.0, 1.0).binding_phase(),
+            BindingPhase::Conditioning
+        );
         assert_eq!(peaks(1.0, 9.0, 1.0).binding_phase(), BindingPhase::Denoise);
         assert_eq!(peaks(1.0, 1.0, 9.0).binding_phase(), BindingPhase::Decode);
         assert_eq!(peaks(9.0, 9.0, 1.0).binding_phase(), BindingPhase::Denoise);
         assert_eq!(peaks(9.0, 9.0, 9.0).binding_phase(), BindingPhase::Decode);
         assert_eq!(
             [
-                BindingPhase::Text.index(),
+                BindingPhase::Conditioning.index(),
                 BindingPhase::Denoise.index(),
                 BindingPhase::Decode.index()
             ],
