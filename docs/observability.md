@@ -159,11 +159,16 @@ prior/excessive GPU errors"*. It is never the first error: something else alread
 on that channel, so the event carries `firstFailure` (this process's first contained
 failure, which is what actually explains the cascade) alongside the raw `driverError`.
 
-`mlx_command_queue_poisoned` fires once, from the model-cache containment seam, for the
-job that ran into it. `mlx_command_queue_poisoned_exit` fires from the worker loop
-immediately afterwards, carrying the same reason as the `Unhealthy` heartbeat, just
-before the worker exits so its supervisor restarts it with a clean GPU context. Between
-the two, every queued job is refused **without** being handed to the GPU.
+`mlx_command_queue_poisoned` fires once, from one of two containment seams that classify
+a caught panic through the shared `gpu_poison` state: the model-cache containment seam
+(`cache_thread.rs`) for a cache-job panic, or the dedicated SAM3 smart-select thread
+(`person_segment_sam3.rs`'s `sam3_panic_error`, which logs its own "...during sam3
+smart-select" message) for a panic caught there. `mlx_command_queue_poisoned_exit` fires
+from the worker loop immediately afterwards, carrying the same reason as the `Unhealthy`
+heartbeat, just before the worker exits so its supervisor restarts it with a clean GPU
+context. Between the two, every queued job is refused **without** being handed to the
+GPU. It still fires only once per poisoning: the latch refuses any further cache or SAM3
+job outright, and the worker exits before another segment job can be claimed.
 
 | field | meaning |
 | --- | --- |
