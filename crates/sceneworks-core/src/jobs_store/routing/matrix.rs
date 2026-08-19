@@ -2283,12 +2283,57 @@ fn video_job_type(mode: &str) -> JobType {
     }
 }
 
+/// Stamp the optional asset carriers the API sends on EVERY request of this family, in the shape it
+/// sends them when the user supplied none: an `Option<String>` carrier serializes as an explicit
+/// `null` and a `Vec<String>` carrier as `[]` (`ImageJobRequest` / `VideoJobRequest` in
+/// `apps/rust-api/src/dto.rs` — neither field carries `skip_serializing_if`). Only keys the probe
+/// left ABSENT are filled, so a probe that populates a carrier keeps its own value.
+///
+/// sc-20530 batch item A. The probes used to spell only the carriers a mode needs and leave the rest
+/// missing, which is an encoding NO production request ever has. That gap is what let the sc-20525
+/// defect class hide: a gate that read `null` as "malformed" enforce-failed every real SANA
+/// text-to-image submission while this matrix — probing with the key absent — reported the cell
+/// supported. Probing in the production encoding is what makes the matrix able to see that class.
+fn stamp_absent_optional_carriers(job_type: &JobType, payload: &mut Map<String, Value>) {
+    let (scalars, plurals): (&[&str], &[&str]) = match job_type {
+        JobType::ImageGenerate | JobType::ImageEdit => (
+            &["sourceAssetId", "referenceAssetId", "maskAssetId"],
+            &["referenceAssetIds"],
+        ),
+        JobType::VideoGenerate
+        | JobType::VideoExtend
+        | JobType::VideoBridge
+        | JobType::PersonReplace => (
+            &[
+                "sourceAssetId",
+                "lastFrameAssetId",
+                "sourceClipAssetId",
+                "bridgeRightClipAssetId",
+                "referenceClipAssetId",
+            ],
+            &["referenceAssetIds", "sourceClipAssetIds"],
+        ),
+        // Every other probed job type has a required-carrier request shape (VQA/interleave/detail)
+        // or no asset carriers at all; nothing to normalize.
+        _ => (&[], &[]),
+    };
+    for key in scalars {
+        payload.entry((*key).to_owned()).or_insert(Value::Null);
+    }
+    for key in plurals {
+        payload
+            .entry((*key).to_owned())
+            .or_insert_with(|| Value::Array(Vec::new()));
+    }
+}
+
 fn probe_job(job_type: JobType, model: &str, payload: Value) -> Result<JobSnapshot, String> {
     let mut payload = payload
         .as_object()
         .cloned()
         .ok_or_else(|| "probe payload must be an object".to_owned())?;
     payload.insert("model".to_owned(), Value::String(model.to_owned()));
+    stamp_absent_optional_carriers(&job_type, &mut payload);
     validate_probe_structure(&job_type, &payload)?;
     Ok(JobSnapshot {
         id: "capability-matrix-probe".to_owned(),

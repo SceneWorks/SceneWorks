@@ -452,6 +452,16 @@ pub(crate) fn image_request_candle_eligible(model: &str, payload: &Map<String, V
 /// otherwise defaults quant from the manifest) — so a payload-level value `> 0` is a deliberate quant
 /// request. `<= 0` (dense) and absent both leave candle on its native dense path (sc-5099).
 pub(crate) fn candle_request_wants_quant(payload: &Map<String, Value>) -> bool {
+    candle_requested_quant_bits(payload).is_some()
+}
+
+/// The quant tier the request explicitly asks for, when it asks for one: `advanced.mlxQuantize`
+/// parsed as a positive bit width (`4` → q4). `None` covers absent, null, unparseable, and the
+/// `<= 0` dense encoding — exactly the cases [`candle_request_wants_quant`] calls "no quant
+/// request", which is defined in terms of this function so the two can never disagree. Split out
+/// for sc-20530: the gap classifier has to name the REQUESTED tier in the refusal message, and
+/// re-deriving it there is how the wording drifts from the gate that produced the refusal.
+pub(crate) fn candle_requested_quant_bits(payload: &Map<String, Value>) -> Option<i64> {
     payload
         .get("advanced")
         .and_then(Value::as_object)
@@ -461,7 +471,7 @@ pub(crate) fn candle_request_wants_quant(payload: &Map<String, Value>) -> bool {
                 .as_i64()
                 .or_else(|| value.as_str()?.trim().parse().ok())
         })
-        .is_some_and(|bits| bits > 0)
+        .filter(|bits| *bits > 0)
 }
 
 fn candle_request_wants_torch_quantization(payload: &Map<String, Value>) -> bool {

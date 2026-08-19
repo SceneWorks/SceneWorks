@@ -6,12 +6,13 @@ use serde_json::{Map, Value};
 
 use crate::contracts::{JobSnapshot, JobType};
 use crate::jobs_store::routing::candle::{
-    image_job_is_candle_eligible, image_request_candle_pose_reject,
+    candle_requested_quant_bits, image_job_is_candle_eligible, image_request_candle_pose_reject,
     training_job_is_candle_eligible, upscale_job_is_candle_eligible, video_job_is_candle_eligible,
     video_upscale_job_is_candle_eligible, CANDLE_POSE_MODELS,
 };
 use crate::jobs_store::routing::catalog::{
-    CANDLE_ROUTED_MODELS, CANDLE_VIDEO_ROUTED_MODELS, MLX_ROUTED_MODELS, VIDEO_MLX_ROUTED_MODELS,
+    CANDLE_LORA_MODELS, CANDLE_QUANT_LORA_MODELS, CANDLE_QUANT_MODELS, CANDLE_ROUTED_MODELS,
+    CANDLE_VIDEO_ROUTED_MODELS, MLX_ROUTED_MODELS, VIDEO_MLX_ROUTED_MODELS,
 };
 use crate::jobs_store::routing::mlx::{
     caption_job_is_mlx_eligible, job_is_mlx_eligible, training_job_is_mlx_eligible,
@@ -19,6 +20,10 @@ use crate::jobs_store::routing::mlx::{
     video_mode_is_mlx_eligible, video_upscale_job_is_mlx_eligible,
 };
 use crate::jobs_store::routing::SENSENOVA_MODEL_IDS;
+use crate::jobs_store::routing::{
+    has_malformed_optional_string, has_nonempty_nested_array, has_nonempty_string,
+    has_nonempty_string_array,
+};
 
 /// True when *any* MLX-routing predicate (image/detail, video, or training) claims this
 /// job — the union an `mlx` worker would want. Used both to classify a claim for routing
@@ -575,8 +580,22 @@ pub fn candle_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
 
 /// Name the precise gap for a candle-ineligible image job (sc-5502) — the candle-worded,
 /// candle-parity twin of [`classify_image_gap`]. The strict-pose-on-an-unwired-family case (the
-/// canonical sc-5968 silent-T2I trap) is named precisely; the rest report whether the model has no
-/// candle engine at all or is a candle txt2img family asked for a conditioned shape with no lane.
+/// canonical sc-5968 silent-T2I trap) is named precisely; then each remaining distinguishable
+/// cause gets its own wording, and only a payload that matches none of them reaches the catch-all.
+///
+/// **sc-20530.** This used to end in a single catch-all that listed five possible causes
+/// ("the requested edit / reference / inpaint / LoRA / quant shape") and identified none. The
+/// 2026-08-18 sweep rejected `chroma1_{base,flash,hd}`, `flux_dev` and `flux_schnell` with
+/// "conditioned shape on a txt2img candle family" for payloads that were plain
+/// `mode: "text_to_image"` with every carrier null and no LoRA or pose — the real cause was
+/// `advanced.mlxQuantize` on families that advertise `supported_quants: &[]`. The refusal itself is
+/// correct (candle refuses rather than silently running dense — sc-5099); only the wording was,
+/// sending triage after a conditioning bug that did not exist.
+///
+/// The causes below are tested in the order `image_request_candle_eligible` evaluates them, so
+/// the reported cause is the first check that actually refused — the same answer a reader gets by
+/// stepping the gate. **Classification only:** nothing here decides routing, and every branch
+/// returns an `UnsupportedReason` for a payload the gates had already refused.
 pub(crate) fn classify_candle_image_gap(payload: &Map<String, Value>) -> UnsupportedReason {
     let Some(model) = payload.get("model").and_then(Value::as_str) else {
         return UnsupportedReason::new(None, "image generation", "no model specified.", None);
@@ -605,13 +624,141 @@ pub(crate) fn classify_candle_image_gap(payload: &Map<String, Value>) -> Unsuppo
             Some("epic 3692"),
         );
     }
-    // A candle txt2img family but a conditioned shape (edit / reference / inpaint / LoRA / quant)
-    // with no candle lane for it (the candle identity/control/edit lanes early-return `Ok`).
+    // A candle-routed family whose lanes all refused. Blame the first check that actually refused,
+    // in the order `image_request_candle_eligible` evaluates them.
+    let mode = payload.get("mode").and_then(Value::as_str).unwrap_or("");
+    // The modes whose whole point is a conditioning image; every one is owned by a specialized
+    // candle lane (or by no lane at all), never by the generic txt2img gate.
+    let conditioning_mode = matches!(
+        mode,
+        "edit_image" | "reference" | "image_to_image" | "character_image" | "style_variations"
+    );
+    const SCALAR_CARRIERS: [&str; 3] = ["sourceAssetId", "referenceAssetId", "maskAssetId"];
+    let malformed: Vec<&str> = SCALAR_CARRIERS
+        .into_iter()
+        .filter(|key| has_malformed_optional_string(payload, key))
+        .collect();
+    let carriers: Vec<&str> = SCALAR_CARRIERS
+        .into_iter()
+        .filter(|key| has_nonempty_string(payload, key))
+        .chain(
+            has_nonempty_string_array(payload, "referenceAssetIds").then_some("referenceAssetIds"),
+        )
+        .collect();
+
+    // A carrier in a shape no route can consume (a number/bool/array/object where an asset id
+    // belongs) fails every gate closed, and reads to a user like an unconditioned request — the
+    // sc-20525 defect class. Name it as the shape defect it is instead of a missing lane.
+    if !malformed.is_empty() {
+        return UnsupportedReason::new(
+            Some(model),
+            "malformed conditioning carrier",
+            &format!(
+                "the request carries {carriers} in a shape that is neither an asset id string nor \
+                 null, so every candle lane fails it closed. This is a malformed payload, not a \
+                 missing candle lane — the same request with a valid or absent carrier may well \
+                 route.",
+                carriers = malformed.join(" / ")
+            ),
+            Some("sc-20525"),
+        );
+    }
+    if !carriers.is_empty() {
+        return UnsupportedReason::new(
+            Some(model),
+            "conditioning carrier with no candle lane on this family",
+            &format!(
+                "the request carries {carriers} (mode {mode:?}); this candle family has no lane \
+                 that serves that conditioning shape off-Mac.",
+                carriers = carriers.join(" + "),
+            ),
+            Some("epic 5480"),
+        );
+    }
+    if conditioning_mode {
+        return UnsupportedReason::new(
+            Some(model),
+            "conditioning mode with no conditioning image",
+            &format!(
+                "the request declares mode {mode:?}, which needs a source/reference image, but \
+                 carries none — no candle lane can serve it. Re-submit with the asset the mode \
+                 requires, or as plain text_to_image."
+            ),
+            Some("epic 5480"),
+        );
+    }
+
+    let has_loras = payload
+        .get("loras")
+        .and_then(Value::as_array)
+        .is_some_and(|loras| !loras.is_empty());
+    let serves_lora =
+        CANDLE_QUANT_LORA_MODELS.contains(&model) || CANDLE_LORA_MODELS.contains(&model);
+    if has_loras && !serves_lora {
+        return UnsupportedReason::new(
+            Some(model),
+            "user LoRA on a candle family with no adapter lane",
+            "this candle family advertises no inference adapter slot off-Mac, so a user LoRA / \
+             LyCORIS cannot be folded onto it; the request is refused rather than rendered with \
+             the adapter silently dropped. The same prompt without adapters routes to candle.",
+            Some("epic 5480"),
+        );
+    }
+
+    let requested_quant = candle_requested_quant_bits(payload);
+    let serves_quant =
+        CANDLE_QUANT_LORA_MODELS.contains(&model) || CANDLE_QUANT_MODELS.contains(&model);
+    if let Some(bits) = requested_quant {
+        if !serves_quant {
+            return UnsupportedReason::new(
+                Some(model),
+                &format!("q{bits} quant tier request on a dense-only candle family"),
+                &format!(
+                    "the request asks for q{bits} (advanced.mlxQuantize = {bits}), but this candle \
+                     family serves dense bf16/fp16 only — it ships no packed q4/q8 tier and does no \
+                     load-time quantization off-Mac. Candle refuses rather than silently rendering \
+                     dense at a tier you did not ask for (sc-5099). This is NOT a conditioning gap: \
+                     re-submit without advanced.mlxQuantize and the same request routes to candle."
+                ),
+                Some("sc-5099"),
+            );
+        }
+    }
+
+    // Whatever is left is not one of the isolated causes. Say what the payload actually carries so
+    // the reader is never sent hunting for a conditioning bug that is not there (sc-20530).
+    let mut carried: Vec<String> = Vec::new();
+    if has_loras {
+        carried.push("user LoRA(s)".to_owned());
+    }
+    if let Some(bits) = requested_quant {
+        carried.push(format!("a q{bits} tier request"));
+    }
+    if has_nonempty_nested_array(payload, "advanced", "poses") {
+        carried.push("a strict-pose set".to_owned());
+    }
+    if has_nonempty_nested_array(payload, "advanced", "phases") {
+        carried.push("a phase schedule".to_owned());
+    }
+    if carried.is_empty() {
+        return UnsupportedReason::new(
+            Some(model),
+            "candle-routed family refused an unconditioned request",
+            "this candle family is routed off-Mac and the request carries no reference / source / \
+             mask / LoRA / pose conditioning at all, so no conditioning gap explains the refusal — \
+             some other shape check in the candle image gate declined it. Treat this as a routing \
+             defect worth filing rather than a missing engine feature.",
+            Some("sc-20530"),
+        );
+    }
     UnsupportedReason::new(
         Some(model),
-        "conditioned shape on a txt2img candle family",
-        "this candle family serves text-to-image; the requested edit / reference / inpaint / LoRA / \
-         quant shape has no candle lane for it off-Mac.",
+        "advanced request shape with no candle lane on this family",
+        &format!(
+            "the request carries {carried}; this candle family serves text-to-image but has no \
+             candle lane for that combination off-Mac.",
+            carried = carried.join(" + ")
+        ),
         Some("epic 5480"),
     )
 }

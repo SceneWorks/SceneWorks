@@ -1707,7 +1707,12 @@ def test_flux2_klein_manifest_entries_present():
         model = models[model_id]
         assert model["adapter"] == "mlx_flux2", model_id
         assert model["family"] == "flux2-klein", model_id
-        assert model["macOnly"] is True, model_id
+        # sc-20530: `macOnly` is REMOVED from both entries, not flipped to false. The flag is read
+        # only by the video catalog-withdrawal contract (`video_model_withdrawn_on_platform`, which
+        # requires `type == "video"`) and by the id-pinned vision captioner in the web eligibility
+        # helpers, so on an image entry it never gated anything — it only read like a platform
+        # contract these candle-routed entries do not have. Pinned absent so it cannot creep back.
+        assert "macOnly" not in model, model_id
         # sc-8711 (epic 8506): re-hosted as a public, ungated SceneWorks MLX quant-matrix
         # turnkey (q4/q8/bf16), so the entry is `gated: false` with no credentialHost — the
         # FLUX Non-Commercial LICENSE.md travels with the weights.

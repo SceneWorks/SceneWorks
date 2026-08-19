@@ -4091,3 +4091,212 @@ fn an_unhealthy_worker_is_routed_nothing_even_with_full_capabilities() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// sc-20530: `candle_unsupported` message classification. Routing is NOT under test here (the gate
+// tests above own that); these pin WHICH cause the terminal error blames. The 2026-08-18 sweep
+// showed five families rejected with "conditioned shape on a txt2img candle family" for payloads
+// that carried no conditioning at all — the real cause was `advanced.mlxQuantize` on a dense-only
+// family. A message naming a conditioning bug that does not exist sends triage hunting one.
+// ---------------------------------------------------------------------------------------------
+
+/// The five families the sweep caught (`chroma1_*`, `flux_dev`, `flux_schnell`) advertise
+/// `supported_quants: &[]` — dense bf16/fp16 only — so `advanced.mlxQuantize: 4` is correctly
+/// refused rather than silently run dense (sc-5099). The refusal must SAY that: name the requested
+/// tier and what the family does serve, and never claim a conditioning shape the payload lacks.
+#[test]
+fn quant_request_on_a_dense_only_candle_family_names_the_tier_not_a_conditioned_shape() {
+    for model in [
+        "chroma1_base",
+        "chroma1_flash",
+        "chroma1_hd",
+        "flux_dev",
+        "flux_schnell",
+    ] {
+        for bits in [4, 8] {
+            let job = image_generate_job(json!({
+                "projectId": "project_1",
+                "model": model,
+                "prompt": "a red fox",
+                "mode": "text_to_image",
+                "referenceAssetId": null,
+                "sourceAssetId": null,
+                "maskAssetId": null,
+                "advanced": { "mlxQuantize": bits }
+            }));
+            // Routing is unchanged: the request is still refused (the sc-5099 no-silent-dense posture).
+            assert!(
+                !image_job_is_candle_eligible(&job),
+                "{model} q{bits} must stay refused — this story changes wording only"
+            );
+            let reason = candle_supported(&job).expect_err("a quant request must stay a named gap");
+            let message = reason.candle_error_message();
+            assert!(
+                reason.feature.contains("quant"),
+                "{model} q{bits} must be blamed on the quant tier: {reason:?}"
+            );
+            assert!(
+                message.contains(&format!("q{bits}")),
+                "the message must name the REQUESTED tier q{bits}: {message}"
+            );
+            assert!(
+                message.contains("mlxQuantize"),
+                "the message must name the payload field that caused it: {message}"
+            );
+            assert!(
+                message.contains("dense"),
+                "the message must say what the family DOES serve (dense only): {message}"
+            );
+            assert!(
+                !message.contains("conditioned shape"),
+                "an unconditioned payload must never be blamed on a conditioning shape: {message}"
+            );
+            assert!(
+                !message.contains("edit / reference / inpaint"),
+                "the message must not list causes the payload does not carry: {message}"
+            );
+        }
+    }
+}
+
+/// AC-4 mutation guard: the classification split must not move a single routing decision. The same
+/// five families with the quant override REMOVED still route to candle, and `mlxQuantize: 0` (the
+/// dense encoding) still routes too — only the refusal STRING changed.
+#[test]
+fn quant_message_split_did_not_move_the_routing_decision() {
+    for model in [
+        "chroma1_base",
+        "chroma1_flash",
+        "chroma1_hd",
+        "flux_dev",
+        "flux_schnell",
+    ] {
+        let dense = image_generate_job(json!({
+            "projectId": "project_1",
+            "model": model,
+            "prompt": "a red fox",
+            "mode": "text_to_image",
+            "referenceAssetId": null,
+            "sourceAssetId": null,
+            "maskAssetId": null
+        }));
+        assert!(
+            image_job_is_candle_eligible(&dense),
+            "{model} plain dense txt2img must still route to candle"
+        );
+        assert!(
+            candle_supported(&dense).is_ok(),
+            "{model} plain dense txt2img must not be a gap"
+        );
+        let zero = image_generate_job(json!({
+            "projectId": "project_1",
+            "model": model,
+            "prompt": "a red fox",
+            "mode": "text_to_image",
+            "advanced": { "mlxQuantize": 0 }
+        }));
+        assert!(
+            image_job_is_candle_eligible(&zero) && candle_supported(&zero).is_ok(),
+            "{model} mlxQuantize:0 is dense and must still route"
+        );
+    }
+}
+
+/// A user LoRA on a candle family with no adapter lane is its own cause — not a "conditioned
+/// shape". `boogu_image` is quant-capable but adapter-less (`CANDLE_QUANT_MODELS`, not the
+/// quant+LoRA set), so the adapter half of the gate alone refuses it.
+#[test]
+fn lora_on_a_candle_family_with_no_adapter_lane_is_named_separately() {
+    let job = image_generate_job(json!({
+        "projectId": "project_1",
+        "model": "boogu_image",
+        "prompt": "a red fox",
+        "mode": "text_to_image",
+        "loras": [{ "id": "lora_1", "scale": 0.8 }]
+    }));
+    assert!(
+        !image_job_is_candle_eligible(&job),
+        "routing is unchanged: an adapter-less family still refuses a LoRA"
+    );
+    let reason = candle_supported(&job).expect_err("a LoRA gap must stay named");
+    let message = reason.candle_error_message();
+    assert!(
+        reason.feature.contains("LoRA"),
+        "the LoRA cause must be named: {reason:?}"
+    );
+    assert!(
+        !message.contains("conditioned shape"),
+        "a LoRA request is not a conditioning shape: {message}"
+    );
+    assert!(
+        !message.contains("quant tier"),
+        "the message must not blame a quant tier the payload never asked for: {message}"
+    );
+}
+
+/// An edit/inpaint carrier on a family with no candle edit lane keeps a conditioning-flavored
+/// message — but it names the carriers the payload ACTUALLY has instead of listing five candidates.
+#[test]
+fn edit_carrier_on_a_family_without_an_edit_lane_names_the_carrier() {
+    let job = image_edit_job(json!({
+        "projectId": "project_1",
+        "model": "chroma1_base",
+        "prompt": "a red fox",
+        "mode": "edit_image",
+        "sourceAssetId": "asset_1"
+    }));
+    assert!(
+        !image_job_is_candle_eligible(&job),
+        "routing is unchanged: chroma has no candle edit lane"
+    );
+    let reason = candle_supported(&job).expect_err("an edit gap must stay named");
+    let message = reason.candle_error_message();
+    assert!(
+        message.contains("sourceAssetId"),
+        "the message must name the carrier the payload carries: {message}"
+    );
+    assert!(
+        !message.contains("mlxQuantize"),
+        "the message must not blame a quant tier the payload never asked for: {message}"
+    );
+}
+
+/// The catch-all is now a true last resort: reached only when no distinguishable cause applies, and
+/// it must not assert a conditioning shape for a payload that carries none. Probed directly because
+/// production has no reachable unconditioned-and-refused image shape today — which is exactly why
+/// the catch-all's claim has to stay honest if one ever appears.
+#[test]
+fn catch_all_does_not_claim_a_conditioned_shape_for_an_unconditioned_payload() {
+    use crate::jobs_store::routing::gaps::classify_candle_image_gap;
+
+    let reason = classify_candle_image_gap(&object(json!({
+        "model": "chroma1_base",
+        "prompt": "a red fox",
+        "mode": "text_to_image",
+        "referenceAssetId": null,
+        "sourceAssetId": null,
+        "maskAssetId": null,
+        "loras": []
+    })));
+    let message = reason.candle_error_message();
+    assert!(
+        !message.contains("conditioned shape"),
+        "an unconditioned payload must not be blamed on a conditioning shape: {message}"
+    );
+    assert!(
+        message.contains("no reference / source / mask / LoRA / pose"),
+        "the catch-all must state what the payload does NOT carry: {message}"
+    );
+
+    // A reference-only mode with no carrier is its own cause, not the catch-all.
+    let modeless = classify_candle_image_gap(&object(json!({
+        "model": "flux2_dev",
+        "prompt": "a red fox",
+        "mode": "style_variations",
+        "referenceAssetId": null
+    })));
+    assert!(
+        modeless.detail.contains("style_variations"),
+        "a reference-only mode with no carrier must name the mode: {modeless:?}"
+    );
+}
