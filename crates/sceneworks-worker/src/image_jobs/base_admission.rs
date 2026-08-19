@@ -352,6 +352,11 @@ impl CachedCandleBaseFloorAdmission {
     /// Admit one cold load. `resident_reclaimable_weight_bytes` comes from the exact different-key
     /// cache entry that remains alive until this gate succeeds. A historical process-global peak is
     /// not valid credit: after large -> small, it can describe memory already returned to the driver.
+    ///
+    /// This gate never READS the process-global pool, but an admitted load still WRITES its weight
+    /// bytes there ([`crate::vram_gate::note_loaded_peak`]) — the lanes that do budget
+    /// `free + reclaimable_pool` must not stay blind to an evictable resident that arrived through
+    /// this lane.
     pub(super) fn admit(self, resident_reclaimable_weight_bytes: u64) -> WorkerResult<()> {
         let Some(floor_gb) = (self.source_weight_bytes > 0).then(|| {
             self.source_weight_bytes as f64 / BYTES_PER_GIB + crate::vram_gate::HEADROOM_GB
@@ -374,6 +379,19 @@ impl CachedCandleBaseFloorAdmission {
         let needed = Some(floor_gb);
         match crate::vram_gate::load_plan(needed, None, budget, false) {
             LoadPlan::Resident => {
+                // Record this occupancy in the process-global reclaimable high-water (sc-11023).
+                // The single-slot cache evicts this entry before any later different-model load,
+                // so the lanes that budget `free + reclaimable_pool` (the generic txt2img gate,
+                // `gate_with_evict_reclaim`) may credit it. Without this note, a fresh worker
+                // whose only loads came through this lane gates stock models against raw free
+                // while the import sits resident — a false TooBig reject for a load that fits
+                // once the cache evicts the import. Weights only, no headroom: evicting a
+                // resident generator cannot promise to reclaim that allowance (see
+                // `reclaimable_weight_bytes`).
+                crate::vram_gate::note_loaded_peak(
+                    &self.gpu_id,
+                    self.source_weight_bytes as f64 / BYTES_PER_GIB,
+                );
                 tracing::info!(
                     model = self.model,
                     lane = self.lane,
@@ -565,6 +583,42 @@ mod tests {
             LoadPlan::Resident,
             "precondition: the stale global high-water would have over-admitted"
         );
+    }
+
+    #[test]
+    fn cached_admission_notes_its_weights_into_the_reclaimable_pool() {
+        // A fresh worker whose only load came through the cached imported/ComfyUI lane must still
+        // leave a reclaimable high-water behind: the generic txt2img gate budgets
+        // `free + reclaimable_pool`, and a pool blind to this resident occupant falsely rejects a
+        // stock model that fits once the single-slot cache evicts the import (the "needs ~49 GB
+        // but GPU 0 has ~43 GB" reject with a ~23 GB Kreamania checkpoint resident).
+        let runtime = tokio::runtime::Runtime::new().expect("runtime builds");
+        let gpu_id = "base-admission-cached-note-gpu";
+        let admission = CachedCandleBaseFloorAdmission {
+            model: "kreamania_fixture".to_owned(),
+            lane: "Krea imported",
+            gpu_id: gpu_id.to_owned(),
+            source_weight_bytes: (6.0 * BYTES_PER_GIB) as u64,
+            runtime: runtime.handle().clone(),
+        };
+        admission.admit(0).expect("floor admission admits");
+        assert_eq!(
+            crate::vram_gate::reclaimable_pool_gb(gpu_id),
+            6.0,
+            "the admitted import's weight bytes (headroom excluded) seed the pool"
+        );
+
+        // The un-gateable zero-weight branch admits without a floor and records nothing.
+        let empty_gpu = "base-admission-cached-note-empty-gpu";
+        let admission = CachedCandleBaseFloorAdmission {
+            model: "kreamania_fixture".to_owned(),
+            lane: "Krea imported",
+            gpu_id: empty_gpu.to_owned(),
+            source_weight_bytes: 0,
+            runtime: runtime.handle().clone(),
+        };
+        admission.admit(0).expect("un-gateable admission admits");
+        assert_eq!(crate::vram_gate::reclaimable_pool_gb(empty_gpu), 0.0);
     }
 
     #[test]
