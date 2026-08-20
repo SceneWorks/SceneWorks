@@ -615,6 +615,7 @@ fn conditioning_label(kind: gen_core::ConditioningKind) -> &'static str {
         gen_core::ConditioningKind::ControlClip => "control_clip",
         gen_core::ConditioningKind::VideoSync => "video_sync",
         gen_core::ConditioningKind::ConversationHistory => "conversation_history",
+        gen_core::ConditioningKind::ReferenceVideo => "reference_video",
     }
 }
 
@@ -1921,6 +1922,7 @@ mod tests {
         provider.capabilities.supports_lokr = true;
         provider.capabilities.supported_quants = &[gen_core::Quant::Q4];
         provider.capabilities.supports_kv_cache = true;
+        provider.capabilities.conditioning = vec![gen_core::ConditioningKind::ReferenceVideo];
         let route = gen_core::ImportedModelRegistration {
             family: "mage-flow",
             source: gen_core::ImportedModelSource::TransformerDirectory,
@@ -1939,6 +1941,7 @@ mod tests {
         assert_eq!(imported.source, "transformer_directory");
         assert_eq!(imported.operation, "generate");
         assert_eq!(imported.provider_id, "mage_flow_base");
+        assert_eq!(imported.conditioning, ["reference_video"]);
         assert!(!imported.supports_lora);
         assert!(!imported.supports_lokr);
         assert_eq!(imported.supported_quants, ["q4"]);
