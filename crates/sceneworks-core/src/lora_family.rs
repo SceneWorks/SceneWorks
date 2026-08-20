@@ -884,12 +884,17 @@ fn detect_unique_key_family(keys: &[String]) -> Option<String> {
     // Krea 2 (epic 7565). Its DiT carries a `text_fusion` Qwen3-VL-layer aggregator
     // and a gated single-stream attention whose projection is the leaf Linear
     // `attn.to_gate` — names that appear in no other family's LoRA keys (dual-stream
-    // MMDiT/Flux/SD3/Wan have none). Both the diffusers dotted form
+    // MMDiT/Flux/SD3/Wan have none). Match both the diffusers dotted form
     // (`...text_fusion.projector...`, `...attn.to_gate.lora_A...`) and the
-    // kohya/flattened underscore form are matched. The family label is `krea_2`
-    // (underscore) to match the catalog's `loraCompatibility.families` and the
-    // `krea_2_raw_lora` trainer output exactly, since import-time reconciliation
-    // compares the family string verbatim.
+    // kohya/flattened underscore form. ai-toolkit instead keys adapters to Krea's raw
+    // checkpoint namespace, where `text_fusion` is spelled `txtfusion`; that exact
+    // dotted path segment is equally Krea-exclusive and is already the authoritative
+    // discriminator in the base-weight detector. Do not infer Krea from the accompanying
+    // generic `blocks.*.attn.w{q,k,v,o}` layout alone.
+    //
+    // The family label is `krea_2` (underscore) to match the catalog's
+    // `loraCompatibility.families` and the `krea_2_raw_lora` trainer output exactly,
+    // since import-time reconciliation compares the family string verbatim.
     //
     // The `to_gate` markers require the trailing module-boundary separator (a `.` for
     // the diffusers leaf, so the LoRA sub-weight `lora_A`/`lora_down` follows). Without
@@ -899,6 +904,8 @@ fn detect_unique_key_family(keys: &[String]) -> Option<String> {
     // mis-detected as krea_2 and rejected from every LTX model.
     if keys.iter().any(|key| {
         key.contains("text_fusion")
+            || key.contains(".txtfusion.")
+            || key.starts_with("txtfusion.")
             || key.contains("attn.to_gate.")
             || key.contains("_attn_to_gate.")
     }) {
@@ -3415,6 +3422,55 @@ mod tests {
             "transformer.text_fusion.projector.lora_A.weight",
             "transformer.text_fusion.projector.lora_B.weight",
         ]);
+
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("krea_2"));
+    }
+
+    #[test]
+    fn detects_native_aitoolkit_krea_lora_by_txtfusion_namespace() {
+        // Real ai-toolkit Krea shape (e.g. Afterlight_v1.safetensors): 28 denoiser
+        // blocks plus two layerwise and two refiner text-fusion blocks, each adapting
+        // the five gated-attention and three SwiGLU projections. The raw checkpoint
+        // names use `blocks`/`txtfusion` + `wq`/`wk`/`wv`/`wo` instead of diffusers'
+        // `transformer_blocks`/`text_fusion` + `to_q`/`to_k`/`to_v`/`to_out`.
+        let modules = [
+            "attn.gate",
+            "attn.wk",
+            "attn.wo",
+            "attn.wq",
+            "attn.wv",
+            "mlp.down",
+            "mlp.gate",
+            "mlp.up",
+        ];
+        let roles = ["lora_A.weight", "lora_B.weight"];
+        let mut keys = Vec::new();
+        for block in 0..28 {
+            for module in modules {
+                for role in roles {
+                    keys.push(format!("diffusion_model.blocks.{block}.{module}.{role}"));
+                }
+            }
+        }
+
+        // The BFL-like block stack is not unique enough on its own. Preserve the
+        // detector's conservative contract: without Krea's exclusive namespace it
+        // stays inconclusive instead of risking a confident wrong-family rejection.
+        let block_only = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(detect_lora_family(&block_only), None);
+
+        for stack in ["layerwise_blocks", "refiner_blocks"] {
+            for block in 0..2 {
+                for module in modules {
+                    for role in roles {
+                        keys.push(format!(
+                            "diffusion_model.txtfusion.{stack}.{block}.{module}.{role}"
+                        ));
+                    }
+                }
+            }
+        }
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
 
         assert_eq!(detect_lora_family(&header).as_deref(), Some("krea_2"));
     }
