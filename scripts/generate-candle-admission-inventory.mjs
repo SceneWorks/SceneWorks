@@ -1632,6 +1632,12 @@ function knownGaps({ curveLanes, routes }) {
     "crates/sceneworks-worker/src/conditioning_fit.rs",
     "crates/sceneworks-worker/src/krea_control_fit.rs",
     "crates/sceneworks-core/src/video_memory_curves.rs",
+    // sc-19058: `payload.rs` is not admission plumbing any more, it is an input to the prediction
+    // law. `estimate_synthesis::fitted_phase_curve_gb` reads every curve coefficient through
+    // `json_f64`, whose lane-permissive "a numeric string is a number" reading is load-bearing and
+    // pinned by `a_malformed_temporal_coefficient_fails_the_curve_closed`. Narrowing it to
+    // `Value::as_f64` would move predictions while rotating neither generator's fingerprint.
+    "crates/sceneworks-worker/src/payload.rs",
   ];
   return [
     {
@@ -1644,7 +1650,11 @@ function knownGaps({ curveLanes, routes }) {
         "docs/generated/memory-matrix.json's source-tree revision unrotated and the matrix claims " +
         "a currency it does not have. `candle_scalar_gate.rs` joined the list in sc-19049: the " +
         "scalar gate's arithmetic moved there out of `vram_gate.rs`, which the matrix DOES " +
-        "fingerprint, so the matrix now rotates on none of the candle admission law. Adding them " +
+        "fingerprint, so the matrix now rotates on none of the candle admission law. `payload.rs` " +
+        "joined in sc-19058 for the same reason one step further in: the fitted phase-curve law " +
+        "moved into `estimate_synthesis.rs` (which the matrix does fingerprint) and reads every " +
+        "coefficient through `json_f64`, so that helper is now prediction law nothing covers. " +
+        "Adding them " +
         "rotates the matrix fingerprint and forces a full regeneration, so epic 19048's terminal " +
         "acceptance story owns the fix rather than every slice paying for it.",
       paths: missingFingerprint,

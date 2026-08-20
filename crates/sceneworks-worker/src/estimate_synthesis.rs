@@ -15,9 +15,20 @@
 //!
 //! sc-19058 folded the second and last home of prediction law in the tree onto this module:
 //! `krea_2_turbo`'s declared phase curves, which until then were evaluated inside `vram_gate.rs`'s
-//! candle cfg straight off manifest JSON. Same discipline, same bar — code motion only, and this
-//! time the committed artifact re-verified against it is
-//! `docs/generated/candle-admission-decisions.json`.
+//! candle cfg straight off manifest JSON. Same discipline, same bar — code motion only.
+//!
+//! **Its evidence is NOT the sc-19050 shape above, and the difference matters.** There is no
+//! committed decision artifact standing behind the krea fold, because
+//! `docs/generated/candle-admission-decisions.json` is structurally BLIND to this route: all four
+//! `krea_2_turbo` rows in it are `resolution: "not_evaluated"`, carrying no geometry and no budget
+//! axis, for the reason `candle_admission_decisions.rs` states in its own header — the ladder takes
+//! a `KreaRuntimeEvidenceContext` whose only non-test constructor walks a resolved artifact tree, so
+//! no CPU lane can drive it and stamping it with another gate's answer would fabricate a column.
+//! What actually holds the fold is the `vram_gate` unit suite, which grades the SHIPPED manifest
+//! through the shipped reader — `committed_image_curves_evaluate_bit_identically_to_the_two_coefficient_form`
+//! (36 curves, bitwise, over the pre-sc-18812 expression *with its original association*), the three
+//! sc-19056 lane guards, and the historical q4/q8/bf16 rung-selection tests — plus the verbatim code
+//! motion itself. Claiming the decisions artifact here would be citing a file that cannot disagree.
 //!
 //! # What is a parameter, and why
 //!
@@ -599,8 +610,28 @@ impl BindingPhase {
 ///
 /// Ties resolve to the LATER phase deterministically. Generic in the magnitude type because the
 /// lanes carry different ones — MLX and the video lane predict `u64` bytes, the Krea turbo ladder
-/// predicts `f64` GB — while the rule is identical. `>=` on a NaN is false, so a NaN phase can
-/// never claim the binding label, which is the fail-closed direction.
+/// predicts `f64` GB — while the rule is identical.
+///
+/// ## What NaN actually does here (corrected in sc-19058)
+///
+/// An earlier revision of this comment claimed "a NaN phase can never claim the binding label".
+/// That is FALSE in first position. `>=` on a NaN is false, so a NaN `conditioning` is never
+/// DISPLACED: `binding_phase(NaN, 5.0, 3.0)` returns `Conditioning`. NaN in the second or third
+/// position genuinely cannot claim the label, but the first is not screened at all — the seed is
+/// taken, not compared.
+///
+/// This is reachable rather than theoretical. `vram_gate::krea_record_phase_peaks` builds a triple
+/// straight out of `predictedPhasesGb` through `crate::payload::json_f64` with no finite guard, and
+/// `json_f64` falls back to `str::parse`, which accepts `"NaN"`. A manifest record spelling a phase
+/// peak that way therefore produces a triple on which this function and
+/// `vram_gate::KreaTurboPhasePeaks::peak_gb` disagree: `f64::max` discards the NaN and reports a
+/// finite peak from another phase, while this argmax names the NaN phase.
+///
+/// Left as a recorded inconsistency rather than repaired here, deliberately. A finite guard is a
+/// DECISION change on the one route epic 19048 R6 holds to byte-identity, and it belongs where the
+/// triple is built (a malformed record should fail its estimate closed, exactly as a malformed
+/// curve coefficient already does) rather than inside a shared argmax that several lanes call with
+/// integer magnitudes that cannot be NaN at all.
 ///
 /// Before sc-19050 this rule existed three times, each copy documented as "mirroring" the others.
 /// That is precisely the drift hazard epic 19048 R1 forbids: three mirrors have three chances to

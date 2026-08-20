@@ -3,7 +3,7 @@
   "generatedBy": "scripts/generate-candle-admission-inventory.mjs",
   "story": "sc-19049",
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:a59f2dcd950cd9609e54df7a0339c84a6ef668d45ed1e434649138911910d3cf",
+    "sceneWorksRevision": "source-tree:099ba803944e6150d85142aea8c3778cb7e3c717daaba93a8b8e5f2098314574",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -35,7 +35,7 @@
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "020c11599049409a9791aa9b6102de1d8c6babc64f6c259e3347e245dfffa935"
+        "sha256": "c3bfc293c1183733281fb20e58fec79963ebde79bc9561bb9a63f55c833825df"
       },
       "candleMemoryStrategy": {
         "path": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
@@ -4075,14 +4075,15 @@
       "id": "memory-matrix-source-paths-under-cover-candle-admission",
       "owner": "sc-19059",
       "severity": "high",
-      "detail": "scripts/generate-memory-matrix.mjs's SOURCE_PATHS omits 6 files that decide candle admission, so a change to any of them leaves docs/generated/memory-matrix.json's source-tree revision unrotated and the matrix claims a currency it does not have. `candle_scalar_gate.rs` joined the list in sc-19049: the scalar gate's arithmetic moved there out of `vram_gate.rs`, which the matrix DOES fingerprint, so the matrix now rotates on none of the candle admission law. Adding them rotates the matrix fingerprint and forces a full regeneration, so epic 19048's terminal acceptance story owns the fix rather than every slice paying for it.",
+      "detail": "scripts/generate-memory-matrix.mjs's SOURCE_PATHS omits 7 files that decide candle admission, so a change to any of them leaves docs/generated/memory-matrix.json's source-tree revision unrotated and the matrix claims a currency it does not have. `candle_scalar_gate.rs` joined the list in sc-19049: the scalar gate's arithmetic moved there out of `vram_gate.rs`, which the matrix DOES fingerprint, so the matrix now rotates on none of the candle admission law. `payload.rs` joined in sc-19058 for the same reason one step further in: the fitted phase-curve law moved into `estimate_synthesis.rs` (which the matrix does fingerprint) and reads every coefficient through `json_f64`, so that helper is now prediction law nothing covers. Adding them rotates the matrix fingerprint and forces a full regeneration, so epic 19048's terminal acceptance story owns the fix rather than every slice paying for it.",
       "paths": [
         "crates/sceneworks-worker/src/candle_scalar_gate.rs",
         "crates/sceneworks-worker/src/candle_memory_strategy.rs",
         "crates/sceneworks-worker/src/video_admission.rs",
         "crates/sceneworks-worker/src/conditioning_fit.rs",
         "crates/sceneworks-worker/src/krea_control_fit.rs",
-        "crates/sceneworks-core/src/video_memory_curves.rs"
+        "crates/sceneworks-core/src/video_memory_curves.rs",
+        "crates/sceneworks-worker/src/payload.rs"
       ]
     },
     {

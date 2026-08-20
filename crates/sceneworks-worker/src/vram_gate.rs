@@ -243,6 +243,21 @@ pub(crate) struct KreaTurboPhasePeaks {
 }
 
 impl KreaTurboPhasePeaks {
+    /// sc-19058 folded the phase CURVES onto the shared mechanism but deliberately left this `max`
+    /// chain here, unlike its sibling [`Self::binding_phase`] just below, which delegates.
+    ///
+    /// The two rules disagree on NaN and only one of them is shareable. `f64::max` returns the
+    /// non-NaN operand, so a NaN phase is discarded and this reports a finite peak from another
+    /// phase; [`crate::estimate_synthesis::binding_phase`] seeds on `conditioning` and compares
+    /// with `>=`, so a NaN in FIRST position is never displaced and does claim the label. Routing
+    /// this through the shared argmax would therefore have changed what a NaN triple predicts —
+    /// a decision change on the one route epic 19048 R6 holds to byte-identity.
+    ///
+    /// The disagreement is reachable, not hypothetical: [`krea_record_phase_peaks`] builds a triple
+    /// from `predictedPhasesGb` through `json_f64` with no finite guard, and `json_f64` accepts the
+    /// string `"NaN"`. The full note, and why the repair belongs at the triple's construction rather
+    /// than inside a shared argmax several lanes call with non-NaN-able integers, is on
+    /// [`crate::estimate_synthesis::binding_phase`].
     pub(crate) fn peak_gb(self) -> f64 {
         self.text_gb.max(self.denoise_gb).max(self.decode_gb)
     }
@@ -757,10 +772,19 @@ pub(crate) fn krea_turbo_fit_with_runtime(
     let pixels = u64::from(width).checked_mul(u64::from(height))?;
     // sc-19058: the area hull is the mechanism's, and it is asked here rather than only inside
     // `krea_rung_phase_peaks` because this arm answers WITHOUT pricing a curve. Deliberately the
-    // AREA conjunct alone, not the voxel one: this route is `frames: 1` by construction
-    // (`KREA_LANE_FRAMES`), so `voxels_within_measured_hull` would be inert on every shipped input
-    // and would only start refusing if a future fit block declared `maxMeasuredVoxels` below its own
-    // `maxMeasuredPixels` — a decision change, and this slice's bar is byte-identity.
+    // AREA conjunct alone, not the voxel one. This route is `frames: 1` by construction
+    // (`KREA_LANE_FRAMES`), so `voxels_within_measured_hull` is inert on every shipped input — but
+    // adding it would move TWO verdicts on a fit block that declared `maxMeasuredVoxels`, not one:
+    //
+    //   * declared BELOW its own `maxMeasuredPixels` -> this arm starts answering
+    //     `Unverified{OutOfEnvelope}` where it previously priced the ladder;
+    //   * declared present-but-unreadable, or `0` -> `max_measured_voxels`' `?` makes the whole
+    //     call `None`, so the answer degrades from `Some(Unverified{..})` (a verdict ABOUT this
+    //     evidence) to "not evidence I can read at all", dropping the caller to the legacy scalar
+    //     gate.
+    //
+    // Both are fail-closed, and neither is reachable from any committed manifest. They are still
+    // decision changes, and this slice's bar is byte-identity — so the conjunct stays out.
     if !area_within_measured_hull(turbo_fit, pixels)? {
         return Some(KreaTurboFit::Unverified {
             reason: MemoryEvidenceVerdict::OutOfEnvelope,
