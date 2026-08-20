@@ -85,9 +85,16 @@
 //!   contract is that it cannot false-reject (see above): a refusal means the weights ALONE
 //!   overflow, which is true however the transients are priced. Widening it by 4% manufactures
 //!   refusals no measurement supports — exactly the "invented activation fudge factor" the module
-//!   note rules out — and it is the same call sc-19055 made for
-//!   [`crate::vram_gate::video_weights_fit_error`], the video lane's on-disk weights sum, which
-//!   stays ungraded for the same reason. Both are floors *by construction*, not declared peaks.
+//!   note rules out.
+//!
+//!   sc-19055 made the same *call* for [`crate::vram_gate::video_weights_fit_error`], the video
+//!   lane's on-disk weights sum, but NOT for the same reason, and the two must not be collapsed.
+//!   That gate is not a floor on every tier: its recorded reason is a MEASURED ~44 GiB
+//!   OVER-count on dense bf16, because `candle-gen-wan` halves fp32 experts on load, so the
+//!   on-disk bytes exceed what is ever resident. It under-counts only on the packed q4/q8 tiers.
+//!   Ungraded there means "already over-rejecting on one tier, do not widen it further"; ungraded
+//!   here means "a true lower bound whose refusals are sound, do not turn them unsound". Both
+//!   end at *don't grade*; only this gate is a floor by construction.
 //! * **No geometry axis.** On-disk weight bytes do not vary with width, height or frames, so
 //!   claiming this gate reads geometry would be a false claim in a generated artifact. `no` in the
 //!   inventory's geometry column is the correct answer for a weights floor, and it stays `no`.

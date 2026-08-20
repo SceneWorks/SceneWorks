@@ -648,12 +648,26 @@ fn fit_ladder_for_tier(
     // prediction laws R1 forbids. The parameters stay here (the sc-16013 rows' `measured` flag and
     // their capture geometry); the law moves.
     //
-    // Behaviour-identical on every REACHABLE request, and strictly more fail-closed beyond it. The
-    // mechanism additionally requires `batch == 1 && frames == 1` — a single-image capture cannot
-    // speak for a different workload SHAPE — and the production geometry hardcodes both to 1
+    // Behaviour-identical on every REACHABLE request. The mechanism additionally requires
+    // `batch == 1 && frames == 1` — a single-image capture cannot speak for a different workload
+    // SHAPE — and the production geometry hardcodes both to 1
     // (`image_jobs/krea_control_candle.rs`, and no candle image route turns count into
-    // `geometry.batch`, sc-16194), so no decision moves at this pin. The day either axis becomes
-    // reachable here, the rows stop claiming a request they never measured, without an edit.
+    // `geometry.batch`, sc-16194), so no decision moves at this pin.
+    //
+    // BEYOND the reachable set the change is fail-OPEN, not fail-closed, and that is deliberate.
+    // Losing `MeasuredPeak` withholds the estimate floors, so such a request reaches
+    // `Selection::Unverified` and the ladder returns `BestEffort` — which ADMITS and leans on the
+    // recoverable CUDA-OOM backstop — where the pixels-only law returned `TooBig` and refused
+    // before the load. `a_batched_or_multi_frame_request_cannot_claim_the_single_image_capture`
+    // asserts exactly that transition.
+    //
+    // Refusing is the wrong outcome there, which is why this direction is correct rather than
+    // merely tolerated. A reject built on the sc-16013 floors is a claim that THIS workload does
+    // not fit; those rows measured a batch-1 single-image render and say nothing about a batched or
+    // multi-frame one, so the claim would be unfounded. This module's stated posture — and
+    // `FitDecision::Unknown`'s — is that a gate blocking without evidence is a regression, not a
+    // safety net; `BestEffort` is the variant that exists for exactly this case. The trade is a
+    // refusal we could not justify for an admission the OOM backstop still covers.
     //
     // `declared_pixels` is derived from `measured_geometry` rather than from a second constant, so
     // the sc-16013 capture cell is declared exactly once in this file.
