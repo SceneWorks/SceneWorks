@@ -727,9 +727,12 @@ mod tests {
 
     /// sc-19115. This is the load-bearing decision test, not merely a count of records with cache.
     /// It evaluates the same host-reserve currency production uses over every committed MLX image
-    /// cell and proves that changing the image basis would loosen 54 shipped admission outcomes.
+    /// cell and proves that changing the image basis would only ever LOOSEN shipped admission —
+    /// never tighten it — which is the whole reason the image basis stays where it is.
+    ///
+    /// The verdict is asserted; the corpus size is not. See the shape assertions at the end.
     #[test]
-    fn resident_peak_counterfactual_would_loosen_55_shipped_image_admission_cells() {
+    fn resident_peak_counterfactual_only_loosens_shipped_image_admission() {
         use sceneworks_core::memory_calibration::{Backend, EvidenceBundle, RequiredNullable};
 
         fn phase(phase: &sceneworks_core::memory_calibration::Phase) -> PhaseMemory {
@@ -779,6 +782,18 @@ mod tests {
                 record.id
             );
             if historical != resident {
+                // The DIRECTION, per record, stated where the pinned totals used to be: the
+                // resident basis drops the reclaimable term, so wherever the two bases disagree
+                // the resident one must predict LESS. That is what makes every admission flip
+                // below a loosening rather than a coincidence of this corpus, and unlike a count
+                // it holds at any corpus size.
+                assert!(
+                    resident < historical,
+                    "{}: the resident basis predicted {resident} against the historical \
+                     {historical} — a resident basis that predicts MORE would tighten admission, \
+                     which is the opposite of the sc-19115 finding",
+                    record.id
+                );
                 changed_records += 1;
             }
 
@@ -811,22 +826,58 @@ mod tests {
             }
         }
 
-        // Renewed for the sc-18304 sync merge: the epic's captures grew the corpus 69 -> 74
-        // (five z-image coordinates among them), moving the counterfactual's derived counts.
-        // The load-bearing claim is the only-loosens assertion in the loop above; these pins
-        // characterize the merged corpus.
-        assert_eq!(image_records, 74);
-        assert_eq!(changed_records, 66);
-        assert_eq!(flipped_cells, 55);
-        assert_eq!(
-            flips_by_provider,
-            std::collections::BTreeMap::from([
-                ("flux2_dev", 7),
-                ("krea_2_turbo_control", 8),
-                ("qwen_image", 38),
-                ("z_image_turbo", 2),
-            ])
+        // The MLX `text_to_image` corpus is NOT frozen. Every calibration campaign and every main
+        // sync adds coordinates, and the counterfactual's derived totals move with it: 69 -> 74 at
+        // the sc-18304 sync, 74 -> 93 at the 2026-08-19 epic-17137 sync that brought epic 18803's
+        // captures across. Pinning those totals recorded only which campaign ran last and went red
+        // for legitimate corpus growth, so this states the SHAPE of the counterfactual instead —
+        // the same treatment the sibling calibration gates got (see `memory_calibration.rs`, where
+        // the re-capture set is held to its shape while only frozen history stays pinned).
+        //
+        // The load-bearing claim is the only-loosens assertion in the loop above. These keep it
+        // from passing vacuously on an empty or half-read corpus, and hold the derived tallies to
+        // the identities that must be true at ANY corpus size.
+        assert!(
+            image_records > 0,
+            "no MLX text_to_image record was read — the counterfactual is vacuous"
         );
+        assert!(
+            changed_records > 0 && changed_records <= image_records,
+            "{changed_records} of {image_records} records changed basis: the resident basis must \
+             move some image predictions, and can never move more than the corpus holds"
+        );
+        assert!(
+            flipped_cells > 0,
+            "the resident basis flipped no admission cell — the decision this test records would \
+             then be a no-op, which is the opposite of what sc-19115 concluded"
+        );
+        assert!(
+            flipped_cells <= changed_records * host_bytes.len(),
+            "{flipped_cells} flips exceed the {} cells the {changed_records} changed records span \
+             — the tally is counting something other than host cells",
+            changed_records * host_bytes.len()
+        );
+        // The per-provider tally is a PARTITION of the flips, not a pinned census: it must sum to
+        // the total and may only name providers this corpus actually carries.
+        assert_eq!(
+            flips_by_provider.values().sum::<usize>(),
+            flipped_cells,
+            "the per-provider tally must partition the flipped cells: {flips_by_provider:?}"
+        );
+        let image_providers = evidence
+            .records
+            .iter()
+            .filter(|record| {
+                record.backend == Backend::Mlx && record.target.mode == "text_to_image"
+            })
+            .map(|record| record.target.provider.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        for provider in flips_by_provider.keys() {
+            assert!(
+                image_providers.contains(provider),
+                "{provider} flipped admission but carries no MLX text_to_image record"
+            );
+        }
     }
 
     /// sc-18864. The emitted phase object must carry ONE named MLX quantity per field. Before this
@@ -6895,9 +6946,12 @@ fn ltx_staging_is_proven(
 /// co-existence bound is CONSERVATIVE — it never under-predicts — while switching to `active`
 /// would LOOSEN shipped admission. [`PredictedPeakBasis`] and its image/video constants are the
 /// single policy declaration both lanes consume. The corpus test
-/// `resident_peak_counterfactual_would_loosen_55_shipped_image_admission_cells` pins the decision
-/// against all 69 committed MLX image records and production's scaled foreign-reserve currency:
-/// 62 record predictions change and 54 host-grid decisions flip from refusal to admission.
+/// `resident_peak_counterfactual_only_loosens_shipped_image_admission` re-derives the decision on
+/// every run, against whatever MLX image records the committed corpus currently holds and
+/// production's scaled foreign-reserve currency: some record predictions change and some host-grid
+/// decisions flip, and every flip is refusal -> admission. The totals are deliberately not quoted
+/// here — the corpus grows at each calibration campaign and each main sync (69 records at
+/// sc-19115, 74 at the sc-18304 sync, 93 at the 2026-08-19 epic-17137 sync).
 #[cfg(test)]
 fn ltx_predicted_peak_bytes(
     conditioning: PhaseMemory,

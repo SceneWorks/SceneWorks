@@ -9660,15 +9660,22 @@ async fn video_steps_under_the_post_preset_models_hard_floor_is_rejected() {
 ///
 /// The fixture makes the two plausible homes disagree the same way the floor test above does:
 ///   * default video model — no menu at all (30 steps is its own business)
-///   * `ltx_2_3_eros`      — menu `[8]`, the LTX-2.3 shape
+///   * `mochi_1`           — menu `[8]`, the distilled shape
 ///
-/// Both ids are REAL routed video models, exactly as the floor test above uses `mochi_1`. The menu
-/// model cannot be a made-up id: the sc-19504 no-lane gate runs last on the enqueue path and refuses
-/// any video request no backend's claim predicate accepts, so a synthetic id 400s for
+/// Both ids are REAL routed video models, and `mochi_1` is the same id the floor test above uses.
+/// The menu model cannot be a made-up id: the sc-19504 no-lane gate runs last on the enqueue path
+/// and refuses any video request no backend's claim predicate accepts, so a synthetic id 400s for
 /// "no backend implements it" and the ON-menu `201` arm below — the one that keeps the rejections
 /// above from passing for a gate that simply refuses every step count — can never be reached.
-/// `ltx_2_3_eros` is `video_mlx_routed` + `candle_video_routed` and serves `text_to_video`, and it is
-/// one of the two models this story actually declares `limits.steps` for.
+/// `mochi_1` is `video_mlx_routed` + `candle_video_routed` and serves `text_to_video` only, so both
+/// lanes claim it on every platform. The menu itself is fixture-declared, which is the point: this
+/// asserts the ENFORCEMENT of `limits.steps`, not any particular model's declaration of it.
+///
+/// It was `ltx_2_3_eros` until the 2026-08-19 main sync. That id is now a product WITHDRAWAL
+/// off-Mac (sc-18902 removed its candle route; `video_model_withdrawn_on_platform` names it
+/// literally), so on `parity-rust` the platform gate 400'd first with "available only on macOS" and
+/// the catalog read below could not find the row at all — a fixture id that had quietly become
+/// platform-dependent. Nothing about the step-menu contract changed; only the id it is asserted on.
 #[tokio::test]
 async fn video_steps_off_the_post_preset_models_exact_menu_is_rejected() {
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
@@ -9698,14 +9705,14 @@ async fn video_steps_off_the_post_preset_models_exact_menu_is_rejected() {
               "ui": { "label": "Default Vid" }
             },
             {
-              "id": "ltx_2_3_eros",
+              "id": "mochi_1",
               "name": "Distilled Vid",
               "family": "ltx-video",
               "type": "video",
               "adapter": "ltx_video",
               "capabilities": ["text_to_video"],
               "downloads": [
-                { "provider": "huggingface", "repo": "owner/ltx_2_3_eros", "files": ["*.safetensors"], "default": true }
+                { "provider": "huggingface", "repo": "owner/mochi_1", "files": ["*.safetensors"], "default": true }
               ],
               "paths": {},
               "defaults": { "steps": 8 },
@@ -9733,7 +9740,7 @@ async fn video_steps_off_the_post_preset_models_exact_menu_is_rejected() {
               "id": "preset_override",
               "name": "Preset Override",
               "workflow": "text_to_video",
-              "model": "ltx_2_3_eros",
+              "model": "mochi_1",
               "defaults": {},
               "prompt": { "prefix": "cinematic", "suffix": "smooth" }
             }
@@ -9776,11 +9783,11 @@ async fn video_steps_off_the_post_preset_models_exact_menu_is_rejected() {
     assert_eq!(
         status,
         StatusCode::BAD_REQUEST,
-        "30 steps is off ltx_2_3_eros's exact menu and must be refused at enqueue: {body}"
+        "30 steps is off mochi_1's exact menu and must be refused at enqueue: {body}"
     );
     let detail = body["detail"].as_str().unwrap_or_default();
     assert!(
-        detail.contains("ltx_2_3_eros"),
+        detail.contains("mochi_1"),
         "names the model whose menu applied — NOT the default's: {detail}"
     );
     assert!(
@@ -9824,7 +9831,7 @@ async fn video_steps_off_the_post_preset_models_exact_menu_is_rejected() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "8 is the menu: {body}");
-    assert_eq!(body["payload"]["model"], "ltx_2_3_eros");
+    assert_eq!(body["payload"]["model"], "mochi_1");
     assert_eq!(
         body["payload"]["advanced"]["steps"], 8,
         "the admitted count travels VERBATIM — the gate refuses, it never rewrites"
@@ -9883,8 +9890,8 @@ async fn video_steps_off_the_post_preset_models_exact_menu_is_rejected() {
         .as_array()
         .expect("catalog is an array")
         .iter()
-        .find(|model| model["id"] == "ltx_2_3_eros")
-        .expect("ltx_2_3_eros is listed");
+        .find(|model| model["id"] == "mochi_1")
+        .expect("mochi_1 is listed");
     assert_eq!(
         listed["limits"]["steps"],
         json!([8]),
@@ -11775,13 +11782,13 @@ async fn the_models_endpoint_carries_a_candle_support_block_for_every_video_mode
         .as_array()
         .or_else(|| models.as_array())
         .expect("models list");
-    let mut video_models = 0_usize;
+    let mut video_models = std::collections::BTreeSet::<String>::new();
     for model in models {
         if model["type"].as_str() != Some("video") {
             continue;
         }
-        video_models += 1;
         let id = model["id"].as_str().expect("model id");
+        video_models.insert(id.to_owned());
         let candle = &model["candleSupport"];
         assert!(
             candle.is_object(),
@@ -11799,11 +11806,67 @@ async fn the_models_endpoint_carries_a_candle_support_block_for_every_video_mode
             "{id}: the serialized candleSupport drifted from the predicate"
         );
     }
-    assert!(
-        video_models >= 12,
-        "only {video_models} video models were checked — the catalog read is wrong and this guard \
-         is vacuous"
+    // The population is DERIVED from the shipped manifest, never pinned to a number.
+    //
+    // `GET /api/v1/models` filters the catalog with `retain_models_for_os(std::env::consts::OS)` —
+    // the RUNNER's real OS, not the fixture's `host_os` — so the two lanes that run this suite
+    // legitimately see different video sets: `ltx_2_3_eros` is a product withdrawal off-Mac
+    // (sc-18902), so the macOS workspace job sees it and `parity-rust` on Linux does not. A literal
+    // floor was therefore green on one lane and red on the other for no defect at all, and it also
+    // went stale every time the catalog grew (MiniMax-H3's two entries, here).
+    //
+    // Re-deriving through the same withdrawal predicate the endpoint uses keeps the guard exact on
+    // both lanes and moves it with the catalog instead of breaking on it.
+    let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| *contents)
+        .expect("builtin.models.jsonc present");
+    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+        .expect("builtin.models.jsonc parses");
+    let expected_video_models = manifest["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .filter(|entry| entry["type"].as_str() == Some("video"))
+        .filter_map(|entry| {
+            let id = entry["id"].as_str().expect("model id");
+            (!crate::models::video_model_withdrawn_on_platform(id, entry, std::env::consts::OS))
+                .then(|| id.to_owned())
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        video_models, expected_video_models,
+        "the catalog's video rows must be exactly the shipped video entries this platform still \
+         serves — a mismatch means the catalog read is wrong and every assertion above it is \
+         vacuous"
     );
+    assert!(
+        video_models.len() >= 8,
+        "only {} video models were checked — the shipped catalog cannot have shrunk this far, so \
+         the manifest read itself is wrong",
+        video_models.len()
+    );
+
+    // ...and the split itself, BY NAME, because a derived set is only as discriminating as the
+    // predicate it derives from: silently swapping which entries the withdrawal covers would keep
+    // the equality above green. Exactly one shipped video product is platform-split — the sc-18902
+    // `ltx_2_3_eros` withdrawal — and MiniMax-H3's two partitions are NOT part of it. Both are
+    // listed on every platform (their off-Mac gap is a LANE gap, reported in `candleSupport`
+    // above, which is a different thing from a catalog withdrawal); asserting that here is what
+    // keeps "epic 17137's entries went missing off-Mac" from ever being mistaken for this split.
+    assert_eq!(
+        video_models.contains("ltx_2_3_eros"),
+        std::env::consts::OS == "macos",
+        "`ltx_2_3_eros` is the one off-Mac product withdrawal: listed on macOS, absent elsewhere"
+    );
+    for id in ["minimax_h3", "minimax_h3_ref"] {
+        assert!(
+            video_models.contains(id),
+            "{id} must be listed on EVERY platform — it carries no `macOnly` and is not a product \
+             withdrawal, so a missing row here is a catalog defect, not a platform split"
+        );
+    }
 
     // The two gating switches the client reads, and the reason `candleGatingActive` is
     // platform-intrinsic rather than the `candle_required` rollout flag: the pairs it hides are
