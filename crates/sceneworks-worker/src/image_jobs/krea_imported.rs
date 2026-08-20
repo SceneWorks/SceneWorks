@@ -322,9 +322,14 @@ fn krea_imported_request_shape_available(request: &ImageRequest) -> bool {
     let operation = krea_imported_operation(request);
     if krea_imported_native_nvfp4(request) {
         #[cfg(target_os = "macos")]
-        return false;
-        if operation != gen_core::ImportedModelOperation::Generate || !request.loras.is_empty() {
+        {
             return false;
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            if operation != gen_core::ImportedModelOperation::Generate || !request.loras.is_empty() {
+                return false;
+            }
         }
     }
     if sceneworks_core::jobs_store::imported_control_intent_is_material(&request.advanced)
