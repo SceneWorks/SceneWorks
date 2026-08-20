@@ -39,11 +39,27 @@ pub(crate) use crate::fit_gate::{resolve_offload, FitDecision};
 // re-exports keep every call site, doc link and unit test in this file resolving unchanged; there is
 // still exactly one definition of each item.
 pub(crate) use crate::candle_scalar_gate::{
-    fit_decision, load_plan, predicted_peak_gb, predicted_peak_gb_for_request,
-    predicted_peak_gb_with_adapter_bytes, predicted_sequential_peak_gb,
-    predicted_sequential_peak_gb_for_request, predicted_sequential_peak_gb_with_adapter_bytes,
-    scalar_peak_class, sequential_overflow_gb, LoadPlan, VramBudget, HEADROOM_GB,
+    fit_decision, load_plan, predicted_peak_gb_for_request, predicted_peak_gb_with_adapter_bytes,
+    predicted_sequential_peak_gb, predicted_sequential_peak_gb_for_request,
+    predicted_sequential_peak_gb_with_adapter_bytes, scalar_peak_class, sequential_overflow_gb,
+    LoadPlan, VramBudget, HEADROOM_GB,
 };
+
+/// The RAW per-tier scalar reader, re-exported for TESTS ONLY since sc-19055.
+///
+/// It lost its last production caller through this module when `wan_video_fit_error_*` moved onto
+/// `video_admission::graded_video_peak_gb`, and the `cfg(test)` is how that stays true: every
+/// production comparison on this lane now goes through a GRADED entry point —
+/// `predicted_peak_gb_for_request` on the image lane, `graded_video_peak_gb` on the video lane — so
+/// a raw manifest scalar is never compared to a budget. A future edit that wants the ungraded number
+/// for a live decision has to add its own import and explain why, rather than finding one already
+/// in scope.
+///
+/// (`predicted_peak_gb_with_adapter_bytes` above is deliberately NOT test-only: `image_jobs/base.rs`
+/// feeds that raw number to the shared selector, which applies the grade itself through the resident
+/// candidate's evidence class. Pre-widening it there would double-charge the margin.)
+#[cfg(test)]
+pub(crate) use crate::candle_scalar_gate::predicted_peak_gb;
 
 /// Emulate a smaller card: cap usable VRAM (GB). Set e.g. `SCENEWORKS_CUDA_VRAM_CAP_GB=10` to make the
 /// fit-gate treat this GPU as a 10 GB card, so a too-big model is rejected (and, once Phase 1 lands,
@@ -1668,6 +1684,16 @@ fn krea_turbo_smaller_fit(
 ///
 /// Pure (no GPU probe, no env) so the whole decision is unit-testable without CUDA; the caller resolves
 /// the budget.
+/// ## sc-19055: the derived peak is graded as the floor it is
+///
+/// `mochi_needed_gb` is an ARCHITECTURAL formula, and this module's own note above says candle's
+/// real peak "runs at or above what this predicts" — the VAE's post-permute `.contiguous()` copies
+/// materialize a full extra tensor per up-stage that the formula does not model. A prediction
+/// documented to under-count is a declared floor, not a measured peak, so it takes the mechanism's
+/// floor grade ([`crate::video_admission::graded_derived_video_floor_gb`]).
+///
+/// The widening therefore moves the number TOWARD the measured behavior rather than away from it,
+/// which is what makes this flip conservative in substance and not merely in direction.
 pub(crate) fn mochi_fit_error(
     model_label: &str,
     weight_bytes: u64,
@@ -1677,10 +1703,13 @@ pub(crate) fn mochi_fit_error(
     gpu_id: &str,
     budget: Option<VramBudget>,
 ) -> Option<WorkerError> {
-    let (needed_gb, budget) = (
-        crate::fit_gate::mochi_needed_gb(weight_bytes, frames, width, height, HEADROOM_GB)?,
-        budget?,
-    );
+    let (needed_gb, budget) =
+        (
+            crate::video_admission::graded_derived_video_floor_gb(
+                crate::fit_gate::mochi_needed_gb(weight_bytes, frames, width, height, HEADROOM_GB)?,
+            ),
+            budget?,
+        );
     (budget.free_gb + f64::EPSILON < needed_gb).then(|| {
         mochi_too_big_error(
             model_label,
@@ -1744,6 +1773,19 @@ fn mochi_too_big_error(
 ///
 /// The check keys off physical `total_gb`, not momentary `free_gb`. This story establishes a hardware
 /// boundary, not a trustworthy transient-working-set threshold for a busy card.
+///
+/// ## sc-19055: nothing to grade, and that is a property of the gate's shape
+///
+/// This is the one flat video gate that predicts no peak. `svd_profile_needs_larger_card` is a
+/// BOOLEAN envelope over `(frames, chunk, steps, width, height, physical card class)` — it answers
+/// "is this recipe inside the tuple a real 32 GB card completed", not "how many GB does this need".
+/// There is no scalar in it for [`crate::estimate_synthesis::graded_scalar_gb`] to widen, and
+/// inventing one to have something to grade would be exactly the fabricated prediction the epic's
+/// no-silent-flips rule exists to prevent.
+///
+/// It is also already the most geometry-aware gate on the video lane: every axis of the envelope is
+/// a request axis. So its migration under this story is that it now says so explicitly rather than
+/// being lumped with the resolution-blind scalars it never resembled.
 pub(crate) fn svd_fit_error(
     frames: u32,
     decode_chunk_size: u32,
@@ -1974,6 +2016,25 @@ pub(crate) fn wan_vace_fun_sequential_weight_bytes(
 /// (`weight_bytes == 0` — an exempt engine, or a dir that could not be scanned) ⇒ `None`, exactly like
 /// [`fit_decision`]'s [`FitDecision::Unknown`]. A gate that blocks without evidence is a regression, not
 /// a safety net.
+///
+/// ## sc-19055: deliberately NOT graded, and this is the evidence
+///
+/// Every other flat video gate now grades its prediction through the mechanism. This one keeps its
+/// raw comparison, because the thing it compares is not a declared scalar — it is a measured on-disk
+/// byte sum whose error DIRECTION is known per tier, and it is already wrong in the refusing
+/// direction on the tier that matters:
+///
+/// * packed q4/q8 — the floor UNDER-counts (the f32 TE doubling), so it merely admits: the pre-gate
+///   status quo, and the safe direction. Widening would help nothing measurable here.
+/// * dense bf16 — the floor OVER-counts by ~44 GiB (117.5 GiB summed against a ~75 GiB device set,
+///   because `candle-gen-wan` halves fp32 experts on load) and this module's note records that it
+///   "wall-rejects a 96 GB card that would render". That is the sc-12179 class. Widening it by the
+///   estimate margin would deepen a recorded, measured wall-reject.
+///
+/// Grading is for evidence whose uncertainty the margin was derived to cover. Applying it to a
+/// number already known to be wrong by ~44 GiB in the refusing direction would be superstition
+/// dressed as rigour. `wan_video_fit_error_with_adapter_bytes` routes here only when the manifest
+/// publishes NO row at all, so the ungraded path is exactly the unmeasured fallback it always was.
 pub(crate) fn video_weights_fit_error(
     model_label: &str,
     weight_bytes: u64,
@@ -2023,12 +2084,23 @@ pub(crate) fn video_weights_fit_error(
 /// Missing either signal admits, exactly like [`fit_decision`]'s [`FitDecision::Unknown`]: no budget
 /// (`nvidia-smi` unreadable) ⇒ `None`, and an engine with neither a `candle` block nor countable
 /// weights (`ltx`/`svd`) ⇒ `None` through the floor.
+/// ## sc-19055: the scalar is now GRADED by the mechanism before it is compared
+///
+/// The raw number is unchanged. What changed is that the comparison no longer treats a per-tier
+/// manifest row as this request's peak: it asks
+/// [`crate::video_admission::graded_video_peak_gb`] — the video lane's binding onto
+/// `estimate_synthesis`'s declared-scalar law — what that row may truthfully claim at this
+/// `geometry`, and compares THAT. For every video request the answer is the estimate-margin-widened
+/// declared floor, because `vramMeasuredPixels` is a pixels-only capture and a video request always
+/// carries `frames > 1`. See [`crate::video_admission::video_scalar_class`] for why that is the
+/// finding rather than an accident.
 #[cfg(any(test, doc))]
 pub(crate) fn wan_video_fit_error(
     model_label: &str,
     manifest_entry: &JsonObject,
     tier_key: &str,
     weight_bytes: u64,
+    geometry: gen_core::MemoryGeometry,
     gpu_id: &str,
     budget: Option<VramBudget>,
 ) -> Option<WorkerError> {
@@ -2038,6 +2110,7 @@ pub(crate) fn wan_video_fit_error(
         tier_key,
         weight_bytes,
         0,
+        geometry,
         gpu_id,
         budget,
     )
@@ -2046,18 +2119,36 @@ pub(crate) fn wan_video_fit_error(
 /// Adapter-aware Wan admission. Packed callers pass the independently resident user stack; dense
 /// callers pass zero because their factors are folded. The calibrated Lightning stack is already in
 /// the manifest peak and must not be included here.
+///
+/// `geometry` arrives from the request (sc-19055) rather than being absent: this gate used to be
+/// resolution- AND frame-blind, so a 5-second and a 30-second clip at any resolution were admitted
+/// off one constant. It is now the mechanism, not this function, that decides what that constant may
+/// claim for the geometry in hand — no prediction law lives here (epic 19048 R1).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn wan_video_fit_error_with_adapter_bytes(
     model_label: &str,
     manifest_entry: &JsonObject,
     tier_key: &str,
     weight_bytes: u64,
     adapter_bytes: u64,
+    geometry: gen_core::MemoryGeometry,
     gpu_id: &str,
     budget: Option<VramBudget>,
 ) -> Option<WorkerError> {
     // Unmeasured (no `candle` block, or no row for this tier and no `minMemoryGb`) ⇒ the sc-12344
-    // floor, byte-for-byte the shipped behavior.
-    let Some(needed_gb) = predicted_peak_gb(manifest_entry, tier_key) else {
+    // floor, byte-for-byte the shipped behavior. `graded_video_peak_gb` is `None` on exactly that
+    // condition — it grades what `predicted_peak_gb` reads and nothing else — so this single call
+    // both predicts and selects the fallback, rather than reading the manifest twice.
+    //
+    // The floor branch is deliberately NOT graded: see `video_weights_fit_error`'s sc-19055 note for
+    // the measured reason widening an on-disk byte sum would make the dense tier's recorded
+    // wall-reject worse rather than better.
+    let Some(needed_gb) = crate::video_admission::graded_video_peak_gb(
+        manifest_entry,
+        tier_key,
+        adapter_bytes,
+        geometry,
+    ) else {
         return video_weights_fit_error(
             model_label,
             weight_bytes.saturating_add(adapter_bytes),
@@ -2065,7 +2156,6 @@ pub(crate) fn wan_video_fit_error_with_adapter_bytes(
             budget,
         );
     };
-    let needed_gb = needed_gb + adapter_bytes as f64 / BYTES_PER_GIB;
     let budget = budget?;
     (budget.free_gb + f64::EPSILON < needed_gb)
         .then(|| video_peak_too_big_error(model_label, tier_key, needed_gb, budget.free_gb, gpu_id))
@@ -2079,15 +2169,24 @@ pub(crate) fn wan_video_fit_error_with_adapter_bytes(
 #[cfg(test)]
 pub(crate) fn scail2_video_fit_error(
     manifest_entry: &JsonObject,
+    geometry: gen_core::MemoryGeometry,
     gpu_id: &str,
     budget: Option<VramBudget>,
 ) -> Option<WorkerError> {
-    scail2_video_fit_error_with_adapter_bytes(manifest_entry, 0, gpu_id, budget)
+    scail2_video_fit_error_with_adapter_bytes(manifest_entry, 0, geometry, gpu_id, budget)
 }
 
+/// `geometry` arrives from the request since sc-19055. Every structural fail-closed clause below is
+/// untouched — this route refuses outright without a complete measured bf16 row, and that stays a
+/// refusal — but the admitted peak is now GRADED by the mechanism
+/// ([`crate::video_admission::graded_video_peak_gb`]) instead of compared raw. SCAIL's capture is
+/// `vramMeasuredPixels: 399360` (832x480) with `measured: true`, so its row certifies a
+/// single-image-shaped capture that no `frames > 1` request is covered by; the graded number is the
+/// estimate-margin-widened declared floor.
 pub(crate) fn scail2_video_fit_error_with_adapter_bytes(
     manifest_entry: &JsonObject,
     adapter_bytes: u64,
+    geometry: gen_core::MemoryGeometry,
     gpu_id: &str,
     budget: Option<VramBudget>,
 ) -> Option<WorkerError> {
@@ -2107,7 +2206,11 @@ pub(crate) fn scail2_video_fit_error_with_adapter_bytes(
     let measured_pixels = candle
         .and_then(|value| value.get("vramMeasuredPixels"))
         .and_then(Value::as_u64);
-    let (true, Some(peak_gb), Some(min_memory_gb), Some(MEASURED_PIXELS)) = (
+    // `_peak_gb` is bound for its STRUCTURAL proof only — that `vramGbByTier.bf16` is present,
+    // finite and positive. Its value is no longer read here: since sc-19055 the number this gate
+    // compares comes from `graded_video_peak_gb`, which re-reads the same row through the shared
+    // scalar reader and grades it. Two readers of one key, with the arithmetic in exactly one.
+    let (true, Some(_peak_gb), Some(min_memory_gb), Some(MEASURED_PIXELS)) = (
         measured == Some(true),
         peak_gb,
         min_memory_gb,
@@ -2120,16 +2223,47 @@ pub(crate) fn scail2_video_fit_error_with_adapter_bytes(
                 .to_owned(),
         ));
     };
-    let base_needed_gb = peak_gb + HEADROOM_GB;
-    if (min_memory_gb as f64) + f64::EPSILON < base_needed_gb.ceil() {
+    // sc-19055: the mechanism grades the row for THIS geometry. `graded_video_peak_gb` re-reads the
+    // same `vramGbByTier.bf16` row through the shared scalar reader, so the raw quantity is
+    // unchanged; the grade is the estimate-margin widening a declared floor earns.
+    //
+    // A TYPED refusal, not an `expect` (sc-19055 review, L1). The structural clauses above have
+    // already proven `vramGbByTier.bf16` is present, finite and positive, so `None` here is a
+    // contradiction between two readers of one key rather than a recoverable state — but this call
+    // sits on a path captured into the generator-cache cold-load closure, where a panic poisons the
+    // cache thread rather than failing one request. Every other incomplete-row condition on this
+    // route returns `WorkerError::InvalidPayload`; an unreachable branch is not a reason to be the
+    // one that aborts. What it must NOT do is fall back to the ungraded number: that is the less
+    // conservative of the two and precisely the value this story exists to stop comparing.
+    let Some(needed_gb) = crate::video_admission::graded_video_peak_gb(
+        manifest_entry,
+        "bf16",
+        adapter_bytes,
+        geometry,
+    ) else {
+        return Some(WorkerError::InvalidPayload(
+            "SCAIL-2 Candle admission is unavailable because the catalog's measured bf16 CUDA row \
+             could not be graded for this request, although the same row read as complete moments \
+             earlier. Refusing to load the 47.2 GB shared package; update SceneWorks before \
+             retrying."
+                .to_owned(),
+        ));
+    };
+    // The advertised floor must not sit below what this gate will actually DEMAND (sc-19055 review,
+    // M2). Before this story the clause compared `minMemoryGb` against the UNGRADED
+    // `peak + HEADROOM_GB`, which passed at the shipped `minMemoryGb: 105` and then let admission
+    // demand the graded 108.28 — a 3.28 GB desync, so a machine provisioned to the catalog's own
+    // stated minimum was refused by a message naming 109. Comparing the same quantity admission
+    // compares keeps the two from drifting apart again by construction; `minMemoryGb` was raised to
+    // 109 in the same change so the clause still passes for the shipped row.
+    if (min_memory_gb as f64) + f64::EPSILON < needed_gb.ceil() {
         return Some(WorkerError::InvalidPayload(format!(
             "SCAIL-2 Candle admission is unavailable because catalog minMemoryGb={min_memory_gb} \
              is below the measured bf16 CUDA peak plus reserve (~{} GB). Refusing to load the \
              47.2 GB shared package; update SceneWorks before retrying.",
-            base_needed_gb.ceil() as u64,
+            needed_gb.ceil() as u64,
         )));
     }
-    let needed_gb = base_needed_gb + adapter_bytes as f64 / BYTES_PER_GIB;
     let Some(budget) = budget else {
         return Some(WorkerError::InvalidPayload(
             "SCAIL-2 Candle admission could not read free GPU VRAM from nvidia-smi. Refusing to \
@@ -2231,6 +2365,33 @@ mod tests {
 
     fn obj(value: Value) -> JsonObject {
         value.as_object().expect("object literal").clone()
+    }
+
+    /// A VIDEO request geometry for the flat gates (sc-19055).
+    ///
+    /// `frames > 1` is the load-bearing part, and every caller below uses a real clip length rather
+    /// than a convenient `1`: [`crate::video_admission::video_scalar_class`] certifies a declared
+    /// scalar as a measured peak only for a `frames == 1` request, because `vramMeasuredPixels`
+    /// records pixels and nothing about clip length. A test that passed `frames: 1` would grade
+    /// these gates as the IMAGE lane does and would keep passing if the video migration were
+    /// reverted.
+    fn video_geometry(width: u32, height: u32, frames: u32) -> gen_core::MemoryGeometry {
+        crate::video_admission::video_gate_geometry(width, height, frames)
+    }
+
+    /// SCAIL-2's own measured cell geometry — 832x480, the 81-frame render its `vramGbByTier.bf16`
+    /// row was captured on. Deliberately the EXACT capture geometry: if a pixels-only
+    /// `vramMeasuredPixels` could certify anything, it would certify this cell, so grading it as a
+    /// floor here is the strongest form of the claim.
+    fn scail2_geometry() -> gen_core::MemoryGeometry {
+        video_geometry(832, 480, 81)
+    }
+
+    /// A Wan clip at the family's `vramMeasuredPixels` capture area (1024x1024 = 1,048,576 px), 81
+    /// frames. Same reasoning as [`scail2_geometry`]: inside the declared pixel envelope, so the
+    /// only thing that demotes it is the frames axis the capture never recorded.
+    fn wan_geometry() -> gen_core::MemoryGeometry {
+        video_geometry(1024, 1024, 81)
     }
 
     fn krea_fit_manifest() -> JsonObject {
@@ -5732,21 +5893,25 @@ mod tests {
 
     #[test]
     fn scail2_requires_a_measured_bf16_row_and_splits_low_from_high_cards() {
+        // Mirrors the shipped `scail2_14b` candle block. `minMemoryGb` is 109, not the pre-sc-19055
+        // 105: the catalog's advertised floor tracks what admission actually demands, and the
+        // structural clause now compares the SAME graded quantity (review finding M2), so a 105
+        // here would trip that clause instead of reaching the admission boundary under test.
         let entry = obj(json!({
             "candle": {
-                "minMemoryGb": 105,
+                "minMemoryGb": 109,
                 "vramGbByTier": { "bf16": 102.115 },
                 "vramMeasuredPixels": 399360,
                 "measured": true
             }
         }));
         let low = apply_vram_cap(None, Some(104.0));
-        let message = scail2_video_fit_error(&entry, "0", low)
-            .expect("102.115 GB measured + 2 GB reserve cannot fit 104 GB")
+        let message = scail2_video_fit_error(&entry, scail2_geometry(), "0", low)
+            .expect("102.115 GB declared + 2 GB reserve cannot fit 104 GB")
             .to_string();
         assert!(message.contains("SCAIL-2 shared bf16"), "{message}");
         assert!(
-            message.contains("105") && message.contains("104"),
+            message.contains("109") && message.contains("104"),
             "{message}"
         );
         assert!(
@@ -5755,21 +5920,35 @@ mod tests {
         );
         assert!(message.contains("MLX q4/q8"), "{message}");
 
-        let high = apply_vram_cap(None, Some(105.0));
+        // sc-19055 DECISION FLIP (conservative, enumerated in the story ledger). The admission
+        // boundary moved 105 -> 109 GB. SCAIL's row is `measured: true` at
+        // `vramMeasuredPixels: 399360` — but that is a PIXELS-only capture, and this request is 81
+        // frames, so the mechanism classes it `DeclaredFloor` and widens 104.115 by the candle
+        // estimate margin to ~108.28.
+        //
+        // Both sides of the new boundary are asserted, because a test that only checked the refusal
+        // would keep passing if the grade were applied twice.
+        let just_under = apply_vram_cap(None, Some(108.0));
         assert!(
-            scail2_video_fit_error(&entry, "0", high).is_none(),
-            "a card above measured peak + reserve must be admitted"
+            scail2_video_fit_error(&entry, scail2_geometry(), "0", just_under).is_some(),
+            "a card below the GRADED floor is refused — 105 GB used to be admitted here"
+        );
+        let high = apply_vram_cap(None, Some(109.0));
+        assert!(
+            scail2_video_fit_error(&entry, scail2_geometry(), "0", high).is_none(),
+            "a card above the graded declared floor must still be admitted"
         );
         let adapter_message = scail2_video_fit_error_with_adapter_bytes(
             &entry,
             BYTES_PER_GIB as u64,
+            scail2_geometry(),
             "0",
-            apply_vram_cap(None, Some(105.0)),
+            apply_vram_cap(None, Some(109.0)),
         )
         .expect("a 1 GiB adapter source must move the same card over the cold-load boundary")
         .to_string();
-        assert!(adapter_message.contains("106"), "{adapter_message}");
-        let no_probe = scail2_video_fit_error(&entry, "0", None)
+        assert!(adapter_message.contains("110"), "{adapter_message}");
+        let no_probe = scail2_video_fit_error(&entry, scail2_geometry(), "0", None)
             .expect("an unknown live budget cannot safely admit the dense F32 stack")
             .to_string();
         assert!(
@@ -5824,7 +6003,7 @@ mod tests {
                 }
             })),
         ] {
-            let message = scail2_video_fit_error(&entry, "0", None)
+            let message = scail2_video_fit_error(&entry, scail2_geometry(), "0", None)
                 .expect("catalog omission must refuse even when no GPU budget is observable")
                 .to_string();
             assert!(
@@ -5834,20 +6013,35 @@ mod tests {
             assert!(message.contains("Refusing to load"), "{message}");
         }
 
-        let under_floor = obj(json!({
-            "candle": {
-                "minMemoryGb": 104,
-                "measured": true,
-                "vramGbByTier": { "bf16": 102.115 },
-                "vramMeasuredPixels": 399360
-            }
-        }));
-        let message = scail2_video_fit_error(&under_floor, "0", None)
-            .expect("a floor below measured peak + reserve must refuse before probing the GPU")
-            .to_string();
-        assert!(message.contains("minMemoryGb=104"), "{message}");
-        assert!(message.contains("~105 GB"), "{message}");
-        assert!(message.contains("Refusing to load"), "{message}");
+        // An advertised floor below what admission DEMANDS refuses before probing the GPU. Since
+        // sc-19055 the demand is the graded 108.28 (ceil 109), and this clause compares that same
+        // number rather than the ungraded 105 it used to — which is what stops the catalog's stated
+        // minimum and the gate's demand from silently desyncing (review finding M2). The shipped
+        // `minMemoryGb` moved 105 -> 109 in the same change, so 105 is now genuinely under-floor and
+        // is asserted as such below.
+        for (advertised, entry) in [104_u64, 105].map(|advertised| {
+            (
+                advertised,
+                obj(json!({
+                    "candle": {
+                        "minMemoryGb": advertised,
+                        "measured": true,
+                        "vramGbByTier": { "bf16": 102.115 },
+                        "vramMeasuredPixels": 399360
+                    }
+                })),
+            )
+        }) {
+            let message = scail2_video_fit_error(&entry, scail2_geometry(), "0", None)
+                .expect("a floor below the graded demand must refuse before probing the GPU")
+                .to_string();
+            assert!(
+                message.contains(&format!("minMemoryGb={advertised}")),
+                "{message}"
+            );
+            assert!(message.contains("~109 GB"), "{message}");
+            assert!(message.contains("Refusing to load"), "{message}");
+        }
     }
 
     /// The 5B's FORMER RESIDENT candle block (q4 46.1 / q8 48.7 / bf16 54.0), as sc-12402/sc-12631 shipped
@@ -5892,21 +6086,30 @@ mod tests {
             "precondition: the weights floor admits this job on a 5090 — that IS the sc-12402 bug"
         );
 
-        // Measured peak: 46.1 + 2 headroom = 48.1 GB vs 32 GB ⇒ REFUSED before the load + denoise.
+        // Declared peak: 46.1 + 2 headroom = 48.1 GB, graded for a VIDEO geometry ⇒ ~50.0 GB vs
+        // 32 GB free ⇒ REFUSED before the load + denoise.
+        //
+        // sc-19055 DECISION FLIP (conservative, enumerated in the story ledger): the compared number
+        // moved 48.1 -> 50.02 because this fixture's row carries no `vramMeasuredPixels` at all and
+        // the request carries `frames: 81`, so the mechanism classes it `DeclaredFloor` and applies
+        // the candle estimate margin. The VERDICT on this card is unchanged — it was a refusal at
+        // 48.1 and is a refusal at 50.02 — which is the shape every flip in this story takes: the
+        // number is honest about its own uncertainty, and the direction is always toward refusing.
         let message = wan_video_fit_error(
             "wan_2_2",
             &entry,
             "q4",
             WAN_5B_Q4_DISK_BYTES,
+            wan_geometry(),
             "0",
             rtx_5090(),
         )
-        .expect("the measured 46.1 GB peak cannot fit a 32 GB card — refuse before the OOM")
+        .expect("the declared 46.1 GB peak cannot fit a 32 GB card — refuse before the OOM")
         .to_string();
         assert!(message.contains("wan_2_2"), "names the model: {message}");
         assert!(message.contains("q4"), "names the sized tier: {message}");
         assert!(
-            message.contains("48") && message.contains("32"),
+            message.contains("50") && message.contains("32"),
             "states what it needs and what the card has: {message}"
         );
         // The measured message is about the RENDER, not the weights — the floor's wording would be a
@@ -5933,8 +6136,16 @@ mod tests {
         // there; `wan_5b_entry`).
         let card96 = apply_vram_cap(None, Some(95.6));
         assert!(
-            wan_video_fit_error("wan_2_2", &entry, "q4", WAN_5B_Q4_DISK_BYTES, "0", card96)
-                .is_none(),
+            wan_video_fit_error(
+                "wan_2_2",
+                &entry,
+                "q4",
+                WAN_5B_Q4_DISK_BYTES,
+                wan_geometry(),
+                "0",
+                card96
+            )
+            .is_none(),
             "the q4 job renders on this card — the gate must not wall-reject it"
         );
         // Same model, different tier ⇒ opposite verdict on a card sized BETWEEN the tiers: a card with
@@ -5943,13 +6154,29 @@ mod tests {
         // tier-independent), so the tiers land close but the gate still splits them.
         let card52 = apply_vram_cap(None, Some(52.0));
         assert!(
-            wan_video_fit_error("wan_2_2", &entry, "q4", WAN_5B_Q4_DISK_BYTES, "0", card52)
-                .is_none(),
+            wan_video_fit_error(
+                "wan_2_2",
+                &entry,
+                "q4",
+                WAN_5B_Q4_DISK_BYTES,
+                wan_geometry(),
+                "0",
+                card52
+            )
+            .is_none(),
             "q4's measured 48.1 GB need fits a 52 GB card"
         );
         assert!(
-            wan_video_fit_error("wan_2_2", &entry, "bf16", WAN_5B_Q4_DISK_BYTES, "0", card52)
-                .is_some(),
+            wan_video_fit_error(
+                "wan_2_2",
+                &entry,
+                "bf16",
+                WAN_5B_Q4_DISK_BYTES,
+                wan_geometry(),
+                "0",
+                card52
+            )
+            .is_some(),
             "bf16's measured 54.0 GB peak + 2 headroom overflows a 52 GB card — refuse"
         );
     }
@@ -5958,14 +6185,33 @@ mod tests {
     fn wan_additive_adapter_bytes_flip_the_measured_and_floor_boundaries() {
         let entry = wan_5b_entry();
         let one_gib = BYTES_PER_GIB as u64;
-        let boundary = apply_vram_cap(None, Some(48.6));
+        // sc-19055 DECISION FLIP (conservative, enumerated in the story ledger): the boundary card
+        // moved 48.6 -> 50.5 GB, because the q4 row (46.1 + 2 = 48.1) is now graded as the declared
+        // floor it is for an 81-frame request and compares at ~50.02. The PROPERTY under test is
+        // unchanged and is what this test is for: adding independently resident adapter bytes must
+        // push a card that just fits over the boundary.
+        let boundary = apply_vram_cap(None, Some(50.5));
         assert!(wan_video_fit_error_with_adapter_bytes(
-            "wan_2_2", &entry, "q4", 0, 0, "0", boundary,
+            "wan_2_2",
+            &entry,
+            "q4",
+            0,
+            0,
+            wan_geometry(),
+            "0",
+            boundary,
         )
         .is_none());
         assert!(
             wan_video_fit_error_with_adapter_bytes(
-                "wan_2_2", &entry, "q4", 0, one_gib, "0", boundary,
+                "wan_2_2",
+                &entry,
+                "q4",
+                0,
+                one_gib,
+                wan_geometry(),
+                "0",
+                boundary,
             )
             .is_some(),
             "a packed adapter must be added to the measured render peak"
@@ -5979,6 +6225,7 @@ mod tests {
             "q4",
             one_gib,
             0,
+            wan_geometry(),
             "0",
             floor_boundary,
         )
@@ -5990,6 +6237,7 @@ mod tests {
                 "q4",
                 one_gib,
                 one_gib,
+                wan_geometry(),
                 "0",
                 floor_boundary,
             )
@@ -6027,6 +6275,7 @@ mod tests {
                 &entry,
                 "bf16",
                 WAN_A14B_DENSE_DISK_BYTES,
+                wan_geometry(),
                 "0",
                 card96
             )
@@ -6047,6 +6296,7 @@ mod tests {
             &no_block,
             "bf16",
             WAN_A14B_BF16_BYTES,
+            wan_geometry(),
             "0",
             rtx_5090(),
         );
@@ -6059,13 +6309,28 @@ mod tests {
         );
 
         // An exempt engine (0 weights) + no block ⇒ admit, never block without evidence.
-        assert!(
-            wan_video_fit_error("ltx_2_3_distilled", &no_block, "bf16", 0, "0", rtx_5090())
-                .is_none()
-        );
+        assert!(wan_video_fit_error(
+            "ltx_2_3_distilled",
+            &no_block,
+            "bf16",
+            0,
+            wan_geometry(),
+            "0",
+            rtx_5090()
+        )
+        .is_none());
         // No live budget ⇒ admit, even with a measured row that would overflow.
         assert!(
-            wan_video_fit_error("wan_2_2", &wan_5b_entry(), "bf16", 0, "0", None).is_none(),
+            wan_video_fit_error(
+                "wan_2_2",
+                &wan_5b_entry(),
+                "bf16",
+                0,
+                wan_geometry(),
+                "0",
+                None
+            )
+            .is_none(),
             "no budget signal ⇒ never block"
         );
     }
@@ -6180,5 +6445,181 @@ mod tests {
         );
         // Keep the hog alive to the end so the warm reading isn't reclaimed early.
         drop(hogs);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // sc-19055 — PER-ROUTE migration evidence, and the two deliberate NON-flips
+    //
+    // Each test below picks a budget in the OPEN INTERVAL between the raw scalar and its graded
+    // value, and asserts which side of it the route lands on. That interval is the only place the
+    // migration is observable, so a test that used any other budget would pass with the wiring
+    // removed. `mechanism_interval` builds it, and refuses to build a degenerate one — a bug in the
+    // fixture cannot silently produce a vacuous test.
+    // ---------------------------------------------------------------------------------------------
+
+    /// A budget strictly between `raw_gb` and its estimate-margin-widened value: the band where an
+    /// ungraded gate admits and a graded gate refuses.
+    ///
+    /// Panics on a degenerate interval rather than returning something usable, because a vacuous
+    /// witness is worse than a missing one.
+    fn mechanism_interval(raw_gb: f64) -> f64 {
+        let widened =
+            (raw_gb * (1.0 + crate::ladder_margin_policy::CANDLE_ESTIMATE_MARGIN) * BYTES_PER_GIB)
+                .ceil()
+                / BYTES_PER_GIB;
+        assert!(
+            widened > raw_gb + 1e-6,
+            "degenerate mechanism interval for {raw_gb}: the grade must be observable"
+        );
+        (raw_gb + widened) / 2.0
+    }
+
+    /// **Per-route wiring: the three live Wan routes are graded by the mechanism.**
+    ///
+    /// Drives the SHIPPED manifest entries, so this is evidence about the routes production serves
+    /// rather than about a fixture. For each, a card inside the mechanism interval must REFUSE:
+    /// breaking the wiring (comparing `predicted_peak_gb` directly, as before sc-19055) admits every
+    /// one of them and turns this red three times over.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn every_live_wan_route_compares_the_graded_declared_floor() {
+        for (model_id, tier) in [
+            ("wan_2_2", "q4"),
+            ("wan_2_2", "bf16"),
+            ("wan_2_2_t2v_14b", "q4"),
+            ("wan_2_2_t2v_14b", "q8"),
+            ("wan_2_2_t2v_14b", "bf16"),
+            ("wan_2_2_i2v_14b", "q4"),
+            ("wan_2_2_i2v_14b", "q8"),
+            ("wan_2_2_i2v_14b", "bf16"),
+        ] {
+            let value = crate::tests::builtin_model_entry(model_id);
+            let entry = value.as_object().expect("manifest entry object");
+            let raw = predicted_peak_gb(entry, tier)
+                .unwrap_or_else(|| panic!("{model_id}/{tier} publishes a candle row"));
+            let inside = apply_vram_cap(None, Some(mechanism_interval(raw)));
+            assert!(
+                wan_video_fit_error(model_id, entry, tier, 0, wan_geometry(), "0", inside)
+                    .is_some(),
+                "{model_id}/{tier}: a card inside the mechanism interval must be refused — an \
+                 ungraded comparison admits it"
+            );
+            // …and the raw number is still the thing being graded: a card above the widened value
+            // admits, so the grade is a margin and not an unbounded inflation.
+            let above = apply_vram_cap(None, Some(raw * 1.2 + 1.0));
+            assert!(
+                wan_video_fit_error(model_id, entry, tier, 0, wan_geometry(), "0", above).is_none(),
+                "{model_id}/{tier}: the grade must stay a bounded margin over the declared row"
+            );
+        }
+    }
+
+    /// **Per-route wiring: SCAIL-2.** Same interval discipline, against the shipped `scail2_14b`
+    /// row. SCAIL is the epic-18472 route sc-19055 inherited, and its gate is reached through the
+    /// generator cache's cold-load admission rather than inline, so its wiring is easy to break
+    /// without breaking a compile.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn the_live_scail2_route_compares_the_graded_declared_floor() {
+        let value = crate::tests::builtin_model_entry("scail2_14b");
+        let entry = value.as_object().expect("manifest entry object");
+        let raw = predicted_peak_gb(entry, "bf16").expect("scail2 publishes a bf16 row");
+        let inside = apply_vram_cap(None, Some(mechanism_interval(raw)));
+        assert!(
+            scail2_video_fit_error(entry, scail2_geometry(), "0", inside).is_some(),
+            "a card inside the mechanism interval must be refused — an ungraded comparison admits it"
+        );
+        let above = apply_vram_cap(None, Some(raw * 1.2 + 1.0));
+        assert!(
+            scail2_video_fit_error(entry, scail2_geometry(), "0", above).is_none(),
+            "the grade must stay a bounded margin over the declared row"
+        );
+    }
+
+    /// **Per-route wiring: Mochi.** Its peak is DERIVED, not declared, so it takes the floor grade
+    /// through `graded_derived_video_floor_gb`. A card inside the interval must refuse.
+    ///
+    /// Also pins the frame dependence that made Mochi need its own gate in the first place: the
+    /// graded number still grows with clip length, so the grade composes with the decode term
+    /// rather than replacing it.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn the_mochi_route_grades_its_derived_decode_peak() {
+        const WEIGHTS: u64 = 9_670_883_602 + 9_524_669_250 + 919_551_200;
+        let raw = crate::fit_gate::mochi_needed_gb(WEIGHTS, 19, 848, 480, HEADROOM_GB)
+            .expect("weights > 0");
+        let inside = apply_vram_cap(None, Some(mechanism_interval(raw)));
+        assert!(
+            mochi_fit_error("mochi_1", WEIGHTS, 19, 848, 480, "0", inside).is_some(),
+            "a card inside the mechanism interval must be refused — the ungraded derived peak \
+             admits it"
+        );
+        let above = apply_vram_cap(None, Some(raw * 1.2 + 1.0));
+        assert!(
+            mochi_fit_error("mochi_1", WEIGHTS, 19, 848, 480, "0", above).is_none(),
+            "the grade must stay a bounded margin over the derived peak"
+        );
+        // Still frame-scaled: the same card that admits a 19-frame clip refuses a 151-frame one.
+        let card = apply_vram_cap(None, Some(raw * 1.2 + 1.0));
+        assert!(
+            mochi_fit_error("mochi_1", WEIGHTS, 151, 848, 480, "0", card).is_some(),
+            "grading must compose with the decode term, not replace it"
+        );
+    }
+
+    /// **Deliberate NON-flip: the on-disk weights floor stays ungraded** (sc-19055).
+    ///
+    /// `video_weights_fit_error` is the fallback for a route with no manifest row — LTX and
+    /// Wan-VACE-Fun today. Its input is a measured byte sum whose error direction is known per tier,
+    /// and the module note records that the dense tier already OVER-counts by ~44 GiB and
+    /// wall-rejects a 96 GB card that renders. Widening that would deepen a recorded sc-12179
+    /// regression.
+    ///
+    /// This test is the tripwire for a future edit that grades it "for consistency": a card inside
+    /// the mechanism interval must still ADMIT.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn the_weights_floor_is_deliberately_not_graded() {
+        const WEIGHTS: u64 = 20_000_000_000;
+        let raw = WEIGHTS as f64 / BYTES_PER_GIB + HEADROOM_GB;
+        let inside = apply_vram_cap(None, Some(mechanism_interval(raw)));
+        assert!(
+            video_weights_fit_error("ltx_2_3_distilled", WEIGHTS, "0", inside).is_none(),
+            "the weights floor must NOT be graded — see its sc-19055 note for the measured reason"
+        );
+        // …and it is still a live gate: below the raw floor it refuses.
+        let below = apply_vram_cap(None, Some(raw - 1.0));
+        assert!(
+            video_weights_fit_error("ltx_2_3_distilled", WEIGHTS, "0", below).is_some(),
+            "not grading is not the same as not gating"
+        );
+    }
+
+    /// **Deliberate NON-flip: SVD's envelope has no scalar to grade** (sc-19055).
+    ///
+    /// `svd_fit_error` answers a boolean question about a hardware class, not "how many GB". Its
+    /// verdicts must therefore be exactly what they were: the validated tuple admits on the
+    /// measured minimum card class, and one axis beyond it refuses on a 32 GB card. Inventing a
+    /// peak here so there were something to grade would be a fabricated prediction.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn the_svd_envelope_is_ungraded_because_it_predicts_no_peak() {
+        let minimum = apply_vram_cap(
+            None,
+            Some(crate::fit_gate::SVD_VALIDATED_PROFILE_MIN_VRAM_GB),
+        );
+        assert!(
+            svd_fit_error(25, 8, 25, 1024, 576, "0", minimum).is_none(),
+            "the validated tuple admits on the measured minimum card class, ungraded"
+        );
+        let card32 = apply_vram_cap(None, Some(32.0));
+        assert!(
+            svd_fit_error(25, 8, 25, 1024, 576, "0", card32).is_none(),
+            "and on the card it was validated on"
+        );
+        assert!(
+            svd_fit_error(26, 8, 25, 1024, 576, "0", card32).is_some(),
+            "one frame beyond the measured envelope still refuses — the gate is live"
+        );
     }
 }

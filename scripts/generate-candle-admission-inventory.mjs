@@ -582,11 +582,15 @@ export function parseBespokeOverrideEngines(bodies) {
 // "Is this gate geometry-aware?" is a property of ONE function's signature, not of a mechanism. Two
 // mistakes are easy here and both were made before sc-19049's review:
 //
-//  1. **Unioning across a mechanism.** `flat_video_fit_error` names seven symbols. `svd_fit_error`
-//     and `mochi_fit_error` take `(frames, width, height)`; `wan_video_fit_error*`,
-//     `scail2_video_fit_error*` and `video_weights_fit_error` are deliberately resolution-blind. A
-//     union labels the wan/scail2/LTX routes geometry-aware on the strength of SVD's signature â€” a
-//     claim about a function those routes never call.
+//  1. **Unioning across a mechanism.** `flat_video_fit_error` names seven symbols and they do
+//     NOT agree. `svd_fit_error` and `mochi_fit_error` take `(frames, width, height)` as
+//     scalars; `wan_video_fit_error*` and `scail2_video_fit_error*` take
+//     `geometry: MemoryGeometry` since sc-19055; `video_weights_fit_error` remains deliberately
+//     resolution-blind, because its input is an on-disk weights byte sum rather than a
+//     prediction (see its sc-19055 note). A union would label the LTX / Wan-VACE-Fun routes
+//     geometry-aware on the strength of a signature belonging to a function those routes never
+//     call, which is why this stays a PER-SYMBOL derivation even now that most of the
+//     mechanism's symbols happen to agree.
 //  2. **Scanning parameter TOKENS for `width:`.** Geometry also arrives inside a struct:
 //     `krea_control_fit::fit_ladder_for_entry_with_runtime` takes `geometry: MemoryGeometry` and
 //     `candle_memory_strategy::evaluate_shared_image` takes the same, while
@@ -1992,6 +1996,9 @@ export function renderMarkdown(inventory) {
     "parameter (`geometry: MemoryGeometry`, `query: VideoCurveQuery`) â€” a scan of the parameter",
     "tokens sees none of those. Unioning these per mechanism is what previously labelled the",
     "wan/scail2/LTX video routes geometry-aware on the strength of `svd_fit_error`'s signature.",
+    "sc-19055 migrated the wan/scail2 gates onto `geometry: MemoryGeometry`, so they are now",
+    "geometry-aware on their OWN signatures; `video_weights_fit_error` (LTX, Wan-VACE-Fun) is",
+    "not, and a union would still misreport it.",
   );
   lines.push("");
   lines.push("| gate | mechanism | geometry-aware | axes | reached via |");

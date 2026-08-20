@@ -709,25 +709,43 @@ test("struct-wrapped geometry is seen, and per-symbol facts are never unioned ac
     );
   }
 
-  // The mechanism-union defect: `flat_video_fit_error` names seven symbols, two of which take
-  // geometry scalars. The other five are deliberately resolution-blind and must say so.
+  // The mechanism-union defect: `flat_video_fit_error` names seven symbols and they still do not
+  // agree, which is the whole reason this stays a per-symbol derivation. Two take geometry scalars;
+  // four take `geometry: MemoryGeometry` since sc-19055 migrated them onto the mechanism; one is
+  // still deliberately resolution-blind and must say so.
   for (const symbol of ["svd_fit_error", "mochi_fit_error"]) {
     assert.equal(gates.get(symbol).geometryAware, true, symbol);
     assert.deepEqual(gates.get(symbol).geometryAxes, ["frames", "height", "width"]);
   }
+  // sc-19055: struct-wrapped, and the axes must come from the STRUCT rather than from a sibling
+  // symbol's scalars — a union from `svd_fit_error` would produce the same `geometryAware: true`
+  // with a different `reachedVia`, so the provenance is asserted too.
   for (const symbol of [
     "wan_video_fit_error",
     "wan_video_fit_error_with_adapter_bytes",
     "scail2_video_fit_error",
     "scail2_video_fit_error_with_adapter_bytes",
-    "video_weights_fit_error",
   ]) {
+    const gate = gates.get(symbol);
     assert.equal(
-      gates.get(symbol).geometryAware,
-      false,
-      `${symbol} is resolution-blind; a mechanism union labelled it aware from svd_fit_error`,
+      gate.geometryAware,
+      true,
+      `${symbol} takes geometry: MemoryGeometry since sc-19055`,
+    );
+    assert.deepEqual(gate.geometryAxes, ["frames", "height", "width"], symbol);
+    assert.ok(
+      gate.reachedVia.some((via) => via.startsWith("struct_parameter:")),
+      `${symbol}: sc-19055 threads geometry through a struct parameter, not scalars; got ${gate.reachedVia}`,
     );
   }
+  // The one flat gate sc-19055 deliberately did NOT migrate: its input is an on-disk weights byte
+  // sum, and its dense-tier over-count already wall-rejects a card that renders, so grading it
+  // would deepen a recorded regression. A union from its four migrated siblings would hide that.
+  assert.equal(
+    gates.get("video_weights_fit_error").geometryAware,
+    false,
+    "video_weights_fit_error stays resolution-blind; a mechanism union would relabel it",
+  );
   // The module-qualified scalar-gate label is the sc-19054 COMPOSITION (`load_plan` graded by
   // `predicted_peak_gb_for_request`) and is geometry-aware, while the bare `load_plan` symbol
   // stays signature-derived and blind — the dataflow composition is labelled, never unioned.

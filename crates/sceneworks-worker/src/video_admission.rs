@@ -39,6 +39,150 @@ use sceneworks_core::video_request::{
 
 use crate::memory_strategy::{Budget, Candidate, CandidateBasis, RequestScope, Selection};
 
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// The PRE-LOAD declared-scalar arm of the video mechanism (sc-19055, epic 19048 R1/R2/R3)
+//
+// Everything above this line is the POST-load evidence gate: it has a loaded provider, therefore a
+// `MemoryProviderContract`, a calibration identity and a live closure digest, and can consult the
+// packaged fitted curves. The flat per-family fit errors in `vram_gate` run BEFORE the load — to
+// refuse a job without first paying for a 13-20 GiB download — so they have none of those inputs and
+// cannot reach the fitted arm. What they CAN reach, and before sc-19055 did not, is the mechanism's
+// declared-scalar law.
+//
+// **Epic decision 3 (sc-18814, reaffirmed activity-19060) is why this lives here** and not in
+// `candle_memory_strategy` or a unified `mlx_fit_gate`: the video gate is `video_request.rs` /
+// `video_admission.rs`. Migrating the flat errors onto the evidence-based mechanism means the video
+// lane consumes `estimate_synthesis`'s law from inside the video architecture, exactly as the
+// post-load half above already consumes `floor_weights_bytes` / `estimate_evidence` /
+// `binding_phase`. Nothing here routes a video request through the image-lane selector.
+//
+// Scoped to the CANDLE lane (`all(not(macos), backend-candle)`) — the same cfg `vram_gate`, their
+// only consumer, carries. They read `candle.vramGbByTier` / `candle.measured` /
+// `candle.vramMeasuredPixels`, which are candle-lane manifest keys; the macOS video route reads the
+// `mlx` block and admits through `mlx_fit_gate`. Widening the cfg would put four functions no macOS
+// caller can reach into that lane's dead-code surface, and this module's own `allow(dead_code)`
+// covers only the neither-build.
+//
+// **What is a parameter and what is computed** (R1). The route supplies its manifest entry, its
+// resolved tier key, its adapter bytes and its request geometry. The mechanism decides what that
+// scalar may CLAIM for that geometry (`estimate_synthesis::declared_scalar_class`) and how a claim
+// of each class is GRADED (`estimate_synthesis::graded_scalar_gb`). No `vram_gate` call site
+// computes a peak any more; each one names a request.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/// **Every candle video request is `DeclaredFloor`, and that is the finding, not an accident.**
+///
+/// [`crate::estimate_synthesis::declared_scalar_class`] certifies a declared scalar as the request's
+/// peak only when the capture geometry covers it — which requires `frames == 1`, because
+/// `vramMeasuredPixels` records PIXELS and says nothing about clip length. A video request has
+/// `frames > 1` by construction, so the manifest's `candle.vramGbByTier` rows for `wan_2_2`,
+/// `wan_2_2_t2v_14b`, `wan_2_2_i2v_14b` and `scail2_14b` — all of which carry `measured: true` and a
+/// pixels-only `vramMeasuredPixels` — are exactly the "declared floor" epic 19048 R3 says they are.
+///
+/// This is not the mechanism being pessimistic about good data. The manifest schema documents these
+/// rows as "video = default frames": each is ONE capture at ONE clip length, and the flat gate that
+/// read it compared it to the budget unchanged at EVERY clip length. A 5-second and a 30-second Wan
+/// render were admitted identically off a single number. Grading the row as the floor it is, is the
+/// first time the video lane's own uncertainty about the frames axis is priced at all.
+///
+/// The day a candle video capture arm (sc-19057) lands per-frame-count curves, those become fitted
+/// evidence through the POST-load arm above; this pre-load arm stays the floor, which is the correct
+/// division — a pre-load gate cannot identify a curve cell it has not loaded the provider for.
+///
+/// **Test/doc-only since the sc-19055 review.** [`graded_video_peak_gb`] now delegates wholesale to
+/// `candle_scalar_gate::predicted_peak_gb_for_request` (finding M3) rather than restating its four
+/// steps, so nothing in production calls this. It is kept — under `any(test, doc)`, the same idiom
+/// `krea_control_fit`'s test seams use — because it names the video lane's classification for the
+/// tests that assert it and for the doc-links in `vram_gate` that explain WHY a video row is never a
+/// measured peak. `doc` is in the cfg deliberately: a doc-link to an item excluded from the rustdoc
+/// build is a rustdoc failure, not a missing link.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle", any(test, doc)))]
+pub(crate) fn video_scalar_class(
+    manifest_entry: &sceneworks_core::contracts::JsonObject,
+    tier_key: &str,
+    geometry: MemoryGeometry,
+) -> crate::estimate_synthesis::DeclaredScalarClass {
+    crate::candle_scalar_gate::scalar_peak_class(manifest_entry, "vramGbByTier", tier_key, geometry)
+}
+
+/// The graded pre-load admission peak for a candle video route whose manifest publishes a per-tier
+/// scalar (sc-19055).
+///
+/// The RAW number is unchanged — still [`crate::candle_scalar_gate::predicted_peak_gb`] plus the
+/// independently resident adapter stack, the exact quantity `wan_video_fit_error` compared before
+/// this story. What is new is the grade: the scalar is presented as the peak only where its
+/// declared capture covers the request ([`video_scalar_class`], which for video is never), and as
+/// the estimate-margin-widened declared floor otherwise.
+///
+/// `None` means the manifest publishes nothing for this tier — no `candle` block, no row, no
+/// `minMemoryGb`. The caller falls back to its own weights floor, exactly as before.
+///
+/// **This DELEGATES to the image lane's reader rather than restating it** (sc-19055 review, M3).
+/// The first draft of this function spelled the same four steps out again — read the row, add the
+/// adapter stack, classify against `vramGbByTier`, grade on the candle lane — which is a second copy
+/// of a prediction law and exactly what epic 19048 R1 forbids and sc-19059's AC1 greps for. Nothing
+/// pinned the two copies equal, so a change to either would have forked the grading silently.
+///
+/// Epic decision 3 does not forbid this. That decision is about ROUTING — a video request must not
+/// be graded by the image lane's *selector* (`candle_memory_strategy::evaluate_shared_image`) — not
+/// about refusing to share a pure arithmetic helper that reads a manifest scalar. This function
+/// already called two `candle_scalar_gate` helpers before the review, so the "importing the image
+/// gate" line had in fact already been crossed; delegating merely stops the arithmetic between them
+/// from being duplicated. The video-lane NAME and doc stay, so the call sites still read as video
+/// admission and the video lane keeps its own entry point.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) fn graded_video_peak_gb(
+    manifest_entry: &sceneworks_core::contracts::JsonObject,
+    tier_key: &str,
+    adapter_bytes: u64,
+    geometry: MemoryGeometry,
+) -> Option<f64> {
+    crate::candle_scalar_gate::predicted_peak_gb_for_request(
+        manifest_entry,
+        tier_key,
+        adapter_bytes,
+        geometry,
+    )
+}
+
+/// Grade a DERIVED video peak — one computed from an architectural formula rather than read from a
+/// manifest row (sc-19055).
+///
+/// Mochi's `fit_gate::mochi_needed_gb` is the live case: its own module doc says the value is
+/// "DERIVED, not measured", and that candle's real peak "runs at or above what this predicts"
+/// because the VAE materializes a full extra copy at each up-stage that the formula does not model.
+/// A number that is documented to under-predict is a floor by definition, so it takes the floor
+/// grade — and the widening moves it TOWARD the measured truth rather than away from it, which is
+/// the evidence that makes this flip conservative in substance and not merely in direction.
+///
+/// Deliberately a distinct entry point from [`graded_video_peak_gb`] rather than a `bool` on it: the
+/// two differ in where the number came from, and a caller that has to pick a class is a caller that
+/// can pick the wrong one. Here the class is a property of the function you called.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) fn graded_derived_video_floor_gb(peak_gb: f64) -> f64 {
+    crate::estimate_synthesis::graded_scalar_gb(
+        peak_gb,
+        crate::estimate_synthesis::DeclaredScalarClass::DeclaredFloor,
+        crate::estimate_synthesis::CANDLE_LANE,
+    )
+}
+
+/// The gen-core geometry a pre-load video gate grades against.
+///
+/// Built here rather than at each `vram_gate` call site so every flat gate keys the SAME axes: a
+/// site that forgot `frames` would silently re-certify a scalar as a measured peak
+/// ([`video_scalar_class`] tests `frames == 1`), which is precisely the claim this story removes.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) fn video_gate_geometry(width: u32, height: u32, frames: u32) -> MemoryGeometry {
+    MemoryGeometry {
+        width,
+        height,
+        batch: 1,
+        frames: frames.max(1),
+        reference_count: 0,
+    }
+}
+
 type VideoDecodeProfileResolver = fn(
     VideoLane,
     &str,

@@ -616,12 +616,19 @@ pub(super) fn candle_video_offload_policy(engine_id: &str) -> OffloadPolicy {
 ///
 /// `budget` arrives resolved so this stays free of the GPU probe and is unit-testable without CUDA. No
 /// budget signal (or an exempt engine) ⇒ admits. `Err` is the actionable pre-load rejection.
+///
+/// `geometry` (sc-19055) is the REQUEST's, built by
+/// [`crate::video_admission::video_gate_geometry`]. It is what lets the mechanism decide whether the
+/// tier's manifest row may be presented as this clip's peak; before this story the gate compared the
+/// row unchanged at every resolution and clip length.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn wan_vram_preflight(
     engine_id: &str,
     manifest_entry: &JsonObject,
     tier_key: &str,
     model_dir: PathBuf,
+    geometry: gen_core::MemoryGeometry,
     gpu_id: &str,
     budget: Option<crate::vram_gate::VramBudget>,
 ) -> WorkerResult<PathBuf> {
@@ -631,18 +638,21 @@ pub(super) fn wan_vram_preflight(
         tier_key,
         model_dir,
         0,
+        geometry,
         gpu_id,
         budget,
     )
 }
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[allow(clippy::too_many_arguments)]
 fn wan_vram_preflight_with_adapter_bytes(
     engine_id: &str,
     manifest_entry: &JsonObject,
     tier_key: &str,
     model_dir: PathBuf,
     adapter_bytes: u64,
+    geometry: gen_core::MemoryGeometry,
     gpu_id: &str,
     budget: Option<crate::vram_gate::VramBudget>,
 ) -> WorkerResult<PathBuf> {
@@ -652,6 +662,7 @@ fn wan_vram_preflight_with_adapter_bytes(
         tier_key,
         crate::vram_gate::wan_weight_bytes(engine_id, &model_dir),
         adapter_bytes,
+        geometry,
         gpu_id,
         budget,
     ) {
@@ -906,11 +917,16 @@ pub(super) struct Scail2ColdLoadPlan {
     pub(super) admission: crate::generator_cache::GeneratorColdLoadAdmission,
 }
 
+///
+/// `geometry` (sc-19055) is captured into the admission closure so the deferred cold-load check
+/// grades SCAIL's measured bf16 row against the clip actually requested. The closure runs later, on
+/// the cache thread, so the geometry must be moved in rather than re-derived there.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) fn scail2_cold_load_plan(
     manifest_entry: &JsonObject,
     model_dir: PathBuf,
     adapter_bytes: u64,
+    geometry: gen_core::MemoryGeometry,
     gpu_id: &str,
 ) -> Scail2ColdLoadPlan {
     let manifest_entry = manifest_entry.clone();
@@ -926,6 +942,7 @@ pub(super) fn scail2_cold_load_plan(
         match crate::vram_gate::scail2_video_fit_error_with_adapter_bytes(
             &manifest_entry,
             adapter_bytes,
+            geometry,
             &gpu_id,
             budget,
         ) {
@@ -1102,6 +1119,10 @@ pub(super) async fn generate_candle_video_using(
             &request.model_manifest_entry,
             candle_wan_tier_key(quant),
             dir,
+            // sc-19055: the COERCED frame count, not the raw request — the same number the load
+            // actually renders (`video_frame_count` snapped it onto the engine's temporal lattice
+            // above). Gating on the raw count would grade a clip length that never runs.
+            crate::video_admission::video_gate_geometry(request.width, request.height, frames),
             &settings.gpu_id,
             candle_video_vram_budget(settings).await,
         )?;
@@ -1210,6 +1231,9 @@ pub(super) async fn generate_candle_video_using(
                 tier_key,
                 model_dir,
                 user_adapter_bytes,
+                // sc-19055: the SAME coerced geometry the base-only gate above graded against, so
+                // the two passes of this gate cannot disagree about which clip is being priced.
+                crate::video_admission::video_gate_geometry(request.width, request.height, frames),
                 &settings.gpu_id,
                 candle_video_vram_budget(settings).await,
             )?;
@@ -1796,6 +1820,12 @@ pub(super) async fn generate_candle_scail2(
         &request.model_manifest_entry,
         resolve_candle_scail2_model_dir(settings)?,
         adapter_bytes,
+        // sc-19055: the COERCED clip length the input below actually renders, not the raw request.
+        crate::video_admission::video_gate_geometry(
+            request.width,
+            request.height,
+            wan_frame_count(request.raw_frame_count()),
+        ),
         &settings.gpu_id,
     );
     let negative_prompt = non_empty_negative_prompt(request);
@@ -1974,6 +2004,12 @@ pub(super) async fn generate_candle_scail2_replace(
         &request.model_manifest_entry,
         resolve_candle_scail2_model_dir(settings)?,
         adapter_bytes,
+        // sc-19055: the COERCED clip length the input below actually renders, not the raw request.
+        crate::video_admission::video_gate_geometry(
+            request.width,
+            request.height,
+            wan_frame_count(request.raw_frame_count()),
+        ),
         &settings.gpu_id,
     );
     let negative_prompt = non_empty_negative_prompt(request);

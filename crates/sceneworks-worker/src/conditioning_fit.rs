@@ -61,6 +61,51 @@
 //! that can refuse a host which cannot hold the weights. The route declares only the files it actually
 //! loads so the floor does not over-count unused or repacked checkpoints.
 //!
+//! ## What sc-19055 migrated, and what it deliberately did not
+//!
+//! Epic 19048 R1 forbids a prediction law living in a backend-local module, and sc-19055's brief is
+//! that the overlay accounting must survive the migration "as candidate composition in the shared
+//! mechanism, not by flattening it away". Two things moved:
+//!
+//! * **The composition.** `base + overlay` was a hand-written `saturating_add` here. It is now the
+//!   auxiliary term of [`crate::estimate_synthesis::compose_resident_floor_bytes`] under
+//!   [`CONDITIONING_ENGAGED`] — the SAME law
+//!   [`crate::estimate_synthesis::floor_weights_bytes`] applies to a provider contract's declared
+//!   components, with the bytes sourced from disk instead of from a contract. Byte-identical today;
+//!   the point is that an overlay a future contract declares `bounded_by` an engaged rung now drops
+//!   out of the floor on its own, in one place, for both lanes.
+//! * **The headroom.** [`HEADROOM_GB`] was a third literal `2.0`; it is now the candle lane's one
+//!   constant.
+//!
+//! What did NOT move, and why the inventory still reports this mechanism geometry-blind:
+//!
+//! * **No estimate-margin grading.** [`crate::estimate_synthesis::graded_scalar_gb`] widens a
+//!   `DeclaredFloor` by the lane's estimate margin, and that is right for a gate whose number is a
+//!   *declared peak* being honest about its uncertainty. It is wrong here. This floor's whole
+//!   contract is that it cannot false-reject (see above): a refusal means the weights ALONE
+//!   overflow, which is true however the transients are priced. Widening it by 4% manufactures
+//!   refusals no measurement supports — exactly the "invented activation fudge factor" the module
+//!   note rules out.
+//!
+//!   sc-19055 made the same *call* for [`crate::vram_gate::video_weights_fit_error`], the video
+//!   lane's on-disk weights sum, but NOT for the same reason, and the two must not be collapsed.
+//!   That gate is not a floor on every tier: its recorded reason is a MEASURED ~44 GiB
+//!   OVER-count on dense bf16, because `candle-gen-wan` halves fp32 experts on load, so the
+//!   on-disk bytes exceed what is ever resident. It under-counts only on the packed q4/q8 tiers.
+//!   Ungraded there means "already over-rejecting on one tier, do not widen it further"; ungraded
+//!   here means "a true lower bound whose refusals are sound, do not turn them unsound". Both
+//!   end at *don't grade*; only this gate is a floor by construction.
+//! * **No geometry axis.** On-disk weight bytes do not vary with width, height or frames, so
+//!   claiming this gate reads geometry would be a false claim in a generated artifact. `no` in the
+//!   inventory's geometry column is the correct answer for a weights floor, and it stays `no`.
+//! * **No shared SELECTOR.** [`crate::memory_strategy::select_strategy`] grades candidates against a
+//!   `MemoryProviderContract`, and these lanes have none to give it — that is the premise of this
+//!   whole module (see "Why these lanes cannot use the existing gates"). Reaching the selector here
+//!   is blocked upstream, in the same way and for the same reason as the unreached image class
+//!   `candle_admission_decisions::no_unreached_image_route_declares_a_provider_contract`
+//!   pins: no provider contract, no candidates. Sharing the composition law is what IS reachable at
+//!   this pin, and it is what makes the eventual selector migration a rewiring rather than a rewrite.
+//!
 //! Everything here is pure and unit-tested; the live `nvidia-smi` reading lives in [`crate::gpu`] and
 //! the per-lane wiring is in `image_jobs/conditioning_gate.rs`.
 
@@ -69,11 +114,27 @@ use super::*;
 use crate::fit_gate::BYTES_PER_GIB;
 use crate::vram_gate::VramBudget;
 
-/// Fixed transient/runtime headroom (GB) added on top of the on-disk weights floor. Mirrors
-/// [`crate::vram_gate`]'s and [`crate::krea_control_fit`]'s own `HEADROOM_GB` — allocator slack + CUDA
-/// context overhead, NOT an activation estimate (this gate makes no claim about activations; see the
-/// module note on why the floor stays a floor).
-const HEADROOM_GB: f64 = 2.0;
+/// Fixed transient/runtime headroom (GB) added on top of the on-disk weights floor: allocator slack
+/// plus CUDA context overhead, NOT an activation estimate (this gate makes no claim about
+/// activations; see the module note on why the floor stays a floor).
+///
+/// **The candle lane's ONE reserve** (sc-19055, epic 19048 R1). This was a literal `2.0` documented
+/// as "mirrors [`crate::vram_gate`]'s and [`crate::krea_control_fit`]'s own `HEADROOM_GB`" — three
+/// copies of one number, which is the drift hazard R1 forbids and the same one
+/// [`crate::estimate_synthesis::binding_phase`] was extracted to close ("three mirrors have three
+/// chances to stop mirroring"). [`crate::krea_control_fit`] already aliased the constant; this is
+/// the last copy. The value is unchanged, so no admission decision moves.
+const HEADROOM_GB: f64 = crate::vram_gate::HEADROOM_GB;
+
+/// The composition a conditioning render actually runs.
+///
+/// These lanes load through bespoke concrete entrypoints (`QwenFunControl::load(&QwenFunControlPaths)`
+/// and friends) with no rung selection and no `LoadSpec`, so nothing stages, tiles, chunks or windows:
+/// the load is whole-model resident with the overlay co-resident beside it. That is *why* the two
+/// terms are additive, and stating it as the engaged composition — rather than as a hand-written `+`
+/// — is what lets [`crate::estimate_synthesis::compose_resident_floor_bytes`] drop the overlay out on
+/// its own the day one of these lanes gains a contract that bounds it.
+const CONDITIONING_ENGAGED: &[gen_core::MemoryStrategy] = &[gen_core::MemoryStrategy::Resident];
 
 /// WHERE one candle conditioning lane is admitted — not whether.
 ///
@@ -167,9 +228,34 @@ impl ConditioningFootprint {
         }
     }
 
-    /// Total resident on-disk bytes (base + overlay).
+    /// Total resident on-disk bytes for the composition this render runs, composed by the shared
+    /// mechanism (sc-19055, epic 19048 R1/R2).
+    ///
+    /// The additive base+overlay accounting this gate exists for is not flattened away by the
+    /// migration — it becomes the auxiliary term of
+    /// [`crate::estimate_synthesis::compose_resident_floor_bytes`], the same law
+    /// [`crate::estimate_synthesis::floor_weights_bytes`] applies to a provider contract's declared
+    /// components. Under [`CONDITIONING_ENGAGED`] that is `base + overlay`, byte-identical to the
+    /// `saturating_add` this replaced.
+    ///
+    /// **`conditioning_bytes: 0` is a claim about the EVIDENCE, not about the model.** A recursive
+    /// `.safetensors` scan of a base directory cannot separate the text encoder from the DiT, so
+    /// this gate does not know the split. Declaring it zero (rather than guessing) is what keeps the
+    /// composition honest: were a rung ever to engage `StagedResidency` here, the law's
+    /// `conditioning.max(heavy)` would return the whole base unreduced — no phantom saving from a
+    /// split nothing measured. `transformer_bytes` is zero for the same reason.
     fn total_bytes(&self) -> u64 {
-        self.base_bytes.saturating_add(self.overlay_bytes)
+        crate::estimate_synthesis::compose_resident_floor_bytes(
+            &crate::estimate_synthesis::ResidentWeights {
+                conditioning_bytes: 0,
+                heavy_bytes: self.base_bytes,
+                transformer_bytes: 0,
+            },
+            CONDITIONING_ENGAGED,
+            // The overlay network(s) held beside the base. `None` — nothing here declares a rung
+            // that bounds them, because nothing here selects a rung at all.
+            [(self.overlay_bytes, None)],
+        )
     }
 }
 
@@ -457,6 +543,93 @@ mod tests {
         assert!(
             (floor - base_only - 7.0).abs() < 1e-9,
             "the overlay must contribute its own bytes: {floor} vs {base_only}"
+        );
+    }
+
+    /// **sc-19055: the floor is the MECHANISM's composition and the LANE's headroom, not this
+    /// module's arithmetic.**
+    ///
+    /// Both halves are pinned against their sources rather than against a literal, so a re-hardcoded
+    /// copy of either is red:
+    ///
+    /// * the reserve is compared to [`crate::vram_gate::HEADROOM_GB`] — the candle lane's one
+    ///   constant. MUTATION PROOF: restoring the pre-sc-19055 `const HEADROOM_GB: f64 = 2.0;` and
+    ///   moving `vram_gate`'s value turns this red, which the old literal could not do.
+    /// * the composed total is compared to
+    ///   [`crate::estimate_synthesis::compose_resident_floor_bytes`] driven with the same component
+    ///   shape, so the gate and the mechanism cannot disagree about what a resident composition
+    ///   holds.
+    ///
+    /// The interval is the open band between the base-only floor and the composed floor: a budget
+    /// inside it admits one and refuses the other, so neither assertion can be satisfied vacuously.
+    #[test]
+    fn the_floor_is_the_shared_composition_plus_the_lane_headroom() {
+        let f = footprint(20 * GIB, 7 * GIB);
+        let composed = crate::estimate_synthesis::compose_resident_floor_bytes(
+            &crate::estimate_synthesis::ResidentWeights {
+                conditioning_bytes: 0,
+                heavy_bytes: 20 * GIB,
+                transformer_bytes: 0,
+            },
+            CONDITIONING_ENGAGED,
+            [(7 * GIB, None)],
+        );
+        assert_eq!(composed, 27 * GIB, "resident composition holds both terms");
+        let expected = composed as f64 / BYTES_PER_GIB + crate::vram_gate::HEADROOM_GB;
+        let floor = conditioning_floor_gb(&f).expect("weights present");
+        assert!(
+            (floor - expected).abs() < 1e-9,
+            "floor {floor} must be the shared composition plus the lane's headroom ({expected})"
+        );
+
+        // The open band between the base-only floor and the composed floor. A budget inside it must
+        // separate the two, which is what stops either assertion above from being vacuous.
+        let base_only = conditioning_floor_gb(&footprint(20 * GIB, 0)).expect("weights present");
+        let inside = (base_only + floor) / 2.0;
+        assert!(
+            base_only < inside && inside < floor,
+            "the band must be open: {base_only} < {inside} < {floor}"
+        );
+        assert!(matches!(
+            decide(&footprint(20 * GIB, 0), budget(inside)),
+            ConditioningFit::Fits { .. }
+        ));
+        assert!(matches!(
+            decide(&f, budget(inside)),
+            ConditioningFit::TooBig { .. }
+        ));
+    }
+
+    /// A composition that engages `StagedResidency` promises NO saving here, because this gate
+    /// cannot see the conditioning/heavy split a directory scan does not expose (sc-19055).
+    ///
+    /// The mechanism's law reduces a staged base to `conditioning.max(heavy)`; with
+    /// `conditioning_bytes: 0` that is `heavy` unchanged, so the floor cannot shrink on the strength
+    /// of a split nothing measured. Pinned because the tempting "improvement" — guessing a split so
+    /// staging looks cheaper — would under-predict toward an OOM.
+    #[test]
+    fn a_staged_composition_promises_no_saving_without_a_measured_split() {
+        let weights = crate::estimate_synthesis::ResidentWeights {
+            conditioning_bytes: 0,
+            heavy_bytes: 20 * GIB,
+            transformer_bytes: 0,
+        };
+        let resident = crate::estimate_synthesis::compose_resident_floor_bytes(
+            &weights,
+            CONDITIONING_ENGAGED,
+            [(7 * GIB, None)],
+        );
+        let staged = crate::estimate_synthesis::compose_resident_floor_bytes(
+            &weights,
+            &[
+                gen_core::MemoryStrategy::Resident,
+                gen_core::MemoryStrategy::StagedResidency,
+            ],
+            [(7 * GIB, None)],
+        );
+        assert_eq!(
+            staged, resident,
+            "an unmeasured conditioning split must not become a staging saving"
         );
     }
 

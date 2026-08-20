@@ -967,16 +967,35 @@ def test_scail2_candle_admission_matches_the_validated_shared_package_evidence()
     manifest = _load_builtin_models_manifest()
     scail = next(model for model in manifest["models"] if model["id"] == "scail2_14b")
     candle = scail["candle"]
+    # `minMemoryGb` is 109, not the 102.115 + 2 = 105 this audit pinned until sc-19055.
+    #
+    # The EVIDENCE is unchanged (overallPeakGb=102.115, asserted verbatim below). What changed is
+    # the law that turns evidence into an advertised floor. `vramMeasuredPixels` records PIXELS
+    # only, so it cannot say the capture was 81 frames; a video request therefore fails the
+    # `frames == 1` conjunct in `estimate_synthesis::declared_scalar_class` and the row grades as
+    # the DECLARED FLOOR it is, widened by the candle estimate margin. Admission demands
+    # ceil(104.115 x 1.04) = 109, and `vram_gate::scail2_video_fit_error_with_adapter_bytes`
+    # compares this key against that same graded number — so a 105 here refuses SCAIL-2 on every
+    # card, unconditionally. This audit is the cross-language mirror of that gate.
+    #
+    # The number is pinned LITERALLY rather than re-derived. Deriving it would require
+    # `CANDLE_ESTIMATE_MARGIN` here, giving that constant a fourth home in a second language —
+    # precisely the drift hazard epic 19048 R1 exists to remove, and a worse trade than a literal
+    # that a reader can check against the authority. The authority is
+    # `estimate_synthesis::graded_scalar_gb` (margin: `ladder_margin_policy::CANDLE_ESTIMATE_MARGIN`).
     assert candle == {
-        "minMemoryGb": 105,
+        "minMemoryGb": 109,
         "vramGbByTier": {"bf16": 102.115},
         "vramMeasuredPixels": 832 * 480,
         "measured": True,
     }
-    assert candle["minMemoryGb"] == math.ceil(
-        candle["vramGbByTier"]["bf16"] + 2
-    )
-    assert "105 GB of free GPU VRAM" in scail["ui"]["description"]
+    # The ungraded law survives as a LOWER BOUND. Grading can only ever widen a declared floor, so
+    # "at least the measured peak plus the shared reserve" stays true under any margin and still
+    # catches the regression this assertion was written for — an advertised floor edited below the
+    # evidence it claims to rest on. Stated as an inequality rather than an equality so it asserts
+    # what the audit can know without mirroring the grading law.
+    assert candle["minMemoryGb"] >= math.ceil(candle["vramGbByTier"]["bf16"] + 2)
+    assert "109 GB of free GPU VRAM" in scail["ui"]["description"]
 
     raw = MANIFEST_PATH.read_text(encoding="utf-8")
     scail_section = raw.split('"id": "scail2_14b"', 1)[1].split(
