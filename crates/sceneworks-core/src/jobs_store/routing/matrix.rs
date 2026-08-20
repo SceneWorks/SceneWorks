@@ -912,12 +912,13 @@ fn validate_runtime_pair(
     mlx: &RuntimeDescriptorFacts,
     candle: &RuntimeDescriptorFacts,
 ) -> Result<(), String> {
-    if mlx.generated_from.inference_revision != candle.generated_from.inference_revision {
-        return Err(format!(
-            "runtime descriptor revisions differ: mlx={} candle={}",
-            mlx.generated_from.inference_revision, candle.generated_from.inference_revision
-        ));
-    }
+    // The two halves deliberately do not have to carry the same revision label (sc-19758,
+    // main `e14171984`). The media Candle dump and the MLX dump are produced on different machines,
+    // so requiring their labels to match would put both machines on the critical path of every pin
+    // bump even when the declared capabilities have not changed.
+    //
+    // The content-level comparisons below remain authoritative: real mapping or descriptor drift
+    // still fails regardless of which inference revision produced either snapshot.
     if mlx.model_mappings != candle.model_mappings {
         return Err("matching-platform production model mappings differ".to_owned());
     }
