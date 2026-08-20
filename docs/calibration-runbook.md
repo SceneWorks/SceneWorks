@@ -671,6 +671,13 @@ node scripts/memory-calibration-harness.mjs run \
   --output /abs/path/OUTSIDE/the/repo/<lane>-evidence.json
 ```
 
+🔴 **`--raw-log-dir`/`--source-path-prefix` are MLX-only — drop both on a candle lane.** They are
+the physical-source-capture arm: the harness refuses any case where `--raw-log-dir` is set and the
+provider returned no `sourceCapture`, and accepts only `sourceCapture.kind === "physical_mlx"`. Only
+`crates/sceneworks-memory-adapter/src/bin/mlx.rs` emits that key; `bin/candle.rs` emits none, so a
+candle sweep dies *inside the per-case loop* — after the first row's cold model load — rather than
+at argument parsing. The two flags are also validated as a pair, so supply both or neither.
+
 Then schema-check the raw bundle before doing anything else:
 
 ```bash
@@ -1664,17 +1671,28 @@ node scripts/memory-calibration-harness.mjs run \
   --provider-command '["/abs/path/to/target/release/memory-candle-adapter.exe"]' \
   --sceneworks-repo /abs/path/to/SceneWorks \
   --inference-repo /abs/path/to/inference \
-  --raw-log-dir  /abs/path/OUTSIDE/the/repo/sc-19057-raw-receipts \
-  --source-path-prefix docs/calibration/sc-19057 \
   --output /abs/path/OUTSIDE/the/repo/wan-candle-video-sc-19057.json
 ```
 
-🔴 **`--output`, `--raw-log-dir` and any `--resume` path MUST be outside the checkout.** The harness
-stamps every record with each repository's `dirty` flag from `git status --porcelain`, **which counts
-untracked paths**, so a bundle written inside the tree dirties the very repository the record is
-attesting to and the whole sweep is discarded at the end (§5, §6). Resume an interrupted sweep by
-pointing `--resume` at the partial output — the runner atomically checkpoints after every successful
-provider response.
+🔴 **There is no `--raw-log-dir` on this lane, and adding it aborts the sweep after the first cold
+model load.** The raw-log provenance arm is MLX-only by construction, in two places that agree:
+`memory-calibration-harness.mjs` fails any case where `--raw-log-dir` is configured and the provider
+returned no `sourceCapture` (*"configured raw-log provenance requires provider sourceCapture"*), and
+the one it does accept must be `sourceCapture.kind === "physical_mlx"`. Only
+`crates/sceneworks-memory-adapter/src/bin/mlx.rs` ever emits that key — for the Qwen physical-source
+arm — and `bin/candle.rs` emits none at all, so a candle case can never satisfy it. The flags are
+also enforced as a PAIR (*"--raw-log-dir and --source-path-prefix must be supplied together"*), so
+supply both or neither; supplying both still dies, and it dies *inside the per-case fragment loop*,
+i.e. after the first row has already paid its ~10-minute cold load. Do not re-add them. Nothing is
+lost by omitting them: `sourceProvenance` is a plan-declared field valid only for authoritative Qwen
+MLX evidence, this plan declares none, and every other non-Qwen arm ships without it.
+
+🔴 **`--output` and any `--resume` path MUST be outside the checkout.** The harness stamps every
+record with each repository's `dirty` flag from `git status --porcelain`, **which counts untracked
+paths**, so a bundle written inside the tree dirties the very repository the record is attesting to
+and the whole sweep is discarded at the end (§5, §6). Resume an interrupted sweep by pointing
+`--resume` at the partial output — the runner atomically checkpoints after every successful provider
+response.
 
 Six rows, ordered cheapest-first. The three-coefficient cross form needs at least three distinct
 non-collinear geometry points plus at least one held-out row, so if the lane budget runs out the last
@@ -1686,8 +1704,8 @@ than that makes the slice singular.
 `candleDefaults[0].variant`, so a committed q8 swap reds that gate. An in-place *uncommitted* swap
 is just as unusable: the harness stamps every record with each repository's dirty flag from `git
 status --porcelain`, which counts untracked changes, so editing the plan inside this checkout
-dirties SceneWorks and the whole q8 sweep is discarded at `check` (§5, and the `--output`/
-`--raw-log-dir` note above). Instead, copy `wan-candle-video-capture-plan.json` to a path OUTSIDE
+dirties SceneWorks and the whole q8 sweep is discarded at `check` (§5, and the `--output` note
+above). Instead, copy `wan-candle-video-capture-plan.json` to a path OUTSIDE
 the checkout, swap `q4` → `q8` in that copy's `target.tier`, `name`, and `fixture` tokens, and point
 `--config` at the copy.
 
@@ -1734,8 +1752,9 @@ claim, and each has a way to be wrong:
 The record is committed **standalone**, the `docs/generated/ltx-mlx-video-sc-18808.json` precedent, and
 wired into `npm run check` so it stays schema-valid:
 
-1. Copy the bundle to `docs/generated/wan-candle-video-sc-19057.json`, and its
-   `docs/calibration/sc-19057/…` raw-receipt tree into the checkout.
+1. Copy the bundle to `docs/generated/wan-candle-video-sc-19057.json`. There is **no** raw-receipt
+   tree to copy — this lane runs without `--raw-log-dir` (see §12d), so `docs/calibration/sc-19057/`
+   holds the capture plan and nothing else.
 2. Add it to the `check:memory-calibration` chain in `package.json`, beside the LTX video record.
    Confirm the gate protects its **existence** by deleting the file and watching the check red.
 3. Feed it to the fitter. `scripts/fit-ltx-temporal-form.mjs` is backend-neutral **in its plumbing**
@@ -1744,6 +1763,26 @@ wired into `npm run check` so it stays schema-valid:
    so it emits a `backend: "candle"` curve into `docs/generated/video-memory-curves.json` beside the
    existing MLX LTX one. That bundle currently contains exactly one curve and it is MLX; this is the
    producer gap this lane closes.
+
+   The container is **multi-lane** as of schema v3 (epic 19048): fit provenance lives on the CURVE
+   (`sourceFit`), not on the bundle, so the two lanes each name their own report. The fitter reads
+   the bundle it is about to write and REPLACES only its own measurement lane, preserving every
+   other one — so promoting candle does not delete the MLX curve, and a later MLX re-promotion does
+   not delete candle. Two consequences:
+
+   * Name the report from its own family: `--source-fit docs/generated/wan-temporal-form-fit-sc-19057.json`
+     (with a matching `--write`). The pattern is
+     `docs/generated/<family>-temporal-form-fit-sc-<story>.json`; a report outside it is refused by
+     the producer, by `packages/schemas/video-memory-curves.schema.json`, and by the runtime reader.
+   * One evidence file may not straddle two lanes, and a promotion must carry exactly one lane —
+     both throw rather than merging ambiguously.
+
+   Then add `docs/generated/wan-candle-video-sc-19057.json` to
+   `PACKAGED_VIDEO_MEMORY_CURVE_SOURCES` in `crates/sceneworks-core/src/video_memory_curves.rs`.
+   That const is the compiled source catalog the loader validates the bundle against, and it must
+   list **exactly** the sources the committed curves consume: a candle curve whose evidence file is
+   not compiled in fails the whole bundle closed with *"curves do not consume the exact compiled
+   source-record catalog"*, taking the MLX curve down with it.
 
    🔴 **Its REGRESSORS are not backend-neutral. Constrain the fit to the `cross` form on this lane.**
    `latentTemporalDepth()` hardcodes LTX's `1 + (frames - 1) / 8` and `latentTokens()` LTX's `/32`
