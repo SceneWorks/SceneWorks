@@ -5,6 +5,7 @@ pub mod base_weights;
 pub mod builtin_manifests;
 pub mod catalog_store;
 pub mod character_store;
+pub mod checkpoint_import;
 pub mod contracts;
 pub mod control_weights;
 pub mod credentials;

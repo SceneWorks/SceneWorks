@@ -58,6 +58,7 @@ libc = "0.2"
 rustix = { version = "1", features = ["fs"] }
 
 [dev-dependencies]
+jsonschema = "0.28"
 tempfile = "3.13"
 
 [lints]
