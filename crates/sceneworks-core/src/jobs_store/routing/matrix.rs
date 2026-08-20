@@ -497,8 +497,9 @@ fn matrix_summary(
 /// rationale and a deletion trigger, that no lane can claim any of them.
 ///
 /// Deliberately `all`, not `any`: a model with one unroutable mode among several is still a defect
-/// and must keep reaching the canonical-mode error. When sc-17157 lands the conditioning
-/// declaration its row is deleted, this returns false again, and the entry rejoins the probes.
+/// and must keep reaching the canonical-mode error. The constant is currently EMPTY (sc-18650
+/// deleted its last row when Ref2VA became claimable), so this returns false for every entry and
+/// every video model rejoins the probes; the mechanism stays for the next owned in-between state.
 fn video_model_is_wholly_unclaimable(model: &ManifestModel) -> bool {
     model.model_type == "video"
         && !model.capabilities.is_empty()
@@ -523,9 +524,9 @@ fn model_row(
     // `KNOWN_UNCLAIMABLE_VIDEO_CAPABILITIES` has no routed mode by design. It stays a video entry —
     // it is not reclassified — but it is EXCLUDED from the canonical probes below rather than
     // handed a fabricated request, because probing it would manufacture a shape the product cannot
-    // serve. `minimax_h3_ref` is the live case: `reference_to_video` is its only capability, the MLX
-    // provider withholds `ConditioningKind::MultiReference` until sc-17157, and the engine
-    // default-denies ref2va, so nothing reachable is lost.
+    // serve. The constant is currently empty (its last row, `minimax_h3_ref` /
+    // `reference_to_video`, was deleted by sc-18650 when the route became claimable), so today no
+    // entry is excused.
     //
     // A PARTIALLY broken model is deliberately NOT excused — `all` means one unroutable mode among
     // several still reaches `canonical_model_request` and still errors there.
@@ -1784,10 +1785,31 @@ fn conditioning_cell(
         let supports = |facts: &RuntimeDescriptorFacts| -> Result<bool, String> {
             for mode in &modes {
                 let job = super::canonical_video_route_probe(&model.id, mode)?;
-                let descriptor_supports = native_video_route_descriptors(facts, &model.id, mode)
-                    .into_iter()
+                let descriptors = native_video_route_descriptors(facts, &model.id, mode);
+                let descriptor_supports = descriptors
+                    .iter()
                     .any(|descriptor| descriptor.conditioning.iter().any(|kind| kind == shape));
-                if descriptor_supports && backend_supports(&job, facts)? {
+                // sc-18650 widened `reference_to_video`'s requirement to
+                // `multiReference | reference` so the ordered omni-reference engines
+                // (MiniMax-H3) can claim the mode. On an engine that declares the heterogeneous
+                // `multiReference` bundle (bernini), the production video wrapper constructs the
+                // BUNDLE from `referenceAssetIds` — its singular `reference` kind is the
+                // still-image surface, and no production video request exercises it. So the
+                // singular axis carries `reference_to_video` only on engines with no
+                // `multiReference` declaration; otherwise this cell would claim a video shape
+                // the wrapper never constructs.
+                let singular_shadowed_by_bundle = shape == "reference"
+                    && *mode == "reference_to_video"
+                    && descriptors.iter().any(|descriptor| {
+                        descriptor
+                            .conditioning
+                            .iter()
+                            .any(|kind| kind == "multiReference")
+                    });
+                if descriptor_supports
+                    && !singular_shadowed_by_bundle
+                    && backend_supports(&job, facts)?
+                {
                     return Ok(true);
                 }
             }

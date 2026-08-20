@@ -21,18 +21,13 @@ use crate::contracts::JobType;
 ///
 /// EXACT, not a suppression list — the class guard fails if a row here is no longer needed, so a
 /// capability that becomes claimable forces its row to be deleted.
-pub(super) const KNOWN_UNCLAIMABLE_VIDEO_CAPABILITIES: &[(&str, &str, &str)] = &[(
-    "minimax_h3_ref",
-    "reference_to_video",
-    "sc-17157. The manifest advertises Ref2VA and the MLX declaration for it is WITHHELD — see \
-     the `minimax_h3_ref` arm in `routing/mlx.rs` for the measurement. The pinned MLX provider \
-     does not declare `ConditioningKind::MultiReference`, which SceneWorks requires for \
-     `reference_to_video` and which `bernini` (the only other engine mapped to that mode) does \
-     declare; advertising the route made `dump-engine-capabilities` refuse to emit the runtime \
-     artifact for EVERY model. Nothing is reachable today regardless: the family's engine \
-     default-denies ref2va at its conditioning allowlist and this partition has no off-Mac \
-     downloads. Delete this row when sc-17157 lands the conditioning declaration.",
-)];
+///
+/// EMPTY is the goal state and the current state. The last row —
+/// `("minimax_h3_ref", "reference_to_video")`, filed while the MLX Ref2VA declaration was
+/// withheld pending a `MultiReference` conditioning declaration — was deleted by sc-18650, which
+/// instead aligned `video_mode_conditioning_requirements` to the ordered omni-reference surface
+/// the pinned engines actually declare and restored the `minimax_h3_ref` arm in `routing/mlx.rs`.
+pub(super) const KNOWN_UNCLAIMABLE_VIDEO_CAPABILITIES: &[(&str, &str, &str)] = &[];
 
 use crate::jobs_store::routing::candle::video_mode_is_candle_eligible;
 use crate::jobs_store::routing::gaps::{
@@ -1165,9 +1160,11 @@ pub(crate) const VIDEO_MODEL_CAPS: &[VideoModelCaps] = &[
     //     `minMemoryGb`. Flipping a column today would route a job to a lane with weights and no
     //     renderer, which is the GH #2074 shape inverted.
     //
-    // `minimax_h3_ref` is further behind still and its off-Mac gap is not merely unfinished: `ref2va`
-    // is DEFAULT-DENIED at the candle provider's conditioning allowlist until sc-17157 ports
-    // `transformer_ref`, which is why sc-19558 deliberately gave it no off-Mac download rows either.
+    // `minimax_h3_ref`'s candle columns stay false for the SAME kind of reason, not a different
+    // kind (sc-20267 corrected the old "candle default-denies ref2va" claim — sc-17157 landed the
+    // candle port and is an ancestor of the pinned revision): it has no off-Mac `transformer_ref`
+    // download rows (sc-19558/sc-19573), no candle dispatch arm, and no measured off-Mac ceiling
+    // of its own. See the manifest entry's `downloads` trailing note for the authoritative record.
     //
     // Same all-false candle shape `scail2_14b` / `krea_realtime_14b` carry.
     VideoModelCaps::new("minimax_h3", true, false, false, false),
@@ -3273,11 +3270,13 @@ mod tests {
             ("minimax_h3", "text_to_video"),
             ("minimax_h3", "image_to_video"),
             ("minimax_h3", "first_last_frame"),
-            // `minimax_h3_ref` / `reference_to_video` is NOT here any more. It is not MLX-only, it
-            // is claimable by NO lane — the MLX declaration is withheld until sc-17157 (see the
-            // `minimax_h3_ref` arm in `routing/mlx.rs`), so it belongs in
-            // `KNOWN_UNCLAIMABLE_VIDEO_CAPABILITIES` instead. This set means "MLX serves it and
-            // candle does not"; leaving it here would assert an MLX lane that no longer exists.
+            // Back since sc-18650 restored the MLX Ref2VA declaration (the `minimax_h3_ref` arm
+            // in `routing/mlx.rs`; the conditioning requirement now admits the engines' ordered
+            // omni-reference surface). MLX-only for the reasons the manifest entry documents: no
+            // off-Mac `transformer_ref` download rows, no candle dispatch arm
+            // (`video_jobs/minimax_h3.rs` is macOS-gated end to end) and no measured off-Mac
+            // ceiling — not an engine conditioning refusal.
+            ("minimax_h3_ref", "reference_to_video"),
         ];
 
         let models = builtin_video_models();
