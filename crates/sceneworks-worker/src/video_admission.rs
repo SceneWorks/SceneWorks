@@ -56,6 +56,13 @@ use crate::memory_strategy::{Budget, Candidate, CandidateBasis, RequestScope, Se
 // post-load half above already consumes `floor_weights_bytes` / `estimate_evidence` /
 // `binding_phase`. Nothing here routes a video request through the image-lane selector.
 //
+// Scoped to the CANDLE lane (`all(not(macos), backend-candle)`) — the same cfg `vram_gate`, their
+// only consumer, carries. They read `candle.vramGbByTier` / `candle.measured` /
+// `candle.vramMeasuredPixels`, which are candle-lane manifest keys; the macOS video route reads the
+// `mlx` block and admits through `mlx_fit_gate`. Widening the cfg would put four functions no macOS
+// caller can reach into that lane's dead-code surface, and this module's own `allow(dead_code)`
+// covers only the neither-build.
+//
 // **What is a parameter and what is computed** (R1). The route supplies its manifest entry, its
 // resolved tier key, its adapter bytes and its request geometry. The mechanism decides what that
 // scalar may CLAIM for that geometry (`estimate_synthesis::declared_scalar_class`) and how a claim
@@ -81,7 +88,7 @@ use crate::memory_strategy::{Budget, Candidate, CandidateBasis, RequestScope, Se
 /// The day a candle video capture arm (sc-19057) lands per-frame-count curves, those become fitted
 /// evidence through the POST-load arm above; this pre-load arm stays the floor, which is the correct
 /// division — a pre-load gate cannot identify a curve cell it has not loaded the provider for.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(crate) fn video_scalar_class(
     manifest_entry: &sceneworks_core::contracts::JsonObject,
     tier_key: &str,
@@ -101,7 +108,7 @@ pub(crate) fn video_scalar_class(
 ///
 /// `None` means the manifest publishes nothing for this tier — no `candle` block, no row, no
 /// `minMemoryGb`. The caller falls back to its own weights floor, exactly as before.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(crate) fn graded_video_peak_gb(
     manifest_entry: &sceneworks_core::contracts::JsonObject,
     tier_key: &str,
@@ -135,7 +142,7 @@ pub(crate) fn graded_video_peak_gb(
 /// Deliberately a distinct entry point from [`graded_video_peak_gb`] rather than a `bool` on it: the
 /// two differ in where the number came from, and a caller that has to pick a class is a caller that
 /// can pick the wrong one. Here the class is a property of the function you called.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(crate) fn graded_derived_video_floor_gb(peak_gb: f64) -> f64 {
     crate::estimate_synthesis::graded_scalar_gb(
         peak_gb,
@@ -149,7 +156,7 @@ pub(crate) fn graded_derived_video_floor_gb(peak_gb: f64) -> f64 {
 /// Built here rather than at each `vram_gate` call site so every flat gate keys the SAME axes: a
 /// site that forgot `frames` would silently re-certify a scalar as a measured peak
 /// ([`video_scalar_class`] tests `frames == 1`), which is precisely the claim this story removes.
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(crate) fn video_gate_geometry(width: u32, height: u32, frames: u32) -> MemoryGeometry {
     MemoryGeometry {
         width,

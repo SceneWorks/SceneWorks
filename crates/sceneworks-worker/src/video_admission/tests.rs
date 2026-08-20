@@ -2194,7 +2194,7 @@ fn same_rung_cap_binding_carries_cap_peak_but_actual_request_geometry() {
 // that only checked the frames == 1 leg would survive deleting the wiring entirely.
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod sc19055_declared_scalar_arm {
     use crate::estimate_synthesis::DeclaredScalarClass;
     use crate::video_admission::{
