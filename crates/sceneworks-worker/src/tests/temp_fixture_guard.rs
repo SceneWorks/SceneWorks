@@ -60,6 +60,16 @@ const ALLOWED: &[(&str, usize, &str)] = &[
         "deliberate (sc-17707, named in the story): sc6139_i2v_pad_frame0.png is a debug artifact \
          a human opens after a real-weight probe run; a guard would delete it first",
     ),
+    (
+        "src/test_fixture_disk.rs",
+        1,
+        "deliberate: `sweep_stale_fixtures` collects leftovers of the ONE fixture whose guard \
+         cannot run — a `TempDir` parked in a `static`, which never sees `Drop`, so that fixture \
+         leaks a directory per test process by construction. The directories it collects are by \
+         definition ones no `TempDir` owns any more, so there is no guard to ask where they are. \
+         Prefix-scoped, PID-attributed and age-cutoff'd so a concurrent run's fixture can never \
+         match; see `is_stale_fixture` and its tests.",
+    ),
 ];
 
 /// No test fixture may build a path under the shared temp root by hand.
