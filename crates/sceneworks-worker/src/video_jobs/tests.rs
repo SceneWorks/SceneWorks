@@ -14746,12 +14746,13 @@ fn minimax_h3_reference_clip_shape_refusals() {
 #[test]
 fn minimax_h3_reference_clip_filter_never_pads_or_upscales() {
     use crate::video_jobs::minimax_h3::{
-        minimax_h3_reference_clip_filter, MINIMAX_H3_CANVAS_SHORT_EDGE,
-        MINIMAX_H3_REFERENCE_CLIP_FPS,
+        minimax_h3_reference_clip_filter, MINIMAX_H3_CANVAS_MAX_PIXELS,
+        MINIMAX_H3_CANVAS_SHORT_EDGE, MINIMAX_H3_REFERENCE_CLIP_FPS,
     };
     let filter = minimax_h3_reference_clip_filter(
         MINIMAX_H3_REFERENCE_CLIP_FPS,
         MINIMAX_H3_CANVAS_SHORT_EDGE,
+        MINIMAX_H3_CANVAS_MAX_PIXELS,
     );
 
     assert_eq!(
@@ -14778,6 +14779,112 @@ fn minimax_h3_reference_clip_filter_never_pads_or_upscales() {
         filter.contains("min(iw,768)") && filter.contains("min(ih,768)"),
         "the SHORT edge is capped at the engine's canvas short edge and never scaled up: {filter}"
     );
+
+    // The mirrored budget is the engine's own, read out of the pinned bundle rather than trusted as
+    // a literal — the same tie `pinned_engine_geometry` makes for the manifest's `maxPixels`.
+    assert_eq!(
+        MINIMAX_H3_CANVAS_MAX_PIXELS,
+        runtime_macos::providers::minimax_h3::pipeline::CANVAS_MAX_PIXELS,
+        "the extraction's area bound must be the canvas budget the pinned engine actually enforces"
+    );
+
+    // The SHORT edge alone does not bound the picture. Past `max_pixels / short_edge²` = 1.75:1 the
+    // area is the binding term, and a cinemascope clip decoded on the short-edge rule alone
+    // materializes well above the canvas the engine then refits it to.
+    assert!(
+        filter.contains("sqrt(1032192*ih/iw)") && filter.contains("sqrt(1032192*iw/ih)"),
+        "the area budget must be in the scale expression on BOTH orientations: {filter}"
+    );
+
+    // The same arithmetic the filter string spells, so the two cannot drift: for a landscape source
+    // the constrained axis is the height, `min(ih, short_edge, sqrt(max_pixels * ih / iw))`, and the
+    // width follows the preserved aspect ratio on the `-1` axis. Truncated, because ffmpeg's scale
+    // expressions evaluate to integers.
+    let budget = u64::from(MINIMAX_H3_CANVAS_MAX_PIXELS);
+    let decoded = |iw: f64, ih: f64| -> (u64, u64) {
+        let short = f64::from(MINIMAX_H3_CANVAS_SHORT_EDGE);
+        let area = f64::from(MINIMAX_H3_CANVAS_MAX_PIXELS);
+        if iw >= ih {
+            let h = ih.min(short).min((area * ih / iw).sqrt()).floor();
+            ((h * iw / ih).floor() as u64, h as u64)
+        } else {
+            let w = iw.min(short).min((area * iw / ih).sqrt()).floor();
+            (w as u64, (w * ih / iw).floor() as u64)
+        }
+    };
+
+    // 2.39:1 — a scope master. The short-edge rule alone gives 1836x768 = 1_410_048 px, 37% over
+    // the engine's budget; with the area term the decode lands inside it.
+    let (w, h) = decoded(2560.0, 1072.0);
+    assert!(
+        w * h <= budget,
+        "a 2.39:1 source must decode inside the engine's canvas budget, got {w}x{h} = {} px",
+        w * h
+    );
+    assert!(
+        h < u64::from(MINIMAX_H3_CANVAS_SHORT_EDGE),
+        "past 1.75:1 the AREA is the binding bound, not the short edge: {h}"
+    );
+
+    // 16:9 is already over budget at a 768 short edge (768 x 1365), so the area term binds there
+    // too — this is the common case, not an exotic one.
+    let (w, h) = decoded(1920.0, 1080.0);
+    assert!(
+        w * h <= budget && h < u64::from(MINIMAX_H3_CANVAS_SHORT_EDGE),
+        "16:9 must also land inside the budget: {w}x{h}"
+    );
+
+    // At or below 1.75:1 the short edge still binds, and nothing is scaled UP.
+    assert_eq!(
+        decoded(1344.0, 768.0),
+        (1344, 768),
+        "exactly the budget at exactly the short edge must pass through untouched"
+    );
+    assert_eq!(
+        decoded(320.0, 240.0),
+        (320, 240),
+        "a source below the canvas is NEVER upscaled here — the engine's own resolver does that"
+    );
+
+    // Portrait is the same rule the other way up.
+    let (w, h) = decoded(1072.0, 2560.0);
+    assert!(
+        w * h <= budget && w < u64::from(MINIMAX_H3_CANVAS_SHORT_EDGE),
+        "the portrait branch must carry the identical bound: {w}x{h}"
+    );
+}
+
+/// A blank `sourceClipAssetIds` entry is refused rather than turned into a path component.
+///
+/// Deliberately a DIRECT call: `string_list` drops blank entries at parse
+/// (`parses_mv2v_and_ads2v_multi_source_fields`), so no HTTP payload can reach this refusal and no
+/// payload-level test can exercise it. It guards the producers that never touch that parser — a
+/// replayed job row, a hand-built `VideoRequest` — where an empty id resolves to the project
+/// directory rather than to a clip.
+#[cfg(target_os = "macos")]
+#[test]
+fn minimax_h3_blank_clip_asset_id_is_refused() {
+    use crate::video_jobs::minimax_h3::minimax_h3_clip_asset_id;
+
+    assert_eq!(
+        minimax_h3_clip_asset_id("minimax_h3_ref", "  clip-a  ").expect("a real id passes"),
+        "clip-a",
+        "the id is trimmed on the way through, so a padded id is not a distinct asset"
+    );
+
+    for blank in ["", "   ", "\t\n"] {
+        let message = minimax_h3_clip_asset_id("minimax_h3_ref", blank)
+            .expect_err("a blank id names no asset")
+            .to_string();
+        assert!(
+            message.contains("sourceClipAssetIds") && message.contains("blank"),
+            "the refusal must name the field and the fault: {message}"
+        );
+        assert!(
+            message.starts_with("minimax_h3_ref:"),
+            "every refusal in this arm leads with the model id: {message}"
+        );
+    }
 }
 
 /// Whether a clip carries a soundtrack is read off the extraction's own stderr — INPUT streams only.
@@ -16364,18 +16471,33 @@ fn a_reference_clip_reaches_the_engine_as_reference_video_conditioning() {
         24,
         "a clip shorter than the render keeps every frame"
     );
-    // 900 -> 768 (the canvas short edge), 1600 scaled with it. NOT the request's canvas, and NOT
-    // padded to it: a reference does not bind the generated geometry.
-    assert_eq!(
-        wide_frames[0].height, 768,
-        "the SHORT edge is capped at the engine's canvas short edge"
+    // 1600x900 is 16:9, and 16:9 laid on a 768 short edge is 1365x768 — already 32% ABOVE the
+    // engine's 768·1344 canvas budget. So the AREA is the binding bound here, not the short edge:
+    // `min(900, 768, sqrt(1032192 · 900 / 1600)) = 762`. This is the common case, not an exotic
+    // one, which is why the short-edge-only rule this replaced materialized nearly every landscape
+    // reference above the canvas the engine then refits it to. NOT the request's canvas either, and
+    // NOT padded to it: a reference does not bind the generated geometry.
+    let expected_height = (1_032_192.0f64 * 900.0 / 1600.0).sqrt().min(768.0);
+    assert!(
+        f64::from(wide_frames[0].height) <= expected_height
+            && expected_height - f64::from(wide_frames[0].height) <= 1.0,
+        "the short edge must land on the engine's own area-constrained value ~{expected_height:.0}, \
+         got {}",
+        wide_frames[0].height
     );
-    let expected_width = (1600.0 * 768.0 / 900.0f64).round() as u32;
+    assert!(
+        u64::from(wide_frames[0].width) * u64::from(wide_frames[0].height) <= 1_032_192,
+        "a decoded reference must land inside the engine's canvas area budget — {}x{} is {} px",
+        wide_frames[0].width,
+        wide_frames[0].height,
+        u64::from(wide_frames[0].width) * u64::from(wide_frames[0].height)
+    );
+    let expected_width = (1600.0 * f64::from(wide_frames[0].height) / 900.0f64).round() as u32;
     assert!(
         wide_frames[0].width.abs_diff(expected_width) <= 1,
         "the aspect ratio must survive the extraction untouched — {}x{} against an expected \
-         ~{expected_width}x768. A `pad=` recipe would have produced the request's canvas with \
-         bars, which renders and conditions on the bars",
+         ~{expected_width}x{expected_height:.0}. A `pad=` recipe would have produced the request's \
+         canvas with bars, which renders and conditions on the bars",
         wide_frames[0].width,
         wide_frames[0].height
     );

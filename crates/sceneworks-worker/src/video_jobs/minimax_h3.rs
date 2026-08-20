@@ -778,6 +778,19 @@ pub(super) const MINIMAX_H3_MIN_REFERENCE_CLIP_FRAMES: usize = {
     (temporal_patch - 1) * stride + 1
 };
 
+/// The area budget the engine fits every canvas inside
+/// (`mlx-gen-minimax-h3::pipeline::CANVAS_MAX_PIXELS`, `768 · 1344 = 1_032_192`).
+///
+/// The SHORT edge alone does not bound the picture: at 16:9 a 768-short-edge canvas is 768 x 1365,
+/// already over budget, and the engine's `resolve_canvas_size` scales BOTH edges by
+/// `sqrt(max_pixels / area)` once the area exceeds this. Mirrored here for the same reason
+/// [`MINIMAX_H3_CANVAS_SHORT_EDGE`] is — as a downward bound on what is materialized, so a
+/// cinemascope source is not decoded to a PNG sequence the engine is about to shrink anyway.
+/// Tied to the pinned engine's own const by
+/// `minimax_h3_reference_clip_filter_never_pads_or_upscales`.
+#[cfg(target_os = "macos")]
+pub(super) const MINIMAX_H3_CANVAS_MAX_PIXELS: u32 = MINIMAX_H3_CANVAS_SHORT_EDGE * 1344;
+
 /// The widest aspect ratio, either way up, that MiniMax-H3 reads a reference at —
 /// `keyframe::MAX_ASPECT_RATIO`, i.e. 1:4 to 4:1. Checked per decoded clip so a panoramic source is
 /// refused from the asset instead of from inside `Ref2VaReferences::new` after the decode has
@@ -794,6 +807,13 @@ pub(super) const MINIMAX_H3_MAX_REFERENCE_ASPECT: f64 = 4.0;
 /// * it caps the SHORT edge (whichever that is) at `short_edge`, where
 ///   `force_original_aspect_ratio=decrease` caps the LONG one — which would hand the engine a clip
 ///   below its canvas for it to upscale back, losing detail for nothing;
+/// * it ALSO caps the area at `max_pixels`, because the short edge alone does not bound the
+///   picture. Both bounds are the engine's, and they are combined the way its own
+///   `resolve_canvas_size` combines them: lay the short edge at `short_edge`, then, if the implied
+///   area is over budget, scale by `sqrt(max_pixels / area)`. Solved for the constrained axis that
+///   is `min(short, sqrt(max_pixels · short_side / long_side))` — the same number, spelled as one
+///   expression. Past 1.75:1 (`max_pixels / short_edge²`) the area term is the binding one, so a
+///   2.39:1 source is no longer materialized ~36% over the canvas the engine will refit it to;
 /// * it never scales UP (`min(…)`), because the engine's own canvas resolver upscales a small
 ///   source anyway and doing it here first would only interpose a second resampler;
 /// * it pads NOTHING. See fact 1: a reference does not bind the canvas, so letterbox bars added
@@ -801,11 +821,19 @@ pub(super) const MINIMAX_H3_MAX_REFERENCE_ASPECT: f64 = 4.0;
 ///
 /// `-1` (not `-2`) on the free axis: the output is a PNG sequence with no chroma subsampling to
 /// satisfy, so the aspect ratio is preserved to the nearest whole pixel rather than the nearest
-/// even one. The engine snaps to a 32 multiple regardless.
+/// even one. The engine snaps to a 32 multiple regardless — which is also why the `sqrt` result is
+/// left unsnapped here: this is a materialization bound, not a canvas decision.
 #[cfg(target_os = "macos")]
-pub(super) fn minimax_h3_reference_clip_filter(fps: u32, short_edge: u32) -> String {
+pub(super) fn minimax_h3_reference_clip_filter(
+    fps: u32,
+    short_edge: u32,
+    max_pixels: u32,
+) -> String {
+    // Landscape constrains the height, portrait the width; the free axis rides `-1`.
+    let landscape_h = format!("min(min(ih,{short_edge}),sqrt({max_pixels}*ih/iw))");
+    let portrait_w = format!("min(min(iw,{short_edge}),sqrt({max_pixels}*iw/ih))");
     format!(
-        "fps={fps},scale='if(gte(iw,ih),-1,min(iw,{short_edge}))':'if(gte(iw,ih),min(ih,{short_edge}),-1)',format=rgb24"
+        "fps={fps},scale='if(gte(iw,ih),-1,{portrait_w})':'if(gte(iw,ih),{landscape_h},-1)',format=rgb24"
     )
 }
 
@@ -881,6 +909,30 @@ pub(super) fn minimax_h3_validate_reference_clip(
     Ok(())
 }
 
+/// Trim one `sourceClipAssetIds` entry, refusing a blank one before it becomes a path component.
+///
+/// **Defense-in-depth behind the parser, not a reachable payload refusal.** `VideoRequest`'s
+/// `string_list` already trims every entry and DROPS the blank ones, so an HTTP payload cannot
+/// carry a blank id this far — `parses_mv2v_and_ads2v_multi_source_fields` in
+/// `sceneworks-core::video_request` pins that. It is kept because this arm is also reachable from
+/// producers that never touch that parser (a job row replayed from an older schema, a hand-built
+/// `VideoRequest`), where an empty id would otherwise resolve to the project directory itself
+/// rather than to a clip. Split out of [`resolve_minimax_h3_clip_conditioning`] so the refusal is
+/// callable — and therefore testable — without an `ApiClient`, a `Settings` and a `JobSnapshot`.
+#[cfg(target_os = "macos")]
+pub(super) fn minimax_h3_clip_asset_id<'a>(
+    model: &str,
+    asset_id: &'a str,
+) -> WorkerResult<&'a str> {
+    let asset_id = asset_id.trim();
+    if asset_id.is_empty() {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{model}: sourceClipAssetIds must not contain blank ids."
+        )));
+    }
+    Ok(asset_id)
+}
+
 /// Decode `request.source_clip_asset_ids` into ordered [`Conditioning::ReferenceVideo`] entries.
 ///
 /// One ffmpeg pass per clip for the picture, plus one more ONLY when that pass's stderr says the
@@ -912,13 +964,7 @@ pub(super) async fn resolve_minimax_h3_clip_conditioning(
 ) -> WorkerResult<Vec<Conditioning>> {
     let mut conditioning = Vec::with_capacity(request.source_clip_asset_ids.len());
     for (index, asset_id) in request.source_clip_asset_ids.iter().enumerate() {
-        let asset_id = asset_id.trim();
-        if asset_id.is_empty() {
-            return Err(WorkerError::InvalidPayload(format!(
-                "{}: sourceClipAssetIds must not contain blank ids.",
-                request.model
-            )));
-        }
+        let asset_id = minimax_h3_clip_asset_id(&request.model, asset_id)?;
         let clip_path = super::ltx::resolve_clip_media_path(
             settings,
             &request.project_id,
@@ -975,6 +1021,7 @@ async fn minimax_h3_decode_reference_clip(
             minimax_h3_reference_clip_filter(
                 MINIMAX_H3_REFERENCE_CLIP_FPS,
                 MINIMAX_H3_CANVAS_SHORT_EDGE,
+                MINIMAX_H3_CANVAS_MAX_PIXELS,
             ),
             // Never more picture than the engine would keep (fact 3).
             "-frames:v".to_owned(),
@@ -1122,11 +1169,16 @@ pub(super) fn minimax_h3_task(conditioning: &[Conditioning]) -> &'static str {
 ///
 /// **Reference order is semantic, not incidental.** The engine labels references `<Picture i>` /
 /// `<Video k>` / `<Audio j>` in list order and advances one shared rotary clock across them, so
-/// re-ordering the list changes the render. Images, then clips, then audio — because that is the
-/// only order the payload can express (`referenceAssetIds`, `sourceClipAssetIds` and
-/// `referenceAudioAssetIds` are three separate lists with no interleaving), and because it is the
-/// order the engine's own `request_references` walks the variants in. The caller's order WITHIN
-/// each list is preserved exactly.
+/// re-ordering the list changes the render. Images, then clips, then audio — and that grouping is
+/// THIS function's choice, not the engine's. It is the only order the payload can express
+/// (`referenceAssetIds`, `sourceClipAssetIds` and `referenceAudioAssetIds` are three separate lists
+/// with no interleaving), so the worker has to pick one; the engine's `request_references`
+/// (`mlx-gen-minimax-h3/src/model.rs:637` at pin `f17c82544`) then walks the conditioning LIST in
+/// the order it arrives, matching each entry on its variant and pushing it straight onto one
+/// `Vec<Ref2VaReference>`. It does NOT re-group by kind — there is no images-then-clips-then-audio
+/// pass on that side to agree with. So whatever order this builds is the order that is labelled and
+/// rotary-clocked, which is exactly why the grouping is stated here rather than left incidental.
+/// The caller's order WITHIN each list is preserved exactly.
 #[cfg(target_os = "macos")]
 pub(super) fn minimax_h3_conditioning(
     first_frame: Option<Image>,
