@@ -1757,10 +1757,29 @@ fn conditioning_cell(
             // a mode needs, and mapping here only gives the axis a semantic so the pair check can
             // report it as routed-or-not rather than erroring on an axis it cannot classify.
             "referenceAudio" => "multiReference",
-            // The reference-VIDEO axis of the same family: a clip supplied as a reference, which is
-            // what `reference_video_to_video` and `ads2v` consume. Both spell that requirement
-            // `videoClip`, so point the descriptor axis at it for the same reason as above.
-            "referenceVideo" => "videoClip",
+            // The reference-VIDEO axis of the same family, and it maps exactly where its audio
+            // sibling above does — to `multiReference`, i.e. `reference_to_video`.
+            //
+            // 🔴 It read `videoClip` until sc-18650's pre-merge review, on the reasonable-sounding
+            // premise that a clip-shaped reference is what `reference_video_to_video` and `ads2v`
+            // consume. It is not what THIS descriptor's model routes. `minimax_h3_ref`'s only
+            // production mode is `reference_to_video`, whose requirement group is
+            // `["multiReference", "reference"]` — it has no `videoClip` mapping at all — so the
+            // `videoClip` spelling selected six probe modes the model never routes,
+            // `native_video_route_descriptors` came back empty on every one of them, and the cell
+            // fell to false with no error: `modes` was non-empty, so the "no production mode
+            // semantic" guard below never fired. The committed matrix therefore recorded
+            // `minimax_h3_ref/conditioningShape/referenceVideo` as unsupported on both backends
+            // while the manifest declares `maxSourceClipAssets: 3` and the worker decodes those
+            // clips into `Conditioning::ReferenceVideo`.
+            //
+            // The axis is the third modality of ONE ordered reference bundle (`Ref2VaReferences`
+            // carries images, clips and soundtracks together), which is why all three members —
+            // `reference`, `referenceAudio`, `referenceVideo` — resolve to the same production
+            // requirement. The engine deliberately does NOT advertise `videoClip`: it has no
+            // in-context clip mechanism, and `minimax_h3.rs` refuses to downgrade
+            // `ReferenceVideo` to `Conditioning::VideoClip` for exactly that reason.
+            "referenceVideo" => "multiReference",
             other => other,
         };
         let modes: Vec<&str> = VIDEO_UI_MODES
@@ -4850,7 +4869,7 @@ mod tests {
             ),
             (
                 "epic-17137-minimax-h3-ref-conditioning-sequencing",
-                ("epic-17137", "conditioning", 2usize),
+                ("epic-17137", "conditioning", 3usize),
             ),
             (
                 "epic-17137-minimax-h3-ref-precision-sequencing",

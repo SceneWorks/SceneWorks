@@ -5,7 +5,7 @@
     "modelCount": 94,
     "importedFamilyCount": 3,
     "cellCount": 916,
-    "mlxOnlyCellCount": 80,
+    "mlxOnlyCellCount": 81,
     "candleOnlyCellCount": 42,
     "exceptionCount": 19
   },
@@ -21,7 +21,7 @@
     "descriptorMlxFacts": "574a5649db72bbb703721f693b545fedb3605be03bf39a7ce9fce18ede91189b",
     "descriptorMlxRuntime": "622131e3dc38f97fdcda9d7d64e2ae748b64cd86f3f53a8e4a57bd39c46ac972",
     "descriptorPreviewFacts": "c6a50113109ce6cc7437bbb16f2f138d30f3189121ab32f0f6ac85ee36f653f5",
-    "exceptionRegister": "5fe90734c4be671a06b4333761b1bf5e7b6e449960b8505d415406a584646dec",
+    "exceptionRegister": "a3919c61135c7e1eeccd2177694a76ef3aaad466ae90878b74fb28f6d620d88d",
     "manifest": "2b5c6f6925297454359499121646717c5f72bf723d1f6d7adfac579a9ba886a8",
     "modelImportDefaults": "ef7fb7fccc493b1bf9be2214f75b028ff1384a119d0b4a6eda630dab05761c99",
     "routerCandle": "307f4fe042e3e2ad0c09be1995d5a5cc5aecd08b1c3815e3ec4a3d7f2659c58d",
@@ -59,7 +59,7 @@
     "workerUtilityDispatch": "017142f8ac644fa2d275e35b94827af4f60644340956dfb84576d7e940737f0d",
     "workerVideoBernini": "352991ae26c8d842c9af1c37e9c6d3261ae6554debe5089744ef8e7972fd15ed",
     "workerVideoCandle": "4527f7c7f42bac9d65daa2004f993657391ec3cdc872bac0bc9e2c012c93e949",
-    "workerVideoDispatch": "13b1ac83da28453d90dcc560a2e759313ccee1ac236b3fe3d0c8f6dcfe6ea504",
+    "workerVideoDispatch": "ee8f351bde3163b092d37e3ad2c462e6960b5631c00ea02526e923d62d45fb03",
     "workerVideoKreaRealtime": "590b65273e5d87c350feec0f677ee05295aa05835cac12348e2f5520fc1724e7",
     "workerVideoLtx": "974d5c3f5a4ef2a3316d8a39aef830a4482662bd7cd6920305a7a13cc7a147b7",
     "workerVideoMochi": "5a0868693b1cbf1c08a6acfc5151c3e3542d812b7cec6f73bfa53d701883dcbc",
@@ -3659,8 +3659,13 @@
         },
         {
           "capability": "referenceVideo",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "epic-8588",
+            "url": "https://app.shortcut.com/trefry/epic/8588",
+            "authority": "epic-8588"
+          }
         }
       ],
       "userAdapters": [
@@ -7668,7 +7673,8 @@
       "revisitCondition": "Revisit when a Candle MiniMax-H3 video lane ships and the generated matrix, routing tests and runtime evidence prove each corresponding Candle cell.",
       "cells": [
         "models/minimax_h3_ref/conditioningShape/reference",
-        "models/minimax_h3_ref/conditioningShape/referenceAudio"
+        "models/minimax_h3_ref/conditioningShape/referenceAudio",
+        "models/minimax_h3_ref/conditioningShape/referenceVideo"
       ]
     },
     {

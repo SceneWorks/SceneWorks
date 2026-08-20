@@ -562,56 +562,6 @@ fn video_preflight(request: &VideoRequest) -> WorkerResult<()> {
     Ok(())
 }
 
-/// Resolve a video request's `referenceAudioAssetIds` (sc-17160) into the engine conditioning:
-/// one [`gen_core::Conditioning::ReferenceAudio`] per id, in submission order.
-///
-/// The audio sibling of [`bernini::resolve_bernini_conditioning`]'s reference-image handling, and
-/// deliberately built on the SAME two primitives the voice-clone reference uses
-/// ([`ltx::resolve_clip_media_path`] + [`crate::audio_jobs::read_wav_pcm16`]) rather than a second
-/// implementation of either.
-///
-/// **The path handling is the load-bearing part.** An asset id is not a filename: the id resolves
-/// through [`ProjectStore::get_asset`] to a PROJECT-RELATIVE `file.path` in the sidecar, which is
-/// then joined under the project root by `safe_project_path`. Reading the id as a bare name — or
-/// joining the sidecar path without the guard — is the sc-4278 / F-MLXW-14 escape, and the
-/// training-preview class of bug where a relative path was assumed absolute. Going through
-/// `resolve_clip_media_path` inherits both the lookup and the guard.
-///
-/// Ungated (compiled in every feature/target config) for the same reason
-/// `resolve_clip_media_path` is: the body depends only on cross-platform helpers, and the
-/// preflight caller below is itself cross-platform.
-pub(crate) fn resolve_reference_audio_conditioning(
-    settings: &Settings,
-    request: &VideoRequest,
-    project_path: &Path,
-) -> WorkerResult<Vec<gen_core::Conditioning>> {
-    request
-        .reference_audio_asset_ids
-        .iter()
-        .map(|asset_id| {
-            let asset_id = asset_id.trim();
-            if asset_id.is_empty() {
-                return Err(WorkerError::InvalidPayload(
-                    "referenceAudioAssetIds must not contain blank ids".to_owned(),
-                ));
-            }
-            let path = ltx::resolve_clip_media_path(
-                settings,
-                &request.project_id,
-                asset_id,
-                project_path,
-            )?;
-            Ok(gen_core::Conditioning::ReferenceAudio {
-                audio: crate::audio_jobs::read_wav_pcm16(&path)?,
-                // No per-reference strength knob today: the request carries one flat list, and
-                // inventing a weight the caller cannot set would be a knob that silently does
-                // nothing. `None` is what the voice-clone reference passes for the same reason.
-                strength: None,
-            })
-        })
-        .collect()
-}
-
 /// Dispatch handler for `JobType::VideoGenerate`: generate, encode, and stream a
 /// single video asset through the Rust GPU worker.
 pub(crate) async fn run_video_generate_job(
@@ -628,16 +578,17 @@ pub(crate) async fn run_video_generate_job(
     // `resolve_voice_clone_plan`, which resolves its reference up front so a missing or
     // undecodable clip fails in the first second rather than deep inside a render that has
     // already cost minutes of GPU time. This runs the whole path: project-scoped asset lookup,
-    // the `safe_project_path` guard, the WAV decode, and the `Conditioning::ReferenceAudio`
-    // construction.
+    // the `safe_project_path` guard, the ffmpeg normalization onto the engine's rate, the WAV
+    // decode, and the `Conditioning::ReferenceAudio` construction.
     //
-    // The vector is discarded here because no engine consumes audio references YET — MiniMax-H3
-    // Ref2VA is the first and its generation arm is sc-17149, which calls this same function and
-    // keeps the value. Until then the resolution's product value is the early, honest refusal;
-    // for every already-shipped model the list is empty (their `limits.maxReferenceAudioAssets`
-    // defaults to 0, so `video_preflight` above has already refused a non-empty one) and this is
-    // a no-op that touches no disk.
-    resolve_reference_audio_conditioning(settings, &request, &project_path)?;
+    // The vector is discarded here because the MiniMax-H3 arm re-resolves it inside
+    // `resolve_minimax_h3_conditioning`, which is where the value is actually consumed. For every
+    // already-shipped model the list is empty (their `limits.maxReferenceAudioAssets` defaults to
+    // 0, so `video_preflight` above has already refused a non-empty one) and this is a no-op that
+    // touches no disk and spawns no process. Only a Ref2VA payload pays for it twice, and one
+    // ffmpeg transcode of a reference clip is milliseconds against a render measured in minutes —
+    // which is the trade the early refusal is worth.
+    resolve_reference_audio_conditioning(api, settings, job, &request, &project_path).await?;
     let plan = VideoPlan::new(&request, &project_path);
     if let Some(parent) = plan.media_path.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -2060,6 +2011,13 @@ fn video_progress(
     }
 }
 
+// The shared standalone-audio-reference resolver (sc-17160 / sc-18650). Not an engine family: it is
+// cross-model and cross-platform. It is a module of its own so the shared parent does not re-absorb
+// a self-contained media pipeline — the property
+// `video_jobs_remains_split_into_real_engine_modules` bounds, and which sc-18650's ffmpeg
+// normalization would otherwise have pushed past its line budget.
+pub(crate) mod reference_audio;
+pub(crate) use reference_audio::resolve_reference_audio_conditioning;
 pub(crate) mod seedvr2;
 pub(crate) mod wan;
 #[cfg(target_os = "macos")]

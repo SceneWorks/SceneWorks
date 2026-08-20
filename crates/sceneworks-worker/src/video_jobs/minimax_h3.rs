@@ -749,8 +749,14 @@ pub(super) const MINIMAX_H3_CANVAS_SHORT_EDGE: u32 = 768;
 
 /// The audio VAE's rate (`mlx-gen-minimax-h3::audio_config::AUDIO_SAMPLE_RATE`). The engine has no
 /// resampler and rejects anything else at its boundary, so the extraction targets it exactly.
+///
+/// An ALIAS of the ungated [`super::reference_audio::REFERENCE_AUDIO_SAMPLE_RATE`], not a second
+/// literal: a video reference's own soundtrack (extracted here) and a standalone audio reference
+/// (extracted by `super::reference_audio`, which cannot see this macOS-gated module) are checked
+/// against the SAME engine constant, so they can never drift apart.
 #[cfg(target_os = "macos")]
-pub(super) const MINIMAX_H3_AUDIO_SAMPLE_RATE: u32 = 32_000;
+pub(super) const MINIMAX_H3_AUDIO_SAMPLE_RATE: u32 =
+    super::reference_audio::REFERENCE_AUDIO_SAMPLE_RATE;
 
 /// Channels a reference soundtrack is extracted at — stereo, the shape the joint model both emits
 /// and was conditioned on. The engine accepts any positive channel count, so this is a choice
@@ -1227,9 +1233,9 @@ pub(super) fn minimax_h3_conditioning(
 /// this is that consumer, and it deliberately re-uses the function rather than re-implementing the
 /// project-scoped lookup and the `safe_project_path` guard.
 ///
-/// Async since sc-18650: the clip references decode through ffmpeg, and the shared runner that owns
-/// the heartbeat and the cancel poll is async. The still-image and audio halves stay synchronous —
-/// only the clip decode moved.
+/// Async since sc-18650: the clip AND audio references decode through ffmpeg (the audio ones to
+/// satisfy `Ref2VaReferences::check_audio`'s rate gate, fact 5 above), and the shared runner that
+/// owns the heartbeat and the cancel poll is async. Only the still-image half stays synchronous.
 #[cfg(target_os = "macos")]
 pub(super) async fn resolve_minimax_h3_conditioning(
     api: &ApiClient,
@@ -1257,11 +1263,13 @@ pub(super) async fn resolve_minimax_h3_conditioning(
     for asset_id in &request.reference_asset_ids {
         reference_images.push(load(asset_id)?);
     }
-    // The still and audio references are cheap, local reads; the clips are an ffmpeg pass each. So
-    // they are resolved LAST — a payload that names a missing reference image or an undecodable
-    // WAV is refused before a single frame is extracted.
+    // The still references are cheap, local reads and the audio references are one short ffmpeg
+    // transcode each; a clip is a whole PNG sequence. So the clips are resolved LAST — a payload
+    // that names a missing reference image or an undecodable soundtrack is refused before a single
+    // frame is extracted.
     let reference_audio =
-        super::resolve_reference_audio_conditioning(settings, request, project_path)?;
+        super::resolve_reference_audio_conditioning(api, settings, job, request, project_path)
+            .await?;
     let reference_clips =
         resolve_minimax_h3_clip_conditioning(api, settings, job, request, project_path, frames)
             .await?;

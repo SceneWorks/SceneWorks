@@ -36,6 +36,13 @@ const ALLOWED: &[(&str, usize, &str)] = &[
          soundtrack) for a real render, removed by the arm on EVERY exit including the refusals",
     ),
     (
+        "src/video_jobs/reference_audio.rs",
+        1,
+        "production: the per-reference work dir the standalone audio references are normalized \
+         into (sc-18650), removed by the resolver on EVERY exit including the refusals — the same \
+         shape as the reference-clip work dir above",
+    ),
+    (
         "src/snapshot_install.rs",
         1,
         "deliberate: `whisper_smoke_hub_cache`'s default root is a revision-keyed cache that is \

@@ -1213,26 +1213,44 @@ fn video_preflight_refuses_reference_media_past_what_the_model_declares() {
 ///
 /// The negative arms are the ones that pin the guard: an id that does not exist, and a project
 /// path that is not the asset's own, must both fail loudly rather than resolve to something.
-#[test]
-fn resolve_reference_audio_conditioning_resolves_project_relative_asset_paths() {
+///
+/// # The fixture rate is 24 kHz on purpose (sc-18650)
+///
+/// It used to be 32 000, which made the `sample_rate` assertion below a false green: it wrote a
+/// constant to disk and read the same constant back, so it was equally satisfied by a resolver
+/// that resampled and by one that did nothing — which is what the resolver actually did, leaving
+/// `referenceAudioAssetIds` with ZERO reachable success paths, because
+/// `Ref2VaReferences::check_audio` rejects every rate but 32 000 and no shipped SceneWorks producer
+/// emits it (every `audio.sampleRates` in `builtin.models.jsonc` is 22050 / 24000 / 48000).
+///
+/// 24 000 is one of those real producer rates, and the ratio to the engine's 32 000 is exactly 4:3,
+/// so the resampled length is a checkable number rather than "some other number": a passthrough
+/// reds on the rate, and a relabel-the-header cheat reds on the length.
+#[tokio::test]
+async fn resolve_reference_audio_conditioning_resolves_project_relative_asset_paths() {
     let data_dir = tempfile::tempdir().expect("temp dir creates");
     let mut settings = Settings::from_env();
     settings.data_dir = data_dir.path().to_path_buf();
+    let api = ApiClient::new(&settings);
+    let job = reference_audio_job_snapshot();
     let store = ProjectStore::new(settings.data_dir.clone(), "worker");
     let project = store.create_project("sc17160").expect("project creates");
     let project_path = PathBuf::from(&project.path);
 
     // Two distinct clips, so an implementation that resolved one id and cloned it — or reordered
-    // the list — is caught: the sample counts differ.
+    // the list — is caught: the sample counts differ. Long enough (0.25 s / 0.5 s) that a real
+    // resampler has a filter window to work in; a handful of samples is not a signal.
     //
     // Registered through `persist_generated_asset`, the same entry point the Audio Studio lane
-    // writes its clips with. `import_asset` is the WRONG door here — it accepts image and video
-    // uploads only — and using it would have proved the resolution against an asset shape the
-    // audio references never actually have.
+    // writes its clips with — which today is the ONLY door an audio asset comes through, since
+    // `import_asset` accepts image and video uploads only.
+    const SOURCE_RATE: u32 = 24_000;
+    // The engine-boundary rate, read off the resolver's own constant rather than retyped.
+    use super::reference_audio::REFERENCE_AUDIO_SAMPLE_RATE;
     let mut asset_ids = Vec::new();
     for (asset_id, name, samples) in [
-        ("asset_voice", "voice.wav", 4usize),
-        ("asset_music", "music.wav", 6usize),
+        ("asset_voice", "voice.wav", 6_000usize),
+        ("asset_music", "music.wav", 12_000usize),
     ] {
         let media_rel = format!("assets/audio/{name}");
         let media_path = project_path.join(&media_rel);
@@ -1240,8 +1258,11 @@ fn resolve_reference_audio_conditioning_resolves_project_relative_asset_paths() 
             .expect("audio dir creates");
         write_wav_pcm16(
             &AudioTrack {
+                // A DC level rather than silence: ffmpeg's resampler is free to trim leading and
+                // trailing silence-shaped padding, and a constant signal makes the output length a
+                // property of the rate conversion rather than of the content.
                 samples: vec![0.25; samples],
-                sample_rate: 32_000,
+                sample_rate: SOURCE_RATE,
                 channels: 1,
             },
             &media_path,
@@ -1284,31 +1305,15 @@ fn resolve_reference_audio_conditioning_resolves_project_relative_asset_paths() 
         "prompt": "p",
         "referenceAudioAssetIds": asset_ids
     }));
-    let conditioning = resolve_reference_audio_conditioning(&settings, &request, &project_path)
-        .expect("both references resolve");
-    assert_eq!(conditioning.len(), 2);
-    let lengths: Vec<usize> = conditioning
-        .iter()
-        .map(|item| match item {
-            gen_core::Conditioning::ReferenceAudio { audio, strength } => {
-                assert_eq!(*strength, None, "no per-reference strength knob exists yet");
-                assert_eq!(audio.sample_rate, 32_000);
-                audio.samples.len()
-            }
-            other => panic!("expected ReferenceAudio, got {other:?}"),
-        })
-        .collect();
-    assert_eq!(
-        lengths,
-        vec![4, 6],
-        "each id decodes to ITS OWN clip, in submission order"
-    );
+
+    // --- Arms that never reach ffmpeg, so they run on every host ------------------------------
 
     // An empty request resolves to no conditioning and touches no disk — the shape every
     // already-shipped video model takes through this call.
     let bare = noop_request(&project.id);
     assert!(
-        resolve_reference_audio_conditioning(&settings, &bare, &project_path)
+        resolve_reference_audio_conditioning(&api, &settings, &job, &bare, &project_path)
+            .await
             .expect("no references resolves cleanly")
             .is_empty()
     );
@@ -1316,7 +1321,7 @@ fn resolve_reference_audio_conditioning_resolves_project_relative_asset_paths() 
     // An unknown id fails loudly rather than resolving to nothing.
     let missing = request_with_audio(&project.id, &["not-an-asset"]);
     assert!(matches!(
-        resolve_reference_audio_conditioning(&settings, &missing, &project_path),
+        resolve_reference_audio_conditioning(&api, &settings, &job, &missing, &project_path).await,
         Err(WorkerError::InvalidPayload(_))
     ));
 
@@ -1325,9 +1330,99 @@ fn resolve_reference_audio_conditioning_resolves_project_relative_asset_paths() 
     // keeps a sidecar path from reaching outside it (sc-4278 / F-MLXW-14).
     let elsewhere = tempfile::tempdir().expect("temp dir creates");
     assert!(matches!(
-        resolve_reference_audio_conditioning(&settings, &request, elsewhere.path()),
+        resolve_reference_audio_conditioning(&api, &settings, &job, &request, elsewhere.path())
+            .await,
         Err(WorkerError::InvalidPayload(_))
     ));
+
+    // --- The success arm, which is a real ffmpeg transcode -------------------------------------
+
+    if !ffmpeg_reachable() {
+        eprintln!(
+            "skipping the resample half of \
+             resolve_reference_audio_conditioning_resolves_project_relative_asset_paths: \
+             ffmpeg not found"
+        );
+        return;
+    }
+
+    let conditioning =
+        resolve_reference_audio_conditioning(&api, &settings, &job, &request, &project_path)
+            .await
+            .expect("both references resolve");
+    assert_eq!(conditioning.len(), 2);
+    let lengths: Vec<usize> = conditioning
+        .iter()
+        .map(|item| match item {
+            gen_core::Conditioning::ReferenceAudio { audio, strength } => {
+                assert_eq!(*strength, None, "no per-reference strength knob exists yet");
+                // THE contract. The asset on disk is 24 kHz; the engine hard-errors on anything
+                // but this, and ships no resampler to fix it. Passing the header's rate through
+                // is what made this capability unreachable (sc-18650).
+                assert_eq!(
+                    audio.sample_rate, REFERENCE_AUDIO_SAMPLE_RATE,
+                    "the reference must reach the engine at its audio VAE's rate, not the \
+                     asset's {SOURCE_RATE} Hz"
+                );
+                assert_eq!(audio.channels, 1, "the source layout is left alone");
+                audio.samples.len()
+            }
+            other => panic!("expected ReferenceAudio, got {other:?}"),
+        })
+        .collect();
+
+    // A resampler that only rewrote the header would return the SOURCE counts (6 000 / 12 000).
+    // The 4:3 rate ratio means a real conversion returns 8 000 / 16 000, give or take the filter's
+    // own edge handling.
+    for (index, (&measured, source)) in lengths.iter().zip([6_000usize, 12_000]).enumerate() {
+        let expected = source * REFERENCE_AUDIO_SAMPLE_RATE as usize / SOURCE_RATE as usize;
+        let drift = measured.abs_diff(expected);
+        assert!(
+            drift <= 128,
+            "reference {index}: {source} samples @ {SOURCE_RATE} Hz must resample to about \
+             {expected} @ {REFERENCE_AUDIO_SAMPLE_RATE} Hz, got {measured} (drift {drift})"
+        );
+    }
+    assert!(
+        lengths[0] < lengths[1],
+        "each id decodes to ITS OWN clip, in submission order: {lengths:?}"
+    );
+}
+
+/// A [`JobSnapshot`] for the reference-audio resolver tests. The resolver spawns ffmpeg through the
+/// shared runner, which uses the id only to name the scratch directory and to address the
+/// heartbeat/cancel polls — neither of which needs a real job row, because the poll interval never
+/// elapses inside a sub-second transcode.
+fn reference_audio_job_snapshot() -> JobSnapshot {
+    serde_json::from_value(json!({
+        "id": "job-sc17160",
+        "type": "video_generate",
+        "status": "running",
+        "projectId": null,
+        "projectName": null,
+        "payload": { "model": "ref2va_probe" },
+        "result": {},
+        "requestedGpu": "auto",
+        "assignedGpu": null,
+        "workerId": "test-worker",
+        "progress": 0.0,
+        "stage": "queued",
+        "message": "queued",
+        "error": null,
+        "etaSeconds": null,
+        "elapsedSeconds": null,
+        "attempts": 1,
+        "sourceJobId": null,
+        "duplicateOfJobId": null,
+        "cancelRequested": false,
+        "createdAt": "2026-08-11T00:00:00Z",
+        "updatedAt": "2026-08-11T00:00:00Z",
+        "startedAt": null,
+        "completedAt": null,
+        "canceledAt": null,
+        "lastHeartbeatAt": null
+    }))
+    .expect("the reference-audio job snapshot deserializes")
 }
 
 /// A [`VideoRequest`] carrying only a project id — the shape every video job that predates
