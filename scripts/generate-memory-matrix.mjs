@@ -2024,8 +2024,9 @@ export function parseOutOfMatrixRung4Families(parsed, { familyGroups } = {}) {
       //                              predicate: an `Implemented/unverified` record whose contract
       //                              does not implement the rung (or the reverse) is a
       //                              contradiction, not a nuance.
-      //   `memoryCharacterization` — the PEAKS claim. `status` and `coveredPixelBound` are DERIVED
-      //                              from `measuredGeometries` by the shared
+      //   `memoryCharacterization` — the PEAKS claim. `status`, `coveredPixelBound` and (on a
+      //                              temporal record) `coveredFrameBound` are DERIVED from
+      //                              `measuredGeometries` by the shared
       //                              `memoryCharacterization()` helper, exactly as the family
       //                              verdict is derived from its stacks above — asserting them
       //                              independently is how a record drifts. A characterization on a
@@ -2052,17 +2053,52 @@ export function parseOutOfMatrixRung4Families(parsed, { familyGroups } = {}) {
           `${at}: memoryCharacterization with a non-empty reason is required — the record must say what is measured and what the terminal campaign still owes (sc-17153)`,
         );
       }
-      const derivedCharacterization = memoryCharacterization(
-        characterization.measuredGeometries ?? [],
-      );
+      // sc-18663. The comparison is on JSON, and the derived side is `sortedUnique`, so ORDER and
+      // duplicates are part of the claim. Say that here rather than let the derivation message below
+      // report two arrays that read as identical — that diagnostic sent a reader looking for a
+      // status bug when the record merely listed its geometries out of order.
+      const measuredGeometries = characterization.measuredGeometries ?? [];
+      if (
+        !Array.isArray(measuredGeometries) ||
+        JSON.stringify(measuredGeometries) !== JSON.stringify(sortedUnique(measuredGeometries))
+      ) {
+        throw new Error(
+          `${at}: measuredGeometries ${JSON.stringify(measuredGeometries)} must be an array that is sorted and duplicate-free — the derivation compares it against sortedUnique(...), so ordering and repeats are part of the claim (sc-18663)`,
+        );
+      }
+      // sc-18663. `memoryCharacterization()` emits a FOURTH key, `coveredFrameBound`, as soon as the
+      // form is temporal — any `WxHxfF` geometry. Projecting only the three image-shaped keys made
+      // the comparison unsatisfiable for every multi-frame record: the derived object always carried
+      // a key the declared one could not, so a video family could not record temporal coverage at
+      // all, which is exactly what epic 17137's terminal campaign has to record.
+      //
+      // The temporal form is INFERRED from the geometries rather than read from a record field, and
+      // that is the whole point of the check: a `declaresTemporalCurve`-style field on the record
+      // would be a SECOND independent claim — settable to `false` to relax the grading — in the one
+      // place whose job is to make the characterization a function of `measuredGeometries` alone. A
+      // published cell can read the flag from the manifest because the manifest's curve is not the
+      // cell's own assertion; an out-of-matrix record has no such external declaration to read.
+      // (Consequence, stated rather than left implicit: a record measured ONLY at single-frame
+      // geometries is graded against two coefficients even for a video family. Measurements can only
+      // ADD the temporal axis, so a real video capture — which always carries frames — is graded
+      // against three.)
+      const derivedCharacterization = memoryCharacterization(measuredGeometries);
       const declaredCharacterization = {
         status: characterization.status,
         measuredGeometries: characterization.measuredGeometries,
         coveredPixelBound: characterization.coveredPixelBound,
+        // Present on both sides or neither: an omitted bound leaves the key out and mismatches the
+        // derived `null`, and a bound smuggled onto a record whose geometries carry no frame axis
+        // adds a key the derived object does not have. Both are the same defect — a bound that does
+        // not follow from the geometries — and both fail below.
+        ...(Object.hasOwn(derivedCharacterization, "coveredFrameBound") ||
+        Object.hasOwn(characterization, "coveredFrameBound")
+          ? { coveredFrameBound: characterization.coveredFrameBound }
+          : {}),
       };
       if (JSON.stringify(declaredCharacterization) !== JSON.stringify(derivedCharacterization)) {
         throw new Error(
-          `${at}: memoryCharacterization ${JSON.stringify(declaredCharacterization)} does not derive from its measuredGeometries (${JSON.stringify(derivedCharacterization)}) — status and coveredPixelBound follow from the geometries, they are not separate claims`,
+          `${at}: memoryCharacterization ${JSON.stringify(declaredCharacterization)} does not derive from its measuredGeometries (${JSON.stringify(derivedCharacterization)}) — status, coveredPixelBound and coveredFrameBound follow from the geometries, they are not separate claims`,
         );
       }
       if (characterization.status !== "unmeasured" && !isImplemented(verdict.state)) {
@@ -2384,6 +2420,14 @@ export function parseRung4Survey(body, { familyGroups, generatorSource } = {}) {
   // verdicts from one parse and topology declarations from another.
   survey.unroutedBackends = unroutedBackends;
   survey.modalityRelationships = modalityRelationships;
+  // sc-18663: ONE computation of the out-of-matrix catalog entries, attached to the parse that
+  // validated the records they come from. Two consumers read it — `buildMatrix` subtracts these
+  // entries from the coordinate universe, and `assertCalibrationPlanTargetsResolvedCoordinates`
+  // exempts plan rows that target them — and a second, independently spelled set is exactly how an
+  // exemption would outlive the subtraction it is the complement of.
+  survey.outOfMatrixCatalogEntries = new Set(
+    Object.values(parsed.outOfMatrixFamilies ?? {}).flatMap((family) => family.catalogEntries ?? []),
+  );
   return survey;
 }
 
@@ -3533,7 +3577,9 @@ function validateMatrix(
     }
   }
   assertCellInventoryMatchesCatalog(matrix.cells, cellInventoryExpectations);
-  assertCalibrationPlanTargetsResolvedCoordinates(calibrationPlan, matrix.cells);
+  assertCalibrationPlanTargetsResolvedCoordinates(calibrationPlan, matrix.cells, {
+    outOfMatrixEntries: rung4Survey.outOfMatrixCatalogEntries,
+  });
   assertTwinCoverage(matrix.models);
   assertVideoOwnership(matrix.models);
   assertUnroutedEntriesAreDeclared(matrix.models);
@@ -3744,10 +3790,33 @@ export function plannedCellIds(calibrationPlan, cells) {
  * So this is not a slim guard. It is the check that should always have existed: a plan entry naming a
  * coordinate the catalog cannot express is a typo, a stale target, or a vocabulary drift, and all
  * three are defects. It throws rather than warns because the failure mode it replaces was silence.
+ *
+ * ## The one exemption, and why it is not a hole (sc-18663)
+ *
+ * `buildMatrix` SUBTRACTS the survey's declared out-of-matrix catalog entries from the coordinate
+ * universe, so those entries resolve to no cell BY CONSTRUCTION. Requiring a plan row for one of
+ * them to match a coordinate is therefore a category error, not a missing-coordinate report: such a
+ * family is validated by its `outOfMatrixFamilies` record — every stack, both claims, on every
+ * generation — instead of by a published cell, and epic 17137's terminal campaign has to be able to
+ * plan captures against MiniMax-H3 before the matrix can carry a verdict for it.
+ *
+ * The exemption reads the SAME set the universe subtraction reads (`survey.outOfMatrixCatalogEntries`,
+ * computed once in `parseRung4Survey`), so the two cannot drift into exempting rows the matrix does
+ * carry. It is keyed on `target.modelId`, the same field the subtraction is keyed on, so it is the
+ * exact complement of that subtraction and nothing wider. An entry naming a family that is in
+ * NEITHER the matrix nor the survey's out-of-matrix set still fails closed, and the day `familyGroup`
+ * learns one of the named entries `parseOutOfMatrixRung4Families` throws and forces the family into
+ * the matrix — at which point its plan rows are held to the coordinate requirement again.
  */
-export function assertCalibrationPlanTargetsResolvedCoordinates(calibrationPlan, cells) {
+export function assertCalibrationPlanTargetsResolvedCoordinates(
+  calibrationPlan,
+  cells,
+  { outOfMatrixEntries = new Set() } = {},
+) {
   const unmatched = calibrationPlan.providers.filter(
-    (entry) => !cells.some((cell) => planEntryTargetsCoordinate(entry, cell)),
+    (entry) =>
+      !outOfMatrixEntries.has(entry.target.modelId) &&
+      !cells.some((cell) => planEntryTargetsCoordinate(entry, cell)),
   );
   if (!unmatched.length) return;
   const detail = unmatched
@@ -4149,11 +4218,10 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
   // escape hatches: `parseOutOfMatrixRung4Families` (run inside `parseRung4Survey` above) validates
   // every one on every generation and throws the day `familyGroup` learns one of the named entries,
   // which is what forces the family INTO this universe when the epic promotes it.
-  const outOfMatrixEntries = new Set(
-    Object.values(JSON.parse(bodies.rung4Survey).outOfMatrixFamilies ?? {}).flatMap(
-      (family) => family.catalogEntries ?? [],
-    ),
-  );
+  // sc-18663: read from the parse above rather than re-derived from a second `JSON.parse` of the
+  // same body. The calibration-plan exemption reads the same set, and two spellings of it would let
+  // an exemption survive a subtraction being narrowed (or the reverse).
+  const outOfMatrixEntries = rung4Survey.outOfMatrixCatalogEntries;
   const entries = manifest.models.filter(
     (model) => MATRIX_MODALITIES.has(model.type) && !outOfMatrixEntries.has(model.id),
   );
@@ -4524,37 +4592,56 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
   // Report-only side channel: the enumeration is deliberately absent from the checked-in document, so
   // `report-memory-contract-reconciliation.mjs` collects it here instead of reassembling the inputs.
   onReconciliation?.(memoryContractReconciliation);
-  const calibrationRuns = calibrationBundle.records.map((record) => {
-    const cell = cells.find(
-      (candidate) =>
-        candidate.modelId === record.target.modelId &&
-        candidate.resolvedRoute === record.target.provider &&
-        candidate.backend === record.backend &&
-        candidate.tier === record.target.tier &&
-        candidate.mode === record.target.mode &&
-        candidate.overlay === matrixOverlayFor(record.target.overlay) &&
-        candidate.rung === record.strategy.rung,
-    );
-    if (!cell) throw new Error(`${record.id}: calibration record does not map to a matrix cell`);
-    const modality = manifestById.get(record.target.modelId)?.type ?? null;
-    return {
-      cellId: cell.id,
-      binding: calibrationBinding(record, cell, {
-        exactPlanEntries: exactPlanEntriesForRecord(calibrationPlan, record),
-        modality,
-      }),
-      semantics: cell.evidence.currentEnvironmentVerification.some(
-        (evidence) => evidence.source === `docs/generated/memory-calibration-evidence.json#${record.id}`,
-      )
-        ? "current"
-        : evidenceSemantics(record, {
-            sceneWorks: sceneWorksRevision,
-            inference: pin,
-            inferenceClosureDigests: closureDigestsByProvider,
-          }),
-      record,
-    };
-  });
+  // sc-18663: the SAME category error as the calibration-plan guard, one step later. An out-of-matrix
+  // family's catalog entries are subtracted from the universe above, so its receipts can never find a
+  // cell — and demanding one turned the campaign's first MiniMax-H3 record into a generation failure.
+  // Those numbers are carried by the family's `outOfMatrixFamilies.memoryCharacterization`, which is
+  // DERIVED from its `measuredGeometries` and validated on every generation, so nothing goes
+  // unrecorded by being unbound here.
+  //
+  // Keyed on the SAME set the subtraction uses (`survey.outOfMatrixCatalogEntries`) and on the
+  // record's own `target.modelId`, so the skip is the exact complement of the subtraction and cannot
+  // outlive it: the day `familyGroup` learns one of those entries the survey record is refused, the
+  // family joins the universe, and its records bind here like any other. A record naming a family in
+  // NEITHER set still throws below — this narrows the requirement, it does not remove it.
+  //
+  // One consequence, stated rather than left to be discovered: `summary.calibrationRuns` counts the
+  // BUNDLE, so once an out-of-matrix receipt exists it exceeds `matrix.calibrationRuns.length` by
+  // exactly the skipped rows. That is the honest pair — how many receipts exist, and how many bound
+  // to a published coordinate — not a discrepancy.
+  const calibrationRuns = calibrationBundle.records
+    .filter((record) => !outOfMatrixEntries.has(record.target.modelId))
+    .map((record) => {
+      const cell = cells.find(
+        (candidate) =>
+          candidate.modelId === record.target.modelId &&
+          candidate.resolvedRoute === record.target.provider &&
+          candidate.backend === record.backend &&
+          candidate.tier === record.target.tier &&
+          candidate.mode === record.target.mode &&
+          candidate.overlay === matrixOverlayFor(record.target.overlay) &&
+          candidate.rung === record.strategy.rung,
+      );
+      if (!cell) throw new Error(`${record.id}: calibration record does not map to a matrix cell`);
+      const modality = manifestById.get(record.target.modelId)?.type ?? null;
+      return {
+        cellId: cell.id,
+        binding: calibrationBinding(record, cell, {
+          exactPlanEntries: exactPlanEntriesForRecord(calibrationPlan, record),
+          modality,
+        }),
+        semantics: cell.evidence.currentEnvironmentVerification.some(
+          (evidence) => evidence.source === `docs/generated/memory-calibration-evidence.json#${record.id}`,
+        )
+          ? "current"
+          : evidenceSemantics(record, {
+              sceneWorks: sceneWorksRevision,
+              inference: pin,
+              inferenceClosureDigests: closureDigestsByProvider,
+            }),
+        record,
+      };
+    });
 
   // Replaced after validation with the PUBLISHED cells only (sc-18099). Built over the full set here
   // so the document shape below is unchanged and `validateMatrix` still sees the full inventory.

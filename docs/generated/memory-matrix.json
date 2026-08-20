@@ -1,7 +1,7 @@
 {
   "schemaVersion": 8,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:9ebce0ec7b668ad11e343b70dec38caa241b1b92cd9490b03d37aafbe1dc901e",
+    "sceneWorksRevision": "source-tree:2a56454eb8c301d84cf3b317d1b1e222a50bfc4e072e52355e301f92c6a3bace",
     "inferenceRevision": "f17c82544558666f8d843b4e344e3efa0fd08ed7",
     "sources": {
       "manifest": {
@@ -82,11 +82,11 @@
       },
       "inferenceClosures": {
         "path": "config/inference-provider-closures.json",
-        "sha256": "dbc29660a2284ed32382c910163c1cd80e6cf5f844bf12a3f84d7119b5cc860c"
+        "sha256": "0a4ac30c8212eb97ef257d78c6823e4a7fdb2d1a15cd9deffae9283454e5f5ba"
       },
       "rung4Survey": {
         "path": "config/rung4-applicability-survey.json",
-        "sha256": "9c62adff3151ba3338d8120d502adc0416d8edd0edef5e99a97d9707f313305d"
+        "sha256": "180b8c9c1f16ad2e1ec13583bca17f03039df972be68c775084a6302bbe8b47c"
       },
       "rung4ContractPrerequisites": {
         "path": "config/rung4-contract-prerequisites.json",
