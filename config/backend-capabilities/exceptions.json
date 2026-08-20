@@ -20,6 +20,10 @@
     {
       "name": "Michael Trefry",
       "authority": "epic-17137"
+    },
+    {
+      "name": "Michael Trefry",
+      "authority": "epic-18803"
     }
   ],
   "records": [
@@ -221,6 +225,71 @@
       "cells": [
         "models/minimax_h3/userAdapters/lora",
         "models/minimax_h3/userAdapters/lokr"
+      ]
+    },
+    {
+      "id": "epic-18803-eros-candle-operation-withdrawal",
+      "category": "operation",
+      "decisionType": "product_decision",
+      "evidence": "SC-18902 exact-head Candle/CUDA run 31766800005 completed the shipped Eros render, but artifact 9207109616 showed unresolved noise, no prompt subject, and no coherent motion. Michael Trefry approved withdrawing the Eros Candle product route under epic-18803; the reviewed removal merged in SceneWorks PR #2312.",
+      "approver": "Michael Trefry",
+      "authority": "epic-18803",
+      "approvedDate": "2026-08-14",
+      "userFacingBehavior": "Eros remains available on MLX; its unsupported Candle operation controls are hidden or disabled with an explanation, and direct Candle requests fail closed.",
+      "revisitCondition": "Revisit only after a complete Candle-native Eros distillation recipe passes exact-head CUDA runtime evidence, generated matrix verification, and routing tests for every named operation.",
+      "cells": [
+        "models/ltx_2_3_eros/operationAndMode/extend_clip",
+        "models/ltx_2_3_eros/operationAndMode/first_last_frame",
+        "models/ltx_2_3_eros/operationAndMode/image_to_video",
+        "models/ltx_2_3_eros/operationAndMode/replace_person",
+        "models/ltx_2_3_eros/operationAndMode/text_to_video",
+        "models/ltx_2_3_eros/operationAndMode/video_bridge"
+      ]
+    },
+    {
+      "id": "epic-18803-eros-candle-conditioning-withdrawal",
+      "category": "conditioning",
+      "decisionType": "product_decision",
+      "evidence": "SC-18902 exact-head Candle/CUDA run 31766800005 completed the shipped Eros render, but artifact 9207109616 showed unresolved noise, no prompt subject, and no coherent motion. Michael Trefry approved withdrawing the Eros Candle product route under epic-18803; the reviewed removal merged in SceneWorks PR #2312.",
+      "approver": "Michael Trefry",
+      "authority": "epic-18803",
+      "approvedDate": "2026-08-14",
+      "userFacingBehavior": "Eros remains available on MLX; its unsupported Candle conditioning controls are hidden or disabled with an explanation, and direct Candle requests fail closed.",
+      "revisitCondition": "Revisit only after a complete Candle-native Eros distillation recipe passes exact-head CUDA runtime evidence, generated matrix verification, and routing tests for every named conditioning shape.",
+      "cells": [
+        "models/ltx_2_3_eros/conditioningShape/controlClip",
+        "models/ltx_2_3_eros/conditioningShape/keyframe",
+        "models/ltx_2_3_eros/conditioningShape/reference",
+        "models/ltx_2_3_eros/conditioningShape/videoClip"
+      ]
+    },
+    {
+      "id": "epic-18803-eros-candle-adapter-withdrawal",
+      "category": "adapter",
+      "decisionType": "product_decision",
+      "evidence": "SC-18902 exact-head Candle/CUDA run 31766800005 completed the shipped Eros render, but artifact 9207109616 showed unresolved noise, no prompt subject, and no coherent motion. Michael Trefry approved withdrawing the Eros Candle product route under epic-18803; the reviewed removal merged in SceneWorks PR #2312.",
+      "approver": "Michael Trefry",
+      "authority": "epic-18803",
+      "approvedDate": "2026-08-14",
+      "userFacingBehavior": "Eros remains available on MLX; its unsupported Candle adapter controls are hidden or disabled with an explanation, and direct Candle requests fail closed.",
+      "revisitCondition": "Revisit only after a complete Candle-native Eros distillation recipe passes exact-head CUDA runtime evidence, generated matrix verification, and routing tests for every named adapter type.",
+      "cells": [
+        "models/ltx_2_3_eros/userAdapters/lora",
+        "models/ltx_2_3_eros/userAdapters/lokr"
+      ]
+    },
+    {
+      "id": "epic-18803-eros-candle-precision-withdrawal",
+      "category": "precision",
+      "decisionType": "product_decision",
+      "evidence": "SC-18902 exact-head Candle/CUDA run 31766800005 completed the shipped Eros render, but artifact 9207109616 showed unresolved noise, no prompt subject, and no coherent motion. Michael Trefry approved withdrawing the Eros Candle product route under epic-18803; the reviewed removal merged in SceneWorks PR #2312.",
+      "approver": "Michael Trefry",
+      "authority": "epic-18803",
+      "approvedDate": "2026-08-14",
+      "userFacingBehavior": "Eros remains available on MLX; its unsupported Candle precision control is hidden or disabled with an explanation, and direct Candle requests fail closed.",
+      "revisitCondition": "Revisit only after a complete Candle-native Eros distillation recipe passes exact-head CUDA runtime evidence, generated matrix verification, and routing tests for the named precision tier.",
+      "cells": [
+        "models/ltx_2_3_eros/precisionTier/bf16"
       ]
     }
   ]

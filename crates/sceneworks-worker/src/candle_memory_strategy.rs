@@ -36,6 +36,7 @@ const FLUX2_DEV_REQUEST_EVIDENCE_REVISION: &str = "sc-15833-candle-flux2-dev-req
 const FLUX2_KLEIN_REQUEST_EVIDENCE_REVISION: &str = "sc-15831-candle-flux2-klein-request-scope-v1";
 const MAGE_FLOW_REQUEST_EVIDENCE_REVISION: &str = "sc-15813-candle-mage-flow-request-scope-v1";
 const PULID_FLUX_REQUEST_EVIDENCE_REVISION: &str = "sc-15839-candle-pulid-flux-request-scope-v1";
+const DECLARATION_REQUEST_EVIDENCE_REVISION: &str = "sc-18456-candle-declaration-request-scope-v1";
 const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 
 pub(crate) struct CandleMemoryEvaluation {
@@ -44,7 +45,37 @@ pub(crate) struct CandleMemoryEvaluation {
     pub predicted_peak_gb: f64,
 }
 
-fn numeric_tier(tier: &str) -> Option<MemoryNumericTier> {
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn declared_component_floors(engine_id: &str) -> &'static [gen_core::ComponentPrecisionFloor] {
+    crate::inference_runtime::media_descriptor(engine_id)
+        .map(|descriptor| descriptor.capabilities.component_precision_floors)
+        .unwrap_or(&[])
+}
+
+#[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
+fn declared_component_floors(_: &str) -> &'static [gen_core::ComponentPrecisionFloor] {
+    &[]
+}
+
+fn active_component_floors(
+    engine_id: &str,
+    selected: Option<Quant>,
+) -> &'static [gen_core::ComponentPrecisionFloor] {
+    let declared = declared_component_floors(engine_id);
+    match selected {
+        Some(selected)
+            if !declared.is_empty() && declared.iter().all(|floor| floor.applies_to(selected)) =>
+        {
+            declared
+        }
+        _ => &[],
+    }
+}
+
+fn numeric_tier(engine_id: &str, tier: &str) -> Option<MemoryNumericTier> {
     let quant = match tier {
         "q4" => Some(Quant::Q4),
         "q8" => Some(Quant::Q8),
@@ -54,7 +85,7 @@ fn numeric_tier(tier: &str) -> Option<MemoryNumericTier> {
     Some(MemoryNumericTier {
         precision: Precision::Bf16,
         quant,
-        component_precision_floors: &[],
+        component_precision_floors: active_component_floors(engine_id, quant),
     })
 }
 
@@ -95,6 +126,20 @@ fn request_mode(engine_id: &str, mode: &str) -> RequestModeBinding {
         calibration_key,
         scope_key,
     }
+}
+
+fn request_mode_with_provider_override(
+    engine_id: &str,
+    public_mode: &str,
+    provider_mode: Option<&str>,
+) -> RequestModeBinding {
+    let mut binding = request_mode(engine_id, public_mode);
+    if let Some(provider_mode) = provider_mode {
+        let provider_binding = request_mode(engine_id, provider_mode);
+        binding.mode = provider_binding.mode;
+        binding.scope_key = provider_binding.scope_key;
+    }
+    binding
 }
 
 fn strategy(rung: StrategyRung) -> MemoryStrategy {
@@ -366,7 +411,7 @@ fn verified_candidates(
         let evidence_key = MemoryEvidenceKey {
             resolved_route: runtime_provider.to_owned(),
             backend: MemoryBackend::Candle,
-            tier: numeric_tier(tier).expect("validated numeric tier"),
+            tier: numeric_tier(runtime_provider, tier).expect("validated numeric tier"),
             mode: mode.mode.clone(),
             load_shape,
             overlay: (overlay != "none").then(|| overlay.to_owned()),
@@ -395,9 +440,7 @@ fn verified_candidates(
             harness_version: record.harness_version.clone(),
             predicted_peak_bytes: predicted.overall(),
             observed_peak_bytes: match &record.observed_memory {
-                RequiredNullable::Value(observed) => {
-                    Some(observed.overall_device_or_active_bytes())
-                }
+                RequiredNullable::Value(observed) => Some(observed.overall_non_reclaimable_bytes()),
                 RequiredNullable::Null => None,
             },
             parity: if record.quality.maximum_error_threshold == Some(0.0)
@@ -626,11 +669,61 @@ pub(crate) fn evaluate_shared_image(
     has_reference: bool,
     use_pid: bool,
     has_phases: bool,
+    request_has_phases: bool,
     budget: Option<VramBudget>,
     predicted_peak_gb: Option<f64>,
     runtime_overlay_bytes: u64,
     cache_state: MemoryCacheState,
 ) -> WorkerResult<Option<CandleMemoryEvaluation>> {
+    let (contract_override, provider_overlay_override, provider_mode_override) =
+        if spec.load_shape_declaration_result == gen_core::LoadShapeDeclarationResult::Eligible {
+            let mode =
+                crate::memory_route_registry::MemoryRouteMode::from_request(request_mode_value);
+            let Some(contract) = crate::memory_route_registry::declared_candle_selector_contract(
+                engine_id,
+                Some(tier_key),
+                mode,
+                manifest,
+                spec,
+            ) else {
+                return Ok(None);
+            };
+            (Some(contract), None, None)
+        } else {
+            let Some(mode) =
+                crate::memory_route_registry::MemoryRouteMode::from_request(request_mode_value)
+            else {
+                return Ok(None);
+            };
+            match crate::memory_route_registry::declared_candle_request_strategy_contract(
+            engine_id,
+            Some(tier_key),
+            manifest,
+            spec,
+            crate::memory_route_registry::MemoryRouteRequestContext {
+                mode,
+                reference_count: geometry.reference_count,
+                use_pid,
+                has_phases: request_has_phases,
+            },
+        ) {
+            crate::memory_route_registry::DeclaredCandleStrategyContract::NoRelevantDeclaration => {
+                (None, None, None)
+            }
+            crate::memory_route_registry::DeclaredCandleStrategyContract::Applied {
+                contract,
+                provider_overlay,
+                provider_mode,
+            } => (Some(*contract), Some(provider_overlay), Some(provider_mode)),
+            crate::memory_route_registry::DeclaredCandleStrategyContract::Refused => {
+                return Ok(None)
+            }
+        }
+        };
+    let provider_overlay = provider_overlay_override
+        .as_ref()
+        .map(|overlay| overlay.as_deref())
+        .unwrap_or(overlay);
     evaluate_shared_image_inner(
         engine_id,
         model_id,
@@ -640,15 +733,18 @@ pub(crate) fn evaluate_shared_image(
         tier_key,
         request_mode_value,
         overlay,
+        provider_overlay,
         geometry,
         has_reference,
         use_pid,
         has_phases,
+        request_has_phases,
         budget,
         predicted_peak_gb,
         runtime_overlay_bytes,
         cache_state,
-        None,
+        provider_mode_override.as_deref(),
+        contract_override,
         None,
     )
 }
@@ -684,14 +780,17 @@ pub(crate) fn evaluate_shared_bespoke_image(
         tier_key,
         request_mode_value,
         overlay,
+        overlay,
         geometry,
         has_reference,
         use_pid,
+        has_phases,
         has_phases,
         budget,
         predicted_peak_gb,
         runtime_overlay_bytes,
         cache_state,
+        None,
         Some(contract),
         Some(PULID_FLUX_REQUEST_EVIDENCE_REVISION),
     )
@@ -707,40 +806,24 @@ fn evaluate_shared_image_inner(
     tier_key: &str,
     request_mode_value: &str,
     overlay: Option<&str>,
+    provider_overlay: Option<&str>,
     geometry: MemoryGeometry,
     has_reference: bool,
     use_pid: bool,
-    has_phases: bool,
+    worker_multipass: bool,
+    request_has_phases: bool,
     budget: Option<VramBudget>,
     predicted_peak_gb: Option<f64>,
     runtime_overlay_bytes: u64,
     cache_state: MemoryCacheState,
+    provider_mode_override: Option<&str>,
     contract_override: Option<gen_core::MemoryProviderContract>,
     request_evidence_revision_override: Option<&'static str>,
 ) -> WorkerResult<Option<CandleMemoryEvaluation>> {
-    if !matches!(
-        engine_id,
-        "z_image"
-            | "z_image_turbo"
-            | "z_image_control"
-            | "z_image_turbo_control"
-            | "qwen_image"
-            | "qwen_image_edit"
-            | "flux1_schnell"
-            | "flux1_dev"
-            | "flux2_dev"
-            | "flux2_klein_9b"
-            | "mage_flow_base"
-            | "mage_flow"
-            | "mage_flow_turbo"
-            | "mage_flow_edit_base"
-            | "mage_flow_edit"
-            | "mage_flow_edit_turbo"
-    ) && contract_override.is_none()
-    {
-        return Ok(None);
-    }
     let request_evidence_revision = request_evidence_revision_override.unwrap_or(match engine_id {
+        "z_image" | "z_image_turbo" | "z_image_control" | "z_image_turbo_control" => {
+            Z_IMAGE_REQUEST_EVIDENCE_REVISION
+        }
         "qwen_image" | "qwen_image_edit" => QWEN_IMAGE_REQUEST_EVIDENCE_REVISION,
         "flux1_schnell" | "flux1_dev" => FLUX1_REQUEST_EVIDENCE_REVISION,
         "flux2_dev" => FLUX2_DEV_REQUEST_EVIDENCE_REVISION,
@@ -751,16 +834,17 @@ fn evaluate_shared_image_inner(
         | "mage_flow_edit_base"
         | "mage_flow_edit"
         | "mage_flow_edit_turbo" => MAGE_FLOW_REQUEST_EVIDENCE_REVISION,
-        _ => Z_IMAGE_REQUEST_EVIDENCE_REVISION,
+        _ => DECLARATION_REQUEST_EVIDENCE_REVISION,
     });
     // Hires-fix is two independently shaped denoise passes. The generic generation harness still
     // reuses one context for both, so it cannot truthfully carry a request-scoped geometry yet.
     // Keep that surface on its established path until it mints one scope per pass.
-    if has_phases {
+    if worker_multipass {
         return Ok(None);
     }
-    let mode = request_mode(engine_id, request_mode_value);
-    let Some(tier) = numeric_tier(tier_key) else {
+    let mode =
+        request_mode_with_provider_override(engine_id, request_mode_value, provider_mode_override);
+    let Some(tier) = numeric_tier(engine_id, tier_key) else {
         return Ok(None);
     };
     let Some(budget) = budget else {
@@ -796,7 +880,7 @@ fn evaluate_shared_image_inner(
             tier,
             mode: mode.mode.clone(),
             load_shape: contract.load_shape,
-            overlay: overlay.map(str::to_owned),
+            overlay: provider_overlay.map(str::to_owned),
             geometry,
             strategy: MemoryStrategy::Resident,
             engaged_composition: contract.engaged_composition(MemoryStrategy::Resident),
@@ -859,6 +943,13 @@ fn evaluate_shared_image_inner(
     }
     verified = current_verified;
     closure_digests = current_closure_digests;
+    // Packaged bindings are looked up by the public catalog/matrix overlay above. Once admitted,
+    // however, every candidate submitted to the provider selector must carry the exact provider
+    // evidence identity declared by the route. Krea adapters are load identity, not a provider
+    // `MemoryRunContext` overlay, so their public `lora` cell is normalized to `None` here.
+    for candidate in &mut verified {
+        candidate.key.overlay = provider_overlay.map(str::to_owned);
+    }
     // Calibration records describe the certified overlay fixture. User-provided adapters can be
     // larger, so every optimized candidate must reserve the bytes for the actual request before
     // the common selector performs its fit check. The resident estimate already includes these
@@ -891,7 +982,7 @@ fn evaluate_shared_image_inner(
             tier_key,
             tier,
             &mode,
-            overlay,
+            provider_overlay,
             geometry,
             resident.predicted_peak_bytes,
             runtime_overlay_bytes,
@@ -956,7 +1047,7 @@ fn evaluate_shared_image_inner(
             backend: "candle",
             tier,
             mode: &mode.scope_key,
-            overlay,
+            overlay: provider_overlay,
             geometry,
             // sc-17774: one mechanism, same as every other lane. `unwrap_or_default` fails closed.
             expected_closure_digest: &live_closure_digest,
@@ -997,15 +1088,16 @@ fn evaluate_shared_image_inner(
         predicted_peak_gb: selected_evidence.predicted_peak_bytes as f64 / BYTES_PER_GIB,
         context: MemoryRunContext {
             selection,
+            optimization_authority: gen_core::MemoryOptimizationAuthority::Calibrated,
             calibration_abi: selected_evidence.calibration_abi,
             calibration_fingerprint: selected_evidence.calibration_fingerprint.clone(),
             mode: mode.mode,
             load_shape: contract.load_shape,
             has_reference,
             use_pid,
-            has_phases,
+            has_phases: request_has_phases,
             geometry,
-            overlay: overlay.map(str::to_owned),
+            overlay: provider_overlay.map(str::to_owned),
             budget: gen_core::MemoryBudget {
                 total_bytes: to_bytes(budget.total_gb),
                 committed_bytes: to_bytes((budget.total_gb - budget.free_gb).max(0.0)),
@@ -1135,6 +1227,144 @@ mod tests {
     }
 
     #[test]
+    fn declaration_provider_mode_keeps_the_public_matrix_coordinate() {
+        let raw_reference = request_mode_with_provider_override(
+            "krea_2_raw",
+            "text_to_image",
+            Some("image_to_image"),
+        );
+        assert_eq!(raw_reference.mode, MemoryMode::ImageToImage);
+        assert_eq!(raw_reference.scope_key, "image_to_image");
+        assert_eq!(raw_reference.calibration_key, "text_to_image");
+
+        let ordinary = request_mode_with_provider_override(
+            "krea_2_raw",
+            "text_to_image",
+            Some("text_to_image"),
+        );
+        assert_eq!(ordinary.mode, MemoryMode::TextToImage);
+        assert_eq!(ordinary.scope_key, "text_to_image");
+        assert_eq!(ordinary.calibration_key, "text_to_image");
+    }
+
+    #[test]
+    fn declaration_provider_overlay_binds_staged_selection_and_request_context() {
+        let mut contract = gen_core::MemoryProviderContract::compatibility_default(
+            "krea_2_edit",
+            gen_core::MemoryBackendRealization::CandleCuda {
+                device_residency: true,
+                host_backed_weights: true,
+                host_to_device_block_materialization: true,
+                block_materialization: gen_core::MemoryWindowMaterialization::DeviceFormatTransfer,
+            },
+        );
+        for capability in &mut contract.strategies {
+            capability.support = if matches!(
+                capability.strategy,
+                MemoryStrategy::Resident | MemoryStrategy::StagedResidency
+            ) {
+                gen_core::MemoryStrategySupport::Implemented
+            } else {
+                gen_core::MemoryStrategySupport::Missing
+            };
+        }
+        // Declaring StagedResidency Implemented is not free: gen-core's `conformance_errors()`
+        // requires the lifecycle that rung actually needs — the three phases plus synchronized
+        // release of completed ones — because staging IS phase-scoped residency. Without them the
+        // contract is non-conformant, and `select_strategy`'s first gate rejects the WHOLE request
+        // as `Unverified { Invalid }` before any candidate is considered, which reads as "nothing
+        // fit" rather than "the fixture declared a rung it did not equip".
+        contract.lifecycle = gen_core::MemoryLifecycleCapabilities {
+            phases: vec![
+                gen_core::MemoryPhase::Conditioning,
+                gen_core::MemoryPhase::Denoise,
+                gen_core::MemoryPhase::Decode,
+            ],
+            synchronized_phase_release: true,
+            ..contract.lifecycle
+        };
+        assert!(
+            contract.conformance_errors().is_empty(),
+            "the staged fixture must be a shape a real provider could declare: {:?}",
+            contract.conformance_errors()
+        );
+        // `sequentialPeakGb` is read PER TIER by `vram_gate::predicted_sequential_peak_gb`
+        // (`sequential.get(tier_key)`), so a bare scalar looks up as `None` and the staged floor
+        // silently falls back to the RESIDENT peak — which can never fit where resident does not,
+        // making this test's premise unsatisfiable by construction. Same map shape the sibling
+        // `eligible_lens_selector_contract_...` fixture uses.
+        const STAGED_ROW_GB: f64 = 2.5;
+        const RESIDENT_PEAK_GB: f64 = 16.0;
+        // `evaluate_shared_image_inner` hands the selector a fixed 2 GiB reserved headroom, and
+        // `Budget::effective_gb` subtracts it, so the staged floor competes against
+        // `free_gb - SELECTOR_RESERVE_GB`.
+        const SELECTOR_RESERVE_GB: f64 = 2.0;
+        let manifest = json!({ "candle": { "sequentialPeakGb": { "q4": STAGED_ROW_GB } } })
+            .as_object()
+            .expect("manifest object")
+            .clone();
+        // Derived through the production formula rather than guessed: the staged row is padded by
+        // the allocator reserve and then widened by the candle estimate margin before the fit check.
+        // The previous literals (4.0 row, 8.0 free) missed by 0.24 GiB even with the map shape, and
+        // a margin re-derivation would silently move the window again.
+        let staged_floor_gb = STAGED_ROW_GB + crate::vram_gate::HEADROOM_GB;
+        let widened_staged_gb =
+            staged_floor_gb * (1.0 + crate::ladder_margin_policy::CANDLE_ESTIMATE_MARGIN);
+        let free_gb = widened_staged_gb + SELECTOR_RESERVE_GB + 0.3;
+        assert!(
+            free_gb - SELECTOR_RESERVE_GB < RESIDENT_PEAK_GB,
+            "the budget must stay below the resident estimate, or 'staged fits where resident does \
+             not' proves nothing"
+        );
+        let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("krea-q4")));
+        let evaluation = evaluate_shared_image_inner(
+            "krea_2_edit",
+            "krea_2_raw",
+            &spec,
+            true,
+            &manifest,
+            "q4",
+            "edit_image",
+            Some("lora"),
+            None,
+            MemoryGeometry {
+                width: 1024,
+                height: 1024,
+                batch: 1,
+                frames: 1,
+                reference_count: 1,
+            },
+            true,
+            false,
+            false,
+            false,
+            Some(VramBudget {
+                free_gb,
+                total_gb: 32.0,
+            }),
+            Some(RESIDENT_PEAK_GB),
+            0,
+            MemoryCacheState::Cold,
+            Some("edit_image"),
+            Some(contract),
+            None,
+        )
+        .expect("selector evaluation")
+        .expect("staged estimate fits where resident does not");
+        assert_eq!(
+            evaluation.context.selection.strategy,
+            MemoryStrategy::StagedResidency
+        );
+        assert_eq!(evaluation.context.overlay, None);
+        assert!(
+            evaluation
+                .memory
+                .expect("staged selection configures generation memory")
+                .stage_residency
+        );
+    }
+
+    #[test]
     fn mage_routes_preserve_text_to_image_and_edit_scope_keys() {
         for engine_id in ["mage_flow_base", "mage_flow", "mage_flow_turbo"] {
             let binding = request_mode(engine_id, "image_generation");
@@ -1152,6 +1382,71 @@ mod tests {
             assert_eq!(binding.mode, MemoryMode::Edit, "engine={engine_id}");
             assert_eq!(binding.calibration_key, "edit_image");
             assert_eq!(binding.scope_key, "edit");
+        }
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn mage_numeric_tiers_bind_only_the_active_q4_precision_floors() {
+        for engine_id in [
+            "mage_flow_base",
+            "mage_flow",
+            "mage_flow_turbo",
+            "mage_flow_edit_base",
+            "mage_flow_edit",
+            "mage_flow_edit_turbo",
+        ] {
+            let declared = crate::inference_runtime::media_descriptor(engine_id)
+                .unwrap_or_else(|| panic!("missing registered Mage descriptor {engine_id}"))
+                .capabilities
+                .component_precision_floors;
+            assert!(!declared.is_empty(), "engine={engine_id}");
+            assert!(
+                declared.iter().all(|floor| floor.applies_to(Quant::Q4)),
+                "engine={engine_id}"
+            );
+            assert_eq!(
+                numeric_tier(engine_id, "q4")
+                    .expect("q4 tier")
+                    .component_precision_floors,
+                declared,
+                "engine={engine_id}"
+            );
+            for tier in ["q8", "bf16"] {
+                assert!(
+                    numeric_tier(engine_id, tier)
+                        .unwrap_or_else(|| panic!("missing {tier} tier"))
+                        .component_precision_floors
+                        .is_empty(),
+                    "engine={engine_id} tier={tier}"
+                );
+            }
+        }
+
+        for engine_id in [
+            "z_image",
+            "z_image_turbo",
+            "z_image_control",
+            "z_image_turbo_control",
+            "qwen_image",
+            "qwen_image_edit",
+            "flux1_schnell",
+            "flux1_dev",
+            "flux2_dev",
+            "flux2_klein_9b",
+        ] {
+            for tier in ["q4", "q8", "bf16"] {
+                assert!(
+                    numeric_tier(engine_id, tier)
+                        .unwrap_or_else(|| panic!("missing {tier} tier"))
+                        .component_precision_floors
+                        .is_empty(),
+                    "engine={engine_id} tier={tier}"
+                );
+            }
         }
     }
 
@@ -1505,6 +1800,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 Some(VramBudget {
                     free_gb,
                     total_gb: 96.0,
@@ -1576,6 +1872,7 @@ mod tests {
                     frames: 1,
                     reference_count: 0,
                 },
+                false,
                 false,
                 false,
                 false,
@@ -1735,6 +2032,74 @@ mod tests {
         contract
     }
 
+    #[test]
+    fn eligible_lens_selector_contract_can_select_sequential_without_mutating_the_load_spec() {
+        let manifest = json!({
+            "candle": {
+                "vramGbByTier": { "q4": 6.0 },
+                "sequentialPeakGb": { "q4": 2.5 }
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("missing-lens-q4")))
+            .with_quant(Quant::Q4)
+            .with_resolved_route("lens")
+            .with_eligible_load_shape_declaration();
+        let mut contract = composition_probe_contract(true, true);
+        contract.provider_id = "lens".to_owned();
+        let evaluation = evaluate_shared_image_inner(
+            "lens",
+            "lens",
+            &spec,
+            true,
+            &manifest,
+            "q4",
+            "text_to_image",
+            None,
+            None,
+            MemoryGeometry {
+                width: 1024,
+                height: 1024,
+                batch: 1,
+                frames: 1,
+                reference_count: 0,
+            },
+            false,
+            false,
+            false,
+            false,
+            Some(VramBudget {
+                free_gb: 7.0,
+                total_gb: 96.0,
+            }),
+            Some(8.0),
+            0,
+            MemoryCacheState::Cold,
+            None,
+            Some(contract),
+            None,
+        )
+        .expect("weights-free Lens selector")
+        .expect("the staged estimate fits while resident does not");
+        assert_ne!(
+            evaluation.context.selection.strategy,
+            MemoryStrategy::Resident
+        );
+        assert!(
+            evaluation
+                .memory
+                .expect("optimized selection carries request memory")
+                .stage_residency
+        );
+        assert_eq!(
+            spec.load_shape_declaration_result,
+            gen_core::LoadShapeDeclarationResult::Eligible
+        );
+        assert_eq!(spec.load_shape, gen_core::LoadShape::EagerMaterialization);
+    }
+
     /// sc-18253: the staged manifest row prices the staged WORKING SET, so it is only a sound
     /// floor for a composition that actually engages `StagedResidency`. The gen-core engagement
     /// mechanism permits a provider to implement a deep rung whose engaged composition excludes
@@ -1780,7 +2145,7 @@ mod tests {
                 contract,
                 &manifest,
                 "q4",
-                numeric_tier("q4").expect("q4 tier"),
+                numeric_tier("z_image_turbo", "q4").expect("q4 tier"),
                 &request_mode("z_image_turbo", "text_to_image"),
                 None,
                 geometry,
@@ -1956,6 +2321,7 @@ mod tests {
                 true,
                 false,
                 false,
+                false,
                 Some(VramBudget {
                     free_gb,
                     total_gb: 32.0,
@@ -2032,6 +2398,7 @@ mod tests {
             true,
             false,
             false,
+            false,
             Some(VramBudget {
                 free_gb: 32.0,
                 total_gb: 32.0,
@@ -2078,6 +2445,7 @@ mod tests {
             false,
             false,
             true,
+            false,
             Some(VramBudget {
                 free_gb: 32.0,
                 total_gb: 32.0,
@@ -2088,6 +2456,63 @@ mod tests {
         )
         .unwrap();
         assert!(evaluation.is_none());
+
+        // The route MUST be the probe contract's own provider (`z_image_turbo`), the same pairing
+        // the sibling `evaluate_shared_bespoke_image` probe uses. `candidate_exclusion` fails closed
+        // on `request.resolved_route != contract.provider_id` with a structural `Invalid`, so a
+        // mismatched pair excludes every candidate and returns `None` — which would have made the
+        // two `is_none()` assertions below pass for a reason that has nothing to do with the
+        // Hires.fix / phases axes they exist to probe.
+        let evaluate_axes = |worker_multipass: bool, request_has_phases: bool| {
+            evaluate_shared_image_inner(
+                "z_image_turbo",
+                "z_image_turbo",
+                &spec,
+                true,
+                &manifest,
+                "q4",
+                "text_to_image",
+                None,
+                None,
+                MemoryGeometry {
+                    width: 512,
+                    height: 512,
+                    batch: 1,
+                    frames: 1,
+                    reference_count: 0,
+                },
+                false,
+                false,
+                worker_multipass,
+                request_has_phases,
+                Some(VramBudget {
+                    free_gb: 32.0,
+                    total_gb: 32.0,
+                }),
+                Some(8.0),
+                0,
+                MemoryCacheState::Cold,
+                None,
+                Some(composition_probe_contract(true, false)),
+                None,
+            )
+            .expect("request-axis evaluation")
+        };
+        // Control arm first, or the two `is_none()` assertions below prove nothing: this fixture must
+        // actually be selectable when neither axis is set.
+        let plain = evaluate_axes(false, false)
+            .expect("the control arm must reach a selection, or the None assertions are vacuous");
+        assert!(!plain.context.has_phases);
+        assert!(
+            evaluate_axes(true, false).is_none(),
+            "Hires.fix alone must remain outside one-scope declaration authority"
+        );
+        assert!(
+            evaluate_axes(true, true).is_none(),
+            "Hires.fix plus GenerationRequest phases cannot collapse into one scope"
+        );
+        let phases = evaluate_axes(false, true).expect("actual request phases stay selectable");
+        assert!(phases.context.has_phases);
     }
 
     #[test]
@@ -2096,7 +2521,7 @@ mod tests {
             key: MemoryEvidenceKey {
                 resolved_route: "z_image".to_owned(),
                 backend: gen_core::MemoryBackend::Candle,
-                tier: numeric_tier("q4").expect("q4 is a supported numeric tier"),
+                tier: numeric_tier("z_image", "q4").expect("q4 is a supported numeric tier"),
                 load_shape: gen_core::LoadShape::EagerMaterialization,
                 mode: gen_core::MemoryMode::TextToImage,
                 overlay: Some("lora".to_owned()),

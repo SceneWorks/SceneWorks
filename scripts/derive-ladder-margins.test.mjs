@@ -11,6 +11,7 @@ import {
   ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE,
   ESTIMATE_WIDENING_MULTIPLIER,
   MLX_HARD_FLOOR,
+  RESIDUAL_BOUNDED_MAX_OVER_PHASES_EXEMPT_FROM_BINDING_PHASE_PIN,
   VARIANCE_SAFETY_MULTIPLIER,
   analyzeBackend,
   deriveBackendMargins,
@@ -21,6 +22,7 @@ import {
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const RUST_POLICY_PATH = path.join(ROOT, "crates", "sceneworks-worker", "src", "ladder_margin_policy.rs");
 const SCRIPT_POLICY_PATH = path.join(ROOT, "scripts", "derive-ladder-margins.mjs");
+const RUNBOOK_PATH = path.join(ROOT, "docs", "calibration-runbook.md");
 
 /** The JSDoc block that ends immediately above `index` (whitespace-tolerant). */
 function docCommentAbove(source, index) {
@@ -95,24 +97,24 @@ test("derivation corpus facts backing the doc comments still hold", async () => 
   const derived = deriveMargins(await loadEvidenceRecords(ROOT));
 
   assert.ok(derived.mlx.analysis.repeatPairs > 0, "mlx repeat pairs exist");
-  assert.ok(derived.mlx.margins.floorBinds, "mlx floor binds (doc comment says variance term < floor)");
+  assert.equal(derived.mlx.margins.floorBinds, false, "mlx variance now exceeds the hard floor");
   assert.equal(derived.candle.analysis.repeatPairs, 0, "candle has zero repeat pairs (floor is the whole margin)");
   assert.equal(derived.mlx.analysis.intraRecordRepeatMeasurements, 0);
   assert.equal(derived.candle.analysis.intraRecordRepeatMeasurements, 0);
 
   // The 5% MLX floor's citable anchor (MLX_HARD_FLOOR rationale 2): the shipped predictor's
-  // envelope gap really does span 4.76%..5.21% across all mlx records, and the floor never
+  // envelope gap really does span 4.76%..5.58% across all mlx records, and the floor never
   // exceeds the demonstrated headroom. Computed by the script, pinned here — not prose.
   const gap = derived.mlx.analysis.envelopeGap;
   assert.equal(gap.count, derived.mlx.analysis.recordCount, "every mlx record has a predicted overall peak");
   assert.equal((gap.min * 100).toFixed(2), "4.76", "envelope gap lower bound matches the doc comments");
-  assert.equal((gap.max * 100).toFixed(2), "5.21", "envelope gap upper bound matches the doc comments");
+  assert.equal((gap.max * 100).toFixed(2), "5.58", "envelope gap upper bound matches the doc comments");
   assert.ok(MLX_HARD_FLOOR <= gap.max, "mlx floor does not exceed the demonstrated envelope headroom");
 });
 
 // The issue-1 resolution (adversarial review of sc-18094): the non-binding exclusion is sound
 // only for SAME-CELL admission, and the estimate margins do NOT absorb per-phase re-capture
-// variance (max can-bind phase spread 17.1369% > 10% MLX estimate margin). That risk is carried
+// variance (a fully widened 68.55% term > the 50.4073% MLX estimate margin). That risk is carried
 // by a pinned constraint instead: sc-18096/18097 must not admit estimate candidates whose
 // predicted binding phase differs from the measured cell's without per-phase re-derivation.
 // This test asserts the constraint constant exists on BOTH sides (script + Rust), that the Rust
@@ -166,13 +168,76 @@ test("the estimate-admission binding-phase constraint is pinned on both sides an
     );
   }
 
-  // Load-bearing on the committed corpus: the demonstrated per-phase re-capture spread exceeds
-  // the widest MLX margin, so the constraint (not the margin) is what stands between an
-  // estimate-backed phase extrapolation and a fatal MLX OOM.
+  // Load-bearing on the committed corpus: widening the demonstrated per-phase re-capture spread
+  // by the derivation's safety and estimate factors exceeds the shipped MLX estimate margin, so
+  // the constraint is still required for phase extrapolation.
   const derived = deriveMargins(await loadEvidenceRecords(ROOT));
   const canBind = derived.mlx.analysis.maxCanBindPhaseSpread;
   assert.equal((canBind.spread * 100).toFixed(4), "17.1369", "spread matches the number cited in both doc comments");
-  assert.ok(canBind.spread > derived.mlx.margins.estimateMargin, "constraint is load-bearing");
+  const fullyWidenedCanBind = Math.max(MLX_HARD_FLOOR, canBind.spread * 2) * 2;
+  assert.equal((fullyWidenedCanBind * 100).toFixed(2), "68.55", "fully widened spread matches the docs");
+  assert.ok(fullyWidenedCanBind > derived.mlx.margins.estimateMargin, "constraint is load-bearing");
+});
+
+// SC-18829's fitted video curve is the narrow, ratified exception to the measured-binding-phase
+// pin: every phase is independently fit and residual-bounded before the request-geometry max. Pin
+// that exact construction on both sides, and pin the evidence verdict that it does not authorize a
+// margin reduction. Otherwise a future scalar/provider-wide bypass could reuse the same boolean.
+test("the residual-bounded max-over-phases exemption is structural and keeps margins unchanged", async () => {
+  assert.equal(RESIDUAL_BOUNDED_MAX_OVER_PHASES_EXEMPT_FROM_BINDING_PHASE_PIN, true);
+
+  const [rustSource, scriptSource, runbook, derived] = await Promise.all([
+    readFile(RUST_POLICY_PATH, "utf8"),
+    readFile(SCRIPT_POLICY_PATH, "utf8"),
+    readFile(RUNBOOK_PATH, "utf8"),
+    loadEvidenceRecords(ROOT).then(deriveMargins),
+  ]);
+  const rustMatch = rustSource.match(
+    /pub const RESIDUAL_BOUNDED_MAX_OVER_PHASES_EXEMPT_FROM_BINDING_PHASE_PIN: bool = (true|false);/,
+  );
+  assert.ok(rustMatch, "rust exemption constant exists");
+  assert.equal(
+    rustMatch[1] === "true",
+    RESIDUAL_BOUNDED_MAX_OVER_PHASES_EXEMPT_FROM_BINDING_PHASE_PIN,
+  );
+  const scriptMatch = scriptSource.match(
+    /export const RESIDUAL_BOUNDED_MAX_OVER_PHASES_EXEMPT_FROM_BINDING_PHASE_PIN = (true|false);/,
+  );
+  assert.ok(scriptMatch, "script exemption constant exists");
+
+  const rustDocLines = [];
+  for (const line of rustSource.slice(0, rustMatch.index).split("\n").reverse()) {
+    if (line.trim() === "") continue;
+    if (!line.trim().startsWith("///")) break;
+    rustDocLines.push(line);
+  }
+  const docs = [
+    ["rust", rustDocLines.reverse().join("\n")],
+    ["script", docCommentAbove(scriptSource, scriptMatch.index)],
+  ];
+  for (const [name, doc] of docs) {
+    const prose = doc
+      .replace(/^\s*(?:\/\/\/|\/\*\*?|\*\/|\*)\s?/gm, " ")
+      .replace(/\s+/g, " ");
+    assert.ok(/every phase independently/i.test(prose), `${name} doc requires independent phases`);
+    assert.ok(/maximum fit\/held-out absolute residual/i.test(prose), `${name} doc requires residual bounds`);
+    assert.ok(/maximum over phases/i.test(prose), `${name} doc requires max after residuals`);
+    assert.ok(/ordinary backend estimate margin/i.test(prose), `${name} doc retains the normal margin`);
+    assert.ok(/not provider-wide|not a provider-wide/i.test(prose), `${name} doc rejects a provider-wide bypass`);
+  }
+
+  // SC-18829's claim is NON-REDUCTION: the video ratification may not shrink the image-lane
+  // margins. The exact MLX value is owned by the sc-18094 derivation pin above (0.5040734… on the
+  // merged 89-record corpus) — re-pinning it here would just freeze the corpus twice.
+  assert.ok(
+    derived.mlx.margins.estimateMargin >= 0.10,
+    "ratification does not reduce MLX margin",
+  );
+  assert.equal(derived.candle.margins.estimateMargin, 0.04, "ratification does not reduce candle margin");
+  assert.match(runbook, /Admission-margin verdict \(SC-18829\): keep the ratified constants unchanged/);
+  assert.match(runbook, /largest\s+adopted q8 `cross` residual is 0\.4438 GiB/);
+  assert.match(runbook, /10% MLX estimate margin/);
+  assert.match(runbook, /Candle has no\s+promoted temporal curve yet/);
 });
 
 // Mutation-proofs the VARIANCE path: with a synthetic repeat pair whose doubled spread exceeds

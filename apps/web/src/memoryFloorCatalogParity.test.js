@@ -1167,14 +1167,26 @@ describe("catalog memory floors: the shapes the round-4 guards depend on", () =>
     expect(partialNoBlanket.map((model) => model.id).join(", ")).toBe("");
   });
 
-  it("has exactly one shipped shape that reached the round-3 blocker, and it is z_image_edit on MLX", () => {
+  it("has no shipped shape left that reaches the round-3 blocker", () => {
     // The blocker class, enumerated from the manifest: an install-set with SOME evidenced tier, SOME
-    // unevidenced tier, and no blanket on the lane. Pinned so the fix's blast radius stays a known quantity.
+    // unevidenced tier, and no blanket on the lane — the shape where `installedFloorHostGb` returns null
+    // rather than quoting a ceiling over a strict subset.
+    //
+    // RESTATED 2026-08-17: `z_image_edit` was the sole instance and no longer qualifies. SC-18460 gave it
+    // an `mlx` block mirroring the `z_image_turbo` engine it resolves through — same `minMemoryGb: 40`,
+    // same `quantize`, same tier layout — so the lane now HAS a blanket and the third condition fails.
+    // That is the blocker being fixed at the source, not the census being loosened: an alias quoting a
+    // different floor from the engine it actually runs on was the underlying defect.
+    //
+    // Kept as a census rather than deleted, with the sweep asserted non-empty, so this reds the moment a
+    // future entry ships partial evidence with no blanket.
     const reached = new Set();
+    let considered = 0;
     for (const row of SWEEP) {
       if (row.subset.length === 0) {
         continue;
       }
+      considered += 1;
       const installed = row.subset.filter((tier) => tierHostEligible(tier, row.eligibility));
       const evidenced = installed.filter((tier) => laneEvidenceGb(row.model, row.os, tier) !== null);
       const unevidenced = installed.filter((tier) => laneEvidenceGb(row.model, row.os, tier) === null);
@@ -1186,7 +1198,8 @@ describe("catalog memory floors: the shapes the round-4 guards depend on", () =>
         reached.add(`${row.id}|${row.os}`);
       }
     }
-    expect([...reached].sort()).toEqual(["z_image_edit|macos"]);
+    expect(considered, "the sweep must actually consider install-sets").toBeGreaterThan(0);
+    expect([...reached].sort()).toEqual([]);
   });
 
   it("reads z_image_edit's four install-sets off the MANIFEST, and agrees with the picker", () => {
@@ -1195,8 +1208,20 @@ describe("catalog memory floors: the shapes the round-4 guards depend on", () =>
     // only literal is the ORDERING claim (that the label rises as heavier tiers join the set).
     const model = manifestModels.find((entry) => entry.id === "z_image_edit");
     expect(model, "z_image_edit must still be in the manifest").toBeTruthy();
-    // The precondition that made this the blocker: no blanket on the MLX lane to catch the partial ceiling.
-    expect(blanketFloorGb(model, "mlx")).toBeNull();
+    // RESTATED 2026-08-17. This used to assert `blanketFloorGb(model, "mlx") === null` — the precondition
+    // that made this entry the round-3 blocker. SC-18460 gave z_image_edit an `mlx` block mirroring the
+    // `z_image_turbo` engine it resolves through, so the lane now declares a floor. The alias and its
+    // engine quoting different floors was the real defect, so the blanket is the fix, not a regression.
+    //
+    // What that costs this test: with a blanket, `installedFloorHostGb` takes `maxHostGb(converted,
+    // blanket)` for an INCOMPLETE set instead of returning null, so the label flattens to the blanket for
+    // three of the four sets and can no longer show the fill's effect through `needsLabel`'s final number.
+    // The round-4 regression this exists for — unevidenced tiers falling back to q4's figure — is still
+    // guarded, just one layer down, on the per-tier requirements themselves. Those are blanket-independent.
+    const blanket = blanketFloorGb(model, "mlx");
+    expect(blanket, "z_image_edit mirrors the z_image_turbo floor it resolves through").toBe(
+      manifestModels.find((entry) => entry.id === "z_image_turbo")?.mlx?.minMemoryGb,
+    );
 
     const options = { backend: "mlx", convRotEligible: true, nvfp4Eligible: true };
     const labelFor = (installed) => {
@@ -1214,19 +1239,33 @@ describe("catalog memory floors: the shapes the round-4 guards depend on", () =>
     const sets = [["q4"], ["q4", "q8"], ["q4", "bf16"], ["q4", "q8", "bf16"]];
     const shownBySet = sets.map((installed) => {
       const { entry, shown } = labelFor(installed);
-      // The label equals the host the HEAVIEST installed tier demands — the whole set, not a subset.
+      // The label is the DOCUMENTED composition in `installedFloorHostGb`: an all-evidenced set quotes the
+      // host its heaviest installed tier demands, and a set with an unevidenced tier quotes that ceiling
+      // raised to the lane's declared floor. Derived from the module's own estimator, never transcribed.
       const required = Math.max(...installed.map((tier) => hostFor(entry, tier)));
-      expect(shown, `[${installed.join(",")}] must quote its heaviest installed tier`).toBe(required);
-      // ...and the picker agrees at that host, in both directions.
+      const allEvidenced = installed.every(
+        (tier) => laneEvidenceGb(model, "macos", tier) !== null,
+      );
+      const expected = allEvidenced ? required : Math.max(required, blanket);
+      expect(
+        shown,
+        `[${installed.join(",")}] must quote ${allEvidenced ? "its heaviest installed tier" : "its heaviest installed tier raised to the declared floor"}`,
+      ).toBe(expected);
+      // ...and the picker agrees at that host: every installed tier fits what the label quotes.
       for (const tier of installed) {
         const variant = entry.variants.find((v) => v.variant === tier);
         expect(tierFits(variant, shown, { model: entry }), `[${installed.join(",")}] tierFits(${tier})`).toBe(
           true,
         );
       }
+      // The heaviest tier's own boundary is exact, one GB below what IT needs. Asserted against the tier
+      // requirement rather than against `shown`, which the blanket may have raised above that boundary.
       const heaviest = installed.reduce((a, b) => (hostFor(entry, a) >= hostFor(entry, b) ? a : b));
       expect(
-        tierFits(entry.variants.find((v) => v.variant === heaviest), shown - 1, { model: entry }),
+        tierFits(entry.variants.find((v) => v.variant === heaviest), hostFor(entry, heaviest) - 1, {
+          model: entry,
+        }),
+        `[${installed.join(",")}] the heaviest tier must not fit one GB under its own requirement`,
       ).toBe(false);
       // `suggestTier` must not have to degrade below what is installed.
       expect(
@@ -1236,15 +1275,23 @@ describe("catalog memory floors: the shapes the round-4 guards depend on", () =>
       return shown;
     });
 
-    // q4 alone is MEASURED, so it is unchanged by the fill; the rest rise strictly as heavier tiers join,
-    // and {q4,q8,bf16} lands on the same figure as {q4,bf16} because bf16 dominates.
+    // The label never falls as heavier tiers join. It no longer rises STRICTLY across all four sets: the
+    // declared floor dominates every set that carries an unevidenced tier, which is the correct answer for
+    // an alias whose engine declares that floor — quoting the derived 27 while the engine says 40 is what
+    // would be wrong.
     const [q4, q4q8, q4bf16, all] = shownBySet;
     expect(q4).toBeLessThan(q4q8);
-    expect(q4q8).toBeLessThan(q4bf16);
+    expect(q4bf16).toBeGreaterThanOrEqual(q4q8);
     expect(all).toBe(q4bf16);
-    // The pre-fix answer was q4's figure for ALL FOUR. Pinned as an inequality so it cannot silently return.
-    expect(q4q8).not.toBe(q4);
-    expect(q4bf16).not.toBe(q4);
+
+    // THE ROUND-4 REGRESSION GUARD, kept at full strength. The pre-fix defect was that an unevidenced tier
+    // fell back to q4's figure, so every set quoted q4's number. That is a claim about the per-tier
+    // requirements, which the disk-based fill supplies and the blanket does not touch — so it is asserted
+    // there, where it is still visible, instead of through a label the floor now flattens.
+    const entry = catalogEntry(model, "macos", ["q4", "q8", "bf16"]);
+    const [q4Host, q8Host, bf16Host] = ["q4", "q8", "bf16"].map((tier) => hostFor(entry, tier));
+    expect(q8Host, "q8 must not inherit q4's figure").toBeGreaterThan(q4Host);
+    expect(bf16Host, "bf16 must not inherit q8's figure").toBeGreaterThan(q8Host);
   });
 
   it("counts the candle.measured === false entries the way tierSuggestion.js describes them", () => {
@@ -1317,22 +1364,46 @@ describe("catalog memory floors: the shapes the round-4 guards depend on", () =>
       measured: true,
     });
     expect(byId.get("sensenova_u1_8b").mlx?.minMemoryGb).toBeUndefined();
-    // krea_2_raw ships a candle block, and ships NO footprint on any download.
+    // krea_2_raw ships a candle block. Its native model tiers still carry no footprint evidence;
+    // SC-18315 adds one soft co-requisite with an exact on-disk byte identity only. That donor must
+    // not acquire resident/peak values until separate runtime evidence exists.
     expect(byId.get("krea_2_raw").candle).toMatchObject({
       minMemoryGb: 32,
       vramGbByTier: { q4: 28.8, q8: 33.4, bf16: 46.4 },
       measured: false,
     });
     expect(byId.get("krea_2_raw").mlx?.minMemoryGb).toBe(48);
-    for (const download of byId.get("krea_2_raw").downloads ?? []) {
-      expect(download.footprint, "krea_2_raw ships no footprint at all").toBeUndefined();
+    const isWanDecoderDonor = (download) =>
+      download.repo === "SceneWorks/krea-realtime-14b-mlx" &&
+      download.componentId === "vae" &&
+      download.files?.length === 1 &&
+      download.files[0] === "q4/vae.safetensors";
+    const kreaRawDownloads = byId.get("krea_2_raw").downloads ?? [];
+    const wanDecoderDonors = kreaRawDownloads.filter(isWanDecoderDonor);
+    expect(wanDecoderDonors).toHaveLength(1);
+    expect(wanDecoderDonors[0]).toMatchObject({
+      coRequisite: true,
+      required: "soft",
+      platforms: ["macos"],
+      estimatedSizeBytes: 507591212,
+    });
+    expect(wanDecoderDonors[0].footprint).toEqual({
+      diskSizeBytes: 507591212,
+      residentMemoryBytes: null,
+      peakMemoryBytes: null,
+    });
+    for (const download of kreaRawDownloads.filter((download) => !isWanDecoderDonor(download))) {
+      expect(download.footprint, "krea_2_raw native tiers ship no footprint evidence").toBeUndefined();
     }
-    // ...and it is NOT the only one: krea_2_turbo has the identical shape, and the two of them are the
-    // complete set of footprint-less matrix entries. The fixture comment claimed "the ONE shipped entry".
+    // ...and it is NOT the only one: krea_2_turbo has the identical native-tier shape, and the two of
+    // them are the complete set of footprint-less matrix entries after excluding only the exact
+    // alternate-decoder donor above. The fixture comment claimed "the ONE shipped entry".
     const footprintless = manifestModels
       .filter((model) => tiersOn(model, "macos").length > 0)
       .filter((model) =>
-        (model.downloads ?? []).every((download) => download.footprint === undefined),
+        (model.downloads ?? [])
+          .filter((download) => !isWanDecoderDonor(download))
+          .every((download) => download.footprint === undefined),
       )
       .map((model) => model.id)
       .sort();

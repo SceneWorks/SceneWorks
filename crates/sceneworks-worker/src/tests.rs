@@ -119,3 +119,125 @@ include!("tests/segment_assembly.rs");
 // Source-level guard keeping test fixtures off the shared temp root (sc-17641 / sc-17707), with the
 // production work dirs and deliberate exceptions enumerated and justified.
 include!("tests/temp_fixture_guard.rs");
+
+/// sc-19710: the retention driver is opt-in and must never create the managed cache root as a side
+/// effect — an opt-out install growing a `models/resolved` tree just because the worker booted
+/// would be exactly the unrequested state the policy exists to prevent. A store that already
+/// exists is still driven even when the policy is disabled, so entries materialized while it was
+/// enabled cannot be stranded by turning the cache off.
+#[test]
+fn resolved_cache_retention_is_opt_in_and_never_creates_the_store() {
+    // `resolved_cache_retention` reads the cache policy from the PROCESS environment, so the
+    // "disabled" half of this test only means anything while `SCENEWORKS_RESOLVED_CACHE_ENABLED`
+    // is pinned off. Pinning it through the shared `test_env` lock does both jobs at once: it
+    // states the precondition instead of inheriting whatever the process happens to have, and it
+    // excludes the concurrent env mutators (`with_local_cache` and friends) that would otherwise
+    // flip the policy to enabled mid-assertion. `.cargo/config.toml` does NOT set
+    // `RUST_TEST_THREADS`, so this suite really does run in parallel and the race is live.
+    crate::test_env::temp_env_vars(
+        &[(
+            sceneworks_core::model_artifacts::resolved_cache::RESOLVED_CACHE_ENABLED_ENV,
+            "0",
+        )],
+        || {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let data_dir = temp.path().join("data");
+            std::fs::create_dir_all(&data_dir).expect("data dir creates");
+            let resolved_root = data_dir.join("models").join("resolved");
+
+            assert!(
+                crate::resolved_cache_retention(&data_dir).is_none(),
+                "a disabled cache with no store has nothing to drive"
+            );
+            assert!(
+                !resolved_root.exists(),
+                "probing for retention must not create the managed cache root"
+            );
+
+            drop(
+                sceneworks_core::model_artifacts::resolved_cache::ResolvedCacheStore::open(
+                    &data_dir,
+                )
+                .expect("store opens"),
+            );
+            assert!(
+                crate::resolved_cache_retention(&data_dir).is_some(),
+                "an existing store must still be reconciled after the policy is disabled"
+            );
+        },
+    );
+}
+
+/// sc-19710: a retention checkpoint must never sit on the claim path. A sweep that evicts walks
+/// every entry and re-hashes each candidate's source, so if the poll loop awaited one, a job
+/// submitted just after a sweep began would wait for the whole sweep. This pins the property the
+/// loop relies on: the checkpoint is *started* and its handle only polled, so the caller keeps
+/// running — and is skipped while a predecessor is still in flight, so sweeps cannot stack.
+#[tokio::test]
+async fn a_retention_checkpoint_never_blocks_the_caller_that_starts_it() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data_dir = temp.path().join("data");
+    std::fs::create_dir_all(&data_dir).expect("data dir creates");
+    // A real store, so the checkpoint actually has work to gate on rather than returning early.
+    drop(
+        sceneworks_core::model_artifacts::resolved_cache::ResolvedCacheStore::open(&data_dir)
+            .expect("store opens"),
+    );
+
+    let started = std::time::Instant::now();
+    let handle = crate::spawn_retention_checkpoint(data_dir.clone(), true);
+    // Control returns without running the sweep inline: it is on the blocking pool.
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(200),
+        "starting a checkpoint must not run it inline"
+    );
+    // The detached work still completes on its own.
+    handle.await.expect("checkpoint task completes");
+
+    // The timing check above cannot fail a fast sweep over a small store, so the real guarantee —
+    // that the poll loop never *awaits* a checkpoint — is pinned at the source level, the same way
+    // this crate pins its temp-fixture rule. Re-introducing an await on the claim path reddens
+    // this immediately, where a behavioural test would silently keep passing on a small cache.
+    //
+    // sc-19706 folded the promotion drain into the SAME maintenance slot, so the anchor is the
+    // slot rather than the retention handle, and the rule now covers both occupants: a promotion
+    // copies and hashes a whole bundle, which is if anything worse to sit behind than a sweep.
+    let source = include_str!("lib.rs");
+    let loop_body = source
+        .split_once("let mut maintenance_task =")
+        .expect("the poll loop keeps the maintenance handle in a local")
+        .1;
+    assert!(
+        !loop_body.contains("maintenance_task.expect")
+            && !loop_body.contains("maintenance_task.unwrap"),
+        "the poll loop must not unwrap the maintenance handle"
+    );
+    for forbidden in [
+        "spawn_retention_checkpoint(settings.data_dir.clone(), false).await",
+        "spawn_retention_checkpoint(settings.data_dir.clone(), true).await",
+        "run_retention_checkpoint",
+        "spawn_promotion_drain(settings.clone()).await",
+        "resolved_cache_promotion::drain_intake",
+    ] {
+        assert!(
+            !loop_body.contains(forbidden),
+            "the poll loop must never await resolved-cache maintenance (found `{forbidden}`): a \
+             sweep re-hashes every eviction candidate's source and a promotion copies a whole \
+             bundle, so awaiting either delays the next claim"
+        );
+    }
+    // The drain's gate is on the claim path itself, so it must be the in-memory check and never
+    // the blocking one. `drain_intake` opens the store; `work_pending` reads two mutexes.
+    assert!(
+        loop_body.contains("resolved_cache_promotion::work_pending(&settings.data_dir)"),
+        "the poll loop must gate the promotion drain on the in-memory pending check"
+    );
+    // ...and the gate must actually START something. The never-await rules above are all
+    // ABSENCE assertions, so an empty `else if work_pending(..) {}` body satisfies every one of
+    // them while promotion silently never runs — which is precisely the shape of the defect that
+    // reopened this story.
+    assert!(
+        loop_body.contains("spawn_promotion_drain(settings.clone())"),
+        "the poll loop must spawn the promotion drain, not merely test for pending work"
+    );
+}

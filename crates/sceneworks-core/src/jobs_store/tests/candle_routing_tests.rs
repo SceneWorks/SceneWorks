@@ -169,6 +169,7 @@ fn candle_image_dispatch_reports_named_lane_and_preserves_precedence() {
                 "model": "kreamania_variant4",
                 "modelManifestEntry": {
                     "family": "krea_2",
+                    "importSourceShape": "transformer_file",
                     "paths": { "model": "C:\\SceneWorks\\models\\imports\\kreamania_variant4" }
                 }
             }),
@@ -613,6 +614,7 @@ fn imported_krea_family_plain_single_file_job_is_candle_eligible() {
         "prompt": "a red fox",
         "modelManifestEntry": {
             "family": "krea_2",
+            "importSourceShape": "transformer_file",
             "paths": { "model": "C:\\SceneWorks\\models\\imports\\kreamania_variant4" }
         }
     });
@@ -637,6 +639,7 @@ fn imported_krea_family_plain_single_file_job_is_candle_eligible() {
         "model": "kreamania_variant4_direct",
         "modelManifestEntry": {
             "family": "krea_2",
+            "importSourceShape": "transformer_file",
             "modelPath": "C:\\SceneWorks\\models\\kreamania_variant4.safetensors"
         }
     });
@@ -658,19 +661,22 @@ fn imported_krea_family_plain_single_file_job_is_candle_eligible() {
         "a non-edit imported-Krea img2img referenceAssetId must be candle-eligible (sc-14071)"
     );
 
-    // The pinned Candle provider accepts adapters, Kontext edit, and strict pose over the imported
-    // DiT. These shapes must route to the same bespoke worker lanes that advertise them.
+    // The Candle imported registrations now inherit LoRA/LoKr, edit, and multi-phase from their
+    // resolved Krea providers. Exercise those through the real scheduler gate, including a
+    // multi-reference edit and phase-specific adapter plan.
     for extra in [
+        json!({ "mode": "edit_image", "sourceAssetId": "source_1" }),
+        json!({ "mode": "edit_image", "referenceAssetIds": ["scene_1", "person_1"] }),
         json!({ "loras": [{ "id": "adapter_1" }] }),
         json!({
             "mode": "edit_image",
             "sourceAssetId": "source_1",
             "loras": [{ "id": "edit", "conditioningRole": "image_edit" }]
         }),
-        json!({ "advanced": { "poses": [{ "id": "pose_1" }] } }),
+        json!({ "advanced": { "phases": [{ "steps": 4 }] } }),
         json!({
-            "loras": [{ "id": "style" }],
-            "advanced": { "poses": [{ "id": "pose_1" }] }
+            "loras": [{ "id": "adapter_1" }],
+            "advanced": { "phases": [{ "steps": 4, "loras": [{ "index": 0, "weight": 0.8 }] }] }
         }),
     ] {
         let mut payload = plain.clone();
@@ -680,18 +686,23 @@ fn imported_krea_family_plain_single_file_job_is_candle_eligible() {
             .extend(extra.as_object().expect("extra object").clone());
         assert!(
             image_job_is_candle_eligible(&image_generate_job(payload.clone())),
-            "supported imported-Krea shape must route on candle: {payload}"
+            "provider-advertised imported-Krea shape must route on candle: {payload}"
         );
     }
 
-    // Every shape the bespoke imported handlers would otherwise ignore remains fail-closed.
+    // Real structural gaps remain fail-closed: a plural reference outside edit, mask/character,
+    // strict pose (the checked-in candle facts register no `pose` import route), an explicit
+    // control map, and a bare non-edit source are not consumed by this lane and must never be
+    // silently flattened to txt2img.
     let mut unsupported_shapes = Vec::new();
     for extra in [
         json!({ "mode": "edit_image" }),
         json!({ "referenceAssetIds": ["reference_1"] }),
+        json!({ "mode": " edit_image ", "sourceAssetId": "source_1" }),
         json!({ "sourceAssetId": "source_1" }),
         json!({ "maskAssetId": "mask_1" }),
         json!({ "characterId": "character_1" }),
+        json!({ "advanced": { "poses": [{ "id": "pose_1" }] } }),
         json!({
             "sourceAssetId": "source_1",
             "advanced": { "poses": [{ "id": "pose_1" }] }
@@ -701,7 +712,14 @@ fn imported_krea_family_plain_single_file_job_is_candle_eligible() {
             "sourceAssetId": "source_1",
             "advanced": { "poses": [{ "id": "pose_1" }] }
         }),
-        json!({ "advanced": { "phases": [{ "steps": 4 }] } }),
+        json!({ "advanced": { "controlImage": "control_1" } }),
+        json!({ "advanced": { "controlMode": "pose" } }),
+        json!({
+            "advanced": {
+                "phases": [{ "steps": 4 }],
+                "controlImage": "control_1"
+            }
+        }),
     ] {
         let mut payload = plain.clone();
         payload
@@ -725,15 +743,27 @@ fn imported_krea_family_plain_single_file_job_is_candle_eligible() {
         "model": "foreign_import",
         "modelManifestEntry": {
             "family": "z-image",
+            "importSourceShape": "transformer_file",
             "paths": { "model": "C:\\SceneWorks\\models\\imports\\foreign" }
         }
     }))));
 }
 
-/// The imported Krea strict-pose set must be claimed by both native backends and must pass Candle's
-/// terminal support oracle, proving scheduler eligibility and the worker capability stay aligned.
+/// A strict-pose set on an imported Krea 2 checkpoint is served on MLX (the pose control branch
+/// folds onto the file-loaded DiT) but NOT on candle: the checked-in candle provider facts register
+/// no `pose` import route for `krea_2`, and none of its routes advertise `control` conditioning, so
+/// the exact provider lookup refuses. This pins the shape of that asymmetry so the candle refusal
+/// stays a LOUD, terminal, named gap rather than a job that silently never routes:
+///   * `image_job_is_candle_eligible` is false, so no candle worker ever claims it — the claim gate
+///     and the resolved imported-provider registration agree;
+///   * `candle_supported` returns `Err(reason)`, which is what makes the enforce sweep
+///     (`fail_unsupported_candle_jobs`) fail it terminally with a named feature instead of routing
+///     it to the grace-window "no candle worker yet" sweep, where it would sit queued forever.
+///
+/// The MLX half of the same payload is asserted alongside it, so a future change that quietly drops
+/// the imported pose surface on BOTH backends cannot pass this test by making the candle half green.
 #[test]
-fn imported_krea_pose_routes_to_both_native_backends() {
+fn imported_krea_pose_is_mlx_only_and_candle_refuses_it_terminally() {
     let pose = json!({
         "projectId": "project_1",
         "model": "kreamania_variant4",
@@ -741,6 +771,7 @@ fn imported_krea_pose_routes_to_both_native_backends() {
         "advanced": { "poses": [{ "id": "pose_1" }] },
         "modelManifestEntry": {
             "family": "krea_2",
+            "importSourceShape": "transformer_file",
             "paths": { "model": "C:\\SceneWorks\\models\\imports\\kreamania_variant4" }
         }
     });
@@ -751,12 +782,15 @@ fn imported_krea_pose_routes_to_both_native_backends() {
         "MLX serves the imported pose set through the native control entrypoint"
     );
     assert!(
-        image_job_is_candle_eligible(&job),
-        "Candle serves the imported pose set through its native control entrypoint"
+        !image_job_is_candle_eligible(&job),
+        "no candle krea_2 pose import route is registered, so it must not claim the job"
     );
+
+    let reason = candle_supported(&job)
+        .expect_err("an imported pose set must be a NAMED candle gap, not a silent never-route");
     assert!(
-        candle_supported(&job).is_ok(),
-        "the Candle enforce sweep must agree that imported strict pose is executable"
+        !reason.feature.trim().is_empty() && !reason.detail.trim().is_empty(),
+        "the terminal failure must name the feature and explain it: {reason:?}"
     );
 }
 
@@ -879,7 +913,6 @@ fn sana_candle_txt2img_and_single_reference_img2img_route_to_candle() {
         for malformed in [
             json!({ "model": model, "referenceAssetIds": ["a"] }),
             json!({ "model": model, "referenceAssetId": 7 }),
-            json!({ "model": model, "referenceAssetId": " " }),
             json!({ "model": model, "referenceAssetId": "a", "sourceAssetId": "b" }),
             json!({ "model": model, "referenceAssetId": "a", "maskAssetId": "m" }),
             json!({ "model": model, "referenceAssetId": "a", "loras": [{ "path": "x" }] }),
@@ -910,6 +943,104 @@ fn sana_candle_txt2img_and_single_reference_img2img_route_to_candle() {
                 image_job_candle_lane(&image_generate_job(malformed.clone())),
                 None,
                 "{model} malformed img2img shape must be rejected: {malformed}"
+            );
+        }
+    }
+}
+
+#[test]
+fn sana_absent_reference_carrier_routes_plain_txt2img_to_candle() {
+    // sc-20525: EVERY real SANA text-to-image submission was enforce-failed `candle_unsupported`
+    // off-Mac. The sc-18475 guard in `image_request_candle_eligible` read the singular carrier with
+    // an inline `match value.as_str()` whose `None` arm meant "malformed" — but `Value::Null` also
+    // lands in that arm, and `null` is exactly how the API normalizes every unset optional asset
+    // carrier before the job is stored. So the normal absent-carrier encoding was classified as a
+    // malformed conditioning shape and the job never reached the txt2img lane. The gate now shares
+    // `has_nonempty_or_malformed_string` with `sana_has_unsupported_carrier`, which is the same fix
+    // the MLX twin already carries (sc-19712 F-1) and the same convention the worker uses (a blank
+    // asset id is treated as absent).
+    for model in ["sana_1600m", "sana_sprint_1600m"] {
+        // 1. Absent, `null`, and blank are all "not supplied" -> the plain candle txt2img lane.
+        for absent in [
+            json!({ "model": model, "prompt": "a red fox", "mode": "text_to_image" }),
+            json!({
+                "model": model,
+                "prompt": "a red fox",
+                "mode": "text_to_image",
+                "referenceAssetId": null
+            }),
+            json!({
+                "model": model,
+                "prompt": "a red fox",
+                "mode": "text_to_image",
+                "referenceAssetId": "   "
+            }),
+            // The exact shape the web UI submits for a plain SANA render: mode `text_to_image`,
+            // every optional carrier explicitly `null`/empty, and no quant override.
+            json!({
+                "model": model,
+                "prompt": "a red fox",
+                "mode": "text_to_image",
+                "referenceAssetId": null,
+                "referenceAssetIds": [],
+                "sourceAssetId": null,
+                "maskAssetId": null,
+                "controls": null,
+                "controlnets": [],
+                "loras": [],
+                "advanced": {
+                    "poses": [],
+                    "phases": null,
+                    "controlMode": null,
+                    "controlImage": null,
+                    "controlScale": null,
+                    "controlWeights": null,
+                    "convRot": null,
+                    "quantTier": null,
+                    "mlxQuantize": null
+                }
+            }),
+        ] {
+            assert_eq!(
+                image_job_candle_lane(&image_generate_job(absent.clone())),
+                Some(CandleImageLane::TextToImage),
+                "{model} plain txt2img must reach the candle txt2img lane: {absent}"
+            );
+            assert!(
+                image_request_candle_eligible(model, &object(absent.clone())),
+                "{model} plain txt2img must be candle-eligible: {absent}"
+            );
+        }
+        // 2. A populated carrier still selects the specialized SANA reference lane.
+        assert_eq!(
+            image_job_candle_lane(&image_generate_job(json!({
+                "model": model,
+                "prompt": "a red fox",
+                "referenceAssetId": "reference-1"
+            }))),
+            Some(CandleImageLane::SanaImg2Img),
+            "{model} non-empty referenceAssetId must select the SANA reference lane"
+        );
+        // 3. A malformed carrier still fails closed rather than being reinterpreted as txt2img.
+        for malformed in [
+            json!(7),
+            json!({ "id": "reference-1" }),
+            json!(["reference-1"]),
+        ] {
+            let payload = json!({
+                "model": model,
+                "prompt": "a red fox",
+                "mode": "text_to_image",
+                "referenceAssetId": malformed
+            });
+            assert_eq!(
+                image_job_candle_lane(&image_generate_job(payload.clone())),
+                None,
+                "{model} malformed referenceAssetId must stay unclaimed: {payload}"
+            );
+            assert!(
+                !image_request_candle_eligible(model, &object(payload.clone())),
+                "{model} malformed referenceAssetId must not be candle-eligible: {payload}"
             );
         }
     }
@@ -2221,24 +2352,19 @@ fn candle_routed_video_models_are_eligible_in_their_native_shape() {
 
 #[test]
 fn non_candle_video_models_and_conditioned_shapes_fall_back() {
-    // `ltx_2_3_eros` now routes to candle for plain text_to_video (sc-5495 — it's a full dense
-    // LTX-2.3 fine-tune on the `ltx_2_3_distilled` engine), but any conditioned eros shape is
-    // refused and remains queued (the candle LTX lane is txt2video-only).
-    assert!(
-        video_request_candle_eligible("ltx_2_3_eros", &object(json!({ "mode": "text_to_video" }))),
-        "ltx_2_3_eros text_to_video must route to the candle lane"
-    );
-    assert!(
-        video_request_candle_eligible(
-            "ltx_2_3_eros",
-            &object(json!({
-                "mode": "first_last_frame",
-                "sourceAssetId": "first",
-                "lastFrameAssetId": "last"
-            }))
-        ),
-        "a complete conditioned ltx_2_3_eros shape must stay on candle"
-    );
+    // sc-18902: exact-head Candle/CUDA acceptance proved that the dense, undistilled 10Eros
+    // checkpoint produces unresolved noise through Candle's single-pass distilled engine. No
+    // 10Eros shape may route to Candle; the validated MLX two-pass distill recipe remains available.
+    for payload in [
+        json!({ "mode": "text_to_video" }),
+        json!({ "mode": "text_to_video", "loras": [{ "id": "ltx_style" }] }),
+        json!({ "mode": "first_last_frame" }),
+    ] {
+        assert!(
+            !video_request_candle_eligible("ltx_2_3_eros", &object(payload.clone())),
+            "ltx_2_3_eros must remain off Candle for every shape: {payload}"
+        );
+    }
     // A genuinely non-candle video model is refused and remains queued.
     assert!(
         !video_request_candle_eligible(
@@ -2247,19 +2373,6 @@ fn non_candle_video_models_and_conditioned_shapes_fall_back() {
         ),
         "an unported model must fall back to the Python worker"
     );
-    // Wan-5B in any conditioned shape (default/i2v mode, a source, or a LoRA) is refused.
-    let cases = [
-        json!({ "prompt": "p" }), // no mode → defaults to i2v
-        json!({ "mode": "first_last_frame" }),
-        json!({ "mode": "text_to_video", "sourceAssetId": "a" }), // txt mode but conditioned
-        json!({ "mode": "image_to_video" }),
-    ];
-    for case in cases {
-        assert!(
-            !video_request_candle_eligible("wan_2_2", &object(case.clone())),
-            "wan_2_2 shape must fall back to torch: {case}"
-        );
-    }
     // The 14B T2V is text-only: any image_to_video / sourced shape is refused (sc-5175).
     for case in [
         json!({ "mode": "image_to_video", "sourceAssetId": "a" }),
@@ -2337,20 +2450,16 @@ fn candle_video_models_with_provider_slots_accept_user_loras() {
         ),
         "wan_2_2_i2v_14b i2v + source + user LoRA must stay on candle"
     );
-    // The pinned candle LTX provider installs additive LoRA residuals on the video-attention
-    // projections for both the packed base tier and the dense Eros checkpoint.
-    for model in ["ltx_2_3", "ltx_2_3_eros"] {
-        assert!(
-            video_request_candle_eligible(
-                model,
-                &object(json!({
-                    "mode": "text_to_video",
-                    "loras": [{ "id": "ltx_style" }],
-                }))
-            ),
-            "{model} text_to_video + user LoRA must stay on candle"
-        );
-    }
+    // The pinned base-LTX Candle provider installs additive LoRA residuals on video-attention
+    // projections. Eros is deliberately absent: its required distill adapter does not fit this
+    // provider surface (sc-18902).
+    assert!(video_request_candle_eligible(
+        "ltx_2_3",
+        &object(json!({
+            "mode": "text_to_video",
+            "loras": [{ "id": "ltx_style" }],
+        }))
+    ));
     assert!(video_request_candle_eligible(
         "wan_2_2",
         &object(json!({ "mode": "text_to_video", "loras": [{ "id": "wan_style" }] }))
@@ -2367,7 +2476,7 @@ fn candle_video_models_with_provider_slots_accept_user_loras() {
 
 #[test]
 fn candle_ltx_and_wan5_serve_new_conditioning_shapes() {
-    for model in ["ltx_2_3", "ltx_2_3_eros", "wan_2_2"] {
+    for model in ["ltx_2_3", "wan_2_2"] {
         assert!(video_request_candle_eligible(
             model,
             &object(json!({ "mode": "image_to_video", "sourceAssetId": "first" }))
@@ -2381,25 +2490,23 @@ fn candle_ltx_and_wan5_serve_new_conditioning_shapes() {
             }))
         ));
     }
-    for model in ["ltx_2_3", "ltx_2_3_eros"] {
-        assert!(video_request_candle_eligible(
-            model,
-            &object(json!({
-                "mode": "extend_clip",
-                "sourceClipAssetId": "left",
-                "loras": [{ "id": "ltx_2_3_ic_union_control" }]
-            }))
-        ));
-        assert!(video_request_candle_eligible(
-            model,
-            &object(json!({
-                "mode": "video_bridge",
-                "sourceClipAssetId": "left",
-                "bridgeRightClipAssetId": "right",
-                "loras": [{ "id": "ltx_2_3_ic_union_control" }]
-            }))
-        ));
-    }
+    assert!(video_request_candle_eligible(
+        "ltx_2_3",
+        &object(json!({
+            "mode": "extend_clip",
+            "sourceClipAssetId": "left",
+            "loras": [{ "id": "ltx_2_3_ic_union_control" }]
+        }))
+    ));
+    assert!(video_request_candle_eligible(
+        "ltx_2_3",
+        &object(json!({
+            "mode": "video_bridge",
+            "sourceClipAssetId": "left",
+            "bridgeRightClipAssetId": "right",
+            "loras": [{ "id": "ltx_2_3_ic_union_control" }]
+        }))
+    ));
 }
 
 #[test]
@@ -2460,14 +2567,25 @@ fn candle_ltx_replace_is_model_native_and_requires_its_ic_adapter() {
         "characterId": "character",
         "loras": [{ "id": "ltx_2_3_ic_union_control" }]
     });
-    for model in ["ltx_2_3", "ltx_2_3_eros"] {
-        assert!(ltx_replace_candle_eligible(model, &object(shape.clone())));
-        let mut payload = object(shape.clone());
-        payload.insert("model".into(), json!(model));
-        assert!(video_job_is_candle_eligible(&person_replace_job(
-            Value::Object(payload)
-        )));
-    }
+    assert!(ltx_replace_candle_eligible(
+        "ltx_2_3",
+        &object(shape.clone())
+    ));
+    let mut payload = object(shape.clone());
+    payload.insert("model".into(), json!("ltx_2_3"));
+    assert!(video_job_is_candle_eligible(&person_replace_job(
+        Value::Object(payload)
+    )));
+
+    assert!(
+        !ltx_replace_candle_eligible("ltx_2_3_eros", &object(shape.clone())),
+        "SC-18902 withdrew Eros from every Candle route, including native replacement"
+    );
+    let mut eros_payload = object(shape.clone());
+    eros_payload.insert("model".into(), json!("ltx_2_3_eros"));
+    assert!(!video_job_is_candle_eligible(&person_replace_job(
+        Value::Object(eros_payload)
+    )));
     let mut missing_adapter = object(shape);
     missing_adapter.remove("loras");
     assert!(!ltx_replace_candle_eligible("ltx_2_3", &missing_adapter));
@@ -2887,10 +3005,11 @@ fn candle_worker_claims_native_video_shapes_and_refuses_invalid_ones() {
             "candle worker should claim {model} image_to_video"
         );
     }
-    // Claims `ltx_2_3_eros` text_to_video (sc-5495 — the candle LTX engine serves the eros fine-tune
-    // too). Refuses an unported model, a conditioned (i2v) shape on a txt2video model, an image→video
-    // model (svd) in a txt2video shape, and the 14B I2V in a txt2video shape (both image→video only).
-    assert!(worker_supports_job(
+    // sc-18902: Candle refuses Eros after exact-head runtime evidence showed its undistilled dense
+    // checkpoint collapses to noise on this single-pass engine. It also refuses an unported model,
+    // a conditioned (i2v) shape on a txt2video model, an image→video model (svd) in a txt2video shape,
+    // and the 14B I2V in a txt2video shape (both image→video only).
+    assert!(!worker_supports_job(
         &candle,
         &video_generate_job(json!({ "model": "ltx_2_3_eros", "mode": "text_to_video" }))
     ));
@@ -3971,4 +4090,565 @@ fn an_unhealthy_worker_is_routed_nothing_even_with_full_capabilities() {
             "{status} routing must be unchanged by the unhealthy backstop"
         );
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// sc-20530: `candle_unsupported` message classification. Routing is NOT under test here (the gate
+// tests above own that); these pin WHICH cause the terminal error blames. The 2026-08-18 sweep
+// showed five families rejected with "conditioned shape on a txt2img candle family" for payloads
+// that carried no conditioning at all — the real cause was `advanced.mlxQuantize` on a dense-only
+// family. A message naming a conditioning bug that does not exist sends triage hunting one.
+// ---------------------------------------------------------------------------------------------
+
+/// The five families the sweep caught (`chroma1_*`, `flux_dev`, `flux_schnell`) advertise
+/// `supported_quants: &[]` — dense bf16/fp16 only — so `advanced.mlxQuantize: 4` is correctly
+/// refused rather than silently run dense (sc-5099). The refusal must SAY that: name the requested
+/// tier and what the family does serve, and never claim a conditioning shape the payload lacks.
+#[test]
+fn quant_request_on_a_dense_only_candle_family_names_the_tier_not_a_conditioned_shape() {
+    for model in [
+        "chroma1_base",
+        "chroma1_flash",
+        "chroma1_hd",
+        "flux_dev",
+        "flux_schnell",
+    ] {
+        for bits in [4, 8] {
+            let job = image_generate_job(json!({
+                "projectId": "project_1",
+                "model": model,
+                "prompt": "a red fox",
+                "mode": "text_to_image",
+                "referenceAssetId": null,
+                "sourceAssetId": null,
+                "maskAssetId": null,
+                "advanced": { "mlxQuantize": bits }
+            }));
+            // Routing is unchanged: the request is still refused (the sc-5099 no-silent-dense posture).
+            assert!(
+                !image_job_is_candle_eligible(&job),
+                "{model} q{bits} must stay refused — this story changes wording only"
+            );
+            let reason = candle_supported(&job).expect_err("a quant request must stay a named gap");
+            let message = reason.candle_error_message();
+            assert!(
+                reason.feature.contains("quant"),
+                "{model} q{bits} must be blamed on the quant tier: {reason:?}"
+            );
+            assert!(
+                message.contains(&format!("q{bits}")),
+                "the message must name the REQUESTED tier q{bits}: {message}"
+            );
+            assert!(
+                message.contains("mlxQuantize"),
+                "the message must name the payload field that caused it: {message}"
+            );
+            assert!(
+                message.contains("dense"),
+                "the message must say what the family DOES serve (dense only): {message}"
+            );
+            assert!(
+                !message.contains("conditioned shape"),
+                "an unconditioned payload must never be blamed on a conditioning shape: {message}"
+            );
+            assert!(
+                !message.contains("edit / reference / inpaint"),
+                "the message must not list causes the payload does not carry: {message}"
+            );
+        }
+    }
+}
+
+/// AC-4 mutation guard: the classification split must not move a single routing decision. The same
+/// five families with the quant override REMOVED still route to candle, and `mlxQuantize: 0` (the
+/// dense encoding) still routes too — only the refusal STRING changed.
+#[test]
+fn quant_message_split_did_not_move_the_routing_decision() {
+    for model in [
+        "chroma1_base",
+        "chroma1_flash",
+        "chroma1_hd",
+        "flux_dev",
+        "flux_schnell",
+    ] {
+        let dense = image_generate_job(json!({
+            "projectId": "project_1",
+            "model": model,
+            "prompt": "a red fox",
+            "mode": "text_to_image",
+            "referenceAssetId": null,
+            "sourceAssetId": null,
+            "maskAssetId": null
+        }));
+        assert!(
+            image_job_is_candle_eligible(&dense),
+            "{model} plain dense txt2img must still route to candle"
+        );
+        assert!(
+            candle_supported(&dense).is_ok(),
+            "{model} plain dense txt2img must not be a gap"
+        );
+        let zero = image_generate_job(json!({
+            "projectId": "project_1",
+            "model": model,
+            "prompt": "a red fox",
+            "mode": "text_to_image",
+            "advanced": { "mlxQuantize": 0 }
+        }));
+        assert!(
+            image_job_is_candle_eligible(&zero) && candle_supported(&zero).is_ok(),
+            "{model} mlxQuantize:0 is dense and must still route"
+        );
+    }
+}
+
+/// A user LoRA on a candle family with no adapter lane is its own cause — not a "conditioned
+/// shape". `boogu_image` is quant-capable but adapter-less (`CANDLE_QUANT_MODELS`, not the
+/// quant+LoRA set), so the adapter half of the gate alone refuses it.
+#[test]
+fn lora_on_a_candle_family_with_no_adapter_lane_is_named_separately() {
+    let job = image_generate_job(json!({
+        "projectId": "project_1",
+        "model": "boogu_image",
+        "prompt": "a red fox",
+        "mode": "text_to_image",
+        "loras": [{ "id": "lora_1", "scale": 0.8 }]
+    }));
+    assert!(
+        !image_job_is_candle_eligible(&job),
+        "routing is unchanged: an adapter-less family still refuses a LoRA"
+    );
+    let reason = candle_supported(&job).expect_err("a LoRA gap must stay named");
+    let message = reason.candle_error_message();
+    assert!(
+        reason.feature.contains("LoRA"),
+        "the LoRA cause must be named: {reason:?}"
+    );
+    assert!(
+        !message.contains("conditioned shape"),
+        "a LoRA request is not a conditioning shape: {message}"
+    );
+    assert!(
+        !message.contains("quant tier"),
+        "the message must not blame a quant tier the payload never asked for: {message}"
+    );
+}
+
+/// An edit/inpaint carrier on a family with no candle edit lane keeps a conditioning-flavored
+/// message — but it names the carriers the payload ACTUALLY has instead of listing five candidates.
+#[test]
+fn edit_carrier_on_a_family_without_an_edit_lane_names_the_carrier() {
+    let job = image_edit_job(json!({
+        "projectId": "project_1",
+        "model": "chroma1_base",
+        "prompt": "a red fox",
+        "mode": "edit_image",
+        "sourceAssetId": "asset_1"
+    }));
+    assert!(
+        !image_job_is_candle_eligible(&job),
+        "routing is unchanged: chroma has no candle edit lane"
+    );
+    let reason = candle_supported(&job).expect_err("an edit gap must stay named");
+    let message = reason.candle_error_message();
+    assert!(
+        message.contains("sourceAssetId"),
+        "the message must name the carrier the payload carries: {message}"
+    );
+    assert!(
+        !message.contains("mlxQuantize"),
+        "the message must not blame a quant tier the payload never asked for: {message}"
+    );
+}
+
+/// The catch-all is now a true last resort: reached only when no distinguishable cause applies, and
+/// it must not assert a conditioning shape for a payload that carries none. Probed directly because
+/// production has no reachable unconditioned-and-refused image shape today — which is exactly why
+/// the catch-all's claim has to stay honest if one ever appears.
+#[test]
+fn catch_all_does_not_claim_a_conditioned_shape_for_an_unconditioned_payload() {
+    use crate::jobs_store::routing::gaps::classify_candle_image_gap;
+
+    let reason = classify_candle_image_gap(&object(json!({
+        "model": "chroma1_base",
+        "prompt": "a red fox",
+        "mode": "text_to_image",
+        "referenceAssetId": null,
+        "sourceAssetId": null,
+        "maskAssetId": null,
+        "loras": []
+    })));
+    let message = reason.candle_error_message();
+    assert!(
+        !message.contains("conditioned shape"),
+        "an unconditioned payload must not be blamed on a conditioning shape: {message}"
+    );
+    assert!(
+        message.contains("no reference / source / mask / LoRA / pose"),
+        "the catch-all must state what the payload does NOT carry: {message}"
+    );
+
+    // A reference-only mode with no carrier is its own cause, not the catch-all.
+    let modeless = classify_candle_image_gap(&object(json!({
+        "model": "flux2_dev",
+        "prompt": "a red fox",
+        "mode": "style_variations",
+        "referenceAssetId": null
+    })));
+    assert!(
+        modeless.detail.contains("style_variations"),
+        "a reference-only mode with no carrier must name the mode: {modeless:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// sc-20530 adversarial-review follow-up. The wording tests above pin WHICH cause is blamed for one
+// payload each; these pin the ORDER the causes are blamed in, which is the property the doc comment
+// on `classify_candle_image_gap` actually claims: "the reported cause is the FIRST check that
+// actually refused, in `image_request_candle_eligible`'s own evaluation order".
+//
+// The order is no longer hand-kept in two places — the gate and the classifier both walk
+// `CANDLE_IMAGE_CHECKS` — but a shared table can still be re-ordered by accident, and the review
+// found two payload shapes where the old hand-kept order was measurably wrong:
+//   * `advanced.phases` refuses BEFORE quant, so a payload carrying both was told to drop
+//     `mlxQuantize` — advice that does not route the request;
+//   * the reference-only modes refuse only on the families that RESERVE them, so a
+//     `style_variations` chroma request was told it was missing a conditioning image when the mode
+//     was not what refused at all.
+// ---------------------------------------------------------------------------------------------
+
+/// `classify_candle_image_gap` on a raw payload, returning `(feature, detail)`. Asserts the gate
+/// really refuses the payload first, so no step can drift into pinning the wording of a shape that
+/// actually routes.
+fn candle_gap(model: &str, payload: Value) -> (String, String) {
+    use crate::jobs_store::routing::gaps::classify_candle_image_gap;
+
+    let mut payload = object(payload);
+    payload.insert("model".to_owned(), Value::String(model.to_owned()));
+    // Every real submission arrives with the optional scalar carriers stamped null (sc-20525).
+    for key in ["sourceAssetId", "referenceAssetId", "maskAssetId"] {
+        payload.entry(key.to_owned()).or_insert(Value::Null);
+    }
+    assert!(
+        !image_request_candle_eligible(model, &payload),
+        "the peel step must still be refused by the gate: {payload:?}"
+    );
+    let reason = classify_candle_image_gap(&payload);
+    (reason.feature.clone(), reason.detail.clone())
+}
+
+/// Reviewer repro 1. `chroma1_base` t2i with BOTH `advanced.mlxQuantize` and `advanced.phases`: the
+/// gate refuses on phases (candle.rs `Phases`) before it ever reaches the quant check, so blaming
+/// the quant tier attached a remediation ("re-submit without advanced.mlxQuantize and the same
+/// request routes to candle") that is FALSE — phases alone is still refused.
+#[test]
+fn phases_are_blamed_before_quant_because_the_gate_refuses_them_first() {
+    let both = json!({
+        "prompt": "a red fox",
+        "mode": "text_to_image",
+        "advanced": { "mlxQuantize": 4, "phases": [{ "steps": 4 }] }
+    });
+    let (feature, detail) = candle_gap("chroma1_base", both.clone());
+    assert!(
+        feature.contains("phases"),
+        "the FIRST refusing check is advanced.phases, not the quant tier: {feature}"
+    );
+    assert!(
+        !detail.contains("re-submit without advanced.phases"),
+        "removing phases does NOT route this request (the quant tier still refuses it), so the \
+         message must not promise it does: {detail}"
+    );
+    assert!(
+        detail.contains("advanced.mlxQuantize"),
+        "the message must name the OTHER check that also refuses, so the reader is not sent \
+         through a fix that leaves the request refused: {detail}"
+    );
+
+    // Peel the phases off and the quant tier becomes the first refusal — with its remediation back,
+    // because now it really is the only one.
+    let (feature, detail) = candle_gap(
+        "chroma1_base",
+        json!({
+            "prompt": "a red fox",
+            "mode": "text_to_image",
+            "advanced": { "mlxQuantize": 4 }
+        }),
+    );
+    assert!(feature.contains("q4 quant tier"), "{feature}");
+    assert!(
+        detail.contains("re-submit without advanced.mlxQuantize and the same request routes"),
+        "the quant remediation is honest once quant is the ONLY refusal: {detail}"
+    );
+
+    // …and peeling the quant off routes it, which is what makes that remediation true.
+    assert!(
+        image_request_candle_eligible(
+            "chroma1_base",
+            &object(json!({ "prompt": "a red fox", "mode": "text_to_image" }))
+        ),
+        "chroma1_base plain t2i with neither phases nor quant must route to candle"
+    );
+}
+
+/// Reviewer repro 2. The gate's reference-only-mode refusal applies ONLY to the families that
+/// reserve those modes for a specialized lane (flux2_* / qwen_image_edit* / sensenova_u1_8b*). On
+/// `chroma1_base` a `style_variations` request with every carrier null is NOT refused for the mode —
+/// the quant tier is what refuses it — so a "needs a source/reference image" message names a cause
+/// the gate never applied.
+#[test]
+fn a_reference_mode_is_blamed_only_on_the_families_that_reserve_it() {
+    let (feature, detail) = candle_gap(
+        "chroma1_base",
+        json!({
+            "prompt": "a red fox",
+            "mode": "style_variations",
+            "advanced": { "mlxQuantize": 4 }
+        }),
+    );
+    assert!(
+        feature.contains("q4 quant tier"),
+        "chroma1 does not reserve style_variations, so the quant tier is the first refusal: \
+         {feature}"
+    );
+    assert!(
+        !detail.contains("needs a source/reference image"),
+        "the mode is not what refused on this family — claiming a missing conditioning image sends \
+         triage after a bug that does not exist: {detail}"
+    );
+
+    // The same mode on a family that DOES reserve it keeps the conditioning-image message.
+    let (feature, detail) = candle_gap(
+        "flux2_dev",
+        json!({ "prompt": "a red fox", "mode": "style_variations" }),
+    );
+    assert!(
+        feature.contains("conditioning mode"),
+        "flux2_dev reserves style_variations for its specialized lane: {feature}"
+    );
+    assert!(detail.contains("style_variations"), "{detail}");
+
+    // Every reserved family + mode pair, so the predicate cannot be narrowed without a red test.
+    // The `qwen_image_edit*` ids are reserved by the gate but are NOT in `CANDLE_ROUTED_MODELS` at
+    // all, and that check runs FIRST (candle.rs returns before the mode is ever read) — so the
+    // classifier must blame the missing family, not the mode. Both halves are pinned here: this is
+    // exactly the class of "a later check's message for an earlier check's refusal" the review
+    // found, and it would read as a fixable payload problem on a family that has no lane at all.
+    for model in [
+        "flux2_dev",
+        "flux2_klein_9b",
+        "flux2_klein_9b_kv",
+        "flux2_klein_9b_true_v2",
+        "qwen_image_edit",
+        "qwen_image_edit_2509",
+        "qwen_image_edit_2511",
+        "qwen_image_edit_2511_lightning",
+        "sensenova_u1_8b",
+        "sensenova_u1_8b_fast",
+    ] {
+        let routed = CANDLE_ROUTED_MODELS.contains(&model);
+        for mode in [
+            "reference",
+            "image_to_image",
+            "character_image",
+            "style_variations",
+        ] {
+            let (feature, _) = candle_gap(model, json!({ "prompt": "p", "mode": mode }));
+            if routed {
+                assert!(
+                    feature.contains("conditioning mode"),
+                    "{model} reserves {mode} for a specialized lane: {feature}"
+                );
+            } else {
+                assert!(
+                    feature.contains("unsupported image model"),
+                    "{model} has no candle lane at all, which the gate checks BEFORE the mode: \
+                     {feature}"
+                );
+            }
+        }
+    }
+}
+
+/// The whole order, peeled one cause at a time. Each step asserts the gate still refuses AND that
+/// the classifier names the check `image_request_candle_eligible` reaches first; removing that one
+/// cause moves the blame to the next. `chroma1_base` advertises inference LoRA but no quant tier,
+/// so its peel covers edit-mode → carrier → poses → phases → quant. The `loras` entry rides along
+/// the whole way to prove a check that does NOT refuse never steals the blame.
+#[test]
+fn the_reported_cause_walks_the_gate_order_as_each_cause_is_peeled_off() {
+    let steps: [(Value, &str); 5] = [
+        (
+            json!({
+                "prompt": "p",
+                "mode": "edit_image",
+                "sourceAssetId": "asset_1",
+                "loras": [{ "id": "lora_1" }],
+                "advanced": {
+                    "poses": [{ "id": "pose_1" }],
+                    "phases": [{ "steps": 4 }],
+                    "mlxQuantize": 4
+                }
+            }),
+            "edit_image",
+        ),
+        (
+            json!({
+                "prompt": "p",
+                "mode": "text_to_image",
+                "sourceAssetId": "asset_1",
+                "loras": [{ "id": "lora_1" }],
+                "advanced": {
+                    "poses": [{ "id": "pose_1" }],
+                    "phases": [{ "steps": 4 }],
+                    "mlxQuantize": 4
+                }
+            }),
+            "conditioning carrier",
+        ),
+        (
+            json!({
+                "prompt": "p",
+                "mode": "text_to_image",
+                "loras": [{ "id": "lora_1" }],
+                "advanced": {
+                    "poses": [{ "id": "pose_1" }],
+                    "phases": [{ "steps": 4 }],
+                    "mlxQuantize": 4
+                }
+            }),
+            "strict-pose",
+        ),
+        (
+            json!({
+                "prompt": "p",
+                "mode": "text_to_image",
+                "loras": [{ "id": "lora_1" }],
+                "advanced": { "phases": [{ "steps": 4 }], "mlxQuantize": 4 }
+            }),
+            "phases",
+        ),
+        (
+            json!({
+                "prompt": "p",
+                "mode": "text_to_image",
+                "loras": [{ "id": "lora_1" }],
+                "advanced": { "mlxQuantize": 4 }
+            }),
+            "quant tier",
+        ),
+    ];
+    for (payload, expected) in steps {
+        let (feature, _) = candle_gap("chroma1_base", payload.clone());
+        assert!(
+            feature.contains(expected),
+            "expected the {expected:?} check to be blamed for {payload}: got {feature}"
+        );
+    }
+    // The last peel routes: nothing else in the gate refuses it.
+    assert!(image_request_candle_eligible(
+        "chroma1_base",
+        &object(json!({
+            "prompt": "p",
+            "mode": "text_to_image",
+            "loras": [{ "id": "lora_1" }]
+        }))
+    ));
+
+    // `boogu_image` is the mirror family — quant-capable, adapter-less — so its peel is what pins
+    // the user-LoRA check's position between the carrier check and the pose check.
+    let (feature, _) = candle_gap(
+        "boogu_image",
+        json!({
+            "prompt": "p",
+            "mode": "text_to_image",
+            "referenceAssetId": "asset_1",
+            "loras": [{ "id": "lora_1" }],
+            "advanced": { "poses": [{ "id": "pose_1" }] }
+        }),
+    );
+    assert!(feature.contains("conditioning carrier"), "{feature}");
+    let (feature, _) = candle_gap(
+        "boogu_image",
+        json!({
+            "prompt": "p",
+            "mode": "text_to_image",
+            "loras": [{ "id": "lora_1" }],
+            "advanced": { "poses": [{ "id": "pose_1" }] }
+        }),
+    );
+    assert!(feature.contains("LoRA"), "{feature}");
+    let (feature, _) = candle_gap(
+        "boogu_image",
+        json!({
+            "prompt": "p",
+            "mode": "text_to_image",
+            "advanced": { "poses": [{ "id": "pose_1" }] }
+        }),
+    );
+    assert!(feature.contains("strict-pose"), "{feature}");
+
+    // A reference-only mode on a family that reserves it precedes the carrier check, mirroring the
+    // gate (candle.rs refuses the mode before it looks at carriers at all).
+    let (feature, _) = candle_gap(
+        "flux2_dev",
+        json!({
+            "prompt": "p",
+            "mode": "style_variations",
+            "sourceAssetId": "asset_1"
+        }),
+    );
+    assert!(
+        feature.contains("reference mode"),
+        "the reserved mode is refused before the carrier check: {feature}"
+    );
+
+    // And the SANA carrier check precedes everything: a source carrier on SANA is blamed on the
+    // SANA lane, not on the generic carrier check that would refuse it two entries later.
+    let (feature, _) = candle_gap(
+        "sana_1600m",
+        json!({
+            "prompt": "p",
+            "mode": "text_to_image",
+            "sourceAssetId": "asset_1",
+            "advanced": { "phases": [{ "steps": 4 }] }
+        }),
+    );
+    assert!(feature.contains("SANA"), "{feature}");
+}
+
+/// The sc-20525 malformed-carrier wording is reachable exactly where the gate refuses ON a
+/// malformed carrier: the SANA lane. Everywhere else a malformed scalar reads as "absent" to the
+/// gate, so if such a payload is refused at all something ELSE refused it — and the malformed
+/// message's "the same request with a valid or absent carrier may well route" would be false.
+#[test]
+fn a_malformed_carrier_is_named_only_where_it_is_what_refused() {
+    let (feature, detail) = candle_gap(
+        "sana_1600m",
+        json!({ "prompt": "p", "mode": "text_to_image", "referenceAssetId": 42 }),
+    );
+    assert!(feature.contains("malformed"), "{feature}");
+    assert!(detail.contains("referenceAssetId"), "{detail}");
+
+    // The same malformed carrier on chroma1 does not refuse anything — the gate reads a non-string
+    // scalar as absent — so a chroma request carrying it AND a quant tier is blamed on the quant
+    // tier, the check that actually refused.
+    let (feature, detail) = candle_gap(
+        "chroma1_base",
+        json!({
+            "prompt": "p",
+            "mode": "text_to_image",
+            "sourceAssetId": 42,
+            "advanced": { "mlxQuantize": 4 }
+        }),
+    );
+    assert!(feature.contains("q4 quant tier"), "{feature}");
+    assert!(
+        !detail.contains("malformed"),
+        "the malformed carrier is not what refused this request: {detail}"
+    );
+    // Proof that the carrier really is inert on this family: drop the quant tier and it routes.
+    assert!(image_request_candle_eligible(
+        "chroma1_base",
+        &object(json!({ "prompt": "p", "mode": "text_to_image", "sourceAssetId": 42 }))
+    ));
 }

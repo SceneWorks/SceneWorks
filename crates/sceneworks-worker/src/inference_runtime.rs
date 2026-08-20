@@ -81,6 +81,27 @@ pub(crate) fn media() -> &'static ProviderRegistry {
     }
 }
 
+/// Fresh, weights-free provider-owned memory-contract surfaces for generated capability facts.
+/// Kept separate from the process catalog so each platform dumper can construct its contract-only
+/// inventory without loading model weights.
+pub(crate) fn memory_contract_surface_registry() -> gen_core::Result<ProviderRegistry> {
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    {
+        platform_runtime::memory_contract_surface_registry()
+    }
+
+    #[cfg(not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )))]
+    {
+        gen_core::ProviderRegistryBuilder::new().build()
+    }
+}
+
 /// A registered trainer descriptor without loading model weights. Used by the training dry-run and
 /// real-run shared preflight so both paths validate the active backend's exact network surface.
 pub(crate) fn trainer_descriptor(id: &str) -> Option<gen_core::TrainerDescriptor> {
@@ -252,6 +273,17 @@ pub(crate) fn media_descriptor(id: &str) -> Option<gen_core::ModelDescriptor> {
         .find(|descriptor| descriptor.id == id)
 }
 
+/// Resolve the provider-owned text-encoder contract for an ordinary generator or an explicitly
+/// registered bespoke/composed route. Missing is fail-closed: consumers must never infer a sibling
+/// base id or hardcode a family contract.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn media_encoder_contract(id: &str) -> Option<gen_core::EncoderContract> {
+    media().provider_encoder_contract(id)
+}
+
 // Only the macOS prompt-refine tests iterate the TextLlm registry; on the Windows/candle build
 // nothing calls this, so gate it to match its callers and stay warning-clean under -D warnings.
 #[cfg(all(test, target_os = "macos"))]
@@ -261,6 +293,21 @@ pub(crate) fn textllms() -> impl ExactSizeIterator<Item = &'static TextLlmRegist
 
 pub(crate) fn load(id: &str, spec: &LoadSpec) -> gen_core::Result<Box<dyn Generator>> {
     media().load(id, spec)
+}
+
+/// Resolve one validated imported source shape and operation to the ordinary provider descriptor
+/// that will load it. Missing is an explicit unsupported answer; callers must not union sibling
+/// routes by family.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn imported_model_descriptor(
+    family: &str,
+    source: gen_core::ImportedModelSource,
+    operation: gen_core::ImportedModelOperation,
+) -> Option<gen_core::ModelDescriptor> {
+    media().imported_model_descriptor(family, source, operation)
 }
 
 #[cfg(any(

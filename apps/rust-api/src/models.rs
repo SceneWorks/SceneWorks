@@ -1,6 +1,13 @@
 use super::*;
 
-use sceneworks_core::base_weights::{detect_base_weight_file, import_detection_supported};
+// Keep the behavior-preserving legacy root helper available to this module while all production
+// consumers enter through `model_source_library`; taking the function item constructs no root.
+const _: fn(&FsPath) -> PathBuf = huggingface_hub_cache_dir;
+
+use sceneworks_core::base_weights::{
+    detect_base_weight_file, import_detection_supported, imported_model_primary_weight_file,
+    BaseWeightDetection, ComponentRole,
+};
 use sceneworks_core::credentials::normalize_host;
 use sceneworks_core::lora_family::is_hidden_file;
 
@@ -42,11 +49,42 @@ pub(crate) struct ModelCatalogCache {
 struct ModelCatalogCacheState {
     generation: u64,
     snapshot: Option<(u64, Arc<Vec<Value>>)>,
+    /// Last observed resolved-cache publish key. `None` until the first observation, which is why
+    /// the first reading never counts as a change — an API that has not looked yet has nothing to
+    /// have gone stale against.
+    local_tier_key: Option<u64>,
 }
 
 impl ModelCatalogCache {
     pub(crate) fn invalidate(&self) {
         let mut state = self.state.lock();
+        state.generation = state.generation.wrapping_add(1);
+        state.snapshot = None;
+    }
+
+    /// Invalidates the snapshot when the resolved cache's published set has moved since the last
+    /// catalog read (sc-19712 F-4).
+    ///
+    /// Every other invalidation site is a mutation this process performed, but promotions are
+    /// published by the **worker**, in another process, so no in-process signal exists. Without
+    /// this the catalog kept serving a model's pre-promotion availability indefinitely — and
+    /// `modelLibraryUnavailable()` keys the Model Manager's blocked state on exactly that field,
+    /// so a model that had just completed a job with the drive unplugged was still presented as
+    /// needing the drive reconnected.
+    ///
+    /// A key check, not a timer: a TTL would leave the same wrong answer up for its whole window
+    /// and rebuild pointlessly for the rest of time. The key only moves when a bundle is published
+    /// or withdrawn, so a rebuild happens once per real change and never on a load.
+    pub(crate) fn note_local_tier_key(&self, key: u64) {
+        let mut state = self.state.lock();
+        if state.local_tier_key == Some(key) {
+            return;
+        }
+        let first_observation = state.local_tier_key.is_none();
+        state.local_tier_key = Some(key);
+        if first_observation {
+            return;
+        }
         state.generation = state.generation.wrapping_add(1);
         state.snapshot = None;
     }
@@ -723,6 +761,7 @@ pub(crate) async fn ensure_license_acknowledged_for_source(
              `licenseAcknowledged: true` to assert that the user has accepted it."
         ),
         code: Some(LICENSE_ACKNOWLEDGMENT_REQUIRED_CODE),
+        context: None,
     })
 }
 
@@ -769,8 +808,10 @@ pub(crate) async fn create_model_download_job(
         .ok_or_else(|| ApiError {
             status: StatusCode::NOT_FOUND,
             detail: "Model not found".to_owned(),
+            context: None,
             code: None,
         })?;
+    ensure_model_downloadable(&model)?;
     // License-acknowledgment gate (sc-17227), enforced HERE and not only in the web client.
     //
     // The web client refuses an unacknowledged download at `createModelDownloadJob`, but that code
@@ -793,6 +834,7 @@ pub(crate) async fn create_model_download_job(
                  the user has accepted it."
             ),
             code: Some(LICENSE_ACKNOWLEDGMENT_REQUIRED_CODE),
+            context: None,
         });
     }
     // Tier selection (sc-8508): an explicit `variant` installs that quant tier's download entry; an
@@ -887,6 +929,9 @@ pub(crate) async fn create_model_download_job(
     // against the model's family.
     let requested_gpu = requested_gpu_or_auto(payload.requested_gpu);
     for co_requisite in &co_requisites {
+        if co_requisite_satisfied_by_exact_legacy_rename(&state.settings.data_dir, co_requisite) {
+            continue;
+        }
         let co_payload = build_model_download_job_payload(
             &model,
             &model_id,
@@ -917,7 +962,26 @@ pub(crate) async fn create_model_download_job(
         requested_gpu,
     )
     .await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
+}
+
+fn ensure_model_downloadable(model: &Value) -> Result<(), ApiError> {
+    ensure_model_not_cleanup_only(model)?;
+    if model.get("downloadable").and_then(Value::as_bool) == Some(false) {
+        return Err(ApiError::bad_request(
+            "This model is not available for download.",
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_model_not_cleanup_only(model: &Value) -> Result<(), ApiError> {
+    if model.get("platformCleanupOnly").and_then(Value::as_bool) == Some(true) {
+        return Err(ApiError::bad_request(
+            "This model is retained only so its existing local files can be removed. No download, conversion, or generation route is available on this platform.",
+        ));
+    }
+    Ok(())
 }
 
 /// Build the worker `ModelDownload` job payload for one `download` entry of `model`. Factored out
@@ -1327,8 +1391,10 @@ pub(crate) async fn create_model_convert_job(
         .ok_or_else(|| ApiError {
             status: StatusCode::NOT_FOUND,
             detail: "Model not found".to_owned(),
+            context: None,
             code: None,
         })?;
+    ensure_model_not_cleanup_only(&model)?;
     let mlx = model
         .get("mlx")
         .and_then(Value::as_object)
@@ -1430,7 +1496,96 @@ pub(crate) async fn create_model_convert_job(
         requested_gpu_or_auto(payload.requested_gpu),
     )
     .await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
+}
+
+/// Distinct source repositories a model owns. Co-requisite downloads are excluded: they are
+/// shared dependencies rather than this model's own source, and resolved-cache entries are
+/// selected by *primary* provenance.
+pub(crate) fn owned_source_repositories(model: &Value) -> Vec<String> {
+    let mut repositories = model
+        .get("downloads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|entry| !is_co_requisite_download(entry))
+        .filter_map(|entry| entry.get("repo").and_then(Value::as_str))
+        .filter(|repo| !repo.trim().is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    repositories.sort();
+    repositories.dedup();
+    repositories
+}
+
+/// Reconciles the resolved-model hot cache with a source that has just been deleted (sc-19710).
+///
+/// Without this, entries whose authoritative source is gone can never be reclaimed: automatic
+/// retention refuses to evict an artifact it cannot re-verify as a second copy, so an orphaned
+/// entry would be held `SourceUnverified` forever — exactly the stranded state the epic forbids.
+///
+/// Reconciliation failures never fail the delete, whose files are already removed; they are logged
+/// and returned as warnings so the orphan is surfaced rather than silently stranded.
+async fn reconcile_deleted_source(
+    state: &AppState,
+    selectors: Vec<sceneworks_core::model_artifacts::resolved_cache::SourceLifecycleSelector>,
+) -> Vec<String> {
+    use sceneworks_core::model_artifacts::resolved_cache::ResolvedCacheStore;
+
+    if selectors.is_empty() {
+        return Vec::new();
+    }
+    let data_dir = state.settings.data_dir.clone();
+    // Reconcile whenever a managed store exists, even if the policy was since disabled: entries
+    // materialized while it was enabled must still be reconciled rather than orphaned. Never
+    // create the store as a side effect of a delete.
+    if !data_dir.join("models").join("resolved").exists() {
+        return Vec::new();
+    }
+    let now = sceneworks_core::time::now_unix_seconds().max(0) as u64;
+    let outcome = tokio::task::spawn_blocking(move || {
+        let store = ResolvedCacheStore::open(&data_dir)?;
+        let mut warnings = Vec::new();
+        for selector in selectors {
+            let report = store.reconcile_removed_source(&selector, now)?;
+            for deferred in report.deferred {
+                warnings.push(format!(
+                    "A cached copy of {} is still in use and will be reclaimed after it is released.",
+                    selector.repository
+                ));
+                tracing::info!(
+                    repository = %selector.repository,
+                    cache_key = %deferred.cache_key,
+                    hold = %deferred.hold,
+                    "resolved-cache reconciliation deferred an in-use entry"
+                );
+            }
+            for stranded in report.unmatched_unreadable {
+                warnings.push(format!(
+                    "A damaged resolved-cache entry ({stranded}) could not be matched to {} and was left in place.",
+                    selector.repository
+                ));
+            }
+        }
+        Ok::<_, sceneworks_core::model_artifacts::resolved_cache::ResolvedCacheError>(warnings)
+    })
+    .await;
+    match outcome {
+        Ok(Ok(warnings)) => warnings,
+        Ok(Err(error)) => {
+            tracing::warn!(error = %error, "resolved-cache reconciliation failed after a source delete");
+            vec![format!(
+                "Cached copies of this model could not be reconciled and may still occupy disk: {error}"
+            )]
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "resolved-cache reconciliation task failed");
+            vec![
+                "Cached copies of this model could not be reconciled and may still occupy disk."
+                    .to_owned(),
+            ]
+        }
+    }
 }
 
 pub(crate) async fn delete_model(
@@ -1449,6 +1604,7 @@ pub(crate) async fn delete_model(
         .ok_or_else(|| ApiError {
             status: StatusCode::NOT_FOUND,
             detail: "Model not found".to_owned(),
+            context: None,
             code: None,
         })?;
     let manifest_path = state
@@ -1465,7 +1621,9 @@ pub(crate) async fn delete_model(
     let cleanup_source = manifest_entry.as_ref().unwrap_or(&model);
     let allowed_roots = vec![
         state.settings.data_dir.join("models"),
-        huggingface_hub_cache_dir(&state.settings.data_dir),
+        sceneworks_core::hf_home::model_source_library(&state.settings.data_dir)
+            .root()
+            .to_owned(),
     ];
     let removal = match remove_whole_model_artifacts(
         catalogs.models(&state).await?,
@@ -1515,8 +1673,25 @@ pub(crate) async fn delete_model(
             "Built-in model catalog entries are read-only unless local files are installed",
         ));
     }
-    let warnings =
+    let mut warnings =
         catalog_delete_warnings(&state, "model", &model_id, None, Some(&catalogs)).await?;
+    // The source is gone; reclaim (or surface) every resolved-cache entry that depended on it.
+    warnings.extend(
+        reconcile_deleted_source(
+            &state,
+            owned_source_repositories(cleanup_source)
+                .into_iter()
+                .map(|repository| {
+                    sceneworks_core::model_artifacts::resolved_cache::SourceLifecycleSelector {
+                        repository,
+                        revision: None,
+                        tier: None,
+                    }
+                })
+                .collect(),
+        )
+        .await,
+    );
     let policy = if removed_entry.is_some() {
         "Removed the model registry entry and SceneWorks-owned local model files."
     } else {
@@ -1772,10 +1947,16 @@ pub(crate) async fn delete_model_variant(
         .ok_or_else(|| ApiError {
             status: StatusCode::NOT_FOUND,
             detail: "Model not found".to_owned(),
+            context: None,
             code: None,
         })?;
     let data_dir = &state.settings.data_dir;
-    let allowed_roots = vec![data_dir.join("models"), huggingface_hub_cache_dir(data_dir)];
+    let allowed_roots = vec![
+        data_dir.join("models"),
+        sceneworks_core::hf_home::model_source_library(data_dir)
+            .root()
+            .to_owned(),
+    ];
     // A tier lives in one of two storage shapes. Download-matrix models (`hasVariantMatrix`) keep the
     // tier as a `files`-filtered slice of a shared HF cache repo (sc-12024); convert-at-install
     // models (Anima) keep it as a real `<converted>/<tier>/` dir emitted by one convert job
@@ -1862,10 +2043,27 @@ pub(crate) async fn delete_model_variant(
             "Tier '{variant}' is not installed"
         )));
     }
+    // A single-tier delete only orphans resolved-cache entries built from that tier; entries for
+    // the model's other tiers stay valid, so the selector is scoped by tier.
+    let cache_warnings = reconcile_deleted_source(
+        &state,
+        owned_source_repositories(&model)
+            .into_iter()
+            .map(|repository| {
+                sceneworks_core::model_artifacts::resolved_cache::SourceLifecycleSelector {
+                    repository,
+                    revision: None,
+                    tier: Some(variant.clone()),
+                }
+            })
+            .collect(),
+    )
+    .await;
     Ok(Json(json!({
         "id": model_id,
         "variant": variant,
         "kind": "model-variant",
+        "warnings": cache_warnings,
         // Permanent delete: no OS trash, no undo (sc-12088).
         "trashed": false,
         // A tier delete NEVER removes the registry entry: the model stays in the catalog so the
@@ -2059,7 +2257,18 @@ async fn remove_empty_dirs(dir: &FsPath) {
 /// subtrees, and — when no payload remains (no blobs, no snapshot files) — the whole repo cache
 /// dir, so a fully-drained repo doesn't linger as a bare `refs/` skeleton. Best-effort.
 async fn prune_empty_repo_cache(repo_cache: &FsPath) {
-    remove_empty_dirs(&repo_cache.join("snapshots")).await;
+    let Some(source_root) = repo_cache.parent() else {
+        return;
+    };
+    let Ok(source_library) =
+        sceneworks_core::model_artifacts::ArtifactSourceLibrary::new(source_root)
+    else {
+        return;
+    };
+    let Ok(snapshots_root) = source_library.snapshots_root_from_repository_root(repo_cache) else {
+        return;
+    };
+    remove_empty_dirs(&snapshots_root).await;
     remove_empty_dirs(&repo_cache.join("blobs")).await;
     let has_blobs = std::fs::read_dir(repo_cache.join("blobs"))
         .map(|mut entries| entries.next().is_some())
@@ -2183,18 +2392,28 @@ const MODEL_IMPORT_DISABLED_DETAIL: &str = "Model import is temporarily disabled
 /// widens or bypasses that. The worker re-runs the same predicate over the downloaded bytes so repo/
 /// URL imports (whose file is not on disk at queue time) are covered there.
 fn import_source_supported(source: &FsPath) -> Result<(), ApiError> {
-    let weight_file = if source.is_dir() {
-        first_safetensors_path(source)
-    } else {
-        Some(source.to_path_buf())
-    };
+    let weight_file = imported_model_primary_weight_file(source);
     let Some(weight_file) = weight_file else {
         return Err(ApiError::bad_request(
             "No safetensors base-weight file was found to import; single-file base-checkpoint import expects a .safetensors transformer.",
         ));
     };
     let detection = detect_base_weight_file(&weight_file).map_err(model_family_inspection_error)?;
-    import_detection_supported(&detection).map_err(ApiError::bad_request)
+    import_detection_supported(&detection).map_err(ApiError::bad_request)?;
+    if matches!(
+        &detection,
+        BaseWeightDetection::Recognized(verdict)
+            if verdict.family.as_deref() == Some("mage-flow")
+    ) && (!source.is_dir()
+        || !sceneworks_core::base_weights::is_mage_flow_transformer_dir(source))
+    {
+        return Err(ApiError::bad_request(
+            "Model import for the 'mage-flow' family requires a complete transformer directory \
+             containing config.json and diffusion_pytorch_model.safetensors; a bare weights file \
+             is refused because the loader cannot derive its architecture.",
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) async fn create_model_import_job(
@@ -2410,7 +2629,7 @@ pub(crate) async fn queue_model_import_job(
         "auto".to_owned(),
     )
     .await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 pub(crate) async fn model_import_request_from_multipart(
@@ -2597,7 +2816,10 @@ pub(crate) fn max_model_upload_bytes() -> usize {
 /// byte-accurate download size — so an unreachable huggingface.co can't stall
 /// those paths (sc-4169).
 pub(crate) async fn model_catalog(state: &AppState) -> Result<Vec<Value>, ApiError> {
-    Ok(model_catalog_snapshot(state).await?.as_ref().clone())
+    let mut models = model_catalog_snapshot(state).await?.as_ref().clone();
+    crate::model_sources::refresh_live_external_availability(&state.settings.data_dir, &mut models)
+        .await?;
+    Ok(models)
 }
 
 /// Catalog with live Hugging Face download-size estimates (negative-cached on
@@ -2612,6 +2834,9 @@ pub(crate) async fn model_catalog_sized(state: &AppState) -> Result<Vec<Value>, 
     let (size_estimates, snapshot) = tokio::join!(size_estimates, snapshot);
     let size_estimates = size_estimates?;
     let mut models = snapshot?.as_ref().clone();
+    crate::model_sources::refresh_live_external_availability(&state.settings.data_dir, &mut models)
+        .await?;
+    let selection_catalog = models.clone();
     for model in &mut models {
         let context = model_download_context(model)?;
         let live_estimate = context.as_ref().and_then(|context| {
@@ -2621,7 +2846,12 @@ pub(crate) async fn model_catalog_sized(state: &AppState) -> Result<Vec<Value>, 
                 .flatten()
         });
         apply_model_catalog_size_fields(model, context.as_ref(), live_estimate)?;
-        apply_runtime_text_encoder_options(model, &state.settings.data_dir)?;
+        apply_runtime_text_encoder_options(
+            model,
+            &selection_catalog,
+            &state.settings.data_dir,
+            &state.settings.external_model_roots,
+        )?;
     }
     Ok(models)
 }
@@ -2632,19 +2862,87 @@ pub(crate) async fn model_catalog_sized(state: &AppState) -> Result<Vec<Value>, 
 /// Models sees it without a server restart, while no repo/revision/download metadata is persisted.
 fn apply_runtime_text_encoder_options(
     model: &mut Value,
+    catalog: &[Value],
     data_dir: &FsPath,
+    external_roots: &[PathBuf],
 ) -> Result<(), ApiError> {
-    let adapter = model
-        .get("adapter")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let options = sceneworks_worker::text_encoder_options_for_adapter(adapter, data_dir);
+    let mut options =
+        sceneworks_worker::image_text_encoder_options(catalog, model, data_dir, external_roots)
+            .into_iter()
+            .map(|option| serde_json::to_value(option).expect("text encoder option serializes"))
+            .collect::<Vec<_>>();
+    if options.is_empty() {
+        let adapter = model
+            .get("adapter")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        options.extend(
+            sceneworks_worker::text_encoder_options_for_adapter(adapter, data_dir)
+                .into_iter()
+                .map(|option| {
+                    serde_json::to_value(option).expect("video text encoder option serializes")
+                }),
+        );
+    }
     set_runtime_text_encoder_options(model, options)
+}
+
+/// Resolve an authored Image Studio encoder selection through the worker-owned descriptor contract.
+/// Only the opaque id comes from the client. The path-bearing resolution is rebuilt from a fresh
+/// server catalog at every create/retry/duplicate boundary and is never trusted as request input.
+pub(crate) async fn resolve_selected_image_text_encoder(
+    state: &AppState,
+    job_payload: &JsonObject,
+    model_id: &str,
+    manifest_entry: &mut Value,
+) -> Result<(), ApiError> {
+    let selected = match job_payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("textEncoderModel"))
+    {
+        None => {
+            if let Some(object) = manifest_entry.as_object_mut() {
+                object.remove("resolvedTextEncoder");
+            }
+            return Ok(());
+        }
+        Some(Value::String(id)) if id == "default" => {
+            if let Some(object) = manifest_entry.as_object_mut() {
+                object.remove("resolvedTextEncoder");
+            }
+            return Ok(());
+        }
+        Some(Value::String(id)) => id.as_str(),
+        Some(_) => return Err(ApiError::bad_request(
+            "advanced.textEncoderModel must be a string option id returned by GET /api/v1/models",
+        )),
+    };
+
+    let catalog = model_catalog_snapshot(state).await?;
+    let catalog_model = catalog
+        .iter()
+        .find(|model| model.get("id").and_then(Value::as_str) == Some(model_id))
+        .unwrap_or(manifest_entry);
+    let resolution = sceneworks_worker::resolve_image_text_encoder_selection(
+        catalog.as_ref(),
+        catalog_model,
+        selected,
+        &state.settings.data_dir,
+        &state.settings.external_model_roots,
+    )
+    .map_err(ApiError::bad_request)?
+    .ok_or_else(|| ApiError::internal("non-default text encoder resolved as default"))?;
+    let object = manifest_entry
+        .as_object_mut()
+        .ok_or_else(|| ApiError::internal("Model manifest entry must be an object"))?;
+    object.insert("resolvedTextEncoder".to_owned(), resolution);
+    Ok(())
 }
 
 fn set_runtime_text_encoder_options(
     model: &mut Value,
-    options: Vec<sceneworks_worker::TextEncoderOption>,
+    options: Vec<Value>,
 ) -> Result<(), ApiError> {
     let object = model
         .as_object_mut()
@@ -2652,7 +2950,7 @@ fn set_runtime_text_encoder_options(
     if options.is_empty() {
         object.remove("textEncoderOptions");
     } else {
-        object.insert("textEncoderOptions".to_owned(), json!(options));
+        object.insert("textEncoderOptions".to_owned(), Value::Array(options));
     }
     Ok(())
 }
@@ -2664,45 +2962,31 @@ mod runtime_text_encoder_option_tests {
     use crate::tests::support::isolate_hf_cache;
 
     #[test]
-    fn catalog_field_is_generic_and_contains_no_distribution_metadata() {
-        let mut model = json!({ "id": "future_video", "adapter": "future_adapter" });
+    fn catalog_field_is_path_free_and_default_can_be_omitted() {
+        let mut model = json!({ "id": "future_image" });
         set_runtime_text_encoder_options(
             &mut model,
             vec![
-                sceneworks_worker::TextEncoderOption {
-                    id: "default",
-                    label: "Bundled encoder (default)",
-                    description: "Uses the installed encoder.",
-                    is_default: true,
-                },
-                sceneworks_worker::TextEncoderOption {
-                    id: "future_staged_encoder",
-                    label: "Staged alternate",
-                    description: "Uses a complete operator-staged alternate.",
-                    is_default: false,
-                },
+                json!({
+                    "id": "default",
+                    "label": "Model encoder (default)",
+                    "description": "Uses the bundled encoder.",
+                    "isDefault": true
+                }),
+                json!({
+                    "id": "text_encoder_0123456789abcdef0123456789abcdef",
+                    "label": "Alternate",
+                    "description": "Contract validated.",
+                    "isDefault": false
+                }),
             ],
         )
         .unwrap();
-
-        let options = model["textEncoderOptions"].as_array().unwrap();
-        assert_eq!(options.len(), 2);
-        assert_eq!(options[1]["id"], "future_staged_encoder");
-        assert_eq!(options[1]["isDefault"], false);
-        for forbidden in ["repo", "revision", "files", "download"] {
-            assert!(
-                options.iter().all(|option| option.get(forbidden).is_none()),
-                "runtime options must not become distribution metadata: {forbidden}"
-            );
+        let serialized = serde_json::to_string(&model["textEncoderOptions"]).unwrap();
+        for forbidden in ["path", "repo", "revision", "files", "download"] {
+            assert!(!serialized.contains(forbidden), "{forbidden}");
         }
-    }
 
-    #[test]
-    fn models_without_a_runtime_surface_emit_no_selector_field() {
-        let mut model = json!({
-            "id": "fixed_encoder_model",
-            "textEncoderOptions": [{ "id": "stale" }]
-        });
         set_runtime_text_encoder_options(&mut model, Vec::new()).unwrap();
         assert!(model.get("textEncoderOptions").is_none());
     }
@@ -2718,7 +3002,7 @@ mod runtime_text_encoder_option_tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn live_options_refresh_when_alternate_becomes_valid_or_corrupt() {
+    fn legacy_ltx_fallback_refreshes_when_alternate_becomes_valid_or_corrupt() {
         let _env = isolate_hf_cache();
         let data_dir = tempfile::tempdir().unwrap();
         let repo = sceneworks_core::hf_home::huggingface_repo_cache_path(
@@ -2726,7 +3010,9 @@ mod runtime_text_encoder_option_tests {
             "TheCluster/amoral-gemma-3-12B-v2-mlx-4bit",
         )
         .unwrap();
-        let snapshot = repo.join("snapshots").join("test-revision");
+        let snapshot = repo
+            .join("snapshots")
+            .join("0123456789abcdef0123456789abcdef01234567");
         std::fs::create_dir_all(&snapshot).unwrap();
         std::fs::write(
             snapshot.join("config.json"),
@@ -2741,22 +3027,27 @@ mod runtime_text_encoder_option_tests {
         write_tiny_safetensors(&snapshot.join("model.safetensors"));
 
         let mut model = json!({ "id": "ltx_2_3", "adapter": "ltx_video" });
-        apply_runtime_text_encoder_options(&mut model, data_dir.path()).unwrap();
+        let catalog = vec![model.clone()];
+        apply_runtime_text_encoder_options(&mut model, &catalog, data_dir.path(), &[]).unwrap();
         assert_eq!(model["textEncoderOptions"].as_array().unwrap().len(), 2);
 
         std::fs::write(snapshot.join("model.safetensors"), b"truncated").unwrap();
-        apply_runtime_text_encoder_options(&mut model, data_dir.path()).unwrap();
+        apply_runtime_text_encoder_options(&mut model, &catalog, data_dir.path(), &[]).unwrap();
         let options = model["textEncoderOptions"].as_array().unwrap();
         assert_eq!(options.len(), 1);
         assert_eq!(options[0]["id"], "default");
 
         std::fs::remove_dir_all(&repo).unwrap();
-        apply_runtime_text_encoder_options(&mut model, data_dir.path()).unwrap();
+        apply_runtime_text_encoder_options(&mut model, &catalog, data_dir.path(), &[]).unwrap();
         assert_eq!(model["textEncoderOptions"].as_array().unwrap().len(), 1);
     }
 }
 
-async fn model_catalog_snapshot(state: &AppState) -> Result<Arc<Vec<Value>>, ApiError> {
+pub(crate) async fn model_catalog_snapshot(state: &AppState) -> Result<Arc<Vec<Value>>, ApiError> {
+    // Before trusting the cached snapshot, check whether the resolved cache's published set moved
+    // under us — the worker publishes promotions in another process, so this is the only signal
+    // the API gets (sc-19712 F-4). It is a handful of stats, cheap enough to pay per read.
+    crate::model_sources::note_local_tier_freshness(state);
     {
         let cache_state = state.model_catalog_cache.state.lock();
         if let Some((snapshot_generation, snapshot)) = cache_state.snapshot.as_ref() {
@@ -2924,6 +3215,12 @@ fn receipt_files_present(
                     .filter(|snapshot| {
                         snapshot_tier_is_loadable(snapshot, &receipt.files, family_complete)
                     })
+                    // A backfill records whatever it FOUND, so a receipt can name a shard index plus
+                    // only the shards that happened to land. Every recorded index must still resolve
+                    // to a complete shard set on disk, or this receipt is laundering an interrupted
+                    // download into "installed" (sc-20526). Stat-only: the index paths are already in
+                    // the receipt, so this costs no directory walk.
+                    .filter(|snapshot| listed_shard_indexes_are_complete(snapshot, &receipt.files))
                     .collect::<Vec<_>>();
                 receipt
                     .revision
@@ -2952,6 +3249,105 @@ fn model_family_tier_predicate(model: &Value) -> Option<fn(&FsPath) -> bool> {
             .unwrap_or_default(),
         model.get("id").and_then(Value::as_str).unwrap_or_default(),
     )
+}
+
+/// Whether a receipt entry is PROVABLY torn: every cached snapshot that holds one of the shard
+/// indexes the entry recorded is missing at least one shard that index names, and no snapshot holds
+/// a complete set (sc-20526).
+///
+/// Deliberately positive-evidence only. A receipt whose repo cache is gone, whose files simply are
+/// not where this box expects them, or that records no shard index at all is left ALONE — read-side
+/// validation already refuses to count such a receipt as installed, and silently deleting a receipt
+/// on ambiguous evidence would destroy the relocation proof an external-library install depends on.
+fn receipt_entry_is_provably_torn(entry: &Value, data_dir: &FsPath) -> bool {
+    if entry.get("backfilled").and_then(Value::as_bool) != Some(true) {
+        return false;
+    }
+    let Some(repo) = entry.get("repo").and_then(Value::as_str) else {
+        return false;
+    };
+    let indexes = entry
+        .get("resolvedFiles")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|file| file.ends_with(sceneworks_core::safetensors::SAFETENSORS_INDEX_SUFFIX))
+        .collect::<Vec<_>>();
+    if indexes.is_empty() {
+        return false;
+    }
+    let Some(root) = huggingface_repo_cache_path(data_dir, repo) else {
+        return false;
+    };
+    let mut saw_torn = false;
+    for snapshot in crate::huggingface_snapshot_dirs(&root) {
+        let present = indexes
+            .iter()
+            .filter(|file| path_is_readable_file(&snapshot.join(file)))
+            .collect::<Vec<_>>();
+        if present.is_empty() {
+            continue;
+        }
+        // One complete snapshot is enough: cached revisions are alternatives, and a re-download
+        // lands beside the torn revision it replaces rather than deleting it.
+        if present.len() == indexes.len()
+            && listed_shard_indexes_are_complete(
+                &snapshot,
+                &indexes
+                    .iter()
+                    .map(|file| (*file).to_owned())
+                    .collect::<Vec<_>>(),
+            )
+        {
+            return false;
+        }
+        saw_torn = true;
+    }
+    saw_torn
+}
+
+/// Repair receipts that a pre-sc-20526 backfill minted over a partially downloaded tier.
+///
+/// The offending shape is `backfilled: true` with a shard index whose `weight_map` names files that
+/// were never downloaded — the receipt recorded the partial on-disk set as if it were complete, and
+/// nothing invalidated it, so affected users needed a manual delete. Dropping the entry here lets the
+/// next scan re-backfill honestly (the backfill writer early-outs while ANY receipt for the model
+/// survives) and heals every other receipt consumer, since they all read this one file.
+///
+/// Cost: one small JSON read per managed model directory plus a stat per recorded index and shard.
+/// It runs on the catalog sweep, never on the per-job hot path.
+fn repair_torn_backfilled_receipts(managed_path: &FsPath, data_dir: &FsPath) {
+    let entries = receipt_entries(managed_path);
+    if entries.is_empty()
+        || !entries
+            .iter()
+            .any(|entry| receipt_entry_is_provably_torn(entry, data_dir))
+    {
+        return;
+    }
+    let _write_guard = RECEIPT_BACKFILL_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Re-read under the lock: a concurrent backfill may have rewritten the file.
+    let kept = receipt_entries(managed_path)
+        .into_iter()
+        .filter(|entry| !receipt_entry_is_provably_torn(entry, data_dir))
+        .collect::<Vec<_>>();
+    let receipt_path = managed_path.join(".sceneworks-download-complete.json");
+    let Some(first) = kept.first().cloned() else {
+        // Every entry was a false-complete: the model is not installed, so the receipt must go
+        // rather than linger as a bare marker `model_is_installed` would still honour.
+        let _ = std::fs::remove_file(&receipt_path);
+        return;
+    };
+    let mut receipt = first;
+    if let Some(object) = receipt.as_object_mut() {
+        object.insert("receipts".to_owned(), Value::Array(kept));
+    }
+    let _ = serde_json::to_vec_pretty(&receipt)
+        .ok()
+        .and_then(|bytes| std::fs::write(&receipt_path, bytes).ok());
 }
 
 fn backfill_current_receipt(
@@ -2988,11 +3384,38 @@ fn backfill_current_receipt(
             }
             let resolved = snapshot_files(&snapshot).into_iter()
                 .filter(|file| allow_pattern_matches(file, &files)).collect::<Vec<_>>();
+            // Record only a file set that SATISFIES what the repo declares, never merely what was
+            // found (sc-20526). A `<tier>/*` glob and a whole-repo fetch declare no per-file claim,
+            // so the sharded-safetensors indexes IN the resolved set are the workable ground truth:
+            // every shard their `weight_map` names must be on disk. Otherwise this would mint a
+            // "complete" receipt for a tier missing ~4 GB of its text encoder (lens_turbo bf16) and
+            // that receipt would then keep the model reading installed through the usable-stale path.
+            if !listed_shard_indexes_are_complete(&snapshot, &resolved) {
+                return None;
+            }
+            // Record WHICH snapshot these files were read from (sc-19712 F-5). A revision-less
+            // receipt makes its whole repository unserveable from the resolved cache — there is no
+            // pair to compare coverage against — so a backfilled install silently dropped out of
+            // the local tier while still being promotable, occupying cache bytes it could never be
+            // served from. The revision is not unknowable here: the snapshot directory selected
+            // just above IS `.../snapshots/<revision>`, and `resolvedFiles` were read from it. Only
+            // a genuinely immutable 40-hex name is recorded; anything else is omitted rather than
+            // written as a revision the source tier could not re-resolve. The worker's
+            // `establish_receipt_tree_stamp` already patches receipts this same way.
+            let snapshot_revision = snapshot
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| {
+                    sceneworks_core::model_artifacts::validate_immutable_revision(name).is_ok()
+                })
+                .map(|name| Value::String(name.to_owned()))
+                .unwrap_or(Value::Null);
             (!resolved.is_empty()).then(|| json!({
                 "schemaVersion": 2, "repo": repo,
                 "modelId": model.get("id").cloned().unwrap_or(Value::Null),
                 "variant": entry.get("variant").cloned().unwrap_or_else(|| Value::String("default".to_owned())),
                 "manifestFiles": files, "resolvedFiles": resolved, "backfilled": true,
+                "snapshotRevision": snapshot_revision,
             }))
         }).collect::<Vec<_>>();
     if receipts.is_empty() {
@@ -3082,6 +3505,40 @@ mod import_gate_tests {
         ]
     }
 
+    fn fused_sdxl_f16_keys() -> Vec<(&'static str, &'static str)> {
+        vec![
+            (
+                "model.diffusion_model.input_blocks.7.0.out_layers.3.weight",
+                "F16",
+            ),
+            (
+                "model.diffusion_model.middle_block.1.transformer_blocks.0.attn1.to_q.weight",
+                "F16",
+            ),
+            (
+                "conditioner.embedders.0.transformer.text_model.embeddings.token_embedding.weight",
+                "F16",
+            ),
+            (
+                "conditioner.embedders.1.model.transformer.resblocks.9.attn.in_proj_weight",
+                "F16",
+            ),
+            ("first_stage_model.encoder.conv_in.weight", "F16"),
+            ("first_stage_model.decoder.conv_out.weight", "F16"),
+        ]
+    }
+
+    fn legacy_user_entry(family: &str, path: &FsPath) -> JsonObject {
+        json!({
+            "id": "legacy_user_model",
+            "family": family,
+            "paths": { "model": path.to_string_lossy() },
+        })
+        .as_object()
+        .expect("legacy entry")
+        .clone()
+    }
+
     #[test]
     fn krea2_bf16_upload_is_accepted() {
         let temp = tempfile::tempdir().unwrap();
@@ -3091,6 +3548,67 @@ mod import_gate_tests {
             import_source_supported(&file).is_ok(),
             "a dense-bf16 Krea 2 DiT upload must pass the import gate"
         );
+    }
+
+    #[test]
+    fn legacy_source_shape_backfill_uses_the_exact_loader_structure() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("data");
+        let models = data_dir.join("models");
+
+        let krea_dir = models.join("imports/krea");
+        let krea_file = krea_dir.join("transformer.safetensors");
+        write_safetensors(&krea_file, &krea2_bf16_dit_keys());
+        let mut krea = legacy_user_entry("krea_2", &krea_dir);
+        stamp_legacy_import_source_shape(&mut krea, &data_dir, true);
+        assert_eq!(krea["importSourceShape"], json!("transformer_file"));
+
+        let sdxl_file = models.join("imports/sdxl.safetensors");
+        write_safetensors(&sdxl_file, &fused_sdxl_f16_keys());
+        let mut sdxl = legacy_user_entry("sdxl", &sdxl_file);
+        stamp_legacy_import_source_shape(&mut sdxl, &data_dir, true);
+        assert_eq!(sdxl["importSourceShape"], json!("fused_checkpoint"));
+
+        let mage_dir = models.join("imports/mage");
+        std::fs::create_dir_all(&mage_dir).unwrap();
+        std::fs::write(mage_dir.join("config.json"), b"{}").unwrap();
+        std::fs::write(
+            mage_dir.join("diffusion_pytorch_model.safetensors"),
+            b"weights",
+        )
+        .unwrap();
+        let mut mage = legacy_user_entry("mage-flow", &mage_dir);
+        stamp_legacy_import_source_shape(&mut mage, &data_dir, true);
+        assert_eq!(mage["importSourceShape"], json!("transformer_directory"));
+    }
+
+    #[test]
+    fn legacy_source_shape_backfill_refuses_ambiguous_or_mismatched_trees() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("data");
+        let models = data_dir.join("models");
+
+        let ambiguous = models.join("imports/ambiguous");
+        write_safetensors(&ambiguous.join("one.safetensors"), &krea2_bf16_dit_keys());
+        write_safetensors(&ambiguous.join("two.safetensors"), &krea2_bf16_dit_keys());
+        let mut multiple = legacy_user_entry("krea_2", &ambiguous);
+        stamp_legacy_import_source_shape(&mut multiple, &data_dir, true);
+        assert!(multiple.get("importSourceShape").is_none());
+
+        let nested = models.join("imports/nested");
+        write_safetensors(
+            &nested.join("transformer/model.safetensors"),
+            &krea2_bf16_dit_keys(),
+        );
+        let mut recursive = legacy_user_entry("krea_2", &nested);
+        stamp_legacy_import_source_shape(&mut recursive, &data_dir, true);
+        assert!(recursive.get("importSourceShape").is_none());
+
+        let sdxl_file = models.join("imports/wrong-family.safetensors");
+        write_safetensors(&sdxl_file, &fused_sdxl_f16_keys());
+        let mut wrong_family = legacy_user_entry("krea_2", &sdxl_file);
+        stamp_legacy_import_source_shape(&mut wrong_family, &data_dir, true);
+        assert!(wrong_family.get("importSourceShape").is_none());
     }
 
     #[test]
@@ -3221,6 +3739,491 @@ mod download_receipt_tests {
             .unwrap_or_else(|| panic!("builtin entry {model_id} present"))
     }
 
+    fn seed_manifest_download(data_dir: &FsPath, download: &Value) {
+        let repo = download.get("repo").and_then(Value::as_str).unwrap();
+        let revision = download.get("revision").and_then(Value::as_str).unwrap();
+        let snapshot = huggingface_repo_cache_path(data_dir, repo)
+            .unwrap()
+            .join("snapshots")
+            .join(revision);
+        for file in string_array_field(download, "files") {
+            let path = snapshot.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"legacy Eros weights").unwrap();
+        }
+    }
+
+    fn seed_manifest_downloads(data_dir: &FsPath, model: &Value, include_co_requisites: bool) {
+        for download in model
+            .get("downloads")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|download| include_co_requisites || !is_co_requisite_download(download))
+        {
+            seed_manifest_download(data_dir, download);
+        }
+    }
+
+    /// A platformCleanupOnly tombstone has its `variants` projection stripped by
+    /// `apply_model_catalog_entry`, yet the snapshot pipeline still runs size enrichment on it.
+    /// The refresh must no-op for tombstones while staying a hard error for real entries —
+    /// this exact mismatch 500'd the whole catalog for machines holding legacy Eros weights.
+    /// (Platform-neutral twin of the seeded-cache Eros tests below, which cannot run on Windows:
+    /// their setup writes the literal `gemma/*` manifest pattern as a filename.)
+    #[test]
+    fn size_refresh_tolerates_a_cleanup_tombstone_without_variants() {
+        let mut tombstone = json!({
+            "id": "ltx_2_3_eros",
+            "platformCleanupOnly": true,
+        });
+        refresh_variant_download_sizes(&mut tombstone)
+            .expect("tombstone size refresh must be a no-op");
+        assert!(
+            tombstone.get("variants").is_none(),
+            "tombstone refresh must not invent a variants projection"
+        );
+
+        let mut real_entry = json!({ "id": "ltx_2_3" });
+        assert!(
+            refresh_variant_download_sizes(&mut real_entry).is_err(),
+            "a non-tombstone entry without a variants array is still a contract violation"
+        );
+    }
+
+    /// SC-18902: Eros is a real MLX product route, but its exact-head Candle/CUDA capture was
+    /// unusable. Pin the complete catalog projection so a future edit cannot restore the 46.8 GB
+    /// Windows/Linux offer merely by changing one of the three required download rows.
+    #[test]
+    fn ltx_eros_catalog_is_macos_only_and_not_downloadable_off_macos() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let base = builtin_models_entry("ltx_2_3");
+        assert_ne!(
+            base.get("macOnly").and_then(Value::as_bool),
+            Some(true),
+            "base LTX-2.3 must remain cross-platform"
+        );
+        for os in ["windows", "linux"] {
+            let mut candle_base = base.clone();
+            retain_downloads_for_os(&mut candle_base, os);
+            assert!(
+                model_download_context(&candle_base)
+                    .expect("valid base LTX catalog entry")
+                    .is_some(),
+                "{os}: base LTX-2.3 remains downloadable"
+            );
+        }
+
+        let entry = builtin_models_entry("ltx_2_3_eros");
+        assert_eq!(entry.get("macOnly").and_then(Value::as_bool), Some(true));
+
+        let mut false_override = entry.clone();
+        let object = false_override.as_object_mut().unwrap();
+        object.insert("macOnly".to_owned(), Value::Bool(false));
+        object.insert("type".to_owned(), Value::String("image".to_owned()));
+        object.insert("downloadable".to_owned(), Value::Bool(true));
+        let mut absent_override = entry.clone();
+        let object = absent_override.as_object_mut().unwrap();
+        object.remove("macOnly");
+        object.insert("downloadable".to_owned(), Value::Bool(true));
+        object.insert("usable".to_owned(), Value::Bool(true));
+        for override_attempt in [false_override, absent_override] {
+            let mut overridden_projection = vec![override_attempt];
+            retain_models_for_os(&mut overridden_projection, "windows", temp.path()).unwrap();
+            assert!(
+                overridden_projection.is_empty(),
+                "user platform/download fields cannot restore the withdrawn Eros product"
+            );
+        }
+
+        let mut macos = entry.clone();
+        retain_downloads_for_os(&mut macos, "macos");
+        let macos_downloads = macos
+            .get("downloads")
+            .and_then(Value::as_array)
+            .expect("macOS Eros downloads");
+        assert_eq!(
+            macos_downloads
+                .iter()
+                .filter_map(|download| download.get("repo").and_then(Value::as_str))
+                .collect::<Vec<_>>(),
+            vec![
+                "SceneWorks/ltx-2.3-mlx",
+                "TenStrip/LTX2.3-10Eros",
+                "TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments",
+            ],
+            "macOS retains the shared Gemma bundle, Eros checkpoint, and cond_safe adapter"
+        );
+        let macos_context = model_download_context(&macos)
+            .expect("valid Eros download context")
+            .expect("macOS Eros remains downloadable");
+        let macos_state = install_state_for(Some(macos_context), &macos, temp.path());
+        assert!(macos_state.downloadable);
+        let mut macos_projection = vec![base.clone(), entry.clone()];
+        retain_models_for_os(&mut macos_projection, "macos", temp.path()).unwrap();
+        assert_eq!(
+            macos_projection
+                .iter()
+                .filter_map(|model| model.get("id").and_then(Value::as_str))
+                .collect::<Vec<_>>(),
+            vec!["ltx_2_3", "ltx_2_3_eros"],
+            "macOS catalog and Model Manager retain both LTX products"
+        );
+
+        for os in ["windows", "linux"] {
+            let mut candle = entry.clone();
+            retain_downloads_for_os(&mut candle, os);
+            assert_eq!(
+                candle
+                    .get("downloads")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|download| download.get("repo").and_then(Value::as_str))
+                    .collect::<Vec<_>>(),
+                vec!["SceneWorks/ltx-2.3-mlx"],
+                "{os}: platform filtering retains only the shared Gemma bundle, never the Eros checkpoint or adapter"
+            );
+            assert!(
+                model_download_context(&candle)
+                    .expect("valid filtered catalog entry")
+                    .is_none(),
+                "{os}: Eros must have no canonical download"
+            );
+            let state = install_state_for(None, &candle, temp.path());
+            assert!(!state.downloadable, "{os}: Eros must not be downloadable");
+            assert!(
+                !state.installed,
+                "{os}: filtered remote files must not resurrect a picker row"
+            );
+            let mut projection = vec![base.clone(), entry.clone()];
+            retain_models_for_os(&mut projection, os, temp.path()).unwrap();
+            assert_eq!(
+                projection
+                    .iter()
+                    .filter_map(|model| model.get("id").and_then(Value::as_str))
+                    .collect::<Vec<_>>(),
+                vec!["ltx_2_3"],
+                "{os}: Model Manager/catalog must omit Eros and preserve base LTX-2.3"
+            );
+        }
+    }
+
+    /// A previously shipped Windows/Linux install remains visible only as a cleanup tombstone. The
+    /// tombstone cannot generate, download, repair, or update, but DELETE can reclaim both the dense
+    /// checkpoint and its Eros-exclusive cond_safe adapter; once removed, the row disappears.
+    #[tokio::test(flavor = "current_thread")]
+    async fn ltx_eros_legacy_install_is_cleanup_only_and_reclaimable_off_macos() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let entry = builtin_models_entry("ltx_2_3_eros");
+        seed_manifest_downloads(data_dir, &entry, true);
+
+        let mut projection = vec![entry.clone()];
+        retain_models_for_os(&mut projection, "windows", data_dir).unwrap();
+        assert_eq!(
+            projection.len(),
+            1,
+            "an installed legacy Eros row is retained"
+        );
+        assert_eq!(
+            projection[0]
+                .get("platformCleanupOnly")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+
+        let context = model_download_context(&projection[0])
+            .unwrap()
+            .expect("cleanup tombstone retains its original artifact context");
+        // No resolved-cache artifacts (sc-19708's availability seam): a platform tombstone is
+        // judged from its own on-disk install, not from an external library's local copies.
+        let projected = apply_model_catalog_entry(
+            projection.pop().unwrap(),
+            Some(context),
+            data_dir,
+            &std::collections::HashSet::new(),
+            &std::collections::HashSet::new(),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            projected.get("installState").and_then(Value::as_str),
+            Some("installed")
+        );
+        assert_eq!(
+            projected.get("usable").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            projected.get("downloadable").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            projected.get("repairAvailable").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            projected.get("updateAvailable").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            projected.get("removable").and_then(Value::as_bool),
+            Some(true)
+        );
+        let refusal = ensure_model_downloadable(&projected)
+            .expect_err("a cleanup tombstone must reject direct download API calls");
+        assert!(refusal.detail.contains("retained only"));
+        let refusal = ensure_model_not_cleanup_only(&projected)
+            .expect_err("a cleanup tombstone must reject direct conversion API calls");
+        assert!(refusal.detail.contains("conversion"));
+        assert_eq!(
+            projected.get("hasVariantMatrix").and_then(Value::as_bool),
+            Some(false)
+        );
+        for field in [
+            "variants",
+            "mlxConversionState",
+            "mlxInstallState",
+            "mlxTiers",
+            "mlxTierStates",
+        ] {
+            assert!(
+                projected.get(field).is_none(),
+                "cleanup projection leaked {field}"
+            );
+        }
+
+        // The snapshot pipeline runs size enrichment on every retained row AFTER the tombstone
+        // strip. It must tolerate the stripped projection — a hard error here 500s the entire
+        // catalog for any machine still holding legacy Eros weights in its HF cache.
+        let mut enriched = projected.clone();
+        let context = model_download_context(&enriched).unwrap();
+        apply_model_catalog_size_fields(&mut enriched, context.as_ref(), None)
+            .expect("size enrichment tolerates a cleanup tombstone");
+        assert!(
+            enriched.get("variants").is_none(),
+            "size enrichment must not resurrect the variants projection on a tombstone"
+        );
+
+        let primary_repo = "TenStrip/LTX2.3-10Eros";
+        let adapter_repo = "TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments";
+        let primary_cache = huggingface_repo_cache_path(data_dir, primary_repo).unwrap();
+        let adapter_cache = huggingface_repo_cache_path(data_dir, adapter_repo).unwrap();
+        let cleanup_paths = model_artifact_paths(&projected, data_dir);
+        assert!(cleanup_paths.contains(&primary_cache));
+        assert!(cleanup_paths.contains(&adapter_cache));
+
+        let allowed_roots = vec![data_dir.join("models"), huggingface_hub_cache_dir(data_dir)];
+        let removal = crate::remove_owned_artifacts(cleanup_paths, &allowed_roots, true)
+            .await
+            .expect("cleanup-only Eros delete succeeds");
+        assert!(!removal.removed_paths.is_empty());
+        assert!(!primary_cache.exists(), "primary Eros cache is reclaimed");
+        assert!(
+            !adapter_cache.exists(),
+            "exclusive cond_safe cache is reclaimed"
+        );
+
+        let mut after_delete = vec![entry.clone()];
+        retain_models_for_os(&mut after_delete, "windows", data_dir).unwrap();
+        assert!(
+            after_delete.is_empty(),
+            "the cleanup tombstone disappears after deletion"
+        );
+
+        // A partial legacy install also needs the delete affordance, but never a repair/download.
+        seed_manifest_downloads(data_dir, &entry, false);
+        let mut partial = vec![entry];
+        retain_models_for_os(&mut partial, "linux", data_dir).unwrap();
+        assert_eq!(
+            partial.len(),
+            1,
+            "a partial legacy install remains reclaimable"
+        );
+        let context = model_download_context(&partial[0]).unwrap();
+        let partial = apply_model_catalog_entry(
+            partial.pop().unwrap(),
+            context,
+            data_dir,
+            &std::collections::HashSet::new(),
+            &std::collections::HashSet::new(),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            partial.get("cacheState").and_then(Value::as_str),
+            Some("incomplete")
+        );
+        assert_eq!(
+            partial.get("repairAvailable").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            partial.get("downloadable").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            partial.get("removable").and_then(Value::as_bool),
+            Some(true)
+        );
+        let partial_primary_cache = huggingface_repo_cache_path(data_dir, primary_repo).unwrap();
+        assert!(partial_primary_cache.exists());
+        let removal = crate::remove_owned_artifacts(
+            model_artifact_paths(&partial, data_dir),
+            &allowed_roots,
+            true,
+        )
+        .await
+        .expect("partial cleanup-only Eros delete succeeds");
+        assert!(!removal.removed_paths.is_empty());
+        assert!(
+            !partial_primary_cache.exists(),
+            "partial primary Eros cache is reclaimed"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ltx_eros_corequisite_only_partial_is_cleanup_only_and_reclaimable_off_macos() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let entry = builtin_models_entry("ltx_2_3_eros");
+        let adapter = entry
+            .get("downloads")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .find(|download| {
+                download.get("cleanupWithModel").and_then(Value::as_bool) == Some(true)
+            })
+            .unwrap();
+        seed_manifest_download(data_dir, adapter);
+
+        let adapter_repo = adapter.get("repo").and_then(Value::as_str).unwrap();
+        let adapter_cache = huggingface_repo_cache_path(data_dir, adapter_repo).unwrap();
+        let mut projection = vec![entry];
+        retain_models_for_os(&mut projection, "windows", data_dir).unwrap();
+        assert_eq!(
+            projection.len(),
+            1,
+            "a co-requisite-only partial is retained"
+        );
+        let context = model_download_context(&projection[0]).unwrap();
+        let projected = apply_model_catalog_entry(
+            projection.pop().unwrap(),
+            context,
+            data_dir,
+            &std::collections::HashSet::new(),
+            &std::collections::HashSet::new(),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            projected.get("cacheState").and_then(Value::as_str),
+            Some("incomplete")
+        );
+        assert_eq!(
+            projected.get("removable").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            projected.get("downloadable").and_then(Value::as_bool),
+            Some(false)
+        );
+
+        let allowed_roots = vec![data_dir.join("models"), huggingface_hub_cache_dir(data_dir)];
+        let removal = crate::remove_owned_artifacts(
+            model_artifact_paths(&projected, data_dir),
+            &allowed_roots,
+            true,
+        )
+        .await
+        .expect("co-requisite-only partial delete succeeds");
+        assert!(!removal.removed_paths.is_empty());
+        assert!(!adapter_cache.exists(), "orphan adapter cache is reclaimed");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ltx_eros_mixed_trash_failure_retains_a_retryable_cleanup_tombstone() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let entry = builtin_models_entry("ltx_2_3_eros");
+        seed_manifest_downloads(data_dir, &entry, true);
+
+        let primary_cache =
+            huggingface_repo_cache_path(data_dir, "TenStrip/LTX2.3-10Eros").unwrap();
+        let adapter_cache =
+            huggingface_repo_cache_path(data_dir, "TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments")
+                .unwrap();
+        let mut projection = vec![entry.clone()];
+        retain_models_for_os(&mut projection, "linux", data_dir).unwrap();
+        let cleanup_model = projection.pop().unwrap();
+        let allowed_roots = vec![data_dir.join("models"), huggingface_hub_cache_dir(data_dir)];
+        let _trash = crate::test_trash_outcomes([
+            (primary_cache.clone(), true),
+            (adapter_cache.clone(), false),
+        ]);
+        let removal = crate::remove_owned_artifacts(
+            model_artifact_paths(&cleanup_model, data_dir),
+            &allowed_roots,
+            false,
+        )
+        .await
+        .expect("mixed OS-trash outcome is recoverable");
+        assert!(removal
+            .removed_paths
+            .iter()
+            .any(|path| path == &primary_cache.display().to_string()));
+        assert!(removal
+            .trash_failed_paths
+            .iter()
+            .any(|path| path == &adapter_cache.display().to_string()));
+        assert!(!primary_cache.exists());
+        assert!(adapter_cache.exists());
+
+        let mut retry_projection = vec![entry.clone()];
+        retain_models_for_os(&mut retry_projection, "linux", data_dir).unwrap();
+        assert_eq!(
+            retry_projection.len(),
+            1,
+            "adapter residue must keep the permanent-delete retry resolvable"
+        );
+        let context = model_download_context(&retry_projection[0]).unwrap();
+        let retry_model = apply_model_catalog_entry(
+            retry_projection.pop().unwrap(),
+            context,
+            data_dir,
+            &std::collections::HashSet::new(),
+            &std::collections::HashSet::new(),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            retry_model.get("cacheState").and_then(Value::as_str),
+            Some("incomplete")
+        );
+        let retry = crate::remove_owned_artifacts(
+            model_artifact_paths(&retry_model, data_dir),
+            &allowed_roots,
+            true,
+        )
+        .await
+        .expect("permanent retry reclaims the retained adapter");
+        assert!(!retry.removed_paths.is_empty());
+        assert!(!adapter_cache.exists());
+
+        let mut after_retry = vec![entry];
+        retain_models_for_os(&mut after_retry, "linux", data_dir).unwrap();
+        assert!(
+            after_retry.is_empty(),
+            "tombstone disappears after retry succeeds"
+        );
+    }
+
     #[test]
     fn multi_repo_marker_filters_nested_receipts_by_requested_repo() {
         let temp = tempfile::tempdir().unwrap();
@@ -3308,6 +4311,521 @@ mod download_receipt_tests {
         std::fs::write(tier.join("tokenizer.json"), b"{}").unwrap();
         let state = install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
         assert!(state.installed);
+    }
+
+    /// sc-20526 fixture: a diffusers quant tier whose text encoder is SHARDED. `present_shards`
+    /// selects which of the three declared shards actually landed, so the same builder produces both
+    /// the interrupted download and the genuinely complete tier.
+    fn write_sharded_diffusers_tier(snapshot: &FsPath, tier: &str, present_shards: &[u32]) {
+        let tier_dir = snapshot.join(tier);
+        std::fs::create_dir_all(&tier_dir).unwrap();
+        std::fs::write(
+            tier_dir.join("model_index.json"),
+            serde_json::to_vec(&json!({
+                "_class_name": "LensPipeline",
+                "text_encoder": ["transformers", "Qwen3Model"],
+                "transformer": ["diffusers", "LensTransformer2DModel"],
+                "vae": ["diffusers", "AutoencoderKL"],
+                "scheduler": ["diffusers", "FlowMatchEulerDiscreteScheduler"],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        for (component, weights) in [
+            ("transformer", "diffusion_pytorch_model.safetensors"),
+            ("vae", "diffusion_pytorch_model.safetensors"),
+        ] {
+            let dir = tier_dir.join(component);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("config.json"), b"{}").unwrap();
+            std::fs::write(dir.join(weights), b"weights").unwrap();
+        }
+        let scheduler = tier_dir.join("scheduler");
+        std::fs::create_dir_all(&scheduler).unwrap();
+        std::fs::write(scheduler.join("scheduler_config.json"), b"{}").unwrap();
+
+        let encoder = tier_dir.join("text_encoder");
+        std::fs::create_dir_all(&encoder).unwrap();
+        std::fs::write(encoder.join("config.json"), b"{}").unwrap();
+        std::fs::write(
+            encoder.join("model.safetensors.index.json"),
+            serde_json::to_vec(&json!({"weight_map": {
+                "model.embed_tokens.weight": "model-00001-of-00003.safetensors",
+                "model.layers.0.self_attn.q_proj.weight": "model-00002-of-00003.safetensors",
+                "lm_head.weight": "model-00003-of-00003.safetensors",
+            }}))
+            .unwrap(),
+        )
+        .unwrap();
+        for shard in present_shards {
+            std::fs::write(
+                encoder.join(format!("model-0000{shard}-of-00003.safetensors")),
+                b"shard",
+            )
+            .unwrap();
+        }
+    }
+
+    fn sharded_tier_model(repo: &str, tier: &str) -> Value {
+        json!({
+            "id": "lens_turbo",
+            "downloads": [{
+                "provider": "huggingface", "repo": repo,
+                "variant": tier, "files": [format!("{tier}/*")]
+            }]
+        })
+    }
+
+    /// sc-20526 (AC 1, AC 6): the lens_turbo bf16 shape. The tier's `<tier>/*` glob matches, its
+    /// `model_index.json` is present, and `text_encoder/` holds a real `.safetensors` — so every
+    /// pre-existing check passed — yet the index names three shards and only the LAST one landed.
+    /// `model.embed_tokens.weight` lives in shard 1, so the load died with "cannot find tensor".
+    /// Backfill must refuse to mint a receipt, and the tier must read not-installed but repairable.
+    #[test]
+    fn backfill_refuses_a_partially_downloaded_sharded_tier() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let repo = "SceneWorks/lens-turbo-mlx";
+        let snapshot = huggingface_repo_cache_path(data_dir, repo)
+            .unwrap()
+            .join("snapshots/rev-a");
+        write_sharded_diffusers_tier(&snapshot, "bf16", &[3]);
+        let model = sharded_tier_model(repo, "bf16");
+
+        let state = install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
+        assert!(
+            !state.installed,
+            "a tier missing 2 of 3 text-encoder shards must not read installed"
+        );
+        assert!(
+            state.cache_incomplete,
+            "it must surface as repairable/re-downloadable, not merely absent"
+        );
+        assert!(
+            state
+                .missing_required_files
+                .iter()
+                .any(|file| file.contains("model-00001-of-00003.safetensors")),
+            "the absent shard must be named: {:?}",
+            state.missing_required_files
+        );
+        let marker = data_dir
+            .join("models")
+            .join(safe_download_dir(repo))
+            .join(".sceneworks-download-complete.json");
+        assert!(
+            !marker.exists(),
+            "backfill must not launder an interrupted download into a complete receipt"
+        );
+
+        // Mutation check: the two missing shards arriving flips every assertion above, proving the
+        // check discriminates on shard completeness rather than rejecting sharded tiers wholesale.
+        for shard in [1, 2] {
+            std::fs::write(
+                snapshot.join(format!(
+                    "bf16/text_encoder/model-0000{shard}-of-00003.safetensors"
+                )),
+                b"shard",
+            )
+            .unwrap();
+        }
+        let state = install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
+        assert!(state.installed, "a genuinely complete tier must pass");
+        assert!(!state.cache_incomplete);
+        let receipt: Value = serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+        assert_eq!(receipt["backfilled"], true);
+        assert!(
+            receipt["resolvedFiles"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|file| file.as_str()
+                    == Some("bf16/text_encoder/model-00001-of-00003.safetensors")),
+            "the honest receipt records the full shard set"
+        );
+    }
+
+    /// sc-20526 (AC 3, AC 4, AC 6): an ALREADY-WRITTEN false-complete receipt — `backfilled: true`
+    /// with `resolvedFiles` listing the index plus only the shards that happened to land. This is
+    /// exactly what shipped to affected users. The next scan must invalidate it (no "usable stale"
+    /// install) AND repair the file, so nobody has to delete it by hand.
+    #[test]
+    fn existing_false_complete_receipt_is_invalidated_and_repaired() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let repo = "SceneWorks/lens-turbo-mlx";
+        let snapshot = huggingface_repo_cache_path(data_dir, repo)
+            .unwrap()
+            .join("snapshots/rev-a");
+        write_sharded_diffusers_tier(&snapshot, "bf16", &[3]);
+        let model = sharded_tier_model(repo, "bf16");
+
+        let managed = data_dir.join("models").join(safe_download_dir(repo));
+        let marker = managed.join(".sceneworks-download-complete.json");
+        std::fs::create_dir_all(&managed).unwrap();
+        let torn_entry = json!({
+            "schemaVersion": 2, "repo": repo, "modelId": "lens_turbo", "variant": "bf16",
+            "manifestFiles": ["bf16/*"],
+            "resolvedFiles": [
+                "bf16/model_index.json",
+                "bf16/text_encoder/config.json",
+                "bf16/text_encoder/model-00003-of-00003.safetensors",
+                "bf16/text_encoder/model.safetensors.index.json",
+            ],
+            "backfilled": true,
+        });
+        std::fs::write(&marker, serde_json::to_vec(&torn_entry).unwrap()).unwrap();
+
+        let state = install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
+        assert!(
+            !state.installed,
+            "a receipt whose recorded files all exist must still not resurrect a torn shard set"
+        );
+        assert!(
+            !marker.exists(),
+            "the false-complete receipt must be repaired away so the install self-heals"
+        );
+
+        // A receipt for a tier that IS complete survives the same sweep untouched.
+        write_sharded_diffusers_tier(&snapshot, "q4", &[1, 2, 3]);
+        let sound = json!({
+            "schemaVersion": 2, "repo": repo, "modelId": "lens_turbo", "variant": "q4",
+            "manifestFiles": ["q4/*"],
+            "resolvedFiles": [
+                "q4/model_index.json",
+                "q4/text_encoder/model-00001-of-00003.safetensors",
+                "q4/text_encoder/model-00002-of-00003.safetensors",
+                "q4/text_encoder/model-00003-of-00003.safetensors",
+                "q4/text_encoder/model.safetensors.index.json",
+            ],
+            "backfilled": true,
+        });
+        let seeded_files = sound["resolvedFiles"].clone();
+        std::fs::write(&marker, serde_json::to_vec(&sound).unwrap()).unwrap();
+        let q4 = sharded_tier_model(repo, "q4");
+        assert!(install_state_for(model_download_context(&q4).unwrap(), &q4, data_dir).installed);
+        // IDENTITY, not mere existence. `marker.exists()` alone proves nothing here: the tier is
+        // complete, so a receipt deleted by an over-eager repair would be re-backfilled inside the
+        // same call and the file would be back before the assertion ran. A re-backfill records the
+        // full WALKED set (model_index, transformer, vae, scheduler, …), so the seeded five entries
+        // surviving verbatim is what proves the sound receipt was never touched.
+        let after: Value = serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+        assert_eq!(
+            after["resolvedFiles"], seeded_files,
+            "repair must be positive-evidence only — a sound receipt is never deleted (nor \
+             re-minted from a walk, which would list the transformer/vae/scheduler files too)"
+        );
+        assert_eq!(after["manifestFiles"], json!(["q4/*"]));
+    }
+
+    /// sc-20526 (AC 2): a WHOLE-REPO download (empty `files`) declares no per-file claim, so "some
+    /// payload landed" used to be the only signal. The repo's own shard index is the ground truth.
+    #[test]
+    fn whole_repo_install_validates_its_shard_index() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let repo = "owner/whole-repo-sharded";
+        let snapshot = huggingface_repo_cache_path(data_dir, repo)
+            .unwrap()
+            .join("snapshots/rev-a");
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::write(snapshot.join("config.json"), b"{}").unwrap();
+        std::fs::write(
+            snapshot.join("model.safetensors.index.json"),
+            serde_json::to_vec(&json!({"weight_map": {
+                "a": "model-00001-of-00002.safetensors",
+                "b": "model-00002-of-00002.safetensors",
+            }}))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(snapshot.join("model-00002-of-00002.safetensors"), b"shard").unwrap();
+        let model = json!({
+            "id": "whole-repo-model",
+            "downloads": [{ "provider": "huggingface", "repo": repo }]
+        });
+
+        let state = install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
+        assert!(!state.installed, "half a shard set is not an install");
+        assert!(state
+            .missing_required_files
+            .iter()
+            .any(|file| file.contains("model-00001-of-00002.safetensors")));
+
+        std::fs::write(snapshot.join("model-00001-of-00002.safetensors"), b"shard").unwrap();
+        assert!(
+            install_state_for(model_download_context(&model).unwrap(), &model, data_dir).installed,
+            "a complete whole-repo shard set must pass"
+        );
+    }
+
+    /// sc-20526 (AC 1) — the shard guard INSIDE `backfill_current_receipt`, standing on its own.
+    ///
+    /// `backfill_refuses_a_partially_downloaded_sharded_tier` cannot witness it: that tier is
+    /// diffusers, so `diffusers_snapshot_health` already drives `cache_installed` false and
+    /// `install_state_for` never enters the backfill at all — delete the guard and that test still
+    /// passes. The guard's reachable lane is a tier that declares NO `model_index.json`: a flat
+    /// explicit-`files` filter whose every pattern is satisfied reads cache-installed, so backfill IS
+    /// entered, and only `listed_shard_indexes_are_complete` over the resolved set stands between an
+    /// index naming a never-downloaded shard and a receipt claiming that set is complete. (The
+    /// cache-health badge for an explicit-file filter is deliberately left as it was — the user
+    /// declared those files and they are all there — so this fixture is the guard alone.)
+    #[test]
+    fn backfill_refuses_a_flat_tier_whose_shard_index_is_torn() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let repo = "owner/flat-sharded";
+        let snapshot = huggingface_repo_cache_path(data_dir, repo)
+            .unwrap()
+            .join("snapshots/rev-a");
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::write(snapshot.join("config.json"), b"{}").unwrap();
+        std::fs::write(
+            snapshot.join("model.safetensors.index.json"),
+            serde_json::to_vec(&json!({"weight_map": {
+                "model.embed_tokens.weight": "model-00001-of-00002.safetensors",
+                "lm_head.weight": "model-00002-of-00002.safetensors",
+            }}))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(snapshot.join("model-00002-of-00002.safetensors"), b"shard").unwrap();
+        let model = json!({
+            "id": "flat_sharded",
+            "downloads": [{
+                "provider": "huggingface", "repo": repo,
+                "files": ["config.json", "model.safetensors.index.json", "*.safetensors"]
+            }]
+        });
+        let marker = data_dir
+            .join("models")
+            .join(safe_download_dir(repo))
+            .join(".sceneworks-download-complete.json");
+
+        let state = install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
+        assert!(
+            state.installed,
+            "fixture precondition: every declared pattern is present, so cache health reads \
+             installed and the backfill lane is genuinely entered"
+        );
+        assert!(
+            !marker.exists(),
+            "backfill must refuse to record a set whose own shard index names a file that never \
+             landed — nothing else on this lane is watching"
+        );
+
+        // Mutation check: the absent shard arriving lets the SAME call mint the receipt, proving the
+        // guard discriminates on shard completeness rather than never writing for this shape.
+        std::fs::write(snapshot.join("model-00001-of-00002.safetensors"), b"shard").unwrap();
+        assert!(
+            install_state_for(model_download_context(&model).unwrap(), &model, data_dir).installed
+        );
+        let receipt: Value = serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+        assert_eq!(receipt["backfilled"], true);
+        assert!(
+            receipt["resolvedFiles"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|file| file.as_str() == Some("model-00001-of-00002.safetensors")),
+            "the honest receipt records the full shard set"
+        );
+    }
+
+    /// sc-20526 (AC 3) — the shard filter in `receipt_files_present`, with repair kept out of the way.
+    ///
+    /// `existing_false_complete_receipt_is_invalidated_and_repaired` deletes the receipt before the
+    /// read side ever runs, so it cannot witness that filter. Here a SECOND cached revision holds the
+    /// same index with a complete shard set, which is precisely the evidence
+    /// `receipt_entry_is_provably_torn` treats as "not provably torn" — the receipt SURVIVES the
+    /// sweep. It still must not count: the only revision holding every file the receipt RECORDED is
+    /// the torn one (rev-a), and the complete revision (rev-b) is missing `config.json`, so no single
+    /// snapshot satisfies both the recorded set and that set's own index.
+    #[test]
+    fn torn_receipt_surviving_repair_is_still_refused_by_the_read_side() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let repo = "owner/two-revision-sharded";
+        let root = huggingface_repo_cache_path(data_dir, repo).unwrap();
+        let index_json = serde_json::to_vec(&json!({"weight_map": {
+            "model.embed_tokens.weight": "model-00001-of-00002.safetensors",
+            "lm_head.weight": "model-00002-of-00002.safetensors",
+        }}))
+        .unwrap();
+
+        // rev-a: exactly what the receipt recorded — and its index names a shard that never landed.
+        let torn = root.join("snapshots/rev-a");
+        std::fs::create_dir_all(&torn).unwrap();
+        std::fs::write(torn.join("config.json"), b"{}").unwrap();
+        std::fs::write(torn.join("model.safetensors.index.json"), &index_json).unwrap();
+        std::fs::write(torn.join("model-00002-of-00002.safetensors"), b"shard").unwrap();
+
+        // rev-b: a COMPLETE shard set, but no `config.json` — so it can never satisfy this receipt.
+        // Its existence is what makes the entry not *provably* torn, so repair leaves the file alone.
+        let sound = root.join("snapshots/rev-b");
+        std::fs::create_dir_all(&sound).unwrap();
+        std::fs::write(sound.join("model.safetensors.index.json"), &index_json).unwrap();
+        for shard in [1, 2] {
+            std::fs::write(
+                sound.join(format!("model-0000{shard}-of-00002.safetensors")),
+                b"shard",
+            )
+            .unwrap();
+        }
+
+        // `tokenizer.json` exists in no revision, so the cache-health lane reads NOT installed and
+        // the receipt is the only thing that could still call this model installed.
+        let model = json!({
+            "id": "two_revision_sharded",
+            "downloads": [{
+                "provider": "huggingface", "repo": repo,
+                "files": ["config.json", "model.safetensors.index.json", "tokenizer.json"]
+            }]
+        });
+        let managed = data_dir.join("models").join(safe_download_dir(repo));
+        std::fs::create_dir_all(&managed).unwrap();
+        let marker = managed.join(".sceneworks-download-complete.json");
+        let seeded = serde_json::to_vec(&json!({
+            "schemaVersion": 2, "repo": repo, "modelId": "two_revision_sharded",
+            "variant": "default",
+            "manifestFiles": ["config.json", "model.safetensors.index.json", "tokenizer.json"],
+            "resolvedFiles": [
+                "config.json",
+                "model.safetensors.index.json",
+                "model-00002-of-00002.safetensors",
+            ],
+            "backfilled": true,
+        }))
+        .unwrap();
+        std::fs::write(&marker, &seeded).unwrap();
+
+        let state = install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
+        assert_eq!(
+            std::fs::read(&marker).ok().as_deref(),
+            Some(seeded.as_slice()),
+            "fixture precondition: a complete sibling revision makes this entry NOT provably torn, \
+             so repair must leave it byte-identical — the read side has to do the refusing"
+        );
+        assert!(
+            !state.installed,
+            "the revision holding every recorded file is the torn one, so a surviving receipt must \
+             not be honoured as a usable-stale install"
+        );
+
+        // Mutation check: the absent shard landing in rev-a makes the SAME surviving receipt
+        // legitimately count, proving the refusal keys on shard completeness, not on the receipt.
+        std::fs::write(torn.join("model-00001-of-00002.safetensors"), b"shard").unwrap();
+        assert!(
+            install_state_for(model_download_context(&model).unwrap(), &model, data_dir).installed,
+            "a receipt whose recorded index IS complete in the revision holding its files counts"
+        );
+    }
+
+    /// sc-20526 (AC 4) — the hard constraint on repair: PROVABLY torn, never merely unverifiable.
+    ///
+    /// A backfilled, index-bearing receipt whose repo cache is not on this box at all (weights moved
+    /// into an external library, or a data dir restored without its HF cache) carries no evidence of
+    /// tearing. Deleting it would destroy the relocation proof an external-library install depends
+    /// on, and read-side validation already refuses to count it — so it must survive untouched.
+    /// Flipping `saw_torn`'s initial value to `true` turns "no evidence" into "delete it".
+    #[test]
+    fn repair_leaves_a_backfilled_receipt_whose_repo_cache_is_absent() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let repo = "owner/relocated-to-external-library";
+        let managed = data_dir.join("models").join(safe_download_dir(repo));
+        std::fs::create_dir_all(&managed).unwrap();
+        let marker = managed.join(".sceneworks-download-complete.json");
+        let seeded = serde_json::to_vec(&json!({
+            "schemaVersion": 2, "repo": repo, "modelId": "relocated", "variant": "bf16",
+            "manifestFiles": ["bf16/*"],
+            "resolvedFiles": [
+                "bf16/text_encoder/model-00003-of-00003.safetensors",
+                "bf16/text_encoder/model.safetensors.index.json",
+            ],
+            "backfilled": true,
+        }))
+        .unwrap();
+        std::fs::write(&marker, &seeded).unwrap();
+        assert!(
+            huggingface_repo_cache_path(data_dir, repo).is_some_and(|root| !root.exists()),
+            "fixture precondition: no repo cache at all, so nothing can be proven about the shards"
+        );
+
+        repair_torn_backfilled_receipts(&managed, data_dir);
+
+        assert_eq!(
+            std::fs::read(&marker).ok().as_deref(),
+            Some(seeded.as_slice()),
+            "an absent repo cache is not evidence of tearing — the receipt must survive byte-identical"
+        );
+    }
+
+    /// sc-20526 (AC 4), the second no-evidence shape: the repo cache IS here, but not one cached
+    /// revision holds the index the receipt recorded (a revision bump, or a cache pruned of this
+    /// tier). Nothing can be read off disk, so nothing is proven and the receipt stays.
+    #[test]
+    fn repair_leaves_a_backfilled_receipt_whose_index_is_in_no_snapshot() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let repo = "owner/index-not-cached";
+        let snapshot = huggingface_repo_cache_path(data_dir, repo)
+            .unwrap()
+            .join("snapshots/rev-a");
+        std::fs::create_dir_all(snapshot.join("q4")).unwrap();
+        std::fs::write(snapshot.join("q4/model_index.json"), b"{}").unwrap();
+        std::fs::write(snapshot.join("q4/some.safetensors"), b"weights").unwrap();
+
+        let managed = data_dir.join("models").join(safe_download_dir(repo));
+        std::fs::create_dir_all(&managed).unwrap();
+        let marker = managed.join(".sceneworks-download-complete.json");
+        let seeded = serde_json::to_vec(&json!({
+            "schemaVersion": 2, "repo": repo, "modelId": "index_not_cached", "variant": "bf16",
+            "manifestFiles": ["bf16/*"],
+            "resolvedFiles": [
+                "bf16/text_encoder/model-00003-of-00003.safetensors",
+                "bf16/text_encoder/model.safetensors.index.json",
+            ],
+            "backfilled": true,
+        }))
+        .unwrap();
+        std::fs::write(&marker, &seeded).unwrap();
+
+        repair_torn_backfilled_receipts(&managed, data_dir);
+
+        assert_eq!(
+            std::fs::read(&marker).ok().as_deref(),
+            Some(seeded.as_slice()),
+            "a recorded index that is in NO snapshot proves nothing — the receipt must survive \
+             byte-identical"
+        );
+
+        // Mutation check: the index arriving with a shard missing IS proof, and the same call now
+        // removes the entry — so the survival above is a decision about evidence, not inaction.
+        let encoder = snapshot.join("bf16/text_encoder");
+        std::fs::create_dir_all(&encoder).unwrap();
+        std::fs::write(
+            encoder.join("model.safetensors.index.json"),
+            serde_json::to_vec(&json!({"weight_map": {
+                "model.embed_tokens.weight": "model-00001-of-00003.safetensors",
+                "lm_head.weight": "model-00003-of-00003.safetensors",
+            }}))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(encoder.join("model-00003-of-00003.safetensors"), b"shard").unwrap();
+        repair_torn_backfilled_receipts(&managed, data_dir);
+        assert!(
+            !marker.exists(),
+            "a recorded index that IS on disk and names a missing shard is provably torn"
+        );
     }
 
     #[test]
@@ -3714,6 +5232,50 @@ mod download_receipt_tests {
                 "{model_id}: nothing is missing once every component is staged, got {:?}",
                 installed.missing_required_files
             );
+
+            // Existing installs predate the upstream repo rename and keep the exact immutable CLIP
+            // snapshot under the legacy cache namespace. The catalog must continue to call those
+            // installs ready instead of offering a repair that would fetch the same ~3.95 GB blob
+            // again; the worker uses the same validator-proven plain source and hard-links the
+            // canonical namespace cache-only when the filesystem supports it.
+            let rename = sceneworks_core::hf_repo_renames::MMAUDIO_DFN5B_CLIP_RENAME;
+            let clip = co_requisites
+                .iter()
+                .find(|download| {
+                    download.get("repo").and_then(Value::as_str) == Some(rename.current_repo)
+                })
+                .expect("live MMAudio manifest has the canonical CLIP component");
+            let clip_revision = clip.get("revision").and_then(Value::as_str).unwrap();
+            let clip_files = string_array_field(clip, "files");
+            std::fs::remove_dir_all(
+                huggingface_repo_cache_path(data_dir, rename.current_repo).unwrap(),
+            )
+            .unwrap();
+            let legacy_repo = huggingface_repo_cache_path(data_dir, rename.legacy_repo).unwrap();
+            let legacy_snapshot = legacy_repo.join("snapshots").join(clip_revision);
+            for file in &clip_files {
+                let path = legacy_snapshot.join(file);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::symlink;
+
+                    let blob = legacy_repo.join("blobs").join("clip-blob");
+                    std::fs::create_dir_all(blob.parent().unwrap()).unwrap();
+                    std::fs::write(&blob, b"existing cached weights").unwrap();
+                    symlink(&blob, &path).unwrap();
+                }
+                #[cfg(not(unix))]
+                std::fs::write(path, b"existing cached weights").unwrap();
+            }
+
+            let legacy_installed =
+                install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
+            assert!(
+                legacy_installed.installed,
+                "{model_id}: the exact legacy CLIP snapshot remains a complete offline install"
+            );
+            assert!(legacy_installed.missing_required_files.is_empty());
         }
     }
 
@@ -4018,6 +5580,10 @@ fn install_state_for(
         // NOT independently mark it installed (sc-9909): a stale .sceneworks-download-complete.json
         // left by an empty download would otherwise read the whole model as installed while every tier
         // reads missing. Single-variant models keep the repo-level managed contract.
+        // sc-20526: drop any receipt a pre-fix backfill minted over a partially downloaded tier
+        // BEFORE it is read, so an affected install self-heals on the next scan instead of needing a
+        // manual delete — and so the backfill below can re-record the tier honestly.
+        repair_torn_backfilled_receipts(&managed_path, data_dir);
         let receipt_file_sets = receipt_file_sets(
             &managed_path,
             &download_context.repo,
@@ -4092,16 +5658,7 @@ fn install_state_for(
                     .iter()
                     .filter(|download| co_requisite_variant(download).as_deref() == Some(tier))
                     .all(|download| {
-                        download
-                            .get("repo")
-                            .and_then(Value::as_str)
-                            .and_then(|repo| huggingface_repo_cache_path(data_dir, repo))
-                            .map(|path| {
-                                huggingface_cache_health(
-                                    &path,
-                                    &string_array_field(download, "files"),
-                                )
-                            })
+                        co_requisite_cache_health(data_dir, download)
                             .is_some_and(|health| health.installed)
                     })
             });
@@ -4127,9 +5684,7 @@ fn install_state_for(
             let Some(repo) = co_requisite.get("repo").and_then(Value::as_str) else {
                 continue;
             };
-            let files = string_array_field(&co_requisite, "files");
-            let health = huggingface_repo_cache_path(data_dir, repo)
-                .map(|path| huggingface_cache_health(&path, &files));
+            let health = co_requisite_cache_health(data_dir, &co_requisite);
             if health.as_ref().is_some_and(|health| health.installed) {
                 continue;
             }
@@ -4178,6 +5733,105 @@ fn install_state_for(
             missing_required_files: Vec::new(),
             update_available: false,
         }
+    }
+}
+
+/// Resolve install-state health for a hard/soft co-requisite, including exact cache-only aliases
+/// for upstream repository renames. This deliberately does not mutate the cache while serving the
+/// catalog. It lets an existing immutable legacy snapshot remain usable/installed; the worker's
+/// load-time resolver then consumes the same validated plain source and hard-links the canonical
+/// cache namespace from those local bytes when possible.
+fn co_requisite_cache_health(
+    data_dir: &FsPath,
+    download: &Value,
+) -> Option<HuggingFaceCacheHealth> {
+    let repo = download.get("repo").and_then(Value::as_str)?;
+    let files = string_array_field(download, "files");
+    let exact_rename = download
+        .get("revision")
+        .and_then(Value::as_str)
+        .and_then(|revision| {
+            sceneworks_core::hf_repo_renames::exact_huggingface_repo_rename(repo, revision, &files)
+        });
+    let current = match exact_rename {
+        Some(rename) => {
+            exact_rename_side_cache_health(data_dir, rename.current_repo, rename, &files)
+        }
+        None => huggingface_repo_cache_path(data_dir, repo)
+            .map(|path| huggingface_cache_health(&path, &files)),
+    };
+    if current.as_ref().is_some_and(|health| health.installed) {
+        return current;
+    }
+
+    let exact_legacy = exact_rename.and_then(|rename| {
+        exact_rename_side_cache_health(data_dir, rename.legacy_repo, rename, &files)
+    });
+
+    match (current, exact_legacy) {
+        (_, Some(legacy)) if legacy.installed => Some(legacy),
+        (Some(current), _) if current.incomplete => Some(current),
+        (_, Some(legacy)) if legacy.incomplete => Some(legacy),
+        (current, legacy) => current.or(legacy),
+    }
+}
+
+fn co_requisite_satisfied_by_exact_legacy_rename(data_dir: &FsPath, download: &Value) -> bool {
+    let Some(repo) = download.get("repo").and_then(Value::as_str) else {
+        return false;
+    };
+    let Some(revision) = download.get("revision").and_then(Value::as_str) else {
+        return false;
+    };
+    let files = string_array_field(download, "files");
+    let Some(rename) =
+        sceneworks_core::hf_repo_renames::exact_huggingface_repo_rename(repo, revision, &files)
+    else {
+        return false;
+    };
+    exact_rename_side_cache_health(data_dir, rename.legacy_repo, rename, &files)
+        .is_some_and(|health| health.installed)
+}
+
+/// Evaluate an exact legacy alias with the same canonical-source confinement used by the worker's
+/// load-time relink. A readable symlink is not sufficient: if it escapes the legacy repository
+/// cache, treating it as installed would suppress the canonical repair download even though the
+/// worker must reject it.
+fn exact_rename_side_cache_health(
+    data_dir: &FsPath,
+    repo: &str,
+    rename: &sceneworks_core::hf_repo_renames::HuggingFaceRepoRename,
+    files: &[String],
+) -> Option<HuggingFaceCacheHealth> {
+    let repo_root = huggingface_repo_cache_path(data_dir, repo)?;
+    if !huggingface_repo_cache_exists(&repo_root) {
+        return Some(HuggingFaceCacheHealth {
+            installed: false,
+            incomplete: false,
+            missing_files: Vec::new(),
+        });
+    }
+    // Through the typed source-library seam rather than raw joins (sc-19711's artifact inventory
+    // forbids the API constructing a model root directly; `crates/sceneworks-worker/src/model_jobs.rs`
+    // is the one classified infrastructure surface allowed to). `repo_root` came from
+    // `huggingface_repo_cache_path`, i.e. this same library, so the seam accepts it; `.root()` is the
+    // very `huggingface_hub_cache_dir(data_dir)` this used to pass, unchanged.
+    let library = sceneworks_core::hf_home::model_source_library(data_dir);
+    let snapshot = library
+        .snapshots_root_from_repository_root(&repo_root)
+        .ok()?
+        .join(rename.revision);
+    if sceneworks_core::hf_repo_renames::validate_exact_huggingface_repo_rename_snapshot(
+        library.root(),
+        &repo_root,
+        &snapshot,
+        rename,
+    )
+    .is_some()
+    {
+        Some(HuggingFaceCacheHealth::installed())
+    } else {
+        Some(HuggingFaceCacheHealth::missing(files.to_vec()))
     }
 }
 
@@ -4517,6 +6171,12 @@ fn apply_variant_fields(object: &mut JsonObject, data_dir: &FsPath) {
 }
 
 fn refresh_variant_download_sizes(model: &mut Value) -> Result<(), ApiError> {
+    // A platformCleanupOnly tombstone strips the whole variants projection in
+    // `apply_model_catalog_entry` — the missing array is its contract, not corruption, and there
+    // is nothing to refresh. Keep the strict array guard below for every real catalog entry.
+    if model.get("platformCleanupOnly").and_then(Value::as_bool) == Some(true) {
+        return Ok(());
+    }
     // `apply_variant_fields` runs in the blocking install-state sweep while live HF estimation runs
     // concurrently. Refresh only the already-built response fields after both complete: rebuilding
     // variants here would repeat filesystem probes serially and undo the intended overlap.
@@ -4726,26 +6386,94 @@ fn tier_subdir_has_weights(tier_dir: &FsPath) -> bool {
 /// The lane split is a ONE-LINE binding here and a parameter below precisely so the behaviour is
 /// testable on both lanes from either platform.
 fn apply_imported_lora_advertisement(object: &mut JsonObject) {
+    // Deliberately the BUILD's linked engines, not `generation::enqueue_backend` — see that
+    // function's "Scope" note. The pair is consulted asymmetrically below (a withdrawal crosses
+    // lanes, a positive advertisement never does), which a one-hot routing answer cannot express,
+    // and a macOS build links no candle engine to derive a positive candle verdict from.
     let mlx_lane = cfg!(target_os = "macos");
-    apply_imported_lora_advertisement_for_lanes(object, mlx_lane, !mlx_lane);
+    // Resolved as a VERDICT rather than by checking whether the first pass wrote anything:
+    // `apply_model_manifest_defaults` can already have synthesized a `loraCompatibility` object, so
+    // "the key exists" says nothing about whether this projection decided anything.
+    let verdict = imported_lora_advertisement_verdict(object, mlx_lane, !mlx_lane).or_else(|| {
+        // This build's lane had NO OPINION, which is not the same as "adapters are fine". Leaving
+        // the entry untouched restores the permissive `family` fallback — the precise silent
+        // re-advertisement sc-15328 fixed, where the API accepted a LoRA submission no worker could
+        // claim and the job queued forever with no error. A generated Mage full fine-tune on any
+        // non-macOS deployment is exactly that shape: candle registers no `mage-flow` imported
+        // provider, so only MLX can say "serves the family, refuses adapters".
+        //
+        // So a WITHDRAWAL crosses lanes; a positive advertisement never does. Offering adapters
+        // this build cannot claim is the same hang pointed the other way, which is what the filter
+        // to the refusing verdict prevents.
+        imported_lora_advertisement_verdict(object, !mlx_lane, mlx_lane).filter(|serves| !serves)
+    });
+    if let Some(serves_loras) = verdict {
+        write_imported_lora_advertisement(object, serves_loras);
+    }
 }
 
+/// Test-facing lane-scoped projection: resolve ONE lane pair and write its verdict verbatim, with no
+/// cross-lane fallback. Production goes through [`apply_imported_lora_advertisement`], which adds
+/// the withdrawal fallback; keeping this seam separate is what lets a test state each lane's own
+/// truth from either platform without the fallback blurring the two.
+#[cfg(test)]
 fn apply_imported_lora_advertisement_for_lanes(
     object: &mut JsonObject,
     mlx_lane_available: bool,
     candle_lane_available: bool,
 ) {
-    if object.get("type").and_then(Value::as_str) != Some("image") {
-        return;
-    }
-    let Some(id) = object
-        .get("id")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .filter(|id| !id.is_empty())
+    let Some(serves_loras) =
+        imported_lora_advertisement_verdict(object, mlx_lane_available, candle_lane_available)
     else {
         return;
     };
+    write_imported_lora_advertisement(object, serves_loras);
+}
+
+/// The advertisement verdict for one lane pair, with no mutation: `Some(true)` serves adapters,
+/// `Some(false)` serves the family and refuses them, `None` is "not on this seam at all" (a builtin,
+/// a non-image row, or a family no supplied lane registers).
+fn imported_lora_advertisement_verdict(
+    object: &JsonObject,
+    mlx_lane_available: bool,
+    candle_lane_available: bool,
+) -> Option<bool> {
+    if object.get("type").and_then(Value::as_str) != Some("image") {
+        return None;
+    }
+    let id = object
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .filter(|id| !id.is_empty())?;
+    let family = object
+        .get("family")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|family| !family.is_empty())
+        .map(str::to_owned)?;
+    let source = object
+        .get("importSourceShape")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|source| {
+            matches!(
+                *source,
+                "transformer_file" | "fused_checkpoint" | "transformer_directory" | "comfy_ui_tree"
+            )
+        })?;
+    sceneworks_core::jobs_store::imported_image_model_lora_advertisement(
+        &id,
+        &family,
+        source,
+        mlx_lane_available,
+        candle_lane_available,
+    )
+}
+
+/// Write the verdict onto the entry. Split from the resolution above so the production binding can
+/// resolve twice — its own lane, then a cross-lane withdrawal — without projecting twice.
+fn write_imported_lora_advertisement(object: &mut JsonObject, serves_loras: bool) {
     let Some(family) = object
         .get("family")
         .and_then(Value::as_str)
@@ -4755,25 +6483,286 @@ fn apply_imported_lora_advertisement_for_lanes(
     else {
         return;
     };
-    let serves_loras = sceneworks_core::jobs_store::imported_image_model_lora_advertisement(
-        &id,
-        &family,
-        mlx_lane_available,
-        candle_lane_available,
-    );
-    if serves_loras != Some(false) {
-        return;
-    }
     let compatibility = object
         .entry("loraCompatibility".to_owned())
         .or_insert_with(|| json!({}));
+    if !compatibility.is_object() {
+        *compatibility = json!({});
+    }
     let Some(compatibility) = compatibility.as_object_mut() else {
         return;
     };
-    // Preserve every other key (`types` drives the multi-phase surface); only the families
-    // promise is withdrawn.
-    compatibility.insert("families".to_owned(), Value::Array(Vec::new()));
-    compatibility.insert("supported".to_owned(), Value::Bool(false));
+    if serves_loras {
+        let families = compatibility
+            .entry("families".to_owned())
+            .or_insert_with(|| Value::Array(Vec::new()));
+        if !families.is_array() {
+            *families = Value::Array(Vec::new());
+        }
+        if let Some(families) = families.as_array_mut() {
+            if !families
+                .iter()
+                .any(|value| value.as_str() == Some(family.as_str()))
+            {
+                families.push(Value::String(family));
+            }
+        }
+        compatibility.insert("supported".to_owned(), Value::Bool(true));
+    } else {
+        // Explicit empty wins over permissive family fallback in the validator.
+        compatibility.insert("families".to_owned(), Value::Array(Vec::new()));
+        compatibility.insert("supported".to_owned(), Value::Bool(false));
+    }
+}
+
+/// Project the exact active-provider surface for a stamped imported source shape. Family siblings
+/// are never unioned: a Krea transformer file, SDXL fused checkpoint, Mage directory, and external
+/// ComfyUI tree each see only registrations for their structural loader.
+fn apply_imported_provider_surface(object: &mut JsonObject) {
+    // The BUILD's linked engines, like its `apply_imported_lora_advertisement` sibling — not
+    // `generation::enqueue_backend`. See that function's "Scope" note.
+    let mlx_lane = cfg!(target_os = "macos");
+    apply_imported_provider_surface_for_lanes(object, mlx_lane, !mlx_lane);
+}
+
+fn apply_imported_provider_surface_for_lanes(
+    object: &mut JsonObject,
+    mlx_lane_available: bool,
+    candle_lane_available: bool,
+) {
+    if object.get("type").and_then(Value::as_str) != Some("image")
+        || object.get("catalogScope").and_then(Value::as_str) == Some("builtin")
+    {
+        return;
+    }
+    let Some(family) = object
+        .get("family")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|family| !family.is_empty())
+        .map(str::to_owned)
+    else {
+        return;
+    };
+    let Some(source) = object
+        .get("importSourceShape")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|source| {
+            matches!(
+                *source,
+                "transformer_file" | "fused_checkpoint" | "transformer_directory" | "comfy_ui_tree"
+            )
+        })
+        .map(str::to_owned)
+    else {
+        return;
+    };
+
+    let mlx_routes = sceneworks_core::jobs_store::imported_provider_routes("mlx", &family)
+        .filter(|route| route.source == source)
+        .collect::<Vec<_>>();
+    let id = object.get("id").and_then(Value::as_str).unwrap_or_default();
+    let mac_support = if mlx_routes.is_empty() {
+        serde_json::to_value(sceneworks_core::jobs_store::model_mac_support(
+            id, "image", None,
+        ))
+    } else {
+        Ok(json!({
+            "supported": true,
+            "features": {
+                "pose": mlx_routes.iter().any(|route| {
+                    route.operation == "pose"
+                        && route.conditioning.iter().any(|kind| kind == "control")
+                }),
+                "reference": mlx_routes.iter().any(|route| {
+                    route.operation == "generate"
+                        && route
+                            .conditioning
+                            .iter()
+                            .any(|kind| matches!(kind.as_str(), "reference" | "multi_reference"))
+                }),
+                "edit": mlx_routes.iter().any(|route| route.operation == "edit"),
+                "lycoris": mlx_routes
+                    .iter()
+                    .any(|route| route.supports_lora || route.supports_lokr),
+            }
+        }))
+    };
+    if let Ok(mac_support) = mac_support {
+        object.insert("macSupport".to_owned(), mac_support);
+    }
+
+    let routes = [
+        ("mlx", mlx_lane_available),
+        ("candle", candle_lane_available),
+    ]
+    .into_iter()
+    .filter(|(_, available)| *available)
+    .flat_map(|(backend, _)| {
+        sceneworks_core::jobs_store::imported_provider_routes(backend, &family)
+    })
+    .filter(|route| route.source == source)
+    .collect::<Vec<_>>();
+    project_imported_operation_surface(object, &routes);
+}
+
+/// Replace family-wide defaults with the operations exposed by this exact source/backend route set.
+/// Imported rows are initially enriched by `apply_model_manifest_defaults`, so merely adding provider
+/// capabilities leaves unsupported sibling operations visible. This projection is intentionally
+/// subtractive for every route-owned field while preserving unrelated author metadata.
+fn project_imported_operation_surface(
+    object: &mut JsonObject,
+    routes: &[&sceneworks_core::jobs_store::ImportedProviderSurface],
+) {
+    let generates_reference = routes.iter().any(|route| {
+        route.operation == "generate"
+            && route
+                .conditioning
+                .iter()
+                .any(|kind| matches!(kind.as_str(), "reference" | "multi_reference"))
+    });
+    let pose = routes.iter().any(|route| {
+        route.operation == "pose" && route.conditioning.iter().any(|kind| kind == "control")
+    });
+    let edit = routes.iter().any(|route| route.operation == "edit");
+    let edit_multi_reference = routes.iter().any(|route| {
+        route.operation == "edit"
+            && route
+                .conditioning
+                .iter()
+                .any(|kind| kind == "multi_reference")
+    });
+    let multi_phase = routes.iter().any(|route| route.operation == "multi_phase");
+    let generates = routes.iter().any(|route| {
+        matches!(
+            route.operation.as_str(),
+            "generate" | "pose" | "multi_phase"
+        )
+    });
+
+    let capabilities = object
+        .entry("capabilities".to_owned())
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if !capabilities.is_array() {
+        *capabilities = Value::Array(Vec::new());
+    }
+    if let Some(capabilities) = capabilities.as_array_mut() {
+        capabilities.retain(|value| {
+            !matches!(
+                value.as_str(),
+                Some("text_to_image" | "edit_image" | "image_to_image" | "character_image")
+            )
+        });
+        if generates {
+            capabilities.push(Value::String("text_to_image".to_owned()));
+        }
+        if edit {
+            capabilities.push(Value::String("edit_image".to_owned()));
+        }
+    }
+
+    let ui = object.entry("ui".to_owned()).or_insert_with(|| json!({}));
+    if !ui.is_object() {
+        *ui = json!({});
+    }
+    if let Some(ui) = ui.as_object_mut() {
+        if generates_reference {
+            ui.insert("img2img".to_owned(), Value::Bool(true));
+        } else {
+            ui.remove("img2img");
+            ui.remove("img2imgStrength");
+        }
+        if pose {
+            ui.insert("poseLibrary".to_owned(), Value::Bool(true));
+            ui.insert("poseControlScale".to_owned(), Value::Bool(true));
+            ui.insert("controlModes".to_owned(), json!(["pose"]));
+        } else {
+            ui.remove("poseLibrary");
+            ui.remove("poseControlScale");
+            ui.remove("controlModes");
+        }
+        if !edit_multi_reference {
+            ui.remove("editReferences");
+        }
+    }
+
+    // An empty route set means this backend has no opinion about adapter compatibility. Do not
+    // manufacture an empty object: catalog consumers distinguish abstention from an explicit
+    // provider-owned compatibility surface. Once at least one exact route exists, keep the existing
+    // object-shaped projection so supported routes retain a stable schema even when they expose no
+    // acceleration adapter.
+    if routes.is_empty() {
+        object.remove("loraCompatibility");
+    } else {
+        let compatibility = object
+            .entry("loraCompatibility".to_owned())
+            .or_insert_with(|| json!({}));
+        if let Some(compatibility) = compatibility.as_object_mut() {
+            if let Some(types) = compatibility.get_mut("types").and_then(Value::as_array_mut) {
+                types.retain(|value| value.as_str() != Some("acceleration"));
+            }
+            if multi_phase {
+                let types = compatibility
+                    .entry("types".to_owned())
+                    .or_insert_with(|| Value::Array(Vec::new()));
+                if let Some(types) = types.as_array_mut() {
+                    types.push(Value::String("acceleration".to_owned()));
+                }
+            }
+        }
+    }
+
+    object.remove("runtimeQuantTiers");
+    let mut runtime_quant_tiers = Vec::new();
+    for tier in ["q4", "q8"] {
+        if routes.iter().any(|route| {
+            route
+                .supported_quants
+                .iter()
+                .any(|candidate| candidate == tier)
+        }) {
+            runtime_quant_tiers.push(Value::String(tier.to_owned()));
+        }
+    }
+    if routes.iter().any(|route| route.source != "comfy_ui_tree") {
+        runtime_quant_tiers.push(Value::String("bf16".to_owned()));
+    }
+    if !runtime_quant_tiers.is_empty() {
+        object.insert(
+            "runtimeQuantTiers".to_owned(),
+            Value::Array(runtime_quant_tiers),
+        );
+    }
+}
+
+/// True when this entry is a convert-at-install model that loads from a **converted artifact on the
+/// platform this build targets** — so its conversion state belongs in the catalog here (sc-20529).
+///
+/// The converter half is [`sceneworks_core::jobs_store::convert_artifact_required_here`], the SAME
+/// predicate the worker's unconverted-model preflight gates on. Re-implementing the
+/// converter-membership test here (the original shape of this function) put two copies of one
+/// platform rule on either side of the API/worker seam, where they can drift into an API that
+/// offers a convert affordance the worker refuses to honour, or the reverse.
+///
+/// Only the `requiresConversion` read stays local: it is a property of THIS catalog entry, not of
+/// the converter registry, and it is load-bearing — without it a turnkey model that merely names a
+/// converter would start reporting MLX status off-Mac.
+///
+/// Platform-aware, like the core helper: off macOS only `CANDLE_NATIVE_CONVERTERS` qualify, on macOS
+/// every native converter does (where the call site's `cfg!(target_os = "macos")` arm has already
+/// won anyway — macOS surfaces MLX status for every entry, convert-at-install or not).
+fn entry_requires_converted_artifact_here(object: &JsonObject) -> bool {
+    let Some(mlx) = object.get("mlx").and_then(Value::as_object) else {
+        return false;
+    };
+    if mlx.get("requiresConversion").and_then(Value::as_bool) != Some(true) {
+        return false;
+    }
+    mlx.get("converter")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .is_some_and(sceneworks_core::jobs_store::convert_artifact_required_here)
 }
 
 fn apply_mac_and_mlx_fields(object: &mut JsonObject, data_dir: &FsPath) {
@@ -4801,9 +6790,10 @@ fn apply_mac_and_mlx_fields(object: &mut JsonObject, data_dir: &FsPath) {
             .get("type")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        // Forward the catalog-declared family so an imported/user model whose id is in no routing
-        // table still routes to its family's MLX engine (route-by-family, sc-14019) instead of
-        // reporting "not available on Mac". Builtin ids are unaffected (they route by id).
+        // Preserve the catalog-declared family in the shared probe call, but do not authorize an
+        // imported loader from family identity alone. This pass supplies builtin id-keyed defaults;
+        // `apply_imported_provider_surface` runs later with the full manifest entry and replaces an
+        // imported row's provisional verdict from its exact family + `importSourceShape` routes.
         let family = object
             .get("family")
             .and_then(Value::as_str)
@@ -4831,7 +6821,25 @@ fn apply_mac_and_mlx_fields(object: &mut JsonObject, data_dir: &FsPath) {
     if let Ok(candle_support) = serde_json::to_value(candle_support) {
         object.insert("candleSupport".to_owned(), candle_support);
     }
-    let mlx_status = if cfg!(target_os = "macos") {
+    // A LOCAL DISK probe for MLX convert-output tier dirs, so it is a platform fact and must NOT go
+    // through `generation::enqueue_backend`: keying it off `candle_required` would hide `mlxTiers`
+    // and its per-tier state from the Studio on macOS for directories that are genuinely present.
+    //
+    // Off macOS the probe is NARROWED, not skipped (sc-20529). A convert-at-install model whose
+    // converter has a real off-Mac (candle) implementation — `CANDLE_NATIVE_CONVERTERS`, today just
+    // `flux2_klein_diffusers` / `flux2_klein_9b_true_v2` — needs the same convert affordance and the
+    // same converted/needs_conversion/needs_source states on Windows and Linux that macOS gets: the
+    // candle converter (sc-7459) is real, `POST /models/{id}/convert` is not platform-gated, and
+    // `inject_converted_model_path` already reads the converted dir on every platform. Without these
+    // fields the Studio had no way to show that the conversion was still outstanding, so the model
+    // read as installed off its raw single-file download and failed at load.
+    //
+    // It stays NARROW deliberately. Probing every `requiresConversion` model off-Mac would flip
+    // Anima's three variants to `missing` there: `anima_quant` is macOS-only, and off-Mac Anima
+    // loads the raw `circlestone-labs/Anima` `split_files/` tree with no converted dir at all. The
+    // const is the contract that keeps those two cases apart.
+    let mlx_status = if cfg!(target_os = "macos") || entry_requires_converted_artifact_here(object)
+    {
         mlx_catalog_status(object, data_dir)
     } else {
         None
@@ -5069,20 +7077,104 @@ fn apply_model_catalog_entry(
     download_context: Option<DownloadContext>,
     data_dir: &FsPath,
     user_model_ids: &std::collections::HashSet<String>,
+    builtin_model_ids: &std::collections::HashSet<String>,
+    local_artifacts: &[sceneworks_core::model_artifacts::ResolvedModelArtifact],
 ) -> Result<Value, ApiError> {
     #[cfg(test)]
     test_delay_catalog_probe(&model);
     let state = install_state_for(download_context, &model, data_dir);
+    // sc-19708: the typed availability judgement for this entry's default selected closure on
+    // this host, through the ONE shared resolver. Catalog nuances layered on top of it:
+    // an install living in an app-owned path is local-ready regardless of the library, and an
+    // installed-but-incomplete cache stays `incomplete` rather than `missing`.
+    let availability_resolution =
+        crate::model_sources::availability_for_entry(data_dir, &model, None, local_artifacts);
+    // sc-19712 F-5: what a local copy of this entry could EVER cover, which is a different question
+    // from where it resolves from today. A model with soft co-requisites or a revision-less
+    // requirement showed the identical "local copy" affordance as a fully cacheable one, so the
+    // badge promised protection from a disconnect that the cache cannot actually deliver.
+    let cache_eligibility =
+        crate::model_sources::cache_eligibility_for_entry(data_dir, &model, None);
+    use sceneworks_core::model_artifacts::external_library::ModelAvailability;
+    let managed_models = data_dir.join("models");
+    let installed_in_app_owned_path = state.installed
+        && state
+            .installed_path
+            .as_deref()
+            .map(FsPath::new)
+            .is_some_and(|path| path.starts_with(&managed_models));
+    let (availability, availability_resolution) = if installed_in_app_owned_path
+        && !matches!(
+            availability_resolution.availability,
+            ModelAvailability::LocalReady
+        ) {
+        (ModelAvailability::LocalReady, None)
+    } else if availability_resolution.availability == ModelAvailability::Missing
+        && state.cache_incomplete
+    {
+        (ModelAvailability::Incomplete, Some(availability_resolution))
+    } else {
+        (
+            availability_resolution.availability.clone(),
+            Some(availability_resolution),
+        )
+    };
+    let platform_cleanup_only =
+        model.get("platformCleanupOnly").and_then(Value::as_bool) == Some(true);
+    let cleanup_residue_only = platform_cleanup_only
+        && !state.installed
+        && cleanup_with_model_artifact_paths(&model, data_dir)
+            .iter()
+            .any(|path| std::fs::symlink_metadata(path).is_ok());
     let object = model
         .as_object_mut()
         .ok_or_else(|| ApiError::internal("Model manifest entry must be an object"))?;
+    object.insert(
+        "modelAvailability".to_owned(),
+        serde_json::to_value(&availability).map_err(|error| {
+            ApiError::internal(format!("serialize model availability: {error}"))
+        })?,
+    );
+    object.insert(
+        "modelResolution".to_owned(),
+        availability_resolution
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|error| ApiError::internal(format!("serialize model resolution: {error}")))?
+            .unwrap_or(Value::Null),
+    );
+    object.insert(
+        "cacheEligibility".to_owned(),
+        cache_eligibility
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|error| ApiError::internal(format!("serialize cache eligibility: {error}")))?
+            .unwrap_or(Value::Null),
+    );
     let model_id = object.get("id").and_then(Value::as_str).unwrap_or_default();
+    // Ownership and routing authority are deliberately separate. A user overlay on a builtin is
+    // removable (deleting it restores builtin defaults), but it cannot reclassify that protected id
+    // as an imported checkpoint and bypass/trigger source-shaped provider validation.
     let user_managed = user_model_ids.contains(model_id);
+    let builtin_routing_authority = builtin_model_ids.contains(model_id);
     object.insert(
         "catalogScope".to_owned(),
-        Value::String(if user_managed { "user" } else { "builtin" }.to_owned()),
+        Value::String(
+            if builtin_routing_authority {
+                "builtin"
+            } else {
+                "user"
+            }
+            .to_owned(),
+        ),
     );
-    object.insert("downloadable".to_owned(), Value::Bool(state.downloadable));
+    stamp_legacy_import_source_shape(object, data_dir, !builtin_routing_authority);
+    object.insert(
+        "downloadable".to_owned(),
+        Value::Bool(state.downloadable && !platform_cleanup_only),
+    );
     object.insert(
         "installState".to_owned(),
         Value::String(
@@ -5097,7 +7189,7 @@ fn apply_model_catalog_entry(
     object.insert(
         "cacheState".to_owned(),
         Value::String(
-            if state.cache_incomplete {
+            if state.cache_incomplete || cleanup_residue_only {
                 "incomplete"
             } else if state.installed {
                 "complete"
@@ -5119,11 +7211,11 @@ fn apply_model_catalog_entry(
     );
     object.insert(
         "repairAvailable".to_owned(),
-        Value::Bool(state.downloadable && state.cache_incomplete),
+        Value::Bool(state.downloadable && state.cache_incomplete && !platform_cleanup_only),
     );
     object.insert(
         "updateAvailable".to_owned(),
-        Value::Bool(state.update_available),
+        Value::Bool(state.update_available && !platform_cleanup_only),
     );
     object.insert(
         "installedPath".to_owned(),
@@ -5134,8 +7226,12 @@ fn apply_model_catalog_entry(
     );
     object.insert(
         "removable".to_owned(),
-        Value::Bool(user_managed || state.installed),
+        Value::Bool(user_managed || state.installed || platform_cleanup_only),
     );
+    if platform_cleanup_only {
+        object.insert("usable".to_owned(), Value::Bool(false));
+        object.insert("recommended".to_owned(), Value::Bool(false));
+    }
     // Per-variant install tracking (sc-8508, epic 8506): one entry per declared quant tier,
     // each with its own installed flag + path + size + footprint. A single-variant model
     // still emits exactly one "default" variant, so the array is a superset of the
@@ -5143,6 +7239,7 @@ fn apply_model_catalog_entry(
     apply_variant_fields(object, data_dir);
     apply_gating_fields(object);
     apply_mac_and_mlx_fields(object, data_dir);
+    apply_imported_provider_surface(object);
     apply_imported_lora_advertisement(object);
     // Live denoise preview support (sc-16965, epic 16948): `preview.byBackend`, read from the
     // generated `config/manifests/builtin.preview-support.jsonc` rather than from a registry, because
@@ -5152,7 +7249,378 @@ fn apply_model_catalog_entry(
     // diverges by backend and never fully collapses. Additive: a model the generated table does not
     // know gets no `preview` key, which the UI reads as "unknown" and renders exactly as before.
     sceneworks_core::preview_support::apply_to_model_entry(object);
+    sceneworks_core::decoder_support::apply_to_model_entry(object);
+    apply_decoder_availability(object, data_dir);
+    if platform_cleanup_only {
+        // The tombstone exists only to expose whole-model Delete. Strip every tier/conversion
+        // action projection even though the preserved manifest metadata is still needed by the
+        // deletion resolver to locate old files.
+        object.insert("hasVariantMatrix".to_owned(), Value::Bool(false));
+        object.remove("variants");
+        object.remove("mlxConversionState");
+        object.remove("mlxInstallState");
+        object.remove("mlxTiers");
+        object.remove("mlxTierStates");
+    }
     Ok(model)
+}
+
+/// Give a provider-aliased model row the canonical provider's exact optional decoder donors.
+///
+/// Imported Krea entries intentionally carry `downloads: []`: their primary DiT is an in-place user
+/// file, not a downloadable model. Decoder eligibility is nevertheless provider-derived, and the
+/// selected decoder must resolve the same pinned standalone VAE as the builtin Turbo provider. Clone
+/// only soft co-requisites whose component ids occur in the provider's generated decoder facts;
+/// primary downloads and unrelated components (including text encoders) are never inherited.
+fn inherit_provider_decoder_downloads(model: &mut Value, builtin_models: &[Value]) {
+    let Some(object) = model.as_object() else {
+        return;
+    };
+    let Some(model_id) = object.get("id").and_then(Value::as_str) else {
+        return;
+    };
+    let Some(provider_id) =
+        sceneworks_core::decoder_support::provider_id_for_backend(object, "mlx")
+    else {
+        return;
+    };
+    if provider_id == model_id {
+        return;
+    }
+    let component_ids = sceneworks_core::decoder_support::component_ids_for_backend(object, "mlx");
+    if component_ids.is_empty() {
+        return;
+    }
+    let Some(provider) = builtin_models.iter().find(|candidate| {
+        candidate.get("id").and_then(Value::as_str) == Some(provider_id.as_str())
+    }) else {
+        return;
+    };
+    let inherited = provider
+        .get("downloads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|download| {
+            download.get("coRequisite").and_then(Value::as_bool) == Some(true)
+                && download.get("required").and_then(Value::as_str) == Some("soft")
+                && download
+                    .get("componentId")
+                    .and_then(Value::as_str)
+                    .is_some_and(|component_id| {
+                        component_ids
+                            .iter()
+                            .any(|expected| expected == component_id)
+                    })
+                && download
+                    .get("revision")
+                    .and_then(Value::as_str)
+                    .is_some_and(|revision| {
+                        revision.len() == 40
+                            && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    })
+                && download
+                    .get("repo")
+                    .and_then(Value::as_str)
+                    .is_some_and(|repo| !repo.trim().is_empty())
+                && download
+                    .get("files")
+                    .and_then(Value::as_array)
+                    .is_some_and(|files| !files.is_empty())
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if inherited.is_empty() {
+        return;
+    }
+
+    let object = model.as_object_mut().expect("checked object above");
+    let existing = object
+        .remove("downloads")
+        .and_then(|downloads| downloads.as_array().cloned())
+        .unwrap_or_default();
+    // Canonical rows lead so both the API availability probe and the worker's exact component
+    // resolver bind the generated decoder id to the provider's source even if a user manifest
+    // happens to contain another soft component with the generic `vae` id.
+    let mut downloads = inherited.clone();
+    downloads.extend(
+        existing
+            .into_iter()
+            .filter(|download| !inherited.iter().any(|canonical| canonical == download)),
+    );
+    object.insert("downloads".to_owned(), Value::Array(downloads));
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct OptionalComponentAvailability {
+    installed: bool,
+    estimated_size_bytes: Option<u64>,
+}
+
+/// Enrich descriptor-derived decoder options with the local state of their pinned, soft
+/// co-requisite. Eligibility comes exclusively from engine facts; this function answers only whether
+/// the declared standalone component is present. A full Wan model install is neither consulted nor
+/// implied.
+fn apply_decoder_availability(object: &mut JsonObject, data_dir: &FsPath) {
+    let mut components: std::collections::BTreeMap<String, OptionalComponentAvailability> =
+        std::collections::BTreeMap::new();
+    for download in object
+        .get("downloads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if download.get("coRequisite").and_then(Value::as_bool) != Some(true) {
+            continue;
+        }
+        let Some(component_id) = download.get("componentId").and_then(Value::as_str) else {
+            continue;
+        };
+        let installed = pinned_component_download_installed(download, data_dir);
+        let size = download
+            .get("estimatedSizeBytes")
+            .and_then(Value::as_u64)
+            .or_else(|| {
+                download
+                    .get("footprint")
+                    .and_then(|footprint| footprint.get("diskSizeBytes"))
+                    .and_then(Value::as_u64)
+            });
+        // The provider-inheritance seam prepends its canonical exact row. First declaration wins so
+        // a later user-authored soft `vae` row cannot make the Wan option appear installed or divert
+        // the worker to a different file.
+        components
+            .entry(component_id.to_owned())
+            .or_insert(OptionalComponentAvailability {
+                installed,
+                estimated_size_bytes: size,
+            });
+    }
+
+    let Some(by_backend) = object
+        .get_mut(sceneworks_core::decoder_support::DECODERS_FIELD)
+        .and_then(Value::as_object_mut)
+        .and_then(|decoders| {
+            decoders
+                .get_mut(sceneworks_core::decoder_support::BY_BACKEND_FIELD)
+                .and_then(Value::as_object_mut)
+        })
+    else {
+        return;
+    };
+    for options in by_backend.values_mut().filter_map(Value::as_array_mut) {
+        for option in options.iter_mut().filter_map(Value::as_object_mut) {
+            let state = option
+                .get("componentId")
+                .and_then(Value::as_str)
+                .and_then(|id| components.get(id))
+                .copied()
+                .unwrap_or_default();
+            option.insert("available".to_owned(), Value::Bool(state.installed));
+            if let Some(bytes) = state.estimated_size_bytes {
+                option.insert("estimatedSizeBytes".to_owned(), Value::from(bytes));
+            }
+        }
+    }
+}
+
+fn pinned_component_download_installed(download: &Value, data_dir: &FsPath) -> bool {
+    let Some(repo) = download.get("repo").and_then(Value::as_str) else {
+        return false;
+    };
+    let Some(revision) = download.get("revision").and_then(Value::as_str) else {
+        return false;
+    };
+    if revision.len() != 40 || !revision.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return false;
+    }
+    let files = string_array_field(download, "files");
+    if files.is_empty() {
+        return false;
+    }
+    // Through the typed source-library resolver, not a hand-built `snapshots/<rev>` root — the
+    // model-path inventory audit (sc-19703) forbids direct root construction on this file.
+    let resolver = sceneworks_core::model_artifacts::ModelArtifactResolver::new(
+        sceneworks_core::hf_home::model_source_library(data_dir),
+    );
+    let Ok((_, snapshot)) = resolver.discover_source_snapshot(repo, Some(revision)) else {
+        return false;
+    };
+    files
+        .iter()
+        .all(|pattern| snapshot_contains_pattern(&snapshot, pattern))
+}
+
+#[cfg(test)]
+mod decoder_availability_tests {
+    use super::*;
+    use crate::tests::support::isolate_hf_cache;
+
+    fn model() -> Value {
+        json!({
+            "id": "qwen_image",
+            "downloads": [{
+                "provider": "huggingface",
+                "repo": "SceneWorks/krea-realtime-14b-mlx",
+                "revision": "e68e9a3d98187fdf6936838ffcf6df5aa48d6626",
+                "coRequisite": true,
+                "required": "soft",
+                "componentId": "vae",
+                "files": ["q4/vae.safetensors"],
+                "estimatedSizeBytes": 507591212
+            }],
+            "decoders": { "byBackend": { "mlx": [{
+                "id": "wan_2_1_vae", "componentId": "vae", "experimental": true
+            }] } }
+        })
+    }
+
+    fn donor_download() -> Value {
+        model()["downloads"][0].clone()
+    }
+
+    #[test]
+    fn option_is_available_only_at_the_declared_pinned_single_file() {
+        let _env = isolate_hf_cache();
+        let data = tempfile::tempdir().unwrap();
+        let mut model = model();
+        apply_decoder_availability(model.as_object_mut().unwrap(), data.path());
+        assert_eq!(model["decoders"]["byBackend"]["mlx"][0]["available"], false);
+
+        let repo_cache =
+            huggingface_repo_cache_path(data.path(), "SceneWorks/krea-realtime-14b-mlx").unwrap();
+        let wrong = repo_cache.join("snapshots/0000000000000000000000000000000000000000/q4");
+        std::fs::create_dir_all(&wrong).unwrap();
+        std::fs::write(wrong.join("vae.safetensors"), b"stale donor").unwrap();
+        apply_decoder_availability(model.as_object_mut().unwrap(), data.path());
+        assert_eq!(model["decoders"]["byBackend"]["mlx"][0]["available"], false);
+
+        let exact = repo_cache.join("snapshots/e68e9a3d98187fdf6936838ffcf6df5aa48d6626/q4");
+        std::fs::create_dir_all(&exact).unwrap();
+        std::fs::write(exact.join("vae.safetensors"), b"pinned donor").unwrap();
+        apply_decoder_availability(model.as_object_mut().unwrap(), data.path());
+        let option = &model["decoders"]["byBackend"]["mlx"][0];
+        assert_eq!(option["available"], true);
+        assert_eq!(option["estimatedSizeBytes"], 507591212_u64);
+    }
+
+    #[test]
+    fn imported_krea_alias_inherits_exact_provider_donor_and_fails_closed() {
+        let _env = isolate_hf_cache();
+        let data = tempfile::tempdir().unwrap();
+        let builtin = vec![json!({
+            "id": "krea_2_turbo",
+            "downloads": [donor_download()]
+        })];
+        let mut imported = json!({
+            "id": "user_kreamania_variant5",
+            "name": "Kreamania Variant 5",
+            "type": "image",
+            "family": "krea_2",
+            "downloads": []
+        });
+
+        inherit_provider_decoder_downloads(&mut imported, &builtin);
+        let donor = &imported["downloads"][0];
+        assert_eq!(donor["repo"], "SceneWorks/krea-realtime-14b-mlx");
+        assert_eq!(
+            donor["revision"],
+            "e68e9a3d98187fdf6936838ffcf6df5aa48d6626"
+        );
+        assert_eq!(donor["files"], json!(["q4/vae.safetensors"]));
+
+        sceneworks_core::decoder_support::apply_to_model_entry(imported.as_object_mut().unwrap());
+        apply_decoder_availability(imported.as_object_mut().unwrap(), data.path());
+        assert_eq!(
+            imported["decoders"]["byBackend"]["mlx"][0]["available"], false,
+            "an imported alias must not advertise an unresolved donor as selectable"
+        );
+
+        let repo_cache =
+            huggingface_repo_cache_path(data.path(), "SceneWorks/krea-realtime-14b-mlx").unwrap();
+        let wrong = repo_cache.join("snapshots/0000000000000000000000000000000000000000/q4");
+        std::fs::create_dir_all(&wrong).unwrap();
+        std::fs::write(wrong.join("vae.safetensors"), b"wrong revision").unwrap();
+        apply_decoder_availability(imported.as_object_mut().unwrap(), data.path());
+        assert_eq!(
+            imported["decoders"]["byBackend"]["mlx"][0]["available"],
+            false
+        );
+
+        let exact = repo_cache.join("snapshots/e68e9a3d98187fdf6936838ffcf6df5aa48d6626/q4");
+        std::fs::create_dir_all(&exact).unwrap();
+        std::fs::write(exact.join("vae.safetensors"), b"exact donor").unwrap();
+        apply_decoder_availability(imported.as_object_mut().unwrap(), data.path());
+        assert_eq!(
+            imported["decoders"]["byBackend"]["mlx"][0]["available"],
+            true
+        );
+    }
+}
+
+/// Backfill the explicit source-shape discriminator for user entries created before SC-18312.
+/// This is structural inspection under the app-managed model root, never a family guess: a Mage
+/// transformer directory must carry both of its required files; a single-file import is classified
+/// by the same header-only detector the importer uses. The worker repeats confinement and shape
+/// validation before opening weights.
+fn stamp_legacy_import_source_shape(
+    object: &mut JsonObject,
+    data_dir: &FsPath,
+    user_managed: bool,
+) {
+    if !user_managed || object.contains_key("importSourceShape") {
+        return;
+    }
+    let Some(raw) = object
+        .get("modelPath")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            object
+                .get("paths")
+                .and_then(Value::as_object)
+                .and_then(|paths| paths.get("model"))
+                .and_then(Value::as_str)
+        })
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    else {
+        return;
+    };
+    let Ok(path) = std::fs::canonicalize(raw) else {
+        return;
+    };
+    let Ok(model_root) = std::fs::canonicalize(data_dir.join("models")) else {
+        return;
+    };
+    if !path.starts_with(model_root) {
+        return;
+    }
+    if object.get("family").and_then(Value::as_str) == Some("mage-flow")
+        && path.is_dir()
+        && sceneworks_core::base_weights::is_mage_flow_transformer_dir(&path)
+    {
+        object.insert(
+            "importSourceShape".to_owned(),
+            Value::String("transformer_directory".to_owned()),
+        );
+        return;
+    }
+    let Some(weight_file) = imported_model_primary_weight_file(&path) else {
+        return;
+    };
+    let Ok(BaseWeightDetection::Recognized(verdict)) = detect_base_weight_file(&weight_file) else {
+        return;
+    };
+    let family = object.get("family").and_then(Value::as_str);
+    let source = match (family, verdict.family.as_deref(), verdict.component) {
+        (Some("krea_2"), Some("krea_2"), ComponentRole::Transformer) => "transformer_file",
+        (Some("sdxl"), Some("sdxl"), ComponentRole::Checkpoint) => "fused_checkpoint",
+        _ => return,
+    };
+    object.insert(
+        "importSourceShape".to_owned(),
+        Value::String(source.to_owned()),
+    );
 }
 
 type ModelCatalogWorkItem = (Value, Option<DownloadContext>);
@@ -5263,17 +7731,25 @@ mod model_size_concurrency_tests {
         // that premise was falsified by sc-17157, which is an ancestor of the pinned inference
         // revision. See the trailing note in that entry's `downloads` for the current reason.)
         //
-        // THE NUMBERS BELOW ARE THE SYNC MERGE'S, not any single side's. Starting from the shared
-        // 87 / 84 / 84, four independent deltas all apply:
+        // SC-18902 (main) then removed Eros's failed Candle route and platform-scoped both of its
+        // download rows to macOS, so its primary context leaves Windows/Linux while macOS is
+        // unchanged. sc-19708 (main) declared `instantid_face_stack`: the SCRFD + ArcFace pair the
+        // face-analysis and identity lanes stage from `SceneWorks/instantid-mlx`, one unscoped
+        // download row, so every OS gains exactly one.
+        //
+        // THE NUMBERS BELOW ARE THE 2026-08-19 SYNC MERGE'S, not any single side's. Starting from
+        // the shared 87 / 84 / 84, six independent deltas all apply:
         //   main  SCAIL-2 shared bf16 package      +0 / +1 / +1
         //   main  sc-18481 AuraSR retirement       −1 / −1 / −1   (its row was unscoped)
+        //   main  SC-18902 Eros rows macOS-scoped  +0 / −1 / −1
+        //   main  sc-19708 instantid_face_stack    +1 / +1 / +1   (unscoped row)
         //   epic  sc-17158 MiniMax-H3 pair         +2 / +0 / +0   (both rows macOS-only)
         //   epic  sc-19558 H3 off-Mac artifact     +0 / +1 / +1
-        // giving 88 / 85 / 85. Each side read only its own pair and so read 86/84/84 (main) or
-        // 89/85/85 (epic); neither was right once both landed.
+        // giving 89 / 85 / 85. Each side read only its own set and so read 87/84/84 (main) or
+        // 88/85/85 (epic, at the previous sync); neither is right once both land.
         // Still far below `MODEL_SIZE_CACHE_LIMIT` (256), which is what this guard protects.
         for (os, expected_distinct_contexts) in
-            [("macos", 88_usize), ("windows", 85), ("linux", 85)]
+            [("macos", 89_usize), ("windows", 85), ("linux", 85)]
         {
             let mut keys = std::collections::HashSet::new();
             for mut model in manifest["models"]
@@ -5417,28 +7893,47 @@ async fn load_model_catalog_inputs(
         Vec<Value>,
         Vec<Option<DownloadContext>>,
         std::collections::HashSet<String>,
+        std::collections::HashSet<String>,
     ),
     ApiError,
 > {
-    let (mut models, user_model_ids) = merged_model_manifest_entries(state).await?;
+    let manifest_dir = state.settings.config_dir.join("manifests");
+    let builtin =
+        load_manifest_entries(state, &manifest_dir.join("builtin.models.jsonc"), "models").await?;
+    let user =
+        load_manifest_entries(state, &manifest_dir.join("user.models.jsonc"), "models").await?;
+    let user_model_ids = user
+        .iter()
+        .filter_map(|model| model.get("id").and_then(Value::as_str).map(str::to_owned))
+        .collect::<std::collections::HashSet<_>>();
+    let decoder_providers = builtin.clone();
+    let builtin_model_ids = builtin
+        .iter()
+        .filter_map(|model| model.get("id").and_then(Value::as_str).map(str::to_owned))
+        .collect::<std::collections::HashSet<_>>();
+    let mut models = merge_entries_by_id(builtin, user);
+    retain_models_for_os(&mut models, std::env::consts::OS, &state.settings.data_dir)?;
     // Resolve per-platform download sources before computing install state/size: some video models
     // carry both a native MLX-convert checkpoint (macOS) and a diffusers/torch checkpoint
     // (Windows/Linux). Keep only the entries applicable to this OS so the download job, status,
     // size, and the frontend all agree on the right repo (sc-3240).
     for model in &mut models {
-        retain_downloads_for_os(model, std::env::consts::OS);
+        inherit_provider_decoder_downloads(model, &decoder_providers);
+        if model.get("platformCleanupOnly").and_then(Value::as_bool) != Some(true) {
+            retain_downloads_for_os(model, std::env::consts::OS);
+        }
     }
     let download_contexts = models
         .iter()
         .map(model_download_context)
         .collect::<Result<Vec<_>, _>>()?;
-    Ok((models, download_contexts, user_model_ids))
+    Ok((models, download_contexts, user_model_ids, builtin_model_ids))
 }
 
 async fn estimate_current_model_catalog_sizes(
     state: &AppState,
 ) -> Result<HashMap<ModelSizeCacheKey, Option<u64>>, ApiError> {
-    let (_, download_contexts, _) = load_model_catalog_inputs(state).await?;
+    let (_, download_contexts, _, _) = load_model_catalog_inputs(state).await?;
     Ok(estimate_model_catalog_sizes(state, &download_contexts, true).await)
 }
 
@@ -5447,10 +7942,15 @@ async fn build_model_catalog_snapshot(state: &AppState) -> Result<Vec<Value>, Ap
     // sweep) so tests can assert request-scoped and process-shared reuse.
     #[cfg(test)]
     crate::test_note_model_catalog_build();
-    let (models, download_contexts, user_model_ids) = load_model_catalog_inputs(state).await?;
+    let (models, download_contexts, user_model_ids, builtin_model_ids) =
+        load_model_catalog_inputs(state).await?;
+    let builtin_model_ids = Arc::new(builtin_model_ids);
 
     let data_dir = Arc::new(state.settings.data_dir.clone());
     let user_model_ids = Arc::new(user_model_ids);
+    // App-owned resolved-local artifacts, enumerated ONCE per snapshot build (read-only: no
+    // session, no usage refresh) so every entry's availability can detect local-ready coverage.
+    let local_artifacts = Arc::new(crate::model_sources::local_resolved_artifacts(state));
     let work_items = models
         .into_iter()
         .zip(download_contexts.clone())
@@ -5458,6 +7958,8 @@ async fn build_model_catalog_snapshot(state: &AppState) -> Result<Vec<Value>, Ap
     let work_groups = group_model_catalog_work_items(work_items);
     let data_dir_for_sweep = data_dir.clone();
     let user_model_ids_for_sweep = user_model_ids.clone();
+    let builtin_model_ids_for_sweep = builtin_model_ids.clone();
+    let local_artifacts_for_sweep = local_artifacts.clone();
 
     // sc-14530: each model's install-state resolution is independent but may spend seconds
     // waiting on network-volume metadata. Dispatch bounded blocking tasks per primary-repo group
@@ -5472,6 +7974,8 @@ async fn build_model_catalog_snapshot(state: &AppState) -> Result<Vec<Value>, Ap
                     download_context,
                     &data_dir_for_sweep,
                     &user_model_ids_for_sweep,
+                    &builtin_model_ids_for_sweep,
+                    &local_artifacts_for_sweep,
                 )
             })
             .collect::<Result<Vec<_>, _>>()
@@ -5494,9 +7998,15 @@ async fn build_model_catalog_snapshot(state: &AppState) -> Result<Vec<Value>, Ap
         // job validation never wait on unrelated Hugging Face network calls.
         apply_model_catalog_size_fields(model, context.as_ref(), None)?;
     }
-    let external = external.map_err(|err| {
+    let mut external = external.map_err(|err| {
         ApiError::internal(format!("external model catalog scan task failed: {err}"))
     })?;
+    for model in &mut external {
+        if let Some(object) = model.as_object_mut() {
+            apply_imported_provider_surface(object);
+            apply_imported_lora_advertisement(object);
+        }
+    }
     models.extend(external);
     models.sort_by(|left, right| {
         let left_key = (
@@ -5561,8 +8071,63 @@ pub(crate) async fn resolve_model_manifest_entry(
             .find(|entry| entry.get("id").and_then(Value::as_str) == Some(model_id))
             .cloned()
     };
-    let mut entry = merge_model_manifest_entry(find(&builtin), find(&user));
+    let builtin_entry = find(&builtin);
+    let user_entry = find(&user);
+    let mut catalog_scope = if builtin_entry.is_some() {
+        Some("builtin")
+    } else if user_entry.is_some() {
+        Some("user")
+    } else {
+        None
+    };
+    let mut entry = merge_model_manifest_entry(builtin_entry, user_entry);
+    if entry.as_object().map_or(true, JsonObject::is_empty) {
+        // The model-source seam (sc-19708) resolves fixed utility models (upscalers, detectors,
+        // the face stack) for job admission even when the configured manifest directory is
+        // missing or trimmed — the compiled-in builtin manifest is the complete fallback so a
+        // stripped config dir cannot silently strip typed model-source coverage.
+        if let Some(embedded) = embedded_builtin_catalog_entry(|candidate| {
+            candidate.get("id").and_then(Value::as_str) == Some(model_id)
+        })? {
+            entry = embedded;
+            catalog_scope = Some("builtin");
+        }
+    }
+    inherit_provider_decoder_downloads(&mut entry, &builtin);
+    if let (Some(scope), Some(object)) = (catalog_scope, entry.as_object_mut()) {
+        // The merged worker-facing entry must carry the same routing authority as `/models`.
+        // A user manifest may override builtin presentation/defaults without turning the protected
+        // builtin identity into an imported checkpoint. Genuine user-only ids remain user-scoped.
+        object.insert("catalogScope".to_owned(), Value::String(scope.to_owned()));
+        stamp_legacy_import_source_shape(object, &state.settings.data_dir, scope == "user");
+    }
     inject_converted_model_path(&mut entry, &state.settings.data_dir);
+    if let Some(object) = entry.as_object_mut() {
+        // The worker receives the same descriptor-derived selection table and local pinned-file
+        // availability as the catalog UI. This keeps enqueue validation and execution on one fact set.
+        sceneworks_core::decoder_support::apply_to_model_entry(object);
+        apply_decoder_availability(object, &state.settings.data_dir);
+    }
+    Ok(entry)
+}
+
+/// The compiled-in builtin model manifest, used as the last-resort catalog authority when the
+/// on-disk manifest directory does not carry an entry. Kept complete and cross-platform: the
+/// caller derives per-platform closures from it, so filtering here would let a macOS API omit
+/// Candle-only co-requisites from a Windows/Linux worker carrier.
+pub(crate) fn embedded_builtin_catalog_entry(
+    predicate: impl Fn(&Value) -> bool,
+) -> Result<Option<Value>, ApiError> {
+    let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
+    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+        .map_err(|error| ApiError::internal(format!("embedded model manifest invalid: {error}")))?;
+    let entry = manifest
+        .get("models")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|entry| predicate(entry))
+        .cloned();
     Ok(entry)
 }
 
@@ -5646,47 +8211,73 @@ pub(crate) fn merge_model_manifest_entry(builtin: Option<Value>, user: Option<Va
 /// (sc-3240, Wan2.2) — so filtering here makes the download job, install status, size, and the
 /// frontend's `downloads[0]` all resolve to the right per-platform repo from one seam. No-op unless
 /// at least one entry is platform-tagged, so single-repo models are untouched.
-pub(crate) fn retain_downloads_for_os(model: &mut Value, os: &str) {
-    let Some(downloads) = model.get_mut("downloads").and_then(Value::as_array_mut) else {
-        return;
-    };
-    if !downloads
-        .iter()
-        .any(|entry| entry.get("platforms").is_some())
-    {
-        return;
-    }
-    downloads.retain(
-        |entry| match entry.get("platforms").and_then(Value::as_array) {
-            Some(platforms) => platforms.iter().any(|p| p.as_str() == Some(os)),
-            None => true,
-        },
-    );
-}
+///
+/// sc-19708: the manifest-shape predicates below now live in
+/// `sceneworks_core::model_artifacts::artifact_selection` because the availability seam (API
+/// preflight AND the worker's pre-loader guard) selects the same closures. These re-exports keep
+/// the API's install/display call sites on the identical definitions so they cannot drift.
+pub(crate) use sceneworks_core::model_artifacts::artifact_selection::retain_downloads_for_os;
 
-pub(crate) fn model_download(model: &Value) -> Option<Value> {
-    let downloads = model.get("downloads")?.as_array()?;
-    let mut fallback = None;
-    for download in downloads {
-        // Co-requisites (sc-9696) install alongside the primary, never AS it — skip them when
-        // choosing the canonical entry for size/install-path/download.
-        if !is_supported_model_download(download) || is_co_requisite_download(download) {
+pub(crate) use sceneworks_core::model_artifacts::artifact_selection::model_download;
+
+/// Remove whole video products that have no route on `os`. This is intentionally narrower than the
+/// legacy image-model `macOnly` label: only video entries use it as a catalog-withdrawal contract.
+fn retain_models_for_os(
+    models: &mut Vec<Value>,
+    os: &str,
+    data_dir: &FsPath,
+) -> Result<(), ApiError> {
+    if os == "macos" {
+        return Ok(());
+    }
+    let mut retained = Vec::with_capacity(models.len());
+    for mut model in std::mem::take(models) {
+        let model_id = model.get("id").and_then(Value::as_str).unwrap_or_default();
+        let withdrawn_video = video_model_withdrawn_on_platform(model_id, &model, os);
+        if !withdrawn_video {
+            retained.push(model);
             continue;
         }
-        fallback.get_or_insert(download);
-        if download.get("default").and_then(Value::as_bool) == Some(true) {
-            return Some(download.clone());
+
+        // Previously shipped off-Mac routes may already occupy substantial disk. Keep a catalog
+        // tombstone only when the old artifact is installed or partial so Model Manager and DELETE
+        // can reclaim it; a fresh machine sees no row at all. Preserve its original downloads on
+        // the tombstone solely to resolve install state and owned cleanup paths.
+        let context = model_download_context(&model)?;
+        let state = install_state_for(context, &model, data_dir);
+        let cleanup_residue = cleanup_with_model_artifact_paths(&model, data_dir)
+            .iter()
+            .any(|path| std::fs::symlink_metadata(path).is_ok());
+        if state.installed || state.cache_incomplete || cleanup_residue {
+            let object = model
+                .as_object_mut()
+                .ok_or_else(|| ApiError::internal("Model manifest entry must be an object"))?;
+            object.insert("platformCleanupOnly".to_owned(), Value::Bool(true));
+            retained.push(model);
         }
     }
-    fallback.cloned()
+    *models = retained;
+    Ok(())
+}
+
+/// Product withdrawals are authoritative by stable model id, not by a user-overridable manifest
+/// presentation flag. `macOnly` remains the generic platform annotation, while this policy keeps a
+/// same-id user manifest from restoring a product whose off-Mac runtime was explicitly removed.
+pub(crate) fn video_model_withdrawn_on_platform(
+    model_id: &str,
+    model_manifest_entry: &Value,
+    platform: &str,
+) -> bool {
+    platform != "macos"
+        && (matches!(model_id, "ltx_2_3_eros")
+            || (model_manifest_entry.get("type").and_then(Value::as_str) == Some("video")
+                && model_manifest_entry.get("macOnly").and_then(Value::as_bool) == Some(true)))
 }
 
 /// True when a download entry is a co-requisite dependency (sc-9696): fetched ALONGSIDE the primary
 /// download rather than as a pick-one alternate, and gating the entry's install state. See the
 /// manifest schema `downloads[].coRequisite`.
-pub(crate) fn is_co_requisite_download(download: &Value) -> bool {
-    download.get("coRequisite").and_then(Value::as_bool) == Some(true)
-}
+pub(crate) use sceneworks_core::model_artifacts::artifact_selection::is_co_requisite_download;
 
 /// The co-requisite download entries for `model` (sc-9696) — the dependencies that must install
 /// alongside the primary (e.g. the PiD decoder's shared gemma-2-2b-it caption encoder). The catalog
@@ -5700,74 +8291,10 @@ pub(crate) fn is_co_requisite_download(download: &Value) -> bool {
 /// that are themselves per-tier: they exist as `q4`/`q8`/`bf16` subtrees of one components mirror,
 /// and only the one matching the selected tier should be fetched, sized, or gated on. Keying that on
 /// the presence of `variant` keeps every existing co-requisite on exactly its current path.
-pub(crate) fn co_requisite_variant(download: &Value) -> Option<String> {
-    download
-        .get("variant")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_ascii_lowercase)
-}
-
-/// The co-requisite downloads that apply to `variant` (sc-14980).
-///
-/// Tier-agnostic rows (no `variant`) always apply. A tier-scoped row applies only to its own tier;
-/// when no tier is in scope, every tier-scoped row is returned so callers that genuinely aggregate
-/// across tiers still see them all.
-pub(crate) fn model_co_requisite_downloads_for_variant(
-    model: &Value,
-    variant: Option<&str>,
-) -> Vec<Value> {
-    let wanted = variant.map(|value| value.trim().to_ascii_lowercase());
-    model_co_requisite_downloads(model)
-        .into_iter()
-        .filter(
-            |download| match (co_requisite_variant(download), wanted.as_deref()) {
-                (None, _) => true,
-                (Some(_), None) => true,
-                (Some(row), Some(wanted)) => row == wanted,
-            },
-        )
-        .collect()
-}
-
-pub(crate) fn model_co_requisite_downloads(model: &Value) -> Vec<Value> {
-    model
-        .get("downloads")
-        .and_then(Value::as_array)
-        .map(|downloads| {
-            downloads
-                .iter()
-                .filter(|download| {
-                    is_co_requisite_download(download) && is_supported_model_download(download)
-                })
-                .cloned()
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// Select a specific quant tier's download entry for a quant-matrix model (sc-8508). Returns the
-/// supported `downloads` entry whose `variant` matches `variant` (case-insensitive). `None` when the
-/// model declares no such tier — the caller surfaces a 400 rather than silently installing the wrong
-/// tier. A `None` `variant` argument means "the default tier" and is handled by [`model_download`].
-pub(crate) fn model_download_for_variant(model: &Value, variant: &str) -> Option<Value> {
-    let downloads = model.get("downloads")?.as_array()?;
-    let wanted = variant.trim().to_ascii_lowercase();
-    downloads
-        .iter()
-        .find(|download| {
-            is_supported_model_download(download)
-                && !is_co_requisite_download(download)
-                && download
-                    .get("variant")
-                    .and_then(Value::as_str)
-                    .map(|value| value.trim().to_ascii_lowercase())
-                    .as_deref()
-                    == Some(wanted.as_str())
-        })
-        .cloned()
-}
+pub(crate) use sceneworks_core::model_artifacts::artifact_selection::{
+    co_requisite_variant, model_co_requisite_downloads, model_co_requisite_downloads_for_variant,
+    model_download_for_variant,
+};
 
 /// Best-effort credential host for a gated model when the manifest entry doesn't
 /// set `credentialHost` explicitly: an explicit per-download `credentialHost`,
@@ -5800,13 +8327,7 @@ fn derive_credential_host(model: &serde_json::Map<String, Value>) -> Option<Stri
     None
 }
 
-pub(crate) fn is_supported_model_download(download: &Value) -> bool {
-    download.get("provider").and_then(Value::as_str) == Some("huggingface")
-        && download
-            .get("repo")
-            .and_then(Value::as_str)
-            .is_some_and(|repo| !repo.is_empty())
-}
+pub(crate) use sceneworks_core::model_artifacts::artifact_selection::is_supported_model_download;
 
 pub(crate) fn model_download_context(model: &Value) -> Result<Option<DownloadContext>, ApiError> {
     let Some(download) = model_download(model) else {
@@ -5860,10 +8381,30 @@ pub(crate) fn huggingface_cache_health(
             }
             continue;
         }
+        // A whole-repo (empty `files`) fetch of a non-diffusers repo declares no per-file claim, so
+        // "some payload landed" was the only signal. That accepts an interrupted sharded download as
+        // installed. The repo's own `*.safetensors.index.json` files are the declared set for their
+        // shards, so validate them here (sc-20526).
+        //
+        // Cost, stated honestly: ONE snapshot walk per candidate snapshot, whose result answers both
+        // the payload question and the index hunt. This lane previously short-circuited on a
+        // `config.json` stat and walked nothing, so a `config.json`-bearing snapshot now pays a walk
+        // it did not pay before. That walk is not removable by making it lazy: FINDING the indexes is
+        // the check, and the check must run before this returns `installed`. What each index then
+        // costs is one small JSON read plus a stat per distinct shard — no hashing, no header parse,
+        // no tensor read. The whole lane runs on the install/catalog sweep, never per job.
+        let files_on_disk = snapshot_files(&snapshot);
         if path_is_readable_file(&snapshot.join("config.json"))
-            || snapshot_has_payload_file(&snapshot)
+            || snapshot_has_payload_file_in(&files_on_disk)
         {
-            return HuggingFaceCacheHealth::installed();
+            let torn = torn_shard_indexes_in(&snapshot, &files_on_disk);
+            if torn.is_empty() {
+                return HuggingFaceCacheHealth::installed();
+            }
+            if best_missing.is_empty() || torn.len() < best_missing.len() {
+                best_missing = torn;
+            }
+            continue;
         }
         if best_missing.is_empty() {
             best_missing.push("model_index.json".to_owned());
@@ -6079,10 +8620,21 @@ fn diffusers_snapshot_health(snapshot: &FsPath) -> HuggingFaceCacheHealth {
             if !path_is_valid_json_object(&snapshot.join(format!("{component}/config.json"))) {
                 missing.push(format!("{component}/config.json"));
             }
-            if !diffusers_component_has_weight_file(snapshot, component) {
+            // ONE listing of the component directory, asked two questions below (sc-20526).
+            let component_entries = diffusers_component_entries(snapshot, component);
+            if !diffusers_component_has_weight_file_in(&component_entries) {
                 missing.push(format!("{component}/<weights>"));
             } else if is_mage && !diffusers_component_safetensors_are_valid(snapshot, component) {
                 missing.push(format!("{component}/<weights> (malformed safetensors)"));
+            } else {
+                // A sharded component holds "a weight file" as soon as ONE shard landed. The
+                // component's own index declares the rest, so an interrupted download is only
+                // visible by comparing `weight_map` against disk (sc-20526).
+                for shard in
+                    component_missing_shards_in(&snapshot.join(component), &component_entries)
+                {
+                    missing.push(format!("{component}/{shard}"));
+                }
             }
         } else if is_mage && component == "tokenizer" {
             // Mage's Qwen3-VL AutoProcessor is a logical `tokenizer` component in model_index.json,
@@ -6150,25 +8702,79 @@ fn diffusers_component_has_valid_config_file(snapshot: &FsPath, component: &str)
         .unwrap_or(false)
 }
 
-fn diffusers_component_has_weight_file(snapshot: &FsPath, component: &str) -> bool {
-    let component_dir = snapshot.join(component);
-    let Ok(entries) = std::fs::read_dir(component_dir) else {
-        return false;
+/// Every non-hidden readable entry directly inside a diffusers component directory.
+///
+/// The weight-file probe and the shard-index probe ask different questions of the SAME listing, so
+/// the health loop reads the directory once and hands the result to both (sc-20526). Threading the
+/// list is what makes the "one `read_dir` per component" cost claim true rather than aspirational.
+fn diffusers_component_entries(snapshot: &FsPath, component: &str) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(snapshot.join(component)) else {
+        return Vec::new();
     };
-    entries.flatten().any(|entry| {
-        let path = entry.path();
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| !is_hidden_file(path) && path_is_readable_file(path))
+        .collect()
+}
+
+fn diffusers_component_has_weight_file_in(entries: &[PathBuf]) -> bool {
+    entries.iter().any(|path| {
         let name = path
             .file_name()
             .and_then(|value| value.to_str())
             .unwrap_or_default()
             .to_ascii_lowercase();
-        !is_hidden_file(&path)
-            && path_is_readable_file(&path)
-            && (name.ends_with(".safetensors")
-                || name.ends_with(".bin")
-                || name.ends_with(".msgpack")
-                || name.ends_with(".gguf"))
+        name.ends_with(".safetensors")
+            || name.ends_with(".bin")
+            || name.ends_with(".msgpack")
+            || name.ends_with(".gguf")
     })
+}
+
+/// Shards that a component directory's `*.safetensors.index.json` files name but that are not on
+/// disk, reported relative to the component (sc-20526).
+///
+/// A sharded component satisfies [`diffusers_component_has_weight_file_in`] as soon as ONE shard
+/// landed, so an interrupted download left `model.safetensors.index.json` + the last shard and read
+/// "installed" — then died at the first forward pass with `cannot find tensor
+/// model.embed_tokens.weight` (lens_turbo bf16). The index IS the declared file set for a sharded
+/// component, so comparing it against disk is the workable ground truth even when the manifest
+/// declares only a `<tier>/*` glob or a whole-repo fetch.
+///
+/// Cost: no directory read at all — `entries` is the listing
+/// [`diffusers_component_entries`] already spent for the weight-file probe — plus one small JSON
+/// read per index and a stat per distinct shard. No hashing, no header parse, no tensor read.
+fn component_missing_shards_in(dir: &FsPath, entries: &[PathBuf]) -> Vec<String> {
+    let mut missing = Vec::new();
+    for path in entries
+        .iter()
+        .filter(|path| sceneworks_core::safetensors::is_safetensors_index_path(path))
+    {
+        missing.extend(sceneworks_core::safetensors::missing_indexed_shards(
+            dir, path,
+        ));
+    }
+    missing.sort();
+    missing.dedup();
+    missing
+}
+
+/// Whether every `*.safetensors.index.json` NAMED IN `files` (snapshot-relative paths, as a receipt's
+/// `resolvedFiles` or a backfill's resolved set records them) has all of its shards on disk.
+///
+/// This is the receipt-lane half of the shard check and costs nothing beyond a stat per shard: the
+/// file list is already in hand, so no directory walk is needed to find the indexes (sc-20526).
+fn listed_shard_indexes_are_complete(snapshot: &FsPath, files: &[String]) -> bool {
+    files
+        .iter()
+        .filter(|file| file.ends_with(sceneworks_core::safetensors::SAFETENSORS_INDEX_SUFFIX))
+        .all(|file| {
+            let path = snapshot.join(file);
+            path.parent().is_some_and(|dir| {
+                sceneworks_core::safetensors::indexed_shards_are_present(dir, &path)
+            })
+        })
 }
 
 fn diffusers_component_safetensors_are_valid(snapshot: &FsPath, component: &str) -> bool {
@@ -6204,8 +8810,12 @@ fn safetensors_header_is_valid(path: &FsPath) -> bool {
         && serde_json::from_slice::<Value>(&header).is_ok_and(|value| value.is_object())
 }
 
-fn snapshot_has_payload_file(snapshot: &FsPath) -> bool {
-    snapshot_files(snapshot).into_iter().any(|path| {
+/// Whether an already-walked snapshot file list holds anything that is not documentation/artwork.
+///
+/// Takes the list rather than the directory so the whole-repo health probe walks once and reuses the
+/// result for both the payload question and the shard-index validation (sc-20526).
+fn snapshot_has_payload_file_in(files: &[String]) -> bool {
+    files.iter().any(|path| {
         let lower = path.to_ascii_lowercase();
         !lower.ends_with(".md")
             && !lower.ends_with(".png")
@@ -6213,6 +8823,29 @@ fn snapshot_has_payload_file(snapshot: &FsPath) -> bool {
             && !lower.ends_with(".jpeg")
             && !lower.ends_with(".gitattributes")
     })
+}
+
+/// Snapshot-relative shard paths that a `*.safetensors.index.json` in `files` names but that are not
+/// on disk. Takes the already-walked file list so no extra directory traversal is spent (sc-20526).
+fn torn_shard_indexes_in(snapshot: &FsPath, files: &[String]) -> Vec<String> {
+    let mut missing = files
+        .iter()
+        .filter(|file| file.ends_with(sceneworks_core::safetensors::SAFETENSORS_INDEX_SUFFIX))
+        .flat_map(|file| {
+            let path = snapshot.join(file);
+            let dir = path.parent().map(FsPath::to_path_buf).unwrap_or_default();
+            let prefix = match file.rsplit_once('/') {
+                Some((parent, _)) => format!("{parent}/"),
+                None => String::new(),
+            };
+            sceneworks_core::safetensors::missing_indexed_shards(&dir, &path)
+                .into_iter()
+                .map(move |shard| format!("{prefix}{shard}"))
+        })
+        .collect::<Vec<_>>();
+    missing.sort();
+    missing.dedup();
+    missing
 }
 
 /// Every readable file under `snapshot`, snapshot-relative, `/`-separated.
@@ -6518,7 +9151,11 @@ pub(crate) fn model_artifact_paths(model: &Value, data_dir: &FsPath) -> Vec<Path
     if let Some(path) = model_manifest_installed_path(model, data_dir) {
         paths.push(path);
     }
-    if let Some(repo) = model_download(model).and_then(|download| {
+    let cleanup_downloads = model_download(model).into_iter().collect::<Vec<_>>();
+    if model.get("platformCleanupOnly").and_then(Value::as_bool) == Some(true) {
+        paths.extend(cleanup_with_model_artifact_paths(model, data_dir));
+    }
+    for repo in cleanup_downloads.into_iter().filter_map(|download| {
         download
             .get("repo")
             .and_then(Value::as_str)
@@ -6543,6 +9180,24 @@ pub(crate) fn model_artifact_paths(model: &Value, data_dir: &FsPath) -> Vec<Path
         } else {
             data_dir.join(path)
         });
+    }
+    unique_paths(paths)
+}
+
+fn cleanup_with_model_artifact_paths(model: &Value, data_dir: &FsPath) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for repo in model
+        .get("downloads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|download| download.get("cleanupWithModel").and_then(Value::as_bool) == Some(true))
+        .filter_map(|download| download.get("repo").and_then(Value::as_str))
+    {
+        paths.push(data_dir.join("models").join(safe_download_dir(repo)));
+        if let Some(cache_path) = huggingface_repo_cache_path(data_dir, repo) {
+            paths.push(cache_path);
+        }
     }
     unique_paths(paths)
 }
@@ -6936,6 +9591,145 @@ mod variant_install_tests {
             !status.update_available,
             "no convertSourceFile → never reports an update"
         );
+    }
+
+    /// sc-20529: which convert-at-install entries get MLX status surfaced. The converter half is
+    /// delegated to `sceneworks_core::jobs_store::convert_artifact_required_here` — the same
+    /// predicate the worker's preflight gates on — so this pins the DELEGATION (identical verdicts
+    /// on both sides of the API/worker seam) as well as the entry-shape half that stays local.
+    #[test]
+    fn converted_artifact_predicate_tracks_the_core_platform_rule() {
+        use sceneworks_core::jobs_store::convert_artifact_required_here;
+        let entry = |value: Value| value.as_object().unwrap().clone();
+
+        // flux2_klein_9b_true_v2: the candle converter exists (sc-7459), so the converted artifact
+        // is required on EVERY platform — this is the entry the whole story is about.
+        assert!(entry_requires_converted_artifact_here(&entry(json!({
+            "id": "flux2_klein_9b_true_v2",
+            "mlx": { "requiresConversion": true, "converter": "flux2_klein_diffusers" }
+        }))));
+
+        // Anima / LTX / the prequant converters are macOS-only, so off-Mac they require NO converted
+        // artifact: surfacing them there would report `missing` for models that legitimately load
+        // their raw source tree. On macOS every native converter does produce the artifact. Asserted
+        // against the core helper rather than a second hard-coded membership test — that duplication
+        // is exactly what this delegation removed.
+        for converter in [
+            "anima_quant",
+            "ltx_video",
+            "flux2_dev_quant",
+            "sd3_5_large_quant",
+        ] {
+            assert_eq!(
+                entry_requires_converted_artifact_here(&entry(json!({
+                    "id": "x",
+                    "mlx": { "requiresConversion": true, "converter": converter }
+                }))),
+                convert_artifact_required_here(converter),
+                "{converter}: the catalog predicate must agree with the core platform rule"
+            );
+        }
+        // …and off macOS that verdict is concretely `false` (the Anima trap, stated outright).
+        #[cfg(not(target_os = "macos"))]
+        assert!(!entry_requires_converted_artifact_here(&entry(json!({
+            "id": "anima_base",
+            "mlx": { "requiresConversion": true, "converter": "anima_quant" }
+        }))));
+
+        // The entry-shape half, which stays local: a turnkey that merely names a converter is not
+        // convert-at-install, even on macOS where the converter itself qualifies.
+        assert!(!entry_requires_converted_artifact_here(&entry(json!({
+            "id": "x",
+            "mlx": { "converter": "flux2_klein_diffusers" }
+        }))));
+
+        // No mlx block at all.
+        assert!(!entry_requires_converted_artifact_here(&entry(
+            json!({ "id": "x" })
+        )));
+    }
+
+    /// The off-Mac surfacing end-to-end (sc-20529): on EVERY platform, an unconverted
+    /// `flux2_klein_9b_true_v2` reports `needs_source`/`needs_conversion` and a converted one
+    /// reports `converted` + its path, so the Studio can offer the convert affordance and never
+    /// present the model as ready off its raw single-file download.
+    #[test]
+    fn convert_at_install_klein_reports_mlx_state_on_every_platform() {
+        let _env = isolate_hf_cache();
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let mut model = json!({
+            "id": "flux2_klein_9b_true_v2",
+            "name": "FLUX.2 [klein] 9B True V2",
+            "mlx": {
+                "requiresConversion": true,
+                "converter": "flux2_klein_diffusers",
+                "convertSourceRepo": "wikeeyang/Flux2-Klein-9B-True-V2",
+                "convertSourceFile": "Flux2-Klein-9B-True-v2-bf16.safetensors"
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        apply_mac_and_mlx_fields(&mut model, data_dir);
+        assert_eq!(
+            model.get("mlxConversionState").and_then(Value::as_str),
+            Some("needs_source"),
+            "an unconverted klein must report its conversion state on every platform"
+        );
+        assert_eq!(
+            model.get("mlxInstallState").and_then(Value::as_str),
+            Some("missing")
+        );
+
+        seed_converted(data_dir, "flux2_klein_9b_true_v2");
+        let mut model = model.clone();
+        model.remove("mlxConversionState");
+        apply_mac_and_mlx_fields(&mut model, data_dir);
+        assert_eq!(
+            model.get("mlxConversionState").and_then(Value::as_str),
+            Some("converted")
+        );
+        assert_eq!(
+            model.get("mlxInstallState").and_then(Value::as_str),
+            Some("installed")
+        );
+        assert!(model
+            .get("mlxConvertedPath")
+            .and_then(Value::as_str)
+            .is_some_and(|path| path.ends_with("flux2_klein_9b_true_v2")));
+    }
+
+    /// The Anima non-regression (sc-20529). Off macOS, Anima must keep reporting NO mlx status:
+    /// `anima_quant` is macOS-only, so off-Mac Anima loads the raw `circlestone-labs/Anima`
+    /// `split_files/` tree with no converted dir. Emitting `mlxInstallState: "missing"` there
+    /// would present three installed, working models as not installed.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn off_mac_anima_reports_no_mlx_conversion_state() {
+        let _env = isolate_hf_cache();
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let mut model = json!({
+            "id": "anima_base",
+            "mlx": {
+                "requiresConversion": true,
+                "converter": "anima_quant",
+                "convertSourceRepo": "circlestone-labs/Anima"
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+
+        apply_mac_and_mlx_fields(&mut model, data_dir);
+        assert!(
+            model.get("mlxInstallState").is_none(),
+            "off-Mac Anima has no converted artifact by design — reporting an MLX install state \
+             would flip three working models to missing"
+        );
+        assert!(model.get("mlxConversionState").is_none());
     }
 
     #[test]
@@ -8828,11 +11622,45 @@ mod variant_delete_tests {
 mod imported_lora_advertisement_tests {
     use super::*;
 
+    fn route(
+        operation: &str,
+        conditioning: &[&str],
+    ) -> sceneworks_core::jobs_store::ImportedProviderSurface {
+        sceneworks_core::jobs_store::ImportedProviderSurface {
+            family: "fixture".to_owned(),
+            source: "fixture".to_owned(),
+            operation: operation.to_owned(),
+            provider_id: "fixture_provider".to_owned(),
+            conditioning: conditioning
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect(),
+            supports_lora: true,
+            supports_lokr: false,
+            supported_quants: vec!["q4".to_owned(), "q8".to_owned()],
+            supports_kv_cache: false,
+            supports_sequential_offload: false,
+            registry_cached: true,
+        }
+    }
+
     fn entry(id: &str, family: &str) -> JsonObject {
-        json!({ "id": id, "type": "image", "family": family })
-            .as_object()
-            .expect("entry object")
-            .clone()
+        let source = match family {
+            "krea_2" => "transformer_file",
+            "sdxl" => "fused_checkpoint",
+            "mage-flow" => "transformer_directory",
+            _ => "comfy_ui_tree",
+        };
+        json!({
+            "id": id,
+            "type": "image",
+            "family": family,
+            "catalogScope": "user",
+            "importSourceShape": source,
+        })
+        .as_object()
+        .expect("entry object")
+        .clone()
     }
 
     fn withdrawn(object: &JsonObject) -> bool {
@@ -8844,34 +11672,79 @@ mod imported_lora_advertisement_tests {
             && object["loraCompatibility"]["supported"] == json!(false)
     }
 
-    /// Both native imported Krea 2 single-file loaders take adapters. Neither platform projection
-    /// may withdraw the synthesized family promise now that each scheduler gate can claim it.
+    /// Both native imported Krea 2 single-file loaders take adapters (sc-18480), so neither platform
+    /// projection may withdraw the synthesized family promise — each scheduler gate can claim the
+    /// adapter shape, so the projection AFFIRMS it instead.
     #[test]
-    fn imported_krea_2_advertisement_survives_on_both_native_lanes() {
-        for (lane, mlx, candle) in [("MLX", true, false), ("Candle", false, true)] {
-            let mut object = entry("user_kreamania_variant5", "krea_2");
-            apply_imported_lora_advertisement_for_lanes(&mut object, mlx, candle);
-            assert!(
-                object.get("loraCompatibility").is_none(),
-                "{lane} serves imported Krea 2 LoRAs; withdrawing would hide a working surface: \
-                 {object:?}"
-            );
-        }
+    fn imported_krea_2_advertises_adapters_on_both_registered_backends() {
+        let mut on_candle = entry("user_kreamania_variant5", "krea_2");
+        apply_imported_lora_advertisement_for_lanes(&mut on_candle, false, true);
+        assert_eq!(
+            on_candle["loraCompatibility"]["families"],
+            json!(["krea_2"])
+        );
+        assert_eq!(on_candle["loraCompatibility"]["supported"], json!(true));
+
+        let mut on_mlx = entry("user_kreamania_variant5", "krea_2");
+        apply_imported_lora_advertisement_for_lanes(&mut on_mlx, true, false);
+        assert_eq!(on_mlx["loraCompatibility"]["families"], json!(["krea_2"]));
+        assert_eq!(on_mlx["loraCompatibility"]["supported"], json!(true));
     }
 
-    /// Generated Mage-Flow full fine-tunes render plain text-to-image on both native backends, but
-    /// both provider seams reject adapters. Each projection must therefore withdraw only the LoRA
-    /// promise while preserving the now-routable model itself.
+    /// Generated Mage-Flow full fine-tunes render plain text-to-image on MLX, whose provider seam
+    /// rejects adapters — so that projection withdraws the LoRA promise while preserving the
+    /// routable model itself. Candle declares no `mage-flow` imported provider at all, so it has no
+    /// opinion to project and must leave the entry untouched: withdrawing there would advertise a
+    /// lane that exists and merely lacks adapters, which is a different and false claim.
     #[test]
-    fn mage_flow_withdraws_adapters_on_both_native_lanes() {
-        for (lane, mlx, candle) in [("MLX", true, false), ("Candle", false, true)] {
-            let mut object = entry("finetune_9f3c", "mage-flow");
-            apply_imported_lora_advertisement_for_lanes(&mut object, mlx, candle);
-            assert!(
-                withdrawn(&object),
-                "{lane} renders generated Mage t2i but cannot load adapters: {object:?}"
-            );
-        }
+    fn mage_flow_withdraws_adapters_only_on_the_lane_that_serves_it() {
+        let mut on_mlx = entry("finetune_9f3c", "mage-flow");
+        apply_imported_lora_advertisement_for_lanes(&mut on_mlx, true, false);
+        assert!(
+            withdrawn(&on_mlx),
+            "MLX renders generated Mage t2i but cannot load adapters: {on_mlx:?}"
+        );
+
+        let untouched = entry("finetune_9f3c", "mage-flow");
+        let mut on_candle = entry("finetune_9f3c", "mage-flow");
+        apply_imported_lora_advertisement_for_lanes(&mut on_candle, false, true);
+        assert_eq!(
+            on_candle, untouched,
+            "candle declares no mage-flow imported provider, so there is no promise to withdraw"
+        );
+    }
+
+    /// The LANE-SCOPED verdict above is per-lane truth; the PRODUCTION binding must still publish a
+    /// withdrawal on a candle-only deployment. sc-15328's hang was exactly this shape — no explicit
+    /// empty family list, so `families_from_value_chain` fell back to `family`, the API accepted a
+    /// LoRA submission, and no worker could claim it. That regressed on every non-macOS build the
+    /// moment the advertisement became facts-derived, because candle registers no `mage-flow`
+    /// imported provider and therefore answers "no opinion" rather than "refuses adapters".
+    #[test]
+    fn a_candle_only_build_still_withdraws_mage_adapters_from_the_other_lane() {
+        let mut object = entry("finetune_9f3c", "mage-flow");
+        // The production binding's own lane (candle) has no opinion here.
+        assert_eq!(
+            imported_lora_advertisement_verdict(&object, false, true),
+            None
+        );
+        // MLX is the lane that serves the family and refuses adapters, and that refusal is what
+        // must reach the entry regardless of which engine this build links.
+        assert_eq!(
+            imported_lora_advertisement_verdict(&object, true, false),
+            Some(false)
+        );
+        write_imported_lora_advertisement(&mut object, false);
+        assert!(withdrawn(&object), "{object:?}");
+        assert_eq!(object["loraCompatibility"]["families"], json!([]));
+
+        // A positive advertisement must NOT cross lanes: offering adapters this build cannot claim
+        // is the same hang pointed the other way.
+        let krea = entry("user_kreamania_variant5", "krea_2");
+        assert_eq!(
+            imported_lora_advertisement_verdict(&krea, true, false),
+            Some(true)
+        );
     }
 
     /// SDXL genuinely serves adapters on both native loaders, and a builtin routes by id rather
@@ -8882,12 +11755,11 @@ mod imported_lora_advertisement_tests {
         for (mlx, candle) in [(true, false), (false, true)] {
             let mut sdxl = entry("community_xl", "sdxl");
             apply_imported_lora_advertisement_for_lanes(&mut sdxl, mlx, candle);
-            assert!(
-                sdxl.get("loraCompatibility").is_none(),
-                "both fused SDXL loaders accept UNet adapters"
-            );
+            assert_eq!(sdxl["loraCompatibility"]["families"], json!(["sdxl"]));
+            assert_eq!(sdxl["loraCompatibility"]["supported"], json!(true));
 
             let mut builtin = entry("krea_2_turbo", "krea_2");
+            builtin.insert("catalogScope".to_owned(), json!("builtin"));
             apply_imported_lora_advertisement_for_lanes(&mut builtin, mlx, candle);
             assert!(
                 builtin.get("loraCompatibility").is_none(),
@@ -8900,8 +11772,10 @@ mod imported_lora_advertisement_tests {
     /// adapter verdict and keeps sibling compatibility metadata intact.
     #[test]
     fn support_and_withdrawal_preserve_sibling_compatibility_keys() {
+        // The canonical family token, so the affirming branch finds it already present and the
+        // entry is byte-preserved rather than gaining a second, duplicate family entry.
         let compatibility =
-            json!({ "families": ["krea-2"], "supported": true, "types": ["character", "style"] });
+            json!({ "families": ["krea_2"], "supported": true, "types": ["character", "style"] });
         let mut supported = entry("user_kreamania_variant5", "krea_2");
         supported.insert("loraCompatibility".to_owned(), compatibility.clone());
         apply_imported_lora_advertisement_for_lanes(&mut supported, false, true);
@@ -8915,11 +11789,118 @@ mod imported_lora_advertisement_tests {
             "loraCompatibility".to_owned(),
             json!({ "families": ["mage-flow"], "supported": true, "types": ["character", "style"] }),
         );
-        apply_imported_lora_advertisement_for_lanes(&mut withdrawn_entry, false, true);
+        apply_imported_lora_advertisement_for_lanes(&mut withdrawn_entry, true, false);
         assert!(withdrawn(&withdrawn_entry));
         assert_eq!(
             withdrawn_entry["loraCompatibility"]["types"],
             json!(["character", "style"])
         );
+    }
+
+    #[test]
+    fn provider_surface_matches_exact_source_shape() {
+        let mut krea = entry("user_krea", "krea_2");
+        apply_imported_provider_surface_for_lanes(&mut krea, true, false);
+        assert_eq!(krea["ui"]["img2img"], json!(true));
+        assert_eq!(krea["ui"]["poseLibrary"], json!(true));
+        assert!(krea["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "edit_image"));
+        assert_eq!(krea["runtimeQuantTiers"], json!(["q4", "q8", "bf16"]));
+
+        let mut wrong_shape = entry("wrong_shape", "krea_2");
+        wrong_shape.insert("importSourceShape".to_owned(), json!("fused_checkpoint"));
+        apply_model_manifest_defaults(&mut wrong_shape, "image", Some("krea_2"));
+        apply_imported_provider_surface_for_lanes(&mut wrong_shape, true, true);
+        assert!(wrong_shape["capabilities"]
+            .as_array()
+            .is_some_and(|values| values
+                .iter()
+                .all(|value| { !matches!(value.as_str(), Some("text_to_image" | "edit_image")) })));
+        assert!(wrong_shape["ui"].get("img2img").is_none());
+        assert!(wrong_shape["ui"].get("editReferences").is_none());
+        assert!(wrong_shape.get("runtimeQuantTiers").is_none());
+        assert_eq!(wrong_shape["macSupport"]["supported"], json!(false));
+    }
+
+    #[test]
+    fn exact_route_projection_withdraws_family_siblings_before_adding_supported_operations() {
+        let mut candle_sdxl = entry("community_xl", "sdxl");
+        apply_model_manifest_defaults(&mut candle_sdxl, "image", Some("sdxl"));
+        let generate = route("generate", &[]);
+        project_imported_operation_surface(&mut candle_sdxl, &[&generate]);
+        assert!(candle_sdxl["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "text_to_image"));
+        assert!(candle_sdxl["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|value| value != "edit_image"));
+        assert!(candle_sdxl["ui"].get("img2img").is_none());
+
+        let mut krea = entry("user_krea", "krea_2");
+        apply_model_manifest_defaults(&mut krea, "image", Some("krea_2"));
+        let edit = route("edit", &["reference", "multi_reference"]);
+        let pose = route("pose", &["control"]);
+        let multi_phase = route("multi_phase", &[]);
+        let generate = route("generate", &["reference"]);
+        project_imported_operation_surface(&mut krea, &[&generate, &edit, &pose, &multi_phase]);
+        assert_eq!(krea["ui"]["img2img"], json!(true));
+        assert_eq!(krea["ui"]["poseLibrary"], json!(true));
+        assert!(krea["ui"].get("editReferences").is_some());
+        assert!(krea["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "edit_image"));
+        assert!(krea["loraCompatibility"]["types"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value == "acceleration"));
+    }
+
+    #[test]
+    fn external_comfyui_surface_uses_exact_candle_registration() {
+        let mut zimage = entry("external_z", "z-image");
+        zimage.insert("catalogScope".to_owned(), json!("external"));
+        apply_imported_provider_surface_for_lanes(&mut zimage, false, true);
+        assert_eq!(zimage["ui"]["img2img"], json!(true));
+
+        let mut qwen = entry("external_qwen", "qwen-image");
+        qwen.insert("catalogScope".to_owned(), json!("external"));
+        apply_imported_provider_surface_for_lanes(&mut qwen, false, true);
+        assert_eq!(qwen["capabilities"], json!(["text_to_image"]));
+        assert_eq!(qwen["ui"], json!({}));
+        assert!(qwen.get("runtimeQuantTiers").is_none());
+        assert_eq!(qwen["loraCompatibility"], json!({}));
+
+        let mut mage_on_mlx = entry("finetune_9f3c", "mage-flow");
+        apply_model_manifest_defaults(&mut mage_on_mlx, "image", Some("mage-flow"));
+        apply_imported_provider_surface_for_lanes(&mut mage_on_mlx, true, false);
+        assert!(mage_on_mlx["capabilities"]
+            .as_array()
+            .is_some_and(|values| values.contains(&json!("text_to_image"))));
+        assert_eq!(
+            mage_on_mlx["runtimeQuantTiers"],
+            json!(["q4", "q8", "bf16"])
+        );
+
+        let mut mage_on_candle = entry("finetune_9f3c", "mage-flow");
+        apply_model_manifest_defaults(&mut mage_on_candle, "image", Some("mage-flow"));
+        apply_imported_provider_surface_for_lanes(&mut mage_on_candle, false, true);
+        assert!(mage_on_candle["capabilities"]
+            .as_array()
+            .is_some_and(|values| !values.contains(&json!("text_to_image"))));
+        assert!(
+            mage_on_candle.get("loraCompatibility").is_none(),
+            "an empty route set must abstain instead of manufacturing compatibility metadata"
+        );
+        assert!(mage_on_candle.get("runtimeQuantTiers").is_none());
     }
 }

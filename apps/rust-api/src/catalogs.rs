@@ -38,7 +38,7 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 use crate::catalog_scan_supervisor::CatalogScanSpawn;
-use crate::{project_call, ApiError, ApiJson, AppState};
+use crate::{project_call, public_job_snapshot, ApiError, ApiJson, AppState};
 
 const CATALOG_API_CONTRACT_VERSION: u32 = 1;
 const DEFAULT_QUERY_LIMIT: u32 = 50;
@@ -1804,6 +1804,7 @@ pub(crate) async fn update_catalog_analyzer_config(
             ApiError {
                 status: StatusCode::CONFLICT,
                 detail: "Catalog analyzer configuration changed; refresh and retry".to_owned(),
+                context: None,
                 code: Some("catalog_analyzer_config_conflict"),
             }
         } else {
@@ -1853,17 +1854,29 @@ pub(crate) async fn run_catalog_analysis(
     .await?;
     let requested_gpu = crate::requested_gpu_or_auto(request.requested_gpu);
     let batch_size = request.batch_size;
-    let payload = serde_json::json!({
+    // The analyzer flags are route-owned DATA for the model-source seam: they select which fixed
+    // utility models this analysis run will load (declared at the seam's table, resolved from the
+    // catalog manifests), so the job carries them explicitly.
+    let mut payload = serde_json::json!({
         "provider": "catalog",
         "kind": "catalog_analysis",
         "catalogId": catalog_id,
         "catalogName": catalog_name,
         "analyzerConfigRevision": analyzer_config.revision,
+        "structuredAnalysisEnabled": analyzer_config.settings.structured_analysis_enabled,
+        "visionAnalysisEnabled": analyzer_config.settings.vision_analysis_enabled,
+        "semanticEmbeddingsEnabled": analyzer_config.settings.semantic_embeddings_enabled,
         "batchSize": batch_size,
     })
     .as_object()
     .cloned()
     .expect("catalog analysis payload object");
+    crate::model_sources::ensure_runtime_model_sources(
+        &state,
+        &JobType::CatalogAnalysis,
+        &mut payload,
+    )
+    .await?;
     let job = crate::store_call(state.clone(), move |store, _timeout| {
         store.create_job(CreateJob {
             job_type: JobType::CatalogAnalysis,
@@ -1880,7 +1893,7 @@ pub(crate) async fn run_catalog_analysis(
     .await?;
     crate::publish(&state, "job.updated", &job);
     crate::publish_queue(&state).await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 pub(crate) async fn pause_catalog(

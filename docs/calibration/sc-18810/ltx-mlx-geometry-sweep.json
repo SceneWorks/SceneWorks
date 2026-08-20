@@ -1,0 +1,1595 @@
+{
+  "_comment": "sc-18810 two-dimensional geometry sweep for mlx:ltx_2_3. Standalone, like the sc-18808 plan:\na video row in config/memory-calibration-plan.json still matches no matrix coordinate (sc-18817\nfolds these in).\n\nDESIGN. Two spatial-latent levels (768x512 and 512x768 are 24x16 = 384 latent cells; 1280x704 and\n704x1280 are 40x22 = 880) crossed with three frame levels each. Crossing two AREAS is what makes the\ncandidates separable at all: with one area the `mpx` column is proportional to the intercept, so BOTH\nthe additive `perFrame` and the `perMpxFrame` cross designs are singular and neither coefficient is\nidentifiable (pinned by scripts/fit-ltx-temporal-form.test.mjs). fps is held at 30 except for one\ndeliberate probe.\n\nRUNGS ARE NOT UNIFORM ACROSS THE ENVELOPE. The LTX VAE decode auto-selects tiling on TWO independent\nbounds, and only ONE of them is machine-independent:\n\n  * the WRITE bound -- `VaeTiling::LTX.writable_frame_cap(h, w) = i32::MAX / (8*h*w)`\n    (gen-core/src/tiling.rs:167, full_res_channels 8) is 682 / 682 / 655 / 297 / 297 over the five\n    declared resolutions. It is a CEILING: no host may exceed it single-pass.\n  * the MEMORY bound -- single-pass `3.3 GB + 340 B/voxel` against `get_memory_limit() * 0.85`.\n    It moves with the host and binds EARLIER on a smaller one.\n\nSo the claim that survives on every host is ONE-SIDED: no host can exceed 297 single-pass output\nframes at 0.90 MP, and smaller hosts tile earlier via the memory bound. Saying instead that tiling\n\"engages at 298 frames on every host\" is false, and this repository's own CI falsifies it -- a hosted\nmacOS runner tiles 768x512 x 97, which is 585 frames below that bucket's 682 cap. `fit` and\n`held_out` points were all rung-1 single-pass decodes ON THE CAPTURE HOST; the `rung2_boundary`\npoints are rung 2 on every host. Fitting one curve across that break would fit through a capability\nchange.\n\nMEMORY IS NON-MONOTONIC IN FRAMES, which is why the frame levels stop where they do. This paragraph\nis PREDICTED from the engine's own committed cost model (mlx-gen-ltx/src/pipeline.rs LTX_VAE_FIXED_\nBYTES / _ACCUM_BYTES_PER_VOXEL / _TILE_BYTES_PER_OUT_VOXEL), NOT measured -- no f297 or f305 record\nwas captured. At 1280x704 the single-pass decode is predicted to cost 3.3 GB + 340 B/voxel x\n267,632,640 = 94.3 GB at f297, the write cap. One lattice step above it, at f305, the decode must\ntile, and the tiled prediction is 3.3 GB + 40 B/voxel x 274,841,600 = 14.3 GB of unavoidable\nfull-output accumulators PLUS 300 B per tile-voxel for whichever tile the budget selects. The\nselector keeps the LARGEST tile that fits, so the tiled cost RISES with host memory: ~15.0 GB where\nonly the smallest selectable tile (192 px x 64 frames) fits, 18.5-21.8 GB across the 384-512 px x\n96-frame range, and ~63.8 GB on the 128 GiB capture host, which affords 768 px x the full 305 frames\nat its 103.4 GiB ceiling. The collapse across the cap is therefore real on every host but far smaller\non a large one (94.3 -> 63.8 GB here), and the most expensive geometry in the declared envelope is\nstill the cap rather than the maximum.\n\nWHAT WAS AND WAS NOT ATTEMPTED is derived from the committed driver log\n(docs/calibration/sc-18810/sweep-run.log), not from this field. `_role` is a PRE-REGISTRATION label\nwritten before any capture; the log is a RUN RECORD. scripts/fit-ltx-temporal-form.mjs reads both and\nTHROWS when they disagree, because they did: an earlier revision of this plan carried\n`not_attempted_host_limit` on 768x512 x 449 and 1280x704 x 241, and the log shows both were begun --\nf449 twice, the second attempt ending in a signal kill after 1238 s; f241 begun at 11:40:16 with\nfree disk at 16 GiB and no terminal line at all, the driver itself not surviving to write one. Both\nnow read `attempted_failed_host_limit`. Note that a `fit` row can ALSO have been attempted and\nkilled -- q8 768x512 x 361 was -- which is exactly why the host outcome cannot be read off the role.\n\nThe host verdict itself stands, and free DISK is what bounds it: on this host (128 GiB unified) a\nsingle-pass decode near the cap drives MLX's elastic allocator cache past physical memory and the box\ninto swap. 704x1280 x 177 (159,498,240 voxels) completed with a decode phase whose peak ACTIVE was\n50.43 GiB and whose END-OF-PHASE cache was 98.24 GiB -- 148.67 GiB as an UPPER BOUND on what\nco-existed, not a simultaneous reading (PhaseMemory::capture pairs a phase-window peak with an\ninstantaneous cache sample). 768x512 x 449 (176,553,984 voxels) was killed by a signal with free disk\nfalling 81 -> 16 GiB. The geometries still marked `not_attempted_host_limit` sit above that line and\nwere not attempted rather than burned. This is a HOST verdict, not a model verdict, and it was\nreached before any curve was fitted -- role assignment here is a feasibility decision and never\nreferenced a residual.\n\nROLES. `fit` trains the candidates. `held_out` is never fitted: a third area (640x640, 400 latent\ncells) and both transposed aspect ratios. `held_out_fps_probe` re-renders an identical\n{w,h,frames} at 24 fps to measure the audio-latent axis GeometryEnvelope cannot express.\n`reproduction_probe` re-renders the geometry behind sc-18809's WITHDRAWN 43.87 GiB figure (bf16,\n768x512 x 145 = the declared 6 s x 24 fps cell) on the production full-A/V path, so the two compare\nonly as an inequality. `rung2_boundary` covers f305 (one lattice step past the cap) and the envelope\nmaximum f449.\n\nDrive with: node scripts/memory-calibration-harness.mjs run --config\ndocs/calibration/sc-18810/ltx-mlx-geometry-sweep.json --backend mlx --provider <name>\n--fresh-per-case --provider-command '[\"<target>/release/memory-mlx-adapter\"]' --sceneworks-repo\n<repo> --inference-repo <inference-at-pin> --resume <out.json> --output <out.json>, with --output\nOUTSIDE the repo and SCENEWORKS_LTX_{REPOSITORY,REVISION,ROOT,TEXT_ENCODER_ROOT} set.",
+  "providers": [
+    {
+      "name": "mlx-ltx-2-3-q8-768x512-f121-fps30",
+      "_role": "fit",
+      "_latentTokens": 6144,
+      "_writableFrameCap": 682,
+      "_outputVoxels": 47579136,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 768,
+          "height": 512,
+          "batch": 1,
+          "frames": 121
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-q8-640x640-f177-fps30",
+      "_role": "held_out",
+      "_latentTokens": 9200,
+      "_writableFrameCap": 655,
+      "_outputVoxels": 72499200,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 640,
+          "height": 640,
+          "batch": 1,
+          "frames": 177
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-q8-640x640-f177-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-q8-768x512-f241-fps30",
+      "_role": "fit",
+      "_latentTokens": 11904,
+      "_writableFrameCap": 682,
+      "_outputVoxels": 94765056,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 768,
+          "height": 512,
+          "batch": 1,
+          "frames": 241
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-q8-768x512-f241-fps24",
+      "_role": "held_out_fps_probe",
+      "_latentTokens": 11904,
+      "_writableFrameCap": 682,
+      "_outputVoxels": 94765056,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 768,
+          "height": 512,
+          "batch": 1,
+          "frames": 241
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-q8-768x512-f241-fps24-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-q8-1280x704-f121-fps30",
+      "_role": "fit",
+      "_latentTokens": 14080,
+      "_writableFrameCap": 297,
+      "_outputVoxels": 109035520,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 121
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-q8-1280x704-f121-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-q8-1280x704-f145-fps30",
+      "_role": "fit",
+      "_latentTokens": 16720,
+      "_writableFrameCap": 297,
+      "_outputVoxels": 130662400,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-q8-1280x704-f145-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-q8-768x512-f361-fps30",
+      "_role": "fit",
+      "_latentTokens": 17664,
+      "_writableFrameCap": 682,
+      "_outputVoxels": 141950976,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 768,
+          "height": 512,
+          "batch": 1,
+          "frames": 361
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-q8-768x512-f361-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-q8-512x768-f361-fps30",
+      "_role": "held_out",
+      "_latentTokens": 17664,
+      "_writableFrameCap": 682,
+      "_outputVoxels": 141950976,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 512,
+          "height": 768,
+          "batch": 1,
+          "frames": 361
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-q8-512x768-f361-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-q8-1280x704-f177-fps30",
+      "_role": "fit",
+      "_latentTokens": 20240,
+      "_writableFrameCap": 297,
+      "_outputVoxels": 159498240,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 177
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-q8-1280x704-f177-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-q8-704x1280-f177-fps30",
+      "_role": "held_out",
+      "_latentTokens": 20240,
+      "_writableFrameCap": 297,
+      "_outputVoxels": 159498240,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 704,
+          "height": 1280,
+          "batch": 1,
+          "frames": 177
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-q8-704x1280-f177-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-q8-768x512-f449-fps30",
+      "_role": "attempted_failed_host_limit",
+      "_latentTokens": 21888,
+      "_writableFrameCap": 682,
+      "_outputVoxels": 176553984,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 768,
+          "height": 512,
+          "batch": 1,
+          "frames": 449
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-q8-768x512-f449-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-q8-1280x704-f241-fps30",
+      "_role": "attempted_failed_host_limit",
+      "_latentTokens": 27280,
+      "_writableFrameCap": 297,
+      "_outputVoxels": 217169920,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 241
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-q8-1280x704-f241-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-q8-1280x704-f297-fps30",
+      "_role": "not_attempted_host_limit",
+      "_latentTokens": 33440,
+      "_writableFrameCap": 297,
+      "_outputVoxels": 267632640,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 297
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-q8-1280x704-f297-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-q8-1280x704-f305-fps30",
+      "_role": "rung2_boundary",
+      "_latentTokens": 34320,
+      "_writableFrameCap": 297,
+      "_outputVoxels": 274841600,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 305
+        }
+      },
+      "rung": "bounded_decode",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-q8-1280x704-f305-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-q8-1280x704-f449-fps30",
+      "_role": "rung2_boundary",
+      "_latentTokens": 50160,
+      "_writableFrameCap": 297,
+      "_outputVoxels": 404602880,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "q8",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 449
+        }
+      },
+      "rung": "bounded_decode",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-q8-1280x704-f449-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-bf16-768x512-f121-fps30",
+      "_role": "fit",
+      "_latentTokens": 6144,
+      "_writableFrameCap": 682,
+      "_outputVoxels": 47579136,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 768,
+          "height": 512,
+          "batch": 1,
+          "frames": 121
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-bf16-768x512-f121-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-bf16-768x512-f145-fps24",
+      "_role": "reproduction_probe",
+      "_latentTokens": 7296,
+      "_writableFrameCap": 682,
+      "_outputVoxels": 57016320,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 768,
+          "height": 512,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-bf16-768x512-f145-fps24-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-bf16-640x640-f177-fps30",
+      "_role": "held_out",
+      "_latentTokens": 9200,
+      "_writableFrameCap": 655,
+      "_outputVoxels": 72499200,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 640,
+          "height": 640,
+          "batch": 1,
+          "frames": 177
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-bf16-640x640-f177-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-bf16-768x512-f241-fps30",
+      "_role": "fit",
+      "_latentTokens": 11904,
+      "_writableFrameCap": 682,
+      "_outputVoxels": 94765056,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 768,
+          "height": 512,
+          "batch": 1,
+          "frames": 241
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-bf16-768x512-f241-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-bf16-1280x704-f121-fps30",
+      "_role": "fit",
+      "_latentTokens": 14080,
+      "_writableFrameCap": 297,
+      "_outputVoxels": 109035520,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 121
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-bf16-1280x704-f121-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-bf16-1280x704-f145-fps30",
+      "_role": "fit",
+      "_latentTokens": 16720,
+      "_writableFrameCap": 297,
+      "_outputVoxels": 130662400,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-bf16-1280x704-f145-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-bf16-768x512-f361-fps30",
+      "_role": "fit",
+      "_latentTokens": 17664,
+      "_writableFrameCap": 682,
+      "_outputVoxels": 141950976,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 768,
+          "height": 512,
+          "batch": 1,
+          "frames": 361
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-bf16-768x512-f361-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-bf16-512x768-f361-fps30",
+      "_role": "held_out",
+      "_latentTokens": 17664,
+      "_writableFrameCap": 682,
+      "_outputVoxels": 141950976,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 512,
+          "height": 768,
+          "batch": 1,
+          "frames": 361
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-bf16-512x768-f361-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-bf16-1280x704-f177-fps30",
+      "_role": "fit",
+      "_latentTokens": 20240,
+      "_writableFrameCap": 297,
+      "_outputVoxels": 159498240,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 177
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-bf16-1280x704-f177-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-bf16-704x1280-f177-fps30",
+      "_role": "held_out",
+      "_latentTokens": 20240,
+      "_writableFrameCap": 297,
+      "_outputVoxels": 159498240,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 704,
+          "height": 1280,
+          "batch": 1,
+          "frames": 177
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-bf16-704x1280-f177-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-bf16-768x512-f449-fps30",
+      "_role": "not_attempted_host_limit",
+      "_latentTokens": 21888,
+      "_writableFrameCap": 682,
+      "_outputVoxels": 176553984,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 768,
+          "height": 512,
+          "batch": 1,
+          "frames": 449
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-bf16-768x512-f449-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-bf16-1280x704-f241-fps30",
+      "_role": "not_attempted_host_limit",
+      "_latentTokens": 27280,
+      "_writableFrameCap": 297,
+      "_outputVoxels": 217169920,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 241
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-bf16-1280x704-f241-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-bf16-1280x704-f297-fps30",
+      "_role": "not_attempted_host_limit",
+      "_latentTokens": 33440,
+      "_writableFrameCap": 297,
+      "_outputVoxels": 267632640,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 297
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-bf16-1280x704-f297-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-bf16-1280x704-f305-fps30",
+      "_role": "rung2_boundary",
+      "_latentTokens": 34320,
+      "_writableFrameCap": 297,
+      "_outputVoxels": 274841600,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 305
+        }
+      },
+      "rung": "bounded_decode",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-bf16-1280x704-f305-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-bf16-1280x704-f449-fps30",
+      "_role": "rung2_boundary",
+      "_latentTokens": 50160,
+      "_writableFrameCap": 297,
+      "_outputVoxels": 404602880,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "bf16",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 449
+        }
+      },
+      "rung": "bounded_decode",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-bf16-1280x704-f449-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-q4-768x512-f121-fps30",
+      "_role": "fit",
+      "_latentTokens": 6144,
+      "_writableFrameCap": 682,
+      "_outputVoxels": 47579136,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 768,
+          "height": 512,
+          "batch": 1,
+          "frames": 121
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-q4-768x512-f121-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-q4-640x640-f177-fps30",
+      "_role": "held_out",
+      "_latentTokens": 9200,
+      "_writableFrameCap": 655,
+      "_outputVoxels": 72499200,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 640,
+          "height": 640,
+          "batch": 1,
+          "frames": 177
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-q4-640x640-f177-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-q4-768x512-f241-fps30",
+      "_role": "fit",
+      "_latentTokens": 11904,
+      "_writableFrameCap": 682,
+      "_outputVoxels": 94765056,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 768,
+          "height": 512,
+          "batch": 1,
+          "frames": 241
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-q4-768x512-f241-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-q4-1280x704-f121-fps30",
+      "_role": "fit",
+      "_latentTokens": 14080,
+      "_writableFrameCap": 297,
+      "_outputVoxels": 109035520,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 121
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-q4-1280x704-f121-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-q4-1280x704-f145-fps30",
+      "_role": "fit",
+      "_latentTokens": 16720,
+      "_writableFrameCap": 297,
+      "_outputVoxels": 130662400,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 145
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-q4-1280x704-f145-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-q4-768x512-f361-fps30",
+      "_role": "fit",
+      "_latentTokens": 17664,
+      "_writableFrameCap": 682,
+      "_outputVoxels": 141950976,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 768,
+          "height": 512,
+          "batch": 1,
+          "frames": 361
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-q4-768x512-f361-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-q4-512x768-f361-fps30",
+      "_role": "held_out",
+      "_latentTokens": 17664,
+      "_writableFrameCap": 682,
+      "_outputVoxels": 141950976,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 512,
+          "height": 768,
+          "batch": 1,
+          "frames": 361
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-q4-512x768-f361-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-q4-1280x704-f177-fps30",
+      "_role": "fit",
+      "_latentTokens": 20240,
+      "_writableFrameCap": 297,
+      "_outputVoxels": 159498240,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 177
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-q4-1280x704-f177-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-q4-704x1280-f177-fps30",
+      "_role": "held_out",
+      "_latentTokens": 20240,
+      "_writableFrameCap": 297,
+      "_outputVoxels": 159498240,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 704,
+          "height": 1280,
+          "batch": 1,
+          "frames": 177
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-q4-704x1280-f177-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-q4-768x512-f449-fps30",
+      "_role": "not_attempted_host_limit",
+      "_latentTokens": 21888,
+      "_writableFrameCap": 682,
+      "_outputVoxels": 176553984,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 768,
+          "height": 512,
+          "batch": 1,
+          "frames": 449
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-q4-768x512-f449-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-q4-1280x704-f241-fps30",
+      "_role": "not_attempted_host_limit",
+      "_latentTokens": 27280,
+      "_writableFrameCap": 297,
+      "_outputVoxels": 217169920,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 241
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-q4-1280x704-f241-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-q4-1280x704-f297-fps30",
+      "_role": "not_attempted_host_limit",
+      "_latentTokens": 33440,
+      "_writableFrameCap": 297,
+      "_outputVoxels": 267632640,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 297
+        }
+      },
+      "rung": "staged_residency",
+      "engagedRungs": [
+        "resident",
+        "staged_residency"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-q4-1280x704-f297-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-q4-1280x704-f305-fps30",
+      "_role": "rung2_boundary",
+      "_latentTokens": 34320,
+      "_writableFrameCap": 297,
+      "_outputVoxels": 274841600,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 305
+        }
+      },
+      "rung": "bounded_decode",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-q4-1280x704-f305-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    },
+    {
+      "name": "mlx-ltx-2-3-q4-1280x704-f449-fps30",
+      "_role": "rung2_boundary",
+      "_latentTokens": 50160,
+      "_writableFrameCap": 297,
+      "_outputVoxels": 404602880,
+      "evidenceScope": "authoritative",
+      "backend": "mlx",
+      "loadShape": "eager_materialization",
+      "target": {
+        "provider": "ltx_2_3",
+        "modelId": "ltx_2_3",
+        "tier": "q4",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "geometry": {
+          "width": 1280,
+          "height": 704,
+          "batch": 1,
+          "frames": 449
+        }
+      },
+      "rung": "bounded_decode",
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode"
+      ],
+      "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
+      "fixture": "ltx-2-3-mlx-q4-1280x704-f449-fps30-seed18808",
+      "cases": [
+        {
+          "parameters": {},
+          "expectedResult": "passed"
+        }
+      ]
+    }
+  ]
+}

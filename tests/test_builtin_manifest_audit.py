@@ -240,8 +240,28 @@ def _assert_mage_tier_layout(model, model_id, repo, revision):
 
 
 def _assert_mage_candle_ladder(model: dict, model_id: str) -> None:
-    """sc-15813: every Candle Mage route declares the same truthful shared ladder contract."""
-    assert model["candle"] == {
+    """sc-15813: every Candle Mage route declares the same truthful shared ladder contract.
+
+    sc-20246: `memoryStrategyContract` is now ENGINE-PROJECTED per variant
+    (scripts/generate-manifest-memory-declarations.mjs), so it is necessarily NOT shared — each
+    variant names its own provider and its own catalog modes. The shared-ladder pin below therefore
+    covers the hand-authored, measured keys, and the projected contract is asserted separately in
+    shape terms: it must be wholly engine-sourced and must never claim a rung this same block
+    declares structurally exempt.
+    """
+    contract = model["candle"].get("memoryStrategyContract")
+    assert contract is not None, model_id
+    exempt = set(model["candle"].get("memoryStrategyStructuralExemptions", {}))
+    for implementation in contract["implementations"]:
+        assert implementation["source"].startswith("config/engine-capabilities/"), model_id
+        assert implementation["rung"] not in exempt, (model_id, implementation["rung"])
+    assert contract["provider"] == model_id, model_id
+
+    assert {
+        key: value
+        for key, value in model["candle"].items()
+        if key != "memoryStrategyContract"
+    } == {
         "minMemoryGb": 17,
         "vramGbByTier": {"q4": 14.67, "q8": 16.95, "bf16": 20.41},
         "vramMeasuredPixels": 1024 * 1024,
@@ -701,6 +721,61 @@ def test_builtin_models_manifest_satisfies_authoring_schema():
     )
 
 
+def test_memory_declaration_withhold_is_authorable_on_both_backends():
+    """sc-20246: the withhold the declaration projector honors must pass the authoring schema.
+
+    `memoryDeclarationWithhold` is how a backend block records that it declares LESS than
+    `config/engine-capabilities/capabilities.<backend>.json` dumps, on purpose, because a measurement
+    says the wider claim is wrong. No committed entry needs one today — the dumps happen to agree with
+    every recorded verdict — so without this test the property's FIRST real use would red
+    `test_builtin_models_manifest_satisfies_authoring_schema` at the moment somebody needed it, which
+    is precisely when a red is least useful. Validated against the real manifest plus a synthetic
+    withhold rather than against a hand-built document, so the property is exercised where it lives.
+    """
+    schema = _load_schema(SCHEMA_PATH)
+    validator = jsonschema.Draft202012Validator(schema)
+
+    def validate_with(withhold, backend):
+        manifest = _load_builtin_models_manifest()
+        model = next(
+            candidate
+            for candidate in manifest["models"]
+            if candidate.get(backend) is not None
+        )
+        model[backend]["memoryDeclarationWithhold"] = withhold
+        return sorted(
+            validator.iter_errors(manifest), key=lambda error: list(error.absolute_path)
+        )
+
+    for backend in ("mlx", "candle"):
+        for rungs in (["bounded_decode", "bounded_attention"], "all"):
+            errors = validate_with(
+                {
+                    "rungs": rungs,
+                    "story": "SC-15525",
+                    "reason": "rung 2 is withheld on quality: the production latent drifts 84/255.",
+                },
+                backend,
+            )
+            assert not errors, (backend, rungs, [error.message for error in errors])
+
+    # Uncited or malformed withholds must be REJECTED, matching what `withheldRungs` throws on.
+    for bad in (
+        {"rungs": ["bounded_decode"], "reason": "no story"},
+        {"rungs": ["bounded_decode"], "story": "SC-15525"},
+        {"rungs": [], "story": "SC-15525", "reason": "empty"},
+        {"rungs": ["not_a_rung"], "story": "SC-15525", "reason": "unknown rung"},
+        {"rungs": "everything", "story": "SC-15525", "reason": "not the all literal"},
+        {
+            "rungs": "all",
+            "story": "SC-15525",
+            "reason": "extra key",
+            "unexpected": True,
+        },
+    ):
+        assert validate_with(bad, "mlx"), bad
+
+
 def test_sensenova_models_do_not_advertise_lora_compatibility():
     """sc-18476: SenseNova has no diffusion-LoRA merge path, so advertise none."""
     manifest = _load_builtin_models_manifest()
@@ -739,6 +814,78 @@ def test_schema_accepts_mlx_sequential_offload_capability():
         (error.validator, list(error.absolute_path), error.message) for error in errors
     ]
 
+
+def test_cleanup_with_model_is_boolean_and_requires_a_corequisite():
+    """SC-18902: only an explicitly exclusive co-requisite may follow a cleanup tombstone."""
+    schema = _load_schema(SCHEMA_PATH)
+    validator = jsonschema.Draft202012Validator(schema)
+    download = {
+        "provider": "huggingface",
+        "repo": "namespace/exclusive-adapter",
+        "coRequisite": True,
+        "cleanupWithModel": True,
+    }
+    valid = _model_entry_with_download(download)
+    assert not list(validator.iter_errors({"schemaVersion": 1, "models": [valid]}))
+
+    without_corequisite = _model_entry_with_download(
+        {key: value for key, value in download.items() if key != "coRequisite"}
+    )
+    errors = list(
+        validator.iter_errors({"schemaVersion": 1, "models": [without_corequisite]})
+    )
+    assert any(
+        error.validator == "required"
+        and "coRequisite" in error.message
+        for error in errors
+    ), [(error.validator, list(error.absolute_path), error.message) for error in errors]
+
+    wrong_type = _model_entry_with_download({**download, "cleanupWithModel": "yes"})
+    errors = list(validator.iter_errors({"schemaVersion": 1, "models": [wrong_type]}))
+    assert any(
+        error.validator == "type"
+        and list(error.absolute_path)[-1:] == ["cleanupWithModel"]
+        for error in errors
+    ), [(error.validator, list(error.absolute_path), error.message) for error in errors]
+
+
+def _cleanup_with_model_ownership_errors(manifest: dict) -> list[str]:
+    owners_by_repo: dict[str, set[str]] = {}
+    cleanup_rows: list[tuple[str, str]] = []
+    for model in manifest["models"]:
+        for download in model.get("downloads", []):
+            repo = download.get("repo")
+            if repo:
+                owners_by_repo.setdefault(repo, set()).add(model["id"])
+            if download.get("cleanupWithModel") is True:
+                cleanup_rows.append((model["id"], repo))
+    return [
+        f"{model_id}:{repo} is referenced by {sorted(owners_by_repo.get(repo, set()))}"
+        for model_id, repo in cleanup_rows
+        if owners_by_repo.get(repo, set()) != {model_id}
+    ]
+
+
+def test_cleanup_with_model_repositories_are_exclusive_to_one_parent():
+    """Deleting a cleanup tombstone may recursively remove only a repo no sibling model uses."""
+    manifest = _load_builtin_models_manifest()
+    assert not _cleanup_with_model_ownership_errors(manifest)
+
+    mutated = copy.deepcopy(manifest)
+    eros = next(model for model in mutated["models"] if model["id"] == "ltx_2_3_eros")
+    exclusive = next(
+        download for download in eros["downloads"] if download.get("cleanupWithModel") is True
+    )
+    sibling = next(model for model in mutated["models"] if model["id"] == "ltx_2_3")
+    sibling["downloads"].append(
+        {
+            "provider": exclusive["provider"],
+            "repo": exclusive["repo"],
+            "files": exclusive.get("files", []),
+        }
+    )
+    errors = _cleanup_with_model_ownership_errors(mutated)
+    assert errors and "ltx_2_3" in errors[0] and "ltx_2_3_eros" in errors[0], errors
 
 def test_memory_strategy_overlay_vocabularies_match_runtime_contract():
     """Static capabilities and exact provider contracts share one overlay vocabulary.
@@ -1151,9 +1298,6 @@ _COREQUISITE_REVISION_MIGRATION_PENDING: frozenset[tuple[str, str]] = frozenset(
     {
         # ("ltx_2_3", "SceneWorks/ltx-2.3-mlx") pinned in sc-13683 (the gemma coRequisite now carries
         # the full 40-hex LTX_BUNDLE_REVISION); removed here + in the Rust twin to keep both green.
-        ("ltx_2_3_eros", "TenStrip/LTX2.3_Distilled_Lora_1.1_Experiments"),
-        ("wan_2_2_t2v_14b", "lightx2v/Wan2.2-Lightning"),
-        ("wan_2_2_i2v_14b", "lightx2v/Wan2.2-Lightning"),
     }
 )
 
@@ -1530,7 +1674,11 @@ def test_flux2_true_v2_manifest_install_time_conversion():
         for model in _load_builtin_models_manifest()["models"]
         if model["id"] == "flux2_klein_9b_true_v2"
     )
-    assert model["macOnly"] is True
+    # sc-20529: `macOnly` is REMOVED, not flipped. For an image entry the flag is a no-op label
+    # (only video entries and the vision captioner read it), and the FLUX.2-klein converter has a
+    # real candle twin (sc-7459), so claiming macOS-only contradicted the shipped off-Mac convert
+    # lane. Availability is driven by the routing tables, not this flag.
+    assert "macOnly" not in model
     assert model["adapter"] == "mlx_flux2"
     # Only the bf16 single-file is pulled (not the whole 73 GB repo).
     assert model["downloads"][0]["files"] == ["Flux2-Klein-9B-True-v2-bf16.safetensors"]
@@ -1545,7 +1693,29 @@ def test_flux2_true_v2_manifest_install_time_conversion():
     # installs), reading them from its per-tier bf16/ subdir.
     assert mlx["convertBaseRepo"] == "SceneWorks/flux2-klein-9b-mlx"
     assert mlx["convertBaseSubdir"] == "bf16"
-    assert mlx["quantize"] == 8
+    # SC-18460: the converted transformer is a fixed dense BF16 artifact — there is no packed tier
+    # to default to. `resolve_quant` maps `<= 0` to dense/no-quant, and OMITTING the key would
+    # default to q8, so 0 is the only correct declaration here. The former `== 8` described a tier
+    # this entry never ships.
+    assert mlx["quantize"] == 0
+
+
+def test_flux2_dev_carries_no_inert_mac_only_flag():
+    """sc-20530: `flux2_dev` is candle-routed off-Mac (epic 6564) AND MLX on Apple Silicon, so the
+    `macOnly: true` it used to carry was inert *and* misleading — the flag is read only by the video
+    catalog-withdrawal contract (`video_model_withdrawn_on_platform`, gated on `type == "video"`)
+    and by the id-pinned vision captioner in the web eligibility helpers, neither of which sees an
+    image entry with this id. Removed, not flipped to false, and pinned absent like the klein pair
+    so it cannot creep back (sc-20529 removed `macOnly` from `flux2_klein_9b_true_v2` too — see
+    `test_flux2_true_v2_manifest_install_time_conversion` above).
+    """
+    model = next(
+        model
+        for model in _load_builtin_models_manifest()["models"]
+        if model["id"] == "flux2_dev"
+    )
+    assert model["type"] == "image"
+    assert "macOnly" not in model
 
 
 def test_flux2_klein_manifest_entries_present():
@@ -1559,7 +1729,12 @@ def test_flux2_klein_manifest_entries_present():
         model = models[model_id]
         assert model["adapter"] == "mlx_flux2", model_id
         assert model["family"] == "flux2-klein", model_id
-        assert model["macOnly"] is True, model_id
+        # sc-20530: `macOnly` is REMOVED from both entries, not flipped to false. The flag is read
+        # only by the video catalog-withdrawal contract (`video_model_withdrawn_on_platform`, which
+        # requires `type == "video"`) and by the id-pinned vision captioner in the web eligibility
+        # helpers, so on an image entry it never gated anything — it only read like a platform
+        # contract these candle-routed entries do not have. Pinned absent so it cannot creep back.
+        assert "macOnly" not in model, model_id
         # sc-8711 (epic 8506): re-hosted as a public, ungated SceneWorks MLX quant-matrix
         # turnkey (q4/q8/bf16), so the entry is `gated: false` with no credentialHost — the
         # FLUX Non-Commercial LICENSE.md travels with the weights.
@@ -1724,8 +1899,204 @@ def test_krea_2_turbo_candle_vram_tiers_match_measured_peaks():
     }
 
 
+def _committed_phase_curves(manifest: dict) -> dict:
+    """Every ``(tier, rung, phase)`` phase curve committed to the builtin manifest.
+
+    Keyed by a readable coordinate so a failure names the curve rather than an index.
+    """
+    krea = next(model for model in manifest["models"] if model["id"] == "krea_2_turbo")
+    curves = {}
+    for tier, rungs in krea["candle"]["turboFit"]["phaseCurvesByTier"].items():
+        for rung, phases in rungs.items():
+            for phase, curve in phases.items():
+                curves[f"{tier}.{rung}.{phase}"] = curve
+    return curves
+
+
+def test_image_lane_phase_curves_carry_no_temporal_coefficient():
+    """sc-18812: the whole shipped image lane is still two-coefficient, all 36 curves of it.
+
+    This is the precondition that keeps
+    ``test_krea_q8_and_bf16_phase_slopes_are_fitted_from_their_own_two_points`` honest. That test
+    reads ``perMpxGb`` and compares it against a measured two-point delta, which is a COMPLETE
+    account of the curve only while no temporal term exists. Add ``perMpxFrameGb`` to any of these
+    curves and the slope comparison would keep passing while describing a different function.
+
+    The existing literal-dict assertion above covers bf16's 12 curves; this covers all 36, which is
+    what "no image curve moved" actually requires.
+    """
+    curves = _committed_phase_curves(_load_builtin_models_manifest())
+    assert len(curves) == 36, (
+        f"3 tiers x 4 rungs x 3 phases expected, found {len(curves)} - a changed population "
+        "means this guard is covering something other than what it claims"
+    )
+    for label, curve in curves.items():
+        assert set(curve) == {"fixedGb", "perMpxGb"}, (
+            f"{label} declares {sorted(curve)}; the image lane must stay two-coefficient so its "
+            "fitted slope remains the whole geometry response"
+        )
+
+
+def test_schema_admits_the_temporal_coefficient_additively():
+    """sc-18812: the temporal term is OPTIONAL, bounded, and does not disturb existing manifests.
+
+    Three claims, each with its own direction:
+
+    1. The unmodified shipped manifest still validates. That is the migration claim.
+    2. A curve that ADDS ``perMpxFrameGb`` validates - so the change is genuinely additive and a
+       video curve can ship without a schema bump.
+    3. A negative or wrong-typed ``perMpxFrameGb`` is REJECTED, and so is a curve that drops
+       ``perMpxGb`` in favour of it - the term extends the area form, it does not replace it.
+       (Replacing it is what ``latent_tokens``/``output_voxels`` would have required, which is
+       precisely why sc-18812 adopted ``cross`` instead.)
+    """
+    manifest = _load_builtin_models_manifest()
+    schema = _load_schema(SCHEMA_PATH)
+    validator = jsonschema.Draft202012Validator(schema)
+    krea_index = next(
+        index
+        for index, model in enumerate(manifest["models"])
+        if model["id"] == "krea_2_turbo"
+    )
+    assert not list(validator.iter_errors(manifest)), "the shipped manifest must still validate"
+
+    def curve_of(candidate):
+        return candidate["models"][krea_index]["candle"]["turboFit"]["phaseCurvesByTier"]["q8"][
+            "threeStage"
+        ]["decode"]
+
+    def mutated(mutate):
+        candidate = copy.deepcopy(manifest)
+        mutate(candidate)
+        return list(validator.iter_errors(candidate))
+
+    assert not mutated(
+        lambda candidate: curve_of(candidate).update({"perMpxFrameGb": 0.2998482076533136})
+    ), "adding the temporal coefficient must not require a schema bump"
+    assert not mutated(
+        lambda candidate: candidate["models"][krea_index]["candle"]["turboFit"].update(
+            {"maxMeasuredVoxels": 1024 * 1024 * 100}
+        )
+    ), "declaring the temporal envelope bound must validate"
+
+    for label, mutate in (
+        ("negative temporal coefficient", lambda c: curve_of(c).update({"perMpxFrameGb": -0.1})),
+        ("non-numeric temporal coefficient", lambda c: curve_of(c).update({"perMpxFrameGb": "0.3"})),
+        (
+            "temporal coefficient REPLACING the area term",
+            lambda c: curve_of(c).clear() or curve_of(c).update(
+                {"fixedGb": 2.5, "perMpxFrameGb": 0.3}
+            ),
+        ),
+        ("misspelled temporal coefficient", lambda c: curve_of(c).update({"perMpxFrame": 0.3})),
+        (
+            "zero temporal envelope bound",
+            lambda c: c["models"][krea_index]["candle"]["turboFit"].update(
+                {"maxMeasuredVoxels": 0}
+            ),
+        ),
+    ):
+        assert mutated(mutate), f"{label} must be rejected by the schema"
+
+    # sc-18812 review pass: an evidence record must be ABLE to state the frame count it was
+    # captured at. Without this property the matrix generator would key every record as `WxH` and
+    # characterize a video capture as a one-frame design point nobody measured.
+    def record_of(candidate):
+        return candidate["models"][krea_index]["candle"]["turboFit"]["evidenceRecords"][0]
+
+    assert not mutated(
+        lambda candidate: record_of(candidate).update({"frames": 241})
+    ), "an evidence record must be able to declare its frame count"
+    for label, mutate in (
+        ("zero frames", lambda c: record_of(c).update({"frames": 0})),
+        ("fractional frames", lambda c: record_of(c).update({"frames": 24.5})),
+        ("string frames", lambda c: record_of(c).update({"frames": "241"})),
+        ("misspelled frames", lambda c: record_of(c).update({"frameCount": 241})),
+    ):
+        assert mutated(mutate), f"{label} must be rejected by the schema"
+
+
+def _tiers_declaring_a_temporal_curve(turbo_fit: dict) -> set:
+    """Tiers whose committed phase curves carry ``perMpxFrameGb`` on any rung or phase."""
+    declaring = set()
+    for tier, rungs in turbo_fit.get("phaseCurvesByTier", {}).items():
+        for phases in rungs.values():
+            if any("perMpxFrameGb" in curve for curve in phases.values()):
+                declaring.add(tier)
+    return declaring
+
+
+def _evidence_records_missing_frames(turbo_fit: dict) -> list:
+    """Evidence records that support a TEMPORAL curve without saying how many frames they measured.
+
+    This is the fabricated-rank hazard, named: ``generate-memory-matrix.mjs#measuredGeometryKey``
+    reads an absent ``frames`` as 1, which is correct for the image lane and a silent invention on
+    a tier whose curve has a temporal coefficient to determine.
+    """
+    declaring = _tiers_declaring_a_temporal_curve(turbo_fit)
+    return [
+        f"{record['tier']} {record['width']}x{record['height']} "
+        f"({record['sourceStory']} activity {record['sourceActivity']})"
+        for record in turbo_fit.get("evidenceRecords", [])
+        if record["tier"] in declaring and "frames" not in record
+    ]
+
+
+def test_temporal_curve_tiers_declare_frames_on_their_evidence_records():
+    """sc-18812: a tier carrying ``perMpxFrameGb`` may not have frame-silent evidence.
+
+    Inert on the shipped manifest — no committed curve declares the temporal term — so the guard is
+    exercised in BOTH directions against mutated manifests rather than asserted vacuously. Without
+    it, adding a temporal coefficient in one place and a video capture in another would silently
+    characterize that capture as a one-frame design point: a fabricated contribution to the design
+    matrix rank, which over-claims harder than the axis collapse sc-18812 set out to fix.
+    """
+    manifest = _load_builtin_models_manifest()
+    krea = next(model for model in manifest["models"] if model["id"] == "krea_2_turbo")
+    turbo_fit = krea["candle"]["turboFit"]
+
+    # The live guard. Trivially satisfied while the image lane stays two-coefficient (which
+    # ``test_image_lane_phase_curves_carry_no_temporal_coefficient`` is what enforces), and the
+    # first thing to fire on the day a temporal curve ships without its evidence catching up.
+    assert _evidence_records_missing_frames(turbo_fit) == []
+
+    # Direction 1: declare the term, change nothing else. Every record of that tier is now a
+    # frame-silent supporter of a temporal curve, and the audit must name them.
+    declared = copy.deepcopy(turbo_fit)
+    declared["phaseCurvesByTier"]["q8"]["threeStage"]["decode"]["perMpxFrameGb"] = 0.2998
+    assert _tiers_declaring_a_temporal_curve(declared) == {"q8"}
+    offenders = _evidence_records_missing_frames(declared)
+    assert offenders, "a temporal curve with frame-silent evidence must be rejected"
+    assert all(entry.startswith("q8 ") for entry in offenders), offenders
+    assert len(offenders) == sum(
+        1 for record in turbo_fit["evidenceRecords"] if record["tier"] == "q8"
+    ), "every q8 record supports the q8 curve, so every one of them must be named"
+
+    # Direction 2: the same manifest with the frame counts stated is accepted. So the rejection
+    # above is attributable to the missing property and not to the declaration.
+    repaired = copy.deepcopy(declared)
+    for record in repaired["evidenceRecords"]:
+        if record["tier"] == "q8":
+            record["frames"] = 1
+    assert _evidence_records_missing_frames(repaired) == []
+
+    # ...and it is per TIER, not global: q4's records stay frame-silent and stay legal, because no
+    # q4 curve has a temporal coefficient to determine.
+    assert all(
+        "frames" not in record
+        for record in repaired["evidenceRecords"]
+        if record["tier"] == "q4"
+    )
+
+
 def test_krea_q8_and_bf16_phase_slopes_are_fitted_from_their_own_two_points():
-    """sc-16514: equal cross-tier slopes are allowed only when same-tier deltas prove them."""
+    """sc-16514: equal cross-tier slopes are allowed only when same-tier deltas prove them.
+
+    sc-18812 precondition: this reads ``perMpxGb`` as the whole geometry response, which holds
+    only while no curve carries a temporal term. ``test_image_lane_phase_curves_carry_no_temporal
+    _coefficient`` is what enforces that, and it must stay green for this comparison to mean
+    anything.
+    """
     manifest = _load_builtin_models_manifest()
     krea = next(model for model in manifest["models"] if model["id"] == "krea_2_turbo")
     curves = krea["candle"]["turboFit"]["phaseCurvesByTier"]

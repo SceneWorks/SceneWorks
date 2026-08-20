@@ -572,7 +572,7 @@ fn last_ci(haystack: &str, needle: &str) -> Option<usize> {
 
 // ----------------------------------------------------------------------------------------------
 // Magic-prompt expansion (epic 4725, sc-5997) — plain idea → structured JSON caption. Drives the
-// SAME `prompt_refine` TextLlm (Llama-3.2-3B) with Ideogram's open-source magic-prompt system prompt
+// SAME `prompt_refine` TextLlm (Anubis-Mini-8B) with Ideogram's open-source magic-prompt system prompt
 // (`task: "magic_prompt"`) instead of the rewrite rules. The hosted Ideogram / OpenRouter Sonnet/Opus
 // configs in the reference are replaced by the local model (native-first, offline). The caller (web)
 // strips the non-schema `aspect_ratio` key + bboxes and validates the result against the sc-5993

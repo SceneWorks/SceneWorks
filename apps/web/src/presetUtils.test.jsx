@@ -102,18 +102,27 @@ describe("loraMatchesModel", () => {
 
   it("fails CLOSED when the API withdrew the model's LoRA advertisement", () => {
     // The API emits this shape for an imported/fine-tuned model no backend lane on this deployment
-    // can serve adapters for — currently a Mage-Flow full fine-tune. Imported Krea routes adapters
-    // on both native backends. Submitting the withdrawn shape 400s, so offering it is a dead end.
+    // can serve adapters for — a Mage-Flow full fine-tune (whose native single-file loaders reject
+    // inference adapters), or a model whose active registered provider serves the base assembly but
+    // advertises no adapter format (ComfyUI Qwen-Image). Imported Krea routes adapters on both
+    // native backends. Submitting the withdrawn shape 400s, so offering it is a dead-end selection.
     //
     // The empty family list ALONE is not enough: it lands in the permissive "cannot gate" branch
     // asserted above (`noFamilyModel`), which is why the explicit `supported: false` signal exists.
     // These two cases differ only by that flag, so a regression that drops it is caught here.
-    const withdrawn = {
+    const withdrawnFineTune = {
       id: "user_mage_flow_finetune",
       family: "mage-flow",
       loraCompatibility: { families: [], supported: false },
     };
-    expect(loraMatchesModel({ id: "l", family: "mage-flow" }, withdrawn)).toBe(false);
+    const withdrawn = {
+      id: "external_base_qwen_image",
+      family: "qwen-image",
+      loraCompatibility: { families: [], supported: false },
+    };
+    expect(loraMatchesModel({ id: "l", family: "mage-flow" }, withdrawnFineTune)).toBe(false);
+    expect(loraMatchesModel(familylessLora, withdrawnFineTune)).toBe(false);
+    expect(loraMatchesModel({ id: "l", family: "qwen-image" }, withdrawn)).toBe(false);
     expect(loraMatchesModel(familylessLora, withdrawn)).toBe(false);
     // ...while a model that genuinely serves adapters is untouched.
     expect(loraMatchesModel(sdxlLora, { ...sdxlModel, loraCompatibility: { families: ["sdxl"], supported: true } })).toBe(true);
@@ -382,27 +391,27 @@ describe("finiteNumberOrUndefined", () => {
 });
 
 describe("loraWeight", () => {
-  it("defaults a generic LoRA to 0.8", () => {
-    expect(loraWeight({ id: "sdxl_style", family: "sdxl" })).toBe(0.8);
-    expect(loraWeight(null)).toBe(0.8);
+  it("defaults every LoRA to 1.0 regardless of family", () => {
+    // ONE default, no per-family table — krea-2 used to be special-cased (1.5, then 1.0) and
+    // deliberately no longer is. Covers each family-bearing shape extractFamilies() reads.
+    expect(loraWeight({ id: "sdxl_style", family: "sdxl" })).toBe(1.0);
+    expect(loraWeight({ id: "k", family: "krea_2" })).toBe(1.0);
+    expect(loraWeight({ id: "k", compatibility: { families: ["krea_2"] } })).toBe(1.0);
+    expect(loraWeight({ id: "w", families: ["wan-video"] })).toBe(1.0);
+    expect(loraWeight({ id: "f" })).toBe(1.0);
+    expect(loraWeight(null)).toBe(1.0);
   });
 
-  it("defaults a krea-2-family LoRA higher (1.5) for the distilled-Turbo attenuation (sc-7932)", () => {
-    // The family token is normalized (krea_2 -> krea-2), and the bump applies via any of the
-    // family-bearing shapes extractFamilies() reads.
-    expect(loraWeight({ id: "k", family: "krea_2" })).toBe(1.5);
-    expect(loraWeight({ id: "k", compatibility: { families: ["krea_2"] } })).toBe(1.5);
-  });
-
-  it("lets an explicit weight win over the krea-2 family default", () => {
-    expect(loraWeight({ id: "k", family: "krea_2", defaultWeight: 1.0 })).toBe(1.0);
+  it("lets an explicit weight win over the default", () => {
+    expect(loraWeight({ id: "k", family: "krea_2", defaultWeight: 1.3 })).toBe(1.3);
     expect(loraWeight({ id: "k", family: "krea_2", weight: 0.7 })).toBe(0.7);
     expect(loraWeight({ id: "k", family: "krea_2" }, { weight: 2.0 })).toBe(2.0);
+    expect(loraWeight({ id: "g", family: "sdxl", defaultWeight: 0.6 })).toBe(0.6);
   });
 
-  it("falls back to the family default when an explicit value is non-finite", () => {
-    expect(loraWeight({ id: "k", family: "krea_2", defaultWeight: "nope" })).toBe(1.5);
-    expect(loraWeight({ id: "g", family: "sdxl", defaultWeight: "nope" })).toBe(0.8);
+  it("falls back to the default when an explicit value is non-finite", () => {
+    expect(loraWeight({ id: "k", family: "krea_2", defaultWeight: "nope" })).toBe(1.0);
+    expect(loraWeight({ id: "g", family: "sdxl", defaultWeight: "nope" })).toBe(1.0);
   });
 });
 

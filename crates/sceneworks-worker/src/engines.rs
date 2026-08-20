@@ -924,6 +924,15 @@ pub(crate) fn default_repo_for(sceneworks_id: &str) -> Option<&'static str> {
         .map(|row| row.default_repo)
 }
 
+/// Registry id paired with a SceneWorks catalog id. Unlike [`mlx_model`], this pure lookup is
+/// available to the API-side text-encoder catalog builder before a descriptor is joined.
+pub(crate) fn engine_id_for_model(sceneworks_id: &str) -> Option<&'static str> {
+    MODEL_TABLE
+        .iter()
+        .find(|row| row.sceneworks_id == sceneworks_id)
+        .map(|row| row.engine_id)
+}
+
 /// The registry-DERIVED subset of the MLX worker's capabilities (sc-3723): exactly the
 /// capabilities backed by a linked generator/trainer/captioner descriptor whose backend is
 /// enabled in `settings`. Off-macOS the provider crates aren't linked, so the registry is
@@ -1335,8 +1344,9 @@ mod tests {
     /// The engine registry id(s) a video manifest model resolves to, across backends — the union of
     /// the mlx maps (`wan_engine_id` / `ltx_engine_id` / `svd_engine_id` + the native VACE-Fun
     /// dispatch) and the candle map (`candle_video_engine_id`) in `video_jobs`. LTX is backend-split
-    /// (`ltx_2_3` on mlx, `ltx_2_3_distilled` on candle) and `ltx_2_3_eros` shares the base engine id
-    /// per backend; the resolver lists both and picks whichever the active registry actually holds.
+    /// (`ltx_2_3` on mlx, `ltx_2_3_distilled` on candle). `ltx_2_3_eros` is MLX-only after its
+    /// undistilled Candle route failed exact-head CUDA acceptance (sc-18902), so it resolves only the
+    /// MLX id. The resolver lists the valid backend ids and picks whichever the active registry holds.
     /// VACE-Fun uses the same dedicated `wan2_2_vace_fun_14b` provider id on both native backends.
     #[cfg(any(
         target_os = "macos",
@@ -1349,7 +1359,8 @@ mod tests {
             "wan_2_2_i2v_14b" => &["wan2_2_i2v_14b"],
             "wan_2_2_vace_fun_14b" => &["wan2_2_vace_fun_14b"],
             "svd" => &["svd_xt"],
-            "ltx_2_3" | "ltx_2_3_eros" => &["ltx_2_3", "ltx_2_3_distilled"],
+            "ltx_2_3" => &["ltx_2_3", "ltx_2_3_distilled"],
+            "ltx_2_3_eros" => &["ltx_2_3"],
             // Mochi 1 (sc-11991): the sceneworks id IS the engine id, and BOTH backends register it,
             // so one entry resolves the descriptor on either lane.
             "mochi_1" => &["mochi_1"],
@@ -1779,9 +1790,12 @@ mod tests {
     /// (InstantID, candle PuLID) never reach this helper: `mlx_model` returns `None` for them and the
     /// guard `continue`s first — exactly as the size check skips them.
     ///
-    /// The const VALUE agrees across backends for every family (sana/sensenova ÷32, sdxl/kolors ÷8,
-    /// the rest ÷16), so [`pinned_image_stride_pins_each_engines_lattice`] pins one expected value per
-    /// engine on both lanes. Only the const NAME diverges — an accepted precedent (cf. the video
+    /// The const VALUE agrees across backends for every family except SDXL and Kolors: MLX requires
+    /// ÷32 for their full U-Net shape while Candle keeps its ÷8 request lattice (sana/sensenova use
+    /// ÷32 and the remaining families use ÷16). [`pinned_image_stride_pins_each_engines_lattice`]
+    /// therefore pins SDXL and Kolors per backend and one shared expected value for every other
+    /// engine. Const NAME divergence remains an accepted
+    /// precedent (cf. the video
     /// `SIZE_MULTIPLE` vs `SIZE_ALIGN`): mlx spells sana/anima/boogu/ideogram/krea `RES_MULTIPLE` and
     /// sensenova `CELL`; candle spells those `SIZE_MULTIPLE` (sana/anima stay `RES_MULTIPLE`); lens is
     /// `VAE_SCALE_FACTOR` on both — so the mapping is compiled per backend.
@@ -2045,8 +2059,8 @@ mod tests {
     /// [`shipped_image_geometry_is_within_the_pinned_engine_envelope`]. That loop can only go RED when
     /// a SHIPPED bucket drifts off-lattice; this pins the lattice VALUES themselves, so a wrong mapping
     /// or a `runtime-*` pin bump that changes an engine const is RED even while every current bucket
-    /// stays on-stride (they all do — audited). Values are backend-agnostic (only the const NAME
-    /// diverges), so one table covers both lanes.
+    /// stays on-stride. Values are backend-agnostic except for SDXL and Kolors, whose MLX runtimes
+    /// enforce ÷32 while Candle retains ÷8.
     #[cfg(any(
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")
@@ -2054,14 +2068,18 @@ mod tests {
     #[test]
     fn pinned_image_stride_pins_each_engines_lattice() {
         // One representative engine id per family × the exact request-dimension multiple its PINNED
-        // engine enforces on BOTH backends. A const that drifts (or a mis-keyed arm) fails here.
+        // engine enforces. A const that drifts (or a mis-keyed arm) fails here.
+        #[cfg(target_os = "macos")]
+        const SDXL_KOLORS_STRIDE: u32 = 32;
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        const SDXL_KOLORS_STRIDE: u32 = 8;
         let expected: &[(&str, u32)] = &[
             ("sana_1600m", 32),
             ("sana_sprint_1600m", 32),
             ("sensenova_u1_8b", 32),
             ("sensenova_u1_8b_fast", 32),
-            ("sdxl", 8),
-            ("kolors", 8),
+            ("sdxl", SDXL_KOLORS_STRIDE),
+            ("kolors", SDXL_KOLORS_STRIDE),
             ("sd3_5_large", 16),
             ("chroma1_hd", 16),
             ("flux1_dev", 16),
@@ -2194,6 +2212,8 @@ mod tests {
             backend: "mlx",
             modality: gen_core::Modality::Image,
             capabilities: gen_core::Capabilities::default(),
+            encoder_contract: None,
+            denoiser_output_latent_space: None,
             required_components: &[],
             control_kinds: None,
         }
@@ -2217,6 +2237,8 @@ mod tests {
             backend: "candle",
             modality: gen_core::Modality::Image,
             capabilities: gen_core::Capabilities::default(),
+            encoder_contract: None,
+            denoiser_output_latent_space: None,
             required_components: &[],
             control_kinds: None,
         }
@@ -2241,6 +2263,8 @@ mod tests {
             backend: "mlx",
             modality: gen_core::Modality::Image,
             capabilities: gen_core::Capabilities::default(),
+            encoder_contract: None,
+            denoiser_output_latent_space: None,
             required_components: &[],
             control_kinds: None,
         }

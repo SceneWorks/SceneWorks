@@ -100,7 +100,18 @@ mod credentials_ipc;
 // production seams are cfg'd out, so allow dead_code there (mirrors the generator_cache precedent).
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod cache_thread;
+// The single pre-loader model-source guard (sc-19708): every dispatched job's generic model
+// carriers are reduced to this platform's exact requirement closure and judged through the one
+// shared availability resolver before any handler constructs a loader.
+mod external_library_runtime;
 mod inference_runtime;
+mod text_encoder_selection;
+pub use text_encoder_selection::{
+    image_text_encoder_options, resolve_image_text_encoder_selection, ImageTextEncoderOption,
+};
+// Promotion activation (sc-19706): the idle-time producer that turns a successful source-tier load
+// into an app-owned resolved bundle. The guard above records an I/O-free hint; this drains it.
+mod resolved_cache_promotion;
 // Backend-neutral generator load/run cache (epic 3720, sc-3724). Typed entirely against
 // `gen_core::*` (no tensor types leak), so it links on ALL targets — the production load seam
 // (`with_cached_generator`) is reached only from the macOS image/video paths, but the all-targets
@@ -108,6 +119,13 @@ mod inference_runtime;
 // the production caller is cfg'd out, so allow dead_code there (the engines.rs precedent).
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod generator_cache;
+// Request-scoped execution planning (sc-18317, epic 18304 P2): the warm-hit execution-policy
+// decision the `LoadIdentity`/`ExecutionPolicy` split (sc-18305) left owing, plus selection of
+// gen-core's typed execution domains (graph-eval cadence, FFN chunk, CFG batching) from what each
+// provider declares. Backend-neutral and typed entirely against `gen_core::*`, so it links on all
+// targets exactly like `generator_cache`; off macOS its production callers are cfg'd out.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+mod execution_planner;
 // Resident-model cache for the native prompt-refine / caption / describe LLM (sc-8840, F-038): the
 // text-LLM sibling of `generator_cache`. Typed entirely against the tensor-free
 // `gen_core::core_llm::*` contract, so it links on ALL targets — the production seam
@@ -140,6 +158,7 @@ mod engines;
 // on the lanes that link no engines at all.
 pub mod engine_capability_facts;
 mod gpu;
+pub mod memory_route_registry;
 use gpu::*;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod candle_memory_strategy;
@@ -150,8 +169,20 @@ mod fit_gate;
 // `scripts/derive-ladder-margins.test.mjs`.
 pub mod ladder_margin_policy;
 pub mod memory_strategy;
+// The worker half of the VIDEO memory gate (sc-18814, epic 18803): implements
+// `sceneworks_core::video_request`'s selector seam by calling `memory_strategy::select_strategy`.
+// Cross-platform on purpose — the video lane spans both backends and the gate must not imply the
+// two are symmetric, so one module serves both and names the difference explicitly.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod mlx_fit_gate;
+#[cfg_attr(
+    not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )),
+    allow(dead_code)
+)]
+mod video_admission;
 // The full base fine-tune memory-envelope gate (sc-14056) lives beside the generation MLX fit gate
 // (it reuses that module's byte-summing + unified-memory budget probe). Re-exported for the rust-api
 // training submit gate, which calls it alongside `training_base_model_status`/`training_disk_space_error`.
@@ -347,6 +378,12 @@ mod anima_gpu_smoke;
 // the hardware evidence for the sc-13817 dense-force fix.
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod sensenova_gpu_smoke;
+// SC-18902's retained real-weight evidence harness for the former `ltx_2_3_eros` Candle route.
+// Test-only + candle-only, and itself #[ignore]d: the exact-head Windows CUDA capture proved the
+// undistilled route unusable, so product routing now rejects Eros off-Mac. The harness remains as
+// reproducible historical evidence and does not advertise or restore that route.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod ltx_eros_gpu_smoke;
 // Real-weight GPU smoke for the candle SANA 1600M lane (epic 8485, sc-11780). Test-only + candle-only;
 // drives the WORKER's `resolve_weights_dir("sana_1600m")` (the diffusers-snapshot-root resolution) +
 // `gen_core::load("sana_1600m")` against the whole `Efficient-Large-Model/Sana_1600M_1024px_diffusers`
@@ -354,6 +391,13 @@ mod sensenova_gpu_smoke;
 // hardware evidence backing `macOnly: false` / `candle_routed = true`.
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod sana_candle_gpu_smoke;
+// Hardware-gated evidence for the CUDA primary-context lease the generator cache takes around a
+// cold load. Test-only + candle-only; proves an unbound thread cannot read device memory at all,
+// that the lease makes the pre-load snapshot readable, and that releasing it destroys the context —
+// the three facts `generator_cache::bind_backend_load_context` is built on, none of which a unit
+// seam can see (the seams stub both helpers away).
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod generator_cache_context_gpu_smoke;
 // Hardware-gated evidence that a FAILED `cuda_preflight` does not poison the process (sc-16260 AC 4).
 // Test-only + candle-only; hides the devices with `CUDA_VISIBLE_DEVICES=-1`, probes (must fail),
 // restores visibility and probes again in the SAME process — the exact move `recheck_gpu_health`
@@ -1141,6 +1185,125 @@ fn classify_probe_outcome(probe: Result<(), String>, gpu_id: &str) -> GpuHealth 
 /// `cuInit` against a wedged driver every poll turn.
 const GPU_HEALTH_RECHECK: Duration = Duration::from_secs(60);
 
+/// How often an idle worker runs a resolved-cache retention checkpoint (sc-19710). A pass walks
+/// every entry and re-verifies the source of anything it intends to evict, so it is deliberately
+/// far rarer than the poll interval; retention is a housekeeping activity, not a hot path.
+const RESOLVED_CACHE_RETENTION_INTERVAL: Duration = Duration::from_secs(600);
+
+/// Opens the resolved-cache retention driver when there is anything to drive.
+///
+/// The store is never created as a side effect: an opt-out install must not grow a managed cache
+/// root. A store that already exists is still reconciled even when the policy was since disabled,
+/// so entries materialized while it was on cannot be stranded by turning it off.
+fn resolved_cache_retention(
+    data_dir: &std::path::Path,
+) -> Option<sceneworks_core::model_artifacts::resolved_cache::ResolvedCacheRetention> {
+    use sceneworks_core::model_artifacts::resolved_cache::{
+        ResolvedCachePolicy, ResolvedCacheRetention, ResolvedCacheStore,
+    };
+
+    // Derived here rather than read from `Settings::resolved_cache`, which is `cfg(not(test))` and
+    // therefore absent from test builds. It is the same value: that field is itself populated by
+    // `from_env_or_safe_default`, which fails closed to the finite, disabled default.
+    let policy = ResolvedCachePolicy::from_env_or_safe_default();
+    let exists = data_dir.join("models").join("resolved").is_dir();
+    if !policy.enabled && !exists {
+        return None;
+    }
+    let store = match ResolvedCacheStore::open(data_dir) {
+        Ok(store) => store,
+        Err(error) => {
+            tracing::warn!(error = %error, "resolved-cache store unavailable; retention is skipped");
+            return None;
+        }
+    };
+    match ResolvedCacheRetention::new(store, policy) {
+        Ok(retention) => Some(retention),
+        Err(error) => {
+            tracing::warn!(error = %error, "resolved-cache retention policy is invalid; retention is skipped");
+            None
+        }
+    }
+}
+
+/// Starts one retention checkpoint on the blocking pool and returns its handle **without awaiting
+/// it**.
+///
+/// Retention is housekeeping and must never sit on the claim path: a sweep that evicts walks every
+/// entry and re-hashes each candidate's source, so awaiting one would make a job submitted just
+/// afterwards wait for the whole sweep, and awaiting the startup pass would delay the very first
+/// claim by a full recover-plus-retention cycle. Detaching is safe by construction — the eviction
+/// tombstone is durable, so a sweep cut short by process exit converges on the next pass rather
+/// than leaving a half-removed entry. The gating (policy check, store open) happens inside the
+/// blocking task too, so no filesystem work touches the async runtime.
+///
+/// Retention failures are never fatal: the cache is an optimization.
+fn spawn_retention_checkpoint(
+    data_dir: std::path::PathBuf,
+    startup: bool,
+) -> tokio::task::JoinHandle<()> {
+    use sceneworks_core::model_artifacts::resolved_cache::{
+        RetentionCheckpointOutcome, RetentionHold,
+    };
+
+    tokio::task::spawn_blocking(move || {
+        let Some(retention) = resolved_cache_retention(&data_dir) else {
+            return;
+        };
+        let now = sceneworks_core::time::now_unix_seconds().max(0) as u64;
+        let outcome = if startup {
+            retention.run_after_recovery(now)
+        } else {
+            retention.run_if_idle(true, now)
+        };
+        match outcome {
+            Ok(RetentionCheckpointOutcome::Ran(report)) => {
+                // Entries held because their authoritative source could not be verified are the
+                // half of "never strand silently" that eviction counts alone would hide: with both
+                // delete routes now reconciling, a held entry means a source that went away
+                // outside the API. It is deliberately only reported — a disconnected external
+                // library is a disconnect, never an uninstall, and must never trigger removal.
+                let unverified = report
+                    .retained
+                    .iter()
+                    .filter(|record| record.hold == RetentionHold::SourceUnverified)
+                    .count();
+                if !report.evicted.is_empty() || !report.failed.is_empty() || unverified != 0 {
+                    emit_event_value(
+                        Level::INFO,
+                        json!({
+                            "event": "resolved_cache_retention",
+                            "startup": startup,
+                            "evicted": report.evicted.len(),
+                            "failed": report.failed.len(),
+                            "sourceUnverified": unverified,
+                            "bytesBefore": report.complete_bytes_before,
+                            "bytesAfter": report.complete_bytes_after,
+                            "limitSatisfied": report.limit_satisfied,
+                        }),
+                    );
+                }
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(error = %error, startup, "resolved-cache retention checkpoint failed")
+            }
+        }
+    })
+}
+
+/// Starts one resolved-cache promotion drain on the blocking pool and returns its handle **without
+/// awaiting it** (sc-19706).
+///
+/// Same rule as the retention checkpoint, for the same reason: the drain resolves whole closures
+/// against the source library and then copies and hashes a bundle, so awaiting it would make the
+/// next job wait for a promotion it has nothing to do with. Failures are never fatal — the cache is
+/// an optimization, and a closure that could not be promoted is simply recorded again the next time
+/// that model loads.
+fn spawn_promotion_drain(settings: Settings) -> tokio::task::JoinHandle<()> {
+    tokio::task::spawn_blocking(move || resolved_cache_promotion::drain_intake(&settings))
+}
+
 /// Re-run the CUDA probe for a worker that is currently unhealthy, and act on any change
 /// (sc-16260 AC 4).
 ///
@@ -1232,6 +1395,17 @@ pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
     // interval and re-advertises if the host is repaired underneath it. Seeded a full interval
     // out — the startup probe just ran, and re-running it immediately would say nothing new.
     let mut next_gpu_recheck = Instant::now() + GPU_HEALTH_RECHECK;
+    // sc-19710 / sc-19706: ONE resolved-cache maintenance slot, shared by the retention checkpoint
+    // and the promotion drain. A single slot is deliberate rather than one handle each: a sweep
+    // walks and re-hashes eviction candidates while a promotion copies and hashes a whole bundle,
+    // and running both at once would have them competing for the same disk and the same entries —
+    // retention deciding what fits while promotion is still adding to it.
+    //
+    // The startup occupant is the retention checkpoint, which recovers the store (finishing any
+    // eviction interrupted by a crash) and then enforces retention. It is started, never awaited —
+    // the first job claim must not queue behind a recover-plus-retention pass.
+    let mut maintenance_task = Some(spawn_retention_checkpoint(settings.data_dir.clone(), true));
+    let mut next_retention_checkpoint = Instant::now() + RESOLVED_CACHE_RETENTION_INTERVAL;
     loop {
         if !health.is_usable() && Instant::now() >= next_gpu_recheck {
             next_gpu_recheck = Instant::now() + GPU_HEALTH_RECHECK;
@@ -1257,7 +1431,50 @@ pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
             }
         };
         match claim {
-            Ok(None) => lock_failures = 0,
+            Ok(None) => {
+                lock_failures = 0;
+                // Claiming nothing is the proof of idleness both maintenance activities require:
+                // no job is in flight, so neither a sweep nor a bundle copy can compete with one.
+                // Every artifact lock a sweep takes is non-blocking, so an in-use model is skipped
+                // rather than waited on.
+                //
+                // The handle is polled, never awaited: this arm sits directly on the claim path,
+                // so the loop must come straight back round to claim the next job while
+                // maintenance is still running. Work is also skipped entirely while a predecessor
+                // is in flight, so slow sweeps and slow copies cannot stack up.
+                if maintenance_task
+                    .as_ref()
+                    .is_some_and(tokio::task::JoinHandle::is_finished)
+                {
+                    maintenance_task = None;
+                }
+                if maintenance_task.is_none() {
+                    if Instant::now() >= next_retention_checkpoint {
+                        // Retention wins whenever it is due. The reverse ordering could starve
+                        // retention indefinitely on a worker with a steady promotion stream, and
+                        // retention is what keeps the cache inside its size limit — the limit
+                        // promotion admission itself is judged against.
+                        //
+                        // This does NOT make starving promotion impossible, only bounded by an
+                        // assumption: the next checkpoint is armed when this one is STARTED, so a
+                        // sweep that runs longer than the interval is already due again when it
+                        // finishes and sweeps run back to back, with no idle turn left over for a
+                        // drain. That holds only while sweep duration stays under the interval.
+                        // It is self-stabilizing rather than a defect — a sweep that slow means
+                        // the cache is over its limit, which is the condition promotion must not
+                        // be adding to — so the ordering stands, but the guarantee is
+                        // "promotion yields to retention", not "promotion always runs".
+                        next_retention_checkpoint =
+                            Instant::now() + RESOLVED_CACHE_RETENTION_INTERVAL;
+                        maintenance_task =
+                            Some(spawn_retention_checkpoint(settings.data_dir.clone(), false));
+                    } else if resolved_cache_promotion::work_pending(&settings.data_dir) {
+                        // sc-19706: in-memory check only — no store open, no stat — because this
+                        // sits on the claim path exactly like the checkpoint gate above.
+                        maintenance_task = Some(spawn_promotion_drain(settings.clone()));
+                    }
+                }
+            }
             Ok(Some(job)) => {
                 lock_failures = 0;
                 // Execute the claimed job WITHOUT racing (and dropping) the whole future against
@@ -1633,7 +1850,32 @@ async fn run_utility_job(
     // timings are posted separately by the handlers and coalesce-merge server-side.
     let metrics_probe = job_metrics::JobMetricsProbe::start(&settings.gpu_id);
     let result = with_shutdown_flag(shutdown.clone(), async {
-        match job.job_type {
+        // sc-19708: the ONE pre-loader guard. Typed model-source admission happens here for every
+        // job type, before any handler runs; handlers never carry availability or cache policy.
+        //
+        // sc-19707: run it on the BLOCKING pool. The guard walks the resolved-cache journal, stats
+        // whole closures, and — when it leases a local bundle — takes the entry's shared artifact
+        // lock through the blocking `FileExt::lock_shared`. An evictor holding that lock
+        // exclusively would otherwise stall this runtime worker thread, not just this job.
+        let guard_job_type = job.job_type.clone();
+        let guard_payload = job.payload.clone();
+        let guard_settings = settings.clone();
+        let source_guard = tokio::task::spawn_blocking(move || {
+            external_library_runtime::RuntimeSourceGuard::begin(
+                &guard_job_type,
+                &guard_payload,
+                &guard_settings,
+            )
+        })
+        .await
+        .map_err(|error| {
+            (
+                "Model source unavailable.",
+                WorkerError::Io(std::io::Error::other(error.to_string())),
+            )
+        })?
+        .map_err(|error| ("Model source unavailable.", error))?;
+        let dispatch_result = match job.job_type {
             JobType::Placeholder => run_placeholder_job(api, settings, &job, &shutdown)
                 .await
                 .map_err(|error| ("Placeholder job failed.", error)),
@@ -1870,6 +2112,15 @@ async fn run_utility_job(
                 .await;
                 result.map_err(|error| ("Utility job failed.", error))
             }
+        };
+        // Success releases the operation-owned source sessions; failure re-probes the exact bound
+        // sources so a mid-load disconnect surfaces as the typed unavailable condition instead of
+        // a raw loader error (sc-19708). An error with the source still present stays verbatim.
+        match dispatch_result {
+            Ok(()) => source_guard
+                .finish_success()
+                .map_err(|error| ("Model source session cleanup failed.", error)),
+            Err((message, error)) => Err((message, source_guard.classify_failure(settings, error))),
         }
     })
     .await;

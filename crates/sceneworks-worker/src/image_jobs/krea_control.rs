@@ -258,6 +258,21 @@ fn krea_control_overlay_repo_file(request: &ImageRequest) -> WorkerResult<(Strin
     Ok((repo, file))
 }
 
+/// Extract the payload's lexical `advanced.controlWeights.path` without resolving it. Imported File
+/// routes hand this exact entry to `pin_app_managed_model_file`; canonicalizing first would erase the
+/// symlink/path-component identity the prepared token must retain (sc-18306).
+fn krea_control_payload_overlay_raw_path(request: &ImageRequest) -> Option<PathBuf> {
+    request
+        .advanced
+        .get("controlWeights")
+        .and_then(Value::as_object)
+        .and_then(|cw| cw.get("path"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
 /// Confine a payload-supplied `advanced.controlWeights.path` to an app-managed root (sc-11168 / F-006).
 /// The API writes this key for a studio-trained / registered LOCAL overlay (B4/sc-10165), but the value
 /// arrives untrusted across the LAN boundary (epic 4484), so — like every other on-disk model input — it
@@ -270,20 +285,12 @@ fn krea_control_payload_overlay_path(
     settings: &Settings,
     request: &ImageRequest,
 ) -> WorkerResult<Option<PathBuf>> {
-    let Some(path) = request
-        .advanced
-        .get("controlWeights")
-        .and_then(Value::as_object)
-        .and_then(|cw| cw.get("path"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
+    let Some(path) = krea_control_payload_overlay_raw_path(request) else {
         return Ok(None);
     };
     Ok(Some(crate::paths::normalize_app_managed_model_path(
         settings,
-        path,
+        path.to_string_lossy().as_ref(),
         "Krea control overlay",
     )?))
 }
@@ -541,7 +548,13 @@ async fn generate_krea_control_stream(
     // LoRA/LoKr adapters (resolved above) install additively on the base DiT (mlx-gen sc-11720).
     let (quant, _quant_bits) = resolve_quant(request, Some(&weights_dir));
     let adapter_count = adapters.len();
-    let spec = krea_control_spec(weights_dir, control_weights, quant, adapters);
+    let spec = attach_selected_decoder(
+        krea_control_spec(weights_dir, control_weights, quant, adapters),
+        KREA_CONTROL_ENGINE_ID,
+        request,
+        settings,
+    )?;
+    let spec = attach_manifest_text_encoder(spec, KREA_CONTROL_ENGINE_ID, request, settings)?;
     let calibration_provenance = krea_control_calibration_provenance(
         match &spec.weights {
             WeightsSource::Dir(path) => path,
@@ -601,6 +614,10 @@ async fn generate_krea_control_stream(
                     &memory_inputs,
                     cache_state,
                     gen_core::OffloadPolicy::Resident,
+                    // This lane loads through `start_cached_gen_stream`, which never varies the
+                    // execution policy, so there is no warm switch to decide. The seam itself
+                    // declines the proposal it was handed; this one is inert by construction.
+                    crate::execution_planner::WarmPolicyProposal::inert(KREA_CONTROL_ENGINE_ID),
                     0,
                 )?;
                 cache_state = gen_core::MemoryCacheState::Warm;

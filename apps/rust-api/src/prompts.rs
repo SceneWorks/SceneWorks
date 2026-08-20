@@ -170,7 +170,7 @@ pub(crate) async fn create_prompt_refine_job(
         "auto".to_owned(),
     )
     .await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 /// Resolve an `image_caption` reference asset to an absolute on-disk path. Mirrors the worker's

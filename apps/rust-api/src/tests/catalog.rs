@@ -1274,9 +1274,10 @@ async fn lora_download_endpoint_queues_hf_download_for_builtin_lora() {
     let repo_dir =
         huggingface_repo_cache_path(&temp_dir.path().join("data"), "Test/lora-install-probe")
             .expect("repo cache path");
+    let revision = "0123456789abcdef0123456789abcdef01234567";
     std::fs::create_dir_all(repo_dir.join("refs")).expect("create refs");
-    std::fs::write(repo_dir.join("refs").join("main"), "rev1").expect("write refs/main");
-    let snapshot = repo_dir.join("snapshots").join("rev1");
+    std::fs::write(repo_dir.join("refs").join("main"), revision).expect("write refs/main");
+    let snapshot = repo_dir.join("snapshots").join(revision);
     std::fs::create_dir_all(&snapshot).expect("create snapshot");
     std::fs::write(snapshot.join("cached.safetensors"), b"").expect("write adapter");
 
@@ -1340,6 +1341,13 @@ async fn model_and_lora_routes_match_manifest_behavior() {
                   "name": "User Model",
                   "ui": { "label": "User" },
                   "customPluginMetadata": { "vendorKey": "preserved" }
+                },
+                {
+                  "id": "user-only-model",
+                  "name": "Z User Import",
+                  "family": "z-image",
+                  "type": "image",
+                  "paths": { "model": "/missing/user-only-model" }
                 }
               ]
             }
@@ -1418,6 +1426,8 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     // sc-12338: schema enforcement is builtin-only. User manifests remain a lenient
     // extension surface; an unknown custom key must neither brick the route nor be dropped.
     assert_eq!(models[0]["customPluginMetadata"]["vendorKey"], "preserved");
+    assert_eq!(models[0]["catalogScope"], "builtin");
+    assert_eq!(models[0]["removable"], true);
     assert_eq!(models[0]["adapter"], "z_image_diffusers");
     assert_eq!(models[0]["downloadable"], true);
     assert_eq!(models[0]["downloadSizeBytes"], 12884901888_u64);
@@ -1427,6 +1437,13 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     assert!(models[0]["installedPath"]
         .as_str()
         .is_some_and(|value| value.ends_with("owner__model")));
+    let user_only = models
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|model| model["id"] == "user-only-model")
+        .expect("genuine user-only model");
+    assert_eq!(user_only["catalogScope"], "user");
 
     let (status, loras) = request(
         app.clone(),
@@ -1482,6 +1499,26 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     )
     .await;
     let project_id = project["id"].as_str().expect("project id");
+    let (status, refusal) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "prompt": "must stay fail closed",
+            "model": "user-only-model",
+            "count": 1,
+            "width": 512,
+            "height": 512,
+            "advanced": { "controlMode": "pose" }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(refusal["detail"].as_str().is_some_and(|detail| {
+        detail.contains("candle_unsupported") || detail.contains("imported_control_unsupported")
+    }));
+
     let (status, image_job) = request(
         app.clone(),
         "POST",
@@ -1520,6 +1557,10 @@ async fn model_and_lora_routes_match_manifest_behavior() {
         "loras/style.safetensors"
     );
     assert_eq!(image_job["payload"]["model"], "base-model");
+    assert_eq!(
+        image_job["payload"]["modelManifestEntry"]["catalogScope"],
+        "builtin"
+    );
     assert_eq!(image_job["payload"]["loras"][0]["family"], "z-image");
     assert_eq!(
         image_job["payload"]["loras"][0]["compatibility"]["families"][0],
@@ -1612,6 +1653,31 @@ async fn model_and_lora_routes_match_manifest_behavior() {
     assert_eq!(job["payload"]["repo"], "owner/model");
     assert_eq!(job["payload"]["files"][0], "*.safetensors");
     assert_eq!(job["payload"]["targetDir"], models[0]["installedPath"]);
+
+    // Removing a user overlay does not remove or reclassify the protected builtin. The direct
+    // manifest lookup in the delete route owns this behavior independently of routing scope.
+    let (status, deleted_overlay) = request(
+        app.clone(),
+        "DELETE",
+        "/api/v1/models/base-model?permanent=true",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(deleted_overlay["removedManifestEntry"], true);
+    assert_eq!(deleted_overlay["removedLocalArtifacts"], false);
+    let (status, restored_models) =
+        request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    let restored_builtin = restored_models
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|model| model["id"] == "base-model")
+        .expect("protected builtin remains after overlay deletion");
+    assert_eq!(restored_builtin["name"], "Base Model");
+    assert_eq!(restored_builtin["catalogScope"], "builtin");
+    assert_eq!(restored_builtin["installState"], "installed");
 
     let (status, job) = request(
         app,
@@ -3983,6 +4049,291 @@ async fn model_download_job_enqueues_co_requisite_dependencies() {
 }
 
 #[tokio::test]
+async fn mmaudio_repo_rename_keeps_legacy_install_ready_and_skips_duplicate_clip_download() {
+    let _env = isolate_hf_cache();
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    let rename = sceneworks_core::hf_repo_renames::MMAUDIO_DFN5B_CLIP_RENAME;
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        format!(
+            r#"{{
+              "schemaVersion": 1,
+              "models": [{{
+                "id": "mmaudio_rename_fixture",
+                "name": "MMAudio rename fixture",
+                "type": "audio",
+                "family": "mmaudio",
+                "downloads": [
+                  {{ "provider": "huggingface", "repo": "owner/mmaudio", "files": ["weights.bin"] }},
+                  {{ "provider": "huggingface", "repo": "{}", "revision": "{}", "files": ["{}"], "coRequisite": true, "componentId": "clip" }}
+                ]
+              }}]
+            }}"#,
+            rename.current_repo, rename.revision, rename.files[0]
+        ),
+    )
+    .expect("builtin models writes");
+    write_empty_sibling_manifests(&config_dir);
+    let data_dir = temp_dir.path().join("data");
+
+    for (repo, revision, file) in [
+        ("owner/mmaudio", "primary-revision", "weights.bin"),
+        (rename.legacy_repo, rename.revision, rename.files[0]),
+    ] {
+        let path = huggingface_repo_cache_path(&data_dir, repo)
+            .unwrap()
+            .join("snapshots")
+            .join(revision)
+            .join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"existing cached weights").unwrap();
+    }
+
+    // Mutation: the corrected cache namespace may be poisoned or unwritable even though the exact
+    // immutable legacy snapshot remains valid. Catalog readiness must be based on the confined
+    // legacy source the worker can load directly, and serving the catalog must never traverse or
+    // populate this unsafe destination.
+    #[cfg(unix)]
+    let poisoned_canonical_destination = {
+        use std::os::unix::fs::symlink;
+
+        let current_repo = huggingface_repo_cache_path(&data_dir, rename.current_repo).unwrap();
+        std::fs::create_dir_all(&current_repo).unwrap();
+        let outside = temp_dir.path().join("outside-canonical-snapshots");
+        std::fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, current_repo.join("snapshots")).unwrap();
+        outside
+    };
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, models) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    let model = models
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["id"] == "mmaudio_rename_fixture")
+        .expect("fixture model is cataloged");
+    assert_eq!(model["installState"], "installed");
+    assert_eq!(model["repairAvailable"], false);
+
+    let (status, primary) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/mmaudio_rename_fixture/download",
+        json!({ "requestedGpu": "auto" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(primary["payload"]["repo"], "owner/mmaudio");
+
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    let download_jobs = jobs
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|job| job["type"] == "model_download")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        download_jobs.len(),
+        1,
+        "the exact legacy CLIP cache suppresses a duplicate fetch"
+    );
+    assert!(download_jobs
+        .iter()
+        .all(|job| job["payload"]["repo"] != rename.current_repo));
+    #[cfg(unix)]
+    assert!(
+        !poisoned_canonical_destination.join(rename.revision).exists(),
+        "catalog readiness and duplicate suppression must not write through the poisoned destination"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn mmaudio_repo_rename_does_not_suppress_repair_for_an_escaping_legacy_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let _env = isolate_hf_cache();
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    let rename = sceneworks_core::hf_repo_renames::MMAUDIO_DFN5B_CLIP_RENAME;
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        format!(
+            r#"{{
+              "schemaVersion": 1,
+              "models": [{{
+                "id": "mmaudio_rename_escape_fixture",
+                "name": "MMAudio rename escape fixture",
+                "type": "audio",
+                "family": "mmaudio",
+                "downloads": [
+                  {{ "provider": "huggingface", "repo": "owner/mmaudio", "files": ["weights.bin"] }},
+                  {{ "provider": "huggingface", "repo": "{}", "revision": "{}", "files": ["{}"], "coRequisite": true, "componentId": "clip" }}
+                ]
+              }}]
+            }}"#,
+            rename.current_repo, rename.revision, rename.files[0]
+        ),
+    )
+    .expect("builtin models writes");
+    write_empty_sibling_manifests(&config_dir);
+    let data_dir = temp_dir.path().join("data");
+
+    let primary = huggingface_repo_cache_path(&data_dir, "owner/mmaudio")
+        .unwrap()
+        .join("snapshots")
+        .join("primary-revision")
+        .join("weights.bin");
+    std::fs::create_dir_all(primary.parent().unwrap()).unwrap();
+    std::fs::write(primary, b"existing primary weights").unwrap();
+
+    let legacy = huggingface_repo_cache_path(&data_dir, rename.legacy_repo)
+        .unwrap()
+        .join("snapshots")
+        .join(rename.revision)
+        .join(rename.files[0]);
+    std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+    let outside = temp_dir.path().join("outside-clip.bin");
+    std::fs::write(&outside, b"not cache owned").unwrap();
+    symlink(&outside, &legacy).unwrap();
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, models) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    let model = models
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["id"] == "mmaudio_rename_escape_fixture")
+        .expect("fixture model is cataloged");
+    assert_ne!(
+        model["installState"], "installed",
+        "an escaping legacy file cannot satisfy install readiness"
+    );
+    assert_eq!(model["repairAvailable"], true);
+
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/mmaudio_rename_escape_fixture/download",
+        json!({ "requestedGpu": "auto" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    let download_jobs = jobs
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|job| job["type"] == "model_download")
+        .collect::<Vec<_>>();
+    assert!(
+        download_jobs
+            .iter()
+            .any(|job| job["payload"]["repo"] == rename.current_repo),
+        "the unusable legacy alias must not suppress the canonical repair download"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn mmaudio_repo_rename_requires_the_exact_confined_current_snapshot() {
+    use std::os::unix::fs::symlink;
+
+    async fn assert_repair_download(
+        mode: &str,
+        stage_current: impl FnOnce(&std::path::Path, &str),
+    ) {
+        let _env = isolate_hf_cache();
+        std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let config_dir = temp_dir.path().join("config/manifests");
+        std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+        let rename = sceneworks_core::hf_repo_renames::MMAUDIO_DFN5B_CLIP_RENAME;
+        let model_id = format!("mmaudio_current_{mode}_fixture");
+        std::fs::write(
+            config_dir.join("builtin.models.jsonc"),
+            format!(
+                r#"{{
+                  "schemaVersion": 1,
+                  "models": [{{
+                    "id": "{model_id}",
+                    "name": "MMAudio current cache fixture",
+                    "type": "audio",
+                    "family": "mmaudio",
+                    "downloads": [
+                      {{ "provider": "huggingface", "repo": "owner/mmaudio", "files": ["weights.bin"] }},
+                      {{ "provider": "huggingface", "repo": "{}", "revision": "{}", "files": ["{}"], "coRequisite": true, "componentId": "clip" }}
+                    ]
+                  }}]
+                }}"#,
+                rename.current_repo, rename.revision, rename.files[0]
+            ),
+        )
+        .expect("builtin models writes");
+        write_empty_sibling_manifests(&config_dir);
+        let data_dir = temp_dir.path().join("data");
+        let primary = huggingface_repo_cache_path(&data_dir, "owner/mmaudio")
+            .unwrap()
+            .join("snapshots/primary-revision/weights.bin");
+        std::fs::create_dir_all(primary.parent().unwrap()).unwrap();
+        std::fs::write(primary, b"primary").unwrap();
+        let current_root = huggingface_repo_cache_path(&data_dir, rename.current_repo).unwrap();
+        stage_current(&current_root, rename.files[0]);
+
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (status, models) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        let model = models
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|model| model["id"] == model_id)
+            .expect("fixture model is cataloged");
+        assert_ne!(model["installState"], "installed", "{mode}");
+        assert_eq!(model["repairAvailable"], true, "{mode}");
+        let (status, _) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/models/{model_id}/download"),
+            json!({ "requestedGpu": "auto" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+        assert!(jobs
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|job| job["type"] == "model_download"
+                && job["payload"]["repo"] == rename.current_repo));
+    }
+
+    let rename = sceneworks_core::hf_repo_renames::MMAUDIO_DFN5B_CLIP_RENAME;
+    assert_repair_download("wrong_revision", |root, file| {
+        let path = root.join("snapshots/wrong-revision").join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"wrong revision").unwrap();
+    })
+    .await;
+    assert_repair_download("escaping_symlink", |root, file| {
+        let path = root.join("snapshots").join(rename.revision).join(file);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let outside = root.parent().unwrap().join("outside-current.bin");
+        std::fs::write(&outside, b"outside").unwrap();
+        symlink(outside, path).unwrap();
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn model_download_job_forwards_pinned_revision_for_co_requisite() {
     // sc-13541: a co-requisite whose weight the runtime resolves via a pinned-SHA `hf_get_pinned`
     // (chatterbox_tts's ve/perth) must have its `revision` forwarded to the download job, so the worker
@@ -4214,9 +4565,13 @@ async fn lora_catalog_uses_huggingface_cache_install_state() {
         r#"{ "schemaVersion": 1, "presets": [] }"#,
     )
     .expect("user presets writes");
+    let stale_revision = "1111111111111111111111111111111111111111";
+    let current_revision = "2222222222222222222222222222222222222222";
     let stale_cache_file = temp_dir
             .path()
-            .join("data/cache/huggingface/hub/models--Lightricks--LTX-2.3-22b-IC-LoRA-Union-Control/snapshots/aaa111/ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors");
+            .join("data/cache/huggingface/hub/models--Lightricks--LTX-2.3-22b-IC-LoRA-Union-Control/snapshots")
+            .join(stale_revision)
+            .join("ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors");
     std::fs::create_dir_all(
         stale_cache_file
             .parent()
@@ -4226,7 +4581,9 @@ async fn lora_catalog_uses_huggingface_cache_install_state() {
     std::fs::write(&stale_cache_file, b"stale-lora").expect("stale lora cache writes");
     let cache_file = temp_dir
             .path()
-            .join("data/cache/huggingface/hub/models--Lightricks--LTX-2.3-22b-IC-LoRA-Union-Control/snapshots/zzz999/ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors");
+            .join("data/cache/huggingface/hub/models--Lightricks--LTX-2.3-22b-IC-LoRA-Union-Control/snapshots")
+            .join(current_revision)
+            .join("ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors");
     std::fs::create_dir_all(cache_file.parent().expect("cache file has parent"))
         .expect("hf cache creates");
     std::fs::write(&cache_file, b"lora").expect("lora cache writes");
@@ -4235,7 +4592,7 @@ async fn lora_catalog_uses_huggingface_cache_install_state() {
             .join("data/cache/huggingface/hub/models--Lightricks--LTX-2.3-22b-IC-LoRA-Union-Control/refs/main");
     std::fs::create_dir_all(refs_main.parent().expect("refs main has parent"))
         .expect("refs dir creates");
-    std::fs::write(&refs_main, b"zzz999").expect("refs main writes");
+    std::fs::write(&refs_main, current_revision).expect("refs main writes");
 
     let app = create_app(test_settings(&temp_dir)).expect("app creates");
     let (status, loras) = request(app, "GET", "/api/v1/loras", Value::Null).await;
@@ -6464,4 +6821,276 @@ async fn license_acknowledgment_survives_a_typed_download_retry() {
         "an authorized download must stay retryable: {retry_job:?}",
     );
     assert_eq!(retry_job["payload"]["repo"], "SceneWorks/minimax-h3-mlx");
+}
+
+/// Deleting a model must reconcile the resolved-model hot cache (sc-19710). Without this the
+/// entry survives its own source: automatic retention refuses to evict anything it cannot
+/// re-verify as a second copy, so an orphaned entry would be held forever rather than reclaimed.
+#[tokio::test]
+async fn deleting_a_model_reconciles_its_resolved_cache_entries() {
+    use sceneworks_core::model_artifacts::resolved_cache::{
+        MaterializationCancellation, MaterializationOutcome, ResolvedCacheMaterializer,
+        ResolvedCacheStore,
+    };
+    use sceneworks_core::model_artifacts::{
+        ArtifactAvailability, ArtifactCompleteness, ArtifactFile, ArtifactIdentity,
+        ArtifactLocation, ArtifactMemberRole, ArtifactProvenance, ArtifactSourceLibrary,
+        PromotionCandidate, ResolvedBundleClosure, ResolvedBundleMember, ResolvedModelArtifact,
+        MODEL_ARTIFACT_CONTRACT_VERSION,
+    };
+
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let data_dir = temp_dir.path().join("data");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    let model_dir = data_dir.join("models/imports/cached_model");
+    std::fs::create_dir_all(&model_dir).expect("model dir creates");
+    std::fs::write(model_dir.join(".sceneworks-download-complete.json"), "{}")
+        .expect("marker writes");
+
+    // Materialize a real resolved-cache entry for the model's source repository.
+    let revision = "a".repeat(40);
+    let library = sceneworks_core::hf_home::model_source_library(&data_dir)
+        .root()
+        .to_owned();
+    let snapshot = ArtifactSourceLibrary::new(&library)
+        .expect("library root")
+        .repository_root("owner/cached-model")
+        .expect("repository root")
+        .join("snapshots")
+        .join(&revision);
+    std::fs::create_dir_all(&snapshot).expect("snapshot dir creates");
+    std::fs::write(snapshot.join("model.safetensors"), b"weights").expect("weights write");
+    let identity =
+        ArtifactIdentity::pinned("owner/cached-model", &revision, "default").expect("identity");
+    let closure = ResolvedBundleClosure::new(vec![ResolvedBundleMember {
+        role: ArtifactMemberRole::Primary,
+        component_id: None,
+        source: identity.clone(),
+        tier: Some("q8".to_owned()),
+        source_subpath: std::path::PathBuf::new(),
+        destination: std::path::PathBuf::new(),
+        files: vec![ArtifactFile::new("model.safetensors").expect("file")],
+    }])
+    .expect("closure");
+    let artifact = ResolvedModelArtifact {
+        schema_version: MODEL_ARTIFACT_CONTRACT_VERSION,
+        identity: identity.clone(),
+        location: ArtifactLocation::SourceLibrary { root: snapshot },
+        closure,
+        provenance: ArtifactProvenance {
+            identity,
+            fixed_artifact_tier: Some("q8".to_owned()),
+        },
+        completeness: ArtifactCompleteness::Complete,
+        availability: ArtifactAvailability::Available,
+    };
+    let candidate = PromotionCandidate {
+        cache_key: artifact.cache_key().expect("cache key"),
+        artifact,
+    };
+    let store = ResolvedCacheStore::open(&data_dir).expect("store opens");
+    let entry = store.entry_path(&candidate.cache_key).expect("entry path");
+    match ResolvedCacheMaterializer::new(store.clone())
+        .materialize(
+            &candidate,
+            &library,
+            "test:cached_model",
+            &MaterializationCancellation::default(),
+        )
+        .expect("materialization runs")
+    {
+        MaterializationOutcome::Published(_) => {}
+        other => panic!("fixture must publish, got {other:?}"),
+    }
+    assert!(entry.join("bundle").join("model.safetensors").is_file());
+    // Pinned on purpose: an explicit uninstall must reclaim the copy anyway, because the model it
+    // belonged to no longer exists.
+    store
+        .set_artifact_pin(&candidate.cache_key, true)
+        .expect("pin applies");
+
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        format!(
+            r#"{{
+                  "schemaVersion": 1,
+                  "models": [{{
+                    "id": "cached_model",
+                    "name": "Cached Model",
+                    "type": "image",
+                    "family": "z-image",
+                    "downloads": [{{ "repo": "owner/cached-model", "variant": "q8" }}],
+                    "paths": {{ "model": "{}" }}
+                  }}]
+                }}"#,
+            model_dir.display().to_string().replace('\\', "\\\\")
+        ),
+    )
+    .expect("user models writes");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, body) = request(
+        app,
+        "DELETE",
+        "/api/v1/models/cached_model?permanent=true",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["removedManifestEntry"], true);
+    assert!(
+        !entry.exists(),
+        "the resolved-cache entry must be reconciled away with its deleted source"
+    );
+    assert!(
+        store
+            .lookup_complete(&candidate.cache_key)
+            .expect("lookup succeeds")
+            .is_none(),
+        "the reconciled entry must no longer be loadable"
+    );
+}
+
+/// Deleting ONE quant tier must reconcile only that tier's resolved-cache entries (sc-19710).
+/// The sibling tier's entry stays valid, and the tier match is case-insensitive because routes
+/// lowercase the variant while a stored artifact tier keeps whatever case the catalog used — a
+/// mismatch there would silently strand exactly the orphan this story exists to prevent.
+#[tokio::test]
+async fn deleting_one_tier_reconciles_only_that_tiers_resolved_cache_entries() {
+    use sceneworks_core::model_artifacts::resolved_cache::{
+        MaterializationCancellation, MaterializationOutcome, ResolvedCacheMaterializer,
+        ResolvedCacheStore,
+    };
+    use sceneworks_core::model_artifacts::{
+        ArtifactAvailability, ArtifactCompleteness, ArtifactFile, ArtifactIdentity,
+        ArtifactLocation, ArtifactMemberRole, ArtifactProvenance, ArtifactSourceLibrary,
+        PromotionCandidate, ResolvedBundleClosure, ResolvedBundleMember, ResolvedModelArtifact,
+        MODEL_ARTIFACT_CONTRACT_VERSION,
+    };
+
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let data_dir = temp_dir.path().join("data");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+
+    let revision = "b".repeat(40);
+    let library = sceneworks_core::hf_home::model_source_library(&data_dir)
+        .root()
+        .to_owned();
+    let snapshot = ArtifactSourceLibrary::new(&library)
+        .expect("library root")
+        .repository_root("owner/tiered-model")
+        .expect("repository root")
+        .join("snapshots")
+        .join(&revision);
+    std::fs::create_dir_all(&snapshot).expect("snapshot dir creates");
+    std::fs::write(snapshot.join("q8.safetensors"), b"q8-weights").expect("q8 writes");
+    std::fs::write(snapshot.join("q4.safetensors"), b"q4-weights").expect("q4 writes");
+
+    let store = ResolvedCacheStore::open(&data_dir).expect("store opens");
+    let materializer = ResolvedCacheMaterializer::new(store.clone());
+    // `Q8` is stored upper-case on purpose: the route will ask to reconcile `q8`.
+    let mut keys = Vec::new();
+    for (tier, file) in [("Q8", "q8.safetensors"), ("q4", "q4.safetensors")] {
+        let identity =
+            ArtifactIdentity::pinned("owner/tiered-model", &revision, tier).expect("identity");
+        let closure = ResolvedBundleClosure::new(vec![ResolvedBundleMember {
+            role: ArtifactMemberRole::Primary,
+            component_id: None,
+            source: identity.clone(),
+            tier: Some(tier.to_owned()),
+            source_subpath: std::path::PathBuf::new(),
+            destination: std::path::PathBuf::new(),
+            files: vec![ArtifactFile::new(file).expect("file")],
+        }])
+        .expect("closure");
+        let artifact = ResolvedModelArtifact {
+            schema_version: MODEL_ARTIFACT_CONTRACT_VERSION,
+            identity: identity.clone(),
+            location: ArtifactLocation::SourceLibrary {
+                root: snapshot.clone(),
+            },
+            closure,
+            provenance: ArtifactProvenance {
+                identity,
+                fixed_artifact_tier: Some(tier.to_owned()),
+            },
+            completeness: ArtifactCompleteness::Complete,
+            availability: ArtifactAvailability::Available,
+        };
+        let candidate = PromotionCandidate {
+            cache_key: artifact.cache_key().expect("cache key"),
+            artifact,
+        };
+        match materializer
+            .materialize(
+                &candidate,
+                &library,
+                "test:tiered_model",
+                &MaterializationCancellation::default(),
+            )
+            .expect("materialization runs")
+        {
+            MaterializationOutcome::Published(_) => {}
+            other => panic!("fixture must publish, got {other:?}"),
+        }
+        keys.push(candidate.cache_key);
+    }
+    let q8_entry = store.entry_path(&keys[0]).expect("q8 entry path");
+    let q4_entry = store.entry_path(&keys[1]).expect("q4 entry path");
+    assert!(q8_entry.exists() && q4_entry.exists());
+
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{
+              "schemaVersion": 1,
+              "models": [{
+                "id": "tiered_model",
+                "name": "Tiered Model",
+                "type": "image",
+                "family": "z-image",
+                "downloads": [
+                  { "provider": "huggingface", "repo": "owner/tiered-model", "variant": "q8", "files": ["q8.safetensors"] },
+                  { "provider": "huggingface", "repo": "owner/tiered-model", "variant": "q4", "files": ["q4.safetensors"] }
+                ]
+              }]
+            }"#,
+    )
+    .expect("user models writes");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (status, _body) = request(
+        app,
+        "DELETE",
+        "/api/v1/models/tiered_model/variants/q8",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !q8_entry.exists(),
+        "the deleted tier's cached copy must be reconciled away even though its stored tier is \
+         upper-case and the route asked for the lower-case one"
+    );
+    assert!(
+        q4_entry.exists(),
+        "a sibling tier's cached copy must stay valid"
+    );
+    assert!(store
+        .lookup_complete(&keys[1])
+        .expect("sibling lookup succeeds")
+        .is_some());
 }

@@ -401,6 +401,7 @@ pub(super) async fn generate_candle_flux_ipadapter_stream(
         true,
         false,
         false,
+        false,
         raw_budget,
         predicted_peak,
         runtime_overlay_bytes,

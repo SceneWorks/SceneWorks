@@ -1358,6 +1358,17 @@ pub(super) struct VideoGenInput {
     /// MLX (macOS) path and the resident-only LTX candle engine. SVD-XT also selects Sequential in
     /// sc-14625 for its conditioner → UNet → VAE lifecycle.
     pub(super) offload_policy: OffloadPolicy,
+    /// Per-request memory-rung knobs selected by the video memory gate (sc-18814), or `None` for
+    /// the provider's own defaults. Set ONLY by [`generate_video_using`], from
+    /// `crate::video_admission::admit_video_generation`; every handler leaves it at the
+    /// `Default` so a route the gate makes no decision on is byte-identical to before the gate
+    /// existed. The image lane's equivalent is `mlx_fit_gate::evaluate_request`'s
+    /// `MlxRequestEvaluation::memory`.
+    pub(super) memory: Option<gen_core::GenerationMemory>,
+    /// Contract/evidence handshake for provider safety and the request-scoped lifecycle. Kept
+    /// separate from `memory`: a Resident selection still carries context while preserving the
+    /// provider's request defaults with `memory == None`.
+    pub(super) memory_context: Option<gen_core::MemoryRunContext>,
     /// Optional fallible admission consumed only by the serialized generator-cache cold-miss path.
     /// SCAIL Candle and the uncalibrated dual-expert VACE-Fun lane set it; other video families leave
     /// it `None`. It is deliberately outside
@@ -1374,6 +1385,8 @@ pub(super) struct VideoGenInput {
 impl Default for VideoGenInput {
     fn default() -> Self {
         Self {
+            memory: None,
+            memory_context: None,
             engine_id: "",
             model_dir: PathBuf::new(),
             quant: None,
@@ -1419,68 +1432,89 @@ impl Default for VideoGenInput {
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 pub(super) fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
-    LoadSpec {
-        weights: WeightsSource::Dir(input.model_dir.clone()),
-        quantize: input.quant,
-        precision: Precision::Bf16,
-        control: None,
-        // MultiControlNet (sc-3378) is image-only; video providers ignore it.
-        extra_controls: Vec::new(),
-        ip_adapter: None,
-        adapters: input.adapters.clone(),
-        // PiD super-resolving decode (epic 7840) is an image-only latent-space swap; video
-        // providers have no PiD backbone, so never request it.
-        pid: None,
-        // Video providers are not face-ID models — no identity sub-model weights.
-        identity: None,
-        // LTX's external Gemma-3 text encoder rides the spec (sc-8827); `None` ⇒ the provider's
-        // `$LTX_GEMMA_DIR` / `<root>/text_encoder` fallback.
-        text_encoder: input.text_encoder_dir.clone().map(WeightsSource::Dir),
-        // Residency policy (sc-12631). `Resident` for every path historically; the candle A14B flips it
-        // to `Sequential` (`generate_candle_video_using` → `candle_video_offload_policy`) so the two
-        // 14B experts swap one-at-a-time and the load matches the SEQUENTIAL peak the manifest gate sized.
-        // `apply_residency_policy` (the MLX cache seam) never downgrades a `Sequential` set here.
-        offload_policy: input.offload_policy,
-        // Video providers retain their historical eager materialization. Deferred block streaming
-        // is currently an explicit Z-Image load shape, independent of phase residency (SC-15998).
-        load_shape: Default::default(),
-        // Named model components (epic 13657). Video providers advertise no `required_components`, so the
-        // map is empty by default. Two OPTIONAL components ride it:
-        //
-        // * LTX-2.3's `uncensored_enhancer` (sc-2845 / sc-13664): when a `useUncensoredEnhancer` job
-        //   resolved the amoral 4-bit Gemma snapshot, stage it here so the provider loads it on demand
-        //   instead of the deleted `$LTX_UNCENSORED_GEMMA_DIR` / HF-cache scan.
-        // * MiniMax-H3's tiered DiT (`"transformer"`, sc-19508): its quantized partitions live in a
-        //   different repo from its shared components, and `weights` can only name one root.
-        //
-        // * MiniMax-H3's per-tier PACKED text encoder (`"text_encoder"`, sc-19120 / sc-19506): the
-        //   packed conditioner ships beside the DiT tiers in `SceneWorks/minimax-h3-mlx`, while the
-        //   dense bf16 one comes from upstream, so it is the same different-repo problem the DiT
-        //   has. Absent ⇒ `mlx-gen-minimax-h3` falls back to `<weights>/text_encoder`, the dense
-        //   upstream copy. It does NOT read `LoadSpec::text_encoder` — that field has zero hits in
-        //   the whole engine crate, so staging there would resolve nothing and hard-error inside
-        //   the engine at the `config.json` probe.
-        //
-        // All absent ⇒ empty map, the video load path unchanged. They are collected rather than
-        // branched so adding a fourth cannot silently drop one.
-        components: [
-            input
-                .uncensored_enhancer_dir
-                .clone()
-                .map(|dir| ("uncensored_enhancer".to_owned(), WeightsSource::Dir(dir))),
-            input
-                .dit_component_dir
-                .clone()
-                .map(|dir| ("transformer".to_owned(), WeightsSource::Dir(dir))),
-            input
-                .text_encoder_component_dir
-                .clone()
-                .map(|dir| ("text_encoder".to_owned(), WeightsSource::Dir(dir))),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<BTreeMap<_, _>>(),
+    let mut spec = LoadSpec::new(WeightsSource::Dir(input.model_dir.clone()));
+    spec.quantize = input.quant;
+    spec.precision = Precision::Bf16;
+    spec.adapters = input.adapters.clone();
+    // LTX's external Gemma-3 text encoder rides the spec (sc-8827); `None` retains the provider's
+    // legacy fallback. Video providers otherwise have no image-only control/PiD/identity sources.
+    spec.text_encoder = input.text_encoder_dir.clone().map(WeightsSource::Dir);
+    // Never downgrade a Sequential policy selected by the candle A14B route.
+    spec.offload_policy = input.offload_policy;
+    // Named model components (epic 13657). Video providers advertise no `required_components`, so
+    // the map is empty by default. Three OPTIONAL components ride it:
+    //
+    // * LTX-2.3's `uncensored_enhancer` (sc-2845 / sc-13664): when a `useUncensoredEnhancer` job
+    //   resolved the amoral 4-bit Gemma snapshot, stage it here so the provider loads it on demand
+    //   instead of the deleted `$LTX_UNCENSORED_GEMMA_DIR` / HF-cache scan.
+    // * MiniMax-H3's tiered DiT (`"transformer"`, sc-19508): its quantized partitions live in a
+    //   different repo from its shared components, and `weights` can only name one root.
+    // * MiniMax-H3's per-tier PACKED text encoder (`"text_encoder"`, sc-19120 / sc-19506): the
+    //   packed conditioner ships beside the DiT tiers in `SceneWorks/minimax-h3-mlx`, while the
+    //   dense bf16 one comes from upstream, so it is the same different-repo problem the DiT
+    //   has. Absent ⇒ `mlx-gen-minimax-h3` falls back to `<weights>/text_encoder`, the dense
+    //   upstream copy. It does NOT read `LoadSpec::text_encoder` — that field has zero hits in
+    //   the whole engine crate, so staging there would resolve nothing and hard-error inside
+    //   the engine at the `config.json` probe.
+    //
+    // All absent ⇒ empty map, the video load path unchanged. They are collected rather than
+    // branched so adding a fourth cannot silently drop one.
+    spec.components = [
+        input
+            .uncensored_enhancer_dir
+            .clone()
+            .map(|dir| ("uncensored_enhancer".to_owned(), WeightsSource::Dir(dir))),
+        input
+            .dit_component_dir
+            .clone()
+            .map(|dir| ("transformer".to_owned(), WeightsSource::Dir(dir))),
+        input
+            .text_encoder_component_dir
+            .clone()
+            .map(|dir| ("text_encoder".to_owned(), WeightsSource::Dir(dir))),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<BTreeMap<_, _>>();
+    spec
+}
+
+/// Whether the resolved provider input is inside the promoted SC-18810 calibration surface.
+/// This check runs before the live-budget probe and before contract selection, so unsupported
+/// I2V/keyframe/clip, overlay, enhancer, no-audio, and out-of-envelope FPS requests keep the
+/// historical direct-generate path instead of reaching provider safety with invented coverage.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn calibrated_video_memory_surface(input: &VideoGenInput, mode: &str) -> bool {
+    mode == "text_to_video"
+        && input.conditioning.is_empty()
+        && input.adapters.is_empty()
+        && !input.enhance_prompt
+        && !input.use_uncensored_enhancer
+        && input.uncensored_enhancer_dir.is_none()
+        && input.video_mode.is_none()
+        && (24..=30).contains(&input.fps)
+}
+
+/// Apply the admission result at the single loaded-video handoff. Keeping the provider knobs and
+/// lifecycle context in one operation makes it impossible for the generation request to carry an
+/// optimized rung while silently bypassing its safety/begin/configure/finish contract.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn apply_video_admission_outcome(
+    input: &mut VideoGenInput,
+    outcome: crate::video_admission::VideoAdmissionOutcome,
+) -> WorkerResult<()> {
+    if let Some(refusal) = outcome.refusal {
+        return Err(WorkerError::InvalidPayload(refusal));
     }
+    input.memory = outcome.memory;
+    input.memory_context = outcome.context;
+    Ok(())
 }
 
 /// Run one generation to a [`DecodedVideo`] (RGB8 frames + fps + optional audio) against an already
@@ -1496,7 +1530,8 @@ pub(super) fn run_loaded_video_generation(
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<DecodedVideo> {
-    let req = GenerationRequest {
+    let memory_context = input.memory_context;
+    let mut req = GenerationRequest {
         prompt: input.prompt,
         negative_prompt: input.negative_prompt,
         width: input.width,
@@ -1524,12 +1559,19 @@ pub(super) fn run_loaded_video_generation(
         decode_chunk_size: input.decode_chunk_size,
         conditioning_fps: input.conditioning_fps,
         softness: input.softness,
+        // The video memory gate's selection (sc-18814). `None` — every route the gate does not
+        // decide, plus a selected resident rung — leaves the provider's own defaults in place.
+        memory: input.memory,
         cancel: cancel.clone(),
         ..Default::default()
     };
-    let output = generator
-        .generate(&req, on_progress)
-        .map_err(|error| crate::classify_engine_error("video generation failed", error))?;
+    let output = crate::memory_strategy::generate_with_scope(
+        generator,
+        &mut req,
+        memory_context.as_ref(),
+        on_progress,
+    )
+    .map_err(|error| crate::classify_engine_error("video generation failed", error))?;
     match output {
         GenerationOutput::Video { frames, fps, audio } => Ok(DecodedVideo {
             frames: frames
@@ -1889,6 +1931,43 @@ pub(super) async fn generate_video_using(
             input.scheduler_shift = raw_shift;
         }
     }
+    // The video memory gate (sc-18814, epic 18803). Resolved here — the ONE funnel every video
+    // family on both lanes passes through — so no per-family edit is needed and neither lane can
+    // silently miss it. The budget probe is async on the candle lane, so it happens before the
+    // blocking task is spawned; the selection itself runs inside `run`, where the loaded
+    // generator (and therefore the provider's memory contract) is in scope. That is the same
+    // position the image lane calls `mlx_fit_gate::evaluate_request` from: after the load, before
+    // `generate`.
+    // The catalog model id, read straight off the payload rather than by re-parsing the whole
+    // request into a throwaway `VideoRequest` (F-118, the same reason `advanced` arrives by
+    // reference). Read through the SAME function `VideoRequest::from_payload` resolves `model`
+    // with, so the two cannot diverge: a bare `.unwrap_or("ltx_2_3")` kept a present-but-empty
+    // `model` as `""` while the parse resolved it to `ltx_2_3`, and the two ids grade different
+    // families through `video_admission_surface`.
+    let admission_model_id = sceneworks_core::video_request::payload_model_id(&job.payload);
+    // The fitted-curve identity uses the catalog family, not the provider descriptor's internal
+    // family. Resolve it exactly like the asset path's `resolve_family`, without re-parsing the
+    // entire payload into another `VideoRequest` merely for this admission-only key.
+    let admission_manifest_entry = job
+        .payload
+        .get("modelManifestEntry")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let admission_model_family =
+        super::resolve_catalog_video_family(&admission_model_id, &admission_manifest_entry);
+    // Bind fitted curves to the same request mode `VideoRequest::from_payload` resolves. The
+    // promoted LTX curve is T2V; every other mode falls back until its own curve exists.
+    let admission_mode = sceneworks_core::video_request::payload_video_mode(&job.payload);
+    // Curve currency is the provider's live packaged compile closure, independent of whether an
+    // exact per-cell calibration binding exists in the manifest (sc-19020). An undeclared provider
+    // keeps the established sentinel and therefore cannot match a closure-bound fitted curve.
+    let admission_closure_digest = sceneworks_core::memory_calibration::packaged_closure_digest(
+        crate::video_admission::LANE.as_key(),
+        input.engine_id,
+    )
+    .unwrap_or_else(|| crate::mlx_fit_gate::UNCALIBRATED_CLOSURE.to_owned());
+
     let cancel = CancelFlag::new();
     let stall_timeout = video_stall_timeout();
     let log_engine_id = input.engine_id;
@@ -1917,10 +1996,103 @@ pub(super) async fn generate_video_using(
                 e.i2v,
             )
         });
+        // The admission tier/headroom read the model DIRECTORY (`spec_component_bytes` sums the
+        // snapshot's safetensors and asks the registry for a footprint), so they are filesystem
+        // work and must not run on a reactor thread. The clone is cheap (`LoadSpec` is `Clone`;
+        // `spec` itself moves into the loader) and lets both derivations happen inside `run`, which
+        // executes on the generator cache thread — the same position the image lane derives its
+        // own from, inside the blocking closure.
+        let admission_spec = spec.clone();
+        let admission_geometry = (
+            input.width,
+            input.height,
+            input.frames,
+            input.decode_chunk_size,
+        );
         tokio::spawn(async move {
             #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
             let cold_load_cancel = cancel.clone();
-            let run = move |generator: &dyn Generator| {
+            let run = move |generator: &dyn Generator,
+                            cache_state: gen_core::MemoryCacheState,
+                            loaded_policy: crate::generator_cache::ExecutionPolicy,
+                            warm_policy: crate::execution_planner::WarmPolicyProposal,
+                            _external_committed_bytes: u64,
+                            provider_resident_bytes: u64| {
+                // The video lane has no request-scoped memory block for a policy switch to act
+                // through; admission below keeps using the LOADED policy. Decline truthfully.
+                warm_policy.decline(
+                    crate::execution_planner::ServedAsIsReason::RouteHasNoRequestScopedMemory,
+                );
+                let load_policy = loaded_policy.offload_policy;
+                let mut input = input;
+                let admission_tier =
+                    crate::mlx_fit_gate::resolved_video_numeric_tier(engine_id, &admission_spec)?;
+                let spec_headroom_bytes =
+                    crate::mlx_fit_gate::spec_headroom_bytes(engine_id, &admission_spec);
+                let reference_count = u32::try_from(input.conditioning.len()).unwrap_or(u32::MAX);
+                let mut overlays = Vec::new();
+                if !input.adapters.is_empty() {
+                    overlays.push(format!("adapters:{}", input.adapters.len()));
+                }
+                if input.enhance_prompt
+                    || input.use_uncensored_enhancer
+                    || input.uncensored_enhancer_dir.is_some()
+                {
+                    overlays.push("enhancer".to_owned());
+                }
+                let admission_overlay = (!overlays.is_empty()).then(|| overlays.join("+"));
+                let exact_promoted_surface =
+                    calibrated_video_memory_surface(&input, &admission_mode);
+                // No contract means no declared lifecycle/selection seam. Preserve direct
+                // generation without even asking for a live budget; a budget-probe failure must
+                // not turn contract absence into a new refusal.
+                let admission_runtime =
+                    if exact_promoted_surface && generator.memory_strategy_contract().is_some() {
+                        crate::video_admission::live_video_runtime_state(
+                            engine_id,
+                            cache_state,
+                            load_policy,
+                            provider_resident_bytes,
+                        )?
+                    } else {
+                        None
+                    };
+                let admission_headroom_bytes = match admission_runtime {
+                    Some(runtime) => spec_headroom_bytes
+                        .checked_sub(runtime.budget.reserved_headroom_bytes)
+                        .ok_or_else(|| {
+                            WorkerError::InvalidPayload(format!(
+                                "{engine_id} live memory reserve {} exceeds fallback headroom {}; \
+                                 refusing an inconsistent video budget",
+                                runtime.budget.reserved_headroom_bytes, spec_headroom_bytes,
+                            ))
+                        })?,
+                    // Unsupported surfaces and lanes without a canonical post-load snapshot fail
+                    // open before selection, so this value is observationally inert there.
+                    None => spec_headroom_bytes,
+                };
+                let outcome = crate::video_admission::admit_video_generation(
+                    generator,
+                    crate::video_admission::VideoAdmissionInputs {
+                        model_id: &admission_model_id,
+                        model_family: &admission_model_family,
+                        route: engine_id,
+                        mode: &admission_mode,
+                        reference_count,
+                        overlay: admission_overlay.as_deref(),
+                        lane: crate::video_admission::LANE,
+                        tier: admission_tier,
+                        width: admission_geometry.0,
+                        height: admission_geometry.1,
+                        frames: admission_geometry.2,
+                        decode_chunk_size: admission_geometry.3,
+                        fps: input.fps,
+                        runtime: admission_runtime,
+                        headroom_bytes: admission_headroom_bytes,
+                        expected_closure_digest: &admission_closure_digest,
+                    },
+                );
+                apply_video_admission_outcome(&mut input, outcome)?;
                 let mut on_progress = |progress: Progress| {
                     // A closed channel means the consumer loop returned early (POST failure /
                     // 409); trip the engine flag so the denoise bails instead of running unheard
@@ -1950,13 +2122,30 @@ pub(super) async fn generate_video_using(
                                 crate::classify_engine_error("video load failed", error)
                             })
                         },
-                        run,
+                        // The uncached in-place route loads eagerly under the hardcoded policy and
+                        // has no request-scoped planner seam, so the loaded policy is synthesized
+                        // here and the proposal is inert (the run closure declines it regardless).
+                        move |generator, cache_state, load_policy, external, provider| {
+                            run(
+                                generator,
+                                cache_state,
+                                crate::generator_cache::ExecutionPolicy {
+                                    offload_policy: load_policy,
+                                    load_shape: gen_core::LoadShape::EagerMaterialization,
+                                    load_shape_declaration_result:
+                                        gen_core::LoadShapeDeclarationResult::NotEvaluated,
+                                },
+                                crate::execution_planner::WarmPolicyProposal::inert(engine_id),
+                                external,
+                                provider,
+                            )
+                        },
                     )
                     .await
                 }
                 None => match cold_load_admission {
                     Some(admission) => {
-                        crate::generator_cache::with_cached_generator_using_cold_admission(
+                        crate::generator_cache::with_cached_generator_for_request_using_cold_admission(
                             engine_id,
                             spec,
                             "video load failed",
@@ -1968,7 +2157,7 @@ pub(super) async fn generate_video_using(
                         .await
                     }
                     None => {
-                        crate::generator_cache::with_cached_generator_using(
+                        crate::generator_cache::with_cached_generator_for_request_using(
                             engine_id,
                             spec,
                             "video load failed",
@@ -1982,7 +2171,7 @@ pub(super) async fn generate_video_using(
             #[cfg(not(all(not(target_os = "macos"), feature = "backend-candle")))]
             let result = {
                 let _ = comfyui_load;
-                crate::generator_cache::with_cached_generator_using(
+                crate::generator_cache::with_cached_generator_for_request_using(
                     engine_id,
                     spec,
                     "video load failed",
