@@ -746,6 +746,12 @@ mod tests {
 
     /// **sc-19055: the unreached IMAGE class, enumerated with its blocker named.**
     ///
+    /// Note the direction, which the original name of this test overstated (review finding L2): the
+    /// assertions prove **unreached ⇒ declares no provider contract**, not the converse. Six routes
+    /// reach the selector while declaring no contract, through a named evidence revision or the
+    /// bespoke PuLID override, and those are legitimate — the second assertion below is what bounds
+    /// them to exactly those two routes.
+    ///
     /// Epic 19048 R2 wants every candle image route on the shared selector. This story owns the
     /// third inventory class — the routes that never reach it — and the finding is that the image
     /// half of that class is not a SceneWorks wiring gap at all.
@@ -755,9 +761,9 @@ mod tests {
     /// sc-18456's catch-all arm means an unnamed engine still enters the function. What decides
     /// whether the selector actually grades anything is
     /// `inference_runtime::media().memory_strategy_contract(engine_id, spec)` — and at the pinned
-    /// inference revision only seven candle provider crates publish one (flux, flux2, krea, lens,
-    /// mage, qwen-image, z-image, plus wan on the video side). Every other provider returns `None`
-    /// and the function returns `Ok(None)` before any candidate exists.
+    /// inference revision only eight candle provider crates publish one — flux, flux2, krea, lens,
+    /// mage, qwen-image and z-image on the image side, plus wan on the video side. Every other
+    /// provider returns `None` and the function returns `Ok(None)` before any candidate exists.
     ///
     /// The manifest's `candle.memoryStrategyContract` is the declaration side of that same fact,
     /// and it is what the generated inventory keys `sharedSelector.reached` on. So this test pins
@@ -768,7 +774,7 @@ mod tests {
     /// Why this is a test and not a paragraph: it is the difference between claiming the image half
     /// is blocked upstream and demonstrating it against the artifact sc-19059 has to drive to empty.
     #[test]
-    fn the_unreached_image_class_is_exactly_the_routes_declaring_no_provider_contract() {
+    fn no_unreached_image_route_declares_a_provider_contract() {
         let inventory: Value = serde_json::from_str(INVENTORY).expect("inventory parses");
         let routes = inventory["routes"].as_array().expect("routes");
 

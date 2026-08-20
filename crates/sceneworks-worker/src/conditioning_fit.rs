@@ -95,7 +95,7 @@
 //!   `MemoryProviderContract`, and these lanes have none to give it — that is the premise of this
 //!   whole module (see "Why these lanes cannot use the existing gates"). Reaching the selector here
 //!   is blocked upstream, in the same way and for the same reason as the unreached image class
-//!   `candle_admission_decisions::the_unreached_image_class_is_exactly_the_routes_declaring_no_provider_contract`
+//!   `candle_admission_decisions::no_unreached_image_route_declares_a_provider_contract`
 //!   pins: no provider contract, no candidates. Sharing the composition law is what IS reachable at
 //!   this pin, and it is what makes the eventual selector migration a rewiring rather than a rewrite.
 //!

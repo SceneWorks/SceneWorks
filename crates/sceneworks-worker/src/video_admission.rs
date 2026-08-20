@@ -88,7 +88,15 @@ use crate::memory_strategy::{Budget, Candidate, CandidateBasis, RequestScope, Se
 /// The day a candle video capture arm (sc-19057) lands per-frame-count curves, those become fitted
 /// evidence through the POST-load arm above; this pre-load arm stays the floor, which is the correct
 /// division — a pre-load gate cannot identify a curve cell it has not loaded the provider for.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+///
+/// **Test/doc-only since the sc-19055 review.** [`graded_video_peak_gb`] now delegates wholesale to
+/// `candle_scalar_gate::predicted_peak_gb_for_request` (finding M3) rather than restating its four
+/// steps, so nothing in production calls this. It is kept — under `any(test, doc)`, the same idiom
+/// `krea_control_fit`'s test seams use — because it names the video lane's classification for the
+/// tests that assert it and for the doc-links in `vram_gate` that explain WHY a video row is never a
+/// measured peak. `doc` is in the cfg deliberately: a doc-link to an item excluded from the rustdoc
+/// build is a rustdoc failure, not a missing link.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle", any(test, doc)))]
 pub(crate) fn video_scalar_class(
     manifest_entry: &sceneworks_core::contracts::JsonObject,
     tier_key: &str,
@@ -108,6 +116,20 @@ pub(crate) fn video_scalar_class(
 ///
 /// `None` means the manifest publishes nothing for this tier — no `candle` block, no row, no
 /// `minMemoryGb`. The caller falls back to its own weights floor, exactly as before.
+///
+/// **This DELEGATES to the image lane's reader rather than restating it** (sc-19055 review, M3).
+/// The first draft of this function spelled the same four steps out again — read the row, add the
+/// adapter stack, classify against `vramGbByTier`, grade on the candle lane — which is a second copy
+/// of a prediction law and exactly what epic 19048 R1 forbids and sc-19059's AC1 greps for. Nothing
+/// pinned the two copies equal, so a change to either would have forked the grading silently.
+///
+/// Epic decision 3 does not forbid this. That decision is about ROUTING — a video request must not
+/// be graded by the image lane's *selector* (`candle_memory_strategy::evaluate_shared_image`) — not
+/// about refusing to share a pure arithmetic helper that reads a manifest scalar. This function
+/// already called two `candle_scalar_gate` helpers before the review, so the "importing the image
+/// gate" line had in fact already been crossed; delegating merely stops the arithmetic between them
+/// from being duplicated. The video-lane NAME and doc stay, so the call sites still read as video
+/// admission and the video lane keeps its own entry point.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(crate) fn graded_video_peak_gb(
     manifest_entry: &sceneworks_core::contracts::JsonObject,
@@ -115,18 +137,12 @@ pub(crate) fn graded_video_peak_gb(
     adapter_bytes: u64,
     geometry: MemoryGeometry,
 ) -> Option<f64> {
-    crate::candle_scalar_gate::predicted_peak_gb_with_adapter_bytes(
+    crate::candle_scalar_gate::predicted_peak_gb_for_request(
         manifest_entry,
         tier_key,
         adapter_bytes,
+        geometry,
     )
-    .map(|peak_gb| {
-        crate::estimate_synthesis::graded_scalar_gb(
-            peak_gb,
-            video_scalar_class(manifest_entry, tier_key, geometry),
-            crate::estimate_synthesis::CANDLE_LANE,
-        )
-    })
 }
 
 /// Grade a DERIVED video peak — one computed from an architectural formula rather than read from a

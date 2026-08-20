@@ -2206,7 +2206,11 @@ pub(crate) fn scail2_video_fit_error_with_adapter_bytes(
     let measured_pixels = candle
         .and_then(|value| value.get("vramMeasuredPixels"))
         .and_then(Value::as_u64);
-    let (true, Some(peak_gb), Some(min_memory_gb), Some(MEASURED_PIXELS)) = (
+    // `_peak_gb` is bound for its STRUCTURAL proof only — that `vramGbByTier.bf16` is present,
+    // finite and positive. Its value is no longer read here: since sc-19055 the number this gate
+    // compares comes from `graded_video_peak_gb`, which re-reads the same row through the shared
+    // scalar reader and grades it. Two readers of one key, with the arithmetic in exactly one.
+    let (true, Some(_peak_gb), Some(min_memory_gb), Some(MEASURED_PIXELS)) = (
         measured == Some(true),
         peak_gb,
         min_memory_gb,
@@ -2219,33 +2223,47 @@ pub(crate) fn scail2_video_fit_error_with_adapter_bytes(
                 .to_owned(),
         ));
     };
-    let base_needed_gb = peak_gb + HEADROOM_GB;
-    if (min_memory_gb as f64) + f64::EPSILON < base_needed_gb.ceil() {
-        return Some(WorkerError::InvalidPayload(format!(
-            "SCAIL-2 Candle admission is unavailable because catalog minMemoryGb={min_memory_gb} \
-             is below the measured bf16 CUDA peak plus reserve (~{} GB). Refusing to load the \
-             47.2 GB shared package; update SceneWorks before retrying.",
-            base_needed_gb.ceil() as u64,
-        )));
-    }
     // sc-19055: the mechanism grades the row for THIS geometry. `graded_video_peak_gb` re-reads the
     // same `vramGbByTier.bf16` row through the shared scalar reader, so the raw quantity is
-    // unchanged.
+    // unchanged; the grade is the estimate-margin widening a declared floor earns.
     //
-    // `expect` rather than a fallback, deliberately. The structural clauses above have already
-    // proven `vramGbByTier.bf16` is present, finite and positive, and `predicted_peak_gb` reads that
-    // exact row — so `None` here is not a recoverable state but a contradiction between two readers
-    // of one key. An `unwrap_or(base_needed_gb + …)` would paper over it by silently returning the
-    // UNGRADED number, which is the LESS conservative of the two and precisely the value this story
-    // exists to stop comparing. This route already refuses outright on every other incomplete-row
-    // condition; a panic on a self-inconsistent read is consistent with that fail-closed posture.
-    let needed_gb = crate::video_admission::graded_video_peak_gb(
+    // A TYPED refusal, not an `expect` (sc-19055 review, L1). The structural clauses above have
+    // already proven `vramGbByTier.bf16` is present, finite and positive, so `None` here is a
+    // contradiction between two readers of one key rather than a recoverable state — but this call
+    // sits on a path captured into the generator-cache cold-load closure, where a panic poisons the
+    // cache thread rather than failing one request. Every other incomplete-row condition on this
+    // route returns `WorkerError::InvalidPayload`; an unreachable branch is not a reason to be the
+    // one that aborts. What it must NOT do is fall back to the ungraded number: that is the less
+    // conservative of the two and precisely the value this story exists to stop comparing.
+    let Some(needed_gb) = crate::video_admission::graded_video_peak_gb(
         manifest_entry,
         "bf16",
         adapter_bytes,
         geometry,
-    )
-    .expect("the structural clauses above proved vramGbByTier.bf16 is present and positive");
+    ) else {
+        return Some(WorkerError::InvalidPayload(
+            "SCAIL-2 Candle admission is unavailable because the catalog's measured bf16 CUDA row \
+             could not be graded for this request, although the same row read as complete moments \
+             earlier. Refusing to load the 47.2 GB shared package; update SceneWorks before \
+             retrying."
+                .to_owned(),
+        ));
+    };
+    // The advertised floor must not sit below what this gate will actually DEMAND (sc-19055 review,
+    // M2). Before this story the clause compared `minMemoryGb` against the UNGRADED
+    // `peak + HEADROOM_GB`, which passed at the shipped `minMemoryGb: 105` and then let admission
+    // demand the graded 108.28 — a 3.28 GB desync, so a machine provisioned to the catalog's own
+    // stated minimum was refused by a message naming 109. Comparing the same quantity admission
+    // compares keeps the two from drifting apart again by construction; `minMemoryGb` was raised to
+    // 109 in the same change so the clause still passes for the shipped row.
+    if (min_memory_gb as f64) + f64::EPSILON < needed_gb.ceil() {
+        return Some(WorkerError::InvalidPayload(format!(
+            "SCAIL-2 Candle admission is unavailable because catalog minMemoryGb={min_memory_gb} \
+             is below the measured bf16 CUDA peak plus reserve (~{} GB). Refusing to load the \
+             47.2 GB shared package; update SceneWorks before retrying.",
+            needed_gb.ceil() as u64,
+        )));
+    }
     let Some(budget) = budget else {
         return Some(WorkerError::InvalidPayload(
             "SCAIL-2 Candle admission could not read free GPU VRAM from nvidia-smi. Refusing to \
@@ -5875,9 +5893,13 @@ mod tests {
 
     #[test]
     fn scail2_requires_a_measured_bf16_row_and_splits_low_from_high_cards() {
+        // Mirrors the shipped `scail2_14b` candle block. `minMemoryGb` is 109, not the pre-sc-19055
+        // 105: the catalog's advertised floor tracks what admission actually demands, and the
+        // structural clause now compares the SAME graded quantity (review finding M2), so a 105
+        // here would trip that clause instead of reaching the admission boundary under test.
         let entry = obj(json!({
             "candle": {
-                "minMemoryGb": 105,
+                "minMemoryGb": 109,
                 "vramGbByTier": { "bf16": 102.115 },
                 "vramMeasuredPixels": 399360,
                 "measured": true
@@ -5991,20 +6013,35 @@ mod tests {
             assert!(message.contains("Refusing to load"), "{message}");
         }
 
-        let under_floor = obj(json!({
-            "candle": {
-                "minMemoryGb": 104,
-                "measured": true,
-                "vramGbByTier": { "bf16": 102.115 },
-                "vramMeasuredPixels": 399360
-            }
-        }));
-        let message = scail2_video_fit_error(&under_floor, scail2_geometry(), "0", None)
-            .expect("a floor below measured peak + reserve must refuse before probing the GPU")
-            .to_string();
-        assert!(message.contains("minMemoryGb=104"), "{message}");
-        assert!(message.contains("~105 GB"), "{message}");
-        assert!(message.contains("Refusing to load"), "{message}");
+        // An advertised floor below what admission DEMANDS refuses before probing the GPU. Since
+        // sc-19055 the demand is the graded 108.28 (ceil 109), and this clause compares that same
+        // number rather than the ungraded 105 it used to — which is what stops the catalog's stated
+        // minimum and the gate's demand from silently desyncing (review finding M2). The shipped
+        // `minMemoryGb` moved 105 -> 109 in the same change, so 105 is now genuinely under-floor and
+        // is asserted as such below.
+        for (advertised, entry) in [104_u64, 105].map(|advertised| {
+            (
+                advertised,
+                obj(json!({
+                    "candle": {
+                        "minMemoryGb": advertised,
+                        "measured": true,
+                        "vramGbByTier": { "bf16": 102.115 },
+                        "vramMeasuredPixels": 399360
+                    }
+                })),
+            )
+        }) {
+            let message = scail2_video_fit_error(&entry, scail2_geometry(), "0", None)
+                .expect("a floor below the graded demand must refuse before probing the GPU")
+                .to_string();
+            assert!(
+                message.contains(&format!("minMemoryGb={advertised}")),
+                "{message}"
+            );
+            assert!(message.contains("~109 GB"), "{message}");
+            assert!(message.contains("Refusing to load"), "{message}");
+        }
     }
 
     /// The 5B's FORMER RESIDENT candle block (q4 46.1 / q8 48.7 / bf16 54.0), as sc-12402/sc-12631 shipped
