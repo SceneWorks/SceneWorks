@@ -74,8 +74,9 @@
       }
     },
     "catalogRecord": {
-      "type": "object", "required": ["checkpointId", "plan", "summary"], "additionalProperties": false,
+      "type": "object", "required": ["schemaVersion", "checkpointId", "plan", "summary"], "additionalProperties": false,
       "properties": {
+        "schemaVersion": { "const": 1 },
         "checkpointId": { "$ref": "#/$defs/nonBlankText" },
         "plan": { "$ref": "#/$defs/planReference" }, "summary": { "$ref": "#/$defs/planSummary" }
       }

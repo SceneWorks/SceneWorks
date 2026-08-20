@@ -5,11 +5,16 @@
 //! separate atomically published document, so catalog records never duplicate
 //! individual layer locations.
 
-use std::{collections::BTreeSet, fmt, marker::PhantomData};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    marker::PhantomData,
+};
 
 use serde::{
     de::{value::StringDeserializer, DeserializeOwned, Error as _, MapAccess, SeqAccess, Visitor},
-    Deserialize, Deserializer, Serialize,
+    ser::SerializeStruct,
+    Deserialize, Deserializer, Serialize, Serializer,
 };
 use serde_json::Number;
 use sha2::{Digest, Sha256};
@@ -63,31 +68,177 @@ enum RawJsonValue {
 }
 
 impl RawJsonValue {
-    fn envelope_version(&self) -> Result<u32, CheckpointImportContractError> {
+    fn envelope_version(&self) -> Result<u32, VersionDiagnostic> {
         let Self::Object(fields) = self else {
-            return Err(invalid("checkpoint-import schemaVersion must be a u32"));
+            return Err(VersionDiagnostic::Invalid);
         };
-        let mut version = None;
-        for (key, value) in fields {
-            if key != "schemaVersion" {
-                continue;
-            }
-            if version.is_some() {
-                return Err(invalid(
-                    "checkpoint-import JSON contains duplicate object key `schemaVersion`",
-                ));
-            }
-            let Some(value) = match value {
-                Self::Number(number) => number.as_u64(),
-                _ => None,
-            }
-            .and_then(|value| u32::try_from(value).ok()) else {
-                return Err(invalid("checkpoint-import schemaVersion must be a u32"));
-            };
-            version = Some(value);
+        let versions: Vec<_> = fields
+            .iter()
+            .filter_map(|(key, value)| (key == "schemaVersion").then_some(value))
+            .collect();
+        if versions.len() > 1 {
+            return Err(VersionDiagnostic::Duplicate);
         }
-        version.ok_or_else(|| invalid("checkpoint-import schemaVersion must be a u32"))
+        let Some(Self::Number(number)) = versions.first().copied() else {
+            return Err(VersionDiagnostic::Invalid);
+        };
+        number
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or(VersionDiagnostic::Invalid)
     }
+
+    fn object_values<'a>(&'a self, key: &'a str) -> impl Iterator<Item = &'a Self> {
+        match self {
+            Self::Object(fields) => Some(
+                fields
+                    .iter()
+                    .filter_map(move |(candidate, value)| (candidate == key).then_some(value)),
+            ),
+            _ => None,
+        }
+        .into_iter()
+        .flatten()
+    }
+
+    fn array_values(&self) -> impl Iterator<Item = &Self> {
+        match self {
+            Self::Array(values) => Some(values.iter()),
+            _ => None,
+        }
+        .into_iter()
+        .flatten()
+    }
+
+    fn collect_duplicate_keys(&self, duplicates: &mut BTreeSet<String>) {
+        match self {
+            Self::Array(values) => {
+                for value in values {
+                    value.collect_duplicate_keys(duplicates);
+                }
+            }
+            Self::Object(fields) => {
+                let mut counts = BTreeMap::new();
+                for (key, value) in fields {
+                    *counts.entry(key.as_str()).or_insert(0_u32) += 1;
+                    value.collect_duplicate_keys(duplicates);
+                }
+                duplicates.extend(
+                    counts
+                        .into_iter()
+                        .filter(|(_, count)| *count > 1)
+                        .map(|(key, _)| key.to_owned()),
+                );
+            }
+            Self::Null | Self::Bool(_) | Self::Number(_) | Self::String(_) => {}
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VersionedSurface {
+    CheckpointInventory,
+    SourceLocator,
+    ImportPlan,
+    PlanReference,
+    PlanSummary,
+    CatalogRecord,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum VersionDiagnostic {
+    Duplicate,
+    Unsupported(u32),
+    Invalid,
+}
+
+impl VersionDiagnostic {
+    fn precedence_key(&self) -> (u8, u32) {
+        match self {
+            Self::Duplicate => (0, 0),
+            Self::Unsupported(found) => (1, *found),
+            Self::Invalid => (2, 0),
+        }
+    }
+
+    fn into_contract_error(self) -> CheckpointImportContractError {
+        match self {
+            Self::Duplicate => {
+                invalid("checkpoint-import JSON contains duplicate object key `schemaVersion`")
+            }
+            Self::Unsupported(found) => invalid(format!(
+                "checkpoint-import schema version {found} is unsupported; recompile/rescan required"
+            )),
+            Self::Invalid => invalid("checkpoint-import schemaVersion must be a u32"),
+        }
+    }
+}
+
+fn preflight_versioned_tree(
+    value: &RawJsonValue,
+    surface: VersionedSurface,
+) -> Result<(), VersionDiagnostic> {
+    // The current envelope owns precedence over everything inside it. Once it
+    // selects supported v1, inspect every schema-defined child occurrence and
+    // choose a diagnostic by kind/value rather than input order. Ordinary body
+    // validation is deliberately deferred until the whole version graph passes.
+    let version = value.envelope_version()?;
+    if version != CHECKPOINT_IMPORT_CONTRACT_VERSION {
+        return Err(VersionDiagnostic::Unsupported(version));
+    }
+
+    let mut nested_diagnostics = Vec::new();
+    let mut preflight_child = |child: &RawJsonValue, child_surface: VersionedSurface| {
+        if let Err(diagnostic) = preflight_versioned_tree(child, child_surface) {
+            nested_diagnostics.push(diagnostic);
+        }
+    };
+
+    match surface {
+        VersionedSurface::ImportPlan => {
+            for layers in value.object_values("layers") {
+                for layer in layers.array_values() {
+                    for source in layer.object_values("source") {
+                        preflight_child(source, VersionedSurface::SourceLocator);
+                    }
+                }
+            }
+        }
+        VersionedSurface::CatalogRecord => {
+            for plan in value.object_values("plan") {
+                preflight_child(plan, VersionedSurface::PlanReference);
+            }
+            for summary in value.object_values("summary") {
+                preflight_child(summary, VersionedSurface::PlanSummary);
+            }
+        }
+        VersionedSurface::CheckpointInventory => {
+            for records in value.object_values("records") {
+                for record in records.array_values() {
+                    preflight_child(record, VersionedSurface::CatalogRecord);
+                }
+            }
+        }
+        VersionedSurface::SourceLocator
+        | VersionedSurface::PlanReference
+        | VersionedSurface::PlanSummary => {}
+    }
+
+    nested_diagnostics
+        .into_iter()
+        .min_by_key(VersionDiagnostic::precedence_key)
+        .map_or(Ok(()), Err)
+}
+
+fn reject_duplicate_keys(value: &RawJsonValue) -> Result<(), CheckpointImportContractError> {
+    let mut duplicates = BTreeSet::new();
+    value.collect_duplicate_keys(&mut duplicates);
+    if let Some(key) = duplicates.into_iter().next() {
+        return Err(invalid(format!(
+            "checkpoint-import JSON contains duplicate object key `{key}`"
+        )));
+    }
+    Ok(())
 }
 
 impl<'de> Deserialize<'de> for RawJsonValue {
@@ -273,17 +424,23 @@ impl<'de, E: serde::de::Error> Deserializer<'de> for RawJsonValueDeserializer<E>
     }
 }
 
-/// Reads a lossless version envelope before selecting a v1 body decoder. An
-/// unambiguous future version therefore wins over all v1 body diagnostics, while
-/// duplicate envelope versions are always rejected before selecting any decoder.
-fn deserialize_versioned_v1<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+/// Runs recursive envelope preflight and whole-document duplicate-key rejection
+/// before selecting a v1 body decoder. An unambiguous future version therefore
+/// wins over all diagnostics belonging to that version-specific body, while a
+/// supported graph reaches strict typed decoding only after every key is unique.
+fn deserialize_versioned_v1<'de, D, T>(
+    deserializer: D,
+    surface: VersionedSurface,
+) -> Result<T, D::Error>
 where
     D: Deserializer<'de>,
     T: DeserializeOwned,
 {
     let value = RawJsonValue::deserialize(deserializer)?;
-    let version = value.envelope_version().map_err(D::Error::custom)?;
-    validate_version(version).map_err(D::Error::custom)?;
+    preflight_versioned_tree(&value, surface)
+        .map_err(VersionDiagnostic::into_contract_error)
+        .map_err(D::Error::custom)?;
+    reject_duplicate_keys(&value).map_err(D::Error::custom)?;
     T::deserialize(RawJsonValueDeserializer::<D::Error>::new(value))
 }
 
@@ -375,13 +532,7 @@ impl ManagedProvenanceV1 {
 ///
 /// [`Self::semantic_identity`] deliberately excludes physical ownership and
 /// location; [`Self::source_binding_identity`] includes both.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(
-    tag = "kind",
-    rename_all = "snake_case",
-    rename_all_fields = "camelCase",
-    deny_unknown_fields
-)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SourceLocatorV1 {
     Linked {
         schema_version: u32,
@@ -396,6 +547,44 @@ pub enum SourceLocatorV1 {
         sha256: String,
         provenance: ManagedProvenanceV1,
     },
+}
+
+impl Serialize for SourceLocatorV1 {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.validate().map_err(serde::ser::Error::custom)?;
+        match self {
+            Self::Linked {
+                schema_version,
+                root_id,
+                relative_path,
+                fingerprint,
+            } => {
+                let mut state = serializer.serialize_struct("SourceLocatorV1", 5)?;
+                state.serialize_field("kind", "linked")?;
+                state.serialize_field("schemaVersion", schema_version)?;
+                state.serialize_field("rootId", root_id)?;
+                state.serialize_field("relativePath", relative_path)?;
+                state.serialize_field("fingerprint", fingerprint)?;
+                state.end()
+            }
+            Self::Managed {
+                schema_version,
+                install_id,
+                relative_path,
+                sha256,
+                provenance,
+            } => {
+                let mut state = serializer.serialize_struct("SourceLocatorV1", 6)?;
+                state.serialize_field("kind", "managed")?;
+                state.serialize_field("schemaVersion", schema_version)?;
+                state.serialize_field("installId", install_id)?;
+                state.serialize_field("relativePath", relative_path)?;
+                state.serialize_field("sha256", sha256)?;
+                state.serialize_field("provenance", provenance)?;
+                state.end()
+            }
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -456,6 +645,7 @@ impl<'de> Deserialize<'de> for SourceLocatorV1 {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let locator = Self::from(deserialize_versioned_v1::<_, SourceLocatorV1Wire>(
             deserializer,
+            VersionedSurface::SourceLocator,
         )?);
         locator.validate().map_err(D::Error::custom)?;
         Ok(locator)
@@ -510,19 +700,21 @@ impl SourceLocatorV1 {
     }
 
     /// Locator-independent identity of the source bytes.
-    pub fn semantic_identity(&self) -> String {
-        identity(
+    pub fn semantic_identity(&self) -> Result<String, CheckpointImportContractError> {
+        self.validate()?;
+        Ok(identity(
             LOCATOR_SEMANTIC_DOMAIN,
             &LocatorSemanticV1 {
-                schema_version: CHECKPOINT_IMPORT_CONTRACT_VERSION,
+                schema_version: self.schema_version(),
                 content_digest: self.content_digest(),
             },
-        )
+        ))
     }
 
     /// Identity of the source bytes and its physical owner, path, and provenance.
-    pub fn source_binding_identity(&self) -> String {
-        identity(LOCATOR_BINDING_DOMAIN, self)
+    pub fn source_binding_identity(&self) -> Result<String, CheckpointImportContractError> {
+        self.validate()?;
+        Ok(identity(LOCATOR_BINDING_DOMAIN, self))
     }
 
     pub fn canonical_json(&self) -> Result<String, CheckpointImportContractError> {
@@ -555,6 +747,14 @@ impl SourceLocatorV1 {
                 validate_relative_path(relative_path, "managed relative path")?;
                 validate_sha256(sha256, "managed SHA-256")?;
                 provenance.validate()
+            }
+        }
+    }
+
+    fn schema_version(&self) -> u32 {
+        match self {
+            Self::Linked { schema_version, .. } | Self::Managed { schema_version, .. } => {
+                *schema_version
             }
         }
     }
@@ -616,24 +816,36 @@ impl ImportLayerV1 {
         self.source.validate()
     }
 
-    fn semantic_form(&self) -> SemanticLayerV1<'_> {
-        SemanticLayerV1 {
+    fn semantic_form(&self) -> Result<SemanticLayerV1<'_>, CheckpointImportContractError> {
+        self.validate()?;
+        Ok(SemanticLayerV1 {
             layer_id: &self.layer_id,
             role: &self.role,
             target_path: &self.target_path,
-            source_semantic_identity: self.source.semantic_identity(),
-        }
+            source_semantic_identity: self.source.semantic_identity()?,
+        })
     }
 }
 
 /// The complete, immutable loading plan stored separately from catalog rows.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImportPlanV1 {
     pub schema_version: u32,
     pub plan_id: String,
     pub family: String,
     pub layers: Vec<ImportLayerV1>,
+}
+
+impl Serialize for ImportPlanV1 {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.validate().map_err(serde::ser::Error::custom)?;
+        let mut state = serializer.serialize_struct("ImportPlanV1", 4)?;
+        state.serialize_field("schemaVersion", &self.schema_version)?;
+        state.serialize_field("planId", &self.plan_id)?;
+        state.serialize_field("family", &self.family)?;
+        state.serialize_field("layers", &self.layers)?;
+        state.end()
+    }
 }
 
 #[derive(Deserialize)]
@@ -660,6 +872,7 @@ impl<'de> Deserialize<'de> for ImportPlanV1 {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let plan = Self::from(deserialize_versioned_v1::<_, ImportPlanV1Wire>(
             deserializer,
+            VersionedSurface::ImportPlan,
         )?);
         plan.validate().map_err(D::Error::custom)?;
         Ok(plan)
@@ -694,32 +907,40 @@ impl ImportPlanV1 {
 
     /// Content and logical-routing identity, deliberately excluding all physical
     /// source owners, paths, and managed provenance.
-    pub fn semantic_digest(&self) -> String {
-        identity(PLAN_SEMANTIC_DOMAIN, &self.semantic_form())
+    pub fn semantic_digest(&self) -> Result<String, CheckpointImportContractError> {
+        self.validate()?;
+        Ok(identity(PLAN_SEMANTIC_DOMAIN, &self.semantic_form()?))
     }
 
     /// Identity that also binds each layer's exact physical owner, path, and provenance.
-    pub fn source_binding_identity(&self) -> String {
-        identity(PLAN_BINDING_DOMAIN, &self.canonicalized())
+    pub fn source_binding_identity(&self) -> Result<String, CheckpointImportContractError> {
+        self.validate()?;
+        Ok(identity(PLAN_BINDING_DOMAIN, &self.canonicalized()))
     }
 
-    pub fn plan_reference(&self) -> ImportPlanReferenceV1 {
-        ImportPlanReferenceV1 {
-            schema_version: CHECKPOINT_IMPORT_CONTRACT_VERSION,
+    pub fn plan_reference(&self) -> Result<ImportPlanReferenceV1, CheckpointImportContractError> {
+        self.validate()?;
+        let reference = ImportPlanReferenceV1 {
+            schema_version: self.schema_version,
             plan_id: self.plan_id.clone(),
-            semantic_digest: self.semantic_digest(),
-            source_binding_identity: self.source_binding_identity(),
-        }
+            semantic_digest: self.semantic_digest()?,
+            source_binding_identity: self.source_binding_identity()?,
+        };
+        reference.validate()?;
+        Ok(reference)
     }
 
     pub fn summary(&self) -> Result<ImportPlanSummaryV1, CheckpointImportContractError> {
-        Ok(ImportPlanSummaryV1 {
-            schema_version: CHECKPOINT_IMPORT_CONTRACT_VERSION,
+        self.validate()?;
+        let summary = ImportPlanSummaryV1 {
+            schema_version: self.schema_version,
             family: self.family.clone(),
             layer_count: checked_layer_count(self.layers.len())?,
             layer_roles: self.layers.iter().map(|layer| layer.role.clone()).collect(),
-            semantic_digest: self.semantic_digest(),
-        })
+            semantic_digest: self.semantic_digest()?,
+        };
+        summary.validate()?;
+        Ok(summary)
     }
 
     /// Checked conversion shared by plan publication and callers that preflight
@@ -740,6 +961,7 @@ impl ImportPlanV1 {
         if self.layers.is_empty() {
             return Err(invalid("import plan must contain at least one layer"));
         }
+        checked_layer_count(self.layers.len())?;
         let mut previous = None;
         for layer in &self.layers {
             layer.validate()?;
@@ -753,19 +975,19 @@ impl ImportPlanV1 {
         Ok(())
     }
 
-    fn semantic_form(&self) -> SemanticPlanV1<'_> {
+    fn semantic_form(&self) -> Result<SemanticPlanV1<'_>, CheckpointImportContractError> {
         let mut layers: Vec<_> = self
             .layers
             .iter()
             .map(ImportLayerV1::semantic_form)
-            .collect();
+            .collect::<Result<_, _>>()?;
         layers.sort_by(|left, right| left.layer_id.cmp(right.layer_id));
-        SemanticPlanV1 {
-            schema_version: CHECKPOINT_IMPORT_CONTRACT_VERSION,
+        Ok(SemanticPlanV1 {
+            schema_version: self.schema_version,
             plan_id: &self.plan_id,
             family: &self.family,
             layers,
-        }
+        })
     }
 
     fn canonicalized(&self) -> Self {
@@ -777,13 +999,24 @@ impl ImportPlanV1 {
 }
 
 /// Stable handle to a separately atomically stored [`ImportPlanV1`].
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImportPlanReferenceV1 {
     pub schema_version: u32,
     pub plan_id: String,
     pub semantic_digest: String,
     pub source_binding_identity: String,
+}
+
+impl Serialize for ImportPlanReferenceV1 {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.validate().map_err(serde::ser::Error::custom)?;
+        let mut state = serializer.serialize_struct("ImportPlanReferenceV1", 4)?;
+        state.serialize_field("schemaVersion", &self.schema_version)?;
+        state.serialize_field("planId", &self.plan_id)?;
+        state.serialize_field("semanticDigest", &self.semantic_digest)?;
+        state.serialize_field("sourceBindingIdentity", &self.source_binding_identity)?;
+        state.end()
+    }
 }
 
 /// Short spelling for APIs that conventionally call this a plan reference.
@@ -799,7 +1032,8 @@ impl<'de> Deserialize<'de> for ImportPlanReferenceV1 {
             semantic_digest: String,
             source_binding_identity: String,
         }
-        let wire = deserialize_versioned_v1::<_, Wire>(deserializer)?;
+        let wire =
+            deserialize_versioned_v1::<_, Wire>(deserializer, VersionedSurface::PlanReference)?;
         let reference = Self {
             schema_version: wire.schema_version,
             plan_id: wire.plan_id,
@@ -828,14 +1062,26 @@ impl ImportPlanReferenceV1 {
 }
 
 /// Small catalog-facing projection of a plan; it intentionally contains no layers.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImportPlanSummaryV1 {
     pub schema_version: u32,
     pub family: String,
     pub layer_count: u32,
     pub layer_roles: Vec<String>,
     pub semantic_digest: String,
+}
+
+impl Serialize for ImportPlanSummaryV1 {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.validate().map_err(serde::ser::Error::custom)?;
+        let mut state = serializer.serialize_struct("ImportPlanSummaryV1", 5)?;
+        state.serialize_field("schemaVersion", &self.schema_version)?;
+        state.serialize_field("family", &self.family)?;
+        state.serialize_field("layerCount", &self.layer_count)?;
+        state.serialize_field("layerRoles", &self.layer_roles)?;
+        state.serialize_field("semanticDigest", &self.semantic_digest)?;
+        state.end()
+    }
 }
 
 impl<'de> Deserialize<'de> for ImportPlanSummaryV1 {
@@ -849,7 +1095,8 @@ impl<'de> Deserialize<'de> for ImportPlanSummaryV1 {
             layer_roles: Vec<String>,
             semantic_digest: String,
         }
-        let wire = deserialize_versioned_v1::<_, Wire>(deserializer)?;
+        let wire =
+            deserialize_versioned_v1::<_, Wire>(deserializer, VersionedSurface::PlanSummary)?;
         let summary = Self {
             schema_version: wire.schema_version,
             family: wire.family,
@@ -883,12 +1130,24 @@ impl ImportPlanSummaryV1 {
 }
 
 /// A catalog row with a plan reference and compact projection, never per-layer data.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CheckpointCatalogRecordV1 {
+    pub schema_version: u32,
     pub checkpoint_id: String,
     pub plan: ImportPlanReferenceV1,
     pub summary: ImportPlanSummaryV1,
+}
+
+impl Serialize for CheckpointCatalogRecordV1 {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.validate().map_err(serde::ser::Error::custom)?;
+        let mut state = serializer.serialize_struct("CheckpointCatalogRecordV1", 4)?;
+        state.serialize_field("schemaVersion", &self.schema_version)?;
+        state.serialize_field("checkpointId", &self.checkpoint_id)?;
+        state.serialize_field("plan", &self.plan)?;
+        state.serialize_field("summary", &self.summary)?;
+        state.end()
+    }
 }
 
 impl<'de> Deserialize<'de> for CheckpointCatalogRecordV1 {
@@ -896,12 +1155,15 @@ impl<'de> Deserialize<'de> for CheckpointCatalogRecordV1 {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase", deny_unknown_fields)]
         struct Wire {
+            schema_version: u32,
             checkpoint_id: String,
             plan: ImportPlanReferenceV1,
             summary: ImportPlanSummaryV1,
         }
-        let wire = Wire::deserialize(deserializer)?;
+        let wire =
+            deserialize_versioned_v1::<_, Wire>(deserializer, VersionedSurface::CatalogRecord)?;
         let record = Self {
+            schema_version: wire.schema_version,
             checkpoint_id: wire.checkpoint_id,
             plan: wire.plan,
             summary: wire.summary,
@@ -916,17 +1178,23 @@ impl CheckpointCatalogRecordV1 {
         checkpoint_id: impl Into<String>,
         plan: &ImportPlanV1,
     ) -> Result<Self, CheckpointImportContractError> {
-        Ok(Self {
+        plan.validate()?;
+        let record = Self {
+            schema_version: CHECKPOINT_IMPORT_CONTRACT_VERSION,
             checkpoint_id: checkpoint_id.into(),
-            plan: plan.plan_reference(),
+            plan: plan.plan_reference()?,
             summary: plan.summary()?,
-        })
+        };
+        record.validate()?;
+        record.validate_loaded_plan(plan)?;
+        Ok(record)
     }
     pub fn canonical_json(&self) -> Result<String, CheckpointImportContractError> {
         self.validate()?;
         canonical_json(self)
     }
     pub fn validate(&self) -> Result<(), CheckpointImportContractError> {
+        validate_version(self.schema_version)?;
         validate_nonempty(&self.checkpoint_id, "checkpoint id")?;
         self.plan.validate()?;
         self.summary.validate()?;
@@ -946,7 +1214,7 @@ impl CheckpointCatalogRecordV1 {
     ) -> Result<(), CheckpointImportContractError> {
         self.validate()?;
         loaded_plan.validate()?;
-        let expected_reference = loaded_plan.plan_reference();
+        let expected_reference = loaded_plan.plan_reference()?;
         let expected_summary = loaded_plan.summary()?;
         if self.plan.plan_id != expected_reference.plan_id {
             return Err(invalid(
@@ -988,11 +1256,20 @@ impl CheckpointCatalogRecordV1 {
 }
 
 /// Canonical inventory of catalog records used by discovery and routing.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CheckpointInventoryV1 {
     pub schema_version: u32,
     pub records: Vec<CheckpointCatalogRecordV1>,
+}
+
+impl Serialize for CheckpointInventoryV1 {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.validate().map_err(serde::ser::Error::custom)?;
+        let mut state = serializer.serialize_struct("CheckpointInventoryV1", 2)?;
+        state.serialize_field("schemaVersion", &self.schema_version)?;
+        state.serialize_field("records", &self.records)?;
+        state.end()
+    }
 }
 
 impl<'de> Deserialize<'de> for CheckpointInventoryV1 {
@@ -1003,7 +1280,10 @@ impl<'de> Deserialize<'de> for CheckpointInventoryV1 {
             schema_version: u32,
             records: Vec<CheckpointCatalogRecordV1>,
         }
-        let wire = deserialize_versioned_v1::<_, Wire>(deserializer)?;
+        let wire = deserialize_versioned_v1::<_, Wire>(
+            deserializer,
+            VersionedSurface::CheckpointInventory,
+        )?;
         let inventory = Self {
             schema_version: wire.schema_version,
             records: wire.records,
