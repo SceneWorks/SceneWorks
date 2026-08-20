@@ -443,7 +443,8 @@ impl KreaRuntimeEvidenceContext {
 /// below, both load-bearing:
 ///
 /// 1. Every multi-megabyte `.safetensors` the testkit writes is converted to a SPARSE file right
-///    after its tier is written ([`sparsify_fixture_weights_tail`]): `fsutil sparse setflag` +
+///    after its tier is written (`crate::tests::sparsify_fixture_weights_tail`, the shared
+///    sc-20606 home of this discipline): `fsutil sparse setflag` +
 ///    `setrange` over the never-written tail past the safetensors header deallocates it while the
 ///    logical size — and every byte the header actually stores — stays exactly as written. This is
 ///    the no-`unsafe` route to `FSCTL_SET_SPARSE` (the workspace forbids `unsafe`), and it must be
@@ -505,7 +506,7 @@ fn krea_test_artifact_root(tier: &str) -> std::path::PathBuf {
             .expect("write sparse Krea encoder fixture");
             // Per tier, not once at the end: the transient full allocation (doc comment above) is
             // then bounded by ONE tier's encoder file rather than all three.
-            sparsify_fixture_weights_tail(&tier_root.join("text_encoder"));
+            crate::tests::sparsify_fixture_weights_tail(&tier_root.join("text_encoder"));
             if let Some(bits) = bits {
                 let transformer = tier_root.join("transformer");
                 std::fs::create_dir_all(&transformer).expect("Krea transformer fixture dir");
@@ -527,76 +528,6 @@ fn krea_test_artifact_root(tier: &str) -> std::path::PathBuf {
     );
     fixture.root.join(tier)
 }
-
-/// Deallocate the never-written tail of every sizeable `.safetensors` fixture under `dir` while
-/// preserving its logical length and its written safetensors header — see the Windows disk
-/// discipline note on [`krea_test_artifact_root`]. Best-effort: on failure (non-NTFS temp volume,
-/// missing `fsutil`) the fixture still works, it just costs its full logical size on disk, so say
-/// so rather than failing the test process.
-#[cfg(all(test, windows))]
-fn sparsify_fixture_weights_tail(dir: &std::path::Path) {
-    use std::io::Read as _;
-
-    // The NTFS sparse deallocation granularity; keep the header's final partial unit allocated.
-    const SPARSE_UNIT: u64 = 64 * 1024;
-
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(std::ffi::OsStr::to_str) != Some("safetensors") {
-            continue;
-        }
-        let Ok(mut file) = std::fs::File::open(&path) else {
-            continue;
-        };
-        let mut header_len = [0_u8; 8];
-        if file.read_exact(&mut header_len).is_err() {
-            continue;
-        }
-        let Ok(metadata) = file.metadata() else {
-            continue;
-        };
-        drop(file);
-        // Everything past `8 + header_json_len` is the testkit's `set_len` tail: logically zeros,
-        // never written, and safe to deallocate.
-        let written_end = 8_u64.saturating_add(u64::from_le_bytes(header_len));
-        let keep = written_end.div_ceil(SPARSE_UNIT) * SPARSE_UNIT;
-        let total = metadata.len();
-        if total <= keep {
-            continue;
-        }
-        let fsutil = |args: &[&str]| {
-            std::process::Command::new("fsutil")
-                .args(args)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .is_ok_and(|status| status.success())
-        };
-        let path_text = path.to_string_lossy().into_owned();
-        if !(fsutil(&["sparse", "setflag", &path_text])
-            && fsutil(&[
-                "sparse",
-                "setrange",
-                &path_text,
-                &keep.to_string(),
-                &(total - keep).to_string(),
-            ]))
-        {
-            eprintln!(
-                "krea_test_artifact_root: could not sparsify {}; the fixture keeps its full \
-                 {total}-byte allocation on this filesystem",
-                path.display()
-            );
-        }
-    }
-}
-
-/// Non-Windows: `set_len` past EOF is already sparse on APFS/ext4 — nothing to do.
-#[cfg(all(test, not(windows)))]
-fn sparsify_fixture_weights_tail(_dir: &std::path::Path) {}
 
 #[cfg(test)]
 fn krea_test_load_spec(tier: &str) -> gen_core::LoadSpec {
@@ -5761,15 +5692,12 @@ mod tests {
             .tempdir()
             .expect("temp dir");
         let root = root_guard.path();
-        // A tier ROOT: the components live one level DOWN, under each tier.
+        // A tier ROOT: the components live one level DOWN, under each tier. Sparse: 8 x 5 GB is
+        // 40 GB of logical size that must not become real disk on NTFS (sc-20606).
         for tier in ["q4", "q8"] {
             for component in ["transformer", "transformer_2", "text_encoder", "vae"] {
                 let path = root.join(tier).join(component).join("model.safetensors");
-                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-                std::fs::File::create(&path)
-                    .unwrap()
-                    .set_len(5_000_000_000)
-                    .unwrap();
+                crate::tests::set_sparse_len(&path, 5_000_000_000);
             }
         }
 
