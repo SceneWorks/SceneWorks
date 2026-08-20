@@ -265,7 +265,7 @@ fn future_version_envelopes_win_over_future_shape_errors() {
 
 #[test]
 fn raw_json_rejects_duplicate_keys_for_every_versioned_contract() {
-    macro_rules! assert_duplicate_key {
+    macro_rules! assert_duplicate_schema_version {
         ($contract:ty, $document:expr, $key:literal) => {{
             let document = $document;
             let error = serde_json::from_str::<$contract>(&document)
@@ -277,85 +277,151 @@ fn raw_json_rejects_duplicate_keys_for_every_versioned_contract() {
             );
         }};
     }
+    macro_rules! assert_duplicate_body_field {
+        ($contract:ty, $document:expr) => {{
+            let document = $document;
+            let error = serde_json::from_str::<$contract>(&document)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("duplicate"), "{error}");
+        }};
+    }
 
     // A future version followed by v1 must never be collapsed to v1 by a
     // map-based intermediate decoder.
-    assert_duplicate_key!(
+    assert_duplicate_schema_version!(
         SourceLocatorV1,
         format!(
             r#"{{"kind":"linked","schemaVersion":2,"schemaVersion":1,"rootId":"root","relativePath":"model.safetensors","fingerprint":"{DIGEST}"}}"#
         ),
         "schemaVersion"
     );
-    assert_duplicate_key!(
+    assert_duplicate_schema_version!(
         ImportPlanV1,
         format!(
             r#"{{"schemaVersion":2,"schemaVersion":1,"planId":"plan","family":"family","layers":[{{"layerId":"layer","role":"role","targetPath":"model.safetensors","source":{{"kind":"linked","schemaVersion":1,"rootId":"root","relativePath":"model.safetensors","fingerprint":"{DIGEST}"}}}}]}}"#
         ),
         "schemaVersion"
     );
-    assert_duplicate_key!(
+    assert_duplicate_schema_version!(
         ImportPlanReferenceV1,
         format!(
             r#"{{"schemaVersion":2,"schemaVersion":1,"planId":"plan","semanticDigest":"sha256:{DIGEST}","sourceBindingIdentity":"sha256:{DIGEST}"}}"#
         ),
         "schemaVersion"
     );
-    assert_duplicate_key!(
+    assert_duplicate_schema_version!(
         ImportPlanSummaryV1,
         format!(
             r#"{{"schemaVersion":2,"schemaVersion":1,"family":"family","layerCount":1,"layerRoles":["role"],"semanticDigest":"sha256:{DIGEST}"}}"#
         ),
         "schemaVersion"
     );
-    assert_duplicate_key!(
+    assert_duplicate_schema_version!(
         CheckpointInventoryV1,
         r#"{"schemaVersion":2,"schemaVersion":1,"records":[]}"#,
+        "schemaVersion"
+    );
+    assert_duplicate_schema_version!(
+        CheckpointCatalogRecordV1,
+        format!(
+            r#"{{"checkpointId":"checkpoint","plan":{{"schemaVersion":2,"schemaVersion":1,"planId":"plan","semanticDigest":"sha256:{DIGEST}","sourceBindingIdentity":"sha256:{DIGEST}"}},"summary":{{"schemaVersion":1,"family":"family","layerCount":1,"layerRoles":["role"],"semanticDigest":"sha256:{DIGEST}"}}}}"#
+        ),
+        "schemaVersion"
+    );
+    assert_duplicate_schema_version!(
+        CheckpointInventoryV1,
+        format!(
+            r#"{{"schemaVersion":1,"records":[{{"checkpointId":"checkpoint","plan":{{"schemaVersion":2,"schemaVersion":1,"planId":"plan","semanticDigest":"sha256:{DIGEST}","sourceBindingIdentity":"sha256:{DIGEST}"}},"summary":{{"schemaVersion":1,"family":"family","layerCount":1,"layerRoles":["role"],"semanticDigest":"sha256:{DIGEST}"}}}}]}}"#
+        ),
         "schemaVersion"
     );
 
     // Reject duplicate fields in the v1 body too, including nested versioned
     // values reached through a plan and through an otherwise unversioned record.
-    assert_duplicate_key!(
+    assert_duplicate_body_field!(
         SourceLocatorV1,
         format!(
             r#"{{"kind":"linked","schemaVersion":1,"rootId":"first","rootId":"second","relativePath":"model.safetensors","fingerprint":"{DIGEST}"}}"#
-        ),
-        "rootId"
+        )
     );
-    assert_duplicate_key!(
+    assert_duplicate_body_field!(
         ImportPlanV1,
         format!(
             r#"{{"schemaVersion":1,"planId":"first","planId":"second","family":"family","layers":[{{"layerId":"layer","role":"role","targetPath":"model.safetensors","source":{{"kind":"linked","schemaVersion":1,"rootId":"root","relativePath":"model.safetensors","fingerprint":"{DIGEST}"}}}}]}}"#
-        ),
-        "planId"
+        )
     );
-    assert_duplicate_key!(
+    assert_duplicate_body_field!(
         ImportPlanReferenceV1,
         format!(
             r#"{{"schemaVersion":1,"planId":"first","planId":"second","semanticDigest":"sha256:{DIGEST}","sourceBindingIdentity":"sha256:{DIGEST}"}}"#
-        ),
-        "planId"
+        )
     );
-    assert_duplicate_key!(
+    assert_duplicate_body_field!(
         ImportPlanSummaryV1,
         format!(
             r#"{{"schemaVersion":1,"family":"first","family":"second","layerCount":1,"layerRoles":["role"],"semanticDigest":"sha256:{DIGEST}"}}"#
-        ),
-        "family"
+        )
     );
-    assert_duplicate_key!(
+    assert_duplicate_body_field!(
         CheckpointInventoryV1,
-        r#"{"schemaVersion":1,"records":[],"records":[]}"#,
-        "records"
+        r#"{"schemaVersion":1,"records":[],"records":[]}"#
     );
 
-    assert_duplicate_key!(
+    assert_duplicate_body_field!(
         CheckpointCatalogRecordV1,
         format!(
             r#"{{"checkpointId":"checkpoint","plan":{{"schemaVersion":1,"planId":"first","planId":"second","semanticDigest":"sha256:{DIGEST}","sourceBindingIdentity":"sha256:{DIGEST}"}},"summary":{{"schemaVersion":1,"family":"family","layerCount":1,"layerRoles":["role"],"semanticDigest":"sha256:{DIGEST}"}}}}"#
-        ),
-        "planId"
+        )
+    );
+}
+
+#[test]
+fn future_versions_precede_duplicate_body_diagnostics() {
+    macro_rules! assert_recompile_rescan_required {
+        ($contract:ty, $document:expr) => {{
+            let document = $document;
+            let error = serde_json::from_str::<$contract>(&document)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("recompile/rescan required"), "{error}");
+        }};
+    }
+
+    assert_recompile_rescan_required!(
+        SourceLocatorV1,
+        format!(r#"{{"kind":"future","schemaVersion":2,"rootId":"first","rootId":"second"}}"#)
+    );
+    assert_recompile_rescan_required!(
+        ImportPlanV1,
+        r#"{"schemaVersion":2,"planId":"first","planId":"second","futurePlanField":true}"#
+    );
+    assert_recompile_rescan_required!(
+        ImportPlanReferenceV1,
+        r#"{"schemaVersion":2,"planId":"first","planId":"second","futureReferenceField":true}"#
+    );
+    assert_recompile_rescan_required!(
+        ImportPlanSummaryV1,
+        r#"{"schemaVersion":2,"family":"first","family":"second","futureSummaryField":true}"#
+    );
+    assert_recompile_rescan_required!(
+        CheckpointInventoryV1,
+        r#"{"schemaVersion":2,"records":[],"records":[],"futureInventoryField":true}"#
+    );
+
+    // The v1 outer document must stream each nested value losslessly, so its
+    // nested future version gets the same precedence over its duplicate body.
+    assert_recompile_rescan_required!(
+        ImportPlanV1,
+        r#"{"schemaVersion":1,"planId":"plan","family":"family","layers":[{"layerId":"layer","role":"role","targetPath":"model.safetensors","source":{"kind":"future","schemaVersion":2,"rootId":"first","rootId":"second"}}]}"#
+    );
+    assert_recompile_rescan_required!(
+        CheckpointCatalogRecordV1,
+        r#"{"checkpointId":"checkpoint","plan":{"schemaVersion":2,"planId":"first","planId":"second","futureReferenceField":true},"summary":{"schemaVersion":1,"family":"family","layerCount":1,"layerRoles":["role"],"semanticDigest":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}"#
+    );
+    assert_recompile_rescan_required!(
+        CheckpointInventoryV1,
+        r#"{"schemaVersion":1,"records":[{"checkpointId":"checkpoint","plan":{"schemaVersion":2,"planId":"first","planId":"second","futureReferenceField":true},"summary":{"schemaVersion":1,"family":"family","layerCount":1,"layerRoles":["role"],"semanticDigest":"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}]}"#
     );
 }
 
