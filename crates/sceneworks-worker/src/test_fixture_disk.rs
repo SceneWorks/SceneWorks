@@ -198,8 +198,24 @@ pub(crate) fn process_keyed_prefix(family_prefix: &str) -> String {
 ///
 /// `%TEMP%` on the build box is shared by many concurrent `cargo test` processes across several
 /// worktrees, so a sweep that guessed wrong would delete a running test's fixture out from under
-/// it. Three independent conditions must ALL hold before anything is removed, and each one alone
-/// is enough to exclude every live directory — see [`is_stale_fixture`].
+/// it. Three conditions must ALL hold before anything is removed, but they are NOT
+/// interchangeable: each excludes a different population, and only ONE of them stands between this
+/// sweep and a concurrent run of this same fixture family.
+///
+/// * The **age cutoff** is that one. A concurrent `cargo test` of this crate builds its fixture
+///   under the SAME family prefix and a DIFFERENT pid, so it satisfies both other conditions —
+///   being minutes old is the only thing that keeps it. This was observed live:
+///   `sceneworks-krea-memfix-foMx94` from another agent's run appeared in `%TEMP%` while this
+///   change was under review.
+/// * **Prefix scoping** excludes unrelated tools' temp state (another crate's fixtures,
+///   `tempfile`'s default `.tmp*` names, an editor's scratch dir). It does NOT exclude concurrent
+///   runs of this family, which share the prefix by construction.
+/// * The **PID tag** excludes this process's own directory, and nothing else. A concurrent run
+///   carries a different pid and is not excluded by it.
+///
+/// So [`STALE_FIXTURE_AGE`] carries the concurrency guarantee alone. Shortening it does not leave
+/// two other guards in place — it removes the only protection a concurrent run has. See
+/// [`is_stale_fixture`].
 pub(crate) fn sweep_stale_fixtures(family_prefix: &str) {
     // The one deliberate `temp_dir()` call in this crate's fixtures (allow-listed in
     // `tests/temp_fixture_guard.rs`): the directories being collected are, by definition, ones no
@@ -224,19 +240,22 @@ pub(crate) fn sweep_stale_fixtures(family_prefix: &str) {
 
 /// The whole sweep decision, as a pure function so it can be asserted directly.
 ///
-/// Every one of these is load-bearing for concurrency safety:
+/// Each condition excludes a DIFFERENT population — they do not back each other up; see the
+/// decomposition on [`sweep_stale_fixtures`] before changing any of them:
 ///
 /// * **prefix scoping** — only directories this fixture family created are candidates. Unrelated
 ///   temp state (another crate's fixtures, `tempfile`'s default `.tmp*` names, an editor's scratch
-///   dir) never matches, so a mis-typed family can only make the sweep do nothing.
+///   dir) never matches, so a mis-typed family can only make the sweep do nothing. Concurrent runs
+///   of THIS family share the prefix and are not excluded here.
 /// * **age cutoff** — a candidate must be at least [`STALE_FIXTURE_AGE`] old. A directory a
-///   concurrent process created is minutes old at most, so it can never qualify; this is the
-///   condition that actually protects other runs, and it holds even for a process whose PID this
-///   one cannot see.
+///   concurrent process created is minutes old at most, so it can never qualify. This is the only
+///   condition that protects a concurrent run of this family, and it holds even for a process
+///   whose PID this one cannot see.
 /// * **PID attribution** — a directory tagged with our own PID is ours and is excluded outright,
-///   so re-entering initialization can never delete the fixture it is building. A directory with no
-///   PID tag, or an unparseable one, is treated as another process's and stays subject to the age
-///   cutoff.
+///   so re-entering initialization can never delete the fixture it is building. That is its whole
+///   job: a concurrent run has a different PID and is left to the age cutoff. A directory with no
+///   PID tag, or an unparseable one, is treated as another process's and likewise stays subject to
+///   the age cutoff.
 ///
 /// An unreadable or future-dated mtime fails CLOSED (keep the directory): the cost of keeping a
 /// dead fixture one more day is disk, the cost of deleting a live one is a broken test run.
