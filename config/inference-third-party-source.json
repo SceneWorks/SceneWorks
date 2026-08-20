@@ -1,7 +1,7 @@
 {
-  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory. Pin 2dc9f916 moves from 6f47e670 through the current inference feature merge, including SC-17218 Boogu preview support plus already-landed MiniMax H3 and Candle CUDA-architecture diagnostic work. The exact scanner finds 649 provenance candidates and 96 production-Rust crate prefixes. Nineteen paths were added and none removed: ten Candle and seven MLX MiniMax-H3 architecture-port files, plus candle-gen/build.rs and candle-gen/src/cuda_arch.rs for the first-party CUDA architecture diagnostic. No existing path changed its normalized marker or disposition; every other row differs only in git_blob_sha1, which is not a licensing signal. The two new MiniMax-H3 crate prefixes are classified as architecture reimplementations under the linked inference registry's MiniMax H3 Community License and Apache-2.0 Qwen3-VL component terms. The existing candle-gen architecture area now covers its crate-root build script as well as src/. No LICENSE file, production include_str!/include_bytes! site, artifact disclosure, or other crate-prefix classification changed.",
-  "inferenceRevision": "2dc9f9166a1ed7ae4cb6f4db8ae1284ce1122cc1",
-  "auditDigest": "0c9bd301030e3c753eb83e42243297dd8aafba7e653664d8e46799dde74de4ac",
+  "_comment": "Exact audit of production include_str!/include_bytes! sites and known hand-ports in the pinned inference revision. The digest is checked by check-license-coverage.mjs; any inference pin change forces a new audit. Tests/fixtures are outside this production inventory. Pin a829226b advances inference main through the merged SC-17181 MLX SDXL/Kolors preview correction and the intervening MiniMax-H3 integration. The exact scanner finds 649 provenance candidates and 96 production-Rust crate prefixes. Nineteen paths were added: seventeen MiniMax-H3 implementation files across the Candle and MLX crates, plus candle-gen/build.rs and candle-gen/src/cuda_arch.rs. No path was removed, no normalized marker or source-area assignment changed, and 35 existing rows differ only in git_blob_sha1, which is not a licensing signal. The two new MiniMax-H3 crate prefixes and eighteen ported-source candidates are not yet classified; under the sc-19751 report-only policy, check-license-coverage.mjs records those 20 compliance worklist items and exits successfully. No LICENSE file or production include_str!/include_bytes! site changed.",
+  "inferenceRevision": "56e4c32d8b966536f60dcd0a7920c166938faef3",
+  "auditDigest": "bc79db78d3a6048892f74b705a6410498ffd9d2b105da9fbbf381c8bc5f27a1f",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "2dc9f9166a1ed7ae4cb6f4db8ae1284ce1122cc1",
+    "revision": "56e4c32d8b966536f60dcd0a7920c166938faef3",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
     "matchedFiles": 649,
-    "populationSha256": "25291fc002f3f002b18836b896bd75572a6ede5549625b4983ebb463e2efefd6"
+    "populationSha256": "444bb0611373cc4d06c98707081a381e20792eaabf00473c88fd4a7d2f40f2ad"
   },
   "portedSourceAreas": [
     {
@@ -139,7 +139,7 @@
     },
     {
       "id": "architecture:crates/media/candle-gen/candle-gen",
-      "pathPrefix": "crates/media/candle-gen/candle-gen/",
+      "pathPrefix": "crates/media/candle-gen/candle-gen/src/",
       "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
       "disposition": "architecture-reimplementation-existing-terms",
       "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
@@ -259,13 +259,6 @@
       "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
       "disposition": "architecture-reimplementation-existing-terms",
       "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
-    },
-    {
-      "id": "architecture:crates/media/candle-gen/candle-gen-minimax-h3",
-      "pathPrefix": "crates/media/candle-gen/candle-gen-minimax-h3/src/",
-      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
-      "disposition": "architecture-reimplementation-existing-terms",
-      "evidence": "The linked inference license registry maps MiniMax H3 model components to the MiniMax H3 Community License and its byte-identical Qwen3-VL-32B text encoder to Apache-2.0; the candidate inventory pins the exact source blob and normalized provenance markers."
     },
     {
       "id": "architecture:crates/media/candle-gen/candle-gen-mochi",
@@ -499,13 +492,6 @@
       "excludePaths": [
         "crates/media/mlx-gen/mlx-gen-mage/src/latent.rs"
       ]
-    },
-    {
-      "id": "architecture:crates/media/mlx-gen/mlx-gen-minimax-h3",
-      "pathPrefix": "crates/media/mlx-gen/mlx-gen-minimax-h3/src/",
-      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
-      "disposition": "architecture-reimplementation-existing-terms",
-      "evidence": "The linked inference license registry maps MiniMax H3 model components to the MiniMax H3 Community License and its byte-identical Qwen3-VL-32B text encoder to Apache-2.0; the candidate inventory pins the exact source blob and normalized provenance markers."
     },
     {
       "id": "architecture:crates/media/mlx-gen/mlx-gen-mochi",
@@ -844,7 +830,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "2dc9f9166a1ed7ae4cb6f4db8ae1284ce1122cc1",
+    "revision": "56e4c32d8b966536f60dcd0a7920c166938faef3",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 96,
     "cratePopulationSha256": "ab6f0f6f4c71a93339973ba3054d40b651b8db7f96ed219d5d152c3c624c49fc"
