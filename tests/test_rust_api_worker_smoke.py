@@ -24,6 +24,7 @@ from rust_api_harness import (
     enable_api_listening_log,
     SpawnedProcess,
     minimal_safetensors as _minimal_safetensors,
+    spawn_env,
     spawn_process,
     wait_for_health,
 )
@@ -248,7 +249,10 @@ def rust_api(tmp_path):
         "SCENEWORKS_RUST_API_BINARY", "sceneworks-rust-api", "the Rust API smoke test"
     )
 
-    env = os.environ.copy()
+    # `spawn_env`, not the ambient environment: the API resolves the HF cache vars
+    # ahead of SCENEWORKS_DATA_DIR, so an unpinned spawn probes the developer's real
+    # Hugging Face cache for install state instead of this test's temp data dir.
+    env = spawn_env(tmp_path)
     env.update(
         {
             "SCENEWORKS_API_HOST": "127.0.0.1",
@@ -512,7 +516,7 @@ def test_rust_worker_claims_and_completes_lora_import_against_rust_api_binary(ru
     source = tmp_path / "data" / "loras" / "tiny.safetensors"
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_bytes(_minimal_safetensors())
-    env = os.environ.copy()
+    env = spawn_env(tmp_path)
     env.update(
         {
             "SCENEWORKS_API_URL": rust_api,
@@ -563,7 +567,7 @@ def test_rust_worker_completes_ffmpeg_frame_and_timeline_jobs_against_rust_api_b
         "SCENEWORKS_RUST_WORKER_BINARY", "sceneworks-rust-worker", "the Rust worker smoke test"
     )
 
-    env = os.environ.copy()
+    env = spawn_env(tmp_path)
     env.update(
         {
             "SCENEWORKS_API_URL": rust_api,
