@@ -25,15 +25,15 @@
       "mlx": false
     },
     "boogu_image": {
-      "candle": false,
+      "candle": true,
       "mlx": false
     },
     "boogu_image_edit": {
-      "candle": false,
+      "candle": true,
       "mlx": false
     },
     "boogu_image_turbo": {
-      "candle": false,
+      "candle": true,
       "mlx": false
     },
     "chatterbox_tts": {

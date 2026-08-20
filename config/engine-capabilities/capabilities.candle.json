@@ -1,7 +1,7 @@
 {
   "backend": "candle",
   "generatedFrom": {
-    "inferenceRevision": "c6abde8fc5717e34919dba025b307608e84a24c3",
+    "inferenceRevision": "56e4c32d8b966536f60dcd0a7920c166938faef3",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities --no-default-features --features backend-candle"
   },
   "engines": [
@@ -1130,8 +1130,7 @@
       "supportsLokr": true,
       "supportedQuants": [
         "q4",
-        "q8",
-        "nvfp4"
+        "q8"
       ],
       "supportsKvCache": false,
       "supportsSequentialOffload": true,
@@ -1149,8 +1148,7 @@
       "supportsLokr": true,
       "supportedQuants": [
         "q4",
-        "q8",
-        "nvfp4"
+        "q8"
       ],
       "supportsKvCache": false,
       "supportsSequentialOffload": true,
@@ -1168,8 +1166,7 @@
       "supportsLokr": true,
       "supportedQuants": [
         "q4",
-        "q8",
-        "nvfp4"
+        "q8"
       ],
       "supportsKvCache": false,
       "supportsSequentialOffload": true,

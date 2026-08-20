@@ -7,7 +7,7 @@
   ],
   "generatedFrom": {
     "candle": {
-      "inferenceRevision": "a829226bdd81a9a46571bc0abfa2c423f35901fa"
+      "inferenceRevision": "56e4c32d8b966536f60dcd0a7920c166938faef3"
     },
     "mlx": {
       "inferenceRevision": "a829226bdd81a9a46571bc0abfa2c423f35901fa"
@@ -34,15 +34,15 @@
       "mlx": false
     },
     "boogu_image": {
-      "candle": false,
+      "candle": true,
       "mlx": false
     },
     "boogu_image_edit": {
-      "candle": false,
+      "candle": true,
       "mlx": false
     },
     "boogu_image_turbo": {
-      "candle": false,
+      "candle": true,
       "mlx": false
     },
     "chatterbox_tts": {
