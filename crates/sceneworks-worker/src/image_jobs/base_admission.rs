@@ -186,18 +186,37 @@ pub(super) async fn admit_candle_base(
             model = request.model,
         )));
     }
-    let needed = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
+    // sc-19054 (epic 19048 R3): the pre-load gate compares the GRADED prediction — the manifest
+    // scalar presented as the peak only where its measurement covers this request's geometry,
+    // widened by the candle estimate margin where it is only the declared floor. The RAW scalar
+    // (`resident_peak_gb` below) stays what `note_loaded_peak` records: reclaim accounting tracks
+    // expected allocations, not admission ceilings.
+    let request_geometry = gen_core::MemoryGeometry {
+        width: request.width,
+        height: request.height,
+        batch: 1,
+        frames: 1,
+        reference_count: 0,
+    };
+    let needed = crate::vram_gate::predicted_peak_gb_for_request(
         evidence_entry,
         tier,
         adapter_resident_bytes,
+        request_geometry,
     );
-    let resident_peak_gb = needed.expect("a resident tier catalog row predicts a peak");
+    let resident_peak_gb = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
+        evidence_entry,
+        tier,
+        adapter_resident_bytes,
+    )
+    .expect("a resident tier catalog row predicts a peak");
     let sequential_needed = sequential_capable
         .then(|| {
-            crate::vram_gate::predicted_sequential_peak_gb_with_adapter_bytes(
+            crate::vram_gate::predicted_sequential_peak_gb_for_request(
                 evidence_entry,
                 tier,
                 adapter_resident_bytes,
+                request_geometry,
             )
         })
         .flatten();
@@ -230,7 +249,13 @@ pub(super) async fn admit_candle_base(
             Ok(gen_core::OffloadPolicy::Resident)
         }
         LoadPlan::Sequential => {
-            if let Some(peak_gb) = sequential_needed {
+            // The RAW staged working set, not the graded admission ceiling — same accounting
+            // rationale as `resident_peak_gb` above.
+            if let Some(peak_gb) = crate::vram_gate::predicted_sequential_peak_gb_with_adapter_bytes(
+                evidence_entry,
+                tier,
+                adapter_resident_bytes,
+            ) {
                 crate::vram_gate::note_loaded_peak(&settings.gpu_id, peak_gb);
             }
             tracing::info!(

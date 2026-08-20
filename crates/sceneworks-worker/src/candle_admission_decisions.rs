@@ -73,9 +73,10 @@ use std::path::PathBuf;
 use serde_json::{json, Map, Value};
 
 use crate::candle_scalar_gate::{
-    fit_decision, fit_decision_label, load_plan, predicted_peak_gb, predicted_sequential_peak_gb,
-    VramBudget, HEADROOM_GB,
+    fit_decision, fit_decision_label, load_plan, predicted_peak_gb_for_request,
+    predicted_sequential_peak_gb_for_request, scalar_peak_class, VramBudget, HEADROOM_GB,
 };
+use crate::estimate_synthesis::DeclaredScalarClass;
 use crate::fit_gate::resolve_offload;
 
 /// The generated inventory supplies the route UNIVERSE and each route's mechanism classification.
@@ -219,8 +220,13 @@ fn route_gate(
 /// derivation rather than a second declaration of it.
 fn gate_is_geometry_aware(gate: &str) -> bool {
     match gate {
-        // Signature is (&JsonObject, &str) -> Option<f64> plus two scalars; no geometry term exists.
-        "candle_scalar_gate::load_plan" => false,
+        // sc-19054 (epic 19048 R3): the admission peak `load_plan` compares is now computed by
+        // `predicted_peak_gb_for_request(…, geometry: MemoryGeometry)` — the scalar is the peak
+        // only where its `measured`/`vramMeasuredPixels` capture covers the request, the widened
+        // declared floor everywhere else — so the composition this label names IS geometry-aware.
+        // The Node side derives the same fact by composing `load_plan` with the prediction entry's
+        // signature (`deriveGateGeometry`), and the reconciliation test pins the two together.
+        "candle_scalar_gate::load_plan" => true,
         // (…, width: u32, height: u32, …) — direct scalars.
         "krea_turbo_fit_with_runtime" => true,
         // (…, frames: u32, …, width: u32, height: u32, …) — direct scalars.
@@ -389,10 +395,26 @@ fn build_decisions() -> Value {
                 let empty = Map::new();
                 let entry = entry.unwrap_or(&empty);
                 for tier in TIERS {
-                    // THE REAL GATE. Everything below this line is `candle_scalar_gate`'s own code.
-                    let needed = predicted_peak_gb(entry, tier);
-                    let sequential = predicted_sequential_peak_gb(entry, tier);
                     for (width, height, frames) in IMAGE_GEOMETRIES {
+                        // THE REAL GATE (sc-19054: geometry-aware — the scalar is presented as
+                        // the peak only where its `measured`/`vramMeasuredPixels` capture covers
+                        // this cell, the widened declared floor everywhere else). Everything below
+                        // this line is `candle_scalar_gate`'s own code.
+                        let geometry = gen_core::MemoryGeometry {
+                            width: *width,
+                            height: *height,
+                            batch: 1,
+                            frames: *frames,
+                            reference_count: 0,
+                        };
+                        let needed = predicted_peak_gb_for_request(entry, tier, 0, geometry);
+                        let sequential =
+                            predicted_sequential_peak_gb_for_request(entry, tier, 0, geometry);
+                        let scalar_class =
+                            match scalar_peak_class(entry, "vramGbByTier", tier, geometry) {
+                                DeclaredScalarClass::MeasuredPeak => "measured_peak",
+                                DeclaredScalarClass::DeclaredFloor => "declared_floor",
+                            };
                         for budget_gb in BUDGETS_GB {
                             let budget = Some(VramBudget {
                                 free_gb: *budget_gb,
@@ -411,6 +433,7 @@ fn build_decisions() -> Value {
                                 "height": height,
                                 "frames": frames,
                                 "budgetGb": budget_gb,
+                                "scalarClass": scalar_class,
                                 "predictedPeakGb": json_number(needed),
                                 "predictedSequentialPeakGb": json_number(sequential),
                                 "fitDecisionSequentialCapable": fit_decision_label(&capable),
@@ -438,8 +461,9 @@ fn build_decisions() -> Value {
             "module": "crates/sceneworks-worker/src/candle_admission_decisions.rs",
             "gateModule": "crates/sceneworks-worker/src/candle_scalar_gate.rs",
             "entryPoints": [
-                "predicted_peak_gb",
-                "predicted_sequential_peak_gb",
+                "predicted_peak_gb_for_request",
+                "predicted_sequential_peak_gb_for_request",
+                "scalar_peak_class",
                 "fit_decision",
                 "fit_gate::resolve_offload",
                 "sequential_overflow_gb",
@@ -564,43 +588,102 @@ mod tests {
         );
     }
 
-    /// A geometry-blind gate must produce the same plan at every geometry, and the row must SAY it
-    /// is geometry-blind. This is the assertion sc-19054 has to break; when it makes the resident
-    /// path geometry-aware, this test fails and the resulting diff is that story's deliverable.
+    /// **The sc-19054 successor of `a_geometry_blind_gate_yields_one_plan_across_the_geometry_axis`**
+    /// (that test's own doc said this story has to break it — this is the deliberate replacement,
+    /// enumerated in the story's decision ledger). The evaluated scalar gate is now
+    /// geometry-aware: every evaluated row says so, and the PREDICTION moves with the geometry
+    /// axis exactly where the scalar's declared measurement stops covering the request —
+    /// `measured: true` routes captured at 1024² predict the raw peak at 1024² and the
+    /// margin-widened declared floor at 1536²/2048², while `measured: false` routes are
+    /// floor-classed at every geometry (uniformly widened, still geometry-INVARIANT in value).
     #[test]
-    fn a_geometry_blind_gate_yields_one_plan_across_the_geometry_axis() {
+    fn the_scalar_gate_grades_the_geometry_axis_through_the_declared_measurement() {
         let decisions = build_decisions();
-        let mut plans: BTreeMap<(String, String, u64), std::collections::BTreeSet<String>> =
-            BTreeMap::new();
+        let entries = manifest_entries();
+        let mut peaks: BTreeMap<(String, String, String), BTreeMap<u64, f64>> = BTreeMap::new();
         for row in decisions["rows"].as_array().expect("rows") {
             if row["resolution"].as_str() != Some("evaluated") {
                 continue;
             }
             assert_eq!(
                 row["geometrySensitive"].as_bool(),
-                Some(false),
-                "{}: the only evaluated gate today is the geometry-blind scalar gate",
+                Some(true),
+                "{}: since sc-19054 the evaluated scalar gate is geometry-aware",
                 row["modelId"]
             );
-            let key = (
-                row["modelId"].as_str().expect("modelId").to_owned(),
-                row["tier"].as_str().expect("tier").to_owned(),
-                row["budgetGb"].as_f64().expect("budgetGb").to_bits(),
+            let class = row["scalarClass"].as_str().expect("scalarClass");
+            assert!(
+                matches!(class, "measured_peak" | "declared_floor"),
+                "{}: unknown scalarClass {class}",
+                row["modelId"]
             );
-            plans.entry(key).or_default().insert(format!(
-                "{}|{}",
-                row["loadPlanSequentialCapable"], row["loadPlanSequentialIncapable"]
-            ));
+            let Some(peak) = row["predictedPeakGb"].as_f64() else {
+                continue;
+            };
+            let pixels = row["width"].as_u64().expect("width") * row["height"].as_u64().expect("height");
+            peaks
+                .entry((
+                    row["modelId"].as_str().expect("modelId").to_owned(),
+                    row["tier"].as_str().expect("tier").to_owned(),
+                    class.to_owned(),
+                ))
+                .or_default()
+                .insert(pixels, peak);
         }
-        assert!(!plans.is_empty(), "no evaluated rows to check");
-        for (key, distinct) in plans {
-            assert_eq!(
-                distinct.len(),
-                1,
-                "{key:?}: the scalar gate takes no width/height/frames, so it cannot produce \
-                 {distinct:?} across the geometry axis"
-            );
+        assert!(!peaks.is_empty(), "no evaluated rows to check");
+
+        // The axis is LIVE: at least one measured=true route must predict a strictly larger peak
+        // beyond its declared capture geometry than inside it, and inside it the prediction must
+        // be byte-for-byte the pre-story raw scalar + headroom.
+        let mut witnessed_split = false;
+        for ((model_id, tier, _), by_pixels) in peaks
+            .iter()
+            .filter(|((_, _, class), _)| class == "measured_peak")
+        {
+            let entry = entries.get(model_id).expect("evaluated model has an entry");
+            let declared = entry["candle"]["vramMeasuredPixels"]
+                .as_u64()
+                .expect("a measured_peak class requires a declared capture geometry");
+            let raw = entry["candle"]["vramGbByTier"][tier.as_str()]
+                .as_f64()
+                .expect("a measured_peak class requires the tier's own row")
+                + HEADROOM_GB;
+            for (pixels, peak) in by_pixels {
+                assert!(*pixels <= declared, "measured_peak beyond the declared capture");
+                assert_eq!(
+                    round6(raw),
+                    *peak,
+                    "{model_id}/{tier}: inside the declared capture the prediction is the raw \
+                     measured scalar, byte-for-byte the pre-sc-19054 number"
+                );
+            }
+            // The same model+tier's floor-classed cells (beyond the capture) must sit strictly
+            // above the covered raw peak — the widened declared floor.
+            if let Some(floor_cells) = peaks.get(&(
+                model_id.clone(),
+                tier.clone(),
+                "declared_floor".to_owned(),
+            )) {
+                for (pixels, peak) in floor_cells {
+                    assert!(
+                        *pixels > declared,
+                        "{model_id}/{tier}: a floor-classed cell inside the declared capture \
+                         means the measured flag or the pixel comparison was dropped"
+                    );
+                    assert!(
+                        *peak > round6(raw),
+                        "{model_id}/{tier}: beyond the declared capture the scalar is a floor \
+                         and must be widened above the raw peak (got {peak} vs raw {raw})"
+                    );
+                    witnessed_split = true;
+                }
+            }
         }
+        assert!(
+            witnessed_split,
+            "the corpus must witness at least one measured=true route split across the geometry \
+             axis — a corpus that cannot is not exercising sc-19054 at all"
+        );
     }
 
     /// The baseline must never take its sequential-capability input from the manifest. This asserts

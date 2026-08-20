@@ -8275,6 +8275,20 @@ fn vram_reject_tail_for_tier(installed: Vec<&'static str>, rejected_tier: &str) 
 /// provider stages components) down to [`TierFit`]. `Fits` = runs resident OR sequentially; `TooBig` =
 /// won't run even one-component-at-a-time. `Unknown` (no budget / unmeasured tier) counts as `Fits` — the
 /// gate never blocks without a signal.
+/// The 1024² batch-1 admission geometry the tier-fit unit tests grade at (sc-19054). The fixture
+/// manifests carry no `measured` flag, so every prediction is floor-graded regardless of the
+/// geometry — the tests' boundaries account for the widened numbers.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn sc19054_test_geometry() -> gen_core::MemoryGeometry {
+    gen_core::MemoryGeometry {
+        width: 1024,
+        height: 1024,
+        batch: 1,
+        frames: 1,
+        reference_count: 0,
+    }
+}
+
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn candle_tier_fit(
     manifest_entry: &JsonObject,
@@ -8282,11 +8296,16 @@ fn candle_tier_fit(
     budget: Option<crate::vram_gate::VramBudget>,
     sequential_capable: bool,
     adapter_bytes: u64,
+    geometry: gen_core::MemoryGeometry,
 ) -> TierFit {
-    let needed = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
+    // sc-19054: the GRADED prediction — the scalar is the peak only where its measurement covers
+    // this request's geometry, the widened declared floor everywhere else — so the downtier
+    // chooser and the admission gate downstream of it answer from the same number.
+    let needed = crate::vram_gate::predicted_peak_gb_for_request(
         manifest_entry,
         tier,
         adapter_bytes,
+        geometry,
     );
     match crate::vram_gate::resolve_offload(
         crate::vram_gate::fit_decision(needed, budget),
@@ -8298,10 +8317,11 @@ fn candle_tier_fit(
         } => {
             // Resident won't fit but the provider stages — fits only if the MEASURED sequential peak
             // fits (unmeasured ⇒ best-effort run, so `sequential_overflow_gb` yields None ⇒ Fits).
-            let seq_needed = crate::vram_gate::predicted_sequential_peak_gb_with_adapter_bytes(
+            let seq_needed = crate::vram_gate::predicted_sequential_peak_gb_for_request(
                 manifest_entry,
                 tier,
                 adapter_bytes,
+                geometry,
             );
             match crate::vram_gate::sequential_overflow_gb(seq_needed, budget) {
                 Some(seq_gb) => TierFit::TooBig {
@@ -9001,11 +9021,11 @@ mod krea_turbo_memory_route_tests {
             total_gb: 16.0,
         });
         assert_eq!(
-            super::candle_tier_fit(&manifest, "q4", budget, false, 0),
+            super::candle_tier_fit(&manifest, "q4", budget, false, 0, super::sc19054_test_geometry()),
             super::TierFit::Fits
         );
         assert!(matches!(
-            super::candle_tier_fit(&manifest, "q4", budget, false, 1024 * 1024 * 1024),
+            super::candle_tier_fit(&manifest, "q4", budget, false, 1024 * 1024 * 1024, super::sc19054_test_geometry()),
             super::TierFit::TooBig { .. }
         ));
     }
@@ -9899,6 +9919,16 @@ async fn generate_candle_stream(
             tier,
             min_quality_floor(request),
         );
+        // sc-19054: the tier chooser grades each candidate tier at the request's own admission
+        // geometry (the heaviest pass, same as the gate below). `reference_count` is not a scalar
+        // classification axis, so 0 is exact here.
+        let downtier_geometry = gen_core::MemoryGeometry {
+            width: memory_width,
+            height: memory_height,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        };
         let candidates: Vec<(&'static str, TierFit)> =
             downtier_candidate_tiers(request, settings, tier, floor)
                 .into_iter()
@@ -9949,6 +9979,7 @@ async fn generate_candle_stream(
                                     budget,
                                     false,
                                     candidate_adapter_bytes,
+                                    downtier_geometry,
                                 )
                             }
                             None => {
@@ -9966,6 +9997,7 @@ async fn generate_candle_stream(
                                     budget,
                                     false,
                                     candidate_adapter_bytes,
+                                    downtier_geometry,
                                 )
                             }
                         }
@@ -9976,6 +10008,7 @@ async fn generate_candle_stream(
                             budget,
                             sequential_capable,
                             candidate_adapter_bytes,
+                            downtier_geometry,
                         )
                     };
                     (candidate, fit)
@@ -10083,10 +10116,28 @@ async fn generate_candle_stream(
         mlx_raw_settings(request, &repo, steps, quant_bits, guidance.or(true_cfg));
     let adapter_resident_bytes =
         candle_adapter_resident_bytes(engine_id, tier, adapter_source_bytes);
+    // `needed` is the RAW scalar prediction: the shared selector grades it itself through the
+    // resident candidate's evidence class (a pre-widened input would double-charge the margin),
+    // and `note_loaded_peak` records expected allocations, not admission ceilings.
     let needed = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
         &request.model_manifest_entry,
         tier,
         adapter_resident_bytes,
+    );
+    // `gated_needed` is what the legacy pre-gate COMPARES (sc-19054, epic 19048 R3): the scalar
+    // presented as the peak only where its measurement covers this request's admission geometry,
+    // widened by the candle estimate margin where it is only the declared floor.
+    let gated_needed = crate::vram_gate::predicted_peak_gb_for_request(
+        &request.model_manifest_entry,
+        tier,
+        adapter_resident_bytes,
+        gen_core::MemoryGeometry {
+            width: memory_width,
+            height: memory_height,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        },
     );
     let krea_runtime_context = krea_turbo_ladder
         .then(|| krea_runtime_evidence_context(request, settings, tier, &weights_dir))
@@ -10261,7 +10312,7 @@ async fn generate_candle_stream(
                 Some(crate::vram_gate::KreaTurboFit::Fits { .. })
                     | Some(crate::vram_gate::KreaTurboFit::Reject { .. })
             ) {
-                match (needed, budget) {
+                match (gated_needed, budget) {
                     (Some(needed_gb), Some(budget)) => {
                         crate::vram_gate::FitDecision::Offload {
                             needed_gb,
@@ -10271,10 +10322,10 @@ async fn generate_candle_stream(
                     _ => crate::vram_gate::FitDecision::Unknown,
                 }
             } else if krea_turbo_ladder {
-                krea_unverified_resident_decision(needed, budget)
+                krea_unverified_resident_decision(gated_needed, budget)
             } else {
                 crate::vram_gate::resolve_offload(
-                    crate::vram_gate::fit_decision(needed, budget),
+                    crate::vram_gate::fit_decision(gated_needed, budget),
                     sequential_capable,
                 )
             };
@@ -10288,10 +10339,19 @@ async fn generate_candle_stream(
                 // physically drops the DiT before VAE decode. Other models retain the established
                 // sequential-overflow gate below; unverified Krea evidence reaches the explicit
                 // resident-or-reject path instead of this arm.
-                let sequential_needed = crate::vram_gate::predicted_sequential_peak_gb_with_adapter_bytes(
+                // Graded like `gated_needed` above: the second-stage offload gate compares the
+                // staged working set under the same sc-19054 scalar grade.
+                let sequential_needed = crate::vram_gate::predicted_sequential_peak_gb_for_request(
                     &request.model_manifest_entry,
                     tier,
                     adapter_resident_bytes,
+                    gen_core::MemoryGeometry {
+                        width: memory_width,
+                        height: memory_height,
+                        batch: 1,
+                        frames: 1,
+                        reference_count: 0,
+                    },
                 );
                 let krea_selected = if krea_turbo_ladder {
                     match shared_krea_fit {
@@ -14571,8 +14631,8 @@ mod candle_downtier_emulation_tests {
             .cloned()
             .unwrap();
         // Not sequential-capable (krea keeps the resident path) ⇒ resident-or-reject.
-        let q8_fit = candle_tier_fit(&manifest, "q8", budget, false, 0);
-        let q4_fit = candle_tier_fit(&manifest, "q4", budget, false, 0);
+        let q8_fit = candle_tier_fit(&manifest, "q8", budget, false, 0, sc19054_test_geometry());
+        let q4_fit = candle_tier_fit(&manifest, "q4", budget, false, 0, sc19054_test_geometry());
         assert!(
             matches!(q8_fit, TierFit::TooBig { .. }),
             "q8 (~38 GB) must exceed the {cap} GB emulated card: {q8_fit:?}"
