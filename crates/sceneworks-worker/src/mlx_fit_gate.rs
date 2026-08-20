@@ -2247,9 +2247,14 @@ fn intra_transformer_evicted_bytes(contract: &MemoryProviderContract) -> u64 {
 ///     The reduction is therefore `min(evicted, base_bytes − conditioning − transformer)`, never
 ///     the raw eviction, and this leg is deliberately not an un-lumping of the staged phases: no
 ///     measured basis for that exists here (epic 18093 owns it).
-///   * `BoundedTransformerResidency` still subtracts the load-exact `transformer_bytes`, because
-///     that rung windows the whole transformer — the sub-stack is inside it, so a second deduction
-///     would double-count the same bytes.
+///   * `BoundedTransformerResidency` subtracts the load-exact `transformer_bytes` from the
+///     LOAD-EXACT lump and takes NO eviction reduction at all, because that rung windows the whole
+///     transformer — the evictable sub-stack is inside the window it just removed, so reducing by
+///     the eviction as well deducts the same bytes twice. Both legs must remove the transformer,
+///     which leaves `decoder`; taking the reduction first and the window second leaves
+///     `max(0, decoder − evicted)` instead, and at bf16 the `.max(transformer_bytes)` clamp binds
+///     so that is exactly **0** — MiniMax-H3's whole 11.02 GB video+audio VAE pair vanishing from
+///     the floor, the OOM direction (sc-18650 pre-merge review).
 ///
 /// The auxiliary fold deliberately charges `resident_bytes`, not
 /// `MemoryResidentComponent::steady_state_bytes`: an auxiliary network stands beside the base model
@@ -2267,16 +2272,20 @@ pub(crate) fn estimate_floor_weights_bytes(
     // The load-exact non-conditioning working set: what the transformer's own phase holds while the
     // evictable sub-stack is still materialized.
     let heavy_load_exact = facts.base_bytes.saturating_sub(conditioning);
-    let mut heavy = if staged {
+    let bounded_transformer = engaged.contains(&MemoryStrategy::BoundedTransformerResidency);
+    // The two reductions are EXCLUSIVE, not sequential. The staged reduction's clamp holds the lump
+    // at `transformer_bytes` precisely so the precompute instant stays covered — and rung 4 then
+    // removes that same `transformer_bytes`, sub-stack included. Applying both leaves
+    // `max(0, decoder − evicted)` where the answer is `decoder`.
+    let heavy = if staged && !bounded_transformer {
         heavy_load_exact
             .saturating_sub(intra_transformer_evicted_bytes(contract))
             .max(facts.transformer_bytes)
+    } else if bounded_transformer {
+        heavy_load_exact.saturating_sub(facts.transformer_bytes)
     } else {
         heavy_load_exact
     };
-    if engaged.contains(&MemoryStrategy::BoundedTransformerResidency) {
-        heavy = heavy.saturating_sub(facts.transformer_bytes);
-    }
     let base = if staged {
         conditioning.max(heavy)
     } else {
@@ -17189,6 +17198,17 @@ mod tests {
         /// itself a finding, graded by [`q4_with_the_dense_conditioner_moves_nothing`].
         const PACKED_TEXT_ENCODER_BYTES: u64 = TEXT_ENCODER_BYTES / 4;
 
+        /// A conditioning stack SHORTER than the decoder — the stand-in
+        /// [`rung_four_deducts_the_transformer_once_not_twice`] needs, one step past
+        /// [`PACKED_TEXT_ENCODER_BYTES`].
+        ///
+        /// The staged branch's floor is `conditioning.max(heavy)`. Above `VAE_BYTES` the conditioner
+        /// wins that `max` and `heavy` is INVISIBLE — which is exactly how the rung-4 test passed
+        /// for arithmetic that had erased the decoder from `heavy` entirely (sc-18650 pre-merge
+        /// review). Below `VAE_BYTES`, `heavy` is the binding leg and the assertion reads the number
+        /// it names.
+        const SUB_DECODER_CONDITIONER_BYTES: u64 = PACKED_TEXT_ENCODER_BYTES / 2;
+
         const STAGED: &[MemoryStrategy] = &[MemoryStrategy::StagedResidency];
         const CO_RESIDENT: &[MemoryStrategy] = &[];
         const STAGED_PLUS_RUNG4: &[MemoryStrategy] = &[
@@ -17466,31 +17486,119 @@ mod tests {
             }
         }
 
+        /// Declare the rung-4 → rung-1 edge on an [`h3_shaped_contract`], so the composition under
+        /// test is one a SELECTOR can produce rather than a hand-written slice.
+        ///
+        /// `MemoryStrategy::engages` deliberately does not make rung 4 engage rung 1 — the shared
+        /// prerequisite is `LoadShape::DeferredMaterialization`, which needs no residency policy —
+        /// so `staged + rung 4` exists only where a provider appends the edge through
+        /// `additional_prerequisites`. Thirteen shipped MLX providers do (sana, flux, flux2, chroma,
+        /// kolors, krea ×2, lens, mage, qwen-image, sd3, sdxl, anima), each pushing exactly this
+        /// pair. MiniMax-H3 itself declares `additional_prerequisites: Vec::new()`, which is why
+        /// this composition moves no live admission TODAY and why the arithmetic it grades is one
+        /// provider declaration away from mattering.
+        fn rung4_edge_contract(mut contract: MemoryProviderContract) -> MemoryProviderContract {
+            for rung in [
+                MemoryStrategy::StagedResidency,
+                MemoryStrategy::BoundedTransformerResidency,
+            ] {
+                contract
+                    .strategies
+                    .iter_mut()
+                    .find(|capability| capability.strategy == rung)
+                    .expect("the compatibility contract declares every rung's capability")
+                    .support = gen_core::MemoryStrategySupport::Implemented;
+            }
+            contract.additional_prerequisites.push((
+                MemoryStrategy::BoundedTransformerResidency,
+                gen_core::MemoryStrategyPrerequisite::Rung {
+                    rung: MemoryStrategy::StagedResidency,
+                    scope: gen_core::MemoryPrerequisiteScope::EngagedInSameRequest,
+                },
+            ));
+            contract
+        }
+
         /// Rung 4 windows the WHOLE transformer, sub-stack included, so the eviction must not be
-        /// deducted a second time on top of it.
+        /// deducted a second time on top of it. BOTH legs remove the transformer, and what is left
+        /// is the DECODER — the component rung 4 does not window and which stays resident.
+        ///
+        /// # This test was a false green until sc-18650's pre-merge review
+        ///
+        /// It ran on [`PACKED_TEXT_ENCODER_BYTES`], which is TALLER than [`VAE_BYTES`], so the
+        /// staged branch's `conditioning.max(heavy)` threw `heavy` away and both arms collapsed onto
+        /// the conditioner. It passed whether the arithmetic deducted the transformer once or
+        /// twice — and it was deducting it twice, leaving `max(0, decoder − evicted)`, which at bf16
+        /// is exactly **0**: MiniMax-H3's whole 11.02 GB video+audio VAE pair gone from the floor.
+        /// Its own expected value, `PACKED_TEXT_ENCODER_BYTES.max(VAE_BYTES)`, was inert for the
+        /// same reason — the `.max` never chose its right-hand side.
+        ///
+        /// So the conditioner is now deliberately BELOW the decoder, which puts `heavy` on the
+        /// binding side of that `max`, and the composition is read off `engaged_composition` on a
+        /// contract that declares the edge instead of being written out by hand.
         #[test]
         fn rung_four_deducts_the_transformer_once_not_twice() {
-            let legacy = h3_shaped_contract(
-                PACKED_TEXT_ENCODER_BYTES,
+            let legacy = rung4_edge_contract(h3_shaped_contract(
+                SUB_DECODER_CONDITIONER_BYTES,
                 DIT_BF16_BYTES,
                 ADALN_RESIDENT_BF16_BYTES,
                 false,
-            );
-            let adopted = h3_shaped_contract(
-                PACKED_TEXT_ENCODER_BYTES,
+            ));
+            let adopted = rung4_edge_contract(h3_shaped_contract(
+                SUB_DECODER_CONDITIONER_BYTES,
                 DIT_BF16_BYTES,
                 ADALN_RESIDENT_BF16_BYTES,
                 true,
+            ));
+            // The two properties that make this fixture able to SEE the arithmetic, asserted off the
+            // contract's own facts so a later constant edit cannot quietly re-mask the test.
+            assert!(
+                adopted.asset_facts.conditioning_bytes < adopted.asset_facts.decoder_bytes,
+                "the conditioner has to be the SHORTER leg of `conditioning.max(heavy)`, or that \
+                 `max` hides the answer this test exists to read ({} vs {})",
+                adopted.asset_facts.conditioning_bytes,
+                adopted.asset_facts.decoder_bytes
             );
-            declared_eviction(&adopted, ADALN_RESIDENT_BF16_BYTES);
+            let evicted = declared_eviction(&adopted, ADALN_RESIDENT_BF16_BYTES);
+            assert!(
+                evicted > adopted.asset_facts.decoder_bytes,
+                "the eviction must be able to swallow the decoder whole ({evicted} vs {}), or a \
+                 double deduction would understate the floor partially rather than erasing the \
+                 decode phase outright",
+                adopted.asset_facts.decoder_bytes
+            );
+
+            // The composition is the PROVIDER'S, not this test's. Without the declared edge rung 4
+            // engages rungs 2 and 3 but never rung 1, so `StagedResidency` appearing here is the
+            // edge doing its job — and `estimate_floor_weights_bytes` reads exactly these two.
+            let composition =
+                adopted.engaged_composition(MemoryStrategy::BoundedTransformerResidency);
             assert_eq!(
-                estimate_floor_weights_bytes(&adopted, STAGED_PLUS_RUNG4),
-                estimate_floor_weights_bytes(&legacy, STAGED_PLUS_RUNG4),
+                composition,
+                vec![
+                    MemoryStrategy::Resident,
+                    MemoryStrategy::StagedResidency,
+                    MemoryStrategy::BoundedTransformerResidency,
+                ],
+                "the declared rung-4 -> rung-1 edge is what makes this composition reachable"
             );
             assert_eq!(
-                estimate_floor_weights_bytes(&adopted, STAGED_PLUS_RUNG4),
-                PACKED_TEXT_ENCODER_BYTES.max(VAE_BYTES),
-                "the windowed transformer leaves the floor exactly once"
+                legacy.engaged_composition(MemoryStrategy::BoundedTransformerResidency),
+                composition,
+                "adopting the sub-stack vocabulary must not change which rungs engage"
+            );
+
+            assert_eq!(
+                estimate_floor_weights_bytes(&adopted, &composition),
+                estimate_floor_weights_bytes(&legacy, &composition),
+                "the declared eviction lives INSIDE the window rung 4 removes, so adopting the \
+                 vocabulary must not move this floor by a byte"
+            );
+            assert_eq!(
+                estimate_floor_weights_bytes(&adopted, &composition),
+                VAE_BYTES,
+                "the windowed transformer leaves the floor exactly once, and what remains is the \
+                 decoder rung 4 does not window"
             );
         }
 

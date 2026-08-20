@@ -1738,7 +1738,8 @@ export const OUT_OF_MATRIX_CELL_STATES = Object.freeze([
  *
  * Rung 4's only shared prerequisite is `LoadShape::DeferredMaterialization`
  * (`BOUNDED_TRANSFORMER_RESIDENCY_REQUIRES`, inference
- * `crates/contracts/gen-core/src/memory_strategy.rs:290-293`). SC-15998 removed the rung-1 edge the
+ * `crates/contracts/gen-core/src/memory_strategy.rs:310-313` at the pinned f17c82544). SC-15998
+ * removed the rung-1 edge the
  * survey's notes asserted, because it had encoded one provider's coupled loader shape as universal
  * arithmetic.
  *
@@ -1919,10 +1920,13 @@ export function parseOutOfMatrixRung4Families(parsed, { familyGroups } = {}) {
       // ...and must say which tree those citations resolve in. This is the one thing an
       // out-of-matrix record needs that a `families` verdict does not: `families` is surveyed
       // against the crates the Cargo pin already carries, so `generatedFrom.inferenceRevision`
-      // dates every path in it. These records are surveyed BEFORE the lane exists — MiniMax-H3's
-      // `inference:` paths and every byte constant quoted from them resolve at 79f02e6d0, and at
-      // 014134e3 neither H3 crate is present at all. Without the field the record silently mixes
-      // two revisions and reads as if the matrix's own pin dated it (sc-18664).
+      // dates every path in it. These records are surveyed at a revision of their own —
+      // MiniMax-H3's MLX paths resolve at e09f46aaf and its Candle ones at 79f02e6d0, two DIFFERENT
+      // trees, and neither is the pin. What the field asserts has moved since it was introduced: at
+      // the pinned f17c82544 both H3 crates exist and both anchors are ANCESTORS of it, so the
+      // field now reads "last surveyed here, not re-surveyed since" rather than "the pinned tree
+      // has no such crate yet". Without it the record silently mixes revisions and reads as if the
+      // matrix's own pin dated it (sc-18664; meaning restated sc-18650 pre-merge review).
       if (!RUNG4_CONTRACT_REVISION_PATTERN.test(verdict.contractRevision ?? "")) {
         throw new Error(
           `${at}: contractRevision must name the inference revision this record's evidence paths resolve at, as a git sha of at least 9 hex characters — got ${JSON.stringify(verdict.contractRevision)}. An out-of-matrix record is surveyed from crates the matrix's own pinned revision need not contain, so without it the record mixes two trees (sc-18664)`,
@@ -2618,9 +2622,9 @@ export function catalogFamilyBackends(manifestModels, routedBackends) {
  * is the right question for the edge it now serves, because gen-core's `validate_selection` accepts
  * a `Rung { .. EngagedInSameRequest }` prerequisite when `MemoryProviderContract::engages` holds,
  * and for an edge the realization itself appended, `engages` reduces to that rung being declared
- * `Implemented` (inference `crates/contracts/gen-core/src/memory_strategy.rs:1028-1044` at pinned
- * rev `014134e3`: `required_by_realization` is true by construction, so the conjunction is the
- * `matches!(self.support(rung), Some(Implemented))` term).
+ * `Implemented` (inference `crates/contracts/gen-core/src/memory_strategy.rs:1346-1362` at the
+ * pinned rev `f17c82544`: `required_by_realization` is true by construction, so the conjunction is
+ * the `matches!(self.support(rung), Some(Implemented))` term).
  *
  * This is the reduction of ONE of `validate_selection`'s two accepting arms, not of the whole
  * prerequisite check. The second arm is `StructurallyNotApplicable`, and it lives in the `rung`
@@ -2666,9 +2670,9 @@ export function stagedResidencyIsAvailable({
 /**
  * gen-core's `BOUNDED_TRANSFORMER_RESIDENCY_REQUIRES`, mirrored (sc-19542).
  *
- * `&[MemoryStrategyPrerequisite::LoadShape(LoadShape::DeferredMaterialization)]` at pinned rev
- * `014134e3` — inference `crates/contracts/gen-core/src/memory_strategy.rs:290-293`, the identifier
- * on line 292. Exactly one edge, shared by every provider, and no rung edge at all. Everything else
+ * `&[MemoryStrategyPrerequisite::LoadShape(LoadShape::DeferredMaterialization)]` at the pinned rev
+ * `f17c82544` — inference `crates/contracts/gen-core/src/memory_strategy.rs:310-313`, the identifier
+ * on line 312. Exactly one edge, shared by every provider, and no rung edge at all. Everything else
  * a provider demands of rung 4 it appends itself, which is what
  * `config/rung4-contract-prerequisites.json` records per (family, backend).
  *
@@ -2702,7 +2706,8 @@ const RUNG4_PREREQUISITE_EVALUATORS = Object.freeze({
   "load-shape": () => true,
   /**
    * gen-core's `EngagedInSameRequest` arm has TWO ways to be satisfied, and this mirrors both —
-   * inference `crates/contracts/gen-core/src/memory_strategy.rs:1468-1481` at pinned `014134e3`.
+   * inference `crates/contracts/gen-core/src/memory_strategy.rs:1862-1873` at the pinned
+   * `f17c82544`.
    *
    * 1. `if self.engages(selection.strategy, rung) { continue }`. For an edge the realization itself
    *    appended, `engages`'s `required_by_realization` term is true by construction, so the

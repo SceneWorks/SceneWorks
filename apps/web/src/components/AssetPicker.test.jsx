@@ -377,6 +377,14 @@ describe("VideoSourcePickerField video-only sources", () => {
 // pickers the tests above drive. That modal is a DIFFERENT component with a different upload
 // path, so its coverage says nothing about this one. These drive the real field and mock only the
 // transport boundary (`importAsset`), the same seam the video/image import tests mock.
+//
+// 🔴 sc-18650 pre-merge review. These originally stubbed `importAsset` with an invented three-key
+// row (`{ id, type, projectId }`) — a shape no server ever sends — while the server it stood for
+// REFUSED audio outright: `ProjectStore::import_asset` accepted `image/` and `video/` only, so the
+// dropzone's real success rate was zero and `handleUpload`'s `Promise.allSettled` turned the 400
+// into "Could not import the selected audio file." That gate is now open, and these stubs answer
+// with the row the store actually writes (`importedAudioAsset` below) so a picker that started
+// depending on a field the response does not carry fails here instead of in the app.
 describe("AssetPickerField audio import (VideoStudio reference audio)", () => {
   let container;
   let root;
@@ -399,6 +407,36 @@ describe("AssetPickerField audio import (VideoStudio reference audio)", () => {
 
   // What VideoStudio hands the field: audio-only assets, categories hidden, multi-select.
   const audioAssets = [{ id: "voice-1", type: "audio", projectId: "p1", displayName: "Voice Take 1" }];
+
+  // The row `ProjectStore::import_asset` writes for an audio upload, field for field:
+  // `type: "audio"` (`media_type_for_mime`), `origin: "upload"`, and a `file` block whose
+  // `mimeType` is ALWAYS `audio/wav` because `normalize_audio_upload` transcodes every accepted
+  // container to PCM-16 RIFF/WAVE before storing it — the one encoding `read_wav_pcm16` decodes.
+  //
+  // `mimeType` being fixed is the load-bearing part, not decoration: it means the picker may not
+  // key its acceptance on the mime the BROWSER reported for the chosen file, because the stored
+  // asset's mime is frequently a different one. The `.flac` case below is exactly that.
+  const importedAudioAsset = (id) => ({
+    schemaVersion: 1,
+    id,
+    projectId: "p1",
+    generationSetId: null,
+    type: "audio",
+    displayName: "take.wav",
+    createdAt: "2026-08-20T00:00:00Z",
+    origin: "upload",
+    file: {
+      path: `assets/uploads/take-${id}.wav`,
+      mimeType: "audio/wav",
+      width: null,
+      height: null,
+      duration: 1.5,
+      fps: null,
+      sampleRate: 24000,
+      channels: 1,
+    },
+    status: { favorite: false, rating: 0, rejected: false, trashed: false },
+  });
 
   async function openPicker(props) {
     await act(async () => {
@@ -426,7 +464,7 @@ describe("AssetPickerField audio import (VideoStudio reference audio)", () => {
 
   it("imports a browsed audio file and confirms it alongside the existing selection", async () => {
     const onChange = vi.fn();
-    const importAsset = vi.fn(async () => ({ id: "uploaded-audio", type: "audio", projectId: "p1" }));
+    const importAsset = vi.fn(async () => importedAudioAsset("uploaded-audio"));
     const input = await openPicker({ importAsset, onChange, values: ["voice-1"] });
 
     // Scoped to the picker's kind, and multi because the field is.
@@ -445,7 +483,7 @@ describe("AssetPickerField audio import (VideoStudio reference audio)", () => {
 
   it("imports a DROPPED audio file through the same path", async () => {
     const onChange = vi.fn();
-    const importAsset = vi.fn(async () => ({ id: "dropped-audio", type: "audio", projectId: "p1" }));
+    const importAsset = vi.fn(async () => importedAudioAsset("dropped-audio"));
     await openPicker({ importAsset, onChange });
 
     const zone = document.body.querySelector(".dataset-add-dropzone");
@@ -475,15 +513,22 @@ describe("AssetPickerField audio import (VideoStudio reference audio)", () => {
 
   it("accepts a backend-supported audio extension when the browser reports a generic MIME", async () => {
     const onChange = vi.fn();
-    const importAsset = vi.fn(async () => ({ id: "uploaded-flac", type: "audio", projectId: "p1" }));
+    // The server's answer for a `.flac`: `audio/flac` clears `import_asset`'s `audio/` gate (an
+    // `application/octet-stream` content type is discarded in favour of the filename guess), and
+    // `normalize_audio_upload` then stores it as PCM-16 WAV — so the row comes back `audio/wav`,
+    // NOT `audio/flac`.
+    const importAsset = vi.fn(async () => importedAudioAsset("uploaded-flac"));
     const input = await openPicker({ importAsset, onChange });
 
-    // Browsers routinely hand .flac/.m4a back as application/octet-stream, and the backend takes
-    // them — an extension fallback the MIME-only check would refuse.
+    // Browsers routinely hand .flac/.m4a back as application/octet-stream, so the client's
+    // pre-flight has to fall back to the extension or it would refuse a file the server accepts.
     const file = new File(["audio"], "master.flac", { type: "application/octet-stream" });
     await chooseFiles(input, [file]);
 
     expect(importAsset).toHaveBeenCalledWith(file, { select: false, throwOnError: true });
+    // ...and the post-flight has to accept the NORMALIZED row rather than looking for the mime it
+    // sent. A picker that compared the response's `file.mimeType` to the chosen file's would drop
+    // this import on the floor with "Could not import the selected audio file."
     expect(onChange).toHaveBeenCalledWith(["uploaded-flac"]);
   });
 
@@ -491,7 +536,13 @@ describe("AssetPickerField audio import (VideoStudio reference audio)", () => {
     const onChange = vi.fn();
     // The importer answers for whatever the project made of the bytes; a row that is not audio
     // cannot drive an audio-conditioned render, so it must not silently become the selection.
-    const importAsset = vi.fn(async () => ({ id: "not-audio", type: "image", projectId: "p1" }));
+    // `media_type_for_mime` is what decides that `type`, and it answers from the mime the store
+    // resolved — not from what the caller believed they were uploading.
+    const importAsset = vi.fn(async () => ({
+      ...importedAudioAsset("not-audio"),
+      type: "image",
+      file: { path: "assets/uploads/take-not-audio.png", mimeType: "image/png" },
+    }));
     const input = await openPicker({ importAsset, onChange });
 
     await chooseFiles(input, [new File(["audio"], "take.wav", { type: "audio/wav" })]);
