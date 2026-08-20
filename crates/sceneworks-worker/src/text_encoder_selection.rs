@@ -687,13 +687,18 @@ mod tests {
             let contract = crate::inference_runtime::media_encoder_contract(ENGINE_ID)
                 .expect("the composed Qwen control route owns an encoder contract");
             gen_core_testkit::write_encoder_contract_tokenizer_fixture(&base, contract).unwrap();
+            // The testkit's fixture ends with the encoder's dense multi-gigabyte `set_len`, which
+            // NTFS allocates in full — release the never-written tail after each write. Logical
+            // size and written bytes are unchanged; see `crate::test_fixture_disk`.
             let source = match shape {
                 "file" => {
                     gen_core_testkit::write_encoder_contract_fixture(&selected, contract).unwrap();
+                    crate::test_fixture_disk::sparsify_written_safetensors(&selected);
                     WeightsSource::File(selected.join("model.safetensors"))
                 }
                 "dir" => {
                     gen_core_testkit::write_encoder_contract_fixture(&selected, contract).unwrap();
+                    crate::test_fixture_disk::sparsify_written_safetensors(&selected);
                     WeightsSource::Dir(selected.clone())
                 }
                 "snapshot" => {
@@ -702,6 +707,9 @@ mod tests {
                         contract,
                     )
                     .unwrap();
+                    crate::test_fixture_disk::sparsify_written_safetensors(
+                        &selected.join("text_encoder"),
+                    );
                     gen_core_testkit::write_encoder_contract_tokenizer_fixture(&selected, contract)
                         .unwrap();
                     WeightsSource::Dir(selected.clone())
