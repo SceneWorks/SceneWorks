@@ -939,12 +939,21 @@ export function ModelManagerScreen() {
     refreshModelCache();
   }, [refreshModelCache]);
 
-  // Bounded convergence refresh. It runs ONLY while the snapshot actually holds an entry the store
-  // is still moving (queued, copying, being removed) and stops the moment every entry is terminal,
-  // so an all-settled cache is read exactly once. `stalled` is the honest end of the bound: still
-  // in flight, but nothing is re-reading any more, which the card has to say rather than leave a
-  // "checking…" line that has quietly stopped meaning anything.
-  const { stalled: cacheConvergenceStalled } = useCacheConvergence(modelCache, refreshModelCache);
+  // The cache endpoint is also the cross-platform source of truth for whether this feature is on.
+  // Keep every local-copy surface hidden until the policy is both known and explicitly enabled:
+  // the feature is off by default, and an unavailable status read must not make an opt-in feature
+  // appear enabled. A disabled cache can still contain entries left from an earlier session, but
+  // those should not advertise an opt-in feature across every model card.
+  const localCopiesEnabled = modelCache?.policy?.enabled === true;
+
+  // Bounded convergence refresh. It runs ONLY while the enabled cache snapshot actually holds an
+  // entry the store is still moving (queued, copying, being removed) and stops the moment every
+  // entry is terminal, so an all-settled cache is read exactly once. A disabled cache never arms a
+  // hidden polling loop for old entries that may remain on disk.
+  const { stalled: cacheConvergenceStalled } = useCacheConvergence(
+    localCopiesEnabled ? modelCache : null,
+    refreshModelCache,
+  );
 
   // "Keep locally" / "Allow automatic removal" — the artifact pin. Re-reads the authoritative
   // status afterwards rather than optimistically flipping the row: the UI must not claim a state
@@ -1330,20 +1339,27 @@ export function ModelManagerScreen() {
     // Where this model's files actually resolve from, straight off the typed judgement the one
     // shared resolver produced (sc-19708). NEVER re-derived here from paths or error text — that
     // discipline is the whole reason a second, drifting availability opinion can't exist.
-    const availability = availabilityBadge(model);
+    // `local_ready` is itself local-copy messaging, so suppress even a stale catalog judgement
+    // until the current cache policy is known to be enabled. The other availability badges still
+    // matter with caching off (for example, that the external library is disconnected).
+    const availability =
+      model.modelAvailability === "local_ready" && !localCopiesEnabled
+        ? null
+        : availabilityBadge(model);
     // How much of this model a local copy could ever serve, straight off the backend's typed
     // `cacheEligibility` (sc-19712 F-5). Null for a fully cacheable model and for a row with no
     // external requirement closure; a badge whenever the local-copy affordance would over-promise.
-    const cacheCoverage = cacheEligibilityBadge(model);
+    const cacheCoverage = localCopiesEnabled ? cacheEligibilityBadge(model) : null;
     // Local copies of THIS model, joined by the backend.
-    const localCopies = entriesForModel(modelCache, model.id);
+    const localCopies = localCopiesEnabled ? entriesForModel(modelCache, model.id) : [];
     // The block renders ONLY when the cache state is actually known. `modelCache` is null when the
     // status read failed outright, and a returned snapshot carries `error` when the store exists
     // but could not be listed — in both cases the entry list is empty for want of an answer, not
     // because there are no copies. Gating on `cacheKnown` is what stops "No local copy yet." from
     // being rendered as a confident claim over a read that never succeeded.
     const cacheKnown = Boolean(modelCache) && !modelCache.error;
-    const showLocalCopySection = cacheKnown && (localCopies.length > 0 || canHoldLocalCopy(model));
+    const showLocalCopySection =
+      localCopiesEnabled && cacheKnown && (localCopies.length > 0 || canHoldLocalCopy(model));
     return (
       <article className={model.recommended ? "model-card recommended" : "model-card"} key={model.id}>
         <div className="model-card-head">
@@ -2201,7 +2217,7 @@ export function ModelManagerScreen() {
       {/* Stated once for the whole screen, because the read that failed was one read for the whole
           screen. Says what is unavailable and why, without implying anything about what is or is
           not cached — that is precisely what could not be determined. */}
-      {cacheError ? (
+      {localCopiesEnabled && cacheError ? (
         <p className="inline-warning">
           Local model copies can’t be shown right now, so their controls are hidden: {cacheError}
         </p>
