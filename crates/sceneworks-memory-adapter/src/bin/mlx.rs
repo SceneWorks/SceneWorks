@@ -9648,10 +9648,26 @@ fn minimax_load_spec(
 
 /// The admission context for the MiniMax-H3 safety scenarios, describing the base t2va route.
 ///
-/// `mode` is [`MemoryMode::TextToImage`] and that is NOT a copy-paste from an image arm: it is the
-/// spelling the pinned provider's own `memory_strategy::routes()` uses for its t2va route (the
-/// shared text-to-image key), with `ImageToImage` for `fl2va` and `Other("ref2va")` for the third.
-/// Probing under a different key would exercise an evidence key no shipped MiniMax-H3 render uses.
+/// `mode` IS AN EVIDENCE KEY, not a label. gen-core's `standard_memory_strategy_safety_check`
+/// builds `MemoryDecodePolicyQuery { mode_key: context.mode.as_key(), .. }` and matches it against
+/// each adopted decode-geometry record's own mode, so a probe run under one spelling cannot answer
+/// a request asked under another. The runtime asks under `text_to_video` for every MiniMax render:
+/// `video_jobs::wan` resolves the admission mode with
+/// `sceneworks_core::video_request::payload_video_mode`, `video_admission` admits only
+/// `"text_to_video"`, and it types that string with `memory_mode_from_mode_key`, which maps every
+/// non-canonical key to [`MemoryMode::Other`]. This capture therefore carries the same `Other`
+/// spelling `ltx_context` does.
+///
+/// This was [`MemoryMode::TextToImage`] until sc-18663, taken from the pinned provider's
+/// `memory_strategy::routes()`, which really does spell t2va with the shared text-to-image key.
+/// That list enumerates the provider's weights-free BEHAVIOR fixtures; it is not the key the
+/// shipped video funnel queries under, and following it made this harness probe `text_to_image`
+/// while the plan it validates ([`validate_minimax_target`] hard-requires `text_to_video`), the
+/// record it emits, and the runtime all said `text_to_video`. The split was inert only because
+/// MiniMax declares `decode_geometry_policy_authoritative: false` with an empty policy table, so
+/// the lookup returns `Ok(None)` under either spelling — the day it declares a policy, the harness
+/// would measure under one key and the runtime ask under the other, silently. Pinned by
+/// `the_minimax_capture_context_binds_the_mode_key_the_runtime_video_route_sends`.
 fn minimax_context(
     selection: MemorySelection,
     calibration: &MemoryCalibrationIdentity,
@@ -9668,7 +9684,7 @@ fn minimax_context(
         // call site passes `calibration.fingerprint`.
         calibration_fingerprint: fingerprint.to_owned(),
         load_shape: calibration.load_shape,
-        mode: MemoryMode::TextToImage,
+        mode: MemoryMode::Other("text_to_video".to_owned()),
         has_reference: false,
         use_pid: false,
         has_phases: true,
@@ -13680,6 +13696,58 @@ mod minimax_tests {
             .find(|fixture| fixture.provider_id == MINIMAX_PROVIDER)
             .expect("the provider-owned MiniMax-H3 contract fixture");
         (fixture.contract)(&weights_free_spec(quant, load_shape)).unwrap()
+    }
+
+    /// The capture harness must probe under the SAME evidence key the shipped runtime queries.
+    ///
+    /// The MiniMax twin of `the_ltx_runtime_context_binds_the_exact_video_route_and_selection`,
+    /// which pins this correspondence for the family that already had it right. sc-18663: this arm
+    /// probed admission under `text_to_image` while the plan it validates, the record it emits and
+    /// `video_admission` all say `text_to_video` — see [`minimax_context`] for why that split is
+    /// currently inert and what makes it stop being inert.
+    ///
+    /// NEITHER SIDE IS RESTATED AS A LITERAL. A test spelling `"text_to_video"` on both sides still
+    /// passes when both sides move together, which is the drift this exists to catch.
+    #[test]
+    fn the_minimax_capture_context_binds_the_mode_key_the_runtime_video_route_sends() {
+        // The runtime side, derived: `video_jobs::wan` resolves every video job's admission mode
+        // with `payload_video_mode`, and `video_admission` types that string with
+        // `memory_mode_from_mode_key`, whose contract is `as_key(from(key)) == key`. So the string
+        // this returns IS the `mode_key` the runtime's decode-policy query carries.
+        let payload = json!({
+            "model": MINIMAX_PROVIDER,
+            "mode": sceneworks_core::contracts::ContractMode::TextToVideo.as_str(),
+        });
+        let runtime_mode_key = sceneworks_core::video_request::payload_video_mode(
+            payload.as_object().expect("the probe payload is an object"),
+        );
+        assert!(
+            sceneworks_core::video_request::is_minimax_h3_model(MINIMAX_PROVIDER),
+            "the payload above must be a MiniMax-H3 video job, or it derives another family's key"
+        );
+
+        // And that really is the only route this arm records: the plan-target gate admits the
+        // derived spelling and refuses the image spelling this context used to carry.
+        let plan_under = |mode: &str| {
+            let mut request = minimal_request(MINIMAX_PROVIDER);
+            request["planned"]["target"]["mode"] = json!(mode);
+            request
+        };
+        assert!(validate_minimax_target(&plan_under(&runtime_mode_key)).is_ok());
+        assert!(validate_minimax_target(&plan_under(MemoryMode::TextToImage.as_key())).is_err());
+
+        // The capture side, from the builder every MiniMax admission probe runs through.
+        let contract = fixture_contract(Some(Quant::Q4), LoadShape::EagerMaterialization);
+        let calibration = contract.calibration.as_ref().unwrap();
+        let context = minimax_context(
+            planned_selection(&minimal_request(MINIMAX_PROVIDER)).unwrap(),
+            calibration,
+            &calibration.fingerprint,
+            validate_minimax_geometry(1344, 768, 124).unwrap(),
+            1 << 40,
+            1,
+        );
+        assert_eq!(context.mode.as_key(), runtime_mode_key);
     }
 
     /// The per-arm twin of the sc-18104 provider guard: dispatch routes by name today, but this arm
