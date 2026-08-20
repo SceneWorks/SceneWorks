@@ -7,7 +7,7 @@
     "cellCount": 916,
     "mlxOnlyCellCount": 80,
     "candleOnlyCellCount": 42,
-    "exceptionCount": 15
+    "exceptionCount": 19
   },
   "sources": {
     "apiContractEntry": "67da4bd170ee62f6bebcb13a8fdd19b4c96577b7efe9f18d2139d877ed5f41c5",
@@ -21,7 +21,7 @@
     "descriptorMlxFacts": "574a5649db72bbb703721f693b545fedb3605be03bf39a7ce9fce18ede91189b",
     "descriptorMlxRuntime": "622131e3dc38f97fdcda9d7d64e2ae748b64cd86f3f53a8e4a57bd39c46ac972",
     "descriptorPreviewFacts": "c6a50113109ce6cc7437bbb16f2f138d30f3189121ab32f0f6ac85ee36f653f5",
-    "exceptionRegister": "5b16913147432d8089a365ca26df022dbd98692c984042dca941d4e29b2596ad",
+    "exceptionRegister": "5fe90734c4be671a06b4333761b1bf5e7b6e449960b8505d415406a584646dec",
     "manifest": "2b5c6f6925297454359499121646717c5f72bf723d1f6d7adfac579a9ba886a8",
     "modelImportDefaults": "ef7fb7fccc493b1bf9be2214f75b028ff1384a119d0b4a6eda630dab05761c99",
     "routerCandle": "307f4fe042e3e2ad0c09be1995d5a5cc5aecd08b1c3815e3ec4a3d7f2659c58d",
@@ -7640,6 +7640,66 @@
       "cells": [
         "models/minimax_h3/userAdapters/lora",
         "models/minimax_h3/userAdapters/lokr"
+      ]
+    },
+    {
+      "id": "epic-17137-minimax-h3-ref-operation-sequencing",
+      "category": "operation",
+      "decisionType": "sequencing_choice",
+      "evidence": "Michael Trefry directly approved carrying these MLX-only cells under epic-17137 on 2026-08-20, in session, extending the same rationale he approved for the minimax_h3 rows on 2026-08-16 to the minimax_h3_ref twin. sc-18650 activated the Ref2VA route, so these cells became visible to the generated matrix for the first time. MiniMax-H3 is a macOS-only family — there is no Candle lane to be at parity with, because the family's candle half is not shipped.",
+      "approver": "Michael Trefry",
+      "authority": "epic-17137",
+      "approvedDate": "2026-08-20",
+      "userFacingBehavior": "Unsupported Candle MiniMax-H3 controls are hidden or disabled with an explanation, and a direct unsupported request will fail closed rather than degrading silently.",
+      "revisitCondition": "Revisit when a Candle MiniMax-H3 video lane ships and the generated matrix, routing tests and runtime evidence prove each corresponding Candle cell.",
+      "cells": [
+        "models/minimax_h3_ref/operationAndMode/reference_to_video"
+      ]
+    },
+    {
+      "id": "epic-17137-minimax-h3-ref-conditioning-sequencing",
+      "category": "conditioning",
+      "decisionType": "sequencing_choice",
+      "evidence": "Michael Trefry directly approved carrying these MLX-only cells under epic-17137 on 2026-08-20, in session, extending the same rationale he approved for the minimax_h3 rows on 2026-08-16 to the minimax_h3_ref twin. sc-18650 activated the Ref2VA route, so these cells became visible to the generated matrix for the first time. MiniMax-H3 is a macOS-only family — there is no Candle lane to be at parity with, because the family's candle half is not shipped.",
+      "approver": "Michael Trefry",
+      "authority": "epic-17137",
+      "approvedDate": "2026-08-20",
+      "userFacingBehavior": "Unsupported Candle MiniMax-H3 controls are hidden or disabled with an explanation, and a direct unsupported request will fail closed rather than degrading silently.",
+      "revisitCondition": "Revisit when a Candle MiniMax-H3 video lane ships and the generated matrix, routing tests and runtime evidence prove each corresponding Candle cell.",
+      "cells": [
+        "models/minimax_h3_ref/conditioningShape/reference",
+        "models/minimax_h3_ref/conditioningShape/referenceAudio"
+      ]
+    },
+    {
+      "id": "epic-17137-minimax-h3-ref-precision-sequencing",
+      "category": "precision",
+      "decisionType": "sequencing_choice",
+      "evidence": "Michael Trefry directly approved carrying these MLX-only cells under epic-17137 on 2026-08-20, in session, extending the same rationale he approved for the minimax_h3 rows on 2026-08-16 to the minimax_h3_ref twin. sc-18650 activated the Ref2VA route, so these cells became visible to the generated matrix for the first time. MiniMax-H3 is a macOS-only family — there is no Candle lane to be at parity with, because the family's candle half is not shipped.",
+      "approver": "Michael Trefry",
+      "authority": "epic-17137",
+      "approvedDate": "2026-08-20",
+      "userFacingBehavior": "Unsupported Candle MiniMax-H3 controls are hidden or disabled with an explanation, and a direct unsupported request will fail closed rather than degrading silently.",
+      "revisitCondition": "Revisit when a Candle MiniMax-H3 video lane ships and the generated matrix, routing tests and runtime evidence prove each corresponding Candle cell.",
+      "cells": [
+        "models/minimax_h3_ref/precisionTier/bf16",
+        "models/minimax_h3_ref/precisionTier/q4",
+        "models/minimax_h3_ref/precisionTier/q8"
+      ]
+    },
+    {
+      "id": "epic-17137-minimax-h3-ref-adapter-sequencing",
+      "category": "adapter",
+      "decisionType": "sequencing_choice",
+      "evidence": "Michael Trefry directly approved carrying these MLX-only cells under epic-17137 on 2026-08-20, in session, extending the same rationale he approved for the minimax_h3 rows on 2026-08-16 to the minimax_h3_ref twin. sc-18650 activated the Ref2VA route, so these cells became visible to the generated matrix for the first time. MiniMax-H3 is a macOS-only family — there is no Candle lane to be at parity with, because the family's candle half is not shipped.",
+      "approver": "Michael Trefry",
+      "authority": "epic-17137",
+      "approvedDate": "2026-08-20",
+      "userFacingBehavior": "Unsupported Candle MiniMax-H3 controls are hidden or disabled with an explanation, and a direct unsupported request will fail closed rather than degrading silently.",
+      "revisitCondition": "Revisit when a Candle MiniMax-H3 video lane ships and the generated matrix, routing tests and runtime evidence prove each corresponding Candle cell.",
+      "cells": [
+        "models/minimax_h3_ref/userAdapters/lora",
+        "models/minimax_h3_ref/userAdapters/lokr"
       ]
     },
     {

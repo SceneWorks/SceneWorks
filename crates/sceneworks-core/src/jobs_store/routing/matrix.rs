@@ -4794,24 +4794,90 @@ mod tests {
             ])
         );
 
-        assert_eq!(register.records.len(), 15);
-        let expected_groups = BTreeMap::from([
-            (("epic-9083", "precision"), 27usize),
-            (("epic-8433", "operation"), 3usize),
-            (("epic-8433", "conditioning"), 2usize),
-            (("epic-8433", "adapter"), 2usize),
-            (("epic-8433", "precision"), 3usize),
-            (("epic-8588", "conditioning"), 6usize),
-            (("epic-7434", "guidance"), 4usize),
-            (("epic-17137", "operation"), 3usize),
-            (("epic-17137", "conditioning"), 2usize),
-            (("epic-17137", "precision"), 3usize),
-            (("epic-17137", "adapter"), 2usize),
-            (("epic-18803", "operation"), 6usize),
-            (("epic-18803", "conditioning"), 4usize),
-            (("epic-18803", "adapter"), 2usize),
-            (("epic-18803", "precision"), 1usize),
+        // Keyed by record id, not by (authority, category): one epic can approve more than one
+        // record in the same category on different days. epic-17137 does — the minimax_h3 rows
+        // were approved 2026-08-16 and the minimax_h3_ref twin's on 2026-08-20 — and under the
+        // old (authority, category) key those two collapsed into one entry, silently losing a
+        // record from the comparison.
+        let expected_records = BTreeMap::from([
+            (
+                "epic-9083-precision-sequencing",
+                ("epic-9083", "precision", 27usize),
+            ),
+            (
+                "epic-8433-krea-realtime-operation-sequencing",
+                ("epic-8433", "operation", 3usize),
+            ),
+            (
+                "epic-8433-krea-realtime-conditioning-sequencing",
+                ("epic-8433", "conditioning", 2usize),
+            ),
+            (
+                "epic-8433-krea-realtime-adapter-sequencing",
+                ("epic-8433", "adapter", 2usize),
+            ),
+            (
+                "epic-8433-krea-realtime-precision-sequencing",
+                ("epic-8433", "precision", 3usize),
+            ),
+            (
+                "epic-8588-conditioning-sequencing",
+                ("epic-8588", "conditioning", 6usize),
+            ),
+            (
+                "epic-7434-cfg-pp-guidance-sequencing",
+                ("epic-7434", "guidance", 4usize),
+            ),
+            (
+                "epic-17137-minimax-h3-operation-sequencing",
+                ("epic-17137", "operation", 3usize),
+            ),
+            (
+                "epic-17137-minimax-h3-conditioning-sequencing",
+                ("epic-17137", "conditioning", 2usize),
+            ),
+            (
+                "epic-17137-minimax-h3-precision-sequencing",
+                ("epic-17137", "precision", 3usize),
+            ),
+            (
+                "epic-17137-minimax-h3-adapter-sequencing",
+                ("epic-17137", "adapter", 2usize),
+            ),
+            (
+                "epic-17137-minimax-h3-ref-operation-sequencing",
+                ("epic-17137", "operation", 1usize),
+            ),
+            (
+                "epic-17137-minimax-h3-ref-conditioning-sequencing",
+                ("epic-17137", "conditioning", 2usize),
+            ),
+            (
+                "epic-17137-minimax-h3-ref-precision-sequencing",
+                ("epic-17137", "precision", 3usize),
+            ),
+            (
+                "epic-17137-minimax-h3-ref-adapter-sequencing",
+                ("epic-17137", "adapter", 2usize),
+            ),
+            (
+                "epic-18803-eros-candle-operation-withdrawal",
+                ("epic-18803", "operation", 6usize),
+            ),
+            (
+                "epic-18803-eros-candle-conditioning-withdrawal",
+                ("epic-18803", "conditioning", 4usize),
+            ),
+            (
+                "epic-18803-eros-candle-adapter-withdrawal",
+                ("epic-18803", "adapter", 2usize),
+            ),
+            (
+                "epic-18803-eros-candle-precision-withdrawal",
+                ("epic-18803", "precision", 1usize),
+            ),
         ]);
+        assert_eq!(register.records.len(), expected_records.len());
         let actual_groups: BTreeMap<_, _> = register
             .records
             .iter()
@@ -4859,24 +4925,30 @@ mod tests {
                 assert!(record.revisit_condition.contains("routing tests"));
                 assert!(record.revisit_condition.contains("runtime evidence"));
                 (
-                    (record.authority.as_str(), record.category.as_str()),
-                    record.cells.len(),
+                    record.id.as_str(),
+                    (
+                        record.authority.as_str(),
+                        record.category.as_str(),
+                        record.cells.len(),
+                    ),
                 )
             })
             .collect();
-        assert_eq!(actual_groups, expected_groups);
+        assert_eq!(actual_groups, expected_records);
 
         let exception_paths: BTreeSet<_> = register
             .records
             .iter()
             .flat_map(|record| record.cells.iter().cloned())
             .collect();
-        // 47 + epic-17137's 10 (MiniMax-H3 became visible to the matrix at pin 75d66db5) +
-        // epic-18803's 13 (the Eros Candle withdrawal). The set is compared against the
-        // generated residual above, so this only pins that no cell is approved TWICE.
+        // Derived from the table above rather than a second frozen literal: the set is compared
+        // against the generated residual below, so all this pins is that no cell is approved TWICE.
         assert_eq!(
             exception_paths.len(),
-            70,
+            expected_records
+                .values()
+                .map(|(_, _, cells)| *cells)
+                .sum::<usize>(),
             "every approved cell appears once"
         );
         assert_eq!(
@@ -4890,9 +4962,9 @@ mod tests {
         );
 
         let matrix = backend_capability_matrix().expect("capability matrix generates");
-        // 7 + epic-17137's 4 MiniMax-H3 records (operation/conditioning/precision/adapter)
-        // + epic-18803's 4 Eros Candle withdrawal records.
-        assert_eq!(matrix.summary.exception_count, 15);
+        // The generated summary must count exactly the records the register carries; the register's
+        // own population is pinned by the table above, so this asserts the join, not a literal.
+        assert_eq!(matrix.summary.exception_count, register.records.len());
         let mut residual_paths = BTreeSet::new();
         for model in &matrix.models {
             for (axis, cells) in [
