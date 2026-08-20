@@ -3,10 +3,10 @@
   "generatedBy": "scripts/generate-candle-admission-inventory.mjs",
   "story": "sc-19049",
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:45bd90329bc70cb8a6ca63db1c81587f8704831be02fd3d1ae430f67a397ee74",
+    "sceneWorksRevision": "source-tree:15f7143ac8860128a94b7c442ecf6609112bacce00be40fc7b53daadb31b4fc5",
     "decisions": {
       "path": "docs/generated/candle-admission-decisions.json",
-      "digest": "sha256:d5b6510060a7b9ca812eebcf9332991cab5577a0b34d86ac76a7669419b142be",
+      "digest": "sha256:2aecbc27a99e467d78488df09441452434d72ddcf0cb432613fb611581125bc9",
       "producedBy": {
         "module": "crates/sceneworks-worker/src/candle_admission_decisions.rs",
         "gateModule": "crates/sceneworks-worker/src/candle_scalar_gate.rs",
@@ -91,7 +91,7 @@
       "too_big": 746,
       "unknown": 1008
     },
-    "geometrySensitiveCandleRows": 2508,
+    "geometrySensitiveCandleRows": 2524,
     "notEvaluatedByGate": {
       "conditioning_fit::decide": 8,
       "krea_turbo_fit_with_runtime": 4,
@@ -59469,8 +59469,12 @@
         "flat_video_fit_error"
       ],
       "sharedSelectorVia": null,
-      "geometrySensitive": false,
-      "geometryAxes": [],
+      "geometrySensitive": true,
+      "geometryAxes": [
+        "frames",
+        "height",
+        "width"
+      ],
       "missingInput": "weight_bytes: u64, measured off the resolved model dir on disk (wan_weight_bytes / wan_vace_fun_sequential_weight_bytes); no manifest number reproduces it"
     },
     {
@@ -59486,8 +59490,12 @@
         "flat_video_fit_error"
       ],
       "sharedSelectorVia": null,
-      "geometrySensitive": false,
-      "geometryAxes": [],
+      "geometrySensitive": true,
+      "geometryAxes": [
+        "frames",
+        "height",
+        "width"
+      ],
       "missingInput": "weight_bytes: u64, measured off the resolved model dir on disk (wan_weight_bytes / wan_vace_fun_sequential_weight_bytes); no manifest number reproduces it"
     },
     {
@@ -59503,8 +59511,12 @@
         "flat_video_fit_error"
       ],
       "sharedSelectorVia": null,
-      "geometrySensitive": false,
-      "geometryAxes": [],
+      "geometrySensitive": true,
+      "geometryAxes": [
+        "frames",
+        "height",
+        "width"
+      ],
       "missingInput": "weight_bytes: u64, measured off the resolved model dir on disk (wan_weight_bytes / wan_vace_fun_sequential_weight_bytes); no manifest number reproduces it"
     },
     {
@@ -59520,8 +59532,12 @@
         "flat_video_fit_error"
       ],
       "sharedSelectorVia": null,
-      "geometrySensitive": false,
-      "geometryAxes": [],
+      "geometrySensitive": true,
+      "geometryAxes": [
+        "frames",
+        "height",
+        "width"
+      ],
       "missingInput": "weight_bytes: u64, measured off the resolved model dir on disk (wan_weight_bytes / wan_vace_fun_sequential_weight_bytes); no manifest number reproduces it"
     },
     {
@@ -74501,8 +74517,12 @@
         "flat_video_fit_error"
       ],
       "sharedSelectorVia": null,
-      "geometrySensitive": false,
-      "geometryAxes": [],
+      "geometrySensitive": true,
+      "geometryAxes": [
+        "frames",
+        "height",
+        "width"
+      ],
       "missingInput": "weight_bytes: u64, measured off the resolved model dir on disk (wan_weight_bytes / wan_vace_fun_sequential_weight_bytes); no manifest number reproduces it"
     },
     {
@@ -74518,8 +74538,12 @@
         "flat_video_fit_error"
       ],
       "sharedSelectorVia": null,
-      "geometrySensitive": false,
-      "geometryAxes": [],
+      "geometrySensitive": true,
+      "geometryAxes": [
+        "frames",
+        "height",
+        "width"
+      ],
       "missingInput": "weight_bytes: u64, measured off the resolved model dir on disk (wan_weight_bytes / wan_vace_fun_sequential_weight_bytes); no manifest number reproduces it"
     },
     {
@@ -74535,8 +74559,12 @@
         "flat_video_fit_error"
       ],
       "sharedSelectorVia": null,
-      "geometrySensitive": false,
-      "geometryAxes": [],
+      "geometrySensitive": true,
+      "geometryAxes": [
+        "frames",
+        "height",
+        "width"
+      ],
       "missingInput": "weight_bytes: u64, measured off the resolved model dir on disk (wan_weight_bytes / wan_vace_fun_sequential_weight_bytes); no manifest number reproduces it"
     },
     {
@@ -74552,8 +74580,12 @@
         "flat_video_fit_error"
       ],
       "sharedSelectorVia": null,
-      "geometrySensitive": false,
-      "geometryAxes": [],
+      "geometrySensitive": true,
+      "geometryAxes": [
+        "frames",
+        "height",
+        "width"
+      ],
       "missingInput": "weight_bytes: u64, measured off the resolved model dir on disk (wan_weight_bytes / wan_vace_fun_sequential_weight_bytes); no manifest number reproduces it"
     },
     {
@@ -74569,8 +74601,12 @@
         "flat_video_fit_error"
       ],
       "sharedSelectorVia": null,
-      "geometrySensitive": false,
-      "geometryAxes": [],
+      "geometrySensitive": true,
+      "geometryAxes": [
+        "frames",
+        "height",
+        "width"
+      ],
       "missingInput": "weight_bytes: u64, measured off the resolved model dir on disk (wan_weight_bytes / wan_vace_fun_sequential_weight_bytes); no manifest number reproduces it"
     },
     {
@@ -74586,8 +74622,12 @@
         "flat_video_fit_error"
       ],
       "sharedSelectorVia": null,
-      "geometrySensitive": false,
-      "geometryAxes": [],
+      "geometrySensitive": true,
+      "geometryAxes": [
+        "frames",
+        "height",
+        "width"
+      ],
       "missingInput": "weight_bytes: u64, measured off the resolved model dir on disk (wan_weight_bytes / wan_vace_fun_sequential_weight_bytes); no manifest number reproduces it"
     },
     {
@@ -74603,8 +74643,12 @@
         "flat_video_fit_error"
       ],
       "sharedSelectorVia": null,
-      "geometrySensitive": false,
-      "geometryAxes": [],
+      "geometrySensitive": true,
+      "geometryAxes": [
+        "frames",
+        "height",
+        "width"
+      ],
       "missingInput": "weight_bytes: u64, measured off the resolved model dir on disk (wan_weight_bytes / wan_vace_fun_sequential_weight_bytes); no manifest number reproduces it"
     },
     {
@@ -74620,8 +74664,12 @@
         "flat_video_fit_error"
       ],
       "sharedSelectorVia": null,
-      "geometrySensitive": false,
-      "geometryAxes": [],
+      "geometrySensitive": true,
+      "geometryAxes": [
+        "frames",
+        "height",
+        "width"
+      ],
       "missingInput": "weight_bytes: u64, measured off the resolved model dir on disk (wan_weight_bytes / wan_vace_fun_sequential_weight_bytes); no manifest number reproduces it"
     },
     {
@@ -74637,8 +74685,12 @@
         "flat_video_fit_error"
       ],
       "sharedSelectorVia": null,
-      "geometrySensitive": false,
-      "geometryAxes": [],
+      "geometrySensitive": true,
+      "geometryAxes": [
+        "frames",
+        "height",
+        "width"
+      ],
       "missingInput": "weight_bytes: u64, measured off the resolved model dir on disk (wan_weight_bytes / wan_vace_fun_sequential_weight_bytes); no manifest number reproduces it"
     },
     {
@@ -74654,8 +74706,12 @@
         "flat_video_fit_error"
       ],
       "sharedSelectorVia": null,
-      "geometrySensitive": false,
-      "geometryAxes": [],
+      "geometrySensitive": true,
+      "geometryAxes": [
+        "frames",
+        "height",
+        "width"
+      ],
       "missingInput": "weight_bytes: u64, measured off the resolved model dir on disk (wan_weight_bytes / wan_vace_fun_sequential_weight_bytes); no manifest number reproduces it"
     },
     {
@@ -74671,8 +74727,12 @@
         "flat_video_fit_error"
       ],
       "sharedSelectorVia": null,
-      "geometrySensitive": false,
-      "geometryAxes": [],
+      "geometrySensitive": true,
+      "geometryAxes": [
+        "frames",
+        "height",
+        "width"
+      ],
       "missingInput": "weight_bytes: u64, measured off the resolved model dir on disk (wan_weight_bytes / wan_vace_fun_sequential_weight_bytes); no manifest number reproduces it"
     },
     {
@@ -74688,8 +74748,12 @@
         "flat_video_fit_error"
       ],
       "sharedSelectorVia": null,
-      "geometrySensitive": false,
-      "geometryAxes": [],
+      "geometrySensitive": true,
+      "geometryAxes": [
+        "frames",
+        "height",
+        "width"
+      ],
       "missingInput": "weight_bytes: u64, measured off the resolved model dir on disk (wan_weight_bytes / wan_vace_fun_sequential_weight_bytes); no manifest number reproduces it"
     },
     {

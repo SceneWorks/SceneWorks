@@ -137,21 +137,23 @@ pub(crate) fn scalar_peak_class(
 /// request geometry is compared as-is (byte-for-byte the pre-story behavior), while a
 /// [`DeclaredScalarClass::DeclaredFloor`] is widened by the candle ESTIMATE margin — exactly the
 /// grade the shared selector gives an `EstimateFloor` candidate, applied here only because the
-/// legacy scalar gate has no selector downstream of it. The widening arithmetic is the selector's
-/// own (`memory_strategy::widened_peak_bytes` over integer bytes), never a second law.
+/// legacy scalar gate has no selector downstream of it.
+///
+/// **sc-19055 moved the law itself into the mechanism**
+/// ([`crate::estimate_synthesis::graded_scalar_gb`]). This is now a thin lane binding that names
+/// the candle lane and nothing else: epic 19048 R1 forbids a prediction law living in a
+/// backend-local module, and the video flat gates could not have consumed this grade while it was
+/// private to the image gate. The arithmetic is unchanged — the image lane's rows in
+/// `docs/generated/candle-admission-decisions.json` are byte-identical across that move, which is
+/// the proof it was code motion.
 ///
 /// [`DeclaredScalarClass::DeclaredFloor`]: crate::estimate_synthesis::DeclaredScalarClass
 fn graded_scalar_gb(peak_gb: f64, class: crate::estimate_synthesis::DeclaredScalarClass) -> f64 {
-    match class {
-        crate::estimate_synthesis::DeclaredScalarClass::MeasuredPeak => peak_gb,
-        crate::estimate_synthesis::DeclaredScalarClass::DeclaredFloor => {
-            let bytes = (peak_gb * BYTES_PER_GIB).ceil().clamp(0.0, u64::MAX as f64) as u64;
-            crate::memory_strategy::peak_bytes_to_gb(crate::memory_strategy::widened_peak_bytes(
-                bytes,
-                crate::memory_strategy::estimate_margin(gen_core::MemoryBackend::Candle),
-            ))
-        }
-    }
+    crate::estimate_synthesis::graded_scalar_gb(
+        peak_gb,
+        class,
+        crate::estimate_synthesis::CANDLE_LANE,
+    )
 }
 
 /// **The geometry-aware resident admission prediction** (sc-19054, epic 19048 R3): the

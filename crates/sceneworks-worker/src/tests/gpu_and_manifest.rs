@@ -993,6 +993,14 @@ fn flux2_candle_blocks_drive_the_fit_gate_and_reject() {
 fn wan_candle_blocks_drive_the_video_fit_gate_and_reject() {
     use crate::vram_gate::{apply_vram_cap, predicted_peak_gb, wan_video_fit_error};
 
+    /// The request geometry the live gate grades against (sc-19055): a real clip at the family's
+    /// own `vramMeasuredPixels` capture area. `frames > 1` is what demotes the manifest row from a
+    /// measured peak to a declared floor — see `video_admission::video_scalar_class` — so a
+    /// `frames: 1` fixture here would silently grade this VIDEO gate as the image lane does.
+    fn wan_gate_geometry() -> gen_core::MemoryGeometry {
+        crate::video_admission::video_gate_geometry(1024, 1024, 81)
+    }
+
     let wan = builtin_model_entry("wan_2_2");
     let entry = wan.as_object().expect("wan_2_2 entry object");
     assert!(
@@ -1034,31 +1042,31 @@ fn wan_candle_blocks_drive_the_video_fit_gate_and_reject() {
     // with room to spare, and even clears a 16 GB card.
     let card24 = apply_vram_cap(None, Some(24.0));
     assert!(
-        wan_video_fit_error("wan_2_2", entry, "q4", WAN_5B_Q4_DISK_BYTES, "0", card24).is_none(),
+        wan_video_fit_error("wan_2_2", entry, "q4", WAN_5B_Q4_DISK_BYTES, wan_gate_geometry(), "0", card24).is_none(),
         "the 5B's sequential q4 peak (~14 GB) must fit a 24 GB card — the whole point of the re-drop"
     );
     let card16 = apply_vram_cap(None, Some(16.0));
     assert!(
-        wan_video_fit_error("wan_2_2", entry, "q4", WAN_5B_Q4_DISK_BYTES, "0", card16).is_none(),
+        wan_video_fit_error("wan_2_2", entry, "q4", WAN_5B_Q4_DISK_BYTES, wan_gate_geometry(), "0", card16).is_none(),
         "the sequential q4 peak also clears a 16 GB card"
     );
     // …but the gate reads the TIER: the heavier dense bf16 (16.5 GB need) is REFUSED on that same 16 GB
     // card, so the conservative bf16 pool bound is load-bearing, not decoration.
     assert!(
-        wan_video_fit_error("wan_2_2", entry, "bf16", WAN_5B_Q4_DISK_BYTES, "0", card16).is_some(),
+        wan_video_fit_error("wan_2_2", entry, "bf16", WAN_5B_Q4_DISK_BYTES, wan_gate_geometry(), "0", card16).is_some(),
         "bf16's 14.5 + 2 = 16.5 GB need overflows a 16 GB card — the gate splits the tiers"
     );
     // …and, of course, the 96 GB dev box it was measured on (also reused by the A14B block below).
     let card96 = apply_vram_cap(None, Some(95.6));
     assert!(
-        wan_video_fit_error("wan_2_2", entry, "q4", WAN_5B_Q4_DISK_BYTES, "0", card96).is_none(),
+        wan_video_fit_error("wan_2_2", entry, "q4", WAN_5B_Q4_DISK_BYTES, wan_gate_geometry(), "0", card96).is_none(),
         "the sequential q4 peak fits the 96 GB box it was measured on — wall-rejecting it would regress"
     );
 
     // …but the gate is NOT vacuous: a 12 GB card is still too small for even the offloaded q4 peak +
     // headroom (14.1 > 12), so it is REFUSED before the OOM, and the message names the model + sized tier.
     let card12 = apply_vram_cap(None, Some(12.0));
-    let message = wan_video_fit_error("wan_2_2", entry, "q4", WAN_5B_Q4_DISK_BYTES, "0", card12)
+    let message = wan_video_fit_error("wan_2_2", entry, "q4", WAN_5B_Q4_DISK_BYTES, wan_gate_geometry(), "0", card12)
         .expect("the ~14 GB sequential q4 peak cannot fit a 12 GB card — refuse before the OOM")
         .to_string();
     assert!(message.contains("wan_2_2"), "names the model: {message}");
@@ -1100,30 +1108,30 @@ fn wan_candle_blocks_drive_the_video_fit_gate_and_reject() {
         // (wall-rejecting q4 would be the sc-12179 regression) AND on a 32 GB RTX 5090 — the point of the
         // rework — but REFUSED on a 16 GB card too small for even the offloaded peak, before the OOM.
         assert!(
-            wan_video_fit_error(id, a14b, "q4", 0, "0", card96).is_none(),
+            wan_video_fit_error(id, a14b, "q4", 0, wan_gate_geometry(), "0", card96).is_none(),
             "{id} q4 (~{q4} GB) must fit the 96 GB dev box it was measured on"
         );
         assert!(
-            wan_video_fit_error(id, a14b, "q4", 0, "0", card32).is_none(),
+            wan_video_fit_error(id, a14b, "q4", 0, wan_gate_geometry(), "0", card32).is_none(),
             "{id} q4 (~{q4} GB) must fit a 32 GB RTX 5090 — the epic sc-12732 target"
         );
         assert!(
-            wan_video_fit_error(id, a14b, "q8", 0, "0", card32).is_none(),
+            wan_video_fit_error(id, a14b, "q8", 0, wan_gate_geometry(), "0", card32).is_none(),
             "{id} q8 (~{q8} GB live) is ADMITTED on a 32 GB card — on the unproven pool-trim inference \
              above, pending sc-16118's enforced-cap re-validation"
         );
         assert!(
-            wan_video_fit_error(id, a14b, "q4", 0, "0", card16).is_some(),
+            wan_video_fit_error(id, a14b, "q4", 0, wan_gate_geometry(), "0", card16).is_some(),
             "{id} q4 (~{q4} GB) cannot fit a 16 GB card — refuse before the load"
         );
         // bf16 is the only tier still refused on a 32 GB card; its measured peak now admits a 48 GB card
         // (the old derived 56 bound refused 48).
         assert!(
-            wan_video_fit_error(id, a14b, "bf16", 0, "0", card32).is_some(),
+            wan_video_fit_error(id, a14b, "bf16", 0, wan_gate_geometry(), "0", card32).is_some(),
             "{id} bf16 (~{bf16} GB) must stay refused on a 32 GB card"
         );
         assert!(
-            wan_video_fit_error(id, a14b, "bf16", 0, "0", card48).is_none(),
+            wan_video_fit_error(id, a14b, "bf16", 0, wan_gate_geometry(), "0", card48).is_none(),
             "{id} bf16's measured peak now fits a 48 GB card (the derived 56 bound refused it)"
         );
     }

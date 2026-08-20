@@ -231,12 +231,21 @@ fn gate_is_geometry_aware(gate: &str) -> bool {
         "krea_turbo_fit_with_runtime" => true,
         // (…, frames: u32, …, width: u32, height: u32, …) — direct scalars.
         "svd_fit_error" | "mochi_fit_error" => true,
-        // Deliberately resolution-blind: a per-tier constant plus a weights floor.
+        // sc-19055 (epic 19048 R2): geometry: MemoryGeometry — STRUCT-WRAPPED, and load-bearing.
+        // These were the resolution- AND frame-blind per-tier constants. They now hand the request
+        // geometry to `video_admission::graded_video_peak_gb`, which asks the mechanism what the
+        // manifest row may claim for that shape. For a video request the answer is always the
+        // estimate-margin-widened declared floor, because `vramMeasuredPixels` is a pixels-only
+        // capture; the geometry is nonetheless a real input, and the day a candle video curve is
+        // packaged (sc-19057) it becomes the identity that selects a cell.
         "wan_video_fit_error"
         | "wan_video_fit_error_with_adapter_bytes"
         | "scail2_video_fit_error"
-        | "scail2_video_fit_error_with_adapter_bytes"
-        | "video_weights_fit_error" => false,
+        | "scail2_video_fit_error_with_adapter_bytes" => true,
+        // Deliberately still resolution-blind, and deliberately still UNGRADED: an on-disk weights
+        // byte sum, whose dense-tier over-count already wall-rejects a card that renders. See
+        // `vram_gate::video_weights_fit_error`'s sc-19055 note.
+        "video_weights_fit_error" => false,
         // geometry: MemoryGeometry — STRUCT-WRAPPED, invisible to a token scan.
         "krea_control_fit::fit_ladder_for_entry_with_runtime" => true,
         // ConditioningFootprint carries labels and byte counts only.
@@ -732,6 +741,85 @@ mod tests {
             "candle sequential-capability divergence on bundle {}: {}",
             linked_bundle(),
             serde_json::to_string(&divergence).expect("divergence serializes")
+        );
+    }
+
+    /// **sc-19055: the unreached IMAGE class, enumerated with its blocker named.**
+    ///
+    /// Epic 19048 R2 wants every candle image route on the shared selector. This story owns the
+    /// third inventory class — the routes that never reach it — and the finding is that the image
+    /// half of that class is not a SceneWorks wiring gap at all.
+    ///
+    /// `candle_memory_strategy::evaluate_shared_image` is already CALLED for every base-routed
+    /// candle image request: the engine-id `match` only picks an evidence-revision string, and
+    /// sc-18456's catch-all arm means an unnamed engine still enters the function. What decides
+    /// whether the selector actually grades anything is
+    /// `inference_runtime::media().memory_strategy_contract(engine_id, spec)` — and at the pinned
+    /// inference revision only seven candle provider crates publish one (flux, flux2, krea, lens,
+    /// mage, qwen-image, z-image, plus wan on the video side). Every other provider returns `None`
+    /// and the function returns `Ok(None)` before any candidate exists.
+    ///
+    /// The manifest's `candle.memoryStrategyContract` is the declaration side of that same fact,
+    /// and it is what the generated inventory keys `sharedSelector.reached` on. So this test pins
+    /// the PARTITION: no image route is classified unreached while declaring a provider contract,
+    /// and none is classified reached without one. A future slice that lands contract publication
+    /// for, say, sdxl will flip rows here and must say so.
+    ///
+    /// Why this is a test and not a paragraph: it is the difference between claiming the image half
+    /// is blocked upstream and demonstrating it against the artifact sc-19059 has to drive to empty.
+    #[test]
+    fn the_unreached_image_class_is_exactly_the_routes_declaring_no_provider_contract() {
+        let inventory: Value = serde_json::from_str(INVENTORY).expect("inventory parses");
+        let routes = inventory["routes"].as_array().expect("routes");
+
+        let mut unreached_image = Vec::new();
+        let mut reached_without_declaration = Vec::new();
+        for route in routes {
+            if route["modality"].as_str() != Some("image") {
+                continue;
+            }
+            let model_id = route["modelId"].as_str().expect("modelId");
+            let reached = route["sharedSelector"]["reached"]
+                .as_bool()
+                .expect("sharedSelector.reached");
+            let declares = route["evidence"]["declaresProviderContract"]
+                .as_bool()
+                .unwrap_or(false);
+            // A bespoke override reaches the selector through a caller-supplied revision rather
+            // than through a manifest declaration, so it is legitimately reached without one.
+            let bespoke = route["sharedSelector"]["via"].as_str() == Some("bespoke_override");
+            let named = route["sharedSelector"]["via"].as_str() == Some("named_revision");
+            if !reached {
+                assert!(
+                    !declares,
+                    "{model_id}: declares a provider contract but is classified unreached — the \
+                     inventory's reachability key and this partition disagree"
+                );
+                unreached_image.push(model_id.to_owned());
+            } else if !declares && !bespoke && !named {
+                reached_without_declaration.push(model_id.to_owned());
+            }
+        }
+
+        assert!(
+            reached_without_declaration.is_empty(),
+            "these image routes reach the selector through neither a named revision, a bespoke \
+             override, nor a manifest provider contract: {reached_without_declaration:?}"
+        );
+        assert!(
+            !unreached_image.is_empty(),
+            "the unreached image class is empty — if a slice genuinely closed it, delete this test \
+             and record the closure in the epic's divergence ledger rather than weakening it"
+        );
+
+        // The blocker is upstream, so the count is a property of the PIN, not of this tree. Printed
+        // rather than pinned: pinning it would red on an inference bump that publishes a contract,
+        // which is the outcome the epic wants, not a regression.
+        eprintln!(
+            "sc-19055: {} candle image routes remain off the shared selector at this inference \
+             pin, every one of them because its provider publishes no MemoryProviderContract: {:?}",
+            unreached_image.len(),
+            unreached_image
         );
     }
 }

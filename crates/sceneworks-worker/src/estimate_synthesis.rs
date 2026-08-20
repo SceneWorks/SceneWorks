@@ -215,6 +215,66 @@ pub(crate) fn declared_scalar_class(
     }
 }
 
+/// **Grade a declared scalar for admission** (epic 19048 R1/R3; hoisted here by sc-19055).
+///
+/// A [`DeclaredScalarClass::MeasuredPeak`] compares as-is — it IS the peak for this request. A
+/// [`DeclaredScalarClass::DeclaredFloor`] is widened by the lane's own estimate margin, which is
+/// exactly the grade [`crate::memory_strategy::select_strategy`] gives a
+/// [`CandidateBasis::EstimateFloor`] candidate. Gates that have no selector downstream of them (the
+/// candle image scalar gate, and since sc-19055 the flat video fit errors) apply it here instead, so
+/// the two positions cannot drift into two different gradings of the same class of evidence.
+///
+/// Widening is [`crate::memory_strategy::widened_peak_bytes`] over integer bytes — the selector's
+/// own arithmetic, never a second law — and the margin is
+/// [`EstimateLane::estimate_margin`], never a copied constant.
+///
+/// Lives in the mechanism rather than in either lane because R1 forbids a prediction law in a
+/// backend-local module: before sc-19055 this function was `candle_scalar_gate::graded_scalar_gb`,
+/// reachable only from the image lane, so the video lane could not have consumed it without either
+/// importing the image gate or growing a second copy.
+#[cfg_attr(
+    not(any(target_os = "macos", feature = "backend-candle")),
+    allow(dead_code)
+)]
+pub(crate) fn graded_scalar_bytes(
+    peak_bytes: u64,
+    class: DeclaredScalarClass,
+    lane: EstimateLane,
+) -> u64 {
+    match class {
+        DeclaredScalarClass::MeasuredPeak => peak_bytes,
+        DeclaredScalarClass::DeclaredFloor => {
+            crate::memory_strategy::widened_peak_bytes(peak_bytes, lane.estimate_margin())
+        }
+    }
+}
+
+/// [`graded_scalar_bytes`] for a caller that holds GB rather than bytes.
+///
+/// The GB -> integer-byte -> GB round trip is deliberate and is the arithmetic the pre-sc-19055
+/// candle image gate already used: widening MUST happen in the selector's integer-byte unit so a
+/// gate-side grade and a selector-side grade of the same number agree exactly rather than to within
+/// a float rounding.
+#[cfg_attr(
+    not(any(target_os = "macos", feature = "backend-candle")),
+    allow(dead_code)
+)]
+pub(crate) fn graded_scalar_gb(
+    peak_gb: f64,
+    class: DeclaredScalarClass,
+    lane: EstimateLane,
+) -> f64 {
+    match class {
+        DeclaredScalarClass::MeasuredPeak => peak_gb,
+        DeclaredScalarClass::DeclaredFloor => {
+            let bytes = (peak_gb * (1024.0 * 1024.0 * 1024.0))
+                .ceil()
+                .clamp(0.0, u64::MAX as f64) as u64;
+            crate::memory_strategy::peak_bytes_to_gb(graded_scalar_bytes(bytes, class, lane))
+        }
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // The binding phase — ONE argmax, three lanes
 // ─────────────────────────────────────────────────────────────────────────────────────────────

@@ -3,7 +3,7 @@
   "generatedBy": "scripts/generate-candle-admission-inventory.mjs",
   "story": "sc-19049",
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:45bd90329bc70cb8a6ca63db1c81587f8704831be02fd3d1ae430f67a397ee74",
+    "sceneWorksRevision": "source-tree:15f7143ac8860128a94b7c442ecf6609112bacce00be40fc7b53daadb31b4fc5",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -31,11 +31,11 @@
       },
       "candleScalarGate": {
         "path": "crates/sceneworks-worker/src/candle_scalar_gate.rs",
-        "sha256": "fafc7242d309013cc94d75f01a9572cc31796cd1a8c31fabced78294d5a2abd3"
+        "sha256": "59af6f5e548c6a8419929b1ee4c47d697068a6fc08ca7921b3fa3af49dba5331"
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "99d1ce02c2ea0ec1ea018253013339b725525be0e79a11183423410cfe2c7184"
+        "sha256": "a6f4714ae503d4abab5cb354e46259cf8374491e4753283fa2575e3e2fb15d05"
       },
       "candleMemoryStrategy": {
         "path": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
@@ -55,7 +55,7 @@
       },
       "videoAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
-        "sha256": "0b0341817f56a96bf942148f8f3cbf331c67de8334ea14da38b3961c999a3d65"
+        "sha256": "3cf4a9fc7e4356d64a87ae5dd449d575aac29a0f60c4688b57c31711fb72ec7d"
       },
       "videoMemoryCurves": {
         "path": "crates/sceneworks-core/src/video_memory_curves.rs",
@@ -139,7 +139,7 @@
       },
       "videoRouteCandle": {
         "path": "crates/sceneworks-worker/src/video_jobs/candle.rs",
-        "sha256": "2b6af0c5b3c8e240eb378ccd0aac9549d399a5fe0c35947d861d262cf05ecf9c"
+        "sha256": "4c6bbdad4b97a5ab1488df18442705acd8a3c96cb3d44128f0ae9d5833cbf766"
       }
     }
   },
@@ -333,7 +333,7 @@
         "crates/sceneworks-worker/src/image_jobs/qwen_edit_candle.rs",
         "crates/sceneworks-worker/src/image_jobs/base.rs",
         "crates/sceneworks-worker/src/image_jobs/zimage_control.rs",
-        "crates/sceneworks-worker/src/vram_gate.rs"
+        "crates/sceneworks-worker/src/video_admission.rs"
       ]
     },
     {
@@ -752,9 +752,15 @@
         },
         {
           "symbol": "wan_video_fit_error",
-          "geometryAware": false,
-          "geometryAxes": [],
-          "reachedVia": [],
+          "geometryAware": true,
+          "geometryAxes": [
+            "frames",
+            "height",
+            "width"
+          ],
+          "reachedVia": [
+            "struct_parameter:geometry:MemoryGeometry"
+          ],
           "unresolvedParameterTypes": [
             {
               "parameter": "manifest_entry",
@@ -764,9 +770,15 @@
         },
         {
           "symbol": "wan_video_fit_error_with_adapter_bytes",
-          "geometryAware": false,
-          "geometryAxes": [],
-          "reachedVia": [],
+          "geometryAware": true,
+          "geometryAxes": [
+            "frames",
+            "height",
+            "width"
+          ],
+          "reachedVia": [
+            "struct_parameter:geometry:MemoryGeometry"
+          ],
           "unresolvedParameterTypes": [
             {
               "parameter": "manifest_entry",
@@ -776,9 +788,15 @@
         },
         {
           "symbol": "scail2_video_fit_error",
-          "geometryAware": false,
-          "geometryAxes": [],
-          "reachedVia": [],
+          "geometryAware": true,
+          "geometryAxes": [
+            "frames",
+            "height",
+            "width"
+          ],
+          "reachedVia": [
+            "struct_parameter:geometry:MemoryGeometry"
+          ],
           "unresolvedParameterTypes": [
             {
               "parameter": "manifest_entry",
@@ -788,9 +806,15 @@
         },
         {
           "symbol": "scail2_video_fit_error_with_adapter_bytes",
-          "geometryAware": false,
-          "geometryAxes": [],
-          "reachedVia": [],
+          "geometryAware": true,
+          "geometryAxes": [
+            "frames",
+            "height",
+            "width"
+          ],
+          "reachedVia": [
+            "struct_parameter:geometry:MemoryGeometry"
+          ],
           "unresolvedParameterTypes": [
             {
               "parameter": "manifest_entry",
@@ -814,13 +838,13 @@
       ],
       "geometryAwareSymbols": [
         "svd_fit_error",
-        "mochi_fit_error"
-      ],
-      "geometryBlindSymbols": [
+        "mochi_fit_error",
         "wan_video_fit_error",
         "wan_video_fit_error_with_adapter_bytes",
         "scail2_video_fit_error",
-        "scail2_video_fit_error_with_adapter_bytes",
+        "scail2_video_fit_error_with_adapter_bytes"
+      ],
+      "geometryBlindSymbols": [
         "video_weights_fit_error"
       ],
       "calledFrom": [
@@ -1146,17 +1170,29 @@
       "gate": "scail2_video_fit_error",
       "mechanism": "flat_video_fit_error",
       "definedIn": "crates/sceneworks-worker/src/vram_gate.rs",
-      "geometryAware": false,
-      "geometryAxes": [],
-      "reachedVia": []
+      "geometryAware": true,
+      "geometryAxes": [
+        "frames",
+        "height",
+        "width"
+      ],
+      "reachedVia": [
+        "struct_parameter:geometry:MemoryGeometry"
+      ]
     },
     {
       "gate": "scail2_video_fit_error_with_adapter_bytes",
       "mechanism": "flat_video_fit_error",
       "definedIn": "crates/sceneworks-worker/src/vram_gate.rs",
-      "geometryAware": false,
-      "geometryAxes": [],
-      "reachedVia": []
+      "geometryAware": true,
+      "geometryAxes": [
+        "frames",
+        "height",
+        "width"
+      ],
+      "reachedVia": [
+        "struct_parameter:geometry:MemoryGeometry"
+      ]
     },
     {
       "gate": "scalar_peak_class",
@@ -1206,17 +1242,29 @@
       "gate": "wan_video_fit_error",
       "mechanism": "flat_video_fit_error",
       "definedIn": "crates/sceneworks-worker/src/vram_gate.rs",
-      "geometryAware": false,
-      "geometryAxes": [],
-      "reachedVia": []
+      "geometryAware": true,
+      "geometryAxes": [
+        "frames",
+        "height",
+        "width"
+      ],
+      "reachedVia": [
+        "struct_parameter:geometry:MemoryGeometry"
+      ]
     },
     {
       "gate": "wan_video_fit_error_with_adapter_bytes",
       "mechanism": "flat_video_fit_error",
       "definedIn": "crates/sceneworks-worker/src/vram_gate.rs",
-      "geometryAware": false,
-      "geometryAxes": [],
-      "reachedVia": []
+      "geometryAware": true,
+      "geometryAxes": [
+        "frames",
+        "height",
+        "width"
+      ],
+      "reachedVia": [
+        "struct_parameter:geometry:MemoryGeometry"
+      ]
     }
   ],
   "videoBindings": [

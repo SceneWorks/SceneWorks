@@ -2184,3 +2184,178 @@ fn same_rung_cap_binding_carries_cap_peak_but_actual_request_geometry() {
     );
     assert!(outcome.refusal.is_none());
 }
+
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// sc-19055 â€” the PRE-LOAD declared-scalar arm of the video mechanism
+//
+// These pin the seam the flat `vram_gate` fit errors were migrated onto. Every one is written so
+// that reverting the migration (dropping the grade, or grading the wrong way) turns one of two legs
+// red â€” an assertion that only checked "the number got bigger" would survive a double-grade, and one
+// that only checked the frames == 1 leg would survive deleting the wiring entirely.
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+mod sc19055_declared_scalar_arm {
+    use crate::estimate_synthesis::DeclaredScalarClass;
+    use crate::video_admission::{
+        graded_derived_video_floor_gb, graded_video_peak_gb, video_gate_geometry,
+        video_scalar_class,
+    };
+    use serde_json::json;
+
+    const BYTES_PER_GIB_F: f64 = 1024.0 * 1024.0 * 1024.0;
+
+    fn entry(value: serde_json::Value) -> sceneworks_core::contracts::JsonObject {
+        value.as_object().expect("object literal").clone()
+    }
+
+    /// A wan-shaped row: `measured: true` with a PIXELS-only capture geometry, which is the exact
+    /// shape every candle video model in the shipped manifest carries.
+    fn wan_shaped_row() -> sceneworks_core::contracts::JsonObject {
+        entry(json!({
+            "candle": {
+                "minMemoryGb": 14,
+                "vramGbByTier": { "q4": 12.1, "bf16": 14.5 },
+                "vramMeasuredPixels": 1_048_576,
+                "measured": true
+            }
+        }))
+    }
+
+    /// The grade re-derived from the POLICY constant rather than from the function under test, so
+    /// this is an independent expectation and not a restatement of the implementation.
+    fn expected_widened_gb(raw_gb: f64) -> f64 {
+        (raw_gb * (1.0 + crate::ladder_margin_policy::CANDLE_ESTIMATE_MARGIN) * BYTES_PER_GIB_F)
+            .ceil()
+            / BYTES_PER_GIB_F
+    }
+
+    /// **The sc-19055 headline.** A candle video route's manifest scalar is a DECLARED FLOOR at
+    /// every clip length, because `vramMeasuredPixels` records pixels and certifies nothing about
+    /// frames â€” and the raw quantity underneath it is untouched.
+    ///
+    /// Both legs are load-bearing:
+    ///   * `frames: 1` (a shape the video gate never issues, exercised here precisely because it
+    ///     isolates the frames conjunct) still classes `MeasuredPeak` inside the declared pixel
+    ///     envelope and returns the pre-story number BYTE-FOR-BYTE. Deleting the frames conjunct
+    ///     from `declared_scalar_class` leaves this leg green and reds the next one; grading
+    ///     unconditionally reds THIS one.
+    ///   * `frames: 81` classes `DeclaredFloor` and returns exactly the estimate-margin-widened
+    ///     value. Dropping the grade â€” i.e. reverting the migration â€” reds this leg.
+    #[test]
+    fn a_video_clip_is_a_declared_floor_and_a_single_frame_is_the_untouched_raw_scalar() {
+        let manifest = wan_shaped_row();
+        let raw = 12.1 + crate::candle_scalar_gate::HEADROOM_GB;
+
+        // Leg 1 â€” inside the declared capture, single-image shaped: the raw scalar, ungraded.
+        let single_frame = video_gate_geometry(1024, 1024, 1);
+        assert_eq!(
+            video_scalar_class(&manifest, "q4", single_frame),
+            DeclaredScalarClass::MeasuredPeak,
+        );
+        assert_eq!(
+            graded_video_peak_gb(&manifest, "q4", 0, single_frame),
+            Some(raw),
+            "the RAW quantity the flat gate compared before sc-19055 is unchanged"
+        );
+
+        // Leg 2 â€” the same pixels, a real clip: the declared floor, widened.
+        let clip = video_gate_geometry(1024, 1024, 81);
+        assert_eq!(
+            video_scalar_class(&manifest, "q4", clip),
+            DeclaredScalarClass::DeclaredFloor,
+            "a pixels-only capture cannot certify a clip length it never recorded"
+        );
+        let graded = graded_video_peak_gb(&manifest, "q4", 0, clip).expect("the q4 row predicts");
+        assert!(
+            (graded - expected_widened_gb(raw)).abs() < 1e-9,
+            "the clip takes exactly the candle estimate margin (got {graded}, expected {})",
+            expected_widened_gb(raw)
+        );
+        assert!(graded > raw, "the grade is strictly conservative");
+    }
+
+    /// Every clip length is graded the same way, and the frames axis does NOT otherwise move the
+    /// number. This is the honest statement of what the pre-load arm can and cannot do: it prices
+    /// the row's uncertainty about frames, but it has no fitted temporal term â€” that lives in the
+    /// POST-load arm, behind an identified curve cell.
+    ///
+    /// Pins the boundary too: `frames: 2` is already a clip.
+    #[test]
+    fn the_pre_load_arm_prices_uncertainty_about_frames_not_a_temporal_curve() {
+        let manifest = wan_shaped_row();
+        let at = |frames: u32| {
+            graded_video_peak_gb(&manifest, "q4", 0, video_gate_geometry(1024, 1024, frames))
+                .expect("the q4 row predicts")
+        };
+        let two = at(2);
+        for frames in [2, 25, 81, 241] {
+            assert_eq!(at(frames), two, "no fitted temporal term exists pre-load");
+        }
+        assert!(
+            two > at(1),
+            "but every clip is graded, and a single frame is not"
+        );
+    }
+
+    /// Adapter bytes join the peak BEFORE the grade â€” `widen(peak + adapters)`, never
+    /// `widen(peak) + adapters` â€” mirroring the image lane's overlay accounting order.
+    #[test]
+    fn adapter_bytes_precede_the_grade() {
+        let manifest = wan_shaped_row();
+        let clip = video_gate_geometry(1024, 1024, 81);
+        let one_gib = 1u64 << 30;
+        let graded =
+            graded_video_peak_gb(&manifest, "q4", one_gib, clip).expect("the q4 row predicts");
+        let expected = expected_widened_gb(12.1 + crate::candle_scalar_gate::HEADROOM_GB + 1.0);
+        assert!(
+            (graded - expected).abs() < 1e-9,
+            "got {graded}, expected {expected}"
+        );
+    }
+
+    /// A row the tier does not OWN is a floor even at `frames: 1` â€” the `minMemoryGb` fallback is
+    /// the default tier's padded floor, exactly as on the image lane. The video seam reuses the
+    /// shared classifier rather than re-deriving one, and this is what proves it.
+    #[test]
+    fn a_borrowed_row_is_a_floor_at_every_shape() {
+        let manifest = wan_shaped_row();
+        assert_eq!(
+            video_scalar_class(&manifest, "q8", video_gate_geometry(1024, 1024, 1)),
+            DeclaredScalarClass::DeclaredFloor,
+            "q8 has no row of its own and falls to minMemoryGb"
+        );
+    }
+
+    /// No manifest number at all â‡’ `None`, so the caller keeps its own weights floor. This is the
+    /// ABSENT-EVIDENCE case, and it must reproduce today's decision exactly: the seam neither
+    /// invents a peak nor grades a number it does not have.
+    #[test]
+    fn an_absent_row_yields_no_prediction_rather_than_a_synthesized_one() {
+        let clip = video_gate_geometry(1024, 1024, 81);
+        for manifest in [entry(json!({})), entry(json!({ "candle": {} }))] {
+            assert_eq!(graded_video_peak_gb(&manifest, "q4", 0, clip), None);
+        }
+    }
+
+    /// A DERIVED peak (Mochi's architectural decode formula) takes the floor grade unconditionally
+    /// â€” there is no capture geometry that could ever certify it, because nothing measured it.
+    #[test]
+    fn a_derived_peak_is_always_floor_graded() {
+        let raw = 81.0;
+        let graded = graded_derived_video_floor_gb(raw);
+        assert!(
+            (graded - expected_widened_gb(raw)).abs() < 1e-9,
+            "got {graded}"
+        );
+    }
+
+    /// `video_gate_geometry` normalizes a zero/absent clip length to one invocation rather than to
+    /// zero, matching core's own frame normalization. A `frames: 0` that stayed zero would compute
+    /// a voxel count of zero downstream.
+    #[test]
+    fn the_gate_geometry_normalizes_a_zero_clip_length() {
+        assert_eq!(video_gate_geometry(1024, 1024, 0).frames, 1);
+        assert_eq!(video_gate_geometry(1024, 1024, 81).batch, 1);
+    }
+}
