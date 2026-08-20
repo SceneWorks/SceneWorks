@@ -168,6 +168,21 @@
       "sourceFileCount": 131,
       "lockedPackageCount": 171
     },
+    "mlx:minimax_h3": {
+      "crate": "crates/media/mlx-gen/mlx-gen-minimax-h3",
+      "digest": "b34791cbe6729475e83a3a738dcd95a7ffe85804733dcd07b36ab7a7b5753b6d",
+      "closureCrates": [
+        "crates/contracts/core-llm",
+        "crates/contracts/gen-core",
+        "crates/media/mlx-gen",
+        "crates/media/mlx-gen/mlx-gen-boogu",
+        "crates/media/mlx-gen/mlx-gen-minimax-h3",
+        "crates/media/mlx-gen/mlx-gen-pid",
+        "crates/media/mlx-gen/mlx-gen-z-image"
+      ],
+      "sourceFileCount": 235,
+      "lockedPackageCount": 174
+    },
     "mlx:qwen_image": {
       "crate": "crates/media/mlx-gen/mlx-gen-qwen-image",
       "digest": "ff68347b172444f1c599110642018e5da858a9ef27364c7757fc50cdb0905680",

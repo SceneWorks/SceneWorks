@@ -58,7 +58,7 @@ import {
   stagedResidencyIsAvailable,
   strategyStatus,
 } from "./generate-memory-matrix.mjs";
-import { recordId } from "./memory-calibration-harness.mjs";
+import { logicalCaseId, recordId } from "./memory-calibration-harness.mjs";
 import { recordsNeedingDigest } from "./backfill-closure-digests.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 import { stripInertLines } from "./lib/source-revision.mjs";
@@ -2770,6 +2770,33 @@ const surveyRejects = async (mutate, pattern) => {
 
 const h3 = (survey) => survey.outOfMatrixFamilies["17137"];
 
+// The projection the generator's derive-check compares against `memoryCharacterization(...)` — the
+// three image-shaped keys, PLUS `coveredFrameBound` whenever the record carries one (sc-18663). It
+// is spelled once here because a test that hard-coded three keys would keep passing while the
+// generator compared four, which is the shape of the defect sc-18663 fixed.
+const declaredCharacterization = (characterization) => ({
+  status: characterization.status,
+  measuredGeometries: characterization.measuredGeometries,
+  coveredPixelBound: characterization.coveredPixelBound,
+  ...(Object.hasOwn(characterization, "coveredFrameBound")
+    ? { coveredFrameBound: characterization.coveredFrameBound }
+    : {}),
+});
+
+// One temporal characterization, derived by the shipped helper rather than hand-written, so a test
+// fixture can never assert a bound the geometries do not support.
+const temporalCharacterization = (record, geometries) => ({
+  ...record.memoryCharacterization,
+  ...memoryCharacterization(geometries),
+});
+
+// The out-of-matrix catalog entries, read through the generator's own parse rather than re-spelled
+// here: it is the set `buildMatrix` subtracts from the coordinate universe AND the set the
+// calibration-plan guard exempts, and a test that spelled its own could green-light an exemption
+// production does not make (sc-18663).
+const shippedOutOfMatrixEntries = (body) =>
+  parseRung4Survey(body, { familyGroups: familyGroup }).outOfMatrixCatalogEntries;
+
 test("the survey's notes state rung 4's real prerequisite and cannot restate the removed one", async () => {
   const survey = await surveyFixture();
   const notes = survey.notes.join("\n");
@@ -2952,28 +2979,39 @@ test("the out-of-matrix record carries the cell's two distinct claims, and each 
   const survey = await surveyFixture();
   const mlx = h3(survey).backends.mlx;
   const candle = h3(survey).backends.candle;
-  assert.equal(mlx.state, "Implemented/unverified");
-  assert.equal(candle.state, "Missing");
+  // sc-18663: the MLX row is the one epic 17137's terminal campaign measures, so what is pinned
+  // about it is the RELATIONSHIP between its two claims, never a snapshot of either value. The
+  // candle row is the opposite — `Missing` is permanent, and everything about it is pinned exactly.
   assert.ok(isImplemented(mlx.state), "the MLX code claim classifies as implemented");
+  assert.equal(candle.state, "Missing");
   assert.ok(!isImplemented(candle.state), "the candle code claim classifies as not implemented");
   for (const backend of [mlx, candle]) {
     assert.ok(OUT_OF_MATRIX_CELL_STATES.includes(backend.state));
-    // Structure now, numbers at the terminal campaign: zero SceneWorks calibration receipts exist
-    // for this family, so the PEAKS claim must derive to `unmeasured` — and must say so honestly.
+    // The PEAKS claim is a FUNCTION of the measured geometries, whatever they turn out to be. The
+    // projection must carry `coveredFrameBound` too (sc-18663): the shared helper emits it as soon
+    // as a geometry is temporal, and a three-key projection would silently stop comparing the whole
+    // claim the moment the campaign records its first `WxHxfF` point.
     assert.deepEqual(
-      {
-        status: backend.memoryCharacterization.status,
-        measuredGeometries: backend.memoryCharacterization.measuredGeometries,
-        coveredPixelBound: backend.memoryCharacterization.coveredPixelBound,
-      },
+      declaredCharacterization(backend.memoryCharacterization),
       memoryCharacterization(backend.memoryCharacterization.measuredGeometries),
     );
-    assert.equal(backend.memoryCharacterization.status, "unmeasured");
+    // ...and peaks may only be characterized where the CODE claim says the rung works.
+    if (backend.memoryCharacterization.status !== "unmeasured") {
+      assert.ok(
+        isImplemented(backend.state),
+        `${backend.state}: a characterized record must carry an implemented state`,
+      );
+    }
   }
-  // "Which is which" is stated honestly per backend: MLX names the terminal campaign as the owner
-  // of the numbers; candle names why it must stay unmeasured (its state is not implemented).
-  assert.match(mlx.memoryCharacterization.reason, /terminal/i);
+  // Candle must stay `unmeasured` forever — the validator refuses a characterized non-implemented
+  // record — and must say WHY, which is the half a status alone cannot carry.
+  assert.equal(candle.memoryCharacterization.status, "unmeasured");
   assert.match(candle.memoryCharacterization.reason, /not implemented/i);
+  // MLX: while the numbers are still owed, the reason names who owes them. Once the campaign fills
+  // the row in, the derivation above is what keeps the claim honest.
+  if (mlx.memoryCharacterization.status === "unmeasured") {
+    assert.match(mlx.memoryCharacterization.reason, /terminal/i);
+  }
   await buildMatrix({ publish: false, sourceOverrides: { rung4Survey: JSON.stringify(survey) } });
 
   // Each guard mutated ALONE, through the real generator — the same path `--check` takes.
@@ -3009,6 +3047,91 @@ test("the out-of-matrix record carries the cell's two distinct claims, and each 
       measuredGeometries: ["384x224"],
       coveredPixelBound: null,
     };
+  }, /while the state is not implemented/);
+});
+
+test("an out-of-matrix record can record TEMPORAL coverage, and cannot assert it (sc-18663)", async () => {
+  // The defect: the derive-check projected three keys while `memoryCharacterization()` emits a
+  // FOURTH — `coveredFrameBound` — as soon as any geometry is temporal. The declared side could
+  // therefore never equal the derived side for a multi-frame record, so a video family could not
+  // record the temporal coverage epic 17137's terminal campaign exists to produce. The helper's
+  // shape is asserted first, or the rest of this test would be pinning a defect that moved.
+  assert.ok(
+    Object.hasOwn(memoryCharacterization(["1344x768xf124"]), "coveredFrameBound"),
+    "a temporal geometry makes the derived characterization four-keyed",
+  );
+  assert.ok(!Object.hasOwn(memoryCharacterization(["1344x768"]), "coveredFrameBound"));
+
+  // Positive half, through the real generator: one temporal point, and a temporal FIT crossing two
+  // areas and two frame counts — the rank-3 design `memoryCharacterization` grades against.
+  const fitted = ["1344x768xf124", "1344x768xf61", "832x480xf124"];
+  for (const geometries of [["1344x768xf124"], fitted]) {
+    const survey = await surveyFixture();
+    const mlx = h3(survey).backends.mlx;
+    mlx.memoryCharacterization = temporalCharacterization(mlx, geometries);
+    // The fixture is the campaign's own shape: the MLX row measured, the frame bound present.
+    assert.equal(mlx.memoryCharacterization.status, geometries.length === 1 ? "point" : "fitted");
+    assert.ok(Object.hasOwn(mlx.memoryCharacterization, "coveredFrameBound"));
+    await buildMatrix({ publish: false, sourceOverrides: { rung4Survey: JSON.stringify(survey) } });
+  }
+  const fittedRecord = (survey) => {
+    const mlx = h3(survey).backends.mlx;
+    mlx.memoryCharacterization = temporalCharacterization(mlx, fitted);
+    return mlx.memoryCharacterization;
+  };
+  assert.deepEqual(
+    memoryCharacterization(fitted),
+    { status: "fitted", measuredGeometries: fitted, coveredPixelBound: 1032192, coveredFrameBound: 124 },
+    "the fixture's own bounds come from the shipped helper, not from this file",
+  );
+
+  // Negative half. Each guard mutated ALONE, through the real generator — a frame bound that does
+  // not follow from the geometries is refused in every direction it can be wrong in.
+  await surveyRejects((mutated) => {
+    delete fittedRecord(mutated).coveredFrameBound;
+  }, /does not derive from its measuredGeometries/);
+  await surveyRejects((mutated) => {
+    fittedRecord(mutated).coveredFrameBound = 61;
+  }, /does not derive from its measuredGeometries/);
+  await surveyRejects((mutated) => {
+    // Smuggled the other way: a frame bound on a record whose geometries carry no frame axis at
+    // all. The derived object has no such key, so the claim is the record's own.
+    const mlx = h3(mutated).backends.mlx;
+    mlx.memoryCharacterization = {
+      ...temporalCharacterization(mlx, ["1344x768"]),
+      coveredFrameBound: null,
+    };
+  }, /does not derive from its measuredGeometries/);
+  await surveyRejects((mutated) => {
+    // The status still follows from the geometries on the temporal axis too: three points at ONE
+    // area cannot determine three coefficients, so `fitted` there is an assertion.
+    const mlx = h3(mutated).backends.mlx;
+    mlx.memoryCharacterization = {
+      ...temporalCharacterization(mlx, ["1344x768xf121", "1344x768xf124", "1344x768xf61"]),
+      status: "fitted",
+      coveredPixelBound: 1032192,
+      coveredFrameBound: 124,
+    };
+  }, /does not derive from its measuredGeometries/);
+
+  // `sortedUnique` is part of the comparison, so ordering and repeats are part of the claim — and
+  // the diagnostic has to SAY so rather than report two arrays that read as identical.
+  await surveyRejects((mutated) => {
+    fittedRecord(mutated).measuredGeometries = ["832x480xf124", "1344x768xf124", "1344x768xf61"];
+  }, /must be an array that is sorted and duplicate-free/);
+  await surveyRejects((mutated) => {
+    const mlx = h3(mutated).backends.mlx;
+    mlx.memoryCharacterization = {
+      ...temporalCharacterization(mlx, ["1344x768xf124"]),
+      measuredGeometries: ["1344x768xf124", "1344x768xf124"],
+    };
+  }, /must be an array that is sorted and duplicate-free/);
+
+  // And the OTHER claim still fences it: a measured record on a backend whose state is not
+  // implemented is refused, temporal or not. Candle's `Missing` row may never carry these numbers.
+  await surveyRejects((mutated) => {
+    const candle = h3(mutated).backends.candle;
+    candle.memoryCharacterization = temporalCharacterization(candle, ["1344x768xf124"]);
   }, /while the state is not implemented/);
 });
 
@@ -4911,9 +5034,14 @@ test("a calibration-plan entry that addresses no coordinate fails generation (sc
     "retired product modes are excluded from the active calibration plan",
   );
 
-  // The shipped plan is clean, which is the property worth pinning: every entry addresses something.
+  // The shipped plan is clean, which is the property worth pinning: every entry addresses something
+  // — or names a family the matrix cannot carry a coordinate for at all (sc-18663), which is the
+  // set the generator itself exempts and is read here from the same parse the generator reads.
   const resolved = await buildMatrix({ publish: false });
-  assert.doesNotThrow(() => assertCalibrationPlanTargetsResolvedCoordinates(plan, resolved.cells));
+  const outOfMatrixEntries = shippedOutOfMatrixEntries(await readFile(SURVEY_URL, "utf8"));
+  assert.doesNotThrow(() =>
+    assertCalibrationPlanTargetsResolvedCoordinates(plan, resolved.cells, { outOfMatrixEntries }),
+  );
 
   // And the guard discriminates, on each axis independently — a guard that only caught `mode` would
   // be a fix for one typo rather than for the class.
@@ -4953,6 +5081,159 @@ test("a calibration-plan entry that addresses no coordinate fails generation (sc
     assert.ok(
       matrix.cells.some((cell) => planEntryTargetsCoordinate(entry, cell)),
       `${entry.name} is a shipped plan target, so its coordinate must be published`,
+    );
+  }
+});
+
+test("a plan row for an OUT-OF-MATRIX family is exempt, and nothing else is (sc-18663)", async () => {
+  // The category error: `buildMatrix` subtracts the survey's declared out-of-matrix catalog entries
+  // from the coordinate universe, so a MiniMax-H3 row can never match a coordinate — and the
+  // sc-18099 guard read that as "addresses nothing" and threw. Epic 17137's terminal campaign has to
+  // plan captures against exactly those entries, so the first such row failed generation outright.
+  const resolved = await buildMatrix({ publish: false });
+  const outOfMatrixEntries = shippedOutOfMatrixEntries(await readFile(SURVEY_URL, "utf8"));
+  assert.ok(outOfMatrixEntries.has("minimax_h3") && outOfMatrixEntries.has("minimax_h3_ref"));
+  // The premise of the exemption, asserted rather than assumed: these entries resolve to no cell.
+  for (const id of outOfMatrixEntries) {
+    assert.equal(
+      resolved.cells.filter((cell) => cell.modelId === id).length,
+      0,
+      `${id}: an out-of-matrix entry may not carry a coordinate — the exemption would then hide a real cell`,
+    );
+  }
+
+  const plan = activeCalibrationPlan(
+    JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url), "utf8")),
+  );
+  const minimaxRow = (over = {}) => ({
+    name: "mlx-minimax-h3-q4-t2va-window",
+    evidenceScope: "authoritative",
+    backend: "mlx",
+    loadShape: "deferred_materialization",
+    rung: "bounded_transformer_residency",
+    engagedRungs: ["bounded_transformer_residency"],
+    calibrationFingerprint: "minimax-h3-mlx-deferred-v1",
+    fixture: "minimax-h3-q4-1344x768-f124",
+    cases: [{ parameters: {}, expectedResult: "passed" }],
+    ...over,
+    target: {
+      provider: "minimax_h3",
+      modelId: "minimax_h3",
+      tier: "q4",
+      mode: "text_to_video_audio",
+      overlay: "none",
+      geometry: { width: 1344, height: 768, batch: 1, frames: 124 },
+      ...over.target,
+    },
+  });
+  const withRow = (over) => {
+    const mutated = JSON.parse(JSON.stringify(plan));
+    mutated.providers.push(minimaxRow(over));
+    return mutated;
+  };
+
+  // The fix, at both entry points: exported guard and the generation path `--check` takes.
+  for (const modelId of ["minimax_h3", "minimax_h3_ref"]) {
+    const planned = withRow({ target: { modelId } });
+    assert.doesNotThrow(() =>
+      assertCalibrationPlanTargetsResolvedCoordinates(planned, resolved.cells, { outOfMatrixEntries }),
+    );
+    await buildMatrix({
+      publish: false,
+      sourceOverrides: { calibrationPlan: JSON.stringify(planned) },
+    });
+  }
+
+  // ...and it is an exemption, not a hole. A family in NEITHER the matrix nor the survey's
+  // out-of-matrix set still fails closed, and so does a row that merely borrows the exempt family's
+  // provider — the exemption is keyed on `target.modelId`, the same field the subtraction is.
+  for (const [label, over] of [
+    ["a family in neither set", { target: { modelId: "hailuo_4", provider: "hailuo_4" } }],
+    ["an exempt provider on an unknown model", { target: { modelId: "not_a_catalog_entry" } }],
+  ]) {
+    const planned = withRow(over);
+    assert.throws(
+      () =>
+        assertCalibrationPlanTargetsResolvedCoordinates(planned, resolved.cells, { outOfMatrixEntries }),
+      /match no resolved matrix coordinate/,
+      `${label} must still fail closed`,
+    );
+    await assert.rejects(
+      buildMatrix({ publish: false, sourceOverrides: { calibrationPlan: JSON.stringify(planned) } }),
+      /match no resolved matrix coordinate/,
+    );
+  }
+
+  // The exemption is opt-in and defaults to the strict behaviour, so a caller that forgets to pass
+  // the set gets the old guard rather than a silently widened one.
+  assert.throws(
+    () => assertCalibrationPlanTargetsResolvedCoordinates(withRow({}), resolved.cells),
+    /match no resolved matrix coordinate/,
+  );
+});
+
+test("an out-of-matrix family's RECEIPT is unbound rather than fatal (sc-18663)", async () => {
+  // The same category error one step later, and the wall the campaign hits immediately after the
+  // plan one: `calibrationRuns` binds every bundle record to a cell, and an out-of-matrix family has
+  // no cell BY CONSTRUCTION, so the first MiniMax-H3 receipt failed generation outright. The record
+  // is skipped instead — its numbers live on the family's derived `memoryCharacterization` — while a
+  // record naming a family in NEITHER set still throws.
+  const bundle = JSON.parse(
+    await readFile(new URL("../docs/generated/memory-calibration-evidence.json", import.meta.url), "utf8"),
+  );
+  const donor = bundle.records.find((record) => record.backend === "mlx");
+  assert.ok(donor, "the shipped bundle must carry an MLX record to re-target");
+  // Re-targeted through the harness's OWN identity functions: the bundle is schema- and
+  // identity-validated before the generator ever reaches the binding step, so a hand-written id
+  // would fail somewhere else and this test would pin the wrong wall.
+  const withRecord = (modelId, provider) => {
+    const clone = JSON.parse(JSON.stringify(donor));
+    clone.target.modelId = modelId;
+    clone.target.provider = provider;
+    clone.logicalCaseId = logicalCaseId(clone);
+    clone.id = recordId(clone);
+    const copy = JSON.parse(JSON.stringify(bundle));
+    copy.records.push(clone);
+    return { body: JSON.stringify(copy), id: clone.id };
+  };
+
+  const baseline = await buildMatrix({ publish: false });
+  assert.equal(
+    baseline.calibrationRuns.length,
+    baseline.summary.calibrationRuns,
+    "today every shipped receipt binds, so the two counts start equal",
+  );
+
+  for (const modelId of ["minimax_h3", "minimax_h3_ref"]) {
+    const { body, id } = withRecord(modelId, "minimax_h3");
+    const matrix = await buildMatrix({
+      publish: false,
+      sourceOverrides: { calibrationEvidence: body },
+    });
+    assert.ok(
+      !matrix.calibrationRuns.some((run) => run.record.id === id),
+      `${modelId}: an out-of-matrix receipt binds to no cell`,
+    );
+    assert.equal(matrix.calibrationRuns.length, baseline.calibrationRuns.length);
+    // The pair stays honest in both halves: the bundle count still sees the receipt, the bound
+    // count does not. A skip that quietly shrank BOTH would hide the receipt entirely.
+    assert.equal(matrix.summary.calibrationRuns, baseline.summary.calibrationRuns + 1);
+  }
+
+  // ...and the requirement is narrowed, not removed. Both arms matter, and the second is what pins
+  // the KEY: the skip reads `target.modelId`, the same field the universe subtraction reads. Keying
+  // it on `target.provider` instead would agree on every well-formed row — `minimax_h3_ref` rides
+  // provider `minimax_h3` — and silently swallow this one, which is precisely the drift the
+  // shared-field rule exists to prevent.
+  for (const [label, modelId, provider] of [
+    ["a family in neither set", "hailuo_4", "hailuo_4"],
+    ["an exempt provider on an unknown model", "hailuo_4", "minimax_h3"],
+  ]) {
+    const unbindable = withRecord(modelId, provider);
+    await assert.rejects(
+      buildMatrix({ publish: false, sourceOverrides: { calibrationEvidence: unbindable.body } }),
+      /calibration record does not map to a matrix cell/,
+      `${label} must still fail closed`,
     );
   }
 });
