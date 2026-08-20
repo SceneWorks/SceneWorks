@@ -426,34 +426,25 @@ pub(super) fn minimax_h3_validate_partition(request: &VideoRequest) -> WorkerRes
                 )));
             }
         }
-        // `Conditioning::ReferenceVideo` — the ONLY variant that carries a reference clip's own
-        // frame rate.
+        // 🔴 THE BLANKET VIDEO-REFERENCE REFUSAL IS GONE (sc-18650). It said "video references are
+        // not renderable in this build", and both of its successive premises are now discharged:
+        // sc-19721's pin bump made `Conditioning::ReferenceVideo { frames, fps, audio }` real and
+        // MiniMax-H3's descriptor advertise `ConditioningKind::ReferenceVideo`, and this story
+        // built the missing SceneWorks half — [`resolve_minimax_h3_clip_conditioning`] decodes a
+        // source clip into the frames, the rate they carry and the clip's own soundtrack.
         //
-        // 🔴 THE REASON FOR THIS REFUSAL CHANGED AT sc-19721, AND THE MESSAGE HAD TO CHANGE WITH IT.
-        // It used to say the variant "arrives with the inference pin bump (sc-18650)", which was
-        // true at `014134e3`: gen-core had no such variant. The pin is now `75d66db5`, where
-        // `Conditioning::ReferenceVideo { frames, fps, audio }` EXISTS and MiniMax-H3's descriptor
-        // ADVERTISES `ConditioningKind::ReferenceVideo`. Both halves of the old reason are gone.
+        // Nothing about the SHAPE of a clip-bearing set is refusable here: the caps are the API's
+        // (`reference_limit_error`) and the engine's (`Ref2VaReferences::new`), the audio-only and
+        // empty shapes are already decided by the shared verdict above, and everything else a clip
+        // can get wrong — too few frames to fill one conditioner group, an out-of-range aspect, an
+        // undecodable file — is knowable only from the ASSET. Those refusals therefore live in the
+        // decode, which runs before any weight is read; putting a placeholder for them here would
+        // be a second opinion with no evidence behind it.
         //
-        // What is missing is on THIS side: nothing in the worker decodes a source clip into
-        // `Vec<Image>` + its own fps + its own `AudioTrack` for this arm — no call site in the repo
-        // constructs the variant at all. That is a SceneWorks feature slice (the sc-19508
-        // follow-up), not a pin. The refusal stands, honestly stated, until it is built.
-        //
-        // Still refused BY NAME rather than downgraded to `Conditioning::VideoClip`: the engine
-        // deliberately does NOT advertise `VideoClip` (it has no in-context clip mechanism), so
-        // that substitution would be refused as `Unsupported` after the load — or, worse, silently
-        // accepted by some future provider as a completely different mechanism.
-        if clip_refs > 0 {
-            return Err(WorkerError::InvalidPayload(format!(
-                "{}: video references are not renderable in this build — the engine accepts them, \
-                 but SceneWorks does not yet decode a reference clip into the frames, frame rate \
-                 and soundtrack the conditioning carries (sc-19508 follow-up). Image and audio \
-                 references render now; remove the sourceClipAssetIds entries. No output was \
-                 produced.",
-                request.model
-            )));
-        }
+        // Still `ReferenceVideo` BY NAME and never downgraded to `Conditioning::VideoClip`: the
+        // engine deliberately does NOT advertise `VideoClip` (it has no in-context clip mechanism),
+        // so that substitution would be refused as `Unsupported` after the load — or, worse,
+        // silently accepted by some future provider as a completely different mechanism.
     } else if has_references {
         return Err(WorkerError::InvalidPayload(format!(
             "{}: this MiniMax-H3 entry loads the base checkpoint, which has no reference \
@@ -631,11 +622,20 @@ pub(super) fn minimax_h3_sampling(
 /// here would create a second place for those constants to drift. `scail2_raw_settings` omits its
 /// `effective*` keys off-recipe for the same reason it never has to answer that question; this arm
 /// answers it explicitly so `minimaxH3Turbo: "off"` and a null step count read as one statement.
+///
+/// `minimaxH3ReferenceClips` / `minimaxH3ReferenceClipSoundtracks` are read off the CONDITIONING
+/// that was actually assembled, for the same reason `task` is (sc-18650). Whether a video
+/// reference's own soundtrack was conditioned on is a real fork in the request — it consumes an
+/// `<Audio j>` label and adds audio rows on the shared rotary clock — and it is decided from the
+/// source file rather than from anything the caller sent, so it is invisible in both the payload
+/// and the output. A clip supplied silently without audio and a silent clip are the same render and
+/// should read as the same record; a clip whose soundtrack WAS used is a different one.
 #[cfg(target_os = "macos")]
 pub(super) fn minimax_h3_raw_settings(
     request: &VideoRequest,
     tier: &str,
     task: &str,
+    conditioning: &[Conditioning],
     steps: Option<u32>,
     scheduler_shift: Option<f32>,
     turbo: Option<&sceneworks_core::minimax_h3_turbo::TurboRecipe>,
@@ -646,6 +646,19 @@ pub(super) fn minimax_h3_raw_settings(
     raw.insert("fps".to_owned(), json!(request.fps));
     raw.insert("minimaxH3Tier".to_owned(), Value::String(tier.to_owned()));
     raw.insert("minimaxH3Task".to_owned(), Value::String(task.to_owned()));
+    let clips = conditioning
+        .iter()
+        .filter(|c| matches!(c, Conditioning::ReferenceVideo { .. }))
+        .count();
+    let clip_soundtracks = conditioning
+        .iter()
+        .filter(|c| matches!(c, Conditioning::ReferenceVideo { audio: Some(_), .. }))
+        .count();
+    raw.insert("minimaxH3ReferenceClips".to_owned(), json!(clips));
+    raw.insert(
+        "minimaxH3ReferenceClipSoundtracks".to_owned(),
+        json!(clip_soundtracks),
+    );
     raw.insert(
         "minimaxH3Turbo".to_owned(),
         Value::String(
@@ -665,6 +678,404 @@ pub(super) fn minimax_h3_raw_settings(
     Value::Object(raw)
 }
 
+// ---------------------------------------------------------------------------
+// Reference CLIPS (sc-18650): `sourceClipAssetIds` -> `Conditioning::ReferenceVideo`.
+//
+// Five engine facts decide every line of the block below. All five are read off the pinned
+// `mlx-gen-minimax-h3` (`crates/media/mlx-gen/mlx-gen-minimax-h3/src/reference.rs` and
+// `model.rs::generate_ref2va`), not inferred from the shape of the payload:
+//
+//  1. **A reference does NOT bind the generated geometry.** `normalize_reference_clip` puts each
+//     clip on the canvas ITS OWN aspect ratio resolves to (short edge 768, area cap 768·1344,
+//     stride-32 snap) — never on the request's canvas. So this decode must NOT reuse the
+//     `scale=W:H:force_original_aspect_ratio=decrease,pad=…` letterbox recipe the Wan-VACE control
+//     video (`vace::load_source_video_frames`) and the LTX in-context clips
+//     (`ltx::extract_clip_frames`) use: those pad to the OUTPUT dimensions, and padding a reference
+//     bakes letterbox bars into media the model reads as content. Aspect is preserved and nothing
+//     is padded; the engine finishes the fit.
+//
+//  2. **The engine resamples onto 24 fps by holding whole frames** — `ffmpeg`'s `fps` filter, which
+//     the engine's own docs name as the mechanism the released model was conditioned through — and
+//     that resample is the IDENTITY when the clip already carries 24 fps. So the decode asks ffmpeg
+//     for `fps=24` and declares 24, rather than declaring a probed source rate and letting the
+//     engine redo it. Three things follow, and each is why this direction was chosen:
+//       * **VFR sources are correct.** ffmpeg resamples off real timestamps; the engine's
+//         whole-frame hold assumes a constant rate, so a VFR clip declared at its *average* rate
+//         would be conditioned on at the wrong speed with nothing to raise about it — the exact
+//         failure `VideoReference::fps` exists to prevent.
+//       * **No rate probe is needed at all**, so there is no sidecar `file.fps` to be stale or
+//         absent (the seedvr2 upscale path defaults that field to 24 when missing — harmless for an
+//         output rate, load-bearing for an input one).
+//       * **The extracted frame count is bounded by the render**, not by the source: a 60 fps
+//         10-minute clip yields the same `frames` PNGs a 24 fps 6-second one does. Declaring the
+//         source rate instead would decode 36 000 frames for the engine to throw away.
+//     The `fps` this arm declares stays TRUE data, not a default: it is the rate the frames handed
+//     over actually carry, because this decode is what put them on it.
+//
+//  3. **The engine truncates the resampled clip to the generated frame count** and then encodes the
+//     soundtrack whole. So the decode caps frames at the request's own `17n + 5` count AND caps the
+//     soundtrack at the matching span — otherwise a 30 s soundtrack would be conditioned against
+//     6 s of picture.
+//
+//  4. **The conditioner reads the clip at 2 fps in groups of 2**, so a clip that normalizes to
+//     fewer than [`MINIMAX_H3_MIN_REFERENCE_CLIP_FRAMES`] frames is rejected — by the engine, but
+//     only inside `encode_prompt_ref2va`, i.e. AFTER the 66.7 GB conditioner is mapped. It is
+//     knowable from the decoded frames alone, so it is refused here instead.
+//
+//  5. **The engine ships no audio resampler.** `Ref2VaReferences::new` rejects any soundtrack that
+//     is not already at the audio VAE's 32 kHz, at the engine boundary — "the caller resamples".
+//     This is the caller.
+// ---------------------------------------------------------------------------
+
+/// The rate a reference clip is handed to the engine at — MiniMax-H3's own 24 fps, which is also
+/// the only output rate it generates at.
+///
+/// Read off the SHARED `MINIMAX_H3_FPS` rather than retyped: the engine resamples every reference
+/// onto `crate::denoise::MINIMAX_H3_FPS`, and the two being the same number is not a coincidence to
+/// be maintained in two places.
+#[cfg(target_os = "macos")]
+pub(super) const MINIMAX_H3_REFERENCE_CLIP_FPS: u32 =
+    sceneworks_core::video_request::MINIMAX_H3_FPS;
+
+/// The short edge the engine lays every reference clip's canvas on
+/// (`mlx-gen-minimax-h3::pipeline::CANVAS_SHORT_EDGE`).
+///
+/// Mirrored here only as a DOWNWARD bound on what is decoded: the extraction never scales a clip
+/// UP to it (the engine's `resolve_canvas_size` does its own upscale, and doing it twice only
+/// costs), and never pads. Its whole job is to keep a 4K source from being materialized at 25 MB a
+/// frame for a canvas that is about to throw 90% of it away.
+#[cfg(target_os = "macos")]
+pub(super) const MINIMAX_H3_CANVAS_SHORT_EDGE: u32 = 768;
+
+/// The audio VAE's rate (`mlx-gen-minimax-h3::audio_config::AUDIO_SAMPLE_RATE`). The engine has no
+/// resampler and rejects anything else at its boundary, so the extraction targets it exactly.
+#[cfg(target_os = "macos")]
+pub(super) const MINIMAX_H3_AUDIO_SAMPLE_RATE: u32 = 32_000;
+
+/// Channels a reference soundtrack is extracted at — stereo, the shape the joint model both emits
+/// and was conditioned on. The engine accepts any positive channel count, so this is a choice
+/// rather than a constraint, and downmixing to mono would discard the stereo image of the very clip
+/// the caller supplied as the reference.
+#[cfg(target_os = "macos")]
+pub(super) const MINIMAX_H3_REFERENCE_AUDIO_CHANNELS: u32 = 2;
+
+/// Fewest 24 fps frames a reference clip may normalize to — **13**.
+///
+/// DERIVED, not picked. The conditioner samples the normalized clip at `VIDEO_SAMPLE_FPS = 2` and
+/// merges the sampled frames in groups of `VISION_TEMPORAL_PATCH = 2`, so the stride is
+/// `24 / 2 = 12` and a clip must reach the second sampled frame: `round(1 · 12) + 1 = 13` frames,
+/// 0.5417 s. `sample_video_condition_frames` computes the identical bound and refuses below it,
+/// because a merged group repeating a single frame is not a shape the released model ever saw.
+///
+/// It is re-derived here from its three inputs rather than written as a literal so a fine-tune that
+/// moved either rate would move this with it.
+#[cfg(target_os = "macos")]
+pub(super) const MINIMAX_H3_MIN_REFERENCE_CLIP_FRAMES: usize = {
+    // `VIDEO_SAMPLE_FPS = 2.0`, `VISION_TEMPORAL_PATCH = 2`.
+    let sample_fps = 2usize;
+    let temporal_patch = 2usize;
+    let stride = MINIMAX_H3_REFERENCE_CLIP_FPS as usize / sample_fps;
+    (temporal_patch - 1) * stride + 1
+};
+
+/// The widest aspect ratio, either way up, that MiniMax-H3 reads a reference at —
+/// `keyframe::MAX_ASPECT_RATIO`, i.e. 1:4 to 4:1. Checked per decoded clip so a panoramic source is
+/// refused from the asset instead of from inside `Ref2VaReferences::new` after the decode has
+/// already been paid for.
+#[cfg(target_os = "macos")]
+pub(super) const MINIMAX_H3_MAX_REFERENCE_ASPECT: f64 = 4.0;
+
+/// The `-vf` chain a reference clip is extracted through.
+///
+/// `fps` FIRST, then `scale` — the resample is the cheaper filter and running it first means the
+/// scaler only ever touches frames that survive. The scale expression is deliberately NOT one of
+/// the `force_original_aspect_ratio` forms used elsewhere in this crate:
+///
+/// * it caps the SHORT edge (whichever that is) at `short_edge`, where
+///   `force_original_aspect_ratio=decrease` caps the LONG one — which would hand the engine a clip
+///   below its canvas for it to upscale back, losing detail for nothing;
+/// * it never scales UP (`min(…)`), because the engine's own canvas resolver upscales a small
+///   source anyway and doing it here first would only interpose a second resampler;
+/// * it pads NOTHING. See fact 1: a reference does not bind the canvas, so letterbox bars added
+///   here would be conditioned on as picture.
+///
+/// `-1` (not `-2`) on the free axis: the output is a PNG sequence with no chroma subsampling to
+/// satisfy, so the aspect ratio is preserved to the nearest whole pixel rather than the nearest
+/// even one. The engine snaps to a 32 multiple regardless.
+#[cfg(target_os = "macos")]
+pub(super) fn minimax_h3_reference_clip_filter(fps: u32, short_edge: u32) -> String {
+    format!(
+        "fps={fps},scale='if(gte(iw,ih),-1,min(iw,{short_edge}))':'if(gte(iw,ih),min(ih,{short_edge}),-1)',format=rgb24"
+    )
+}
+
+/// Whether the ffmpeg run whose stderr this is read an INPUT that carries an audio stream.
+///
+/// Parsed off the extraction's own stderr rather than from a separate probe pass: ffmpeg always
+/// prints the full input stream listing, so the answer is free once the frames have been pulled and
+/// there is no second spawn (and no `ffprobe`, which the desktop bundle does not ship — see
+/// `media_jobs::probe_source_frame_count`).
+///
+/// Scoped to the INPUT section on purpose. `Stream #…: Audio:` also appears under `Output #…` when
+/// a command writes audio, and a parser that read the whole buffer would answer a different
+/// question the moment this chain grows an audio output.
+#[cfg(target_os = "macos")]
+pub(super) fn minimax_h3_clip_input_has_audio(stderr: &str) -> bool {
+    stderr
+        .lines()
+        .skip_while(|line| !line.trim_start().starts_with("Input #"))
+        .take_while(|line| !line.trim_start().starts_with("Output #"))
+        .any(|line| line.contains("Stream #") && line.contains(": Audio:"))
+}
+
+/// Refuse a decoded reference clip whose SHAPE the engine cannot condition on — from the frames
+/// alone, before a single weight is read.
+///
+/// Both rules are the engine's own, and both would otherwise fire late: the frame floor from inside
+/// `encode_prompt_ref2va` with the 66.7 GB conditioner already mapped, the aspect bound from
+/// `Ref2VaReferences::new` after every clip in the request has been decoded. Neither is a NEW gate —
+/// they are the same two refusals, moved to the first layer that can see the evidence, and worded
+/// for someone holding the asset rather than the checkpoint.
+///
+/// What is deliberately NOT refused here: a clip LONGER than the render. The engine truncates it,
+/// that truncation is defined behaviour, and the extraction below has already stopped pulling
+/// frames at the render's own count — so "too long" is not an error shape, it is the normal one.
+#[cfg(target_os = "macos")]
+pub(super) fn minimax_h3_validate_reference_clip(
+    model: &str,
+    asset_id: &str,
+    frames: &[Image],
+) -> WorkerResult<()> {
+    let Some(first) = frames.first() else {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{model}: source clip {asset_id} produced no decodable frames, so there is nothing to \
+             condition on. No output was produced."
+        )));
+    };
+    if frames.len() < MINIMAX_H3_MIN_REFERENCE_CLIP_FRAMES {
+        let seconds =
+            MINIMAX_H3_MIN_REFERENCE_CLIP_FRAMES as f64 / f64::from(MINIMAX_H3_REFERENCE_CLIP_FPS);
+        return Err(WorkerError::InvalidPayload(format!(
+            "{model}: source clip {asset_id} is {} frames long at {} fps, but a reference clip is \
+             read by the conditioner in merged pairs and must run at least \
+             {MINIMAX_H3_MIN_REFERENCE_CLIP_FRAMES} frames ({seconds:.2} s). Supply a longer clip, \
+             or send a still from it as a reference image instead. No output was produced.",
+            frames.len(),
+            MINIMAX_H3_REFERENCE_CLIP_FPS,
+        )));
+    }
+    if first.width == 0 || first.height == 0 {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{model}: source clip {asset_id} decoded to {}x{} frames. No output was produced.",
+            first.width, first.height
+        )));
+    }
+    let (w, h) = (f64::from(first.width), f64::from(first.height));
+    if w > MINIMAX_H3_MAX_REFERENCE_ASPECT * h || h > MINIMAX_H3_MAX_REFERENCE_ASPECT * w {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{model}: source clip {asset_id} is {}x{}, outside the 1:4 to 4:1 range MiniMax-H3 \
+             reads a reference at. Crop it to a less extreme aspect ratio. No output was produced.",
+            first.width, first.height
+        )));
+    }
+    Ok(())
+}
+
+/// Decode `request.source_clip_asset_ids` into ordered [`Conditioning::ReferenceVideo`] entries.
+///
+/// One ffmpeg pass per clip for the picture, plus one more ONLY when that pass's stderr says the
+/// source actually carries audio. Both go through the shared [`run_ffmpeg`]/
+/// [`crate::media_jobs::run_ffmpeg_capture_stderr`] runners, so the job keeps heart-beating and
+/// stays cancellable while a long clip is walked — the same lifecycle every other clip reader in
+/// this crate gets, rather than a private `Command`.
+///
+/// # The soundtrack is carried, not dropped
+///
+/// A video reference's own soundtrack rides `VideoReference::audio` and is conditioned on as THAT
+/// reference's own — rotary-aligned with its video rows, sharing their origin, consuming an
+/// `<Audio j>` label but NOT one of the three standalone audio-reference slots. Dropping it would
+/// silently substitute "condition on motion alone" for the request the caller made, on media they
+/// supplied; re-sending it as a separate `ReferenceAudio` would substitute a standalone reference
+/// with its own rotary slot. Neither is the same request. It is recorded in `rawSettings` because
+/// it is otherwise invisible in the output.
+///
+/// `frames` is the render's own `17n + 5` count, so a clip is never decoded past the point the
+/// engine would truncate it, and the soundtrack is cut to the matching span.
+#[cfg(target_os = "macos")]
+pub(super) async fn resolve_minimax_h3_clip_conditioning(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    project_path: &Path,
+    frames: u32,
+) -> WorkerResult<Vec<Conditioning>> {
+    let mut conditioning = Vec::with_capacity(request.source_clip_asset_ids.len());
+    for (index, asset_id) in request.source_clip_asset_ids.iter().enumerate() {
+        let asset_id = asset_id.trim();
+        if asset_id.is_empty() {
+            return Err(WorkerError::InvalidPayload(format!(
+                "{}: sourceClipAssetIds must not contain blank ids.",
+                request.model
+            )));
+        }
+        let clip_path = super::ltx::resolve_clip_media_path(
+            settings,
+            &request.project_id,
+            asset_id,
+            project_path,
+        )?;
+        // Sanitize the job id before it becomes a path component (F-111), exactly as the
+        // person-track and seedvr2 scratch dirs do; the per-clip index keeps three concurrent
+        // references in one job from sharing a directory.
+        let work_dir = std::env::temp_dir().join(format!(
+            "sw-minimax-h3-ref-{}-{index}",
+            safe_download_dir(&job.id)
+        ));
+        let _ = tokio::fs::remove_dir_all(&work_dir).await;
+        tokio::fs::create_dir_all(&work_dir).await?;
+        let decoded = minimax_h3_decode_reference_clip(
+            api, settings, job, request, asset_id, &clip_path, &work_dir, frames,
+        )
+        .await;
+        let _ = tokio::fs::remove_dir_all(&work_dir).await;
+        conditioning.push(decoded?);
+    }
+    Ok(conditioning)
+}
+
+/// One clip: extract, load, validate, and pair with its soundtrack. Split out of
+/// [`resolve_minimax_h3_clip_conditioning`] only so the caller can drop the scratch directory on
+/// EVERY exit — including the refusals, which are the paths most likely to leave a multi-hundred-MB
+/// PNG sequence behind.
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+async fn minimax_h3_decode_reference_clip(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    request: &VideoRequest,
+    asset_id: &str,
+    clip_path: &Path,
+    work_dir: &Path,
+    frames: u32,
+) -> WorkerResult<Conditioning> {
+    let pattern = work_dir.join("ref_%05d.png");
+    let ctx = FfmpegContext::new(api, settings, &job.id, CANCEL_MESSAGE);
+    let stderr = crate::media_jobs::run_ffmpeg_capture_stderr(
+        vec![
+            "ffmpeg".to_owned(),
+            "-nostdin".to_owned(),
+            "-y".to_owned(),
+            "-i".to_owned(),
+            clip_path.display().to_string(),
+            "-map".to_owned(),
+            "0:v:0".to_owned(),
+            "-vf".to_owned(),
+            minimax_h3_reference_clip_filter(
+                MINIMAX_H3_REFERENCE_CLIP_FPS,
+                MINIMAX_H3_CANVAS_SHORT_EDGE,
+            ),
+            // Never more picture than the engine would keep (fact 3).
+            "-frames:v".to_owned(),
+            frames.to_string(),
+            "-start_number".to_owned(),
+            "0".to_owned(),
+            pattern.display().to_string(),
+        ],
+        Some(ctx),
+    )
+    .await?;
+
+    let decoded = minimax_h3_load_reference_frames(work_dir.to_path_buf()).await?;
+    minimax_h3_validate_reference_clip(&request.model, asset_id, &decoded)?;
+
+    let audio = if minimax_h3_clip_input_has_audio(&stderr) {
+        let wav = work_dir.join("ref_audio.wav");
+        let ctx = FfmpegContext::new(api, settings, &job.id, CANCEL_MESSAGE);
+        run_ffmpeg(
+            vec![
+                "ffmpeg".to_owned(),
+                "-nostdin".to_owned(),
+                "-y".to_owned(),
+                "-i".to_owned(),
+                clip_path.display().to_string(),
+                "-map".to_owned(),
+                "0:a:0".to_owned(),
+                "-vn".to_owned(),
+                // The engine ships no resampler and refuses anything but its VAE's rate (fact 5).
+                "-ar".to_owned(),
+                MINIMAX_H3_AUDIO_SAMPLE_RATE.to_string(),
+                "-ac".to_owned(),
+                MINIMAX_H3_REFERENCE_AUDIO_CHANNELS.to_string(),
+                // `read_wav_pcm16` reads PCM s16 only.
+                "-c:a".to_owned(),
+                "pcm_s16le".to_owned(),
+                // Cut to the span of the picture that was actually kept — the engine encodes the
+                // whole track, so an untrimmed soundtrack would be conditioned against a clip it is
+                // five times longer than (fact 3). The shared `picture_bound_seconds` is the same
+                // frames -> seconds bound the seedvr2 mux uses.
+                "-t".to_owned(),
+                picture_bound_seconds(decoded.len(), MINIMAX_H3_REFERENCE_CLIP_FPS),
+                wav.display().to_string(),
+            ],
+            Some(ctx),
+        )
+        .await?;
+        Some(crate::audio_jobs::read_wav_pcm16(&wav)?)
+    } else {
+        None
+    };
+
+    Ok(Conditioning::ReferenceVideo {
+        frames: decoded,
+        // TRUE data, not a default: `-vf fps=…` above put the frames on exactly this rate, so the
+        // engine's resample is the identity rather than a second opinion (fact 2).
+        fps: MINIMAX_H3_REFERENCE_CLIP_FPS as f32,
+        audio,
+    })
+}
+
+/// Load an extracted `ref_%05d.png` sequence into engine [`Image`]s, in frame order, off the async
+/// runtime.
+///
+/// **`paths.sort()` is what makes the order the clip's order**, and the zero-padded `%05d` pattern
+/// is what makes the lexical sort the numeric one. Frame order is the one property of a motion
+/// reference that is completely invisible in the rendered output when it is wrong — a shuffled
+/// reference still renders a plausible clip — which is why it is asserted directly by
+/// `minimax_h3_reference_clip_frames_keep_source_order`.
+#[cfg(target_os = "macos")]
+pub(super) async fn minimax_h3_load_reference_frames(
+    work_dir: PathBuf,
+) -> WorkerResult<Vec<Image>> {
+    tokio::task::spawn_blocking(move || -> WorkerResult<Vec<Image>> {
+        let mut paths: Vec<PathBuf> = std::fs::read_dir(&work_dir)?
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("png"))
+            .collect();
+        paths.sort();
+        let mut frames = Vec::with_capacity(paths.len());
+        for path in paths {
+            let decoded = crate::image_decode::decode_image_any(&path)
+                .map_err(|error| {
+                    WorkerError::InvalidPayload(format!(
+                        "reference clip frame {}: {error}",
+                        path.display()
+                    ))
+                })?
+                .to_rgb8();
+            frames.push(Image {
+                width: decoded.width(),
+                height: decoded.height(),
+                pixels: decoded.into_raw(),
+            });
+        }
+        Ok(frames)
+    })
+    .await
+    .map_err(|error| task_join_error("reference clip frame decode task", error))?
+}
+
 /// The engine task a resolved conditioning list denoises as — the SceneWorks-side mirror of
 /// `MiniMaxH3Task::resolve`, derived from the SAME input the engine derives it from (the
 /// conditioning itself, not the mode string or the model id).
@@ -677,10 +1088,16 @@ pub(super) fn minimax_h3_task(conditioning: &[Conditioning]) -> &'static str {
     let has_keyframes = conditioning
         .iter()
         .any(|c| matches!(c, Conditioning::Keyframe { .. }));
+    // 🔴 `ReferenceVideo` belongs in this list and was missing from it while the variant could not
+    // be built (sc-18650). A clip-only Ref2VA request would otherwise have recorded `t2va` in
+    // `rawSettings` for a render that denoised on `transformer_ref/` — the one number in the record
+    // whose whole job is to say which checkpoint ran.
     let has_references = conditioning.iter().any(|c| {
         matches!(
             c,
-            Conditioning::Reference { .. } | Conditioning::ReferenceAudio { .. }
+            Conditioning::Reference { .. }
+                | Conditioning::ReferenceVideo { .. }
+                | Conditioning::ReferenceAudio { .. }
         )
     });
     match (has_keyframes, has_references) {
@@ -704,15 +1121,18 @@ pub(super) fn minimax_h3_task(conditioning: &[Conditioning]) -> &'static str {
 /// its own conditioning timestep and does not read this value).
 ///
 /// **Reference order is semantic, not incidental.** The engine labels references `<Picture i>` /
-/// `<Audio j>` in list order and advances one shared rotary clock across them, so re-ordering the
-/// list changes the render. Images precede audio because that is the only order the payload can
-/// express — `referenceAssetIds` and `referenceAudioAssetIds` are two separate lists with no
-/// interleaving — and the caller's order WITHIN each list is preserved exactly.
+/// `<Video k>` / `<Audio j>` in list order and advances one shared rotary clock across them, so
+/// re-ordering the list changes the render. Images, then clips, then audio — because that is the
+/// only order the payload can express (`referenceAssetIds`, `sourceClipAssetIds` and
+/// `referenceAudioAssetIds` are three separate lists with no interleaving), and because it is the
+/// order the engine's own `request_references` walks the variants in. The caller's order WITHIN
+/// each list is preserved exactly.
 #[cfg(target_os = "macos")]
 pub(super) fn minimax_h3_conditioning(
     first_frame: Option<Image>,
     last_frame: Option<Image>,
     reference_images: Vec<Image>,
+    reference_clips: Vec<Conditioning>,
     reference_audio: Vec<Conditioning>,
 ) -> Vec<Conditioning> {
     let mut conditioning = Vec::new();
@@ -736,6 +1156,7 @@ pub(super) fn minimax_h3_conditioning(
             strength: None,
         });
     }
+    conditioning.extend(reference_clips);
     conditioning.extend(reference_audio);
     conditioning
 }
@@ -744,19 +1165,27 @@ pub(super) fn minimax_h3_conditioning(
 ///
 /// `sourceAssetId` → the FIRST keyframe, `lastFrameAssetId` → the LAST — fl2va takes 0, 1 or 2 of
 /// them, so `image_to_video` (first only), a last-frame-only payload, and `first_last_frame` (both)
-/// are one code path rather than three modes. `referenceAssetIds` → ordered image references and
-/// `referenceAudioAssetIds` → ordered audio references, which together are the Ref2VA set.
+/// are one code path rather than three modes. `referenceAssetIds` → ordered image references,
+/// `sourceClipAssetIds` → ordered video references, `referenceAudioAssetIds` → ordered audio
+/// references, which together are the Ref2VA set.
 ///
 /// The audio references go through the SHARED `resolve_reference_audio_conditioning` (sc-17160) —
 /// the same function `run_video_generate_job` already calls to prove they resolve before the job is
 /// marked Running. That call discards its value with a comment naming this arm as the consumer;
 /// this is that consumer, and it deliberately re-uses the function rather than re-implementing the
 /// project-scoped lookup and the `safe_project_path` guard.
+///
+/// Async since sc-18650: the clip references decode through ffmpeg, and the shared runner that owns
+/// the heartbeat and the cancel poll is async. The still-image and audio halves stay synchronous —
+/// only the clip decode moved.
 #[cfg(target_os = "macos")]
-pub(super) fn resolve_minimax_h3_conditioning(
+pub(super) async fn resolve_minimax_h3_conditioning(
+    api: &ApiClient,
     settings: &Settings,
+    job: &JobSnapshot,
     request: &VideoRequest,
     project_path: &Path,
+    frames: u32,
 ) -> WorkerResult<Vec<Conditioning>> {
     let load = |asset_id: &str| {
         load_reference_image(
@@ -776,12 +1205,19 @@ pub(super) fn resolve_minimax_h3_conditioning(
     for asset_id in &request.reference_asset_ids {
         reference_images.push(load(asset_id)?);
     }
+    // The still and audio references are cheap, local reads; the clips are an ffmpeg pass each. So
+    // they are resolved LAST — a payload that names a missing reference image or an undecodable
+    // WAV is refused before a single frame is extracted.
     let reference_audio =
         super::resolve_reference_audio_conditioning(settings, request, project_path)?;
+    let reference_clips =
+        resolve_minimax_h3_clip_conditioning(api, settings, job, request, project_path, frames)
+            .await?;
     Ok(minimax_h3_conditioning(
         first_frame,
         last_frame,
         reference_images,
+        reference_clips,
         reference_audio,
     ))
 }
@@ -842,15 +1278,28 @@ pub(super) async fn generate_minimax_h3_using(
     // Shape before media: a request aimed at the wrong DiT partition must be refused before it
     // costs an asset decode, and long before it costs a 53 GB text-encoder load.
     minimax_h3_validate_partition(request)?;
-    let conditioning = resolve_minimax_h3_conditioning(settings, request, project_path)?;
+    // Resolved ONCE and passed to both the conditioning resolve and the engine input: a reference
+    // clip is truncated to the generated frame count, so the two must be the same number. Deriving
+    // it twice from `request` would be one edit away from conditioning a 145-frame render on a
+    // 209-frame reference.
+    let frames = video_frame_count(&request.model, request.raw_frame_count());
+    let conditioning =
+        resolve_minimax_h3_conditioning(api, settings, job, request, project_path, frames).await?;
     let load = resolve_minimax_h3_load(settings, request)?;
     let task = minimax_h3_task(&conditioning);
     // The turbo recipe (sc-18726) is resolved BEFORE the adapters so a contradictory pair of
     // accelerators is refused by name rather than after a LoRA file has been opened and classified.
     let (steps, scheduler_shift, turbo) = minimax_h3_sampling(request)?;
     let adapters = resolve_minimax_h3_adapters(settings, request)?;
-    let raw_settings =
-        minimax_h3_raw_settings(request, load.tier, task, steps, scheduler_shift, turbo);
+    let raw_settings = minimax_h3_raw_settings(
+        request,
+        load.tier,
+        task,
+        &conditioning,
+        steps,
+        scheduler_shift,
+        turbo,
+    );
     let input = VideoGenInput {
         sampler: None,
         scheduler: None,
@@ -884,7 +1333,7 @@ pub(super) async fn generate_minimax_h3_using(
         // The `17n + 5` lattice (sc-17158), dispatched BY MODEL through the shared ladder. NOT the
         // Wan `4k + 1` stride: the two lattices are not nested, so the Wan coercion would hand the
         // engine an off-lattice count it hard-rejects (the engine never refits).
-        frames: video_frame_count(&request.model, request.raw_frame_count()),
+        frames,
         fps: request.fps,
         // MODEL EVALUATIONS, not sigma grid points — the engine appends the terminal σ = 0 itself
         // (`JointSchedule::with_shifts(evaluations + 1, ..)`), so this number is passed through with
