@@ -1,7 +1,7 @@
 {
   "schemaVersion": 8,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:daf99f4ee3ad7dd1b9bbdc6538797aa905cefe14e5c4ee87ca340f4d821f6147",
+    "sceneWorksRevision": "source-tree:e361b8f488a631f8cbfa12e770326399cea8ef770092c2c7a1221bb244cb8f02",
     "inferenceRevision": "f17c82544558666f8d843b4e344e3efa0fd08ed7",
     "sources": {
       "manifest": {
@@ -86,7 +86,7 @@
       },
       "rung4Survey": {
         "path": "config/rung4-applicability-survey.json",
-        "sha256": "70ea84dd4a959b27d6908fce6e5013d1637dd8c2861225d8fa232787146cef87"
+        "sha256": "15af7dc1697e182153400c97a57c635e704e599aecef4a1991dfe6e923b4a7f9"
       },
       "rung4ContractPrerequisites": {
         "path": "config/rung4-contract-prerequisites.json",
