@@ -253,7 +253,8 @@
       "revisitCondition": "Revisit when a Candle MiniMax-H3 video lane ships and the generated matrix, routing tests and runtime evidence prove each corresponding Candle cell.",
       "cells": [
         "models/minimax_h3_ref/conditioningShape/reference",
-        "models/minimax_h3_ref/conditioningShape/referenceAudio"
+        "models/minimax_h3_ref/conditioningShape/referenceAudio",
+        "models/minimax_h3_ref/conditioningShape/referenceVideo"
       ]
     },
     {

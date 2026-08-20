@@ -4869,7 +4869,7 @@ mod tests {
             ),
             (
                 "epic-17137-minimax-h3-ref-conditioning-sequencing",
-                ("epic-17137", "conditioning", 2usize),
+                ("epic-17137", "conditioning", 3usize),
             ),
             (
                 "epic-17137-minimax-h3-ref-precision-sequencing",
