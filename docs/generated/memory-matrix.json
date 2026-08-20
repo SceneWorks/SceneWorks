@@ -1,7 +1,7 @@
 {
   "schemaVersion": 8,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:552b6c6371b8e0d9970627fe20b3e2e93b728135f819668c153a780613f1047f",
+    "sceneWorksRevision": "source-tree:a995592731683f8fa2ac1cb48d6ace421662f8256313b7cdf835120bc4b7971a",
     "inferenceRevision": "6f47e6707589158b89d0f238c5ef56be6f1bdd7a",
     "sources": {
       "manifest": {
@@ -62,7 +62,7 @@
       },
       "estimateSynthesis": {
         "path": "crates/sceneworks-worker/src/estimate_synthesis.rs",
-        "sha256": "1420099192b392308905cb65538e278e9ca9761ace5da0c787a9faa0128cc599"
+        "sha256": "5ce20ec453cd7d6d40f9067a4d673101de2dd497b342996180e049928f486b02"
       },
       "memoryStrategy": {
         "path": "crates/sceneworks-worker/src/memory_strategy.rs",
@@ -70,7 +70,7 @@
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "c17b08642d90f0c78da346e1f1da4c8f4bba2e73eb6d8d517d702b91a1ebf9f7"
+        "sha256": "020c11599049409a9791aa9b6102de1d8c6babc64f6c259e3347e245dfffa935"
       },
       "instantId": {
         "path": "crates/sceneworks-worker/src/image_jobs/instantid.rs",
