@@ -8,15 +8,14 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
-    marker::PhantomData,
 };
 
 use serde::{
-    de::{value::StringDeserializer, DeserializeOwned, Error as _, MapAccess, SeqAccess, Visitor},
+    de::{DeserializeOwned, Error as _, MapAccess, Visitor},
     ser::SerializeStruct,
     Deserialize, Deserializer, Serialize, Serializer,
 };
-use serde_json::Number;
+use serde_json::value::RawValue;
 use sha2::{Digest, Sha256};
 
 /// Wire version shared by all checkpoint-import contracts in this module.
@@ -52,87 +51,182 @@ fn validate_version(found: u32) -> Result<(), CheckpointImportContractError> {
     Ok(())
 }
 
-/// Lossless JSON used to inspect a version envelope without collapsing duplicate
-/// object keys before the version decision.
-///
-/// `serde_json::Value` alone is not suitable for this preflight: it keeps only
-/// the last duplicate key. That could turn `schemaVersion: 2, schemaVersion: 1`
-/// into an apparently supported v1 document.
-enum RawJsonValue {
-    Null,
-    Bool(bool),
-    Number(Number),
-    String(String),
-    Array(Vec<Self>),
-    Object(Vec<(String, Self)>),
+/// Maximum supported nesting for a v1 body duplicate scan. `serde_json` applies
+/// its own equivalent recursion guard while capturing [`RawValue`]; this second
+/// explicit bound keeps the contract-owned traversal deterministic too.
+const CHECKPOINT_IMPORT_MAX_JSON_DEPTH: usize = 128;
+
+/// A JSON object whose decoded keys remain ordered and whose values stay as raw
+/// tokens. Unlike `serde_json::Value`, this does not collapse duplicate keys or
+/// convert numbers through `f64`.
+struct RawObject(Vec<(String, Box<RawValue>)>);
+
+impl<'de> Deserialize<'de> for RawObject {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_map(RawObjectVisitor)
+    }
 }
 
-impl RawJsonValue {
-    fn envelope_version(&self) -> Result<u32, VersionDiagnostic> {
-        let Self::Object(fields) = self else {
-            return Err(VersionDiagnostic::Invalid);
-        };
-        let versions: Vec<_> = fields
-            .iter()
-            .filter_map(|(key, value)| (key == "schemaVersion").then_some(value))
-            .collect();
-        if versions.len() > 1 {
-            return Err(VersionDiagnostic::Duplicate);
-        }
-        let Some(Self::Number(number)) = versions.first().copied() else {
-            return Err(VersionDiagnostic::Invalid);
-        };
-        number
-            .as_u64()
-            .and_then(|value| u32::try_from(value).ok())
-            .ok_or(VersionDiagnostic::Invalid)
+struct RawObjectVisitor;
+
+impl<'de> Visitor<'de> for RawObjectVisitor {
+    type Value = RawObject;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a JSON object")
     }
 
-    fn object_values<'a>(&'a self, key: &'a str) -> impl Iterator<Item = &'a Self> {
-        match self {
-            Self::Object(fields) => Some(
-                fields
-                    .iter()
-                    .filter_map(move |(candidate, value)| (candidate == key).then_some(value)),
-            ),
-            _ => None,
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut fields = Vec::new();
+        while let Some((key, value)) = map.next_entry::<String, Box<RawValue>>()? {
+            fields.push((key, value));
         }
-        .into_iter()
-        .flatten()
+        Ok(RawObject(fields))
+    }
+}
+
+fn raw_object(value: &RawValue) -> Option<RawObject> {
+    serde_json::from_str(value.get()).ok()
+}
+
+fn raw_array(value: &RawValue) -> Option<Vec<Box<RawValue>>> {
+    serde_json::from_str(value.get()).ok()
+}
+
+fn object_values<'a>(object: &'a RawObject, key: &'a str) -> impl Iterator<Item = &'a RawValue> {
+    object
+        .0
+        .iter()
+        .filter_map(move |(candidate, value)| (candidate == key).then_some(value.as_ref()))
+}
+
+/// Parses a syntactically valid JSON number as an exact, nonnegative u32.
+///
+/// The decimal point and exponent are applied to the significand as decimal
+/// digits, so representations such as `1.0`, `10e-1`, and `0.10e1` agree with
+/// JSON Schema integer equality without any floating-point or range leakage.
+fn exact_json_u32(token: &str) -> Option<u32> {
+    if token.starts_with('-') {
+        return None;
     }
 
-    fn array_values(&self) -> impl Iterator<Item = &Self> {
-        match self {
-            Self::Array(values) => Some(values.iter()),
-            _ => None,
-        }
-        .into_iter()
-        .flatten()
+    let (significand, exponent_token) = token
+        .split_once(['e', 'E'])
+        .map_or((token, None), |(left, right)| (left, Some(right)));
+    let (integer, fraction) = significand
+        .split_once('.')
+        .map_or((significand, ""), |(left, right)| (left, right));
+    if integer.is_empty()
+        || !integer.bytes().all(|byte| byte.is_ascii_digit())
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let mut digits = String::with_capacity(integer.len() + fraction.len());
+    digits.push_str(integer);
+    digits.push_str(fraction);
+    if digits.bytes().all(|byte| byte == b'0') {
+        return Some(0);
     }
 
-    fn collect_duplicate_keys(&self, duplicates: &mut BTreeSet<String>) {
-        match self {
-            Self::Array(values) => {
-                for value in values {
-                    value.collect_duplicate_keys(duplicates);
-                }
+    let exponent = match exponent_token {
+        None => 0_i64,
+        Some(token) => {
+            let (negative, magnitude) = match token.as_bytes().first() {
+                Some(b'+') => (false, &token[1..]),
+                Some(b'-') => (true, &token[1..]),
+                _ => (false, token),
+            };
+            if magnitude.is_empty() || !magnitude.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
             }
-            Self::Object(fields) => {
-                let mut counts = BTreeMap::new();
-                for (key, value) in fields {
-                    *counts.entry(key.as_str()).or_insert(0_u32) += 1;
-                    value.collect_duplicate_keys(duplicates);
-                }
-                duplicates.extend(
-                    counts
-                        .into_iter()
-                        .filter(|(_, count)| *count > 1)
-                        .map(|(key, _)| key.to_owned()),
-                );
+            let magnitude = magnitude.bytes().try_fold(0_i64, |value, digit| {
+                value.checked_mul(10)?.checked_add(i64::from(digit - b'0'))
+            })?;
+            if negative {
+                magnitude.checked_neg()?
+            } else {
+                magnitude
             }
-            Self::Null | Self::Bool(_) | Self::Number(_) | Self::String(_) => {}
+        }
+    };
+    let fraction_len = i64::try_from(fraction.len()).ok()?;
+    let decimal_shift = exponent.checked_sub(fraction_len)?;
+    let significant = digits.trim_start_matches('0');
+
+    let integer_digits = if decimal_shift < 0 {
+        let removed = usize::try_from(decimal_shift.checked_neg()?).ok()?;
+        if removed > significant.len()
+            || !significant[significant.len() - removed..]
+                .bytes()
+                .all(|byte| byte == b'0')
+        {
+            return None;
+        }
+        &significant[..significant.len() - removed]
+    } else {
+        significant
+    };
+    let integer_digits = integer_digits.trim_start_matches('0');
+    if integer_digits.is_empty() {
+        return Some(0);
+    }
+    let appended_zeros = usize::try_from(decimal_shift.max(0)).ok()?;
+    if integer_digits.len().checked_add(appended_zeros)? > 10 {
+        return None;
+    }
+    let mut value = integer_digits.bytes().try_fold(0_u64, |value, digit| {
+        value.checked_mul(10)?.checked_add(u64::from(digit - b'0'))
+    })?;
+    for _ in 0..appended_zeros {
+        value = value.checked_mul(10)?;
+    }
+    u32::try_from(value).ok()
+}
+
+fn deserialize_schema_version<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
+    struct SupportedSchemaVersionVisitor;
+
+    impl<'de> Visitor<'de> for SupportedSchemaVersionVisitor {
+        type Value = u32;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("an exact checkpoint-import u32 schemaVersion")
+        }
+
+        fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Self::Value, E> {
+            u32::try_from(value)
+                .map_err(|_| E::custom("checkpoint-import schemaVersion must be a u32"))
+        }
+
+        fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Self::Value, E> {
+            u32::try_from(value)
+                .map_err(|_| E::custom("checkpoint-import schemaVersion must be a u32"))
+        }
+
+        fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<Self::Value, E> {
+            if value.is_finite()
+                && value >= 0.0
+                && value <= f64::from(u32::MAX)
+                && value.fract() == 0.0
+            {
+                Ok(value as u32)
+            } else {
+                Err(E::custom("checkpoint-import schemaVersion must be a u32"))
+            }
         }
     }
+
+    // Exact lexical acceptance and range checks already happened in the raw
+    // envelope preflight. This visitor only lets serde's internally tagged enum
+    // content representation carry accepted spellings such as `1.0` into v1.
+    deserializer.deserialize_any(SupportedSchemaVersionVisitor)
+}
+
+fn deserialize_layer_count<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
+    let raw = Box::<RawValue>::deserialize(deserializer)?;
+    exact_json_u32(raw.get())
+        .ok_or_else(|| D::Error::custom("checkpoint-import layerCount must be a u32"))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -175,20 +269,28 @@ impl VersionDiagnostic {
 }
 
 fn preflight_versioned_tree(
-    value: &RawJsonValue,
+    value: &RawValue,
     surface: VersionedSurface,
 ) -> Result<(), VersionDiagnostic> {
     // The current envelope owns precedence over everything inside it. Once it
     // selects supported v1, inspect every schema-defined child occurrence and
     // choose a diagnostic by kind/value rather than input order. Ordinary body
     // validation is deliberately deferred until the whole version graph passes.
-    let version = value.envelope_version()?;
+    let object = raw_object(value).ok_or(VersionDiagnostic::Invalid)?;
+    let versions: Vec<_> = object_values(&object, "schemaVersion").collect();
+    if versions.len() > 1 {
+        return Err(VersionDiagnostic::Duplicate);
+    }
+    let version = versions
+        .first()
+        .and_then(|value| exact_json_u32(value.get()))
+        .ok_or(VersionDiagnostic::Invalid)?;
     if version != CHECKPOINT_IMPORT_CONTRACT_VERSION {
         return Err(VersionDiagnostic::Unsupported(version));
     }
 
     let mut nested_diagnostics = Vec::new();
-    let mut preflight_child = |child: &RawJsonValue, child_surface: VersionedSurface| {
+    let mut preflight_child = |child: &RawValue, child_surface: VersionedSurface| {
         if let Err(diagnostic) = preflight_versioned_tree(child, child_surface) {
             nested_diagnostics.push(diagnostic);
         }
@@ -196,26 +298,32 @@ fn preflight_versioned_tree(
 
     match surface {
         VersionedSurface::ImportPlan => {
-            for layers in value.object_values("layers") {
-                for layer in layers.array_values() {
-                    for source in layer.object_values("source") {
-                        preflight_child(source, VersionedSurface::SourceLocator);
+            for layers in object_values(&object, "layers") {
+                if let Some(layers) = raw_array(layers) {
+                    for layer in layers {
+                        if let Some(layer) = raw_object(&layer) {
+                            for source in object_values(&layer, "source") {
+                                preflight_child(source, VersionedSurface::SourceLocator);
+                            }
+                        }
                     }
                 }
             }
         }
         VersionedSurface::CatalogRecord => {
-            for plan in value.object_values("plan") {
+            for plan in object_values(&object, "plan") {
                 preflight_child(plan, VersionedSurface::PlanReference);
             }
-            for summary in value.object_values("summary") {
+            for summary in object_values(&object, "summary") {
                 preflight_child(summary, VersionedSurface::PlanSummary);
             }
         }
         VersionedSurface::CheckpointInventory => {
-            for records in value.object_values("records") {
-                for record in records.array_values() {
-                    preflight_child(record, VersionedSurface::CatalogRecord);
+            for records in object_values(&object, "records") {
+                if let Some(records) = raw_array(records) {
+                    for record in records {
+                        preflight_child(&record, VersionedSurface::CatalogRecord);
+                    }
                 }
             }
         }
@@ -230,198 +338,45 @@ fn preflight_versioned_tree(
         .map_or(Ok(()), Err)
 }
 
-fn reject_duplicate_keys(value: &RawJsonValue) -> Result<(), CheckpointImportContractError> {
+fn collect_duplicate_keys(
+    value: &RawValue,
+    depth: usize,
+    duplicates: &mut BTreeSet<String>,
+) -> Result<(), CheckpointImportContractError> {
+    if depth > CHECKPOINT_IMPORT_MAX_JSON_DEPTH {
+        return Err(invalid(format!(
+            "checkpoint-import JSON exceeds nesting depth limit of {CHECKPOINT_IMPORT_MAX_JSON_DEPTH}"
+        )));
+    }
+    if let Some(object) = raw_object(value) {
+        let mut counts = BTreeMap::new();
+        for (key, child) in &object.0 {
+            *counts.entry(key.as_str()).or_insert(0_u32) += 1;
+            collect_duplicate_keys(child, depth + 1, duplicates)?;
+        }
+        duplicates.extend(
+            counts
+                .into_iter()
+                .filter(|(_, count)| *count > 1)
+                .map(|(key, _)| key.to_owned()),
+        );
+    } else if let Some(values) = raw_array(value) {
+        for child in values {
+            collect_duplicate_keys(&child, depth + 1, duplicates)?;
+        }
+    }
+    Ok(())
+}
+
+fn reject_duplicate_keys(value: &RawValue) -> Result<(), CheckpointImportContractError> {
     let mut duplicates = BTreeSet::new();
-    value.collect_duplicate_keys(&mut duplicates);
+    collect_duplicate_keys(value, 0, &mut duplicates)?;
     if let Some(key) = duplicates.into_iter().next() {
         return Err(invalid(format!(
             "checkpoint-import JSON contains duplicate object key `{key}`"
         )));
     }
     Ok(())
-}
-
-impl<'de> Deserialize<'de> for RawJsonValue {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_any(RawJsonValueVisitor)
-    }
-}
-
-struct RawJsonValueVisitor;
-
-impl<'de> Visitor<'de> for RawJsonValueVisitor {
-    type Value = RawJsonValue;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("a JSON value")
-    }
-
-    fn visit_bool<E: serde::de::Error>(self, value: bool) -> Result<Self::Value, E> {
-        Ok(RawJsonValue::Bool(value))
-    }
-
-    fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Self::Value, E> {
-        Ok(RawJsonValue::Number(Number::from(value)))
-    }
-
-    fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Self::Value, E> {
-        Ok(RawJsonValue::Number(Number::from(value)))
-    }
-
-    fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<Self::Value, E> {
-        Number::from_f64(value)
-            .map(RawJsonValue::Number)
-            .ok_or_else(|| E::custom("JSON numbers must be finite"))
-    }
-
-    fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
-        Ok(RawJsonValue::String(value.to_owned()))
-    }
-
-    fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Self::Value, E> {
-        Ok(RawJsonValue::String(value))
-    }
-
-    fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
-        Ok(RawJsonValue::Null)
-    }
-
-    fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
-        Ok(RawJsonValue::Null)
-    }
-
-    fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<Self::Value, A::Error> {
-        let mut values = Vec::new();
-        while let Some(value) = sequence.next_element::<RawJsonValue>()? {
-            values.push(value);
-        }
-        Ok(RawJsonValue::Array(values))
-    }
-
-    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-        let mut object = Vec::new();
-        while let Some(key) = map.next_key::<String>()? {
-            object.push((key, map.next_value::<RawJsonValue>()?));
-        }
-        Ok(RawJsonValue::Object(object))
-    }
-}
-
-struct RawJsonValueDeserializer<E> {
-    value: RawJsonValue,
-    marker: PhantomData<E>,
-}
-
-impl<E> RawJsonValueDeserializer<E> {
-    fn new(value: RawJsonValue) -> Self {
-        Self {
-            value,
-            marker: PhantomData,
-        }
-    }
-}
-
-struct RawJsonSequenceDeserializer<E> {
-    values: std::vec::IntoIter<RawJsonValue>,
-    marker: PhantomData<E>,
-}
-
-impl<'de, E: serde::de::Error> SeqAccess<'de> for RawJsonSequenceDeserializer<E> {
-    type Error = E;
-
-    fn next_element_seed<T>(&mut self, seed: T) -> Result<Option<T::Value>, Self::Error>
-    where
-        T: serde::de::DeserializeSeed<'de>,
-    {
-        self.values
-            .next()
-            .map(|value| seed.deserialize(RawJsonValueDeserializer::new(value)))
-            .transpose()
-    }
-}
-
-struct RawJsonMapDeserializer<E> {
-    fields: std::vec::IntoIter<(String, RawJsonValue)>,
-    value: Option<RawJsonValue>,
-    marker: PhantomData<E>,
-}
-
-impl<'de, E: serde::de::Error> MapAccess<'de> for RawJsonMapDeserializer<E> {
-    type Error = E;
-
-    fn next_key_seed<K>(&mut self, seed: K) -> Result<Option<K::Value>, Self::Error>
-    where
-        K: serde::de::DeserializeSeed<'de>,
-    {
-        let Some((key, value)) = self.fields.next() else {
-            return Ok(None);
-        };
-        self.value = Some(value);
-        seed.deserialize(StringDeserializer::<E>::new(key))
-            .map(Some)
-    }
-
-    fn next_value_seed<V>(&mut self, seed: V) -> Result<V::Value, Self::Error>
-    where
-        V: serde::de::DeserializeSeed<'de>,
-    {
-        let value = self
-            .value
-            .take()
-            .ok_or_else(|| E::custom("checkpoint-import JSON map value is missing"))?;
-        seed.deserialize(RawJsonValueDeserializer::new(value))
-    }
-}
-
-impl<'de, E: serde::de::Error> Deserializer<'de> for RawJsonValueDeserializer<E> {
-    type Error = E;
-
-    fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
-    where
-        V: Visitor<'de>,
-    {
-        match self.value {
-            RawJsonValue::Null => visitor.visit_unit(),
-            RawJsonValue::Bool(value) => visitor.visit_bool(value),
-            RawJsonValue::Number(value) => {
-                if let Some(value) = value.as_i64() {
-                    visitor.visit_i64(value)
-                } else if let Some(value) = value.as_u64() {
-                    visitor.visit_u64(value)
-                } else {
-                    visitor.visit_f64(value.as_f64().ok_or_else(|| {
-                        E::custom("checkpoint-import JSON number is not representable")
-                    })?)
-                }
-            }
-            RawJsonValue::String(value) => visitor.visit_string(value),
-            RawJsonValue::Array(values) => visitor.visit_seq(RawJsonSequenceDeserializer {
-                values: values.into_iter(),
-                marker: PhantomData,
-            }),
-            RawJsonValue::Object(fields) => visitor.visit_map(RawJsonMapDeserializer {
-                fields: fields.into_iter(),
-                value: None,
-                marker: PhantomData,
-            }),
-        }
-    }
-
-    fn deserialize_option<V>(self, visitor: V) -> Result<V::Value, Self::Error>
-    where
-        V: Visitor<'de>,
-    {
-        match self.value {
-            RawJsonValue::Null => visitor.visit_none(),
-            value => visitor.visit_some(Self::new(value)),
-        }
-    }
-
-    serde::forward_to_deserialize_any! {
-        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string bytes byte_buf
-        unit unit_struct newtype_struct seq tuple tuple_struct map struct enum identifier
-        ignored_any
-    }
 }
 
 /// Runs recursive envelope preflight and whole-document duplicate-key rejection
@@ -436,12 +391,12 @@ where
     D: Deserializer<'de>,
     T: DeserializeOwned,
 {
-    let value = RawJsonValue::deserialize(deserializer)?;
+    let value = Box::<RawValue>::deserialize(deserializer)?;
     preflight_versioned_tree(&value, surface)
         .map_err(VersionDiagnostic::into_contract_error)
         .map_err(D::Error::custom)?;
     reject_duplicate_keys(&value).map_err(D::Error::custom)?;
-    T::deserialize(RawJsonValueDeserializer::<D::Error>::new(value))
+    serde_json::from_str(value.get()).map_err(D::Error::custom)
 }
 
 fn checked_layer_count(layer_count: usize) -> Result<u32, CheckpointImportContractError> {
@@ -510,16 +465,48 @@ fn canonical_json<T: Serialize>(value: &T) -> Result<String, CheckpointImportCon
 }
 
 /// Provenance retained for an application-owned installed checkpoint.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ManagedProvenanceV1 {
     pub source: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference: Option<String>,
 }
 
+impl Serialize for ManagedProvenanceV1 {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.validate().map_err(serde::ser::Error::custom)?;
+        let mut state = serializer.serialize_struct(
+            "ManagedProvenanceV1",
+            if self.reference.is_some() { 2 } else { 1 },
+        )?;
+        state.serialize_field("source", &self.source)?;
+        if let Some(reference) = &self.reference {
+            state.serialize_field("reference", reference)?;
+        }
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for ManagedProvenanceV1 {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Wire {
+            source: String,
+            #[serde(default)]
+            reference: Option<String>,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        let provenance = Self {
+            source: wire.source,
+            reference: wire.reference,
+        };
+        provenance.validate().map_err(D::Error::custom)?;
+        Ok(provenance)
+    }
+}
+
 impl ManagedProvenanceV1 {
-    fn validate(&self) -> Result<(), CheckpointImportContractError> {
+    pub fn validate(&self) -> Result<(), CheckpointImportContractError> {
         validate_nonempty(&self.source, "managed provenance source")?;
         if let Some(reference) = &self.reference {
             validate_nonempty(reference, "managed provenance reference")?;
@@ -596,12 +583,14 @@ impl Serialize for SourceLocatorV1 {
 )]
 enum SourceLocatorV1Wire {
     Linked {
+        #[serde(deserialize_with = "deserialize_schema_version")]
         schema_version: u32,
         root_id: String,
         relative_path: String,
         fingerprint: String,
     },
     Managed {
+        #[serde(deserialize_with = "deserialize_schema_version")]
         schema_version: u32,
         install_id: String,
         relative_path: String,
@@ -692,11 +681,12 @@ impl SourceLocatorV1 {
         Ok(locator)
     }
 
-    pub fn content_digest(&self) -> &str {
-        match self {
+    pub fn content_digest(&self) -> Result<&str, CheckpointImportContractError> {
+        self.validate()?;
+        Ok(match self {
             Self::Linked { fingerprint, .. } => fingerprint,
             Self::Managed { sha256, .. } => sha256,
-        }
+        })
     }
 
     /// Locator-independent identity of the source bytes.
@@ -706,7 +696,7 @@ impl SourceLocatorV1 {
             LOCATOR_SEMANTIC_DOMAIN,
             &LocatorSemanticV1 {
                 schema_version: self.schema_version(),
-                content_digest: self.content_digest(),
+                content_digest: self.content_digest()?,
             },
         ))
     }
@@ -762,13 +752,24 @@ impl SourceLocatorV1 {
 
 /// One logical layer of an import plan. The source remains separate from its
 /// logical shape, so linked and managed copies can compile to the same plan.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImportLayerV1 {
     pub layer_id: String,
     pub role: String,
     pub target_path: String,
     pub source: SourceLocatorV1,
+}
+
+impl Serialize for ImportLayerV1 {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.validate().map_err(serde::ser::Error::custom)?;
+        let mut state = serializer.serialize_struct("ImportLayerV1", 4)?;
+        state.serialize_field("layerId", &self.layer_id)?;
+        state.serialize_field("role", &self.role)?;
+        state.serialize_field("targetPath", &self.target_path)?;
+        state.serialize_field("source", &self.source)?;
+        state.end()
+    }
 }
 
 #[derive(Deserialize)]
@@ -809,7 +810,7 @@ struct SemanticLayerV1<'a> {
 }
 
 impl ImportLayerV1 {
-    fn validate(&self) -> Result<(), CheckpointImportContractError> {
+    pub fn validate(&self) -> Result<(), CheckpointImportContractError> {
         validate_nonempty(&self.layer_id, "import layer id")?;
         validate_nonempty(&self.role, "import layer role")?;
         validate_relative_path(&self.target_path, "import layer target path")?;
@@ -851,6 +852,7 @@ impl Serialize for ImportPlanV1 {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ImportPlanV1Wire {
+    #[serde(deserialize_with = "deserialize_schema_version")]
     schema_version: u32,
     plan_id: String,
     family: String,
@@ -1027,6 +1029,7 @@ impl<'de> Deserialize<'de> for ImportPlanReferenceV1 {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase", deny_unknown_fields)]
         struct Wire {
+            #[serde(deserialize_with = "deserialize_schema_version")]
             schema_version: u32,
             plan_id: String,
             semantic_digest: String,
@@ -1089,8 +1092,10 @@ impl<'de> Deserialize<'de> for ImportPlanSummaryV1 {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase", deny_unknown_fields)]
         struct Wire {
+            #[serde(deserialize_with = "deserialize_schema_version")]
             schema_version: u32,
             family: String,
+            #[serde(deserialize_with = "deserialize_layer_count")]
             layer_count: u32,
             layer_roles: Vec<String>,
             semantic_digest: String,
@@ -1155,6 +1160,7 @@ impl<'de> Deserialize<'de> for CheckpointCatalogRecordV1 {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase", deny_unknown_fields)]
         struct Wire {
+            #[serde(deserialize_with = "deserialize_schema_version")]
             schema_version: u32,
             checkpoint_id: String,
             plan: ImportPlanReferenceV1,
@@ -1265,9 +1271,11 @@ pub struct CheckpointInventoryV1 {
 impl Serialize for CheckpointInventoryV1 {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         self.validate().map_err(serde::ser::Error::custom)?;
+        let mut records: Vec<_> = self.records.iter().collect();
+        records.sort_by(|left, right| left.checkpoint_id.cmp(&right.checkpoint_id));
         let mut state = serializer.serialize_struct("CheckpointInventoryV1", 2)?;
         state.serialize_field("schemaVersion", &self.schema_version)?;
-        state.serialize_field("records", &self.records)?;
+        state.serialize_field("records", &records)?;
         state.end()
     }
 }
@@ -1277,6 +1285,7 @@ impl<'de> Deserialize<'de> for CheckpointInventoryV1 {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase", deny_unknown_fields)]
         struct Wire {
+            #[serde(deserialize_with = "deserialize_schema_version")]
             schema_version: u32,
             records: Vec<CheckpointCatalogRecordV1>,
         }
