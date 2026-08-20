@@ -264,6 +264,102 @@ fn future_version_envelopes_win_over_future_shape_errors() {
 }
 
 #[test]
+fn raw_json_rejects_duplicate_keys_for_every_versioned_contract() {
+    macro_rules! assert_duplicate_key {
+        ($contract:ty, $document:expr, $key:literal) => {{
+            let document = $document;
+            let error = serde_json::from_str::<$contract>(&document)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(&format!("duplicate object key `{}`", $key)),
+                "{error}"
+            );
+        }};
+    }
+
+    // A future version followed by v1 must never be collapsed to v1 by a
+    // map-based intermediate decoder.
+    assert_duplicate_key!(
+        SourceLocatorV1,
+        format!(
+            r#"{{"kind":"linked","schemaVersion":2,"schemaVersion":1,"rootId":"root","relativePath":"model.safetensors","fingerprint":"{DIGEST}"}}"#
+        ),
+        "schemaVersion"
+    );
+    assert_duplicate_key!(
+        ImportPlanV1,
+        format!(
+            r#"{{"schemaVersion":2,"schemaVersion":1,"planId":"plan","family":"family","layers":[{{"layerId":"layer","role":"role","targetPath":"model.safetensors","source":{{"kind":"linked","schemaVersion":1,"rootId":"root","relativePath":"model.safetensors","fingerprint":"{DIGEST}"}}}}]}}"#
+        ),
+        "schemaVersion"
+    );
+    assert_duplicate_key!(
+        ImportPlanReferenceV1,
+        format!(
+            r#"{{"schemaVersion":2,"schemaVersion":1,"planId":"plan","semanticDigest":"sha256:{DIGEST}","sourceBindingIdentity":"sha256:{DIGEST}"}}"#
+        ),
+        "schemaVersion"
+    );
+    assert_duplicate_key!(
+        ImportPlanSummaryV1,
+        format!(
+            r#"{{"schemaVersion":2,"schemaVersion":1,"family":"family","layerCount":1,"layerRoles":["role"],"semanticDigest":"sha256:{DIGEST}"}}"#
+        ),
+        "schemaVersion"
+    );
+    assert_duplicate_key!(
+        CheckpointInventoryV1,
+        r#"{"schemaVersion":2,"schemaVersion":1,"records":[]}"#,
+        "schemaVersion"
+    );
+
+    // Reject duplicate fields in the v1 body too, including nested versioned
+    // values reached through a plan and through an otherwise unversioned record.
+    assert_duplicate_key!(
+        SourceLocatorV1,
+        format!(
+            r#"{{"kind":"linked","schemaVersion":1,"rootId":"first","rootId":"second","relativePath":"model.safetensors","fingerprint":"{DIGEST}"}}"#
+        ),
+        "rootId"
+    );
+    assert_duplicate_key!(
+        ImportPlanV1,
+        format!(
+            r#"{{"schemaVersion":1,"planId":"first","planId":"second","family":"family","layers":[{{"layerId":"layer","role":"role","targetPath":"model.safetensors","source":{{"kind":"linked","schemaVersion":1,"rootId":"root","relativePath":"model.safetensors","fingerprint":"{DIGEST}"}}}}]}}"#
+        ),
+        "planId"
+    );
+    assert_duplicate_key!(
+        ImportPlanReferenceV1,
+        format!(
+            r#"{{"schemaVersion":1,"planId":"first","planId":"second","semanticDigest":"sha256:{DIGEST}","sourceBindingIdentity":"sha256:{DIGEST}"}}"#
+        ),
+        "planId"
+    );
+    assert_duplicate_key!(
+        ImportPlanSummaryV1,
+        format!(
+            r#"{{"schemaVersion":1,"family":"first","family":"second","layerCount":1,"layerRoles":["role"],"semanticDigest":"sha256:{DIGEST}"}}"#
+        ),
+        "family"
+    );
+    assert_duplicate_key!(
+        CheckpointInventoryV1,
+        r#"{"schemaVersion":1,"records":[],"records":[]}"#,
+        "records"
+    );
+
+    assert_duplicate_key!(
+        CheckpointCatalogRecordV1,
+        format!(
+            r#"{{"checkpointId":"checkpoint","plan":{{"schemaVersion":1,"planId":"first","planId":"second","semanticDigest":"sha256:{DIGEST}","sourceBindingIdentity":"sha256:{DIGEST}"}},"summary":{{"schemaVersion":1,"family":"family","layerCount":1,"layerRoles":["role"],"semanticDigest":"sha256:{DIGEST}"}}}}"#
+        ),
+        "planId"
+    );
+}
+
+#[test]
 fn catalog_record_recomputes_every_loaded_plan_claim() {
     let import_plan = plan(linked("root", "model.safetensors"));
     let record = CheckpointCatalogRecordV1::from_plan("checkpoint", &import_plan).unwrap();

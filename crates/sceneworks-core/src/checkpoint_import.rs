@@ -5,13 +5,13 @@
 //! separate atomically published document, so catalog records never duplicate
 //! individual layer locations.
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, fmt};
 
 use serde::{
-    de::{DeserializeOwned, Error as _},
+    de::{DeserializeOwned, Error as _, MapAccess, SeqAccess, Visitor},
     Deserialize, Deserializer, Serialize,
 };
-use serde_json::Value;
+use serde_json::{Map, Number, Value};
 use sha2::{Digest, Sha256};
 
 /// Wire version shared by all checkpoint-import contracts in this module.
@@ -47,15 +47,100 @@ fn validate_version(found: u32) -> Result<(), CheckpointImportContractError> {
     Ok(())
 }
 
-/// Reads a version envelope before selecting a v1 body decoder. This intentionally
-/// prevents a future discriminant or future-only field from hiding the actionable
-/// recompile/rescan error behind a generic v1-shape deserialization failure.
+/// A JSON value that rejects duplicate object keys at every nesting level.
+///
+/// `serde_json::Value` alone is not suitable for version-envelope preflight:
+/// it keeps only the last duplicate key. That could turn a source document with
+/// `schemaVersion: 2, schemaVersion: 1` into an apparently supported v1 one.
+struct DuplicateKeyRejectingJsonValue(Value);
+
+impl<'de> Deserialize<'de> for DuplicateKeyRejectingJsonValue {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(DuplicateKeyRejectingJsonValueVisitor)
+    }
+}
+
+struct DuplicateKeyRejectingJsonValueVisitor;
+
+impl<'de> Visitor<'de> for DuplicateKeyRejectingJsonValueVisitor {
+    type Value = DuplicateKeyRejectingJsonValue;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a JSON value without duplicate object keys")
+    }
+
+    fn visit_bool<E: serde::de::Error>(self, value: bool) -> Result<Self::Value, E> {
+        Ok(DuplicateKeyRejectingJsonValue(Value::Bool(value)))
+    }
+
+    fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Self::Value, E> {
+        Ok(DuplicateKeyRejectingJsonValue(Value::Number(Number::from(
+            value,
+        ))))
+    }
+
+    fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Self::Value, E> {
+        Ok(DuplicateKeyRejectingJsonValue(Value::Number(Number::from(
+            value,
+        ))))
+    }
+
+    fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<Self::Value, E> {
+        Number::from_f64(value)
+            .map(|number| DuplicateKeyRejectingJsonValue(Value::Number(number)))
+            .ok_or_else(|| E::custom("JSON numbers must be finite"))
+    }
+
+    fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+        Ok(DuplicateKeyRejectingJsonValue(Value::String(
+            value.to_owned(),
+        )))
+    }
+
+    fn visit_string<E: serde::de::Error>(self, value: String) -> Result<Self::Value, E> {
+        Ok(DuplicateKeyRejectingJsonValue(Value::String(value)))
+    }
+
+    fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+        Ok(DuplicateKeyRejectingJsonValue(Value::Null))
+    }
+
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+        Ok(DuplicateKeyRejectingJsonValue(Value::Null))
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<Self::Value, A::Error> {
+        let mut values = Vec::new();
+        while let Some(value) = sequence.next_element::<DuplicateKeyRejectingJsonValue>()? {
+            values.push(value.0);
+        }
+        Ok(DuplicateKeyRejectingJsonValue(Value::Array(values)))
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut object = Map::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if object.contains_key(&key) {
+                return Err(A::Error::custom(format!(
+                    "checkpoint-import JSON contains duplicate object key `{key}`"
+                )));
+            }
+            let value = map.next_value::<DuplicateKeyRejectingJsonValue>()?;
+            object.insert(key, value.0);
+        }
+        Ok(DuplicateKeyRejectingJsonValue(Value::Object(object)))
+    }
+}
+
+/// Reads a duplicate-key-safe version envelope before selecting a v1 body decoder.
+/// This intentionally prevents a future discriminant or future-only field from
+/// hiding the actionable recompile/rescan error behind a generic v1-shape error.
 fn deserialize_versioned_v1<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: Deserializer<'de>,
     T: DeserializeOwned,
 {
-    let value = Value::deserialize(deserializer)?;
+    let value = DuplicateKeyRejectingJsonValue::deserialize(deserializer)?.0;
     let version = value
         .as_object()
         .and_then(|object| object.get("schemaVersion"))
