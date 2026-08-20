@@ -215,6 +215,66 @@ pub(crate) fn declared_scalar_class(
     }
 }
 
+/// **Grade a declared scalar for admission** (epic 19048 R1/R3; hoisted here by sc-19055).
+///
+/// A [`DeclaredScalarClass::MeasuredPeak`] compares as-is — it IS the peak for this request. A
+/// [`DeclaredScalarClass::DeclaredFloor`] is widened by the lane's own estimate margin, which is
+/// exactly the grade [`crate::memory_strategy::select_strategy`] gives a
+/// [`CandidateBasis::EstimateFloor`] candidate. Gates that have no selector downstream of them (the
+/// candle image scalar gate, and since sc-19055 the flat video fit errors) apply it here instead, so
+/// the two positions cannot drift into two different gradings of the same class of evidence.
+///
+/// Widening is [`crate::memory_strategy::widened_peak_bytes`] over integer bytes — the selector's
+/// own arithmetic, never a second law — and the margin is
+/// [`EstimateLane::estimate_margin`], never a copied constant.
+///
+/// Lives in the mechanism rather than in either lane because R1 forbids a prediction law in a
+/// backend-local module: before sc-19055 this function was `candle_scalar_gate::graded_scalar_gb`,
+/// reachable only from the image lane, so the video lane could not have consumed it without either
+/// importing the image gate or growing a second copy.
+#[cfg_attr(
+    not(any(target_os = "macos", feature = "backend-candle")),
+    allow(dead_code)
+)]
+pub(crate) fn graded_scalar_bytes(
+    peak_bytes: u64,
+    class: DeclaredScalarClass,
+    lane: EstimateLane,
+) -> u64 {
+    match class {
+        DeclaredScalarClass::MeasuredPeak => peak_bytes,
+        DeclaredScalarClass::DeclaredFloor => {
+            crate::memory_strategy::widened_peak_bytes(peak_bytes, lane.estimate_margin())
+        }
+    }
+}
+
+/// [`graded_scalar_bytes`] for a caller that holds GB rather than bytes.
+///
+/// The GB -> integer-byte -> GB round trip is deliberate and is the arithmetic the pre-sc-19055
+/// candle image gate already used: widening MUST happen in the selector's integer-byte unit so a
+/// gate-side grade and a selector-side grade of the same number agree exactly rather than to within
+/// a float rounding.
+#[cfg_attr(
+    not(any(target_os = "macos", feature = "backend-candle")),
+    allow(dead_code)
+)]
+pub(crate) fn graded_scalar_gb(
+    peak_gb: f64,
+    class: DeclaredScalarClass,
+    lane: EstimateLane,
+) -> f64 {
+    match class {
+        DeclaredScalarClass::MeasuredPeak => peak_gb,
+        DeclaredScalarClass::DeclaredFloor => {
+            let bytes = (peak_gb * (1024.0 * 1024.0 * 1024.0))
+                .ceil()
+                .clamp(0.0, u64::MAX as f64) as u64;
+            crate::memory_strategy::peak_bytes_to_gb(graded_scalar_bytes(bytes, class, lane))
+        }
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // The binding phase — ONE argmax, three lanes
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -542,8 +602,30 @@ pub(crate) fn estimate_evidence(
 // Basis 2 — the weights + headroom floor
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-/// The floor's per-rung WEIGHTS term, derived only from the provider contract's own declarations
-/// (sc-18096). Nothing here is a tuned coefficient:
+/// The weights one load holds resident, split the way [`compose_resident_floor_bytes`] needs them.
+///
+/// A provider contract is one source of these numbers ([`floor_weights_bytes`]); an on-disk
+/// `.safetensors` sum is another ([`crate::conditioning_fit`], sc-19055). The composition law must
+/// not fork between them, which is why the law takes this rather than a contract.
+#[cfg_attr(
+    not(any(target_os = "macos", feature = "backend-candle")),
+    allow(dead_code)
+)]
+pub(crate) struct ResidentWeights {
+    /// The conditioning stack (text/vision encoders) — the half `StagedResidency` drops.
+    pub(crate) conditioning_bytes: u64,
+    /// Everything else the base model holds resident.
+    pub(crate) heavy_bytes: u64,
+    /// The transformer's share of [`Self::heavy_bytes`], which `BoundedTransformerResidency`
+    /// windows out. Zero when the source cannot separate it — a source that cannot see the split
+    /// must not promise the saving.
+    pub(crate) transformer_bytes: u64,
+}
+
+/// **The resident-composition law: which declared components a composition actually holds**
+/// (sc-18096; hoisted off the contract by sc-19055).
+///
+/// Nothing here is a tuned coefficient:
 ///
 /// * `StagedResidency` engaged ⇒ the co-residency drop the rung exists for: the resident working
 ///   set is the larger of the conditioning stack and everything else, exactly the
@@ -555,35 +637,72 @@ pub(crate) fn estimate_evidence(
 ///   deliberately no transient reduction either, because no measured basis for one exists on an
 ///   unmeasured cell. Their floor equals rung 1's, which keeps them selectable without ever
 ///   promising an unmeasured saving.
-/// * Auxiliary components (control branches, adapter stacks, …) stay resident unless the contract
-///   itself declares them `bounded_by` a rung the composition engages.
-pub(crate) fn floor_weights_bytes(
-    contract: &MemoryProviderContract,
+/// * Auxiliary components (control branches, adapter stacks, identity encoders, …) stay resident
+///   unless their source declares them `bounded_by` a rung the composition engages.
+///
+/// `auxiliary` is an iterator of `(resident_bytes, bounded_by)` so neither caller has to allocate a
+/// vector to describe components it already holds in another shape.
+///
+/// **Why this is the mechanism's and not each gate's** (epic 19048 R1). The additive overlay
+/// accounting the candle conditioning gate does — a base model plus a co-resident second network —
+/// is this exact law with the auxiliary term populated from disk instead of from a contract. Before
+/// sc-19055 that gate summed its two terms itself, so an overlay could never drop out of the floor
+/// when a rung bounded it, and the two positions could drift.
+#[cfg_attr(
+    not(any(target_os = "macos", feature = "backend-candle")),
+    allow(dead_code)
+)]
+pub(crate) fn compose_resident_floor_bytes<I>(
+    weights: &ResidentWeights,
     engaged: &[MemoryStrategy],
-) -> u64 {
-    let facts = contract.asset_facts;
-    let conditioning = facts.conditioning_bytes;
-    let mut heavy = facts.base_bytes.saturating_sub(conditioning);
+    auxiliary: I,
+) -> u64
+where
+    I: IntoIterator<Item = (u64, Option<MemoryStrategy>)>,
+{
+    let conditioning = weights.conditioning_bytes;
+    let mut heavy = weights.heavy_bytes;
     if engaged.contains(&MemoryStrategy::BoundedTransformerResidency) {
-        heavy = heavy.saturating_sub(facts.transformer_bytes);
+        heavy = heavy.saturating_sub(weights.transformer_bytes);
     }
     let base = if engaged.contains(&MemoryStrategy::StagedResidency) {
         conditioning.max(heavy)
     } else {
         conditioning.saturating_add(heavy)
     };
-    let auxiliary = contract
-        .resident_components()
-        .iter()
-        .filter(|component| component.kind.is_auxiliary())
-        .filter(|component| match component.bounded_by {
-            Some(bounding) => !engaged.contains(&bounding),
+    let auxiliary = auxiliary
+        .into_iter()
+        .filter(|(_, bounded_by)| match bounded_by {
+            Some(bounding) => !engaged.contains(bounding),
             None => true,
         })
-        .fold(0_u64, |total, component| {
-            total.saturating_add(component.resident_bytes)
+        .fold(0_u64, |total, (resident_bytes, _)| {
+            total.saturating_add(resident_bytes)
         });
     base.saturating_add(auxiliary)
+}
+
+/// The floor's per-rung WEIGHTS term for a load described by a provider contract (sc-18096) —
+/// [`compose_resident_floor_bytes`] over the contract's own declarations. The contract supplies the
+/// component bytes; the law lives one function up.
+pub(crate) fn floor_weights_bytes(
+    contract: &MemoryProviderContract,
+    engaged: &[MemoryStrategy],
+) -> u64 {
+    let facts = contract.asset_facts;
+    compose_resident_floor_bytes(
+        &ResidentWeights {
+            conditioning_bytes: facts.conditioning_bytes,
+            heavy_bytes: facts.base_bytes.saturating_sub(facts.conditioning_bytes),
+            transformer_bytes: facts.transformer_bytes,
+        },
+        engaged,
+        contract
+            .resident_components()
+            .iter()
+            .filter(|component| component.kind.is_auxiliary())
+            .map(|component| (component.resident_bytes, component.bounded_by)),
+    )
 }
 
 /// The smallest declared value for every numeric knob the engaged composition requires — the most
@@ -1250,6 +1369,78 @@ mod tests {
     }
 
     /// The scale never predicts below the measurement.
+    /// **The resident-composition law, exercised on the shape a gate with no contract supplies**
+    /// (sc-19055).
+    ///
+    /// [`compose_resident_floor_bytes`] was hoisted out of [`floor_weights_bytes`] so the candle
+    /// conditioning gate — which sources component bytes from an on-disk `.safetensors` scan rather
+    /// than from a `MemoryProviderContract` — composes them under the SAME law. Each clause is
+    /// separated by a distinct byte count, so no assertion can pass on a coincidence:
+    ///
+    /// * an unbounded auxiliary (the overlay) is always held;
+    /// * an auxiliary bounded by an ENGAGED rung drops out — the clause that makes routing through
+    ///   the mechanism load-bearing rather than a rename, because a hand-written `base + overlay`
+    ///   cannot express it;
+    /// * an auxiliary bounded by a rung the composition does NOT engage is still held;
+    /// * `BoundedTransformerResidency` removes the transformer's declared share, and only it.
+    #[test]
+    fn the_resident_composition_holds_an_overlay_until_a_rung_bounds_it() {
+        let weights = ResidentWeights {
+            conditioning_bytes: 100,
+            heavy_bytes: 1_000,
+            transformer_bytes: 700,
+        };
+        let overlay = |bounded_by| [(7_u64, bounded_by)];
+
+        // Resident: every term is held. 100 + 1000 + 7.
+        assert_eq!(
+            compose_resident_floor_bytes(&weights, &[MemoryStrategy::Resident], overlay(None)),
+            1_107
+        );
+        // Staged: the co-residency drop, max(100, 1000) = 1000, overlay still held.
+        assert_eq!(
+            compose_resident_floor_bytes(
+                &weights,
+                &[MemoryStrategy::Resident, MemoryStrategy::StagedResidency],
+                overlay(None),
+            ),
+            1_007
+        );
+        // The overlay is bounded by a rung the composition ENGAGES ⇒ it leaves the floor.
+        assert_eq!(
+            compose_resident_floor_bytes(
+                &weights,
+                &[MemoryStrategy::Resident, MemoryStrategy::BoundedAttention],
+                overlay(Some(MemoryStrategy::BoundedAttention)),
+            ),
+            1_100,
+            "an auxiliary bounded by an engaged rung must not stay in the resident floor"
+        );
+        // The same declaration, with that rung NOT engaged ⇒ still held. This is the pair that
+        // proves the `bounded_by` filter reads the composition rather than ignoring it.
+        assert_eq!(
+            compose_resident_floor_bytes(
+                &weights,
+                &[MemoryStrategy::Resident],
+                overlay(Some(MemoryStrategy::BoundedAttention)),
+            ),
+            1_107
+        );
+        // Windowing the transformer removes its declared share of `heavy`, and nothing else.
+        assert_eq!(
+            compose_resident_floor_bytes(
+                &weights,
+                &[
+                    MemoryStrategy::Resident,
+                    MemoryStrategy::BoundedTransformerResidency,
+                ],
+                overlay(None),
+            ),
+            407,
+            "100 conditioning + (1000 - 700) heavy + 7 overlay"
+        );
+    }
+
     #[test]
     fn the_extrapolation_scale_is_floored_at_one() {
         assert_eq!(

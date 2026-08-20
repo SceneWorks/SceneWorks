@@ -37747,7 +37747,7 @@
       "tier": "bf16",
       "gate": "scail2_video_fit_error_with_adapter_bytes",
       "resolution": "not_evaluated",
-      "geometrySensitive": false,
+      "geometrySensitive": true,
       "missingInput": "weight_bytes: u64, measured off the resolved model dir on disk (wan_weight_bytes / wan_vace_fun_sequential_weight_bytes); no manifest number reproduces it"
     },
     {
@@ -37757,7 +37757,7 @@
       "tier": "q8",
       "gate": "scail2_video_fit_error_with_adapter_bytes",
       "resolution": "not_evaluated",
-      "geometrySensitive": false,
+      "geometrySensitive": true,
       "missingInput": "weight_bytes: u64, measured off the resolved model dir on disk (wan_weight_bytes / wan_vace_fun_sequential_weight_bytes); no manifest number reproduces it"
     },
     {
@@ -37767,7 +37767,7 @@
       "tier": "q4",
       "gate": "scail2_video_fit_error_with_adapter_bytes",
       "resolution": "not_evaluated",
-      "geometrySensitive": false,
+      "geometrySensitive": true,
       "missingInput": "weight_bytes: u64, measured off the resolved model dir on disk (wan_weight_bytes / wan_vace_fun_sequential_weight_bytes); no manifest number reproduces it"
     },
     {
@@ -37777,7 +37777,7 @@
       "tier": "nvfp4",
       "gate": "scail2_video_fit_error_with_adapter_bytes",
       "resolution": "not_evaluated",
-      "geometrySensitive": false,
+      "geometrySensitive": true,
       "missingInput": "weight_bytes: u64, measured off the resolved model dir on disk (wan_weight_bytes / wan_vace_fun_sequential_weight_bytes); no manifest number reproduces it"
     },
     {
@@ -47427,7 +47427,7 @@
       "tier": "bf16",
       "gate": "wan_video_fit_error_with_adapter_bytes",
       "resolution": "not_evaluated",
-      "geometrySensitive": false,
+      "geometrySensitive": true,
       "missingInput": "weight_bytes: u64, measured off the resolved model dir on disk (wan_weight_bytes / wan_vace_fun_sequential_weight_bytes); no manifest number reproduces it"
     },
     {
@@ -47437,7 +47437,7 @@
       "tier": "q8",
       "gate": "wan_video_fit_error_with_adapter_bytes",
       "resolution": "not_evaluated",
-      "geometrySensitive": false,
+      "geometrySensitive": true,
       "missingInput": "weight_bytes: u64, measured off the resolved model dir on disk (wan_weight_bytes / wan_vace_fun_sequential_weight_bytes); no manifest number reproduces it"
     },
     {
@@ -47447,7 +47447,7 @@
       "tier": "q4",
       "gate": "wan_video_fit_error_with_adapter_bytes",
       "resolution": "not_evaluated",
-      "geometrySensitive": false,
+      "geometrySensitive": true,
       "missingInput": "weight_bytes: u64, measured off the resolved model dir on disk (wan_weight_bytes / wan_vace_fun_sequential_weight_bytes); no manifest number reproduces it"
     },
     {
@@ -47457,7 +47457,7 @@
       "tier": "nvfp4",
       "gate": "wan_video_fit_error_with_adapter_bytes",
       "resolution": "not_evaluated",
-      "geometrySensitive": false,
+      "geometrySensitive": true,
       "missingInput": "weight_bytes: u64, measured off the resolved model dir on disk (wan_weight_bytes / wan_vace_fun_sequential_weight_bytes); no manifest number reproduces it"
     },
     {
@@ -47467,7 +47467,7 @@
       "tier": "bf16",
       "gate": "wan_video_fit_error_with_adapter_bytes",
       "resolution": "not_evaluated",
-      "geometrySensitive": false,
+      "geometrySensitive": true,
       "missingInput": "weight_bytes: u64, measured off the resolved model dir on disk (wan_weight_bytes / wan_vace_fun_sequential_weight_bytes); no manifest number reproduces it"
     },
     {
@@ -47477,7 +47477,7 @@
       "tier": "q8",
       "gate": "wan_video_fit_error_with_adapter_bytes",
       "resolution": "not_evaluated",
-      "geometrySensitive": false,
+      "geometrySensitive": true,
       "missingInput": "weight_bytes: u64, measured off the resolved model dir on disk (wan_weight_bytes / wan_vace_fun_sequential_weight_bytes); no manifest number reproduces it"
     },
     {
@@ -47487,7 +47487,7 @@
       "tier": "q4",
       "gate": "wan_video_fit_error_with_adapter_bytes",
       "resolution": "not_evaluated",
-      "geometrySensitive": false,
+      "geometrySensitive": true,
       "missingInput": "weight_bytes: u64, measured off the resolved model dir on disk (wan_weight_bytes / wan_vace_fun_sequential_weight_bytes); no manifest number reproduces it"
     },
     {
@@ -47497,7 +47497,7 @@
       "tier": "nvfp4",
       "gate": "wan_video_fit_error_with_adapter_bytes",
       "resolution": "not_evaluated",
-      "geometrySensitive": false,
+      "geometrySensitive": true,
       "missingInput": "weight_bytes: u64, measured off the resolved model dir on disk (wan_weight_bytes / wan_vace_fun_sequential_weight_bytes); no manifest number reproduces it"
     },
     {
@@ -47507,7 +47507,7 @@
       "tier": "bf16",
       "gate": "wan_video_fit_error_with_adapter_bytes",
       "resolution": "not_evaluated",
-      "geometrySensitive": false,
+      "geometrySensitive": true,
       "missingInput": "weight_bytes: u64, measured off the resolved model dir on disk (wan_weight_bytes / wan_vace_fun_sequential_weight_bytes); no manifest number reproduces it"
     },
     {
@@ -47517,7 +47517,7 @@
       "tier": "q8",
       "gate": "wan_video_fit_error_with_adapter_bytes",
       "resolution": "not_evaluated",
-      "geometrySensitive": false,
+      "geometrySensitive": true,
       "missingInput": "weight_bytes: u64, measured off the resolved model dir on disk (wan_weight_bytes / wan_vace_fun_sequential_weight_bytes); no manifest number reproduces it"
     },
     {
@@ -47527,7 +47527,7 @@
       "tier": "q4",
       "gate": "wan_video_fit_error_with_adapter_bytes",
       "resolution": "not_evaluated",
-      "geometrySensitive": false,
+      "geometrySensitive": true,
       "missingInput": "weight_bytes: u64, measured off the resolved model dir on disk (wan_weight_bytes / wan_vace_fun_sequential_weight_bytes); no manifest number reproduces it"
     },
     {
@@ -47537,7 +47537,7 @@
       "tier": "nvfp4",
       "gate": "wan_video_fit_error_with_adapter_bytes",
       "resolution": "not_evaluated",
-      "geometrySensitive": false,
+      "geometrySensitive": true,
       "missingInput": "weight_bytes: u64, measured off the resolved model dir on disk (wan_weight_bytes / wan_vace_fun_sequential_weight_bytes); no manifest number reproduces it"
     },
     {

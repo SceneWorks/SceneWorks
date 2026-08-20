@@ -75,6 +75,35 @@
 //! apply — superseded entries, an unverified runtime artifact, adapter overlays, or a request
 //! above the measured envelope.
 //!
+//! ## What sc-19055 migrated (epic 19048 R1/R2)
+//!
+//! This lane already reached the shared selector — [`fit_ladder_for_tier`] has submitted measured
+//! and estimate-floor candidates to [`crate::memory_strategy::select_strategy`] since sc-18097, and
+//! the request geometry has been a real input since sc-16013. What was still module-local was the
+//! **evidence-coverage law**: a hand-written `evidence_is_current && request_pixels <=
+//! measured_pixels` deciding whether the sc-16013 rows could be claimed for a request. That is the
+//! same question [`crate::estimate_synthesis::declared_scalar_class`] answers for every other
+//! declared scalar in both lanes, and its doc says the answer "must not fork per lane". It no longer
+//! does. This module now supplies the parameters — the rows' `measured` flag and their capture cell
+//! — and the mechanism classifies.
+//!
+//! No admission decision moves at this pin: the mechanism's extra `batch == 1 && frames == 1`
+//! conjuncts are unreachable on a route whose production geometry hardcodes both.
+//!
+//! What is deliberately NOT done here. The sc-16013 rows cannot become fitted extrapolation bases:
+//! [`crate::estimate_synthesis::MeasuredRungBasis`] requires a verified calibration RECORD with a
+//! per-phase `(conditioning, denoise, decode)` triple for the binding-phase constraint to inspect,
+//! and these are whole-render manifest SCALARS with no per-phase decomposition — the same
+//! "records only, never scalars" rule `candle_memory_strategy::collect_estimate_bases` states. Above
+//! the measured envelope the lane therefore still lands on [`KreaControlFit::BestEffort`], and
+//! overturning that deliberate sc-18097 posture needs the per-frame/per-area candle capture
+//! (sc-19057), not a code change here.
+//!
+//! Boundary note: `krea_2_turbo`'s **`turboFit`** ladder is a different module and a different
+//! manifest block (`candle.turboFit.phaseCurvesByTier`, read only in [`crate::vram_gate`]); it is
+//! sc-19058's byte-identical fold-in and is untouched by this story. This module reads only
+//! `candle.control.*`, and neither file reads the other's block.
+//!
 //! Everything here is pure and unit-tested; the live `nvidia-smi` reading lives in [`crate::gpu`] and the
 //! wiring is in `generate_candle_krea_control_stream` (image_jobs/krea_control_candle.rs).
 
@@ -592,23 +621,61 @@ fn fit_ladder_for_tier(
     // the priced 1024² ladder is byte-for-byte unchanged.
     //
     // Floors are synthesized only when every conjunct holds:
-    //  * `evidence_is_current` — dimension-level staleness (`measured: false` / `supersededBy`)
-    //    means the rows were ALREADY known non-current when recorded; they still exclude and may
-    //    not seed floors either (the `BestEffort` never-reject contract stays for them).
+    //  * the sc-16013 rows may be CLAIMED as this request's peak — see `scalar_class` below. That
+    //    subsumes two conjuncts this code used to test itself: dimension-level staleness
+    //    (`candle.control.measured: false` / `supersededBy` — rows ALREADY known non-current when
+    //    recorded, which still exclude and may not seed floors either, so the `BestEffort`
+    //    never-reject contract stays for them), and the measured-envelope test.
     //  * `runtime_verified` and no adapters — the rows price the shipped no-adapter artifact.
     //  * the loaded contract's calibration identity matches the sc-16013 rows (the sc-18096
     //    drifted-provider gate).
-    //  * the request geometry is inside the measured 1024² envelope. The rows are whole-render
-    //    peaks read VERBATIM: at or below the measured area every phase is at most its measured
-    //    value, so the constant extrapolation is an upper bound and no binding-phase flip can
-    //    exceed it — which is why these are `EstimateFloor` candidates outside
-    //    `ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE`'s fitted-curve scope (no per-phase
-    //    decomposition exists to re-check). ABOVE the measured area a verbatim row under-predicts,
-    //    so no floor is emitted and the pre-18097 best-effort contract stands there.
+    //
+    // The rows are whole-render peaks read VERBATIM: at or below the measured area every phase is
+    // at most its measured value, so the constant extrapolation is an upper bound and no
+    // binding-phase flip can exceed it — which is why these are `EstimateFloor` candidates outside
+    // `ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE`'s fitted-curve scope (no per-phase
+    // decomposition exists to re-check). ABOVE the measured area a verbatim row under-predicts, so
+    // no floor is emitted and the pre-18097 best-effort contract stands there.
     //
     // The candle estimate margin is applied by the shared selector, not here.
-    let request_pixels = u64::from(request_geometry.width) * u64::from(request_geometry.height);
-    let measured_pixels = u64::from(measured_geometry.width) * u64::from(measured_geometry.height);
+    //
+    // ── sc-19055 (epic 19048 R1): the coverage test is the MECHANISM's, not this module's. ──
+    //
+    // "Which geometries may a single measured cell claim" is exactly the question
+    // `estimate_synthesis::declared_scalar_class` exists to answer — its own doc says the answer
+    // "must not fork per lane". This module used to answer it with a hand-written
+    // `evidence_is_current && request_pixels <= measured_pixels`, one of the module-local
+    // prediction laws R1 forbids. The parameters stay here (the sc-16013 rows' `measured` flag and
+    // their capture geometry); the law moves.
+    //
+    // Behaviour-identical on every REACHABLE request. The mechanism additionally requires
+    // `batch == 1 && frames == 1` — a single-image capture cannot speak for a different workload
+    // SHAPE — and the production geometry hardcodes both to 1
+    // (`image_jobs/krea_control_candle.rs`, and no candle image route turns count into
+    // `geometry.batch`, sc-16194), so no decision moves at this pin.
+    //
+    // BEYOND the reachable set the change is fail-OPEN, not fail-closed, and that is deliberate.
+    // Losing `MeasuredPeak` withholds the estimate floors, so such a request reaches
+    // `Selection::Unverified` and the ladder returns `BestEffort` — which ADMITS and leans on the
+    // recoverable CUDA-OOM backstop — where the pixels-only law returned `TooBig` and refused
+    // before the load. `a_batched_or_multi_frame_request_cannot_claim_the_single_image_capture`
+    // asserts exactly that transition.
+    //
+    // Refusing is the wrong outcome there, which is why this direction is correct rather than
+    // merely tolerated. A reject built on the sc-16013 floors is a claim that THIS workload does
+    // not fit; those rows measured a batch-1 single-image render and say nothing about a batched or
+    // multi-frame one, so the claim would be unfounded. This module's stated posture — and
+    // `FitDecision::Unknown`'s — is that a gate blocking without evidence is a regression, not a
+    // safety net; `BestEffort` is the variant that exists for exactly this case. The trade is a
+    // refusal we could not justify for an admission the OOM backstop still covers.
+    //
+    // `declared_pixels` is derived from `measured_geometry` rather than from a second constant, so
+    // the sc-16013 capture cell is declared exactly once in this file.
+    let scalar_class = crate::estimate_synthesis::declared_scalar_class(
+        evidence_is_current,
+        Some(u64::from(measured_geometry.width) * u64::from(measured_geometry.height)),
+        request_geometry,
+    );
     let contract_identity_matches = contract
         .calibration
         .as_ref()
@@ -618,11 +685,10 @@ fn fit_ladder_for_tier(
         .map(|gb| (gb - HEADROOM_GB).max(0.0))
         .unwrap_or(resident_floor_gb);
     let mut estimates: Vec<(MemorySelection, MemoryEvidence)> = Vec::new();
-    if evidence_is_current
+    if scalar_class == crate::estimate_synthesis::DeclaredScalarClass::MeasuredPeak
         && runtime_verified
         && adapter_gb == 0.0
         && contract_identity_matches
-        && request_pixels <= measured_pixels
     {
         for strategy in MemoryStrategy::ALL {
             if !matches!(
@@ -2331,6 +2397,71 @@ mod tests {
             ),
             "superseded evidence must not gain a reject through the estimate floors"
         );
+    }
+
+    /// **sc-19055: the coverage test is [`crate::estimate_synthesis::declared_scalar_class`]'s, and
+    /// this is the arm that proves it.**
+    ///
+    /// The law this module used to write itself — `evidence_is_current && request_pixels <=
+    /// measured_pixels` — agrees with the mechanism on every axis it looks at. It differs on the two
+    /// it does NOT look at: `batch` and `frames`. A single-image 1024² capture says nothing about a
+    /// batched or multi-frame render, so the mechanism refuses to let the sc-16013 rows claim one,
+    /// and the floors built from them are withheld.
+    ///
+    /// MUTATION PROOF — this is the only assertion in the file that separates the two laws.
+    /// Restoring the pixels-only conjunct in [`fit_ladder_for_tier`] makes both arms below emit
+    /// floors and land on `TooBig`, turning this red. Every other floor test passes under both laws,
+    /// which is the point: the migration moves no reachable decision, so it needs a test aimed at
+    /// exactly the difference.
+    ///
+    /// The interval is the one `control_estimate_floors_require_current_evidence_and_the_loaded_identity`
+    /// established: 27.5 GiB free (25.5 effective) sits in the open band between the RAW staged
+    /// floor (25.0) and its widened peak (26.0), so the control arm genuinely rejects and the
+    /// withheld-floor arms genuinely cannot.
+    #[test]
+    fn a_batched_or_multi_frame_request_cannot_claim_the_single_image_capture() {
+        let tier = "q4";
+        let contract = registered_contract_for_tier(tier).expect("control contract");
+        let current = current_evidence(krea_manifest_with_chunking());
+        let fit = |geometry: MemoryGeometry| {
+            fit_ladder_for_entry_with_runtime(
+                &current,
+                tier,
+                Some(budget(27.5)),
+                0,
+                geometry,
+                Some(&contract),
+                true,
+            )
+        };
+        // Well inside the measured envelope on every axis the old law looked at (768² < 1024²), so
+        // the ONLY thing separating these three requests is the workload shape.
+        let shaped = |batch: u32, frames: u32| MemoryGeometry {
+            width: 768,
+            height: 768,
+            batch,
+            frames,
+            reference_count: KREA_CONTROL_REFERENCE_COUNT,
+        };
+
+        // Control point: batch 1 / frames 1 keeps its floors and rejects from them.
+        assert!(
+            matches!(fit(shaped(1, 1)), KreaControlFit::TooBig { .. }),
+            "control point: the covered cell must reject from its floors, or the arms below prove \
+             nothing"
+        );
+
+        for (label, geometry) in [
+            ("a batched request", shaped(2, 1)),
+            ("a multi-frame request", shaped(1, 2)),
+        ] {
+            let verdict = fit(geometry);
+            assert!(
+                matches!(verdict, KreaControlFit::BestEffort { .. }),
+                "{label} must lose the floors a single-image capture cannot support, not reject \
+                 from them: {verdict:?}"
+            );
+        }
     }
 
     /// sc-13960: on a warm worker, crediting the cudarc pool the previous control render left behind

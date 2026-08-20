@@ -20000,18 +20000,26 @@
       // candle_gen_scail2 provider and rendered 832x480 / 81 frames / 1 step. GitHub Actions run
       // 31455292141, job 93667700921, artifact 9089420126 (uploaded zip SHA-256
       // de62f67b175ca91519602d5e024baf5342907b9fbe8d1297ad5abb561748bac9) emitted the validated
-      // overallPeakGb=102.115 marker after proving a stable 0.020 GB idle baseline. minMemoryGb is
-      // ceil(102.115 + the shared 2 GB dedicated-VRAM reserve) = 105; there is no lower Candle tier
-      // or sequential-offload path, so both worker modes fail closed below that live free-VRAM floor.
+      // overallPeakGb=102.115 marker after proving a stable 0.020 GB idle baseline. There is no
+      // lower Candle tier or sequential-offload path, so both worker modes fail closed below the
+      // live free-VRAM floor.
+      //
+      // minMemoryGb was ceil(102.115 + the shared 2 GB dedicated-VRAM reserve) = 105 until sc-19055.
+      // That story grades this row as the DECLARED FLOOR it is — a pixels-only capture cannot claim
+      // a clip-length request — so admission now demands the estimate-margin-widened
+      // ceil(104.115 x 1.04) = 109. The advertised minimum tracks the gate's demand rather than the
+      // pre-grade number, because a machine provisioned to exactly the value stated here must not
+      // then be refused by the gate (`vram_gate::scail2_video_fit_error_with_adapter_bytes`, which
+      // now compares this key against the SAME graded quantity so the two cannot desync again).
       "candle": {
-        "minMemoryGb": 105,
+        "minMemoryGb": 109,
         "vramGbByTier": { "bf16": 102.115 },
         "vramMeasuredPixels": 399360,
         "measured": true
       },
       "ui": {
         "label": "SCAIL-2",
-        "description": "zai-org SCAIL-2 character animation: give a reference character image and a driving video, and SCAIL-2 animates your character with the driving motion (the driving clip sets the motion and timing). Built on Wan2.1-14B; native MLX on macOS and native Candle on NVIDIA Windows/Linux using the same dense bf16 package. Candle needs at least 105 GB of free GPU VRAM (102.115 GB measured render peak plus reserve); lower-memory NVIDIA cards are rejected before load. Runs minutes-per-clip (segmented 14B denoise).",
+        "description": "zai-org SCAIL-2 character animation: give a reference character image and a driving video, and SCAIL-2 animates your character with the driving motion (the driving clip sets the motion and timing). Built on Wan2.1-14B; native MLX on macOS and native Candle on NVIDIA Windows/Linux using the same dense bf16 package. Candle needs at least 109 GB of free GPU VRAM (102.115 GB measured render peak, plus reserve and the estimate margin a single-geometry capture carries); lower-memory NVIDIA cards are rejected before load. Runs minutes-per-clip (segmented 14B denoise).",
         "recommendedFor": ["animate_character"],
         "durationHint": "Segmented 14B denoise — keep clips at 5s or less. Generates at 16fps; the driving clip sets the motion and timing.",
         "promptGuide": {
