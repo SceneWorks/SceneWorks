@@ -97,6 +97,7 @@ import { stripJsoncComments } from "./lib/jsonc.mjs";
 import { canonicalSourceText, semanticSourceBody } from "./lib/source-revision.mjs";
 import { TIER_ORDER, declaredProviders } from "./lib/manifest-memory-declarations.mjs";
 import { routedLanes } from "./check-tier-integrity.mjs";
+import { CANDLE_HARD_FLOOR, ESTIMATE_WIDENING_MULTIPLIER } from "./derive-ladder-margins.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -192,15 +193,18 @@ export const ADMISSION_MECHANISMS = Object.freeze([
     definitionSymbols: Object.freeze([
       "predicted_peak_gb",
       "predicted_peak_gb_with_adapter_bytes",
+      "predicted_peak_gb_for_request",
       "predicted_sequential_peak_gb",
       "predicted_sequential_peak_gb_with_adapter_bytes",
+      "predicted_sequential_peak_gb_for_request",
+      "scalar_peak_class",
       "sequential_overflow_gb",
       "load_plan",
     ]),
     callPattern:
-      "(?<!fn\\s)\\b(?:predicted_peak_gb|predicted_peak_gb_with_adapter_bytes|predicted_sequential_peak_gb|predicted_sequential_peak_gb_with_adapter_bytes|sequential_overflow_gb|load_plan)\\s*\\(",
+      "(?<!fn\\s)\\b(?:predicted_peak_gb|predicted_peak_gb_with_adapter_bytes|predicted_peak_gb_for_request|predicted_sequential_peak_gb|predicted_sequential_peak_gb_with_adapter_bytes|predicted_sequential_peak_gb_for_request|scalar_peak_class|sequential_overflow_gb|load_plan)\\s*\\(",
     summary:
-      "Per-tier manifest scalar (`candle.vramGbByTier` + headroom, else `candle.minMemoryGb`) compared to a live VRAM budget.",
+      "Per-tier manifest scalar (`candle.vramGbByTier` + headroom, else `candle.minMemoryGb`) compared to a live VRAM budget. Since sc-19054 the scalar is graded per request geometry: a covering `measured`/`vramMeasuredPixels` capture compares raw, everything else compares as the estimate-margin-widened declared floor.",
   },
   {
     id: "shared_selector_named_revision",
@@ -843,6 +847,31 @@ export function deriveGateGeometry(mechanismFacts) {
         });
       }
     }
+    // sc-19054 (epic 19048 R3): the module-qualified `candle_scalar_gate::load_plan` label names
+    // the route-reached COMPOSITION — since this story the peak `load_plan` compares is computed
+    // by `predicted_peak_gb_for_request(…, geometry: MemoryGeometry)`, so the label's geometry
+    // fact is the composition of the two signatures. The bare `load_plan` symbol entry above
+    // keeps its own signature-derived (geometry-blind) fact: this is a dataflow composition
+    // within one gate path, not a union across mechanism members.
+    const plan = mechanism.symbols.find((entry) => entry.symbol === "load_plan");
+    const prediction = mechanism.symbols.find(
+      (entry) => entry.symbol === "predicted_peak_gb_for_request",
+    );
+    if (plan && prediction) {
+      gates.set("candle_scalar_gate::load_plan", {
+        gate: "candle_scalar_gate::load_plan",
+        mechanism: mechanism.id,
+        definedIn: mechanism.definedIn,
+        geometryAware: plan.geometryAware || prediction.geometryAware,
+        geometryAxes: [...new Set([...plan.geometryAxes, ...prediction.geometryAxes])].sort(),
+        reachedVia: [
+          ...new Set([
+            ...plan.reachedVia,
+            ...prediction.reachedVia.map((via) => `composed:predicted_peak_gb_for_request:${via}`),
+          ]),
+        ].sort(),
+      });
+    }
   }
   // The sentinel the emitter uses for a route no gate is keyed to.
   gates.set("none", {
@@ -1147,6 +1176,64 @@ export function loadPlan(neededGb, sequentialNeededGb, budget, sequentialCapable
   }
   if (decision === "too_big") return "reject";
   return "resident";
+}
+
+// ── sc-19054 (epic 19048 R3): the geometry-aware scalar grade, MIRRORED. ────────────────────────
+
+const BYTES_PER_GIB = 1024 ** 3;
+
+/**
+ * `ladder_margin_policy::CANDLE_ESTIMATE_MARGIN`, restated through its own derivation chain
+ * (`derive-ladder-margins.mjs`: the candle corpus has zero repeat pairs, so the stale margin IS
+ * the hard floor, and the estimate margin doubles it) rather than as a second literal.
+ */
+export const CANDLE_ESTIMATE_MARGIN = CANDLE_HARD_FLOOR * ESTIMATE_WIDENING_MULTIPLIER;
+
+/** `candle_scalar_gate::scalar_peak_class` + `estimate_synthesis::declared_scalar_class`. */
+export function scalarPeakClass(entry, rowsKey, tierKey, geometry) {
+  const candle = entry?.candle;
+  const own = candle?.[rowsKey]?.[tierKey];
+  if (!(typeof own === "number" && Number.isFinite(own))) return "declared_floor";
+  const measured = candle.measured === true;
+  const declaredPixels =
+    typeof candle.vramMeasuredPixels === "number" &&
+    Number.isInteger(candle.vramMeasuredPixels) &&
+    candle.vramMeasuredPixels >= 0
+      ? candle.vramMeasuredPixels
+      : null;
+  const covered =
+    measured &&
+    geometry.batch === 1 &&
+    geometry.frames === 1 &&
+    declaredPixels !== null &&
+    declaredPixels > 0 &&
+    geometry.width * geometry.height <= declaredPixels;
+  return covered ? "measured_peak" : "declared_floor";
+}
+
+/**
+ * `candle_scalar_gate::graded_scalar_gb`: a covering measured peak compares raw; a declared floor
+ * is widened by the candle ESTIMATE margin over integer bytes — the selector's own
+ * `widened_peak_bytes` arithmetic, never a second law.
+ */
+export function gradedScalarGb(peakGb, scalarClass) {
+  if (scalarClass === "measured_peak") return peakGb;
+  const bytes = Math.ceil(peakGb * BYTES_PER_GIB);
+  return Math.ceil(bytes * (1 + CANDLE_ESTIMATE_MARGIN)) / BYTES_PER_GIB;
+}
+
+/** `vram_gate::predicted_peak_gb_for_request` (adapter bytes held at the corpus's zero). */
+export function predictedPeakGbForRequest(entry, tierKey, headroomGb, geometry) {
+  const raw = predictedPeakGb(entry, tierKey, headroomGb);
+  if (raw === null) return null;
+  return gradedScalarGb(raw, scalarPeakClass(entry, "vramGbByTier", tierKey, geometry));
+}
+
+/** `vram_gate::predicted_sequential_peak_gb_for_request`. */
+export function predictedSequentialPeakGbForRequest(entry, tierKey, headroomGb, geometry) {
+  const raw = predictedSequentialPeakGb(entry, tierKey, headroomGb);
+  if (raw === null) return null;
+  return gradedScalarGb(raw, scalarPeakClass(entry, "sequentialPeakGb", tierKey, geometry));
 }
 
 // -------------------------------------------------------------------------------------------------
@@ -1727,6 +1814,9 @@ export function buildBaseline(bodies, inventory, decisions) {
       height: row.height,
       frames: row.frames,
       budgetGb: row.budgetGb,
+      // sc-19054: what the scalar may claim at this cell — `measured_peak` (covering capture,
+      // compared raw) or `declared_floor` (estimate-margin-widened).
+      scalarClass: row.scalarClass,
       predictedPeakGb: row.predictedPeakGb,
       predictedSequentialPeakGb: row.predictedSequentialPeakGb,
       // Both branches of the registry-derived input. See the header note.

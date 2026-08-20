@@ -364,6 +364,9 @@ fn build_decisions() -> Value {
                             .as_ref()
                             .map(|identity| identity.fingerprint.as_str()),
                         headroom_bytes: INJECTED_HEADROOM_BYTES,
+                        // The MLX lane's production parameter (sc-19054): its resident baseline
+                        // carries its own geometry law, so no fitted resident sibling exists.
+                        synthesize_resident: false,
                     },
                     &bases,
                 );

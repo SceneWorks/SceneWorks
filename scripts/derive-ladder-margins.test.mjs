@@ -85,9 +85,16 @@ test("rust ladder_margin_policy constants match the derivation output", async ()
   assert.equal(constants.CANDLE_STALE_MEASURED_MARGIN, derived.candle.margins.staleMeasuredMargin);
   assert.equal(constants.CANDLE_ESTIMATE_MARGIN, derived.candle.margins.estimateMargin);
 
-  // Exactly the six derivation-coupled constants exist; a seventh margin constant added to the
-  // Rust module without extending this pin would otherwise ship unpinned.
-  assert.equal(Object.keys(constants).length, 6);
+  // sc-19054: the fitted-basis extrapolation bound. Not derived by this script's variance law —
+  // its justification is the calibration corpus's widest witnessed same-key geometry pair
+  // (1024² → 2048², a voxel ratio of exactly 4) — but pinned here beside the margins so it
+  // cannot drift silently; raising it is a MEASUREMENT obligation (see the Rust doc comment).
+  assert.equal(constants.MAX_EXTRAPOLATION_VOXEL_SCALE, 4);
+
+  // Exactly the seven pinned f64 constants exist (six derivation-coupled margins plus the
+  // sc-19054 extrapolation bound); an eighth constant added to the Rust module without extending
+  // this pin would otherwise ship unpinned.
+  assert.equal(Object.keys(constants).length, 7);
 });
 
 // Guards the honesty claims baked into the constants' doc comments. If evidence growth changes

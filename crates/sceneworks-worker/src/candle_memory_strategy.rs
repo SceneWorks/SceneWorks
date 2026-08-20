@@ -546,15 +546,18 @@ fn collect_estimate_bases(
     if expected_closure_digest.is_empty() {
         return Vec::new();
     }
-    let evidence_provider = evidence_provider(runtime_provider);
-    let Ok(BundleLoad::Ready(bundle)) = sceneworks_core::memory_calibration::load_packaged_bundle()
-    else {
-        return Vec::new();
-    };
+    // The cheap manifest check FIRST (sc-19054, fold-in from the sc-19053 review): most of the
+    // routed corpus carries no `candle.calibrations` at all, and `load_packaged_bundle()` is a
+    // full uncached JSON parse — pay for it only when there are bindings to resolve against it.
     let Some(bindings) = manifest
         .get("candle")
         .and_then(|value| value.get("calibrations"))
         .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    let evidence_provider = evidence_provider(runtime_provider);
+    let Ok(BundleLoad::Ready(bundle)) = sceneworks_core::memory_calibration::load_packaged_bundle()
     else {
         return Vec::new();
     };
@@ -708,6 +711,12 @@ fn synthesize_fitted_estimates(
                 .as_ref()
                 .map(|identity| identity.fingerprint.as_str()),
             headroom_bytes: (crate::vram_gate::HEADROOM_GB * BYTES_PER_GIB).ceil() as u64,
+            // sc-19054 (epic 19048 R3): the candle resident baseline is a geometry-blind declared
+            // manifest scalar, so a verified resident-rung record at another geometry may
+            // supersede it. The live scalar candidate is withheld by the caller whenever a fitted
+            // resident candidate exists — the same fitted-supersedes-floor rule the optimized
+            // rungs follow.
+            synthesize_resident: true,
         },
         bases,
     );
@@ -1271,6 +1280,18 @@ fn evaluate_shared_image_inner(
         // fitted-basis candidate does not also carry its floor — the generic ladder's own fitted
         // arm `continue`s past the floor for exactly this reason. Keeping both would let the floor
         // admit a request the better evidence predicts will not fit.
+        //
+        // Keyed on STRATEGY alone, deliberately coarser than the ladder's per-(strategy,
+        // parameter-candidate) supersession (sc-19054, fold-in from the sc-19053 review). This
+        // lane's floor law is itself strategy-granular — `synthesize_estimate_floors` emits ONE
+        // candidate per rung at the smallest declared knobs, priced from per-rung manifest rows
+        // that know nothing of parameter variants — so there is no per-variant floor to preserve,
+        // and a parameter-keyed filter would almost never match (the fitted candidate carries the
+        // BASIS record's knobs, the floor the smallest declared ones), resurrecting the floor
+        // beside better evidence of the same rung. The residual coarseness is an over-REFUSAL
+        // only: a decode-quality variant whose fitted extrapolation was refused loses the rung's
+        // single floor too, and the request falls to the next rung or rejects — pinned by
+        // `a_refused_fitted_variant_loses_the_rungs_single_floor_not_its_own`.
         .filter(|(selection, _)| {
             !fitted
                 .iter()
@@ -1280,17 +1301,47 @@ fn evaluate_shared_image_inner(
     } else {
         Vec::new()
     };
+    // ── sc-19054 (epic 19048 R3): the resident scalar is graded for THIS request's geometry. ──
+    //
+    // The manifest scalar behind `predicted_peak_gb` is presented as a MEASURED peak only where
+    // its capture covers the request (`measured: true`, batch-1/frames-1, request pixels within
+    // `vramMeasuredPixels`); everywhere else it is the declared floor epic 18472's flag says it
+    // is, classed `EstimateFloor` so the selector grades it behind the candle estimate margin
+    // exactly like every other floor candidate. The peak NUMBER stays the caller's raw
+    // `predicted_peak_gb` — grading is the selector's job, and a pre-widened input would
+    // double-charge the margin.
+    let resident_candidate_basis =
+        match crate::vram_gate::scalar_peak_class(manifest, "vramGbByTier", tier_key, geometry) {
+            crate::estimate_synthesis::DeclaredScalarClass::MeasuredPeak => {
+                crate::memory_strategy::CandidateBasis::Measured
+            }
+            crate::estimate_synthesis::DeclaredScalarClass::DeclaredFloor => {
+                crate::memory_strategy::CandidateBasis::EstimateFloor
+            }
+        };
+    // Fitted-supersedes-floor applies to the resident rung too (sc-19054): when a verified
+    // resident-rung record at another geometry produced a fitted candidate, the geometry-blind
+    // scalar candidate is WITHHELD, exactly as the optimized rungs' manifest floors are filtered
+    // above. Submitting both would let the scalar admit a request the extrapolated measurement
+    // predicts will not fit (the selector's measured-supersedes-estimate rule would even hard-mask
+    // the fitted candidate wherever the scalar still classes as measured).
+    let fitted_resident = fitted
+        .iter()
+        .any(|(selection, _)| selection.strategy == MemoryStrategy::Resident);
     let capacity = verified.len() + synthesized.len() + fitted.len() + 1;
     let mut selections = Vec::with_capacity(capacity);
     let mut evidence = Vec::with_capacity(capacity);
     let mut candidate_digests = Vec::with_capacity(capacity);
     // Index-aligned basis axis (sc-18097): the synthesized floors carry their estimate basis;
-    // the resident live estimate and every packaged record stay `Measured`.
+    // every packaged record stays `Measured`, and since sc-19054 the resident live estimate
+    // carries whatever the scalar's declared evidence class says for this geometry.
     let mut candidate_bases = Vec::with_capacity(capacity);
-    selections.push(resident_selection);
-    evidence.push(&resident);
-    candidate_digests.push(live_closure_digest.clone());
-    candidate_bases.push(crate::memory_strategy::CandidateBasis::Measured);
+    if !fitted_resident {
+        selections.push(resident_selection);
+        evidence.push(&resident);
+        candidate_digests.push(live_closure_digest.clone());
+        candidate_bases.push(resident_candidate_basis);
+    }
     for (index, item) in verified.iter().enumerate() {
         candidate_digests.push(closure_digests.get(index).cloned().unwrap_or_default());
         selections.push(MemorySelection {
@@ -1360,7 +1411,23 @@ fn evaluate_shared_image_inner(
             && item.key.tier == selection.tier
     };
     let (selected_evidence, estimate_scoped) = if selection.strategy == MemoryStrategy::Resident {
-        (&resident, false)
+        if fitted_resident {
+            // sc-19054: the live scalar candidate was withheld (fitted supersedes floor), so a
+            // resident selection was carried by a verified exact record if one matched, else by
+            // the fitted extrapolation — never by `resident`, which was not submitted.
+            if let Some(item) = verified.iter().find(|item| matches_selection(item)) {
+                (item, false)
+            } else if let Some((_, item)) = fitted.iter().find(|(_, item)| matches_selection(item))
+            {
+                (item, true)
+            } else {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "{engine_id} selected the resident rung without a submitted resident candidate"
+                )));
+            }
+        } else {
+            (&resident, false)
+        }
     } else if let Some(item) = verified.iter().find(|item| matches_selection(item)) {
         (item, false)
     } else if let Some((_, item)) = fitted.iter().find(|(_, item)| matches_selection(item)) {
@@ -2812,6 +2879,400 @@ mod tests {
             (fallback.predicted_peak_gb - floor_gb).abs() < 1e-6,
             "the fall-through peak must be the sc-18097 manifest floor (got {})",
             fallback.predicted_peak_gb
+        );
+    }
+
+    /// A synthetic verified RESIDENT-rung cell at 1024² for [`fitted_probe_contract`] (sc-19054).
+    fn resident_probe_basis(
+        contract: &gen_core::MemoryProviderContract,
+        conditioning: u64,
+        denoise: u64,
+        decode: u64,
+        envelope: u64,
+    ) -> crate::estimate_synthesis::MeasuredRungBasis {
+        let identity = contract.calibration.as_ref().expect("probe identity");
+        crate::estimate_synthesis::MeasuredRungBasis {
+            rung: StrategyRung::Resident,
+            lane: gen_core::MemoryBackend::Candle,
+            parameters: Default::default(),
+            engaged_composition: contract.engaged_composition(MemoryStrategy::Resident),
+            load_shape: contract.load_shape,
+            calibration_abi: identity.abi,
+            calibration_fingerprint: identity.fingerprint.clone(),
+            geometry: CalibrationGeometry {
+                width: 1024,
+                height: 1024,
+                batch: 1,
+                frames: 1,
+            },
+            conditioning_peak_bytes: conditioning,
+            denoise_peak_bytes: denoise,
+            decode_peak_bytes: decode,
+            envelope_peak_bytes: envelope,
+            record_id: "imc-sc19054-resident-probe".to_owned(),
+        }
+    }
+
+    /// **sc-19054 headline (epic 19048 R3): the RESIDENT rung becomes evidence-scaled.** With a
+    /// verified resident-rung 1024² cell present, a 2048² request's resident prediction is the
+    /// extrapolated measurement (×4 over the voxel regressor) and the geometry-blind manifest
+    /// scalar is WITHHELD — fitted supersedes floor on the resident rung exactly as sc-19053
+    /// established for the optimized rungs.
+    ///
+    /// Mutation coverage, all through the production entry point:
+    ///  * removing the resident suppression (submitting the live scalar candidate beside the
+    ///    fitted one) flips the second arm red — the 7 GiB scalar would admit resident at a budget
+    ///    the 12 GiB extrapolation refuses;
+    ///  * reverting `synthesize_resident: true` (or re-adding the unconditional resident skip in
+    ///    the generic ladder) flips the first arm red — no fitted resident candidate exists, so
+    ///    the selection falls back to the scalar peak;
+    ///  * breaking the receipt arm (returning `&resident` for a fitted resident selection) flips
+    ///    the exactness assertion red (7.0 != 12.0).
+    #[test]
+    fn a_resident_record_at_another_geometry_supersedes_the_scalar_baseline() {
+        let manifest = json!({
+            "candle": {
+                "vramGbByTier": { "q4": 5.0 },
+                "sequentialPeakGb": { "q4": 2.5 },
+                "supportsSequentialOffload": true
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("missing-z-image-q4")));
+        let geometry = MemoryGeometry {
+            width: 2048,
+            height: 2048,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        };
+        let contract = fitted_probe_contract();
+        // Decode-bound at the measured cell and after ×4 scaling, so the binding-phase constraint
+        // never fires — this test is about the resident supersession alone.
+        let basis = resident_probe_basis(&contract, GIB, 2 * GIB, 3 * GIB, 3 * GIB);
+        // The caller's RAW scalar prediction (5.0 row + 2.0 headroom), exactly what production
+        // passes through `predicted_peak_gb_with_adapter_bytes`.
+        let scalar_peak_gb = 7.0;
+        let evaluate = |free_gb: f64| {
+            evaluate_shared_image_inner(
+                "z_image_turbo",
+                "z_image_turbo",
+                &spec,
+                true,
+                &manifest,
+                "q4",
+                "text_to_image",
+                None,
+                None,
+                geometry,
+                false,
+                false,
+                false,
+                false,
+                Some(VramBudget {
+                    free_gb,
+                    total_gb: 96.0,
+                }),
+                Some(scalar_peak_gb),
+                0,
+                MemoryCacheState::Cold,
+                None,
+                Some(fitted_probe_contract()),
+                None,
+                Some(vec![basis.clone()]),
+            )
+            .expect("resident probe evaluation")
+        };
+
+        const SELECTOR_RESERVE_GB: f64 = 2.0;
+        let fitted_gb = 12.0; // 3 GiB envelope × voxel scale 4.0
+        let widened_gb = fitted_gb * (1.0 + crate::ladder_margin_policy::CANDLE_ESTIMATE_MARGIN);
+
+        // Arm 1: the fitted resident candidate carries the selection at its widened peak, and the
+        // receipt names the EXTRAPOLATION, not the scalar.
+        let admitted = evaluate(widened_gb + SELECTOR_RESERVE_GB + 0.3)
+            .expect("the fitted resident estimate must admit");
+        assert_eq!(
+            admitted.context.selection.strategy,
+            MemoryStrategy::Resident
+        );
+        assert!(
+            (admitted.predicted_peak_gb - fitted_gb).abs() < 1e-9,
+            "the resident receipt must carry the extrapolated measurement, not the manifest \
+             scalar (got {})",
+            admitted.predicted_peak_gb
+        );
+        assert_eq!(
+            admitted.context.evidence_revision, Z_IMAGE_REQUEST_EVIDENCE_REVISION,
+            "a fitted resident admission is estimate-scoped in telemetry"
+        );
+
+        // Arm 2: at a budget where only the geometry-blind scalar would fit, resident must NOT
+        // admit — the withheld scalar cannot resurface beside the better evidence. The staged
+        // manifest floor (2.5 row) is what serves instead.
+        let scalar_window_gb = scalar_peak_gb
+            * (1.0 + crate::ladder_margin_policy::CANDLE_ESTIMATE_MARGIN)
+            + SELECTOR_RESERVE_GB
+            + 0.3;
+        let fallback =
+            evaluate(scalar_window_gb).expect("the staged manifest floor still serves the request");
+        assert_eq!(
+            fallback.context.selection.strategy,
+            MemoryStrategy::StagedResidency,
+            "fitted supersedes floor on the resident rung: the 7 GiB scalar must not admit a \
+             request the 12 GiB extrapolation refuses"
+        );
+    }
+
+    /// **sc-19054 (epic 19048 R3): the resident scalar is graded per request geometry in the
+    /// SELECTOR.** No bases at all — the pure scalar path. A `measured: true` scalar captured at
+    /// 1024² admits a covered request at its raw peak (byte-for-byte the pre-story behavior), and
+    /// the SAME budget refuses resident for a 2048² request because the scalar is then only the
+    /// declared floor, classed `EstimateFloor` and widened by the candle estimate margin.
+    ///
+    /// Mutation coverage: classing every cell `Measured` (dropping the demotion) flips the 2048²
+    /// arm red; classing every cell `EstimateFloor` flips the 1024² arm red; wiring the class to
+    /// anything but epic 18472's `measured` flag flips the `measured: false` arm red.
+    #[test]
+    fn an_uncovered_scalar_resident_estimate_is_graded_as_the_declared_floor() {
+        let manifest = |measured: bool| {
+            json!({
+                "candle": {
+                    "measured": measured,
+                    "vramMeasuredPixels": 1_048_576,
+                    "vramGbByTier": { "q4": 30.0 },
+                    "sequentialPeakGb": { "q4": 2.5 },
+                    "supportsSequentialOffload": true
+                }
+            })
+            .as_object()
+            .unwrap()
+            .clone()
+        };
+        let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("missing-z-image-q4")));
+        let scalar_peak_gb = 32.0; // 30.0 row + 2.0 headroom, the caller's raw prediction
+        let evaluate = |measured: bool, width: u32, height: u32, free_gb: f64| {
+            evaluate_shared_image_inner(
+                "z_image_turbo",
+                "z_image_turbo",
+                &spec,
+                true,
+                &manifest(measured),
+                "q4",
+                "text_to_image",
+                None,
+                None,
+                MemoryGeometry {
+                    width,
+                    height,
+                    batch: 1,
+                    frames: 1,
+                    reference_count: 0,
+                },
+                false,
+                false,
+                false,
+                false,
+                Some(VramBudget {
+                    free_gb,
+                    total_gb: 96.0,
+                }),
+                Some(scalar_peak_gb),
+                0,
+                MemoryCacheState::Cold,
+                None,
+                Some(fitted_probe_contract()),
+                None,
+                None,
+            )
+            .expect("scalar grade evaluation")
+        };
+
+        const SELECTOR_RESERVE_GB: f64 = 2.0;
+        // Between the raw peak and the widened floor: the covered cell admits resident here, the
+        // uncovered one must not.
+        let split_budget_gb = scalar_peak_gb + SELECTOR_RESERVE_GB + 0.2;
+        assert!(
+            split_budget_gb
+                < scalar_peak_gb * (1.0 + crate::ladder_margin_policy::CANDLE_ESTIMATE_MARGIN)
+                    + SELECTOR_RESERVE_GB,
+            "the probe budget must sit between the raw and widened peaks to discriminate"
+        );
+
+        let covered = evaluate(true, 1024, 1024, split_budget_gb)
+            .expect("a covered measured scalar admits resident");
+        assert_eq!(covered.context.selection.strategy, MemoryStrategy::Resident);
+        assert!(
+            (covered.predicted_peak_gb - scalar_peak_gb).abs() < 1e-9,
+            "inside the declared capture the resident peak is the raw scalar"
+        );
+
+        let uncovered = evaluate(true, 2048, 2048, split_budget_gb)
+            .expect("the staged floor still serves the uncovered request");
+        assert_eq!(
+            uncovered.context.selection.strategy,
+            MemoryStrategy::StagedResidency,
+            "beyond the declared capture the scalar is a floor graded behind the estimate \
+             margin, and this budget no longer fits it"
+        );
+
+        let unmeasured = evaluate(false, 1024, 1024, split_budget_gb)
+            .expect("the staged floor still serves the unmeasured request");
+        assert_eq!(
+            unmeasured.context.selection.strategy,
+            MemoryStrategy::StagedResidency,
+            "epic 18472's measured=false demotes the scalar at EVERY geometry"
+        );
+    }
+
+    /// **sc-19054 fold-in 2 (from the sc-19053 review): the fitted-supersedes-floor filter is
+    /// DELIBERATELY strategy-coarse, and this pins the over-refusal shape.** The candle floor law
+    /// is itself strategy-granular (`synthesize_estimate_floors` emits ONE candidate per rung at
+    /// the smallest declared knobs), so there is no per-variant floor to preserve, and a
+    /// parameter-keyed filter would almost never match (the fitted candidate carries the BASIS
+    /// record's knobs — chunk 256 here — while the floor carries the smallest declared, 128),
+    /// resurrecting the floor beside better evidence of the same rung. The residual coarseness is
+    /// an over-refusal only, in the safe direction.
+    ///
+    /// Shape pinned: `StagedResidency` and `BoundedAttention` both carry fitted candidates (12
+    /// GiB extrapolations) whose widened peaks exceed the probe budget, so with the coarse filter
+    /// EVERY floor is withheld and the request refuses outright (`None`). A PARAMETER-KEYED
+    /// filter would keep the chunk-128 attention floor (its knob differs from the fitted chunk
+    /// 256) and admit `BoundedAttention` at 4.5 GiB — hand-mutating the filter to compare
+    /// parameters flips the `is_none` arm red, which is the discriminant between the two
+    /// granularities. The no-bases control pins that the refusal comes from the supersession,
+    /// not from the budget.
+    #[test]
+    fn a_refused_fitted_variant_loses_the_rungs_single_floor_not_its_own() {
+        let mut contract = fitted_probe_contract();
+        for capability in &mut contract.strategies {
+            if capability.strategy == MemoryStrategy::BoundedAttention {
+                capability.support = gen_core::MemoryStrategySupport::Implemented;
+                capability.parameters.attention_chunk_sizes = vec![128, 256];
+            }
+        }
+        // BoundedAttention requires its lifecycle hook, exactly like the composition probe —
+        // and the staged prerequisite edge, so its floor takes the staged-row clamp (the shape
+        // the shipped deep-rung contracts declare) rather than the resident clamp that would
+        // never fit the probe budget on either filter granularity.
+        contract.lifecycle.attention_chunking = true;
+        contract.additional_prerequisites = vec![(
+            MemoryStrategy::BoundedAttention,
+            gen_core::MemoryStrategyPrerequisite::Rung {
+                rung: MemoryStrategy::StagedResidency,
+                scope: gen_core::MemoryPrerequisiteScope::EngagedInSameRequest,
+            },
+        )];
+        assert!(
+            contract.conformance_errors().is_empty(),
+            "the attention probe must be declarable: {:?}",
+            contract.conformance_errors()
+        );
+        let attention_selection = MemorySelection {
+            strategy: MemoryStrategy::BoundedAttention,
+            parameters: gen_core::MemoryStrategyParameters {
+                attention_chunk_size: Some(256),
+                ..Default::default()
+            },
+            tier: numeric_tier("z_image_turbo", "q4").expect("q4 tier"),
+        };
+        let identity = contract.calibration.as_ref().expect("probe identity");
+        // The measured record's knob is 256 — NOT the floor's smallest 128 — which is exactly why
+        // a parameter-keyed filter would never suppress the floor.
+        let basis = crate::estimate_synthesis::MeasuredRungBasis {
+            rung: StrategyRung::BoundedAttention,
+            lane: gen_core::MemoryBackend::Candle,
+            parameters: attention_selection.parameters,
+            engaged_composition: contract.engaged_composition_for_selection(&attention_selection),
+            load_shape: contract.load_shape,
+            calibration_abi: identity.abi,
+            calibration_fingerprint: identity.fingerprint.clone(),
+            geometry: CalibrationGeometry {
+                width: 1024,
+                height: 1024,
+                batch: 1,
+                frames: 1,
+            },
+            conditioning_peak_bytes: GIB,
+            denoise_peak_bytes: 2 * GIB,
+            decode_peak_bytes: 3 * GIB,
+            envelope_peak_bytes: 3 * GIB,
+            record_id: "imc-sc19054-attention-probe".to_owned(),
+        };
+        let manifest = json!({
+            "candle": {
+                "vramGbByTier": { "q4": 30.0 },
+                "sequentialPeakGb": { "q4": 2.5 },
+                "supportsSequentialOffload": true
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("missing-z-image-q4")));
+        // A fitted STAGED candidate too, so every rung with a floor carries better evidence and
+        // the coarse filter withholds all of them.
+        let staged_basis = fitted_probe_basis(&contract, GIB, 2 * GIB, 3 * GIB, 3 * GIB);
+        // Fits the 4.5 GiB staged-row floors (widened + reserve ≈ 6.98) but not the 12 GiB fitted
+        // extrapolations.
+        let floor_window_gb = (2.5 + crate::vram_gate::HEADROOM_GB)
+            * (1.0 + crate::ladder_margin_policy::CANDLE_ESTIMATE_MARGIN)
+            + 2.0
+            + 0.3;
+        let evaluate = |bases: Vec<crate::estimate_synthesis::MeasuredRungBasis>| {
+            evaluate_shared_image_inner(
+                "z_image_turbo",
+                "z_image_turbo",
+                &spec,
+                true,
+                &manifest,
+                "q4",
+                "text_to_image",
+                None,
+                None,
+                MemoryGeometry {
+                    width: 2048,
+                    height: 2048,
+                    batch: 1,
+                    frames: 1,
+                    reference_count: 0,
+                },
+                false,
+                false,
+                false,
+                false,
+                Some(VramBudget {
+                    free_gb: floor_window_gb,
+                    total_gb: 96.0,
+                }),
+                Some(32.0),
+                0,
+                MemoryCacheState::Cold,
+                None,
+                Some(contract.clone()),
+                None,
+                Some(bases),
+            )
+            .expect("attention probe evaluation")
+        };
+
+        // The over-refusal, pinned: with fitted candidates on both rungs every floor is withheld
+        // and nothing fits this budget. A parameter-keyed filter would keep the chunk-128
+        // attention floor (128 != the fitted 256) and admit BoundedAttention here instead.
+        assert!(
+            evaluate(vec![staged_basis, basis]).is_none(),
+            "strategy-coarse supersession: a variant whose knob the fitted candidate never \
+             covered loses the rung's single floor too — deliberate, safe-direction over-refusal"
+        );
+
+        // Control: the same budget admits on the staged floor when no fitted evidence exists, so
+        // the refusal above is the supersession's and not the budget's.
+        let control = evaluate(Vec::new()).expect("the staged floor serves without bases");
+        assert_eq!(
+            control.context.selection.strategy,
+            MemoryStrategy::StagedResidency
         );
     }
 

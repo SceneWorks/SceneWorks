@@ -39,9 +39,10 @@ pub(crate) use crate::fit_gate::{resolve_offload, FitDecision};
 // re-exports keep every call site, doc link and unit test in this file resolving unchanged; there is
 // still exactly one definition of each item.
 pub(crate) use crate::candle_scalar_gate::{
-    fit_decision, load_plan, predicted_peak_gb, predicted_peak_gb_with_adapter_bytes,
-    predicted_sequential_peak_gb, predicted_sequential_peak_gb_with_adapter_bytes,
-    sequential_overflow_gb, LoadPlan, VramBudget, HEADROOM_GB,
+    fit_decision, load_plan, predicted_peak_gb, predicted_peak_gb_for_request,
+    predicted_peak_gb_with_adapter_bytes, predicted_sequential_peak_gb,
+    predicted_sequential_peak_gb_for_request, predicted_sequential_peak_gb_with_adapter_bytes,
+    scalar_peak_class, sequential_overflow_gb, LoadPlan, VramBudget, HEADROOM_GB,
 };
 
 /// Emulate a smaller card: cap usable VRAM (GB). Set e.g. `SCENEWORKS_CUDA_VRAM_CAP_GB=10` to make the

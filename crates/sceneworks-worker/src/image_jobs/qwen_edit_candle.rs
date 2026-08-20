@@ -697,6 +697,8 @@ pub(super) async fn generate_candle_qwen_edit_stream(
         // The manifest's Lightning rows already include the built-in distill LoRA. Charge only user
         // adapters, and only when the provider keeps them independently resident for this tier.
         let user_adapter_bytes = qwen_user_adapter_resident_bytes(&user_adapters, tier)?;
+        // RAW predictions: the shared selector grades the resident number itself through the
+        // candidate's evidence class, and `note_loaded_peak` records expected allocations.
         let needed = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
             &request.model_manifest_entry,
             tier,
@@ -708,6 +710,28 @@ pub(super) async fn generate_candle_qwen_edit_stream(
             &request.model_manifest_entry,
             tier,
             user_adapter_bytes,
+        );
+        // GRADED predictions — what this lane's own gate compares (sc-19054, epic 19048 R3): the
+        // scalar is the peak only where its measurement covers this request's geometry, the
+        // widened declared floor everywhere else.
+        let edit_geometry = gen_core::MemoryGeometry {
+            width,
+            height,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        };
+        let gated_needed = crate::vram_gate::predicted_peak_gb_for_request(
+            &request.model_manifest_entry,
+            tier,
+            user_adapter_bytes,
+            edit_geometry,
+        );
+        let gated_sequential_needed = crate::vram_gate::predicted_sequential_peak_gb_for_request(
+            &request.model_manifest_entry,
+            tier,
+            user_adapter_bytes,
+            edit_geometry,
         );
         let raw_budget = crate::vram_gate::apply_vram_cap(
             crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
@@ -781,8 +805,8 @@ pub(super) async fn generate_candle_qwen_edit_stream(
             raw_budget,
             |budget| {
                 crate::vram_gate::load_plan(
-                    needed,
-                    sequential_needed,
+                    gated_needed,
+                    gated_sequential_needed,
                     budget,
                     /* sequential_capable */ true,
                 )
@@ -819,7 +843,7 @@ pub(super) async fn generate_candle_qwen_edit_stream(
                 // For the always-sequential-capable edit lane a reject is the sc-10856 second-stage
                 // sequential overflow: even staged, the measured peak won't fit the (post-reclaim) budget.
                 if let Some(seq_gb) =
-                    crate::vram_gate::sequential_overflow_gb(sequential_needed, budget)
+                    crate::vram_gate::sequential_overflow_gb(gated_sequential_needed, budget)
                 {
                     return Err(WorkerError::InvalidPayload(format!(
                         "{model} at the {tier} tier needs ~{seq} GB of VRAM even with sequential \
@@ -839,7 +863,7 @@ pub(super) async fn generate_candle_qwen_edit_stream(
                     "{model} at the {tier} tier needs ~{needed} GB of VRAM (with headroom) but GPU \
                      {gpu} has ~{available} GB available. {tail}",
                     model = request.model,
-                    needed = needed.unwrap_or(0.0).round() as i64,
+                    needed = gated_needed.unwrap_or(0.0).round() as i64,
                     available = available_gb.round() as i64,
                     gpu = settings.gpu_id,
                     tail = reject_tail,

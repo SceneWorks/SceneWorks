@@ -40,11 +40,14 @@ import {
   parseCatalogModalities,
   parseRequestScopeDispatch,
   predictedPeakGb,
+  predictedPeakGbForRequest,
   predictedSequentialPeakGb,
+  predictedSequentialPeakGbForRequest,
   readDecisions,
   readSources,
   renderArtifacts,
   resolveSymbolGeometry,
+  scalarPeakClass,
   selfTest,
   sourceRevisionOf,
 } from "./generate-candle-admission-inventory.mjs";
@@ -270,11 +273,12 @@ test("every route lists the conditioned lanes that serve it, and the bound subse
 test("geometry awareness is read off the gate signatures, not declared", () => {
   const facts = deriveMechanismFacts(bodies);
   const byId = new Map(facts.map((fact) => [fact.id, fact]));
-  // The legacy scalar gate takes (manifest_entry, tier_key) and nothing else. This assertion is the
-  // whole premise of epic requirement R3; if it ever passes as `true` without sc-19054 landing, the
-  // parse is lying.
-  assert.equal(byId.get("legacy_scalar_gate").geometryAware, false);
-  assert.deepEqual(byId.get("legacy_scalar_gate").geometryAxes, []);
+  // sc-19054 landed epic requirement R3: the legacy scalar gate's prediction entry now takes the
+  // request geometry (`predicted_peak_gb_for_request(…, geometry: MemoryGeometry)`), so the
+  // mechanism is geometry-aware — the exact flip the pre-sc-19054 assertion here said only that
+  // story was allowed to make.
+  assert.equal(byId.get("legacy_scalar_gate").geometryAware, true);
+  assert.ok(byId.get("legacy_scalar_gate").geometryAxes.includes("width"));
   // krea_2_turbo's declared phase curves are the one geometry-aware candle IMAGE path today.
   assert.equal(byId.get("krea_turbo_fit").geometryAware, true);
   assert.ok(byId.get("krea_turbo_fit").geometryAxes.includes("width"));
@@ -562,9 +566,16 @@ test("the JS gate mirror reproduces the Rust-emitted decision for every evaluate
     if (row.resolution !== "evaluated") continue;
     const entry = entries.get(row.modelId) ?? null;
     const budget = { freeGb: row.budgetGb, totalGb: row.budgetGb };
-    const needed = predictedPeakGb(entry, row.tier, headroom);
-    const staged = predictedSequentialPeakGb(entry, row.tier, headroom);
-    const label = `${row.modelId}/${row.tier}/${row.budgetGb}`;
+    // sc-19054: the mirror grades per geometry, exactly like the Rust gate.
+    const geometry = { width: row.width, height: row.height, batch: 1, frames: row.frames };
+    const needed = predictedPeakGbForRequest(entry, row.tier, headroom, geometry);
+    const staged = predictedSequentialPeakGbForRequest(entry, row.tier, headroom, geometry);
+    const label = `${row.modelId}/${row.tier}/${row.width}x${row.height}/${row.budgetGb}`;
+    assert.equal(
+      scalarPeakClass(entry, "vramGbByTier", row.tier, geometry),
+      row.scalarClass,
+      `${label}: scalarClass`,
+    );
     assert.equal(round(needed), row.predictedPeakGb, `${label}: predictedPeakGb`);
     assert.equal(round(staged), row.predictedSequentialPeakGb, `${label}: predictedSequentialPeakGb`);
     for (const [capable, fitKey, planKey] of [
@@ -625,25 +636,51 @@ test("the sequential-capability input is the registry descriptor, never the mani
   assert.equal(gap.owner, "sc-19050");
 });
 
-test("candle admission is geometry-blind today, and the baseline says so explicitly", () => {
-  // The single most important property this baseline records. Every image route on the scalar gate
-  // must decide identically across the geometry axis; sc-19054 is the slice that breaks this, and
-  // when it does the diff is the deliverable.
+test("candle scalar admission is geometry-aware since sc-19054, and the baseline shows the split", () => {
+  // The sc-19054 successor of "candle admission is geometry-blind today" — that test's own doc
+  // said sc-19054 is the slice that breaks it, and this is the enumerated replacement. Every
+  // evaluated coordinate publishes the full geometry axis; the scalar is classed per cell
+  // (`measured_peak` where the declared capture covers the request, `declared_floor` otherwise),
+  // floor cells predict strictly above their coordinate's covered peak, and at least one
+  // coordinate must witness the axis actually splitting the prediction.
   const byCoordinate = new Map();
   for (const row of artifacts.baseline.candle) {
-    if (row.resolution !== "evaluated" || row.geometrySensitive) continue;
+    if (row.resolution !== "evaluated") continue;
+    assert.equal(
+      row.geometrySensitive,
+      true,
+      `${row.modelId}: every evaluated row rides the geometry-aware scalar gate since sc-19054`,
+    );
     const key = `${row.modelId}|${row.tier}|${row.budgetGb}`;
     if (!byCoordinate.has(key)) byCoordinate.set(key, []);
     byCoordinate.get(key).push(row);
   }
+  let witnessedSplit = false;
   for (const [key, rows] of byCoordinate) {
     assert.equal(rows.length, BASELINE_IMAGE_GEOMETRIES.length, `${key}: geometry axis is missing`);
-    const plans = new Set(
-      rows.map((row) => `${row.loadPlanSequentialCapable}|${row.loadPlanSequentialIncapable}`),
-    );
-    assert.equal(plans.size, 1, `${key}: a geometry-blind coordinate produced ${plans.size} plans`);
+    const covered = rows.filter((row) => row.scalarClass === "measured_peak");
+    const floors = rows.filter((row) => row.scalarClass === "declared_floor");
+    assert.equal(covered.length + floors.length, rows.length, `${key}: unclassified rows`);
+    if (covered.length > 0 && floors.length > 0) {
+      const coveredPeaks = new Set(covered.map((row) => row.predictedPeakGb));
+      assert.equal(coveredPeaks.size, 1, `${key}: covered cells must share the one measured peak`);
+      const coveredPeak = covered[0].predictedPeakGb;
+      for (const row of floors) {
+        if (row.predictedPeakGb === null) continue;
+        assert.ok(
+          row.predictedPeakGb > coveredPeak,
+          `${key}@${row.width}x${row.height}: a floor-classed cell must be widened above the ` +
+            `covered measured peak (${row.predictedPeakGb} vs ${coveredPeak})`,
+        );
+        witnessedSplit = true;
+      }
+    }
   }
-  assert.ok(byCoordinate.size > 0, "no geometry-blind coordinates — the corpus is empty");
+  assert.ok(byCoordinate.size > 0, "no evaluated coordinates — the corpus is empty");
+  assert.ok(
+    witnessedSplit,
+    "no coordinate split across the geometry axis — the corpus is not exercising sc-19054",
+  );
 });
 
 // -------------------------------------------------------------------------------------------------
@@ -691,8 +728,11 @@ test("struct-wrapped geometry is seen, and per-symbol facts are never unioned ac
       `${symbol} is resolution-blind; a mechanism union labelled it aware from svd_fit_error`,
     );
   }
-  // And the scalar gate itself, which is the whole premise of sc-19054's recorded gap.
-  assert.equal(gates.get("candle_scalar_gate::load_plan").geometryAware, false);
+  // The module-qualified scalar-gate label is the sc-19054 COMPOSITION (`load_plan` graded by
+  // `predicted_peak_gb_for_request`) and is geometry-aware, while the bare `load_plan` symbol
+  // stays signature-derived and blind — the dataflow composition is labelled, never unioned.
+  assert.equal(gates.get("candle_scalar_gate::load_plan").geometryAware, true);
+  assert.equal(gates.get("load_plan").geometryAware, false);
   assert.equal(gates.get("conditioning_fit::decide").geometryAware, false);
 
   // The mechanism-level flag survives only as a summary, and it must be exactly "any symbol is".
@@ -725,11 +765,17 @@ test("every decision row's geometrySensitive comes from the gate that route reac
     );
     assert.deepEqual(row.geometryAxes, gate.geometryAxes);
   }
-  // No evaluated row may claim geometry sensitivity while publishing an axis it does not respond to
-  // — the 0-of-N-variance class this replaces.
+  // The evaluated surface is the scalar gate, geometry-AWARE since sc-19054: the peak `load_plan`
+  // compares is computed by `predicted_peak_gb_for_request`, so an evaluated row that claimed
+  // geometry-blindness would be publishing an axis it responds to without saying so — the inverse
+  // of the 0-of-N-variance class the original assertion replaced.
   for (const row of artifacts.baseline.candle) {
     if (row.resolution !== "evaluated") continue;
-    assert.equal(row.geometrySensitive, false, `${row.modelId}: only the scalar gate is evaluated`);
+    assert.equal(
+      row.geometrySensitive,
+      true,
+      `${row.modelId}: the evaluated scalar gate is geometry-aware since sc-19054`,
+    );
   }
 });
 

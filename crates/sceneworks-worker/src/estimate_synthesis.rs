@@ -133,6 +133,88 @@ pub(crate) fn extrapolation_scale(basis: CalibrationGeometry, request: MemoryGeo
     (request_voxels(request) as f64 / measured).max(1.0)
 }
 
+/// Whether a measured cell is CLOSE enough to seed an extrapolation for this request (sc-19054).
+///
+/// The linear voxel law is trusted only as far as the calibration corpus has witnessed it —
+/// [`crate::ladder_margin_policy::MAX_EXTRAPOLATION_VOXEL_SCALE`] carries the bound and its
+/// derivation. A degenerate zero-voxel basis is refused here outright: its clamp-at-1.0 scale
+/// would silently present a meaningless measurement as the request's peak.
+///
+/// Applied in [`synthesize_estimate_ladder`]'s basis FILTER rather than in the fitted arm, so a
+/// nearer basis can still serve when several exist; only a request beyond EVERY basis's bound
+/// loses its fitted candidates and falls through to the floor arm, exactly like the
+/// binding-phase-flip refusal.
+pub(crate) fn basis_within_extrapolation_bound(
+    basis: CalibrationGeometry,
+    request: MemoryGeometry,
+) -> bool {
+    let measured = basis_voxels(basis) as f64;
+    measured > 0.0
+        && request_voxels(request) as f64
+            <= measured * crate::ladder_margin_policy::MAX_EXTRAPOLATION_VOXEL_SCALE
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// Declared manifest scalars — floors, not peaks (epic 19048 R3, sc-19054)
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/// What a declared per-tier manifest scalar (`vramGbByTier` / `sequentialPeakGb` /
+/// `minMemoryGb`) may truthfully claim for one request geometry (epic 19048 R3).
+///
+/// Production consumers are `candle_scalar_gate` (compiled on `any(macos, backend-candle)`) and
+/// the candle selector bridge — hence the dead-code allowance on the "neither" build, the same
+/// shape [`BindingPhase::index`] carries for its candle-only consumer.
+#[cfg_attr(
+    not(any(target_os = "macos", feature = "backend-candle")),
+    allow(dead_code)
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DeclaredScalarClass {
+    /// The scalar was measured (epic 18472's `measured` flag) at a declared geometry that COVERS
+    /// this request: the peak is monotone non-decreasing in output geometry, so a measurement at
+    /// `vramMeasuredPixels` bounds every smaller same-shape request from above. Presentable as the
+    /// request's peak, exactly as before this story.
+    MeasuredPeak,
+    /// Everything else — unmeasured (`measured` false or absent), no declared geometry, a request
+    /// beyond the declared geometry, or a workload shape (batch/frames) the scalar's single-image
+    /// capture never saw. The scalar is only the DECLARED FLOOR it always truthfully was:
+    /// admission may still lean on it (a floor that under-counts only admits — the pre-epic
+    /// posture) but it must be graded as floor-class evidence, never presented as the peak.
+    DeclaredFloor,
+}
+
+/// Classify one declared scalar for one request (epic 19048 R3). This is mechanism law, not lane
+/// plumbing: which geometries a single-cell measurement may claim is the same question
+/// [`basis_geometry_is_scalable`] answers for record bases, and the answer must not fork per lane.
+///
+/// * `measured` — epic 18472's bare-boolean evidence-class flag, the sibling of `vramGbByTier`.
+///   Adopted as-is; a parallel evidence-class marker must not be invented.
+/// * `declared_pixels` — the scalar's `vramMeasuredPixels` capture geometry. It declares PIXELS of
+///   a batch-1 single-image capture, so a request with `batch != 1` or `frames != 1` is a
+///   different workload SHAPE (the exact discipline [`basis_geometry_is_scalable`] applies to
+///   record bases) and can only take the floor reading.
+#[cfg_attr(
+    not(any(target_os = "macos", feature = "backend-candle")),
+    allow(dead_code)
+)]
+pub(crate) fn declared_scalar_class(
+    measured: bool,
+    declared_pixels: Option<u64>,
+    request: MemoryGeometry,
+) -> DeclaredScalarClass {
+    let covered = measured
+        && request.batch == 1
+        && request.frames == 1
+        && declared_pixels.is_some_and(|pixels| {
+            pixels > 0 && u64::from(request.width) * u64::from(request.height) <= pixels
+        });
+    if covered {
+        DeclaredScalarClass::MeasuredPeak
+    } else {
+        DeclaredScalarClass::DeclaredFloor
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // The binding phase — ONE argmax, three lanes
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -799,11 +881,26 @@ pub(crate) struct EstimateRequest<'a> {
     /// `MlxRequestPlan::generic_headroom_bytes(geometry)` — the exact same headroom convention its
     /// resident baseline charges, so only the weights term differs per rung.
     pub(crate) headroom_bytes: u64,
+    /// Whether the ladder may synthesize a FITTED candidate for the RESIDENT rung (sc-19054,
+    /// epic 19048 R3) — a verified resident-rung measured cell at another geometry, extrapolated
+    /// exactly like the optimized rungs' bases.
+    ///
+    /// A lane parameter because the two resident baselines differ in kind: MLX's resident
+    /// baseline already carries its geometry law (weights plus the area-scaled
+    /// `generic_headroom_bytes` transient) so it passes `false` and keeps the historical skip;
+    /// candle's resident baseline is a geometry-blind declared manifest scalar
+    /// ([`DeclaredScalarClass`]), so it passes `true` and lets measured evidence supersede the
+    /// scalar where records exist. Only the fitted arm ever fires for resident: the floor arm is
+    /// skipped because every lane already submits its own resident floor candidate on every
+    /// request, and a second floor here would duplicate that cell.
+    pub(crate) synthesize_resident: bool,
 }
 
 /// Synthesize estimate-backed candidates for every optimized rung the provider contract marks
-/// `Implemented` (sc-18096, epic 18093 R1a). Called only on legacy admission routes — a covered
-/// cell is authorized by its exact measured ladder and gets no synthetic sibling.
+/// `Implemented` (sc-18096, epic 18093 R1a) — and, when the lane opts in
+/// ([`EstimateRequest::synthesize_resident`], sc-19054), a fitted-only candidate for the RESIDENT
+/// rung. Called only on legacy admission routes — a covered cell is authorized by its exact
+/// measured ladder and gets no synthetic sibling.
 ///
 /// Peak source per rung, in preference order:
 ///
@@ -828,8 +925,10 @@ pub(crate) fn synthesize_estimate_ladder(
     let lane = request.lane.label;
     let mut ladder = SynthesizedEstimateLadder::default();
     for strategy in MemoryStrategy::ALL {
-        if strategy == MemoryStrategy::Resident {
-            // The resident baseline candidate already exists on every legacy route.
+        if strategy == MemoryStrategy::Resident && !request.synthesize_resident {
+            // The resident baseline candidate already exists on every legacy route; only a lane
+            // whose baseline is a geometry-blind declared scalar opts into a fitted sibling
+            // (sc-19054; see `EstimateRequest::synthesize_resident`).
             continue;
         }
         if !matches!(
@@ -887,6 +986,11 @@ pub(crate) fn synthesize_estimate_ladder(
                     // Fail-closed means the basis is DROPPED, not silently rescaled: the rung falls
                     // through to the weights+headroom floor below, which is this lane's own number.
                     basis.lane == request.lane.backend
+                        // sc-19054: the corpus-witnessed extrapolation bound. A basis too far
+                        // below the request is not a seed; a NEARER basis in the same set can
+                        // still serve, and with none in range the rung falls to the floor arm
+                        // exactly like the binding-phase-flip refusal below.
+                        && basis_within_extrapolation_bound(basis.geometry, geometry)
                         && basis.rung == strategy_rung(strategy)
                         && basis.load_shape == contract.load_shape
                         && basis.engaged_composition == engaged
@@ -991,6 +1095,12 @@ pub(crate) fn synthesize_estimate_ladder(
                     .decode_quality_decisions
                     .push(candidate.decode_quality.clone());
                 ladder.estimates.push(candidate);
+                continue;
+            }
+            if strategy == MemoryStrategy::Resident {
+                // Fitted-only for resident (sc-19054): every lane already submits its own resident
+                // floor candidate on every request, so a refused/absent resident basis simply
+                // leaves that baseline in place rather than duplicating it here.
                 continue;
             }
 
@@ -1396,6 +1506,7 @@ mod tests {
                 use_pid: false,
                 calibration_fingerprint: Some("sc19056-lane-fingerprint"),
                 headroom_bytes: 1 << 30,
+                synthesize_resident: false,
             },
             bases,
         )
@@ -1473,6 +1584,243 @@ mod tests {
             lane_of(MeasurementLane::Mlx),
             lane_of(MeasurementLane::Candle),
             "a collapsing map would make every lane comparison trivially true"
+        );
+    }
+
+    /// **sc-19054: the extrapolation bound.** A basis farther below the request than
+    /// `MAX_EXTRAPOLATION_VOXEL_SCALE` is refused in the basis filter and the rung falls to the
+    /// floor arm — the same fall-back shape as the binding-phase-flip refusal, already
+    /// mutation-tested on both lanes.
+    ///
+    /// Mutation coverage: making the cap infinite (or deleting the
+    /// `basis_within_extrapolation_bound` conjunct) turns the far-basis arm's `EstimateFloor`
+    /// assertion red — the 2560² request would gain a fitted candidate at 6.25× the 1024² basis.
+    /// The near-basis control pins that the refusal is DISTANCE, not a blanket fitted shutdown,
+    /// and the exact-boundary arm pins that the witnessed 4× ratio itself still serves.
+    #[test]
+    fn a_basis_beyond_the_extrapolation_bound_falls_to_the_floor_arm() {
+        let contract = lane_fixture_contract();
+        let bases = lane_basis(&contract, gen_core::MemoryBackend::Mlx);
+        let ladder_at = |width: u32, height: u32| {
+            synthesize_estimate_ladder(
+                &EstimateRequest {
+                    lane: MLX_LANE,
+                    contract: &contract,
+                    tier: gen_core::MemoryNumericTier {
+                        precision: gen_core::Precision::Bf16,
+                        quant: None,
+                        component_precision_floors: &[],
+                    },
+                    mode_key: "text_to_image",
+                    overlay: None,
+                    geometry: request(width, height, 1),
+                    use_pid: false,
+                    calibration_fingerprint: Some("sc19056-lane-fingerprint"),
+                    headroom_bytes: 1 << 30,
+                    synthesize_resident: false,
+                },
+                &bases,
+            )
+        };
+
+        // Exactly the witnessed bound: 2048² is 4.0× the 1024² basis — still a seed.
+        let at_bound = ladder_at(2048, 2048);
+        assert_eq!(at_bound.estimates.len(), 1);
+        assert_eq!(
+            at_bound.estimates[0].basis,
+            CandidateBasis::EstimateFittedCurve,
+            "the corpus witnessed 4.0× exactly; the bound must be inclusive"
+        );
+        assert_eq!(
+            at_bound.estimates[0].evidence.predicted_peak_bytes,
+            28 << 30,
+            "7 GiB envelope at voxel scale 4.0"
+        );
+
+        // Beyond it: 2560² is 6.25× — the basis is refused and the rung falls to the floor arm.
+        let beyond = ladder_at(2560, 2560);
+        assert_eq!(beyond.estimates.len(), 1);
+        assert_eq!(
+            beyond.estimates[0].basis,
+            CandidateBasis::EstimateFloor,
+            "a basis beyond MAX_EXTRAPOLATION_VOXEL_SCALE must not seed a fitted estimate; the \
+             rung falls through to the weights+headroom floor"
+        );
+        assert_ne!(
+            beyond.estimates[0].evidence.predicted_peak_bytes,
+            ((7u64 << 30) as f64 * 6.25).ceil() as u64,
+            "falling closed must reach the floor's own number, never re-derive the unbounded \
+             extrapolation"
+        );
+
+        // The predicate itself, both directions plus the degenerate zero-voxel basis.
+        assert!(basis_within_extrapolation_bound(
+            geometry(1024, 1024, 1),
+            request(2048, 2048, 1)
+        ));
+        assert!(!basis_within_extrapolation_bound(
+            geometry(1024, 1024, 1),
+            request(2560, 2560, 1)
+        ));
+        assert!(
+            !basis_within_extrapolation_bound(geometry(0, 1024, 1), request(64, 64, 1)),
+            "a zero-voxel basis is never a seed — its clamp-at-1.0 scale would present a \
+             meaningless measurement as the request peak"
+        );
+    }
+
+    /// **sc-19054 (epic 19048 R3): what a declared manifest scalar may claim.** Measured at a
+    /// covering geometry ⇒ the peak (monotone bound); everything else — unmeasured, undeclared or
+    /// exceeded geometry, or a workload shape (batch/frames) the single-image capture never saw —
+    /// ⇒ the declared floor.
+    ///
+    /// Mutation coverage: dropping the `measured` conjunct flips the unmeasured arm; dropping the
+    /// pixel comparison flips the 2048² arm; dropping the batch/frames shape conjuncts flips
+    /// their arms; treating a missing/zero declaration as covering flips the last two.
+    #[test]
+    fn a_declared_scalar_is_a_peak_only_where_its_measurement_covers_the_request() {
+        let declared = Some(1024_u64 * 1024);
+        let class = |measured, pixels, req| declared_scalar_class(measured, pixels, req);
+
+        assert_eq!(
+            class(true, declared, request(1024, 1024, 1)),
+            DeclaredScalarClass::MeasuredPeak
+        );
+        assert_eq!(
+            class(true, declared, request(512, 512, 1)),
+            DeclaredScalarClass::MeasuredPeak,
+            "the measured peak bounds every smaller same-shape request from above"
+        );
+        assert_eq!(
+            class(true, declared, request(2048, 2048, 1)),
+            DeclaredScalarClass::DeclaredFloor,
+            "a floor captured at 1024² must not be presented as the peak for 4 MP"
+        );
+        assert_eq!(
+            class(false, declared, request(1024, 1024, 1)),
+            DeclaredScalarClass::DeclaredFloor,
+            "epic 18472's measured=false means the numbers were never captured"
+        );
+        assert_eq!(
+            class(true, declared, request(1024, 1024, 4)),
+            DeclaredScalarClass::DeclaredFloor,
+            "frames is a workload shape, not a covered geometry"
+        );
+        assert_eq!(
+            class(
+                true,
+                declared,
+                MemoryGeometry {
+                    width: 1024,
+                    height: 1024,
+                    batch: 2,
+                    frames: 1,
+                    reference_count: 0
+                }
+            ),
+            DeclaredScalarClass::DeclaredFloor,
+            "batch is a workload shape, not a covered geometry"
+        );
+        assert_eq!(
+            class(true, None, request(64, 64, 1)),
+            DeclaredScalarClass::DeclaredFloor,
+            "no declared geometry means no covered request"
+        );
+        assert_eq!(
+            class(true, Some(0), request(64, 64, 1)),
+            DeclaredScalarClass::DeclaredFloor,
+            "a zero declaration covers nothing"
+        );
+    }
+
+    /// **sc-19054: the resident rung synthesizes fitted-only, and only on request.** The lane
+    /// whose resident baseline is a declared scalar (candle) opts in and gets a fitted resident
+    /// candidate from a resident-rung basis; a lane that keeps `false` (MLX) gets none, and even
+    /// the opted-in lane never receives a resident FLOOR from the ladder — the lane's own resident
+    /// baseline is that floor.
+    ///
+    /// Mutation coverage: unconditionally skipping resident (reverting the sc-19054 arm) turns the
+    /// opted-in arm red; unconditionally synthesizing it turns the opted-out arm red; letting
+    /// resident reach the floor arm turns the refused-basis arm red (it would emit an
+    /// `EstimateFloor` for resident).
+    #[test]
+    fn the_resident_rung_synthesizes_fitted_only_and_only_on_request() {
+        let mut contract = lane_fixture_contract();
+        // Make resident the ONLY implemented rung so every emitted candidate is attributable.
+        for capability in &mut contract.strategies {
+            capability.support = if capability.strategy == MemoryStrategy::Resident {
+                gen_core::MemoryStrategySupport::Implemented
+            } else {
+                gen_core::MemoryStrategySupport::Missing
+            };
+        }
+        let identity = contract.calibration.as_ref().expect("fixture calibration");
+        let resident_basis = MeasuredRungBasis {
+            lane: gen_core::MemoryBackend::Candle,
+            rung: StrategyRung::Resident,
+            parameters: Default::default(),
+            engaged_composition: contract.engaged_composition(MemoryStrategy::Resident),
+            load_shape: contract.load_shape,
+            calibration_abi: identity.abi,
+            calibration_fingerprint: identity.fingerprint.clone(),
+            geometry: geometry(1024, 1024, 1),
+            conditioning_peak_bytes: 1 << 30,
+            denoise_peak_bytes: 2 << 30,
+            decode_peak_bytes: 3 << 30,
+            envelope_peak_bytes: 5 << 30,
+            record_id: "sc19054-resident-basis".to_owned(),
+        };
+        let ladder = |synthesize_resident: bool, bases: &[MeasuredRungBasis]| {
+            synthesize_estimate_ladder(
+                &EstimateRequest {
+                    lane: CANDLE_LANE,
+                    contract: &contract,
+                    tier: gen_core::MemoryNumericTier {
+                        precision: gen_core::Precision::Bf16,
+                        quant: None,
+                        component_precision_floors: &[],
+                    },
+                    mode_key: "text_to_image",
+                    overlay: None,
+                    geometry: request(2048, 2048, 1),
+                    use_pid: false,
+                    calibration_fingerprint: Some("sc19056-lane-fingerprint"),
+                    headroom_bytes: 1 << 30,
+                    synthesize_resident,
+                },
+                bases,
+            )
+        };
+
+        // Opted in, basis present: one fitted resident candidate at the scaled envelope.
+        let fitted = ladder(true, std::slice::from_ref(&resident_basis));
+        assert_eq!(fitted.estimates.len(), 1);
+        assert_eq!(
+            fitted.estimates[0].selection.strategy,
+            MemoryStrategy::Resident
+        );
+        assert_eq!(
+            fitted.estimates[0].basis,
+            CandidateBasis::EstimateFittedCurve
+        );
+        assert_eq!(
+            fitted.estimates[0].evidence.predicted_peak_bytes,
+            20 << 30,
+            "5 GiB resident envelope at voxel scale 4.0"
+        );
+
+        // Opted out: the identical basis synthesizes nothing (the MLX posture).
+        assert!(
+            ladder(false, std::slice::from_ref(&resident_basis))
+                .estimates
+                .is_empty(),
+            "a lane whose resident baseline carries its own geometry law gets no fitted sibling"
+        );
+
+        // Opted in, no usable basis: nothing — never a ladder-made resident floor.
+        assert!(
+            ladder(true, &[]).estimates.is_empty(),
+            "the resident rung must not reach the floor arm; the lane's own baseline is the floor"
         );
     }
 
