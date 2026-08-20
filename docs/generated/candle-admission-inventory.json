@@ -3,7 +3,7 @@
   "generatedBy": "scripts/generate-candle-admission-inventory.mjs",
   "story": "sc-19049",
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:a2c56dd39637d3c374415c6e04414cde3cc3de441dc676c6635702e6324b7715",
+    "sceneWorksRevision": "source-tree:08e651e2fb903e43a37e6a93e24e784fe971952a3b8e4435875fdc4bb041d1ee",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -35,7 +35,7 @@
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "a6f4714ae503d4abab5cb354e46259cf8374491e4753283fa2575e3e2fb15d05"
+        "sha256": "8c3abbf059c9484994d1592126b093645994c5dec2e90c8418e347532a4bd9a2"
       },
       "candleMemoryStrategy": {
         "path": "crates/sceneworks-worker/src/candle_memory_strategy.rs",

@@ -2230,16 +2230,22 @@ pub(crate) fn scail2_video_fit_error_with_adapter_bytes(
     }
     // sc-19055: the mechanism grades the row for THIS geometry. `graded_video_peak_gb` re-reads the
     // same `vramGbByTier.bf16` row through the shared scalar reader, so the raw quantity is
-    // unchanged; the structural clauses above have already proven the row is present and complete,
-    // and the `unwrap_or` therefore cannot mask an absent row (it is unreachable, and falling back
-    // to the ungraded number would be the conservative direction anyway).
+    // unchanged.
+    //
+    // `expect` rather than a fallback, deliberately. The structural clauses above have already
+    // proven `vramGbByTier.bf16` is present, finite and positive, and `predicted_peak_gb` reads that
+    // exact row — so `None` here is not a recoverable state but a contradiction between two readers
+    // of one key. An `unwrap_or(base_needed_gb + …)` would paper over it by silently returning the
+    // UNGRADED number, which is the LESS conservative of the two and precisely the value this story
+    // exists to stop comparing. This route already refuses outright on every other incomplete-row
+    // condition; a panic on a self-inconsistent read is consistent with that fail-closed posture.
     let needed_gb = crate::video_admission::graded_video_peak_gb(
         manifest_entry,
         "bf16",
         adapter_bytes,
         geometry,
     )
-    .unwrap_or(base_needed_gb + adapter_bytes as f64 / BYTES_PER_GIB);
+    .expect("the structural clauses above proved vramGbByTier.bf16 is present and positive");
     let Some(budget) = budget else {
         return Some(WorkerError::InvalidPayload(
             "SCAIL-2 Candle admission could not read free GPU VRAM from nvidia-smi. Refusing to \
