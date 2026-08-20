@@ -105,6 +105,28 @@ pub const CANDLE_ESTIMATE_MARGIN: f64 = 0.04;
 /// the estimate margin, not this rule.
 pub const ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE: bool = true;
 
+/// Upper bound on the voxel ratio a fitted-basis extrapolation may span (sc-19054, epic 19048 —
+/// the sc-19050 open item deferred through sc-19053, recorded on activity-20592).
+///
+/// The linear voxel law under-predicts attention-dominated transients at large distance: sdpa
+/// scratch grows as `B·H·S²` — quadratic in token count, so up to quadratic in area — while the
+/// regressor charges area linearly. Inside the witnessed hull the gap is absorbed by the estimate
+/// margin; far outside it nothing bounds the error, and the candle margin is only 4%.
+///
+/// Why 4.0: the calibration corpus's largest same-key geometry pair is 1024² → 2048² — a voxel
+/// ratio of exactly 4 (every packaged image basis sits at 1024² and the largest calibrated request
+/// geometry is 2048²; the video hull is enforced separately by its own curve reader). The corpus
+/// has witnessed nothing farther, so nothing farther may be extrapolated. Raising this constant is
+/// a MEASUREMENT obligation, not an edit: it may only move together with captured evidence at the
+/// wider ratio.
+///
+/// Enforced in the ONE mechanism-level basis filter
+/// (`estimate_synthesis::synthesize_estimate_ladder`), so both lanes inherit it and a nearer basis
+/// can still serve when several exist. A request beyond every basis's bound loses its fitted
+/// candidates and falls through to the floor arm, exactly like the
+/// [`ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE`] refusal.
+pub const MAX_EXTRAPOLATION_VOXEL_SCALE: f64 = 4.0;
+
 /// Ratified exemption for a prediction that evaluates **every phase independently**, adds that
 /// phase's observed maximum fit/held-out absolute residual, and only then takes the maximum over
 /// phases at the request geometry. Such an envelope does not extrapolate from one measured
@@ -132,6 +154,10 @@ const _: () = {
     assert!(MLX_ESTIMATE_MARGIN >= CANDLE_ESTIMATE_MARGIN);
     assert!(ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE);
     assert!(RESIDUAL_BOUNDED_MAX_OVER_PHASES_EXEMPT_FROM_BINDING_PHASE_PIN);
+    // The extrapolation bound must be a real bound: finite, and at least 1.0 (a cap under 1.0
+    // would refuse the degenerate same-cell scale the clamp-at-1.0 law guarantees).
+    assert!(MAX_EXTRAPOLATION_VOXEL_SCALE >= 1.0);
+    assert!(MAX_EXTRAPOLATION_VOXEL_SCALE <= f64::MAX);
 };
 
 #[cfg(test)]
@@ -150,6 +176,9 @@ mod tests {
         assert_eq!(MLX_ESTIMATE_MARGIN, 0.5040734033902377);
         assert_eq!(CANDLE_STALE_MEASURED_MARGIN, 0.02);
         assert_eq!(CANDLE_ESTIMATE_MARGIN, 0.04);
+        // sc-19054: pinned to the corpus's widest witnessed geometry pair (1024² → 2048², voxel
+        // ratio 4). Moving it requires captured evidence at the wider ratio — see the doc.
+        assert_eq!(MAX_EXTRAPOLATION_VOXEL_SCALE, 4.0);
         // ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE is pinned in the compile-time
         // invariants block above (clippy forbids constant assertions in a runtime test) and
         // against the script's mirror export by scripts/derive-ladder-margins.test.mjs.

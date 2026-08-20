@@ -2080,6 +2080,10 @@ fn synthesize_estimate_ladder(
             use_pid,
             calibration_fingerprint,
             headroom_bytes: plan.generic_headroom_bytes(geometry),
+            // The MLX resident baseline already carries its geometry law (weights plus the
+            // area-scaled `generic_headroom_bytes` transient), so no fitted resident sibling is
+            // synthesized (sc-19054; see `EstimateRequest::synthesize_resident`).
+            synthesize_resident: false,
         },
         bases,
     )
