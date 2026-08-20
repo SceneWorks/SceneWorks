@@ -1,7 +1,7 @@
 {
   "_comment": "Per-provider inference compile-closure digests (sc-17774). Calibration currency compares a record's captured closureDigest against the entry here for the SAME provider, so a change to one model's code path can no longer demote another's. Regenerate on every inference pin bump: node scripts/inference-closure-digest.mjs --repo <inference> --write. Derivation, and what this unit deliberately does NOT see, are documented in scripts/inference-closure-digest.mjs.",
   "digestVersion": "inference-closure-digest v3",
-  "inferenceRevision": "a829226bdd81a9a46571bc0abfa2c423f35901fa",
+  "inferenceRevision": "c3bfb064843f517abfe65660be57456214982770",
   "providers": {
     "candle:flux1_dev": {
       "crate": "crates/media/candle-gen/candle-gen-flux",
@@ -50,35 +50,39 @@
     },
     "candle:krea_2_turbo": {
       "crate": "crates/media/candle-gen/candle-gen-krea",
-      "digest": "535ce435574aee771c3ad23e43ec22c4052e69dc2b46ca33eacfc87025afb1df",
+      "digest": "4d86516d1dc5b2ac877f601470aa1b55bca71ab0b0c789940698e12e92dca28f",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
         "crates/media/candle-gen/candle-gen",
         "crates/media/candle-gen/candle-gen-boogu",
+        "crates/media/candle-gen/candle-gen-flux",
         "crates/media/candle-gen/candle-gen-krea",
         "crates/media/candle-gen/candle-gen-pid",
         "crates/media/candle-gen/candle-gen-qwen-image",
+        "crates/media/candle-gen/candle-gen-sdxl",
         "crates/media/candle-gen/vendor/candle-kernels"
       ],
-      "sourceFileCount": 233,
-      "lockedPackageCount": 242
+      "sourceFileCount": 285,
+      "lockedPackageCount": 244
     },
     "candle:krea_2_turbo_control": {
       "crate": "crates/media/candle-gen/candle-gen-krea",
-      "digest": "1c7889c72dc6f4cc9c30b29063b3ce178ad926a792ce4d0e0c026d14e87cd3db",
+      "digest": "b0a2ba86223802cc9416b22a53703f02dd0368e79e1731b75e92afb5071d2d24",
       "closureCrates": [
         "crates/contracts/core-llm",
         "crates/contracts/gen-core",
         "crates/media/candle-gen/candle-gen",
         "crates/media/candle-gen/candle-gen-boogu",
+        "crates/media/candle-gen/candle-gen-flux",
         "crates/media/candle-gen/candle-gen-krea",
         "crates/media/candle-gen/candle-gen-pid",
         "crates/media/candle-gen/candle-gen-qwen-image",
+        "crates/media/candle-gen/candle-gen-sdxl",
         "crates/media/candle-gen/vendor/candle-kernels"
       ],
-      "sourceFileCount": 233,
-      "lockedPackageCount": 242
+      "sourceFileCount": 285,
+      "lockedPackageCount": 244
     },
     "candle:z_image": {
       "crate": "crates/media/candle-gen/candle-gen-z-image",
