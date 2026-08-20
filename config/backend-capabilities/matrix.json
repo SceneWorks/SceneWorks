@@ -4,9 +4,9 @@
   "summary": {
     "modelCount": 92,
     "importedFamilyCount": 3,
-    "cellCount": 872,
+    "cellCount": 874,
     "mlxOnlyCellCount": 62,
-    "candleOnlyCellCount": 45,
+    "candleOnlyCellCount": 47,
     "exceptionCount": 11
   },
   "sources": {
@@ -14,18 +14,18 @@
     "apiDto": "3b82a42da63ce67eb67beefdb7047ecdc6cdb908c6864a6366317ea31f8ecce1",
     "apiGeneration": "095d6dcc340d30ddcf47e0cb946bf55f11f289ea8ff372aaacb84bdfe594710f",
     "apiValidation": "7b3b614849834522f475a8a16e37cf3f2ff202d8ad61dd93116a68ba76775efd",
-    "baseWeightImports": "f61da9f523417d6ad075fabfd6eb57edc7ae7f533aa213606cd6f0f5cad219d2",
-    "descriptorAudioFacts": "128c10e43d2234a2aebb39318559b5d8c980f4dc3a5f7c0a94c6cfa90887ac71",
-    "descriptorCandleFacts": "70fc6268d50674330da805173e56f94c4e1954de004044e7e2c1ee0286f24193",
-    "descriptorCandleRuntime": "9fa622bdf45089405d2f61165234e8943ad068953bb7461c152829673c87e4de",
-    "descriptorMlxFacts": "816740887b48a2a32ebc5c71cdecdd1eca10edcc1a567ea36b6fa87b567c5122",
-    "descriptorMlxRuntime": "b9b544f64f07cafb9bc6e11eef40b1214dac1df32ea22402c94e24f710a3fd9a",
-    "descriptorPreviewFacts": "6c9e656e52d11a4ca59d0862584579c4fa8f540647d686cda345c0a5e1c17e7b",
+    "baseWeightImports": "4566b74afa2b721ecf3ab0af55ce0d95287c5e34d92932269a4db2cd413fe182",
+    "descriptorAudioFacts": "c7aca3d3aae52a2d0ed44493e1e915903ee7e1615172e5c057bde48531281e90",
+    "descriptorCandleFacts": "98c9e8a4f669dab820612694eae5ff2bd2310a098adf243705e71cdc39f924ac",
+    "descriptorCandleRuntime": "0109a8cf029d837bb68ac9435b2073e4b2fda58a18cd0dc35689cfd2444ec987",
+    "descriptorMlxFacts": "10896fa092ce5043b091408bf379c9335d9ee4f504caefb6e86d1538b01a694f",
+    "descriptorMlxRuntime": "db4f3828779169a630c2af2b510826de0b59b39bc5f4b6a39ae1147242df581a",
+    "descriptorPreviewFacts": "54a538f81b243d8cfe211d378e9fad0f4918af8bbc571df87fa80b620694abbe",
     "exceptionRegister": "1c89d8c3dad1025e119d9faed44c3f44173b3f316c1b70faccfed4f44157f704",
     "manifest": "cbe6889a52eea6af32a10ffa519408c1e6745ab1cdc71d5a1635795e6420234f",
     "modelImportDefaults": "be25b4d008912a83668bf9faf3af4c02bafa9b9cb6003bf161fef1901247a6a9",
     "routerCandle": "b80d1af50cbf8ad49c083b6f364b46045d60c8a949d8e16fe0cb3fbc6e391ff8",
-    "routerCatalog": "461abba26710b637c50cf0f1a4ed5477baeafaa1be83a60b538a3e1bafa6f25c",
+    "routerCatalog": "b7064ac6093f92ed0a7c79ab2ad5c86631cfe9e8f9d24f9f524e175b1221e284",
     "routerGaps": "7227b336212498d286d277abb224a0873988a2dbb1075ac6433a14e4ac6d39d3",
     "routerMlx": "973a5073f4b34dc45b3b3526ca1eeb4ee0ce69520c9d69430b7fd1697fe70b2b",
     "scheduler": "a47922ac91e5d61b0456dd2b306e42c9fe0725e94546dbe0e7ee81c87f0474e2",
@@ -49,7 +49,7 @@
     "workerEngineTable": "03c64b8abe9c47424d601d4def9a255ef4c9da081098d972a23925bbce16e63b",
     "workerGpuCapabilities": "46bed541b0f722bdbe73e28fcd31039ef66b0f3dd491bb1880a6f38d4cb7de0f",
     "workerImageDispatch": "bbd246c230adda5a9b5c39fae2d059720040e8d59b80593cfa3b55055682bb41",
-    "workerImageKreaImported": "c7a1af86834cf39019704117d220d5a65bd45346e93e5a68cabb007ea90b28e6",
+    "workerImageKreaImported": "0ce6e705505c9e75ead843201d2cb88f996962247b6f4b5d8e19bab326401d2c",
     "workerImageMageFinetuned": "9cba14a96d3900768a1306752af6ec6d07fbf68d604449f9611c8ad08d091f1b",
     "workerImagePulid": "7809ccd7ef6059a09b976ec7f00ff3d1a95f120050b9f343a9aabc4b0ebac199",
     "workerImagePulidCandle": "e03c33082e5e8c1762a166769ada64cc4942abc5c06a8c6990a5a8914ea205c2",
@@ -2266,6 +2266,12 @@
           "candle": true
         },
         {
+          "capability": "nvfp4",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        },
+        {
           "capability": "q4",
           "mlx": true,
           "candle": true
@@ -2345,6 +2351,12 @@
         },
         {
           "capability": "int8-convrot",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        },
+        {
+          "capability": "nvfp4",
           "mlx": false,
           "candle": true,
           "preservedCandleOnly": true
