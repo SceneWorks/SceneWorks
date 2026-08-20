@@ -1462,16 +1462,14 @@ fn minimax_h3_partitions_are_mlx_routed_and_serve_exactly_their_declared_capabil
             "minimax_h3 advertises {mode} and must serve it"
         );
     }
-    // Ref2VA on the `transformer_ref` partition is WITHHELD until sc-17157 — the pinned MLX
-    // provider does not declare `ConditioningKind::MultiReference`, which SceneWorks requires for
-    // `reference_to_video`, so advertising it made `dump-engine-capabilities` refuse to emit the
-    // runtime artifact for every model. See the `minimax_h3_ref` arm in `routing/mlx.rs`.
-    //
-    // Asserted as `false` rather than deleted, so the day the arm is restored this line goes red
-    // and has to be looked at, instead of the withdrawal quietly outliving its reason.
+    // Ref2VA on the `transformer_ref` partition — ACTIVE since sc-18650 aligned the
+    // `reference_to_video` conditioning requirement (`multiReference | reference`) to the ordered
+    // omni-reference surface the pinned engines declare, so `dump-engine-capabilities` no longer
+    // refuses the runtime artifact. See the `minimax_h3_ref` arm in `routing/mlx.rs`.
     assert!(
-        !video_mode_is_mlx_eligible("minimax_h3_ref", "reference_to_video"),
-        "ref2va stays withheld until sc-17157 lands the MultiReference declaration"
+        video_mode_is_mlx_eligible("minimax_h3_ref", "reference_to_video"),
+        "minimax_h3_ref advertises reference_to_video — its only mode — and must serve it \
+         (sc-18650)"
     );
     for mode in ["text_to_video", "image_to_video", "first_last_frame"] {
         assert!(
@@ -1521,9 +1519,13 @@ fn minimax_h3_partitions_are_mlx_routed_and_serve_exactly_their_declared_capabil
             "first_last_frame",
             json!({ "sourceAssetId": "img-1", "lastFrameAssetId": "img-2" }),
         ),
-        // `minimax_h3_ref` / `reference_to_video` is NOT in this list: its MLX declaration is
-        // withheld until sc-17157 (see the `minimax_h3_ref` arm in `routing/mlx.rs`), so the mlx
-        // worker deliberately does not claim it. Asserted explicitly below rather than dropped.
+        // Ref2VA on the reference partition, with the full three-list conditioning shape the
+        // checkpoint serves (sc-18650 restored the route).
+        (
+            "minimax_h3_ref",
+            "reference_to_video",
+            json!({ "referenceAssetIds": ["img-1"], "referenceAudioAssetIds": ["aud-1"] }),
+        ),
     ] {
         let mut payload = object(json!({ "model": model, "mode": mode }));
         payload.extend(object(extra));
@@ -1533,22 +1535,6 @@ fn minimax_h3_partitions_are_mlx_routed_and_serve_exactly_their_declared_capabil
                 &video_generate_job(Value::Object(payload))
             ),
             "the mlx worker must claim a {model} / {mode} job"
-        );
-    }
-    // The withheld route, asserted as unclaimed so restoring the arm turns this red rather than
-    // letting the withdrawal outlive its reason (sc-17157).
-    {
-        let mut payload =
-            object(json!({ "model": "minimax_h3_ref", "mode": "reference_to_video" }));
-        payload.extend(object(
-            json!({ "referenceAssetIds": ["img-1"], "referenceAudioAssetIds": ["aud-1"] }),
-        ));
-        assert!(
-            !worker_supports_job(
-                &mlx_video_worker(),
-                &video_generate_job(Value::Object(payload))
-            ),
-            "ref2va stays unclaimed until sc-17157 lands the MultiReference declaration"
         );
     }
     // A Ref2VA job on the BASE partition is refused by the claim gate — the wrong-checkpoint case,
@@ -1567,11 +1553,9 @@ fn minimax_h3_partitions_are_mlx_routed_and_serve_exactly_their_declared_capabil
             "minimax_h3",
             ["text_to_video", "image_to_video", "first_last_frame"].as_slice(),
         ),
-        // NO served modes while ref2va is withheld until sc-17157 (see the `minimax_h3_ref` arm in
-        // `routing/mlx.rs`). `supported` stays TRUE below — asserted, not incidental: the row keeps
-        // `video_mlx_routed`, so `classify_video_gap` still does not print the false "no MLX
-        // engine" reason this test was written to catch. Only the per-mode tab is off.
-        ("minimax_h3_ref", &[] as &[&str]),
+        // Exactly its one advertised mode (sc-18650 restored the route): the Ref2VA tab is on,
+        // and only that tab.
+        ("minimax_h3_ref", ["reference_to_video"].as_slice()),
     ] {
         let support = model_mac_support(id, "video", None);
         assert!(
@@ -1752,16 +1736,21 @@ fn candle_video_routed_models_have_an_installable_off_mac_download() {
         );
     }
 
-    // The reference partition is the deliberate opposite, and it must stay that way while candle
-    // default-denies `ref2va` at its conditioning allowlist: advertising off-Mac weights for a mode
-    // the only off-Mac engine refuses is the same defect pointing the other way.
+    // The reference partition is the deliberate opposite. NOT because the candle engine refuses
+    // ref2va — sc-17157's candle port is an ancestor of the pinned revision and the pinned engine
+    // admits it (the manifest entry's sc-20267 correction is the authoritative record) — but
+    // because this repository has no candle lane for it: every `transformer_ref` download row is
+    // macOS-only (the off-Mac tier/route split is sc-19573's concern), there is no candle
+    // dispatch arm (`video_jobs/minimax_h3.rs` is `#[cfg(target_os = "macos")]` end to end), and
+    // the entry has no measured off-Mac ceiling. Advertising off-Mac weights for a mode no
+    // off-Mac lane dispatches is the same defect pointing the other way.
     let h3_ref = entry("minimax_h3_ref").expect("minimax_h3_ref is in the builtin catalog");
     for os in ["windows", "linux"] {
         assert_eq!(
             primary_rows_on(h3_ref, os),
             0,
-            "minimax_h3_ref must have NO {os} download row while `candle-gen-minimax-h3` refuses \
-             ref2va (sc-17157 ports `transformer_ref`). If that port has landed, add the rows AND \
+            "minimax_h3_ref must have NO {os} download row while it has no candle dispatch arm, \
+             no off-Mac `transformer_ref` route and no measured off-Mac ceiling. Add the rows AND \
              the routing column in the same change, and update this assertion deliberately"
         );
     }

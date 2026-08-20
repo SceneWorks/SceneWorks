@@ -896,36 +896,22 @@ pub(crate) fn video_mode_is_mlx_eligible(model: &str, mode: &str) -> bool {
         );
     }
     if model == "minimax_h3_ref" {
-        // WITHHELD, NOT AN OVERSIGHT — `reference_to_video` is the ONLY mode this partition serves,
-        // and it is deliberately not declared MLX-routed yet. Unblocked by **sc-17157**, and the
-        // condition is exact and checkable in one place:
+        // Ref2VA, ACTIVATED (sc-18650). `reference_to_video` is the ONLY mode this partition
+        // serves — the `transformer_ref` checkpoint. The route was withheld while
+        // `video_mode_conditioning_requirements` demanded `multiReference` alone (the old
+        // sc-17157 condition): the pinned engines deliberately declare the ORDERED omni-reference
+        // surface instead — `[Keyframe, Reference, ReferenceVideo, ReferenceAudio]`, because
+        // gen-core has no heterogeneous-reference variant for this family and the request's own
+        // order carries the semantics (`mlx-gen-minimax-h3/src/model.rs`, measured at the pinned
+        // revision). sc-18650 aligned the requirement to that shipped contract
+        // (`multiReference | reference`), so the declaration here no longer makes
+        // `dump-engine-capabilities` refuse the runtime artifact.
         //
-        //   the MLX provider must declare `ConditioningKind::MultiReference` in
-        //   `mlx-gen-minimax-h3/src/model.rs`'s `conditioning` vec.
-        //
-        // Measured at inference `75d66db5` (the revision PR #2356 pins, which is the FIRST one that
-        // registers `mlx_gen_minimax_h3` at all): that vec is
-        // `[Keyframe, Reference, ReferenceVideo, ReferenceAudio]` — no `MultiReference`. SceneWorks
-        // requires `multiReference` for `reference_to_video`
-        // (`video_mode_conditioning_requirements`), and that is the convention rather than a quirk:
-        // `bernini`, the only other engine with a `reference_to_video` mapping, declares it, as do
-        // `scail2_14b` and the whole edit-model family.
-        //
-        // So declaring it here advertises an MLX route the pinned engine does not claim to serve.
-        // `dump-engine-capabilities` refuses outright — "descriptors cannot satisfy required
-        // conditioning alternatives [multiReference]" — which blocks the runtime artifact for EVERY
-        // model, not just this one. Withdrawing the declaration is what makes the catalog true.
-        //
-        // Nothing is lost today: the family's engine is absent from the currently pinned bundle, so
-        // ref2va renders nowhere, and sc-19558 deliberately gave this partition no off-Mac downloads
-        // either. `video_mlx_routed` stays TRUE on the `minimax_h3_ref` row on purpose — this
-        // withholds ONE mapping, not the family, so `classify_video_gap` still does not claim the
-        // model has no MLX engine (sc-17159's point).
-        //
-        // Re-enabling is a one-line revert of this arm plus deleting the matching row from
-        // `KNOWN_UNCLAIMABLE_VIDEO_CAPABILITIES`; that constant is an EXACT set, so it goes red the
-        // moment the pair becomes claimable and cannot be left behind.
-        return false;
+        // The refusals below remain load-bearing: the generic arm would grant this partition
+        // `text_to_video | image_to_video`, which its checkpoint does not do — the two partitions
+        // are separate 18.78 GB DiTs, and routing a t2v request at the reference one loads the
+        // wrong checkpoint.
+        return mode == "reference_to_video";
     }
     match mode {
         "text_to_video" | "image_to_video" => true,

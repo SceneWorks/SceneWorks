@@ -5336,16 +5336,12 @@ mod tests {
     #[test]
     fn video_admission_surface_matches_the_routing_catalog() {
         /// The shipped video ids whose catalog answer is internally inconsistent, with the story
-        /// that owns the inconsistency. Empty is the goal state.
-        ///
-        /// `minimax_h3_ref` (sc-17157): the `VIDEO_MODEL_CAPS` row declares the MLX adapter's
-        /// support (`video_mlx_routed`), but its ONLY mode (`reference_to_video`) is deliberately
-        /// WITHHELD from `video_mode_is_mlx_eligible` until the pinned MLX provider declares
-        /// `ConditioningKind::MultiReference` — see `KNOWN_UNCLAIMABLE_VIDEO_CAPABILITIES` in
-        /// routing/catalog.rs, which is the canonical record of this exact in-between state.
-        /// Declaration-vs-reachability is the point of the split, so the disagreement is owned,
-        /// not absorbed; sc-17157's conditioning declaration deletes this row.
-        const CATALOG_MLX_DISAGREEMENTS: &[&str] = &["minimax_h3_ref"];
+        /// that owns the inconsistency. Empty is the goal state, and the current state: the last
+        /// row (`minimax_h3_ref`, whose only mode was withheld from `video_mode_is_mlx_eligible`
+        /// pending a `MultiReference` conditioning declaration) was deleted by sc-18650, which
+        /// aligned the conditioning requirement to the engines' ordered omni-reference surface
+        /// and restored the arm.
+        const CATALOG_MLX_DISAGREEMENTS: &[&str] = &[];
 
         let shipped = shipped_video_models();
         let mut observed_disagreements = Vec::new();

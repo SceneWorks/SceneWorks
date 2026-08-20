@@ -497,8 +497,9 @@ fn matrix_summary(
 /// rationale and a deletion trigger, that no lane can claim any of them.
 ///
 /// Deliberately `all`, not `any`: a model with one unroutable mode among several is still a defect
-/// and must keep reaching the canonical-mode error. When sc-17157 lands the conditioning
-/// declaration its row is deleted, this returns false again, and the entry rejoins the probes.
+/// and must keep reaching the canonical-mode error. The constant is currently EMPTY (sc-18650
+/// deleted its last row when Ref2VA became claimable), so this returns false for every entry and
+/// every video model rejoins the probes; the mechanism stays for the next owned in-between state.
 fn video_model_is_wholly_unclaimable(model: &ManifestModel) -> bool {
     model.model_type == "video"
         && !model.capabilities.is_empty()
@@ -523,9 +524,9 @@ fn model_row(
     // `KNOWN_UNCLAIMABLE_VIDEO_CAPABILITIES` has no routed mode by design. It stays a video entry —
     // it is not reclassified — but it is EXCLUDED from the canonical probes below rather than
     // handed a fabricated request, because probing it would manufacture a shape the product cannot
-    // serve. `minimax_h3_ref` is the live case: `reference_to_video` is its only capability, the MLX
-    // provider withholds `ConditioningKind::MultiReference` until sc-17157, and the engine
-    // default-denies ref2va, so nothing reachable is lost.
+    // serve. The constant is currently empty (its last row, `minimax_h3_ref` /
+    // `reference_to_video`, was deleted by sc-18650 when the route became claimable), so today no
+    // entry is excused.
     //
     // A PARTIALLY broken model is deliberately NOT excused — `all` means one unroutable mode among
     // several still reaches `canonical_model_request` and still errors there.
@@ -1784,10 +1785,31 @@ fn conditioning_cell(
         let supports = |facts: &RuntimeDescriptorFacts| -> Result<bool, String> {
             for mode in &modes {
                 let job = super::canonical_video_route_probe(&model.id, mode)?;
-                let descriptor_supports = native_video_route_descriptors(facts, &model.id, mode)
-                    .into_iter()
+                let descriptors = native_video_route_descriptors(facts, &model.id, mode);
+                let descriptor_supports = descriptors
+                    .iter()
                     .any(|descriptor| descriptor.conditioning.iter().any(|kind| kind == shape));
-                if descriptor_supports && backend_supports(&job, facts)? {
+                // sc-18650 widened `reference_to_video`'s requirement to
+                // `multiReference | reference` so the ordered omni-reference engines
+                // (MiniMax-H3) can claim the mode. On an engine that declares the heterogeneous
+                // `multiReference` bundle (bernini), the production video wrapper constructs the
+                // BUNDLE from `referenceAssetIds` — its singular `reference` kind is the
+                // still-image surface, and no production video request exercises it. So the
+                // singular axis carries `reference_to_video` only on engines with no
+                // `multiReference` declaration; otherwise this cell would claim a video shape
+                // the wrapper never constructs.
+                let singular_shadowed_by_bundle = shape == "reference"
+                    && *mode == "reference_to_video"
+                    && descriptors.iter().any(|descriptor| {
+                        descriptor
+                            .conditioning
+                            .iter()
+                            .any(|kind| kind == "multiReference")
+                    });
+                if descriptor_supports
+                    && !singular_shadowed_by_bundle
+                    && backend_supports(&job, facts)?
+                {
                     return Ok(true);
                 }
             }
@@ -4772,24 +4794,90 @@ mod tests {
             ])
         );
 
-        assert_eq!(register.records.len(), 15);
-        let expected_groups = BTreeMap::from([
-            (("epic-9083", "precision"), 27usize),
-            (("epic-8433", "operation"), 3usize),
-            (("epic-8433", "conditioning"), 2usize),
-            (("epic-8433", "adapter"), 2usize),
-            (("epic-8433", "precision"), 3usize),
-            (("epic-8588", "conditioning"), 6usize),
-            (("epic-7434", "guidance"), 4usize),
-            (("epic-17137", "operation"), 3usize),
-            (("epic-17137", "conditioning"), 2usize),
-            (("epic-17137", "precision"), 3usize),
-            (("epic-17137", "adapter"), 2usize),
-            (("epic-18803", "operation"), 6usize),
-            (("epic-18803", "conditioning"), 4usize),
-            (("epic-18803", "adapter"), 2usize),
-            (("epic-18803", "precision"), 1usize),
+        // Keyed by record id, not by (authority, category): one epic can approve more than one
+        // record in the same category on different days. epic-17137 does — the minimax_h3 rows
+        // were approved 2026-08-16 and the minimax_h3_ref twin's on 2026-08-20 — and under the
+        // old (authority, category) key those two collapsed into one entry, silently losing a
+        // record from the comparison.
+        let expected_records = BTreeMap::from([
+            (
+                "epic-9083-precision-sequencing",
+                ("epic-9083", "precision", 27usize),
+            ),
+            (
+                "epic-8433-krea-realtime-operation-sequencing",
+                ("epic-8433", "operation", 3usize),
+            ),
+            (
+                "epic-8433-krea-realtime-conditioning-sequencing",
+                ("epic-8433", "conditioning", 2usize),
+            ),
+            (
+                "epic-8433-krea-realtime-adapter-sequencing",
+                ("epic-8433", "adapter", 2usize),
+            ),
+            (
+                "epic-8433-krea-realtime-precision-sequencing",
+                ("epic-8433", "precision", 3usize),
+            ),
+            (
+                "epic-8588-conditioning-sequencing",
+                ("epic-8588", "conditioning", 6usize),
+            ),
+            (
+                "epic-7434-cfg-pp-guidance-sequencing",
+                ("epic-7434", "guidance", 4usize),
+            ),
+            (
+                "epic-17137-minimax-h3-operation-sequencing",
+                ("epic-17137", "operation", 3usize),
+            ),
+            (
+                "epic-17137-minimax-h3-conditioning-sequencing",
+                ("epic-17137", "conditioning", 2usize),
+            ),
+            (
+                "epic-17137-minimax-h3-precision-sequencing",
+                ("epic-17137", "precision", 3usize),
+            ),
+            (
+                "epic-17137-minimax-h3-adapter-sequencing",
+                ("epic-17137", "adapter", 2usize),
+            ),
+            (
+                "epic-17137-minimax-h3-ref-operation-sequencing",
+                ("epic-17137", "operation", 1usize),
+            ),
+            (
+                "epic-17137-minimax-h3-ref-conditioning-sequencing",
+                ("epic-17137", "conditioning", 2usize),
+            ),
+            (
+                "epic-17137-minimax-h3-ref-precision-sequencing",
+                ("epic-17137", "precision", 3usize),
+            ),
+            (
+                "epic-17137-minimax-h3-ref-adapter-sequencing",
+                ("epic-17137", "adapter", 2usize),
+            ),
+            (
+                "epic-18803-eros-candle-operation-withdrawal",
+                ("epic-18803", "operation", 6usize),
+            ),
+            (
+                "epic-18803-eros-candle-conditioning-withdrawal",
+                ("epic-18803", "conditioning", 4usize),
+            ),
+            (
+                "epic-18803-eros-candle-adapter-withdrawal",
+                ("epic-18803", "adapter", 2usize),
+            ),
+            (
+                "epic-18803-eros-candle-precision-withdrawal",
+                ("epic-18803", "precision", 1usize),
+            ),
         ]);
+        assert_eq!(register.records.len(), expected_records.len());
         let actual_groups: BTreeMap<_, _> = register
             .records
             .iter()
@@ -4837,24 +4925,30 @@ mod tests {
                 assert!(record.revisit_condition.contains("routing tests"));
                 assert!(record.revisit_condition.contains("runtime evidence"));
                 (
-                    (record.authority.as_str(), record.category.as_str()),
-                    record.cells.len(),
+                    record.id.as_str(),
+                    (
+                        record.authority.as_str(),
+                        record.category.as_str(),
+                        record.cells.len(),
+                    ),
                 )
             })
             .collect();
-        assert_eq!(actual_groups, expected_groups);
+        assert_eq!(actual_groups, expected_records);
 
         let exception_paths: BTreeSet<_> = register
             .records
             .iter()
             .flat_map(|record| record.cells.iter().cloned())
             .collect();
-        // 47 + epic-17137's 10 (MiniMax-H3 became visible to the matrix at pin 75d66db5) +
-        // epic-18803's 13 (the Eros Candle withdrawal). The set is compared against the
-        // generated residual above, so this only pins that no cell is approved TWICE.
+        // Derived from the table above rather than a second frozen literal: the set is compared
+        // against the generated residual below, so all this pins is that no cell is approved TWICE.
         assert_eq!(
             exception_paths.len(),
-            70,
+            expected_records
+                .values()
+                .map(|(_, _, cells)| *cells)
+                .sum::<usize>(),
             "every approved cell appears once"
         );
         assert_eq!(
@@ -4868,9 +4962,9 @@ mod tests {
         );
 
         let matrix = backend_capability_matrix().expect("capability matrix generates");
-        // 7 + epic-17137's 4 MiniMax-H3 records (operation/conditioning/precision/adapter)
-        // + epic-18803's 4 Eros Candle withdrawal records.
-        assert_eq!(matrix.summary.exception_count, 15);
+        // The generated summary must count exactly the records the register carries; the register's
+        // own population is pinned by the table above, so this asserts the join, not a literal.
+        assert_eq!(matrix.summary.exception_count, register.records.len());
         let mut residual_paths = BTreeSet::new();
         for model in &matrix.models {
             for (axis, cells) in [

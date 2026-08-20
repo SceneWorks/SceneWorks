@@ -228,6 +228,66 @@
       ]
     },
     {
+      "id": "epic-17137-minimax-h3-ref-operation-sequencing",
+      "category": "operation",
+      "decisionType": "sequencing_choice",
+      "evidence": "Michael Trefry directly approved carrying these MLX-only cells under epic-17137 on 2026-08-20, in session, extending the same rationale he approved for the minimax_h3 rows on 2026-08-16 to the minimax_h3_ref twin. sc-18650 activated the Ref2VA route, so these cells became visible to the generated matrix for the first time. MiniMax-H3 is a macOS-only family — there is no Candle lane to be at parity with, because the family's candle half is not shipped.",
+      "approver": "Michael Trefry",
+      "authority": "epic-17137",
+      "approvedDate": "2026-08-20",
+      "userFacingBehavior": "Unsupported Candle MiniMax-H3 controls are hidden or disabled with an explanation, and a direct unsupported request will fail closed rather than degrading silently.",
+      "revisitCondition": "Revisit when a Candle MiniMax-H3 video lane ships and the generated matrix, routing tests and runtime evidence prove each corresponding Candle cell.",
+      "cells": [
+        "models/minimax_h3_ref/operationAndMode/reference_to_video"
+      ]
+    },
+    {
+      "id": "epic-17137-minimax-h3-ref-conditioning-sequencing",
+      "category": "conditioning",
+      "decisionType": "sequencing_choice",
+      "evidence": "Michael Trefry directly approved carrying these MLX-only cells under epic-17137 on 2026-08-20, in session, extending the same rationale he approved for the minimax_h3 rows on 2026-08-16 to the minimax_h3_ref twin. sc-18650 activated the Ref2VA route, so these cells became visible to the generated matrix for the first time. MiniMax-H3 is a macOS-only family — there is no Candle lane to be at parity with, because the family's candle half is not shipped.",
+      "approver": "Michael Trefry",
+      "authority": "epic-17137",
+      "approvedDate": "2026-08-20",
+      "userFacingBehavior": "Unsupported Candle MiniMax-H3 controls are hidden or disabled with an explanation, and a direct unsupported request will fail closed rather than degrading silently.",
+      "revisitCondition": "Revisit when a Candle MiniMax-H3 video lane ships and the generated matrix, routing tests and runtime evidence prove each corresponding Candle cell.",
+      "cells": [
+        "models/minimax_h3_ref/conditioningShape/reference",
+        "models/minimax_h3_ref/conditioningShape/referenceAudio"
+      ]
+    },
+    {
+      "id": "epic-17137-minimax-h3-ref-precision-sequencing",
+      "category": "precision",
+      "decisionType": "sequencing_choice",
+      "evidence": "Michael Trefry directly approved carrying these MLX-only cells under epic-17137 on 2026-08-20, in session, extending the same rationale he approved for the minimax_h3 rows on 2026-08-16 to the minimax_h3_ref twin. sc-18650 activated the Ref2VA route, so these cells became visible to the generated matrix for the first time. MiniMax-H3 is a macOS-only family — there is no Candle lane to be at parity with, because the family's candle half is not shipped.",
+      "approver": "Michael Trefry",
+      "authority": "epic-17137",
+      "approvedDate": "2026-08-20",
+      "userFacingBehavior": "Unsupported Candle MiniMax-H3 controls are hidden or disabled with an explanation, and a direct unsupported request will fail closed rather than degrading silently.",
+      "revisitCondition": "Revisit when a Candle MiniMax-H3 video lane ships and the generated matrix, routing tests and runtime evidence prove each corresponding Candle cell.",
+      "cells": [
+        "models/minimax_h3_ref/precisionTier/bf16",
+        "models/minimax_h3_ref/precisionTier/q4",
+        "models/minimax_h3_ref/precisionTier/q8"
+      ]
+    },
+    {
+      "id": "epic-17137-minimax-h3-ref-adapter-sequencing",
+      "category": "adapter",
+      "decisionType": "sequencing_choice",
+      "evidence": "Michael Trefry directly approved carrying these MLX-only cells under epic-17137 on 2026-08-20, in session, extending the same rationale he approved for the minimax_h3 rows on 2026-08-16 to the minimax_h3_ref twin. sc-18650 activated the Ref2VA route, so these cells became visible to the generated matrix for the first time. MiniMax-H3 is a macOS-only family — there is no Candle lane to be at parity with, because the family's candle half is not shipped.",
+      "approver": "Michael Trefry",
+      "authority": "epic-17137",
+      "approvedDate": "2026-08-20",
+      "userFacingBehavior": "Unsupported Candle MiniMax-H3 controls are hidden or disabled with an explanation, and a direct unsupported request will fail closed rather than degrading silently.",
+      "revisitCondition": "Revisit when a Candle MiniMax-H3 video lane ships and the generated matrix, routing tests and runtime evidence prove each corresponding Candle cell.",
+      "cells": [
+        "models/minimax_h3_ref/userAdapters/lora",
+        "models/minimax_h3_ref/userAdapters/lokr"
+      ]
+    },
+    {
       "id": "epic-18803-eros-candle-operation-withdrawal",
       "category": "operation",
       "decisionType": "product_decision",

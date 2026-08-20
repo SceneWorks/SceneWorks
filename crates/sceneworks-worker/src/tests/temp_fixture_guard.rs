@@ -30,6 +30,12 @@ const ALLOWED: &[(&str, usize, &str)] = &[
         "production: VACE replace-frames + work dir for a real render",
     ),
     (
+        "src/video_jobs/minimax_h3.rs",
+        1,
+        "production: the Ref2VA reference-clip work dir (extracted frames + the clip's own \
+         soundtrack) for a real render, removed by the arm on EVERY exit including the refusals",
+    ),
+    (
         "src/snapshot_install.rs",
         1,
         "deliberate: `whisper_smoke_hub_cache`'s default root is a revision-keyed cache that is \
