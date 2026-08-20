@@ -3,7 +3,7 @@
   "generatedBy": "scripts/generate-candle-admission-inventory.mjs",
   "story": "sc-19049",
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:4c13d39fc7eff6c29e833c98daa2d98aedb3aa9a3535f25d79fdb2553c22b96e",
+    "sceneWorksRevision": "source-tree:6ec77e03d115d816aa72b6dbb22959465ccb6c81b204d630cc00f0bc247fa11f",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -31,15 +31,15 @@
       },
       "candleScalarGate": {
         "path": "crates/sceneworks-worker/src/candle_scalar_gate.rs",
-        "sha256": "56413798b657ad1ae00f571a3f0610f48ecf6303e52d468f223997fcc9864e47"
+        "sha256": "de4db90527b9d863a969c803956db5c42d3f1cf8a2cd50b9a7552241fad09446"
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "b06b4dc42b4cd09a536ef5a73e0cd7349aed4a5fea1938669ae7834a1989d017"
+        "sha256": "1ba87397a8a718b9750a50aeabedc3253bae54c5173b6a5bfa1e8a490203e89a"
       },
       "candleMemoryStrategy": {
         "path": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
-        "sha256": "0b7adcba88fa5067782c66067c81d60eb2d7e2a34d1180155fea4ed676aae816"
+        "sha256": "4ff08853457f8afdde14061075a9d32f68f4f17e6c20f0db78f7e44a8ea9375e"
       },
       "memoryRouteRegistry": {
         "path": "crates/sceneworks-worker/src/memory_route_registry.rs",
@@ -67,11 +67,11 @@
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "911ca896abafb81c71a92a4baf7ec0792c9da9a7de63d1468825f53d34201d22"
+        "sha256": "2de8e52517d351f58c3c79efda513f7e869e8444baa1e908682ab26e5871a5aa"
       },
       "imageBaseAdmission": {
         "path": "crates/sceneworks-worker/src/image_jobs/base_admission.rs",
-        "sha256": "1c37a8c9b7d20fc99ae5b59d3eea14c4c47e2ee700249bd330d0c22020be2df1"
+        "sha256": "75ed9d3c3f23739801a11aab343cca51bb7ceb743bb15f3c69dff186e82fdfcd"
       },
       "imageConditioningGate": {
         "path": "crates/sceneworks-worker/src/image_jobs/conditioning_gate.rs",
@@ -119,7 +119,7 @@
       },
       "imageQwenEdit": {
         "path": "crates/sceneworks-worker/src/image_jobs/qwen_edit_candle.rs",
-        "sha256": "c2cedbbe3ecf4c9c9913649938692c6e4278250d0dbd1573443655de81acc4ff"
+        "sha256": "6bbdd59019e7689fe3459d4cb30ee04b6371bac20b6b353721b8b0c472a27923"
       },
       "imageZimageControl": {
         "path": "crates/sceneworks-worker/src/image_jobs/zimage_control.rs",
@@ -169,13 +169,16 @@
   "mechanisms": [
     {
       "id": "legacy_scalar_gate",
-      "summary": "Per-tier manifest scalar (`candle.vramGbByTier` + headroom, else `candle.minMemoryGb`) compared to a live VRAM budget.",
+      "summary": "Per-tier manifest scalar (`candle.vramGbByTier` + headroom, else `candle.minMemoryGb`) compared to a live VRAM budget. Since sc-19054 the scalar is graded per request geometry: a covering `measured`/`vramMeasuredPixels` capture compares raw, everything else compares as the estimate-margin-widened declared floor.",
       "definedIn": "crates/sceneworks-worker/src/candle_scalar_gate.rs",
       "definitionSymbols": [
         "predicted_peak_gb",
         "predicted_peak_gb_with_adapter_bytes",
+        "predicted_peak_gb_for_request",
         "predicted_sequential_peak_gb",
         "predicted_sequential_peak_gb_with_adapter_bytes",
+        "predicted_sequential_peak_gb_for_request",
+        "scalar_peak_class",
         "sequential_overflow_gb",
         "load_plan"
       ],
@@ -197,6 +200,24 @@
           "geometryAware": false,
           "geometryAxes": [],
           "reachedVia": [],
+          "unresolvedParameterTypes": [
+            {
+              "parameter": "manifest_entry",
+              "type": "JsonObject"
+            }
+          ]
+        },
+        {
+          "symbol": "predicted_peak_gb_for_request",
+          "geometryAware": true,
+          "geometryAxes": [
+            "frames",
+            "height",
+            "width"
+          ],
+          "reachedVia": [
+            "struct_parameter:geometry:MemoryGeometry"
+          ],
           "unresolvedParameterTypes": [
             {
               "parameter": "manifest_entry",
@@ -229,6 +250,42 @@
           ]
         },
         {
+          "symbol": "predicted_sequential_peak_gb_for_request",
+          "geometryAware": true,
+          "geometryAxes": [
+            "frames",
+            "height",
+            "width"
+          ],
+          "reachedVia": [
+            "struct_parameter:geometry:MemoryGeometry"
+          ],
+          "unresolvedParameterTypes": [
+            {
+              "parameter": "manifest_entry",
+              "type": "JsonObject"
+            }
+          ]
+        },
+        {
+          "symbol": "scalar_peak_class",
+          "geometryAware": true,
+          "geometryAxes": [
+            "frames",
+            "height",
+            "width"
+          ],
+          "reachedVia": [
+            "struct_parameter:geometry:MemoryGeometry"
+          ],
+          "unresolvedParameterTypes": [
+            {
+              "parameter": "manifest_entry",
+              "type": "JsonObject"
+            }
+          ]
+        },
+        {
           "symbol": "sequential_overflow_gb",
           "geometryAware": false,
           "geometryAxes": [],
@@ -243,9 +300,17 @@
           "unresolvedParameterTypes": []
         }
       ],
-      "geometryAware": false,
-      "geometryAxes": [],
-      "geometryAwareSymbols": [],
+      "geometryAware": true,
+      "geometryAxes": [
+        "frames",
+        "height",
+        "width"
+      ],
+      "geometryAwareSymbols": [
+        "predicted_peak_gb_for_request",
+        "predicted_sequential_peak_gb_for_request",
+        "scalar_peak_class"
+      ],
       "geometryBlindSymbols": [
         "predicted_peak_gb",
         "predicted_peak_gb_with_adapter_bytes",
@@ -825,9 +890,15 @@
       "gate": "candle_scalar_gate::load_plan",
       "mechanism": "legacy_scalar_gate",
       "definedIn": "crates/sceneworks-worker/src/candle_scalar_gate.rs",
-      "geometryAware": false,
-      "geometryAxes": [],
-      "reachedVia": []
+      "geometryAware": true,
+      "geometryAxes": [
+        "frames",
+        "height",
+        "width"
+      ],
+      "reachedVia": [
+        "composed:predicted_peak_gb_for_request:struct_parameter:geometry:MemoryGeometry"
+      ]
     },
     {
       "gate": "conditioning_fit::decide",
@@ -1020,6 +1091,20 @@
       "reachedVia": []
     },
     {
+      "gate": "predicted_peak_gb_for_request",
+      "mechanism": "legacy_scalar_gate",
+      "definedIn": "crates/sceneworks-worker/src/candle_scalar_gate.rs",
+      "geometryAware": true,
+      "geometryAxes": [
+        "frames",
+        "height",
+        "width"
+      ],
+      "reachedVia": [
+        "struct_parameter:geometry:MemoryGeometry"
+      ]
+    },
+    {
       "gate": "predicted_peak_gb_with_adapter_bytes",
       "mechanism": "legacy_scalar_gate",
       "definedIn": "crates/sceneworks-worker/src/candle_scalar_gate.rs",
@@ -1034,6 +1119,20 @@
       "geometryAware": false,
       "geometryAxes": [],
       "reachedVia": []
+    },
+    {
+      "gate": "predicted_sequential_peak_gb_for_request",
+      "mechanism": "legacy_scalar_gate",
+      "definedIn": "crates/sceneworks-worker/src/candle_scalar_gate.rs",
+      "geometryAware": true,
+      "geometryAxes": [
+        "frames",
+        "height",
+        "width"
+      ],
+      "reachedVia": [
+        "struct_parameter:geometry:MemoryGeometry"
+      ]
     },
     {
       "gate": "predicted_sequential_peak_gb_with_adapter_bytes",
@@ -1058,6 +1157,20 @@
       "geometryAware": false,
       "geometryAxes": [],
       "reachedVia": []
+    },
+    {
+      "gate": "scalar_peak_class",
+      "mechanism": "legacy_scalar_gate",
+      "definedIn": "crates/sceneworks-worker/src/candle_scalar_gate.rs",
+      "geometryAware": true,
+      "geometryAxes": [
+        "frames",
+        "height",
+        "width"
+      ],
+      "reachedVia": [
+        "struct_parameter:geometry:MemoryGeometry"
+      ]
     },
     {
       "gate": "sequential_overflow_gb",
@@ -3548,6 +3661,7 @@
       "unreached": 38
     },
     "geometryAwareMechanisms": [
+      "legacy_scalar_gate",
       "shared_selector_named_revision",
       "shared_selector_bespoke_override",
       "shared_selector_declaration_catch_all",

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 8,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:6cbe0a7ee940538f12968c1a9258223f6dc5a1737e1f8818c077429d7b392686",
+    "sceneWorksRevision": "source-tree:dedefc48190eb9dd69760a6f19538ffa34ba17f35aeca2b9268fb2b949528aa0",
     "inferenceRevision": "6f47e6707589158b89d0f238c5ef56be6f1bdd7a",
     "sources": {
       "manifest": {
@@ -26,7 +26,7 @@
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "911ca896abafb81c71a92a4baf7ec0792c9da9a7de63d1468825f53d34201d22"
+        "sha256": "2de8e52517d351f58c3c79efda513f7e869e8444baa1e908682ab26e5871a5aa"
       },
       "videoRouteWan": {
         "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",
@@ -58,11 +58,11 @@
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "99f535944020361df8d76eb74bd13af1cb500747b2793c97865835f70f7c0531"
+        "sha256": "6a7e8a66adbb77bfffc95e4226a7ca8ae147813e486e21cdec163b5387fb33e2"
       },
       "estimateSynthesis": {
         "path": "crates/sceneworks-worker/src/estimate_synthesis.rs",
-        "sha256": "685f5bec158a3ea032b2f14caf202296c288b33ecca49eb00562a10d385be6f3"
+        "sha256": "be47a308e6c28aba81f1cfc4fced3a677550c75788842467f6407695e32cad43"
       },
       "memoryStrategy": {
         "path": "crates/sceneworks-worker/src/memory_strategy.rs",
@@ -70,7 +70,7 @@
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "b06b4dc42b4cd09a536ef5a73e0cd7349aed4a5fea1938669ae7834a1989d017"
+        "sha256": "1ba87397a8a718b9750a50aeabedc3253bae54c5173b6a5bfa1e8a490203e89a"
       },
       "instantId": {
         "path": "crates/sceneworks-worker/src/image_jobs/instantid.rs",
