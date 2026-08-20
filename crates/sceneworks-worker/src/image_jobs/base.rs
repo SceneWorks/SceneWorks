@@ -14492,8 +14492,9 @@ mod mlx_downtier_emulation_tests {
         let cap = crate::mlx_fit_gate::mlx_memory_cap_gb().expect(
             "set SCENEWORKS_MLX_MEMORY_CAP_GB (e.g. 21) — between the q4 (~19) and q8 (~23) peaks",
         );
-        // Sparse tier dirs: q8 ~5 GiB, q4 ~1 GiB LOGICAL (set_len ⇒ no real disk on APFS). The gate sums
-        // `metadata.len()`, so these read as 5/1 GiB → predicted peaks 23/19 GiB (+18 headroom).
+        // Sparse tier dirs: q8 ~5 GiB, q4 ~1 GiB LOGICAL (the shared sc-20606 helper ⇒ no real
+        // disk on APFS or NTFS). The gate sums `metadata.len()`, so these read as 5/1 GiB →
+        // predicted peaks 23/19 GiB (+18 headroom).
         let root_guard = tempfile::Builder::new()
             .prefix("mlx_downtier_emu_")
             .tempdir()
@@ -14501,9 +14502,7 @@ mod mlx_downtier_emulation_tests {
         let root = root_guard.path();
         let make_tier = |tier: &str, gib: u64| -> PathBuf {
             let dir = root.join(tier).join("transformer");
-            std::fs::create_dir_all(&dir).expect("mk tier dir");
-            let file = std::fs::File::create(dir.join("model.safetensors")).expect("mk weights");
-            file.set_len(gib * 1024 * 1024 * 1024).expect("sparse weights");
+            crate::tests::set_sparse_len(&dir.join("model.safetensors"), gib * 1024 * 1024 * 1024);
             root.join(tier)
         };
         let q8_dir = make_tier("q8", 5);

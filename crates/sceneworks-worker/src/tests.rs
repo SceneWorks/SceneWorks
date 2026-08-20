@@ -119,6 +119,10 @@ include!("tests/segment_assembly.rs");
 // Source-level guard keeping test fixtures off the shared temp root (sc-17641 / sc-17707), with the
 // production work dirs and deliberate exceptions enumerated and justified.
 include!("tests/temp_fixture_guard.rs");
+// The shared NTFS sparse-fixture discipline (sc-19053 / sc-20606): multi-GB `set_len` fixtures are
+// flagged sparse so their logical size — which the weight gates read — costs no real disk on the
+// Windows CUDA runners.
+include!("tests/sparse_fixture.rs");
 
 /// sc-19710: the retention driver is opt-in and must never create the managed cache root as a side
 /// effect — an opt-out install growing a `models/resolved` tree just because the worker booted

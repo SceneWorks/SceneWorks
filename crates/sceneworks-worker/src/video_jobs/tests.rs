@@ -965,14 +965,10 @@ fn comfyui_wan_a14b_gate_rejects_32gb_and_admits_large_card() {
     let root = root_guard.path();
     let high = root.join("high.safetensors");
     let low = root.join("low.safetensors");
-    std::fs::File::create(&high)
-        .unwrap()
-        .set_len(20 * 1024 * 1024 * 1024)
-        .unwrap();
-    std::fs::File::create(&low)
-        .unwrap()
-        .set_len(20 * 1024 * 1024 * 1024)
-        .unwrap();
+    // Sparse: 2 x 20 GiB of logical size the gate sums; must not become real disk on NTFS —
+    // this test runs on the Windows candle lane (sc-20606).
+    crate::tests::set_sparse_len(&high, 20 * 1024 * 1024 * 1024);
+    crate::tests::set_sparse_len(&low, 20 * 1024 * 1024 * 1024);
     let make_paths =
         || ComfyuiWanPaths::test_fixture(high.clone(), low.clone(), None, None, root.to_path_buf());
     assert!(
@@ -1823,9 +1819,10 @@ const MOCHI_Q4_VAE_BYTES: u64 = 919_551_200;
 /// gate resolves the true ~18.73 GiB resident footprint instead of the 1-byte stubs `mochi_root`
 /// writes.
 ///
-/// The files are SPARSE: `set_len` sets the apparent size with zero allocated blocks on APFS/NTFS,
-/// and `sum_safetensors_bytes` reads `metadata().len()`. So this is instant and costs no disk —
-/// materializing 18.7 GiB of real zeros per test would not be viable.
+/// The files are SPARSE: `set_len` sets the apparent size, and `sum_safetensors_bytes` reads
+/// `metadata().len()`. So this is instant and costs no disk — materializing 18.7 GiB of real zeros
+/// per test would not be viable. On NTFS a bare `set_len` tail is fully allocated (sc-19053), so
+/// the shared helper flags the file sparse first (sc-20606).
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -1841,9 +1838,7 @@ fn mochi_root_real_sized(tag: &str) -> tempfile::TempDir {
         ("text_encoder/model.safetensors", MOCHI_Q4_TE_BYTES),
         ("vae/model.safetensors", MOCHI_Q4_VAE_BYTES),
     ] {
-        let path = root.join(relative);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::File::create(&path).unwrap().set_len(len).unwrap();
+        crate::tests::set_sparse_len(&root.join(relative), len);
     }
     std::fs::create_dir_all(root.join("tokenizer")).unwrap();
     std::fs::write(
@@ -2876,9 +2871,7 @@ fn mochi_hf_cache_shared_only(tag: &str) -> tempfile::TempDir {
         ("text_encoder/model.safetensors", MOCHI_Q4_TE_BYTES),
         ("vae/model.safetensors", MOCHI_Q4_VAE_BYTES),
     ] {
-        let path = snapshot.join(relative);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::File::create(&path).unwrap().set_len(len).unwrap();
+        crate::tests::set_sparse_len(&snapshot.join(relative), len);
     }
     std::fs::create_dir_all(snapshot.join("tokenizer")).unwrap();
     std::fs::create_dir_all(repo_dir.join("refs")).unwrap();
@@ -3127,9 +3120,7 @@ fn mochi_root_shared_only(tag: &str) -> tempfile::TempDir {
         ("text_encoder/model.safetensors", MOCHI_Q4_TE_BYTES),
         ("vae/model.safetensors", MOCHI_Q4_VAE_BYTES),
     ] {
-        let path = root.join(relative);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::File::create(&path).unwrap().set_len(len).unwrap();
+        crate::tests::set_sparse_len(&root.join(relative), len);
     }
     std::fs::create_dir_all(root.join("tokenizer")).unwrap();
     root_guard
