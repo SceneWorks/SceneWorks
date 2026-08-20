@@ -620,7 +620,8 @@ mod tests {
             let Some(peak) = row["predictedPeakGb"].as_f64() else {
                 continue;
             };
-            let pixels = row["width"].as_u64().expect("width") * row["height"].as_u64().expect("height");
+            let pixels =
+                row["width"].as_u64().expect("width") * row["height"].as_u64().expect("height");
             peaks
                 .entry((
                     row["modelId"].as_str().expect("modelId").to_owned(),
@@ -649,7 +650,10 @@ mod tests {
                 .expect("a measured_peak class requires the tier's own row")
                 + HEADROOM_GB;
             for (pixels, peak) in by_pixels {
-                assert!(*pixels <= declared, "measured_peak beyond the declared capture");
+                assert!(
+                    *pixels <= declared,
+                    "measured_peak beyond the declared capture"
+                );
                 assert_eq!(
                     round6(raw),
                     *peak,
@@ -659,11 +663,9 @@ mod tests {
             }
             // The same model+tier's floor-classed cells (beyond the capture) must sit strictly
             // above the covered raw peak — the widened declared floor.
-            if let Some(floor_cells) = peaks.get(&(
-                model_id.clone(),
-                tier.clone(),
-                "declared_floor".to_owned(),
-            )) {
+            if let Some(floor_cells) =
+                peaks.get(&(model_id.clone(), tier.clone(), "declared_floor".to_owned()))
+            {
                 for (pixels, peak) in floor_cells {
                     assert!(
                         *pixels > declared,

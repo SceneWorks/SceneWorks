@@ -1310,19 +1310,15 @@ fn evaluate_shared_image_inner(
     // exactly like every other floor candidate. The peak NUMBER stays the caller's raw
     // `predicted_peak_gb` — grading is the selector's job, and a pre-widened input would
     // double-charge the margin.
-    let resident_candidate_basis = match crate::vram_gate::scalar_peak_class(
-        manifest,
-        "vramGbByTier",
-        tier_key,
-        geometry,
-    ) {
-        crate::estimate_synthesis::DeclaredScalarClass::MeasuredPeak => {
-            crate::memory_strategy::CandidateBasis::Measured
-        }
-        crate::estimate_synthesis::DeclaredScalarClass::DeclaredFloor => {
-            crate::memory_strategy::CandidateBasis::EstimateFloor
-        }
-    };
+    let resident_candidate_basis =
+        match crate::vram_gate::scalar_peak_class(manifest, "vramGbByTier", tier_key, geometry) {
+            crate::estimate_synthesis::DeclaredScalarClass::MeasuredPeak => {
+                crate::memory_strategy::CandidateBasis::Measured
+            }
+            crate::estimate_synthesis::DeclaredScalarClass::DeclaredFloor => {
+                crate::memory_strategy::CandidateBasis::EstimateFloor
+            }
+        };
     // Fitted-supersedes-floor applies to the resident rung too (sc-19054): when a verified
     // resident-rung record at another geometry produced a fitted candidate, the geometry-blind
     // scalar candidate is WITHHELD, exactly as the optimized rungs' manifest floors are filtered
@@ -3020,8 +3016,8 @@ mod tests {
             * (1.0 + crate::ladder_margin_policy::CANDLE_ESTIMATE_MARGIN)
             + SELECTOR_RESERVE_GB
             + 0.3;
-        let fallback = evaluate(scalar_window_gb)
-            .expect("the staged manifest floor still serves the request");
+        let fallback =
+            evaluate(scalar_window_gb).expect("the staged manifest floor still serves the request");
         assert_eq!(
             fallback.context.selection.strategy,
             MemoryStrategy::StagedResidency,
@@ -3136,14 +3132,18 @@ mod tests {
     /// is itself strategy-granular (`synthesize_estimate_floors` emits ONE candidate per rung at
     /// the smallest declared knobs), so there is no per-variant floor to preserve, and a
     /// parameter-keyed filter would almost never match (the fitted candidate carries the BASIS
-    /// record's knobs). The residual coarseness is an over-refusal only, in the safe direction.
+    /// record's knobs — chunk 256 here — while the floor carries the smallest declared, 128),
+    /// resurrecting the floor beside better evidence of the same rung. The residual coarseness is
+    /// an over-refusal only, in the safe direction.
     ///
-    /// Shape pinned: `BoundedAttention` declares chunks {128, 256}; a fitted candidate exists at
-    /// the measured chunk 256; the rung's single floor (smallest chunk, 128) is suppressed. At a
-    /// budget that fits the floors but not the fitted peak, the selection falls to
-    /// `StagedResidency` — a PARAMETER-KEYED filter would instead keep the chunk-128 attention
-    /// floor and select it (equal peak, larger parameter preference), so this assertion is the
-    /// discriminant between the two granularities.
+    /// Shape pinned: `StagedResidency` and `BoundedAttention` both carry fitted candidates (12
+    /// GiB extrapolations) whose widened peaks exceed the probe budget, so with the coarse filter
+    /// EVERY floor is withheld and the request refuses outright (`None`). A PARAMETER-KEYED
+    /// filter would keep the chunk-128 attention floor (its knob differs from the fitted chunk
+    /// 256) and admit `BoundedAttention` at 4.5 GiB — hand-mutating the filter to compare
+    /// parameters flips the `is_none` arm red, which is the discriminant between the two
+    /// granularities. The no-bases control pins that the refusal comes from the supersession,
+    /// not from the budget.
     #[test]
     fn a_refused_fitted_variant_loses_the_rungs_single_floor_not_its_own() {
         let mut contract = fitted_probe_contract();
@@ -3153,8 +3153,18 @@ mod tests {
                 capability.parameters.attention_chunk_sizes = vec![128, 256];
             }
         }
-        // BoundedAttention requires its lifecycle hook, exactly like the composition probe.
+        // BoundedAttention requires its lifecycle hook, exactly like the composition probe —
+        // and the staged prerequisite edge, so its floor takes the staged-row clamp (the shape
+        // the shipped deep-rung contracts declare) rather than the resident clamp that would
+        // never fit the probe budget on either filter granularity.
         contract.lifecycle.attention_chunking = true;
+        contract.additional_prerequisites = vec![(
+            MemoryStrategy::BoundedAttention,
+            gen_core::MemoryStrategyPrerequisite::Rung {
+                rung: MemoryStrategy::StagedResidency,
+                scope: gen_core::MemoryPrerequisiteScope::EngagedInSameRequest,
+            },
+        )];
         assert!(
             contract.conformance_errors().is_empty(),
             "the attention probe must be declarable: {:?}",
@@ -3202,53 +3212,67 @@ mod tests {
         .unwrap()
         .clone();
         let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("missing-z-image-q4")));
-        // Fits the 4.5 GiB staged-row floors (widened + reserve ≈ 6.68) but not the 12 GiB fitted
-        // attention estimate.
+        // A fitted STAGED candidate too, so every rung with a floor carries better evidence and
+        // the coarse filter withholds all of them.
+        let staged_basis = fitted_probe_basis(&contract, GIB, 2 * GIB, 3 * GIB, 3 * GIB);
+        // Fits the 4.5 GiB staged-row floors (widened + reserve ≈ 6.98) but not the 12 GiB fitted
+        // extrapolations.
         let floor_window_gb = (2.5 + crate::vram_gate::HEADROOM_GB)
             * (1.0 + crate::ladder_margin_policy::CANDLE_ESTIMATE_MARGIN)
             + 2.0
             + 0.3;
-        let selected = evaluate_shared_image_inner(
-            "z_image_turbo",
-            "z_image_turbo",
-            &spec,
-            true,
-            &manifest,
-            "q4",
-            "text_to_image",
-            None,
-            None,
-            MemoryGeometry {
-                width: 2048,
-                height: 2048,
-                batch: 1,
-                frames: 1,
-                reference_count: 0,
-            },
-            false,
-            false,
-            false,
-            false,
-            Some(VramBudget {
-                free_gb: floor_window_gb,
-                total_gb: 96.0,
-            }),
-            Some(32.0),
-            0,
-            MemoryCacheState::Cold,
-            None,
-            Some(contract),
-            None,
-            Some(vec![basis]),
-        )
-        .expect("attention probe evaluation")
-        .expect("the staged floor serves the request");
+        let evaluate = |bases: Vec<crate::estimate_synthesis::MeasuredRungBasis>| {
+            evaluate_shared_image_inner(
+                "z_image_turbo",
+                "z_image_turbo",
+                &spec,
+                true,
+                &manifest,
+                "q4",
+                "text_to_image",
+                None,
+                None,
+                MemoryGeometry {
+                    width: 2048,
+                    height: 2048,
+                    batch: 1,
+                    frames: 1,
+                    reference_count: 0,
+                },
+                false,
+                false,
+                false,
+                false,
+                Some(VramBudget {
+                    free_gb: floor_window_gb,
+                    total_gb: 96.0,
+                }),
+                Some(32.0),
+                0,
+                MemoryCacheState::Cold,
+                None,
+                Some(contract.clone()),
+                None,
+                Some(bases),
+            )
+            .expect("attention probe evaluation")
+        };
+
+        // The over-refusal, pinned: with fitted candidates on both rungs every floor is withheld
+        // and nothing fits this budget. A parameter-keyed filter would keep the chunk-128
+        // attention floor (128 != the fitted 256) and admit BoundedAttention here instead.
+        assert!(
+            evaluate(vec![staged_basis, basis]).is_none(),
+            "strategy-coarse supersession: a variant whose knob the fitted candidate never \
+             covered loses the rung's single floor too — deliberate, safe-direction over-refusal"
+        );
+
+        // Control: the same budget admits on the staged floor when no fitted evidence exists, so
+        // the refusal above is the supersession's and not the budget's.
+        let control = evaluate(Vec::new()).expect("the staged floor serves without bases");
         assert_eq!(
-            selected.context.selection.strategy,
-            MemoryStrategy::StagedResidency,
-            "strategy-coarse supersession: the chunk-128 attention floor is withheld because a \
-             fitted attention candidate exists (at chunk 256), so the selection falls to the \
-             staged rung — a parameter-keyed filter would select BoundedAttention here"
+            control.context.selection.strategy,
+            MemoryStrategy::StagedResidency
         );
     }
 

@@ -389,7 +389,11 @@ mod tests {
             predicted_peak_gb_for_request(&manifest, "q4", 0, image(width, height))
                 .expect("q4 row predicts")
         };
-        assert_eq!(at(1024, 1024), raw, "covered geometry: the measured peak, ungraded");
+        assert_eq!(
+            at(1024, 1024),
+            raw,
+            "covered geometry: the measured peak, ungraded"
+        );
         assert_eq!(
             at(512, 512),
             raw,
@@ -448,7 +452,12 @@ mod tests {
     fn borrowed_rows_and_min_memory_fallbacks_are_floors_and_adapters_precede_the_grade() {
         let manifest = measured_entry(true);
         assert_eq!(
-            scalar_peak_class(&manifest, "vramGbByTier", crate::image_jobs::NVFP4_TIER, image(1024, 1024)),
+            scalar_peak_class(
+                &manifest,
+                "vramGbByTier",
+                crate::image_jobs::NVFP4_TIER,
+                image(1024, 1024)
+            ),
             DeclaredScalarClass::DeclaredFloor,
             "an nvfp4 request served by the q8 row is sized by another tier's measurement"
         );
