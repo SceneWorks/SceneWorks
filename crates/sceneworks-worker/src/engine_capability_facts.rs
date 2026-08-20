@@ -602,6 +602,7 @@ fn conditioning_label(kind: gen_core::ConditioningKind) -> &'static str {
     match kind {
         gen_core::ConditioningKind::Reference => "reference",
         gen_core::ConditioningKind::ReferenceAudio => "reference_audio",
+        gen_core::ConditioningKind::ReferenceVideo => "reference_video",
         gen_core::ConditioningKind::AudioEdit => "audio_edit",
         gen_core::ConditioningKind::AudioEditRegions => "audio_edit_regions",
         gen_core::ConditioningKind::VoiceEmbedding => "voice_embedding",
