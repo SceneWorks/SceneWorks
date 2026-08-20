@@ -14701,7 +14701,8 @@ mod tests {
     #[test]
     fn production_control_spec_replaces_raw_checkpoint_with_one_typed_residency() {
         use gen_core::{
-            MemoryComponentKind, MemoryFormulaKind, MemoryFormulaVariable, MemoryResidentComponent,
+            MemoryComponentKind, MemoryComponentResidency, MemoryFormulaKind,
+            MemoryFormulaVariable, MemoryResidentComponent,
         };
         use std::fs::File;
 
@@ -14757,6 +14758,7 @@ mod tests {
                     kind: MemoryComponentKind::ControlBranch,
                     resident_bytes: CONTROL_RESIDENT_BYTES,
                     bounded_by: None,
+                    residency: MemoryComponentResidency::WholeRender,
                 }],
             };
         }
@@ -14901,8 +14903,9 @@ mod tests {
     #[test]
     fn mage_adapter_requests_require_and_consume_declared_residency() {
         use gen_core::{
-            ComponentPrecisionFloor, MemoryComponentKind, MemoryFormulaKind, MemoryFormulaVariable,
-            MemoryResidentComponent, PrecisionFloorComponent,
+            ComponentPrecisionFloor, MemoryComponentKind, MemoryComponentResidency,
+            MemoryFormulaKind, MemoryFormulaVariable, MemoryResidentComponent,
+            PrecisionFloorComponent,
         };
 
         let mut inputs = request_inputs(512, 512, 1);
@@ -14963,6 +14966,7 @@ mod tests {
                 kind: MemoryComponentKind::AdapterStack,
                 resident_bytes: gib_to_bytes(ADAPTER_GIB),
                 bounded_by: None,
+                residency: MemoryComponentResidency::WholeRender,
             }],
         };
         const PRECISION_FLOORS: &[ComponentPrecisionFloor] = &[ComponentPrecisionFloor {
