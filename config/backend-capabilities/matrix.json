@@ -4,8 +4,8 @@
   "summary": {
     "modelCount": 94,
     "importedFamilyCount": 3,
-    "cellCount": 907,
-    "mlxOnlyCellCount": 72,
+    "cellCount": 916,
+    "mlxOnlyCellCount": 80,
     "candleOnlyCellCount": 42,
     "exceptionCount": 15
   },
@@ -15,19 +15,19 @@
     "apiGeneration": "6fc635408be65424e4f35f7b651dfc6db276d3e83598cc7941435552f4074b6b",
     "apiValidation": "62c9d13220f46a19b59ca9a66b1d3e3af2b1b3afcc36d21b3311d4fe953162d1",
     "baseWeightImports": "f61da9f523417d6ad075fabfd6eb57edc7ae7f533aa213606cd6f0f5cad219d2",
-    "descriptorAudioFacts": "e93eb6ed2e70da6b8b94c2e36becb6bc0c0f1b17a48c5463691890f1013e8e6f",
-    "descriptorCandleFacts": "12b8dbf702206524df693dd1cc63bd57c6e1989e4f6170fa3980189a8ea01069",
-    "descriptorCandleRuntime": "e4121e5293e87565e63d220b7b6b484a06768684839954d41880a7a4b3454f9b",
-    "descriptorMlxFacts": "27b6d0346af6a3845453b091704a82002dafc2ed4a554689b854a236f6bfe313",
-    "descriptorMlxRuntime": "2e60b222e1c8cefb2f2257a92b70d98e6fd4fb337910193d3c6e461461f6ea75",
-    "descriptorPreviewFacts": "042180db1bc71968711f41d6e84165940c6d3cf713e51ee4566f5e7496514e23",
+    "descriptorAudioFacts": "8f78beb0a6be58bcc2bc75732ceb3b04b7e424f41a1b3b0d5483a522ffc47d89",
+    "descriptorCandleFacts": "5fc740e0faa70cfe1e1eb2dbff8e78aed4d9c85da9a7b7237b71b49790186a47",
+    "descriptorCandleRuntime": "f150bc1786b1453207a824a1d558405bd2c35a4836b9931ad15df0da25dc531a",
+    "descriptorMlxFacts": "574a5649db72bbb703721f693b545fedb3605be03bf39a7ce9fce18ede91189b",
+    "descriptorMlxRuntime": "622131e3dc38f97fdcda9d7d64e2ae748b64cd86f3f53a8e4a57bd39c46ac972",
+    "descriptorPreviewFacts": "c6a50113109ce6cc7437bbb16f2f138d30f3189121ab32f0f6ac85ee36f653f5",
     "exceptionRegister": "5b16913147432d8089a365ca26df022dbd98692c984042dca941d4e29b2596ad",
     "manifest": "2b5c6f6925297454359499121646717c5f72bf723d1f6d7adfac579a9ba886a8",
     "modelImportDefaults": "ef7fb7fccc493b1bf9be2214f75b028ff1384a119d0b4a6eda630dab05761c99",
     "routerCandle": "307f4fe042e3e2ad0c09be1995d5a5cc5aecd08b1c3815e3ec4a3d7f2659c58d",
-    "routerCatalog": "c777c923f1c63f950ae7a9ea3bbe1e4e05547559e87bcdf87c7dde8eb6157846",
+    "routerCatalog": "0e8bedbbd1fe220c1ffd9ba8a767da5a1211872b8545df7670bae844bea5cfab",
     "routerGaps": "f0f4fb5046e48ba5e5b3d4dac925ee6f25da721714f7e2f0641131f746c2c6bd",
-    "routerMlx": "1f5d7c85146cc9da7febda986351f0503bc058c3bec7abf6e827162053af48d4",
+    "routerMlx": "ba0b50925aadd5b63f2e95876a65c600f14507daf3e108fb8716407da09d04d6",
     "scheduler": "f88322ea51f8fbfd9452a95f477e54b591047b635cb02e8e7eb7b3d8cb6ad8b2",
     "trainingCatalog": "ba87e0cb93ab872fd2a430f2ac4aeaedf8c65d6869b37b7ff7df4071309289e0",
     "webAudioStudio": "9b0e0c85ee0117b122e1f7968198f37bcf864c1efcbd405fa45570e63b6f9b16",
@@ -3598,8 +3598,12 @@
         },
         {
           "capability": "reference_to_video",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18481",
+            "url": "https://app.shortcut.com/trefry/story/18481"
+          }
         },
         {
           "capability": "reference_video_to_video",
@@ -3627,13 +3631,94 @@
           "candle": false
         }
       ],
-      "conditioningShape": [],
-      "userAdapters": [],
-      "precisionTier": [],
+      "conditioningShape": [
+        {
+          "capability": "keyframe",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "epic-8588",
+            "url": "https://app.shortcut.com/trefry/epic/8588",
+            "authority": "epic-8588"
+          }
+        },
+        {
+          "capability": "referenceAudio",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "epic-8588",
+            "url": "https://app.shortcut.com/trefry/epic/8588",
+            "authority": "epic-8588"
+          }
+        },
+        {
+          "capability": "referenceVideo",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18481",
+            "url": "https://app.shortcut.com/trefry/story/18481"
+          }
+        },
+        {
+          "capability": "lokr",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18481",
+            "url": "https://app.shortcut.com/trefry/story/18481"
+          }
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "epic-9083",
+            "url": "https://app.shortcut.com/trefry/epic/9083",
+            "authority": "epic-9083"
+          }
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "epic-9083",
+            "url": "https://app.shortcut.com/trefry/epic/9083",
+            "authority": "epic-9083"
+          }
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "epic-9083",
+            "url": "https://app.shortcut.com/trefry/epic/9083",
+            "authority": "epic-9083"
+          }
+        }
+      ],
       "guidanceMethod": [],
       "preview": {
         "capability": "live_preview",
-        "mlx": null,
+        "mlx": false,
         "candle": null
       }
     },
