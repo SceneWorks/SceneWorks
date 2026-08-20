@@ -8,6 +8,7 @@ use sceneworks_core::checkpoint_import::{
 use serde_json::{json, Value};
 
 const DIGEST: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+type JsonParser = fn(Value) -> Result<(), serde_json::Error>;
 
 fn linked(root_id: &str, path: &str) -> SourceLocatorV1 {
     SourceLocatorV1::linked(root_id, path, DIGEST).expect("valid linked locator")
@@ -139,7 +140,7 @@ fn canonical_serialization_and_domain_separated_hashes_are_deterministic() {
 #[test]
 fn catalog_records_hold_only_a_reference_and_compact_summary() {
     let import_plan = plan(linked("external", "flux/model.safetensors"));
-    let record = CheckpointCatalogRecordV1::from_plan("checkpoint-flux-dev", &import_plan);
+    let record = CheckpointCatalogRecordV1::from_plan("checkpoint-flux-dev", &import_plan).unwrap();
     let inventory = CheckpointInventoryV1::new(vec![record.clone()]).expect("valid inventory");
     let encoded = serde_json::to_value(&inventory).expect("serializes");
 
@@ -188,13 +189,13 @@ fn serde_rejects_unknown_versions_invalid_paths_hashes_and_unknown_fields() {
 #[test]
 fn every_versioned_contract_fails_closed_during_deserialization() {
     let import_plan = plan(linked("root", "model.safetensors"));
-    let record = CheckpointCatalogRecordV1::from_plan("checkpoint", &import_plan);
+    let record = CheckpointCatalogRecordV1::from_plan("checkpoint", &import_plan).unwrap();
     let inventory = CheckpointInventoryV1::new(vec![record]).unwrap();
     let values: Vec<Value> = vec![
         serde_json::to_value(linked("root", "model.safetensors")).unwrap(),
         serde_json::to_value(&import_plan).unwrap(),
         serde_json::to_value(import_plan.plan_reference()).unwrap(),
-        serde_json::to_value(import_plan.summary()).unwrap(),
+        serde_json::to_value(import_plan.summary().unwrap()).unwrap(),
         serde_json::to_value(&inventory).unwrap(),
     ];
     let parsers: [fn(Value) -> Result<(), serde_json::Error>; 5] = [
@@ -212,6 +213,116 @@ fn every_versioned_contract_fails_closed_during_deserialization() {
 }
 
 #[test]
+fn future_version_envelopes_win_over_future_shape_errors() {
+    let cases: Vec<(Value, JsonParser)> = vec![
+        (
+            json!({"kind":"future_locator","schemaVersion":2,"newLocatorField":true}),
+            |value| serde_json::from_value::<SourceLocatorV1>(value).map(|_| ()),
+        ),
+        (json!({"schemaVersion":2,"futurePlanField":true}), |value| {
+            serde_json::from_value::<ImportPlanV1>(value).map(|_| ())
+        }),
+        (
+            json!({"schemaVersion":2,"futureReferenceField":true}),
+            |value| serde_json::from_value::<ImportPlanReferenceV1>(value).map(|_| ()),
+        ),
+        (
+            json!({"schemaVersion":2,"futureSummaryField":true}),
+            |value| serde_json::from_value::<ImportPlanSummaryV1>(value).map(|_| ()),
+        ),
+        (
+            json!({"schemaVersion":2,"futureInventoryField":true}),
+            |value| serde_json::from_value::<CheckpointInventoryV1>(value).map(|_| ()),
+        ),
+    ];
+    for (value, parse) in cases {
+        let error = parse(value).unwrap_err().to_string();
+        assert!(error.contains("recompile/rescan required"), "{error}");
+    }
+
+    let future_nested_locator = json!({
+        "schemaVersion": 1, "planId": "plan", "family": "family",
+        "layers": [{
+            "layerId": "layer", "role": "role", "targetPath": "model.safetensors",
+            "source": {"kind": "future_locator", "schemaVersion": 2, "futureLocatorField": true}
+        }]
+    });
+    let error = serde_json::from_value::<ImportPlanV1>(future_nested_locator)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("recompile/rescan required"), "{error}");
+
+    let future_nested_plan = json!({
+        "checkpointId":"checkpoint",
+        "plan":{"schemaVersion":2,"futureReferenceField":true},
+        "summary":{"schemaVersion":2,"futureSummaryField":true}
+    });
+    let error = serde_json::from_value::<CheckpointCatalogRecordV1>(future_nested_plan)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("recompile/rescan required"), "{error}");
+}
+
+#[test]
+fn catalog_record_recomputes_every_loaded_plan_claim() {
+    let import_plan = plan(linked("root", "model.safetensors"));
+    let record = CheckpointCatalogRecordV1::from_plan("checkpoint", &import_plan).unwrap();
+    record.validate_loaded_plan(&import_plan).unwrap();
+
+    let mut wrong_id = record.clone();
+    wrong_id.plan.plan_id = "other-plan".to_owned();
+    assert!(wrong_id.validate_loaded_plan(&import_plan).is_err());
+
+    let forged_identity = "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+    let mut wrong_semantic = record.clone();
+    wrong_semantic.plan.semantic_digest = forged_identity.to_owned();
+    wrong_semantic.summary.semantic_digest = forged_identity.to_owned();
+    assert!(wrong_semantic.validate_loaded_plan(&import_plan).is_err());
+
+    let mut wrong_binding = record.clone();
+    wrong_binding.plan.source_binding_identity = forged_identity.to_owned();
+    assert!(wrong_binding.validate_loaded_plan(&import_plan).is_err());
+
+    let mut wrong_family = record.clone();
+    wrong_family.summary.family = "other-family".to_owned();
+    assert!(wrong_family.validate_loaded_plan(&import_plan).is_err());
+
+    let mut wrong_count = record.clone();
+    wrong_count.summary.layer_count = 2;
+    wrong_count.summary.layer_roles.push("vae".to_owned());
+    assert!(wrong_count.validate_loaded_plan(&import_plan).is_err());
+
+    let mut wrong_roles = record;
+    wrong_roles.summary.layer_roles = vec!["other-role".to_owned()];
+    assert!(wrong_roles.validate_loaded_plan(&import_plan).is_err());
+}
+
+#[test]
+fn inventory_rejects_ambiguous_duplicate_plan_ids() {
+    let import_plan = plan(linked("root", "model.safetensors"));
+    let first = CheckpointCatalogRecordV1::from_plan("checkpoint-a", &import_plan).unwrap();
+    let second = CheckpointCatalogRecordV1::from_plan("checkpoint-b", &import_plan).unwrap();
+    let error = CheckpointInventoryV1::new(vec![first, second])
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("duplicate import plan ids"), "{error}");
+}
+
+#[test]
+fn checked_layer_count_prevents_v1_truncation() {
+    assert_eq!(ImportPlanV1::checked_layer_count(1).unwrap(), 1);
+    if usize::BITS > 32 {
+        let error = ImportPlanV1::checked_layer_count((u32::MAX as usize) + 1)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("more layers than v1 can represent"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
 fn deserialization_rejects_noncanonical_plan_and_mismatched_catalog_digest() {
     let import_plan = plan(linked("root", "model.safetensors"));
     let mut plan_value = serde_json::to_value(&import_plan).unwrap();
@@ -221,10 +332,9 @@ fn deserialization_rejects_noncanonical_plan_and_mismatched_catalog_digest() {
     ]);
     assert!(serde_json::from_value::<ImportPlanV1>(plan_value).is_err());
 
-    let mut record_value = serde_json::to_value(CheckpointCatalogRecordV1::from_plan(
-        "checkpoint",
-        &import_plan,
-    ))
+    let mut record_value = serde_json::to_value(
+        CheckpointCatalogRecordV1::from_plan("checkpoint", &import_plan).unwrap(),
+    )
     .unwrap();
     record_value["summary"]["semanticDigest"] =
         json!("sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
@@ -269,6 +379,10 @@ fn published_schema_covers_every_contract_and_uses_strict_versioned_variants() {
         true
     );
     assert_eq!(
+        defs["importPlan"]["properties"]["layers"]["maxItems"],
+        4_294_967_295_u64
+    );
+    assert_eq!(
         defs["checkpointInventory"]["properties"]["records"]["uniqueItems"],
         true
     );
@@ -286,6 +400,14 @@ fn published_schema_and_serde_reject_the_same_fail_closed_edge_cases() {
     assert!(validator.is_valid(&valid_locator), "valid locator");
     assert!(serde_json::from_value::<SourceLocatorV1>(valid_locator).is_ok());
 
+    let explicit_null_reference = json!({
+        "kind": "managed", "schemaVersion": 1, "installId": "install",
+        "relativePath": "models/model.safetensors", "sha256": DIGEST,
+        "provenance": {"source": "huggingface", "reference": null}
+    });
+    assert!(validator.is_valid(&explicit_null_reference));
+    assert!(serde_json::from_value::<SourceLocatorV1>(explicit_null_reference).is_ok());
+
     let trailing_separator = json!({
         "kind": "linked", "schemaVersion": 1, "rootId": "root",
         "relativePath": "models/", "fingerprint": DIGEST
@@ -301,7 +423,7 @@ fn published_schema_and_serde_reject_the_same_fail_closed_edge_cases() {
     assert!(serde_json::from_value::<SourceLocatorV1>(whitespace_identifier).is_err());
 
     let mut oversized_summary =
-        serde_json::to_value(plan(linked("root", "model.safetensors")).summary()).unwrap();
+        serde_json::to_value(plan(linked("root", "model.safetensors")).summary().unwrap()).unwrap();
     oversized_summary["layerCount"] = json!(4_294_967_296_u64);
     assert!(!validator.is_valid(&oversized_summary));
     assert!(serde_json::from_value::<ImportPlanSummaryV1>(oversized_summary).is_err());
@@ -320,7 +442,7 @@ fn schema_requires_the_published_serde_semantic_validation_step() {
         .contains("CheckpointInventoryV1"));
 
     let import_plan = plan(linked("root", "model.safetensors"));
-    let record = CheckpointCatalogRecordV1::from_plan("checkpoint", &import_plan);
+    let record = CheckpointCatalogRecordV1::from_plan("checkpoint", &import_plan).unwrap();
     let mut exact_duplicate_layers = serde_json::to_value(&import_plan).unwrap();
     exact_duplicate_layers["layers"] = json!([
         exact_duplicate_layers["layers"][0].clone(),
@@ -351,10 +473,9 @@ fn schema_requires_the_published_serde_semantic_validation_step() {
     );
     assert!(serde_json::from_value::<CheckpointInventoryV1>(keyed_duplicate_records).is_err());
 
-    let mut mismatched_summary = serde_json::to_value(CheckpointCatalogRecordV1::from_plan(
-        "checkpoint",
-        &import_plan,
-    ))
+    let mut mismatched_summary = serde_json::to_value(
+        CheckpointCatalogRecordV1::from_plan("checkpoint", &import_plan).unwrap(),
+    )
     .unwrap();
     mismatched_summary["summary"]["semanticDigest"] =
         json!("sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");

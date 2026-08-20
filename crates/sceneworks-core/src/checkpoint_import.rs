@@ -7,7 +7,11 @@
 
 use std::collections::BTreeSet;
 
-use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
+use serde::{
+    de::{DeserializeOwned, Error as _},
+    Deserialize, Deserializer, Serialize,
+};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 /// Wire version shared by all checkpoint-import contracts in this module.
@@ -41,6 +45,30 @@ fn validate_version(found: u32) -> Result<(), CheckpointImportContractError> {
         )));
     }
     Ok(())
+}
+
+/// Reads a version envelope before selecting a v1 body decoder. This intentionally
+/// prevents a future discriminant or future-only field from hiding the actionable
+/// recompile/rescan error behind a generic v1-shape deserialization failure.
+fn deserialize_versioned_v1<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: DeserializeOwned,
+{
+    let value = Value::deserialize(deserializer)?;
+    let version = value
+        .as_object()
+        .and_then(|object| object.get("schemaVersion"))
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| D::Error::custom("checkpoint-import schemaVersion must be a u32"))?;
+    validate_version(version).map_err(D::Error::custom)?;
+    serde_json::from_value(value).map_err(D::Error::custom)
+}
+
+fn checked_layer_count(layer_count: usize) -> Result<u32, CheckpointImportContractError> {
+    u32::try_from(layer_count)
+        .map_err(|_| invalid("import plan contains more layers than v1 can represent"))
 }
 
 fn validate_nonempty(value: &str, label: &str) -> Result<(), CheckpointImportContractError> {
@@ -205,7 +233,9 @@ impl From<SourceLocatorV1Wire> for SourceLocatorV1 {
 
 impl<'de> Deserialize<'de> for SourceLocatorV1 {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let locator = Self::from(SourceLocatorV1Wire::deserialize(deserializer)?);
+        let locator = Self::from(deserialize_versioned_v1::<_, SourceLocatorV1Wire>(
+            deserializer,
+        )?);
         locator.validate().map_err(D::Error::custom)?;
         Ok(locator)
     }
@@ -407,7 +437,9 @@ impl From<ImportPlanV1Wire> for ImportPlanV1 {
 
 impl<'de> Deserialize<'de> for ImportPlanV1 {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let plan = Self::from(ImportPlanV1Wire::deserialize(deserializer)?);
+        let plan = Self::from(deserialize_versioned_v1::<_, ImportPlanV1Wire>(
+            deserializer,
+        )?);
         plan.validate().map_err(D::Error::custom)?;
         Ok(plan)
     }
@@ -459,14 +491,20 @@ impl ImportPlanV1 {
         }
     }
 
-    pub fn summary(&self) -> ImportPlanSummaryV1 {
-        ImportPlanSummaryV1 {
+    pub fn summary(&self) -> Result<ImportPlanSummaryV1, CheckpointImportContractError> {
+        Ok(ImportPlanSummaryV1 {
             schema_version: CHECKPOINT_IMPORT_CONTRACT_VERSION,
             family: self.family.clone(),
-            layer_count: self.layers.len() as u32,
+            layer_count: checked_layer_count(self.layers.len())?,
             layer_roles: self.layers.iter().map(|layer| layer.role.clone()).collect(),
             semantic_digest: self.semantic_digest(),
-        }
+        })
+    }
+
+    /// Checked conversion shared by plan publication and callers that preflight
+    /// an incoming layer count without materializing an impractically large plan.
+    pub fn checked_layer_count(layer_count: usize) -> Result<u32, CheckpointImportContractError> {
+        checked_layer_count(layer_count)
     }
 
     pub fn canonical_json(&self) -> Result<String, CheckpointImportContractError> {
@@ -540,7 +578,7 @@ impl<'de> Deserialize<'de> for ImportPlanReferenceV1 {
             semantic_digest: String,
             source_binding_identity: String,
         }
-        let wire = Wire::deserialize(deserializer)?;
+        let wire = deserialize_versioned_v1::<_, Wire>(deserializer)?;
         let reference = Self {
             schema_version: wire.schema_version,
             plan_id: wire.plan_id,
@@ -590,7 +628,7 @@ impl<'de> Deserialize<'de> for ImportPlanSummaryV1 {
             layer_roles: Vec<String>,
             semantic_digest: String,
         }
-        let wire = Wire::deserialize(deserializer)?;
+        let wire = deserialize_versioned_v1::<_, Wire>(deserializer)?;
         let summary = Self {
             schema_version: wire.schema_version,
             family: wire.family,
@@ -653,12 +691,15 @@ impl<'de> Deserialize<'de> for CheckpointCatalogRecordV1 {
 }
 
 impl CheckpointCatalogRecordV1 {
-    pub fn from_plan(checkpoint_id: impl Into<String>, plan: &ImportPlanV1) -> Self {
-        Self {
+    pub fn from_plan(
+        checkpoint_id: impl Into<String>,
+        plan: &ImportPlanV1,
+    ) -> Result<Self, CheckpointImportContractError> {
+        Ok(Self {
             checkpoint_id: checkpoint_id.into(),
             plan: plan.plan_reference(),
-            summary: plan.summary(),
-        }
+            summary: plan.summary()?,
+        })
     }
     pub fn canonical_json(&self) -> Result<String, CheckpointImportContractError> {
         self.validate()?;
@@ -671,6 +712,54 @@ impl CheckpointCatalogRecordV1 {
         if self.plan.semantic_digest != self.summary.semantic_digest {
             return Err(invalid(
                 "catalog plan reference and summary semantic digests differ",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Verifies that an atomically loaded plan is exactly the plan this catalog
+    /// record advertised, rather than trusting the record's claimed digests.
+    pub fn validate_loaded_plan(
+        &self,
+        loaded_plan: &ImportPlanV1,
+    ) -> Result<(), CheckpointImportContractError> {
+        self.validate()?;
+        loaded_plan.validate()?;
+        let expected_reference = loaded_plan.plan_reference();
+        let expected_summary = loaded_plan.summary()?;
+        if self.plan.plan_id != expected_reference.plan_id {
+            return Err(invalid(
+                "catalog plan reference does not match loaded plan id",
+            ));
+        }
+        if self.plan.semantic_digest != expected_reference.semantic_digest {
+            return Err(invalid(
+                "catalog plan reference does not match loaded plan semantic digest",
+            ));
+        }
+        if self.plan.source_binding_identity != expected_reference.source_binding_identity {
+            return Err(invalid(
+                "catalog plan reference does not match loaded plan source binding",
+            ));
+        }
+        if self.summary.family != expected_summary.family {
+            return Err(invalid(
+                "catalog plan summary does not match loaded plan family",
+            ));
+        }
+        if self.summary.layer_count != expected_summary.layer_count {
+            return Err(invalid(
+                "catalog plan summary does not match loaded plan layer count",
+            ));
+        }
+        if self.summary.layer_roles != expected_summary.layer_roles {
+            return Err(invalid(
+                "catalog plan summary does not match loaded plan layer roles",
+            ));
+        }
+        if self.summary.semantic_digest != expected_summary.semantic_digest {
+            return Err(invalid(
+                "catalog plan summary does not match loaded plan semantic digest",
             ));
         }
         Ok(())
@@ -693,7 +782,7 @@ impl<'de> Deserialize<'de> for CheckpointInventoryV1 {
             schema_version: u32,
             records: Vec<CheckpointCatalogRecordV1>,
         }
-        let wire = Wire::deserialize(deserializer)?;
+        let wire = deserialize_versioned_v1::<_, Wire>(deserializer)?;
         let inventory = Self {
             schema_version: wire.schema_version,
             records: wire.records,
@@ -728,11 +817,17 @@ impl CheckpointInventoryV1 {
     pub fn validate(&self) -> Result<(), CheckpointImportContractError> {
         validate_version(self.schema_version)?;
         let mut ids = BTreeSet::new();
+        let mut plan_ids = BTreeSet::new();
         for record in &self.records {
             record.validate()?;
             if !ids.insert(&record.checkpoint_id) {
                 return Err(invalid(
                     "checkpoint inventory contains duplicate checkpoint ids",
+                ));
+            }
+            if !plan_ids.insert(&record.plan.plan_id) {
+                return Err(invalid(
+                    "checkpoint inventory contains duplicate import plan ids",
                 ));
             }
         }
