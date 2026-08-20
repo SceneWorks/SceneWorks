@@ -1041,6 +1041,10 @@ fn inventory_rejects_ambiguous_duplicate_plan_ids() {
 #[test]
 fn checked_layer_count_prevents_v1_truncation() {
     assert_eq!(ImportPlanV1::checked_layer_count(1).unwrap(), 1);
+    assert_eq!(
+        ImportPlanV1::checked_layer_count(u32::MAX as usize).unwrap(),
+        u32::MAX
+    );
     if usize::BITS > 32 {
         let error = ImportPlanV1::checked_layer_count((u32::MAX as usize) + 1)
             .unwrap_err()
@@ -1102,7 +1106,7 @@ fn published_schema_covers_every_contract_and_uses_strict_versioned_variants() {
         defs["nonBlankText"]["pattern"],
         "(?=.*[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000])"
     );
-    assert_eq!(defs["relativePath"]["pattern"], "^(?=.*[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000])(?!/)(?!.*\\\\)(?!.*:)(?!.*//)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*(?:^|/)\\.{1,2}$)(?!.*\\/$)[^\\x00-\\x1F\\x7F]+$");
+    assert_eq!(defs["relativePath"]["pattern"], "^(?=[\\s\\S]*[^\\u0009-\\u000D\\u0020\\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000])(?!/)(?![\\s\\S]*\\\\)(?![\\s\\S]*:)(?![\\s\\S]*//)(?![\\s\\S]*(?:^|/)\\.{1,2}(?:/|$))(?![\\s\\S]*(?:^|/)\\.{1,2}$)(?![\\s\\S]*\\/$)[^\\x00-\\x1F\\x7F]+$");
     assert_eq!(
         defs["planSummary"]["properties"]["layerCount"]["maximum"],
         4_294_967_295_u64
@@ -1937,6 +1941,54 @@ fn layer_count_uses_the_same_exact_u32_decoder_as_schema_versions() {
                 error.contains("layerCount") || error.contains("layer count"),
                 "{} {lexeme}: {error}",
                 case.label
+            );
+        }
+    }
+}
+
+#[test]
+fn schema_and_serde_reject_path_separators_hidden_by_ecmascript_line_separators() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../packages/schemas/checkpoint-import.schema.json");
+    let schema: Value = serde_json::from_str(&fs::read_to_string(path).expect("read schema"))
+        .expect("schema JSON parses");
+    let validator = jsonschema::validator_for(&schema).expect("schema compiles");
+
+    for relative_path in ["a\u{2028}b", "a\u{2029}b"] {
+        for value in [
+            json!({"kind":"linked","schemaVersion":1,"rootId":"root","relativePath":relative_path,"fingerprint":DIGEST}),
+            json!({"kind":"managed","schemaVersion":1,"installId":"install","relativePath":relative_path,"sha256":DIGEST,"provenance":{"source":"huggingface"}}),
+        ] {
+            assert!(
+                validator.is_valid(&value),
+                "schema rejected ordinary path: {value}"
+            );
+            assert!(
+                serde_json::from_value::<SourceLocatorV1>(value.clone()).is_ok(),
+                "serde rejected ordinary path: {value}"
+            );
+        }
+    }
+
+    for (label, relative_path) in [
+        ("U+2028 slash", "a\u{2028}//b"),
+        ("U+2028 colon", "a\u{2028}:b"),
+        ("U+2028 trailing separator", "a\u{2028}x/"),
+        ("U+2029 slash", "a\u{2029}//b"),
+        ("U+2029 colon", "a\u{2029}:b"),
+        ("U+2029 trailing separator", "a\u{2029}x/"),
+    ] {
+        for value in [
+            json!({"kind":"linked","schemaVersion":1,"rootId":"root","relativePath":relative_path,"fingerprint":DIGEST}),
+            json!({"kind":"managed","schemaVersion":1,"installId":"install","relativePath":relative_path,"sha256":DIGEST,"provenance":{"source":"huggingface"}}),
+        ] {
+            assert!(
+                !validator.is_valid(&value),
+                "schema admitted {label}: {value}"
+            );
+            assert!(
+                serde_json::from_value::<SourceLocatorV1>(value.clone()).is_err(),
+                "serde admitted {label}: {value}"
             );
         }
     }
