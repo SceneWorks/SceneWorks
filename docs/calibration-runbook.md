@@ -284,6 +284,124 @@ fetch `q4` (33.6 GB, and it is the `default: true` tier) and `bf16` (113 GB)
 (`config/manifests/builtin.models.jsonc`, the `flux2_dev` `downloads` array). Neither absence is
 visible from the repo directory or from the marker discussed next.
 
+🔴 **`ls` the snapshot is not enough — the tier may not exist at the revision the manifest pins.**
+Second worked example, `SceneWorks/ltx-2.3-mlx`, provisioned for sc-18809. The snapshot on this Mac
+held `gemma/` + `q8/` only; the manifest declares four rows. `hf download … --include 'bf16/*'`
+**exited 0 having fetched nothing**, because the pinned revision `254989c3…` (2026-06-14) predates
+the upstream `bf16/` upload `01df27d3…` (2026-07-05) by three weeks. The glob was correct and the
+tier was published — just not at the pin. So the download reported success, no directory appeared,
+and the failure would have surfaced later as the engine's `missing transformer.safetensors`.
+
+Two things follow, and both are now enforced rather than remembered:
+
+- **Verify the pin, not the repo.** `node scripts/check-download-patterns.mjs` used to resolve every
+  glob against the repo's *default branch*, so it passed this entry for weeks. As of sc-18809 it
+  fetches `/api/models/<repo>/revision/<rev>` per entry and prints the revision it checked
+  (`ltx_2_3/bf16  SceneWorks/ltx-2.3-mlx@254989c3ca7e  bf16/*`). Run it before quoting a tier as
+  fetchable.
+
+  As of sc-18854 this is **enforced on every PR**, without putting the HF API on a required lane.
+  The check is split in two: `--write` is a networked RECORDER that transcribes one file listing per
+  `repo@revision` key into `config/download-pattern-evidence.json`, and `--check` is a hermetic GATE
+  that re-derives the claims from the manifests and grades them against those committed listings
+  with no network at all. `npm run check` runs the gate, so it reaches check.yml's `parity-scaffold`
+  and the required `parity` aggregator.
+
+  **So the workflow when you touch a `downloads[]` entry or a LoRA `source` is: re-record, then
+  commit the evidence with your manifest change.**
+
+  ```
+  npm run record:download-patterns   # networked; rewrites config/download-pattern-evidence.json
+  npm run check:download-patterns:offline   # what CI runs; no network
+  ```
+
+  🔴 **`config/download-pattern-evidence.json` is GENERATED. Regenerate it — never hand-edit it.**
+  The gate's entire trust chain terminates in that one multi-thousand-line file, and it is trusted
+  unconditionally: a one-line edit to any `files` array turns a real zero-match green, and a `gated`
+  flipped to `false` un-tracks an unfetchable repo. Neither is plausible to catch by eye in a review
+  of a machine-generated diff. The only honest edit is a re-record. If you find yourself wanting to
+  change the artifact by hand, the thing that is actually wrong is the manifest entry or the
+  waiver list in `scripts/check-download-patterns.mjs`.
+
+  **Reviewing someone else's evidence diff** — there is a no-write verify mode for exactly this:
+
+  ```
+  node scripts/check-download-patterns.mjs --write --dry-run
+  ```
+
+  It performs the same networked re-record, writes nothing, and ends with an
+  `=== ARTIFACT VERDICT: … ===` banner. **The banner, not the absence of noise above it, is the
+  signal:**
+
+  - `=== ARTIFACT VERDICT: UP TO DATE (N key(s)) — exit 0 ===` — the committed artifact is
+    byte-identical to what a re-record produces. That is what distinguishes an honest re-record
+    from a hand edit.
+  - `=== ARTIFACT VERDICT: WOULD CHANGE — exit 1 ===` — it is not. Re-record and **read the diff
+    before concluding anything**: a manifest/evidence change or a hand edit both red this mode.
+
+  🔴 **In this mode the exit code carries that verdict and nothing else** (sc-18854 review). The
+  live zero-match / access-gated / redirect / untranslatable lists still print *above* the banner —
+  today's tree prints `SERVED BY A DIFFERENT REPO (1)` on every clean run, with no
+  `ACCESS-GATED` or `ZERO-MATCH PATTERNS` line — but they deliberately do not move the
+  exit status, because an anti-tamper mode that reds unconditionally signals nothing. Grade those
+  lists with `npm run check:download-patterns:offline`; that is the gate CI runs.
+
+  Do **not** read the absent zero-match line as the two modes having converged. They answer
+  different questions, and `scripts/check-download-patterns.test.mjs` no longer relies on a live
+  catalog defect to prove it: the collision case now injects a bogus declared pattern into a
+  throwaway copy of the catalog, which moves a live verdict without moving the artifact.
+
+  `--dry-run` is rejected outright when it is not paired with `--write`, including in combination
+  with `--check` or `--self-test` (both of which ignore it — they never touch the network or the
+  artifact). Same reason: a flag that is silently swallowed lets a reviewer believe they verified
+  the artifact when they did not.
+
+  It is a **human tool and is deliberately wired into nothing**: it needs huggingface.co, and the
+  entire point of the record/grade split is that no required lane depends on that.
+
+  Forgetting the re-record is not a silent pass: adding or re-pinning an entry changes its
+  `repo@revision` key, and a claim with no recorded listing reds the gate with the exact command to
+  run. The recorder never evaluates a pattern — it only transcribes — so you cannot record your way
+  out of a real zero-match. All 95 of 95 keys are pinned to immutable lowercase 40-hex revisions,
+  whose listings cannot go stale. sc-18924 closed the last 11-key moving-default-branch window and
+  made missing, branch, or tag revisions a hard offline-gate failure, so a new manifest entry cannot
+  silently reopen it.
+
+  Each recorded key also carries `gated` and `servedRepo`, and the gate hard-fails on both
+  (`evidence-gated`, `evidence-repo-id-mismatch`) with tracked waivers in `KNOWN_REPO_CONDITIONS`.
+  A green metadata listing does **not** mean a repo is fetchable: `gated: "auto"` answers 200 and
+  then 401s the actual download unless the token's account has accepted that repo's licence.
+  sc-18923 removed the two catalog instances by pinning checksum-identical public rehosts; any new
+  gated source fails the offline gate unless it receives an explicit tracked waiver.
+- **A tier that lands at a different revision is a resolution problem too.** The cache then holds two
+  `snapshots/<rev>/` dirs with the tiers split across them, and `huggingface_snapshot_dir` selects
+  exactly one. `ltx_bundle_subdir_across_revisions` (sc-18809) scans siblings with tier preference
+  dominating revision, mirroring `bundled_ltx_gemma_dir`'s sc-14377 fix for the co-requisite TE.
+  Without that a bf16 request silently renders at whatever tier sits in the selected snapshot.
+
+Inventory after provisioning, following symlinks (`du -shL`), all four manifest rows now pinned to
+`01df27d3…`: `gemma/` 26.4 GB, `q4/` 20.5 GB, `q8/` 29.7 GB, `bf16/` 47.1 GB. Blob-level dedup means
+the bump itself re-downloads nothing — the cache is keyed by LFS digest and `01df27d3…` only *added*
+`bf16/`.
+
+🔴 **Record WHICH snapshot each tier landed in, not just that it landed.** "Provisioned at the
+manifest revision" and "provisioned" are different claims, and this host is the worked example of the
+gap. Actual layout, `models--SceneWorks--ltx-2.3-mlx/snapshots/`, with no `refs/main`:
+
+| snapshot | holds | files |
+| --- | --- | --- |
+| `254989c3…` (pre-bump) | `gemma/` `q4/` `q8/` | **39** ← selected |
+| `01df27d3…` (the manifest pin) | `gemma/` `bf16/` | 27 |
+
+So `q4` and `q8` are on disk at the **old** revision, not the manifest's. Because blobs are shared by
+LFS digest the bytes are identical either way, and `hf download` at the new pin would only re-link
+them — this is bookkeeping, not a re-fetch. But it is exactly the layout that breaks a naive presence
+check: with no `refs/main`, `resolve_huggingface_snapshot_dir` falls to "most files" and selects the
+39-file **pre-bump** snapshot, which has no `bf16/` and never will. Any probe that looks only there is
+permanently false — see `ensure_ltx_{q8,bf16}_present`, which sc-18809 had to move onto the same
+cross-revision scan as the resolver for precisely this reason. When you write "tier X is provisioned"
+into a handoff, name the snapshot.
+
 ⚠ **This step answers "which tiers exist", NOT "which tiers are usable" — do not let it become the
 latter.** In that same worked example, `find … -name .sceneworks-model-revision` over the entire
 `models--SceneWorks--flux2-dev-mlx` tree returns **nothing**, so by the very rule stated immediately
@@ -357,7 +475,7 @@ Each also honours an optional repository-secret override (`SCENEWORKS_QWEN_IMAGE
 `SCENEWORKS_Z_IMAGE_ROOT`, …), used only when it canonicalizes to a path ending in that lane's exact
 suffix.
 
-### Adapter environment — six families, one per provider arm
+### Adapter environment — seven families, one per provider arm
 
 The derivation rule: **each provider arm reads `SCENEWORKS_<ARTIFACT>_{REPOSITORY,REVISION,ROOT}`**,
 where `<ARTIFACT>` names the artifact family the arm loads, not the provider id verbatim
@@ -404,6 +522,19 @@ SCENEWORKS_KREA_CONTROL_OVERLAY_REVISION=<exact overlay revision>
 SCENEWORKS_FLUX2_REPOSITORY=SceneWorks/flux2-dev-mlx         # fixed; validated against FLUX2_REPOSITORY
 SCENEWORKS_FLUX2_REVISION=<exact artifact revision>
 SCENEWORKS_FLUX2_ROOT=/abs/path/.../snapshots/<rev>/<tier>   # q4 | q8 — tier DERIVED from the plan target
+
+# memory-mlx-adapter — ltx_2_3   (sc-18808; the only VIDEO arm. FOUR vars, not three)
+SCENEWORKS_LTX_REPOSITORY=SceneWorks/ltx-2.3-mlx             # fixed; validated against LTX_REPOSITORY
+SCENEWORKS_LTX_REVISION=<exact artifact revision>
+SCENEWORKS_LTX_ROOT=/abs/path/.../snapshots/<rev>/<tier>     # bf16 | q4 | q8, derived from the plan target
+SCENEWORKS_LTX_TEXT_ENCODER_ROOT=/abs/path/.../snapshots/<rev>/gemma
+# The Gemma-3-12B co-requisite is a HARD load-time requirement of the pinned provider
+# (`resolve_gemma_dir`; sc-13664 removed the env/HF-cache fallbacks), rides `LoadSpec::text_encoder`,
+# and is snapshot-validated against the SAME repository and revision as the tier root — a mismatched
+# TE silently changes the measured conditioning peak. Both roots must therefore resolve under one
+# revision. On this host q4/q8 originally materialised under the pre-bump snapshot `254989c3…` while
+# the manifest pins `01df27d3…`; `hf download --revision 01df27d3… --include 'q8/*' --include 'q4/*'`
+# re-links them at the manifest revision for **zero bytes**, because the blobs are shared (sc-18810).
 
 # memory-mlx-adapter — any lane, optional
 SCENEWORKS_MLX_WIRED_LIMIT_BYTES=<explicit wired-ceiling override>
@@ -668,6 +799,394 @@ from a real capture rather than trusted forward.
   lane cannot be measured at the production geometry at all; three-tier coverage there needs a
   ≥192 GB Mac, or bf16 rows captured at a reduced geometry and labelled as such. Establish this
   before you accept a three-tier scope, not after two tiers have already been swept.
+- 🔴 **…but establish it by MEASURING, because the obvious arithmetic over-counts a staged pipeline.**
+  Counter-example, `mlx:ltx_2_3` bf16, settled in sc-18809. The arithmetic said no: 47.1 GB of dense
+  bf16 tier plus the 26.4 GB Gemma co-requisite is **73.5 GB of weights** before a single video
+  activation, on a 128 GiB box, across an envelope reaching 449 frames. That is the same shape as the
+  `flux2_dev` finding above, and the epic carried it as a live risk. **It was wrong**, because the two
+  giants never co-reside: sc-10976 stages the text phase (build TE → `encode_av` → `eval` → drop →
+  `clear_cache()`) *before* the AvDiT materializes, so the weights floor is `max(TE, DiT)`, not their
+  sum. Measured with the committed real-weights test (below), the bf16 co-residence estimate is
+  69.20 GiB while the actual staged peak at the same geometry is **36.89 GiB** — 47% lower. Whenever a
+  provider stages components, an additive weights sum is an upper bound that can be off by nearly 2×;
+  read the provider's load path before quoting it, and prefer one cheap measured load over the sum.
+
+### bf16 feasibility, measured — the shape of an answer this section wants
+
+Host: Apple M5 Max, **128 GiB** unified (`sysctl hw.memsize` → `137438953472`). The ceiling that
+actually binds is Metal's `recommendedMaxWorkingSetSize` = `115448725504` B = **107.52 GiB**
+(`MTLCreateSystemDefaultDevice().recommendedMaxWorkingSetSize`); `maxBufferLength` is 80.64 GiB, which
+bounds any *single* allocation and is nowhere near binding here. Quote both — `hw.memsize` alone
+overstates what Metal will wire.
+
+Instrument, on real weights at inference pin `b965641e`:
+
+```bash
+cargo test -p mlx-gen-ltx --release --test sequential_residency_real_weights -- --ignored --nocapture
+# with LTX_MODEL_DIR=<snapshot>/<tier> and LTX_GEMMA_DIR=<snapshot>/gemma
+```
+
+It brackets a real staged `generate` in `reset_peak_memory()` / `get_peak_memory()`. Confirm the run
+was not skipped — an `#[ignore]`d test that returns early still reports `ok`, so require the printed
+line and a non-trivial wall time.
+
+🔴 **Read the reproducibility column before you use any of these numbers.** The command above
+reproduces the **first two rows only**. That test's geometry is *hardcoded* at 256×256×9 — verified at
+inference pin `b965641e` and byte-identical at inference `HEAD` (`1ee44388`), with a clean working
+tree. The two larger rows were captured by hand-editing that geometry onto env vars locally; **that
+edit was never committed and no longer exists anywhere**, so those rows cannot be re-run from any
+revision of either repo as written.
+
+| tier | geometry | frames | stage-2 latent tokens | DiT weights | **staged peak** | wall | reproducible? |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| q4 | 256×256 | 9 | 128 | 10.57 GiB | 33.10 GiB | 15.6 s | ✅ via the command above |
+| bf16 | 256×256 | 9 | 128 | 35.37 GiB | 36.89 GiB | 13.6 s | ✅ via the command above |
+| bf16 | 768×512 | 145 | 7 296 | 35.37 GiB | 43.87 GiB | 90.6 s | ❌ one-off, uncommitted instrumentation |
+| bf16 | **1280×704** | **449** | **50 160** | 35.37 GiB | **87.07 GiB** | 847.8 s | ❌ one-off, uncommitted instrumentation |
+
+Lifting the geometry onto env vars in the committed inference test is **sc-18856**; until that lands,
+treat the bottom two rows as **anecdote with a number attached** — good enough to have retired a scope
+risk, not good enough to fit a curve on.
+
+**Verdict: bf16 ran to completion at the manifest maximum on this host, and the reason the planning
+arithmetic said it could not is structural.** The last row is that maximum — the largest
+`limits.resolutions` entry at `hardMaxDuration` 15 s × the fastest declared 30 fps, so 450 raw frames
+snapped to 449 by LTX's `8k + 1` stride. It completed and returned all 449 frames.
+
+Separate the two claims, because they are not equally earned:
+
+- **The structural finding is solid**: the weights floor is `max(TE, DiT)`, not `TE + DiT`, because
+  sc-10976 stages and drops the text phase before the AvDiT materializes. This is visible in the
+  *reproducible* rows alone (36.89 GiB staged vs a 69.20 GiB co-residence estimate) and it does not
+  depend on the two one-off captures at all.
+- 🔴 **The "19% headroom" figure is NOT yet earned.** It reads `87.07` against the 107.52 GiB ceiling,
+  and every one of the caveats below cuts in the same direction — the true production peak is
+  *higher* than 87.07, by an unmeasured amount. Do not plan against 20 GiB of slack.
+
+⚠ **Caveats that bound what this table can be used for.** All four apply to every row:
+
+1. **All four rows ran `video_mode: "no_audio"`.** Per inference `mlx-gen-ltx/src/model.rs`, that
+   gate (`if Self::no_audio(req)`) skips `decode_audio_track` — the audio VAE *and* the vocoder — which
+   a **default** production LTX job runs. The table measures a non-default path, and the omitted decode
+   sits at the 449-frame tail where memory is already highest.
+2. **`get_peak_memory()` is MLX *active* memory and excludes the allocator cache**, but the 107.52 GiB
+   `recommendedMaxWorkingSetSize` ceiling bounds active **+** cache. `clear_cache()` only runs at phase
+   boundaries, so cache growth *inside* the 449-frame decode is unaccounted for on the very row that
+   defines the envelope. `get_cache_memory()` was not logged.
+3. **n = 1, at the maximum envelope.** One sample, no variance, no re-run — on the row carrying the
+   entire feasibility claim.
+4. **Captured on an otherwise-idle host**, with nothing else resident. A real worker shares the box
+   with the API process, the OS, and anything else the user is running; none of that is accounted for.
+
+Two things fell out that the sweep should **re-measure before building on**, not consume:
+
+- **Peak looks linear in stage-2 latent token count**, `T_lat · (H/32) · (W/32)` with
+  `T_lat = 1 + (frames − 1)/8`. Across the three bf16 rows the marginal cost is 0.997 then
+  1.032 MiB/token, and `36.89 GiB + 1.0 MiB × tokens` predicts the max-envelope peak as 85.87 GiB
+  against 87.07 GiB measured — 1.4% error over a **392×** token range. Neither raw frame count nor
+  area alone can do that; the product is the right regressor *shape*.
+  🔴 **But two of the three points are the non-reproducible rows, so this is a hypothesis with n = 3,
+  not a fit.** sc-18810 must **re-measure these points itself** once sc-18856 commits the geometry
+  knob, and fit on its own captures — do not inherit `1.0 MiB/token`, `85.87 GiB`, or the 1.4% error
+  as settled inputs.
+- **Which phase is the floor flips with tier.** For q4 the text phase dominates (peak 33.10 GiB with a
+  10.57 GiB DiT); for bf16 the DiT does (35.37 GiB). A model that assumes one or the other is wrong
+  for half the tiers of the same lane. This one rests entirely on the two **reproducible** rows.
+
+**What a sweep may assume on this host.** bf16 completed at the maximum `limits` combination — the
+five declared resolutions (0.41–0.90 MP) crossed with durations 4–15 s and fps 24/25/30, i.e. 96–449
+frames — and q8 (20.6 GiB DiT) and q4 (10.6 GiB) sit strictly below it in the DiT phase. So the lane
+needs **no reduced-geometry caveat and no ≥192 GB Mac**, and three-tier coverage is in scope.
+
+🔴 **What it may NOT assume: a specific headroom number.** The measured 87.07 GiB was taken with audio
+decode skipped, without cache accounting, once. Re-measure at the geometry you actually intend to
+sweep, with audio on, before treating any margin as spendable. Budget wall clock too: the
+max-envelope bf16 row took **14.1 minutes**, and `nax-worker` caps at 240 minutes per dispatch.
+
+### sc-18810 re-measured it through the committed apparatus — three of those claims did not survive
+
+Every number below is **measured** — from `docs/generated/ltx-mlx-geometry-sweep-sc-18810.json`,
+captured through the sc-18808 MLX arm and `scripts/memory-calibration-harness.mjs` on the
+**production full-A/V path** (`video_mode` unset, audio track decoded — the row above used
+`no_audio`), q8, inference pin `b965641e` — **except where a paragraph says PREDICTED**, which means
+it is computed from the engine's committed `LTX_VAE_*` cost model and has no record behind it. §5 is
+the only such paragraph. 13 records over **8 captured fixtures spanning 7 distinct {w,h,frames}
+geometries plus one fps probe** — the probe repeats `{768x512, f241}` at 24 fps, and §3 below argues
+that is the same geometry, so it may not also be counted as an eighth one. Replicates on four of them
+give a measured noise floor rather than an assumed one: decode is byte-identical across repeats,
+denoise varies by 0.001% (2.7e-4 GiB), and the text phase by 0.33% (0.110 GiB).
+
+🔴 **That noise floor is CROSS-SESSION and CROSS-REVISION, and every "× noise" statement below
+inherits it.** The capture crashed the host after four records and resumed later, so it spans two
+driver sessions and **four SceneWorks revisions** — `f301d712` (session 1, 4 records), then
+`817cf550`, `41e8151f` and `c30c4974` (session 2, 9 records). Both sessions' logs ship
+(`docs/calibration/sc-18810/precrash-q8-run.log` and `sweep-run.log`) and
+`ltx-temporal-form-fit-sc-18810.json`'s `sourceSessions` says which records came from which; the
+original PR committed only the second log, so four records had no terminal line anywhere. **Every
+one of the four replicate groups contains one record from each session**, so not one of them is a
+back-to-back repeat: the floor bounds repeat-plus-revision variation, not repeat variation alone. The
+text floor's own maximum spread happens to fall between two session-2 records (`41e8151f` 33.2283
+vs `817cf550` 33.1188 GiB), so it is cross-revision even setting the crashed session aside. This is
+reported rather than corrected because correcting it means re-rendering, and a floor that is too
+WIDE is the conservative direction for a residual to be compared against.
+
+⚠️ The evidence **bundle**'s own `sourceSessions` is `[]` for this lane, as it is for sc-18808: the
+harness only populates it on its capture path and these records were ingested without it. The
+per-session provenance above is derived from the committed logs by
+`scripts/fit-ltx-temporal-form.mjs`, and a captured record with no `OK` terminal in a committed log
+now **throws** rather than shipping — which is the guard that would have caught the original gap.
+
+**1. The peak is not one curve — it is the max of three, and only the phases are fittable.** The
+shipped structure already does this (`KreaTurboPhasePeaks::peak_gb`), and it is load-bearing rather
+than incidental. Fitting the *overall* peak with any single form leaves a held-out error of
+**≥10.26 GiB** (94× the text-phase noise floor) for all five candidate forms, because a max of linear
+pieces is not linear. Fitting each phase separately, and taking each phase's OWN best form, lands at
+**0.019–0.30 GiB** — decode 0.019 (`cross`), denoise 0.13 (`latent_tokens`), text 0.30 (`area_only`).
+⚠️ That band is a per-phase *best-of*, and it is **not** the band any single shipped form achieves:
+the `cross` form sc-18812 actually adopts spans **0.019–0.44 GiB** (0.0185 / 0.1741 / 0.4438). Citing
+0.019–0.30 as `cross`'s own accuracy is the mis-read that shipped once already, in the
+`perMpxFrameGb` schema description. Add the temporal term *per phase*; never to the aggregate.
+
+**Admission-margin verdict (SC-18829): keep the ratified constants unchanged.** Runtime adds each
+phase's maximum fit/held-out absolute residual before taking the maximum over all three phases, and
+only then applies the ordinary backend estimate margin. This construction is explicitly exempt from
+the measured-binding-phase pin: it does not assume that one phase remains binding, because every
+phase is independently represented and residual-bounded at the request geometry. The largest
+adopted q8 `cross` residual is 0.4438 GiB; the 10% MLX estimate margin over the observed 33–40 GiB
+phase envelope contributes roughly 3.3–4.0 GiB on top of that bound. The residual is therefore not
+being spent as margin, and the margin is not being used to conceal a missing phase. Candle has no
+promoted temporal curve yet, so this verdict changes no Candle constant or evidence claim.
+
+**Currency at the final provider-contract pin:** the SC-18808 q8 curve is historical by design.
+SC-19109 changes the loaded provider contract/carrier fingerprint and the final inference feature
+closure changes the provider digest, so runtime must reject the old fingerprint/`87a27d…` closure
+instead of making that artifact reachable by alias. SC-18946 owns the frozen-closure q8 reseed/refit
+and the first q4, bf16, and rung-2 captures. The schema-v2 producer groups those new records by their
+complete identity and can promote them without code changes; until those physical captures exist,
+the final atomic inference pin will route q8, q4, and bf16 through the provider-owned conservative
+geometry/temporal fallback. The historical capture pin `b965641e` had neither the loaded LTX
+contract nor that profile API. This branch's frozen preparation pin `b4a29108` contains both and
+exercises the fallback, but it is not the permanent inference-`main` pin and carries no replacement
+physical captures yet; this checkpoint therefore must not be reported as production-complete.
+
+**Multi-curve promotion is selector-complete, not tier-pooled.** The fit report's canonical
+`selectorFits` partitions records by model, catalog family, provider, backend, tier, mode, rung,
+load shape, batch, inference closure, calibration ABI/fingerprint, and decode pass before fitting
+any coefficient. Its legacy `fits.<phase>.<tier>` view is emitted only when that tier maps to one
+complete selector; a campaign containing (for example) q8 staged and q8 bounded-decode records
+omits the ambiguous q8 legacy slice instead of pooling them. `video-memory-curves.json` consumes the
+matching selector fit and exact sorted record IDs. Its `sourceCatalog` hashes every immutable source
+file's exact bytes, and each curve separately names the path, digest, and record subset it consumed;
+the Rust loader recomputes those source handshakes and rejects missing, extra, cross-curve-reused, or
+selector-mismatched records before any curve can evaluate.
+
+**2. The phase coefficients are the right order of magnitude for the staged components, and the
+per-voxel one matches the engine's own fit to 0.3%.** 🔴 Every coefficient below is fitted on **four
+q8 geometries (seven records) of the six declared `fit` rows** — one was attempted and killed, one
+was never begun; see *Coverage is derived* below — and scored on six held-out records. The
+"× noise" figures are against the cross-session, cross-revision floor described above.
+
+| phase | best form | coefficients (q8) | held-out max residual |
+| --- | --- | --- | --- |
+| text | `fixedGb + perMpxGb·mpx` (no temporal term) | 32.92 + 0.68·mpx | 0.30 GiB (2.8× noise) |
+| denoise | `fixedGb + perLatentTokenGb·T_lat·(W/32)·(H/32)` | 20.52 + 0.000986/token | **0.13 GiB** |
+| decode | `fixedGb + perMpxGb·mpx + perMpxFrameGb·(mpx·frames)` | 2.52 + 0.12·mpx + 0.2998·mpx·frames | **0.019 GiB** |
+
+🔴 **The intercepts are NOT identities, and an earlier revision of this section said they were by
+comparing GiB against GB.** The coefficient column is GiB; `stagedTextEncoderBytes` and
+`stagedTransformerBytes` are decimal bytes. In **one unit (GB)**:
+
+- denoise intercept **22.03 GB** against a **20.61 GB** transformer — **1.42 GB unexplained (6.9%)**
+- text intercept **35.35 GB** against a **32.73 GB** staged text encoder — **2.62 GB unexplained (8.0%)**
+
+The GiB→GB factor is **7.37%**, so the apparent agreement WAS that factor. The residue is plausibly
+other resident state (the connector, small components, allocator overhead), but nothing here
+establishes that — and the denoise gap is ~10× that fit's own 0.13 GiB held-out residual, so it is
+not measurement slack either. Treat the intercepts as fitted parameters near the component sizes, not
+as the component sizes.
+
+The **per-voxel** result is unit-clean and stronger than first claimed. `perMpxFrameGb` 0.2998 GiB per
+`mpx·frames` is **322 B per output voxel**. The engine's own single-pass decode cost is
+`LTX_VAE_ACCUM_BYTES_PER_VOXEL + LTX_VAE_TILE_BYTES_PER_OUT_VOXEL` (a single pass is one tile, so
+both terms apply), and those two are documented as fitted at **~36 + ~287 = 323 B/voxel**, then
+rounded *up* to 40 + 300 = 340 for headroom (`mlx-gen-ltx/src/pipeline.rs:218-228`). Measured 322
+against the engine's fitted **323** is **0.3%** — an independent reproduction of that fit, not of the
+rounded constant. `perLatentTokenGb` 0.000986 is **1.009 MiB/token**, which reproduces the withdrawn
+`0.997–1.032 MiB/token` above — as a **denoise-phase** relation, not an overall-peak one.
+
+🔴 **The additive `perFrameGb` form should not be adopted, but "15–350× worse" over-sells it and is
+withdrawn.** Held-out max residuals, additive against the `cross` form actually adopted by sc-18812:
+decode **6.5722 vs 0.0185** (355×), denoise **2.6848 vs 0.1741** (15.4×) — and text **0.3445 vs
+0.4438**, where additive is **1.29× BETTER**. The range holds on the two phases that carry the
+temporal response, not on all three. The adoption still stands: text is nearly flat in frames (all
+five candidates land within 0.164 GiB of each other there, 0.3015–0.4650, against a 22.6 GiB spread
+on decode), `cross` strictly contains `area_only` and `output_voxels` so neither can be refitted to
+beat it, and the 0.0993 GiB `cross` concedes on text is *below* that phase's own 0.1095 GiB
+replicate floor — the largest of the three floors by orders of magnitude (denoise 2.7e-4, decode 0).
+
+**3. 🔴 fps is a real but negligible memory axis — not an unmeasurable one.** Measured at identical
+`{768x512, 241 frames}`, fps 30 vs 24 (a 25% difference in audio-latent length): conditioning
+**identical to the byte**, decode identical to within 400 B, denoise **+26.0 MB (+0.075%)**. The
+argument for ignoring it is MAGNITUDE, not resolution: 26.0 MB is **90× this dataset's own denoise
+replicate floor** (2.7e-4 GiB) and is comfortably resolvable — it is under the *text*-phase floor
+only. It is 0.075% of the denoise phase and 0.07% of the run's 33.23 GiB active peak, and at this
+geometry the admission quantity (`max` over phases, here the text phase) is **identical to the byte**
+across the two fps values. So the joint audio denoise does cost memory, and the cost is far below any
+headroom a budget would carry. `GeometryEnvelope`'s missing fps axis is not a correctness gap for
+memory — but sc-18812 should record it as *small*, not as *unmeasured*.
+
+**4. 🔴 `recommendedMaxWorkingSetSize` does not bound active + cache.** Measured directly here:
+`recommendedMaxWorkingSetSize` = 115,448,725,504 B = **107.52 GiB**, `maxBufferLength` = 80.64 GiB,
+`hw.memsize` = 128 GiB, MLX's own `get_memory_limit()` = 130,567,005,798 B = **121.60 GiB**
+(0.95 × `hw.memsize`). q8 at 640x640 x 177 reached **24.30 GiB peak active + 90.68 GiB end-of-phase
+allocator cache = 114.98 GiB**, i.e. 7.46 GiB *above* the 107.52 GiB ceiling, on a render that
+completed and was bit-identical on warm repeat.
+
+> **Provenance of the 114.98 GiB.** It is the **session-1** record (`f301d712`, 08:31:49Z). Its
+> session-2 replicate (`817cf550`) reads **115.47 GiB** — 0.49 GiB higher, the largest replicate
+> spread in this series and, like every replicate here, cross-revision. Either record clears the
+> 107.52 GiB ceiling by more than 7 GiB, so the finding does not turn on which one is quoted; the
+> lower one is quoted deliberately, because the claim is that even the *smaller* reading exceeds the
+> ceiling.
+
+⚠️ That 114.98 GiB is an **upper bound on co-existence, not a simultaneous maximum**.
+`PhaseMemory::capture()` pairs a phase-**window** peak (`get_peak_memory`) with an **instantaneous**
+end-of-phase cache reading (`get_cache_memory`); MLX exposes no "cache at the active peak". Cache
+enters the decode at ~0 and grows monotonically to 90.68 GiB, so the two readings are furthest apart
+exactly where the number is largest, and the 7.46 GiB excess is 6.5% of the reading — inside that
+uncertainty. The **qualitative** finding is not in doubt (it is corroborated by the driver log's
+free-disk trace, 81 → 16 GiB across two large decodes): MLX's cache is elastic, grows past the
+recommended working set, and is released under pressure. Log it — but a feasibility ceiling is not
+made of active+cache, and the cache series is unfittable (held-out error ≥20 GiB for every form).
+Tightening 114.98 GiB into a true simultaneous reading would need cache sampled at the active peak —
+an MLX-side hook this apparatus does not have — and a re-render, so the bound is stated rather than
+closed.
+
+**5. 🔴 Peak memory is NON-MONOTONIC in frames, and the worst geometry is the write cap. PREDICTED —
+no f297 or f305 record was captured.** Rung 2 engages on TWO independent bounds:
+
+- the **write bound**, `VaeTiling::LTX.writable_frame_cap(h,w) = i32::MAX/(8·h·w)`
+  (`gen-core/src/tiling.rs:167`, `full_res_channels: 8`) = 682 / 682 / 655 / **297** / **297** over
+  the five declared resolutions. It does not move with the host.
+- the **memory bound**, single-pass `3.3 GB + 340 B/voxel` against `get_memory_limit() × 0.85`. It
+  does, and it binds **earlier** on a smaller machine.
+
+🔴 So the claim that holds everywhere is **ONE-SIDED: no host can exceed 297 single-pass output frames
+at 0.90 MP, and smaller hosts tile earlier via the memory bound.** "The 0.90 MP buckets tile from 298
+frames on every host" is FALSE and this repository's own CI falsifies it — the hosted `macos-26`
+runner tiles `768x512 x 97`, **585 frames below that bucket's 682 cap**, purely for memory.
+
+There are in fact **three** outcomes at a given geometry, not two, and the third is only visible on a
+small host: below the full-output **accumulator floor** (`3.3 GB + 40 B/voxel`) no tiling helps —
+the accumulators hold the assembled video — so `budgeted_plan` **refuses before any render**. That
+runner reports `~13 GB just for the output buffers, over this machine's ~6 GB safe budget` at
+1280x704 f297. All three outcomes are now pinned at fixed budgets in
+`the_ltx_arm_follows_the_engine_across_the_decode_tiling_boundary`, and the live host's own outcome
+is asserted as a total function of its budget rather than assumed.
+
+Predicted from the committed cost model: single-pass decode climbs to **94.3 GB** at 1280x704 f297
+(`3.3 GB + 340 B/voxel × 267,632,640`). One lattice step above, at f305, the decode must tile, and its
+cost is `3.3 GB + 40 B/voxel × 274,841,600 = 14.3 GB` of unavoidable full-output accumulators plus
+`300 B` per tile-voxel. The selector keeps the **largest** tile that fits, so the tiled cost *rises*
+with host memory: **≈15.0 GB** where only the smallest selectable tile (192 px × 64 frames) fits,
+**18.5–21.8 GB** across the 384–512 px × 96-frame range, and **≈63.8 GB** on this 128 GiB host, which
+affords 768 px × the full 305 frames under its 103.4 GiB ceiling. The collapse across the cap is real
+on every host but much smaller on a large one (94.3 → 63.8 GB here). The most expensive geometry in
+the declared envelope is still the cap, not the maximum, and a curve fitted across that boundary fits
+through a capability change.
+
+**6. 🔴 What actually bounds this host is FREE DISK, via swap.** Because the allocator cache grows
+past physical memory, large single-pass decodes push the box into swap. From the committed driver log
+(`docs/calibration/sc-18810/sweep-run.log`): 704x1280 x 177 (159,498,240 output voxels) completed;
+768x512 x 449 (176,553,984 voxels) was **killed by a signal** after 1238 s with free disk falling
+81 → 16 GiB; 1280x704 x 241 (217,169,920 voxels) was begun at 16 GiB free and left **no terminal line
+at all** — the driver itself did not survive it; and 768x512 x 361 (141,950,976 voxels) was killed
+later in the same session at lower free space. Across that one session free space went
+**95 → 15 GiB against the driver's 25 GiB floor**, and the driver halted itself on that floor rather
+than continuing. The safe ceiling therefore *moves with free disk*, and degraded as APFS local
+snapshots pinned the churn. Check `df -h /System/Volumes/Data` before AND during, and treat any
+single-pass decode above ~150M output voxels as needing tens of GiB of headroom. This is a HOST
+verdict, not a model verdict.
+
+**Candle adoption/measurement state (explicitly not a fitted-curve claim).** No Candle LTX or Wan
+geometry sweep has been promoted into `video-memory-curves.json`; the only fitted curve in this
+section remains historical MLX LTX q8. SceneWorks now has the synchronous post-load CUDA
+`mem_get_info` snapshot and fixed cold-load provider attribution needed for a truthful live budget.
+At the historical `b965641e` capture pin the provider-owned geometry/frames decode profile and the
+loaded Candle generator contract were absent, so Candle failed open before selection. The frozen
+preparation pin `b4a29108` includes the reviewed SC-19117 profile and SC-19223 contract: unmeasured
+Candle routes now use the provider-owned decode working set plus each contract component exactly
+once and the ordinary 4% estimate margin. This is schema-capable estimate fallback, **not** a fitted
+curve, an optimization claim, or Candle calibration; the permanent inference-`main` pin must still
+consume the same APIs. A fitted Candle curve remains blocked on a real GPU sweep with the same
+fit/held-out, per-phase, closure-bound evidence discipline above.
+
+**Coverage is derived, not asserted.** `scripts/fit-ltx-temporal-form.mjs` buckets every planned entry
+from two artifacts — the dataset (was a record captured?) and the driver logs (was it ever begun, and
+did it terminate?) — and **throws** when the plan and the logs disagree. It used to take "attempted
+and killed" from a hardcoded two-element array, and that array was wrong: `1280x704 f241` was
+published as `not_attempted_host_limit` while the log shows it was begun. Final counts, all read from
+`coverage.byState` rather than typed here: **8 captured fixtures over 7 distinct geometries /
+13 records**, 3 attempted-and-not-survived, 7 `not_attempted_host_limit`, **1 `stopped_before`**, and
+25 never reached (**12 bf16, 11 q4, 2 q8** — the two q8 rows are the rung-2 boundary pair).
+
+🔴 **One declared `fit` row was never captured, so the realized fit design is smaller than the plan
+declares.** Of the six q8 rows pre-registered as `fit`, **four produced records**. `768x512 f361` was
+attempted and killed. `1280x704 f177` was **never begun at all** — it is the geometry the driver
+named on its `STOP` line when free disk fell through the floor, and it now has its own
+`stopped_before` bucket rather than being buried among the unreached rows. An earlier revision of
+this paragraph said the unreached rows were "all bf16 and q4"; three were q8, and one of those three
+was this `fit` row, so the false parenthetical was also what concealed it. The row keeps its `fit`
+role — re-labelling a pre-registered role after seeing which points survived is exactly the
+after-the-fact redraw the role vocabulary exists to prevent — and the fit script's test
+*"the REALIZED fit design is smaller than the declared one"* pins the 6-declared / 4-realized split
+against the shipped bundle. **Every q8 coefficient in §2 is therefore fitted on four geometries
+(seven records), not six**, and re-capturing either missing row is a change to the fit, not a
+confirmation of it.
+
+## 6d. What the emitted memory counters mean (schema v5, sc-18864)
+
+A phase carries **three** numbers, and only two of them are measurements.
+
+| field | MLX | CUDA | kind |
+|---|---|---|---|
+| `activeBytes` | `mlx_rs::memory::get_peak_memory()` | `nvidia-smi memory.used` delta | peak over the phase window |
+| `reclaimableBytes` | `mlx_rs::memory::get_cache_memory()` | `0` (no caching allocator) | instantaneous at the phase boundary |
+| `allocatorBytes` | `activeBytes + reclaimableBytes` | same | **derived**, and the validators enforce the identity |
+
+`allocatorBytes` is an **upper bound on co-existence, not a simultaneous maximum**: it adds a
+peak-over-window to an instantaneous-at-boundary reading, and MLX exposes no "cache at the active
+peak". During an LTX decode the cache is ~0 on entry and grows monotonically to its end-of-phase
+value, so the bound is loosest exactly where it is largest — up to **142.6 GB on a 137.4 GB host**
+for a q8 render that completed and was bit-identical on warm repeat.
+
+**Only `activeBytes` may be compared against a hardware or wired ceiling.** The allocator cache is
+elastic; MLX releases it under pressure, which is why a completing render co-existed **7.46 GiB
+above** Metal's `recommendedMaxWorkingSetSize` (§6c). Both `validate_complete` and
+`validate_runtime_complete` — and their JS mirrors — now run that check against `activeBytes`.
+
+Schema v4 also carried `deviceBytes` and `wiredBytes`. **Both adapters set them to verbatim copies
+of `allocatorBytes`**, provably so across all 456 committed phase objects that carried them (404
+across the five bundles plus 52 in the thirteen immutable v4 receipts), and MLX exposes no third
+counter they could have carried. Schema v5 removes them rather than inventing readings for them, so
+a record can no longer *represent* `wiredBytes > hardware.wiredLimitBytes` — the shape every
+committed MLX record used to carry, and the reason none could be promoted past `gated`.
+
+### What happened to the records captured under v4
+
+**Migrated in place, not re-captured and not tombstoned.** No capture was ever physically
+impossible: across every committed MLX record, `activeBytes` is under both `memoryBytes` and
+`wiredLimitBytes` — the inversion lived entirely in the aliased names. Dropping the two aliases is
+lossless, so the corrected record is exactly what the fixed adapter would have emitted for the same
+measurement, and re-running renders would have destroyed information (fresh weights, fresh host
+state) to recover numbers already retained. `docs/generated/memory-matrix.json` re-generates
+**bitwise identical outside its provenance block**, which is the check that the migration moved no
+published cell.
+
+The immutable provider-stdout receipts under `docs/calibration/` still carry the v4 shape and
+**must not be rewritten** — they are byte-addressed provenance. `recordFromPhysicalMlxResponse`
+projects v4 → v5 during reconstruction, and **refuses** a receipt whose aliases are not copies of
+`allocatorBytes`, because that would mean the adapter measured something the names claimed.
 
 ## 7. Ingest, stamping, and a new lane
 

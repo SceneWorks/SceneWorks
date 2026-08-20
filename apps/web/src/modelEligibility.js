@@ -102,10 +102,12 @@ export function videoModelServesMode(model, mode, caps) {
 
 // Usable on Video Studio: a video-type model that isn't platform-blocked and serves ≥1 mode.
 export function videoModelUsable(model, caps) {
+  const platform = caps?.platform ?? "";
   return (
     model?.type === "video" &&
     !macModelBlock(model, caps) &&
     !candleModelBlock(model, caps) &&
+    !(model?.macOnly === true && platform !== "macos") &&
     VIDEO_MODES.some((mode) => videoModelServesMode(model, mode, caps))
   );
 }
@@ -251,7 +253,11 @@ export function angleModelUsable(model, caps) {
 }
 
 export function poseModelUsable(model, caps) {
-  return !macModelBlock(model, caps) && Boolean(model?.ui?.poseLibrary);
+  return (
+    !macModelBlock(model, caps) &&
+    !macModelFeatureBlock(model, caps, "pose") &&
+    Boolean(model?.ui?.poseLibrary)
+  );
 }
 
 // Strict-control modes the selected backbone advertises (sc-8245). The single source of truth is the
@@ -325,7 +331,11 @@ export function missingRequiredModels(models, ids) {
 // installed model so every screen has at least the models that would unlock it.
 export function downloadOffersFor(models, predicate, caps) {
   const eligible = (models ?? []).filter(
-    (model) => model?.installState !== "installed" && predicate(model, caps),
+    (model) =>
+      model?.installState !== "installed" &&
+      model?.usable !== false &&
+      model?.downloadable !== false &&
+      predicate(model, caps),
   );
   const recommended = eligible.filter((model) => model?.recommended === true);
   return recommended.length ? recommended : eligible;

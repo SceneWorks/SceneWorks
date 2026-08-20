@@ -31,6 +31,17 @@ from rust_api_harness import (
 pytestmark = pytest.mark.parity
 
 ROOT = Path(__file__).resolve().parents[1]
+# 🔴 REGENERATE ON LINUX WITH DEFAULT FEATURES, NOT ON A MAC. These snapshots record the contract
+# of the build `parity-rust` runs: Linux with NO `backend-candle`, i.e. the "neither" build. Parts
+# of the model manifest are cfg-split, so a Mac serves a DIFFERENT and equally correct response —
+# `encoder_route_for_model` has a real arm under
+# `any(target_os = "macos", all(not(macos), feature = "backend-candle"))` and a `None`-returning
+# stub otherwise, so `textEncoderOptions` is present on macOS and absent on the lane. Running
+# `UPDATE_SNAPSHOTS=1` here therefore bakes macOS-only keys into a Linux contract and turns this
+# suite red on CI while it passes locally — which is exactly how it was broken once.
+#
+# Expect `pytest -m parity` on a Mac to report that field as `only in candidate`. That divergence is
+# the cfg split showing through, not snapshot drift, and it is not a reason to regenerate.
 SNAPSHOT_PATH = ROOT / "tests" / "fixtures" / "rust_api_contract_snapshots" / "snapshots.json"
 UPDATE_SNAPSHOTS = os.getenv(
     "UPDATE_SNAPSHOTS",
@@ -204,6 +215,20 @@ class ServerApiHarness:
                 "SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE": "1",
             }
         )
+        # sc-19708: the catalog now reports the configured model-library root
+        # (`modelResolution.configuredLibraryPath`). That root is environment-derived — the API
+        # resolves HF_HUB_CACHE / HUGGINGFACE_HUB_CACHE / HF_HOME and otherwise falls back to the
+        # OS Hugging Face home under $HOME — so without a pin the golden would record WHOSE
+        # machine recorded it (a macOS dev box bakes in /Users/<name>/..., which then fails on
+        # every Linux runner, and re-recording there just flips which machine is broken).
+        # HF_HUB_CACHE has top precedence, so pinning it under `root` makes the value identical on
+        # every machine and lets the existing per-runtime redaction render it <runtime-root>/...,
+        # exactly like every other path in the contract. It also keeps the contract run off the
+        # developer's real Hugging Face cache. The assertion still discriminates: the field must
+        # be present, a string, and this exact configured root.
+        env["HF_HUB_CACHE"] = str(root / "data" / "cache" / "huggingface" / "hub")
+        for inherited in ("HUGGINGFACE_HUB_CACHE", "HF_HOME"):
+            env.pop(inherited, None)
         enable_api_listening_log(env)
         rust_binary = os.getenv("SCENEWORKS_RUST_API_BINARY")
         command = (

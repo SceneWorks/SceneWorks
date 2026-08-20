@@ -10,6 +10,7 @@ import {
   MAX_PRESET_LORAS,
   compactModeList,
   loraMatchesModel,
+  loraWeight,
   presetLoraId,
   presetLoras,
   presetSaveValidation,
@@ -494,7 +495,9 @@ export function PresetManagerScreen() {
         return current;
       }
       const source = loras.find((lora) => lora.id === id);
-      const weight = source?.defaultWeight ?? source?.weight ?? 0.8;
+      // Through the shared resolver, not a hand-rolled copy of its precedence chain: this seeds
+      // the SAME starting weight the studio pickers show, and can't drift from the default again.
+      const weight = loraWeight(source);
       return { ...current, loras: [...current.loras, { id, weight: String(weight) }] };
     });
   }
@@ -599,7 +602,7 @@ export function PresetManagerScreen() {
       defaults,
       loras: form.loras.map((lora) => ({
         id: lora.id,
-        weight: Number.isFinite(Number(lora.weight)) ? Number(lora.weight) : 0.8,
+        weight: Number.isFinite(Number(lora.weight)) ? Number(lora.weight) : 1.0,
       })),
       ui: { description: form.description.trim() },
     };

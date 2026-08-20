@@ -39,11 +39,11 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use crate::lora_family::{read_safetensors_header, SafetensorsHeaderError};
+use crate::lora_family::{is_hidden_file, read_safetensors_header, SafetensorsHeaderError};
 
 /// Which part of a generation pipeline a base-weight file holds. ComfyUI stores
 /// these as separate files (modern checkpoints are *not* fused), so an assembled
@@ -223,6 +223,61 @@ pub const MAGE_FLOW_TRANSFORMER_CONFIG_FILE: &str = "config.json";
 pub fn is_mage_flow_transformer_dir(dir: &Path) -> bool {
     dir.join(MAGE_FLOW_TRANSFORMER_CONFIG_FILE).is_file()
         && dir.join(MAGE_FLOW_TRANSFORMER_WEIGHTS_FILE).is_file()
+}
+
+/// Resolve the one weight file carried by a user-import source without guessing across a model
+/// tree. Accepted shapes are deliberately the same structural shapes the imported loaders own:
+///
+/// - a direct, non-hidden `.safetensors` file;
+/// - an exact Mage-Flow transformer directory; or
+/// - a flat install directory containing exactly one top-level, non-hidden `.safetensors` file and
+///   no diffusers snapshot markers.
+///
+/// Recursive discovery is intentionally forbidden. A sharded/multi-file/diffusers tree cannot be
+/// collapsed to whichever child `read_dir` happened to return first and mislabeled as a single-file
+/// import route.
+pub fn imported_model_primary_weight_file(source: &Path) -> Option<PathBuf> {
+    let is_plain_safetensors_file = |path: &Path| {
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("safetensors"))
+            && !is_hidden_file(path)
+            && std::fs::symlink_metadata(path)
+                .ok()
+                .is_some_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+    };
+    if is_plain_safetensors_file(source) {
+        return Some(source.to_path_buf());
+    }
+    if !source.is_dir() {
+        return None;
+    }
+    if is_mage_flow_transformer_dir(source) {
+        let config = source.join(MAGE_FLOW_TRANSFORMER_CONFIG_FILE);
+        let weights = source.join(MAGE_FLOW_TRANSFORMER_WEIGHTS_FILE);
+        let config_is_regular = std::fs::symlink_metadata(config)
+            .ok()
+            .is_some_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink());
+        return (config_is_regular && is_plain_safetensors_file(&weights)).then_some(weights);
+    }
+    if source.join("model_index.json").is_file()
+        || source.join("config.json").is_file()
+        || source.join("transformer").is_dir()
+    {
+        return None;
+    }
+    let mut found = None;
+    for entry in std::fs::read_dir(source).ok()?.flatten() {
+        let candidate = entry.path();
+        if !is_plain_safetensors_file(&candidate) {
+            continue;
+        }
+        if found.is_some() {
+            return None;
+        }
+        found = Some(candidate);
+    }
+    found
 }
 
 /// Whether an imported community single-file **base checkpoint** described by `verdict` can be
@@ -1608,6 +1663,53 @@ mod tests {
         );
         assert!(!is_mage_flow_transformer_dir(&case("empty", &[])));
         assert!(!is_mage_flow_transformer_dir(&root.join("absent")));
+    }
+
+    #[test]
+    fn imported_model_primary_weight_file_accepts_only_exact_loader_shapes() {
+        let root_guard = tempfile::tempdir().expect("import-shape fixtures");
+        let root = root_guard.path();
+
+        let direct = root.join("direct.safetensors");
+        fs::write(&direct, b"weights").unwrap();
+        assert_eq!(
+            imported_model_primary_weight_file(&direct),
+            Some(direct.clone())
+        );
+
+        let flat = root.join("flat");
+        fs::create_dir(&flat).unwrap();
+        let lone = flat.join("model.safetensors");
+        fs::write(&lone, b"weights").unwrap();
+        fs::write(flat.join("install.json"), b"{}").unwrap();
+        assert_eq!(imported_model_primary_weight_file(&flat), Some(lone));
+
+        let multiple = root.join("multiple");
+        fs::create_dir(&multiple).unwrap();
+        fs::write(multiple.join("a.safetensors"), b"a").unwrap();
+        fs::write(multiple.join("b.safetensors"), b"b").unwrap();
+        assert_eq!(imported_model_primary_weight_file(&multiple), None);
+
+        let nested = root.join("nested");
+        fs::create_dir_all(nested.join("child")).unwrap();
+        fs::write(nested.join("child/model.safetensors"), b"weights").unwrap();
+        assert_eq!(imported_model_primary_weight_file(&nested), None);
+
+        let snapshot = root.join("snapshot");
+        fs::create_dir(&snapshot).unwrap();
+        fs::write(snapshot.join("model.safetensors"), b"weights").unwrap();
+        fs::write(snapshot.join("model_index.json"), b"{}").unwrap();
+        assert_eq!(imported_model_primary_weight_file(&snapshot), None);
+
+        let mage = root.join("mage");
+        fs::create_dir(&mage).unwrap();
+        fs::write(mage.join(MAGE_FLOW_TRANSFORMER_CONFIG_FILE), b"{}").unwrap();
+        let mage_weights = mage.join(MAGE_FLOW_TRANSFORMER_WEIGHTS_FILE);
+        fs::write(&mage_weights, b"weights").unwrap();
+        assert_eq!(
+            imported_model_primary_weight_file(&mage),
+            Some(mage_weights)
+        );
     }
 
     #[test]

@@ -3,6 +3,8 @@ import { readFile, readdir } from "node:fs/promises";
 import test from "node:test";
 
 import { SOURCE_PATHS } from "./generate-memory-matrix.mjs";
+import { buildPlans as buildLtxPlans } from "./generate-ltx-sc18946-plan.mjs";
+import { stripJsoncComments } from "./lib/jsonc.mjs";
 
 async function source(path) {
   return readFile(new URL(`../${path}`, import.meta.url), "utf8");
@@ -282,7 +284,9 @@ test("windows-candle keeps the provisioning and five-rung timeout budgets", asyn
   const workflow = await source(".github/workflows/windows-candle.yml");
   assert.match(
     workflow,
-    /timeout-minutes: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.provision_snapshot && 240 \|\| github\.event_name == 'workflow_dispatch' && inputs\.run_five_rung_reference && 120 \|\| 45 \}\}/,
+    // The LTX Eros acceptance arm (SC-18902, from main) rides ahead of the provisioning budget;
+    // the provisioning / five-rung / default budgets keep their exact prior values behind it.
+    /timeout-minutes: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.run_ltx_eros_acceptance && 360 \|\| github\.event_name == 'workflow_dispatch' && inputs\.provision_snapshot && 240 \|\| github\.event_name == 'workflow_dispatch' && inputs\.run_five_rung_reference && 120 \|\| 45 \}\}/,
   );
 });
 
@@ -542,7 +546,7 @@ const COMPILE_CHAIN_STEPS = [
   "Fetch the pinned inference release",
   "Test the candle GPU worker (backend-candle)",
   "Check the candle sidecar builds (rust-api, backend-candle)",
-  "Check and test the candle memory adapter (memory-candle-adapter)",
+  "Check and test the candle memory adapter (lib + memory-candle-adapter)",
   "Clippy (candle worker)",
   "Verify capabilities.candle.json is a real dump, not a restamp",
 ];
@@ -649,11 +653,13 @@ test("a weights-only dispatch skips the entire compile chain, pinned per step", 
   }
 
   // Derived backstop, so a NEW compile step cannot appear without a decision: every cargo step is
-  // either skipped for a weights-only dispatch, or gated on the five-rung capture -- which is not a
-  // weights-only dispatch and legitimately compiles its adapter.
+  // either skipped for a weights-only dispatch, or gated on the five-rung capture or the LTX Eros
+  // acceptance capture (SC-18902) -- neither of which is a weights-only dispatch, so both
+  // legitimately compile what they run.
   for (const step of jobSteps(workflow).filter((candidate) => candidate.cargo)) {
     assert.ok(
-      skip.test(step.body) || /if: \$\{\{[^\n]*inputs\.run_five_rung_reference/.test(step.body),
+      skip.test(step.body) ||
+        /if: \$\{\{[^\n]*inputs\.(run_five_rung_reference|run_ltx_eros_acceptance)/.test(step.body),
       `${step.name} would compile on a weights-only dispatch; guard it or gate it`,
     );
   }
@@ -718,9 +724,14 @@ test("every failure mode a weights-only dispatch can hit is still fatal", async 
 
 test("Windows CUDA runs the Candle adapter's platform-only unit tests", async () => {
   const workflow = await source(".github/workflows/windows-candle.yml");
-  assert.match(
+  // NO `--bin` selector (sc-18808 review): it excludes the crate's LIB test target, and the crate
+  // is outside `default-members`, so a plain `cargo test` never reaches it either. Under the old
+  // selector the shared protocol guards in src/lib.rs executed in ZERO lanes on either platform.
+  assert.match(workflow, /^ +cargo test -p sceneworks-memory-adapter --features candle$/m);
+  assert.doesNotMatch(
     workflow,
-    /cargo test -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter/,
+    /cargo test -p sceneworks-memory-adapter --features candle --bin/,
+    "a --bin selector on the TEST step drops the lib target, where the shared protocol guards live",
   );
   assert.match(workflow, /console\.log\(JSON\.stringify\(a,null,2\)\)/);
   assert.match(workflow, /'amortizable','unable_to_amortize'/);
@@ -737,10 +748,42 @@ test("macOS MLX runs the MLX adapter's platform-only unit tests", async () => {
   assert.ok(hostedStart >= 0, "macos-checks job not found");
   assert.ok(hostedEnd > hostedStart, "nax-worker must follow macos-checks");
   const hosted = workflow.slice(hostedStart, hostedEnd);
+  // Same no-`--bin` rule as the Candle twin above (sc-18808 review). `--bin memory-mlx-adapter`
+  // silently drops the crate's lib test target; `memory-candle-adapter` still stays out on its own
+  // `required-features = ["candle"]`, so omitting the selector widens coverage without widening the
+  // lane's platform surface.
   assert.match(
     hosted,
-    /^ {6}- name: Test the MLX memory adapter \(memory-mlx-adapter\)\n {8}run: cargo test -p sceneworks-memory-adapter --features mlx --bin memory-mlx-adapter$/m,
+    /^ {6}- name: Test the MLX memory adapter \(lib \+ memory-mlx-adapter\)\n {8}run: cargo test -p sceneworks-memory-adapter --features mlx$/m,
   );
+  assert.doesNotMatch(
+    hosted,
+    /cargo test -p sceneworks-memory-adapter --features mlx --bin/,
+    "a --bin selector drops the lib target, where the shared protocol guards live",
+  );
+});
+
+// The third `--bin` guard (sc-18808 review), and the one that actually runs on a feature-targeted
+// PR. The two above pin CI workflows that do NOT: windows-candle.yml has no `pull_request` trigger
+// for these branches, so `check.yml`'s hosted `candle` job — which is just
+// `scripts/check-candle-build.mjs` — is the ONLY candle-configured compiler a PR here reaches.
+// `cargo check --bin` does not compile `#[cfg(test)]`, so under the narrow selector the crate's
+// candle test module was not typechecked in any PR-reachable lane at all: a test that failed to
+// compile merged green and first broke on the self-hosted `cuda` pool ~24m later.
+test("the PR-reachable candle lane typechecks the memory adapter's TESTS, not just its bin", async () => {
+  const script = await source("scripts/check-candle-build.mjs");
+  assert.match(
+    script,
+    /\["check", "-p", "sceneworks-memory-adapter", "--features", "candle", "--all-targets"\]/,
+  );
+  assert.doesNotMatch(
+    script,
+    /"--bin",\s*\n?\s*"memory-candle-adapter"/,
+    "`cargo check --bin` skips #[cfg(test)] — the candle test module would go untypechecked on PRs",
+  );
+  // And this script is genuinely the lane that runs: check.yml must still call it.
+  assert.match(await source(".github/workflows/check.yml"), /run: npm run rust:check:candle$/m);
+  assert.match(await source("package.json"), /"rust:check:candle": "node scripts\/check-candle-build\.mjs"/);
 });
 
 test("Docker relevance gate paginates and checks for truncated file lists", async () => {
@@ -808,6 +851,39 @@ test("Rust Docker dependency layers include every memory-strategy adapter target
   }
 });
 
+test("Rust Docker builders copy every production generated embed from sceneworks-core", async () => {
+  const coreSources = await Promise.all(
+    ["memory_calibration.rs", "video_memory_curves.rs"].map((file) =>
+      source(`crates/sceneworks-core/src/${file}`),
+    ),
+  );
+  const generatedEmbeds = new Set(
+    [
+      ...coreSources
+        .join("\n")
+        .matchAll(/include_str!\("\.\.\/\.\.\/\.\.\/(docs\/generated\/[^"\n]+)"\)/g),
+    ].map((match) => match[1]),
+  );
+  assert(generatedEmbeds.has("docs/generated/memory-calibration-evidence.json"));
+  assert(generatedEmbeds.has("docs/generated/video-memory-curves.json"));
+  assert(
+    [...generatedEmbeds].some((path) => path.startsWith("docs/generated/ltx-mlx-")),
+    "the promoted video-memory curve must compile at least one immutable LTX evidence source",
+  );
+
+  const dockerfile = await source("docker/rust.Dockerfile");
+  for (const path of generatedEmbeds) {
+    const copy = path.startsWith("docs/generated/ltx-mlx-")
+      ? "COPY docs/generated/ltx-mlx-*.json ./docs/generated/"
+      : `COPY ${path} ./docs/generated/`;
+    assert.equal(
+      dockerfile.split(copy).length - 1,
+      2,
+      `${path} must be present in both the ordinary and Candle Rust builder contexts`,
+    );
+  }
+});
+
 test("both Rust Docker builders carry the mechanically digested web capability sources", async () => {
   const dockerfile = await source("docker/rust.Dockerfile");
   const matrix = await source(
@@ -861,6 +937,48 @@ test("all three manifest scripts import the shared JSONC parser", async () => {
     const script = await source(scriptPath);
     assert.match(script, /import \{ stripJsoncComments \} from "\.\/lib\/jsonc\.mjs";/);
     assert.doesNotMatch(script, /function stripJsoncComments/);
+  }
+});
+
+// sc-18854. The download-pattern gate is split into a networked RECORDER (`--write`, writes
+// config/download-pattern-evidence.json) and a hermetic GATE (`--check`, grades the committed
+// listings offline). The offline gate remains available by name after the sc-19758 gate teardown;
+// wiring the live/recording mode into any workflow would put huggingface.co on a required context,
+// which is exactly what the split exists to prevent. Two GitHub-runner TLS flakes on outbound
+// downloads were observed the day this landed.
+//
+// The negative assertion is the load-bearing half: nothing stops a future change from
+// "simplifying" the offline gate back into the live one.
+test("the offline download-pattern gate remains callable and its networked modes stay out of every workflow", async () => {
+  const pkg = JSON.parse(await source("package.json"));
+  assert.match(pkg.scripts["check:download-patterns:offline"], /check-download-patterns\.mjs --self-test/);
+  assert.match(pkg.scripts["check:download-patterns:offline"], /check-download-patterns\.mjs --check/);
+  // The gate is only as good as its evidence, so the recorder must stay reachable by name.
+  assert.match(pkg.scripts["record:download-patterns"], /check-download-patterns\.mjs --write/);
+
+  const dir = new URL("../.github/workflows/", import.meta.url);
+  const workflows = (await readdir(dir)).filter((name) => /\.ya?ml$/.test(name));
+  assert.ok(workflows.length >= 10, `expected the workflow dir to be populated, got ${workflows.length}`);
+  for (const name of workflows) {
+    const text = await source(`.github/workflows/${name}`);
+    // A bare script invocation not immediately followed by --check/--self-test would be the
+    // live (networked) mode.
+    assert.doesNotMatch(
+      text,
+      /check-download-patterns\.mjs(?!\s+--(?:check|self-test))/,
+      `${name} must not invoke the live download-pattern check`,
+    );
+    // ...and the same via the npm aliases. `check:download-patterns:offline` is permitted.
+    assert.doesNotMatch(
+      text,
+      /check:download-patterns(?!:offline)/,
+      `${name} must not run the live check:download-patterns alias`,
+    );
+    assert.doesNotMatch(
+      text,
+      /record:download-patterns/,
+      `${name} must not run the download-pattern recorder`,
+    );
   }
 });
 
@@ -1001,10 +1119,11 @@ test("macOS memory-strategy calibration dispatch is opt-in and secret-scoped", a
     workflow,
     /memory-calibration-harness\.mjs check/,
   );
-  assert.match(
-    workflow,
-    /actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/,
-  );
+  // Pinned to the SHAPE, not to a review-time SHA. scripts/lib/action-pins.mjs is the authority on
+  // this and says so outright: the control is that the reference resolves to an immutable 40-hex
+  // commit, and Dependabot rewrites the SHA in place, so freezing the value here only means every
+  // automated bump reddens a test that has nothing to do with what it is checking.
+  assert.match(workflow, /actions\/upload-artifact@[0-9a-f]{40}\b/);
   assert.match(
     workflow,
     /if: \$\{\{ success\(\) && github\.event_name == 'workflow_dispatch' && inputs\.run_memory_calibration \}\}/,
@@ -1195,7 +1314,13 @@ test("the pre-push derived-docs trigger covers every non-Rust source the matrix 
   assert.ok(pattern, "the derived-docs trigger pattern is still a single-quoted ERE in the hook");
   const trigger = new RegExp(pattern);
   const rustArm = /(^|\/)([^/]+\.rs|Cargo\.(toml|lock)|rustfmt\.toml)$/;
-  for (const relative of Object.values(SOURCE_PATHS)) {
+  // Imported reconciliation logic also changes the generated summary/gate even though it is code,
+  // not a hashed data source, so a module-only edit must run the same stale-artifact check.
+  const derivedInputs = [
+    ...Object.values(SOURCE_PATHS),
+    "scripts/lib/memory-contract-reconciliation.mjs",
+  ];
+  for (const relative of derivedInputs) {
     if (rustArm.test(relative)) continue;
     assert.ok(trigger.test(relative), `${relative} must trigger the pre-push derived-docs check`);
   }
@@ -1317,7 +1442,7 @@ test("the MLX memory adapter is guarded on a PR lane, like its Candle twin", asy
   assert.ok(guard < firstDispatchOnly, "MLX adapter guard must precede the dispatch-only steps");
 });
 
-test("both stage-1 lanes verify their complete capability dump, then publish only its evidence", async () => {
+test("both stage-1 lanes verify their own capability dump last among coverage, reachably, and publish only its evidence", async () => {
   // sc-17119 (mlx) + sc-17592 (candle). config/engine-capabilities/capabilities.<backend>.json is
   // read as a SOURCE by every other guard: bump-inference.mjs checks only its existence, declared
   // backend and `inferenceRevision`, and the vitest drift guard re-derives the catalog from its
@@ -1364,7 +1489,18 @@ test("both stage-1 lanes verify their complete capability dump, then publish onl
     const nextJobAt = afterVerify.search(/\n {2}[A-Za-z0-9_-]+:\n/);
     const verifyJobTail = nextJobAt < 0 ? afterVerify : afterVerify.slice(0, nextJobAt);
     for (const block of verifyJobTail.split(/\n {6}- (?=name: |uses: )/).slice(1)) {
-      if (/^name: Upload fresh (?:MLX|Candle) capability facts/m.test(block)) {
+      // The Candle lane publishes its fresh dump ONLY when verification failed, so the upload is
+      // diagnostic evidence for a red run rather than a per-PR measurement publication.
+      const candleFailureArtifact =
+        path === ".github/workflows/windows-candle.yml" &&
+        block.startsWith(
+          "name: Upload fresh Candle capability facts after a verification failure",
+        ) &&
+        /if: \$\{\{ always\(\) && steps\.verify_candle_capabilities\.outcome == 'failure' \}\}/.test(
+          block,
+        );
+      if (candleFailureArtifact) continue;
+      if (/^name: Upload fresh MLX capability facts/m.test(block)) {
         assert.match(block, /if: \$\{\{ always\(\) \}\}/);
         assert.match(block, /uses: actions\/upload-artifact@[0-9a-f]{40}/);
         assert.match(block, /path: \$\{\{ runner\.temp \}\}\/engine-capability-facts-verify/);
@@ -1456,6 +1592,50 @@ test("both stage-1 lanes verify their complete capability dump, then publish onl
       );
     }
   }
+});
+
+// Kept as its own test rather than folded into the `candleFailureArtifact` carve-out above, which was
+// raised as possible duplication. It is not: that carve-out is a `continue` GUARD, so it can only ever
+// weaken the ordering rule, never assert anything. Three claims below have nowhere else to live —
+//
+//   * the upload step EXISTS. Delete it and the guard simply stops matching, the ordering loop finds no
+//     such block, and every assertion up there still passes. The failure-only upload would be gone with
+//     nothing red.
+//   * the VERIFY step declares `id: verify_candle_capabilities`. Without the id,
+//     `steps.verify_candle_capabilities.outcome` resolves to nothing, the condition is false on every
+//     run, and the upload never fires — while the guard's literal text match keeps passing.
+//   * the artifact CONTENT: name, whole-directory path, if-no-files-found. See the note below on the
+//     enumerated two-file spelling that silently produced an unusable artifact.
+//
+// The `if:` expression is deliberately spelled in both places: up there it is the condition under which
+// the carve-out is legitimate, here it is the failure-only guarantee itself.
+test("Windows preserves exact fresh capability facts when verification fails", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  const verifyAt = workflow.indexOf(
+    "- name: Verify capabilities.candle.json is a real dump, not a restamp",
+  );
+  const uploadAt = workflow.indexOf(
+    "- name: Upload fresh Candle capability facts after a verification failure",
+  );
+  assert.ok(verifyAt > 0 && uploadAt > verifyAt);
+  const tail = workflow.slice(verifyAt, uploadAt + 1000);
+  assert.match(tail, /id: verify_candle_capabilities/);
+  assert.match(
+    tail,
+    /if: \$\{\{ always\(\) && steps\.verify_candle_capabilities\.outcome == 'failure' \}\}/,
+  );
+  // The shape, not a review-time SHA — see the note in the calibration-artifact test above.
+  assert.match(tail, /actions\/upload-artifact@[0-9a-f]{40}\b/);
+  // The whole scratch DIRECTORY, not an enumerated file list, and that distinction has already
+  // been load-bearing once. The dumper writes three files — `capabilities.candle.json`,
+  // `audio/capabilities.candle.json`, and the rich `runtime/capabilities.candle.json` — and the
+  // runtime descriptor is the one the backend capability matrix cannot be rebuilt without. The
+  // enumerated two-file spelling this used to assert predates that third file, so an artifact
+  // produced under it looks complete and silently cannot repair the matrix. Pin the directory and
+  // the artifact name the repair instructions actually tell you to download.
+  assert.match(tail, /name: backend-capability-facts-candle/);
+  assert.match(tail, /path: \$\{\{ runner\.temp \}\}\/engine-capability-facts-verify\s/);
+  assert.match(tail, /if-no-files-found: warn/);
 });
 
 test("every workspace path a self-hosted lane watches maps to a package that lane builds", async () => {
@@ -2020,6 +2200,26 @@ function assertFeaturePullRequestCoverage(workflow, context) {
   );
 }
 
+function assertWindowsResolvedCacheRuntimeCoverage(workflow, context) {
+  const lines = workflow.split("\n");
+  const buildStart = lines.findIndex((line) => line === "  build-windows:");
+  assert.ok(buildStart >= 0, `${context}: build-windows job must be present`);
+  const nextJob = lines
+    .slice(buildStart + 1)
+    .findIndex((line) => /^  [A-Za-z0-9_-]+:\s*$/.test(line));
+  assert.ok(nextJob >= 0, `${context}: build-windows job must have a following job boundary`);
+  const requiredBuild = lines
+    .slice(buildStart, buildStart + 1 + nextJob)
+    .filter((line) => !/^\s*#/.test(line))
+    .join("\n");
+  assert.match(
+    requiredBuild,
+    /^ {8}run: "cargo test -p sceneworks-core model_artifacts::resolved_cache:: -- --test-threads=1"$/m,
+    `${context}: required build-windows must execute both the durable-store and native ` +
+      "materialization safety suites, not only compile or select one half",
+  );
+}
+
 test("every required workflow reports on feature-target pull requests", async () => {
   for (const path of REQUIRED_WORKFLOWS) {
     assertFeaturePullRequestCoverage(await source(path), path);
@@ -2203,6 +2403,37 @@ test("dropping the PR path filter did not expose the self-hosted pools", async (
     "build-windows is the required check; it must actually run on the speculative merge rather " +
       "than skip into a free Success.",
   );
+  assertWindowsResolvedCacheRuntimeCoverage(desktop, ".github/workflows/desktop-windows.yml");
+});
+
+test("Windows resolved-cache coverage rejects either narrowed test module", async () => {
+  const workflow = await source(".github/workflows/desktop-windows.yml");
+  for (const narrowed of [
+    "model_artifacts::resolved_cache::tests::",
+    "model_artifacts::resolved_cache::materialization::tests::",
+  ]) {
+    const mutated = workflow.replace("model_artifacts::resolved_cache:: --", `${narrowed} --`);
+    assert.notEqual(mutated, workflow, "the workflow mutation must replace the widened filter");
+    assert.throws(
+      () => assertWindowsResolvedCacheRuntimeCoverage(mutated, `${narrowed} mutation`),
+      /execute both the durable-store and native materialization safety suites/,
+    );
+  }
+
+  const decoy = workflow
+    .replace(
+      '        run: "cargo test -p sceneworks-core model_artifacts::resolved_cache:: -- --test-threads=1"',
+      '        run: "cargo test -p sceneworks-core model_artifacts::resolved_cache::tests:: -- --test-threads=1"\n' +
+        '        # run: "cargo test -p sceneworks-core model_artifacts::resolved_cache:: -- --test-threads=1"',
+    )
+    .replace(
+      "\n  package-windows:",
+      '\n  decoy-resolved-cache:\n    steps:\n      - run: "cargo test -p sceneworks-core model_artifacts::resolved_cache:: -- --test-threads=1"\n\n  package-windows:',
+    );
+  assert.throws(
+    () => assertWindowsResolvedCacheRuntimeCoverage(decoy, "comment and sibling decoy mutation"),
+    /execute both the durable-store and native materialization safety suites/,
+  );
 });
 
 test("windows-candle stays out of the queue and out of the required set", async () => {
@@ -2347,6 +2578,496 @@ test("the FLUX.2 composition audit still runs, and is still wired into a lane", 
     /#\[cfg\(all\(test, not\(target_os = "macos"\), feature = "backend-candle"\)\)\]\s*\nmod flux2_composition_audit;/,
     "an undeclared module is compiled by no lane, so the composition check would vanish in silence",
   );
+});
+
+// sc-18808 review. The MLX LTX arm hand-copies four `limits.*` values out of
+// config/manifests/builtin.models.jsonc — LTX_RESOLUTIONS, LTX_DURATIONS_SECONDS, LTX_FPS and
+// LTX_DIMENSION_MULTIPLE — and DERIVES its accepted frame envelope `[97, 449]` from the durations x
+// fps cross product. The derivation was the point: the envelope is not written down. But nothing
+// bound the four inputs, so a limits edit in the manifest would leave the derived envelope stale and
+// silently change what a real-weight video capture admits, with no test anywhere going red.
+//
+// The adapter crate deliberately carries two dependencies (serde_json + sha2) and cannot take
+// sceneworks-core's bundled SQLite / image codecs just to reach `strip_jsonc_comments`, so the
+// binding lives here, where the manifest reader already exists and `npm run check` runs it on every
+// PR. Every extraction below asserts it MATCHED before it compares — a renamed constant must red,
+// not silently pass with nothing to check.
+test("the MLX LTX arm's manifest constants match the shipped ltx_2_3 limits", async () => {
+  const manifest = JSON.parse(
+    stripJsoncComments(await source("config/manifests/builtin.models.jsonc")),
+  );
+  const adapter = await source("crates/sceneworks-memory-adapter/src/bin/mlx.rs");
+
+  const rustConst = (name) => {
+    const start = adapter.indexOf(`const ${name}`);
+    assert.ok(start >= 0, `${name} must still exist in the MLX adapter`);
+    const equals = adapter.indexOf("=", start);
+    const end = adapter.indexOf(";", equals);
+    assert.ok(equals > start && end > equals, `${name} must be a simple const initializer`);
+    return adapter.slice(equals + 1, end).trim();
+  };
+  // `[(768, 512), ...]` is a Rust tuple array; `(`/`)` -> `[`/`]` makes it JSON.
+  const rustTuples = (name) => JSON.parse(rustConst(name).replaceAll("(", "[").replaceAll(")", "]"));
+
+  const providerId = JSON.parse(rustConst("LTX_PROVIDER"));
+  assert.equal(providerId, "ltx_2_3");
+  const model = manifest.models.find((entry) => entry.id === providerId);
+  assert.ok(model, `builtin.models.jsonc must still declare ${providerId}`);
+  const limits = model.limits;
+  assert.ok(limits, `${providerId} must still declare a limits block`);
+
+  assert.deepEqual(
+    rustTuples("LTX_RESOLUTIONS"),
+    limits.resolutions.map((size) => size.split("x").map(Number)),
+    "LTX_RESOLUTIONS is a verbatim copy of limits.resolutions",
+  );
+  assert.deepEqual(
+    JSON.parse(rustConst("LTX_DURATIONS_SECONDS")),
+    limits.durations,
+    "LTX_DURATIONS_SECONDS is a verbatim copy of limits.durations",
+  );
+  assert.deepEqual(
+    JSON.parse(rustConst("LTX_FPS")),
+    limits.fps,
+    "LTX_FPS is a verbatim copy of limits.fps",
+  );
+  assert.equal(
+    Number(rustConst("LTX_DIMENSION_MULTIPLE")),
+    limits.requiresDimensionsMultipleOf,
+    "LTX_DIMENSION_MULTIPLE is limits.requiresDimensionsMultipleOf",
+  );
+
+  // ... and the envelope those four inputs feed. Recomputed here from the MANIFEST through the same
+  // nearest-8k+1 ladder `sceneworks_core::video_request::ltx_frame_count` implements, so a limits
+  // edit is caught as a changed ENVELOPE — what the arm actually admits — and not merely as a
+  // changed constant.
+  const snap = (raw) => {
+    const frames = Math.max(raw, 9);
+    const lower = frames - ((frames - 1) % 8);
+    const upper = lower + 8;
+    if (lower < 9) return upper;
+    return frames - lower <= upper - frames ? lower : upper;
+  };
+  const reachable = limits.durations.flatMap((duration) =>
+    limits.fps.map((fps) => snap(duration * fps)),
+  );
+  const productWidth = Number(rustConst("LTX_PRODUCT_CANARY_WIDTH"));
+  const productHeight = Number(rustConst("LTX_PRODUCT_CANARY_HEIGHT"));
+  const productFrames = Number(rustConst("LTX_PRODUCT_CANARY_FRAMES"));
+  const productFps = Number(rustConst("LTX_PRODUCT_CANARY_FPS"));
+  const productResolution = `${productWidth}x${productHeight}`;
+  assert.equal(
+    model.defaults.resolution,
+    productResolution,
+    "the product-envelope canary must use the shipped default resolution",
+  );
+  assert.ok(
+    limits.resolutions.includes(productResolution),
+    "the product-envelope resolution must remain inside the shipped envelope",
+  );
+  const defaultDownloads = model.downloads.filter((download) => download.default === true);
+  assert.equal(defaultDownloads.length, 1, "LTX must retain exactly one default artifact variant");
+  assert.equal(
+    defaultDownloads[0].variant,
+    "q4",
+    "the product-envelope canary must measure the default product artifact variant",
+  );
+  const productDuration = (productFrames - 1) / productFps;
+  assert.ok(Number.isInteger(productDuration), "the product tuple must span an exact duration");
+  assert.ok(limits.durations.includes(productDuration), "the product duration must remain shipped");
+  assert.ok(limits.fps.includes(productFps), "the product FPS must remain shipped");
+  assert.equal(
+    snap(productDuration * productFps),
+    productFrames,
+    "the shipped duration/FPS snap must resolve to the exact product frame count",
+  );
+  assert.match(
+    adapter,
+    /const LTX_FRAME_ENVELOPE: \(u32, u32\) = ltx_frame_envelope\(\);/,
+    "the frame envelope must stay DERIVED from the declared arrays, not written down",
+  );
+  const envelopeTestAt = adapter.indexOf(
+    "fn ltx_frame_envelope_is_derived_from_the_declared_durations_and_fps(",
+  );
+  assert.ok(envelopeTestAt >= 0, "the envelope derivation test must still exist");
+  assert.match(
+    adapter.slice(envelopeTestAt, envelopeTestAt + 600),
+    new RegExp(
+      `assert_eq!\\(LTX_FRAME_ENVELOPE, \\(${Math.min(...reachable)}, ${Math.max(...reachable)}\\)\\)`,
+    ),
+    "the pinned envelope must equal the one the shipped limits actually reach",
+  );
+});
+
+test("the LTX real-weight safety canary cannot relax or masquerade as campaign evidence", async () => {
+  const [adapter, runner] = await Promise.all([
+    source("crates/sceneworks-memory-adapter/src/bin/mlx.rs"),
+    source("scripts/run-ltx-safety-canary.mjs"),
+  ]);
+  const historical = JSON.parse(await source("docs/generated/ltx-mlx-video-sc-18808.json"));
+  const costaged = historical.records[0].diagnostics.measurements.find(
+    (entry) => entry.name === "costagedGiantsBytes",
+  )?.value;
+  assert.equal(costaged, 53_347_146_863, "SC-18808 historical co-staged bound changed");
+  assert.match(
+    adapter,
+    /const LTX_CANARY_MAX_FOOTPRINT_BYTES: u64 = 53_347_146_863;/,
+    "the conservative canary stop must remain byte-bound to SC-18808 co-staged arithmetic",
+  );
+
+  const campaign = adapter.slice(
+    adapter.indexOf("fn run_ltx_with_admission("),
+    adapter.indexOf("fn campaign_entry_diagnostic("),
+  );
+  const ordinary = adapter.slice(
+    adapter.indexOf("fn run_ltx(request:"),
+    adapter.indexOf("fn run(request:"),
+  );
+  assert.match(
+    ordinary,
+    /run_ltx_with_admission\(request, LtxRunAdmission::Ordinary, &mut phases\)/,
+  );
+  assert.ok(campaign.indexOf("refuse_unsafe_ltx_capture(") >= 0);
+  assert.ok(
+    campaign.indexOf("refuse_unsafe_ltx_capture(") < campaign.indexOf("ltx_load_spec("),
+    "the campaign must still refuse before model-path/provider/weights access",
+  );
+  const campaignRows = Object.values(buildLtxPlans()).flatMap((plan) => plan.providers);
+  assert.equal(campaignRows.length, 73, "SC-20430 must explicitly inventory 73 rows");
+  const ratified = campaignRows.filter((row) => row._role === "bounded_carrier_entry");
+  assert.equal(ratified.length, 3, "exactly one matched bounded carrier per tier may be ratified");
+  assert.deepEqual(ratified.map((row) => row.target.tier), ["q4", "q8", "bf16"]);
+  const crossLayer = {
+    q8: {
+      logicalCaseId: "implan-d47640caa0c469f2ee13",
+      identity: "sc-20430-q8-768x512-f121-fps30-bounded-192-64-authoritative-v1",
+      inventorySha256: "bb0bb7577157a158ca39494837d64cb36ded0380ca7ee0c930fea7311f22a247",
+    },
+    bf16: {
+      logicalCaseId: "implan-b3926164bf6bfbee98e1",
+      identity: "sc-20430-bf16-768x512-f121-fps30-bounded-192-64-authoritative-v1",
+      inventorySha256: "006caeaa9a8638b337cdf5a8622ce8535380b18ebaf90b36c3e2d5d15354f2a8",
+    },
+  };
+  for (const row of ratified.filter(({ target }) => target.tier !== "q4")) {
+    const exact = crossLayer[row.target.tier];
+    for (const [label, value] of [
+      ["provider", row.name], ["fixture", row.fixture],
+      ["logical case", exact.logicalCaseId], ["private identity", exact.identity],
+      ["inventory SHA", exact.inventorySha256],
+    ]) {
+      assert.ok(runner.includes(value), `${row.target.tier} runner ${label} changed`);
+      if (label !== "provider") {
+        assert.ok(adapter.includes(value), `${row.target.tier} adapter ${label} changed`);
+      }
+    }
+  }
+  assert.match(runner,
+    /process\.argv\[2\] === "--bounded-selector-report"[\s\S]*boundedSelectorReportController/,
+    "SC-20430 matched phase anchors must remain executable as a CPU-only report path");
+  const originalRows = campaignRows.filter((row) => row._role !== "bounded_carrier_entry");
+  assert.equal(originalRows.length, 70, "all original campaign rows must remain present");
+  for (const row of originalRows) {
+    assert.ok(
+      ["incident_forbidden", "arithmetic_unmeasurable", "safety_refused_open"]
+        .includes(row._measurementSafety.disposition),
+      `${row.name} must retain an explicit refusal disposition`,
+    );
+  }
+  assert.doesNotMatch(
+    ordinary,
+    /LTX_(?:CANARY|PRODUCT_CANARY)_FIXTURE|diagnostic_(?:product_envelope_)?canary_complete/,
+  );
+  const campaignEntry = adapter.slice(
+    adapter.indexOf("fn run_ltx_campaign_entry("),
+    adapter.indexOf("fn run_ltx(request:"),
+  );
+  for (const required of [
+    "prevalidate_ltx_campaign_entry(request)?",
+    "consume_ltx_canary_watchdog_attestation(request)?",
+    "LtxCanaryLimits::install()?",
+    "LtxRunAdmission::CampaignEntry",
+    "validate_ltx_campaign_entry_fragment(&fragment)?",
+    "validate_ltx_canary_cleanup(",
+    '"_campaignEntry"',
+    "watchdog_lease.complete()?",
+    'watchdog_lease.mark("common_load")?',
+    'watchdog_lease.mark("cleanup")?',
+  ]) assert.ok(campaignEntry.includes(required), `campaign entry must retain ${required}`);
+  for (const phase of [
+    "primary_conditioning", "primary_denoise", "primary_decode",
+  ]) assert.ok(campaign.includes(`phase_sink.mark("${phase}")`),
+    `campaign execution must report ${phase}`);
+  for (const phase of [
+    "lifecycle_warm_repeat", "lifecycle_cancel", "lifecycle_cancel_recovery",
+    "lifecycle_error", "lifecycle_error_recovery",
+  ]) assert.ok(adapter.includes(`phase_sink.mark("${phase}")`),
+    `campaign lifecycle must report ${phase}`);
+  assert.ok(
+    campaignEntry.indexOf("prevalidate_ltx_campaign_entry(request)?")
+      < campaignEntry.indexOf("consume_ltx_canary_watchdog_attestation(request)?"),
+    "the exact campaign row must be validated before the watchdog releases model allocation",
+  );
+  const boundedCarrier = adapter.slice(
+    adapter.indexOf("fn run_ltx_bounded_carrier_proof("),
+    adapter.indexOf("fn run_ltx_campaign_entry("),
+  );
+  for (const required of [
+    "prevalidate_ltx_bounded_carrier_proof(request)?",
+    "start_lease_for(&LTX_BOUNDED_CARRIER_PHASE_NAMES)?",
+    'watchdog_lease.mark("common_load")?',
+    'watchdog_lease.mark("primary_conditioning")?',
+    'watchdog_lease.mark("primary_denoise")',
+    'watchdog_lease.mark("primary_decode")',
+    'watchdog_lease.mark("cleanup")?',
+    "validate_ltx_bounded_carrier_generation_request(&generation_request)?",
+    "scoped_generate(",
+    "spatial_decode_tile_count != 24",
+    "validate_ltx_canary_cleanup(",
+    '"diagnosticOnly": true',
+    '"promotable": false',
+    '"ingestible": false',
+    '"seed": LTX_SEED',
+  ]) assert.ok(boundedCarrier.includes(required), `bounded carrier must retain ${required}`);
+  assert.doesNotMatch(boundedCarrier, /verify_ltx_lifecycle|LtxRunAdmission::CampaignEntry/,
+    "SC-20254 must execute one provider request scope, not the multi-render campaign lifecycle");
+  assert.equal((boundedCarrier.match(/scoped_generate\(/g) ?? []).length, 1,
+    "SC-20254 must contain exactly one full-A/V render call");
+  assert.match(adapter, /LTX_BOUNDED_CARRIER_ACTION => run_ltx_bounded_carrier_proof\(&request\)/);
+  const boundedCampaign = adapter.slice(
+    adapter.indexOf("fn run_ltx_bounded_campaign_entry("),
+    adapter.indexOf("fn run_ltx(request:"),
+  );
+  for (const required of [
+    "prevalidate_ltx_bounded_campaign_entry(request)?",
+    "consume_ltx_canary_watchdog_attestation(request)?",
+    "start_lease_for(&LTX_BOUNDED_CARRIER_PHASE_NAMES)?",
+    "LtxRunAdmission::BoundedCampaignEntry",
+    "validate_ltx_bounded_campaign_fragment(&fragment)?",
+    "validate_ltx_canary_cleanup(",
+    '"_boundedCampaignEntry"',
+    'watchdog_lease.mark("common_load")?',
+    'watchdog_lease.mark("cleanup")?',
+  ]) assert.ok(boundedCampaign.includes(required), `bounded campaign must retain ${required}`);
+  assert.match(adapter,
+    /LTX_BOUNDED_CAMPAIGN_ACTION => run_ltx_bounded_campaign_entry\(&request\)/);
+  const attestationIndex = boundedCampaign.indexOf(
+    "consume_ltx_canary_watchdog_attestation(request)?",
+  );
+  const limitsIndex = boundedCampaign.indexOf("LtxCanaryLimits::install()?");
+  const modelResolutionIndex = boundedCampaign.indexOf("run_ltx_with_admission(");
+  assert.ok(attestationIndex >= 0 && limitsIndex >= 0 && modelResolutionIndex >= 0,
+    "SC-20318 safety ordering anchors must all remain present");
+  assert.ok(
+    attestationIndex < limitsIndex,
+    "SC-20318 must reject a mismatched watchdog phase profile before allocator/model work",
+  );
+  assert.ok(
+    attestationIndex < modelResolutionIndex,
+    "SC-20318 must reject a mismatched watchdog phase profile before model resolution",
+  );
+
+  const canary = adapter.slice(
+    adapter.indexOf("fn validate_ltx_canary_plan_for("),
+    adapter.indexOf("/// The `mlx:ltx_2_3` SC-18946 arm"),
+  );
+  for (const required of [
+    "_diagnosticOnly",
+    'Some("fixture")',
+    "profile.width()",
+    "profile.height()",
+    "profile.frames()",
+    "LTX_CANARY_TILE_EDGE",
+    "LTX_CANARY_OVERLAP",
+    "profile.video_mode_identity()",
+    '"status": profile.completion_status()',
+    '"canaryIdentity": profile.identity()',
+    '"promotable": false',
+    '"ingestible": false',
+    'strategy["spatialDecodeTiles"]',
+    '"preProviderActiveBytes": pre_provider.active',
+    '"preProviderCacheBytes": pre_provider.cache',
+    '"identity": LTX_CANARY_ONES_CACHE_IDENTITY',
+    '"bytes": expected_persistent_active',
+  ]) assert.ok(canary.includes(required), `canary must retain ${required}`);
+  const limitsInstalled = canary.indexOf("let limits = LtxCanaryLimits::install()?");
+  const baselineCaptured = canary.indexOf("let pre_provider = AllocatorState::capture_current()");
+  const providerLoadSpec = canary.indexOf("ltx_load_spec(request, \"q4\", &selection)?");
+  assert.ok(limitsInstalled >= 0 && limitsInstalled < baselineCaptured,
+    "the allocator baseline must be captured after canary limits are installed");
+  assert.ok(baselineCaptured < providerLoadSpec,
+    "the allocator baseline must be captured before provider/model resolution");
+  assert.match(canary, /clear_cache\(\);\n\s*let pre_provider = AllocatorState::capture_current\(\);/,
+    "the pre-provider baseline must exclude reclaimable allocator cache");
+  assert.match(canary, /validate_ltx_canary_pre_provider\(pre_provider\)\?;/);
+  assert.match(
+    canary,
+    /validate_ltx_canary_cleanup\(pre_provider, cleanup, expected_persistent_active\)\?;/,
+    "successful canary output must require the exact named persistent allocation",
+  );
+  assert.doesNotMatch(campaign, /validate_ltx_canary_(?:pre_provider|cleanup)/,
+    "production generation must not use the diagnostic canary residue exception");
+
+  const profiles = adapter.slice(
+    adapter.indexOf("enum LtxCanaryProfile"),
+    adapter.indexOf("/// LTX's video VAE"),
+  );
+  for (const required of [
+    'Self::Safety => Some("no_audio")',
+    "Self::ProductEnvelope => None",
+    'Self::Safety => "diagnostic_canary_complete"',
+    'Self::ProductEnvelope => "diagnostic_product_envelope_canary_complete"',
+    'Self::Safety => "a sunlit pine branch, static camera"',
+    'Self::ProductEnvelope => "sc-20169-product-envelope"',
+  ]) assert.ok(profiles.includes(required), `diagnostic profiles must retain ${required}`);
+  const generationRequest = adapter.slice(
+    adapter.indexOf("fn ltx_canary_generation_request_for("),
+    adapter.indexOf("fn ltx_load_spec("),
+  );
+  assert.match(
+    generationRequest,
+    /video_mode: profile\.video_mode\(\)\.map\(str::to_owned\)/,
+    "the canary must skip the downstream audio decoder and vocoder",
+  );
+  const admissionBridge = adapter.slice(
+    adapter.indexOf("fn ltx_canary_request_for_provider_admission("),
+    adapter.indexOf("fn ltx_load_spec("),
+  );
+  assert.match(admissionBridge, /request\.video_mode = None;/);
+  assert.match(admissionBridge, /request\.video_mode = Some\("no_audio"\.to_owned\(\)\);/);
+  assert.match(admissionBridge, /scoped_generate_observed_after_configuration\(/);
+  const genericScope = adapter.slice(
+    adapter.indexOf("fn scoped_generate_observed("),
+    adapter.indexOf("fn scoped_generate_observed_after_configuration("),
+  );
+  assert.match(genericScope, /None,/,
+    "ordinary production generation must not gain the canary-only post-configure override");
+  const configuredScope = adapter.slice(
+    adapter.indexOf("fn scoped_generate_observed_after_configuration("),
+    adapter.indexOf("/// Combine the generator and request-scope terminals"),
+  );
+  assert.ok(
+    configuredScope.indexOf(".configure_request(&mut request)")
+      < configuredScope.indexOf("after_configuration(&mut request)"),
+    "the canary restores no_audio only after ordinary provider configuration",
+  );
+  assert.ok(
+    configuredScope.indexOf("after_configuration(&mut request)")
+      < configuredScope.indexOf("generator.generate(&request"),
+    "the exact no_audio override must be restored before generation",
+  );
+  for (const lifecycle of ["enter_phase", "leave_phase", "scope.finish", "settle_scoped_generation"]) {
+    assert.ok(configuredScope.includes(lifecycle), `canary scope must retain ${lifecycle}`);
+  }
+  const diagnosticRun = adapter.slice(
+    adapter.indexOf("fn run_ltx_canary_for("),
+    adapter.indexOf("/// The `mlx:ltx_2_3` SC-18946 arm"),
+  );
+  assert.match(
+    diagnosticRun,
+    /LtxCanaryProfile::ProductEnvelope => scoped_generate\(/,
+    "the product-envelope canary must use the ordinary provider request-scope lifecycle",
+  );
+  assert.doesNotMatch(
+    diagnosticRun,
+    /LtxCanaryProfile::ProductEnvelope => scoped_generate_ltx_no_audio_canary/,
+  );
+  for (const required of [
+    "LTX_PRODUCT_CANARY_WIDTH",
+    "LTX_PRODUCT_CANARY_HEIGHT",
+    "LTX_PRODUCT_CANARY_FRAMES",
+    "spatial_tile_count",
+    "validate_diagnostic_audio",
+  ]) assert.ok(adapter.includes(required), `product-envelope canary must retain ${required}`);
+
+  const limitsLifecycle = adapter.slice(
+    adapter.indexOf("impl LtxCanaryLimits"),
+    adapter.indexOf("impl LtxDecodePlan"),
+  );
+  assert.match(limitsLifecycle, /set_wired_limit\(self\.previous_wired\);/);
+  assert.match(limitsLifecycle, /set_memory_limit\(self\.previous_memory\);/);
+  assert.match(limitsLifecycle, /impl Drop for LtxCanaryLimits[\s\S]*self\.restore\(\);/);
+});
+
+test("the SC-20318 provider phase profile is exact across runner, watchdog and adapter", async () => {
+  const [runner, watchdog, adapter] = await Promise.all([
+    source("scripts/run-ltx-safety-canary.mjs"),
+    source("scripts/memory-calibration-watchdog.py"),
+    source("crates/sceneworks-memory-adapter/src/bin/mlx.rs"),
+  ]);
+  const campaignPhases = [
+    "common_load", "primary_conditioning", "primary_denoise", "primary_decode",
+    "lifecycle_warm_repeat", "lifecycle_cancel", "lifecycle_cancel_recovery",
+    "lifecycle_error", "lifecycle_error_recovery", "cleanup",
+  ];
+  const boundedPhases = [
+    "common_load", "primary_conditioning", "primary_denoise", "primary_decode", "cleanup",
+  ];
+  const quotedValues = (sourceText, expression, label) => {
+    const match = sourceText.match(expression);
+    assert.ok(match, `${label} must remain a literal exact contract`);
+    return [...match[1].matchAll(/"([^"]+)"/g)].map((entry) => entry[1]);
+  };
+
+  assert.deepEqual(quotedValues(
+    watchdog,
+    /^CAMPAIGN_ENTRY_PROVIDER_PHASES = \(([\s\S]*?)^\)$/m,
+    "Python campaign-entry phases",
+  ), campaignPhases);
+  assert.deepEqual(quotedValues(
+    watchdog,
+    /^BOUNDED_CARRIER_PROVIDER_PHASES = \(([\s\S]*?)^\)$/m,
+    "Python bounded-carrier phases",
+  ), boundedPhases);
+  assert.deepEqual(quotedValues(
+    watchdog,
+    /^BOUNDED_CAMPAIGN_ENTRY_PROVIDER_PHASES = \(([\s\S]*?)^\)$/m,
+    "Python bounded-campaign-entry phases",
+  ), boundedPhases);
+  const pythonProfiles = watchdog.slice(
+    watchdog.indexOf("PROVIDER_PHASE_PROFILES = {"),
+    watchdog.indexOf("\n}\n", watchdog.indexOf("PROVIDER_PHASE_PROFILES = {")) + 2,
+  );
+  assert.match(pythonProfiles,
+    /"campaign-entry": CAMPAIGN_ENTRY_PROVIDER_PHASES/);
+  assert.match(pythonProfiles,
+    /"bounded-carrier": BOUNDED_CARRIER_PROVIDER_PHASES/);
+  assert.match(pythonProfiles,
+    /"bounded-campaign-entry": BOUNDED_CAMPAIGN_ENTRY_PROVIDER_PHASES/);
+
+  assert.deepEqual(quotedValues(
+    runner,
+    /export const PROVIDER_PHASES = Object\.freeze\(\[([\s\S]*?)\]\);/,
+    "runner campaign-entry phases",
+  ), campaignPhases);
+  assert.deepEqual(quotedValues(
+    runner,
+    /export const BOUNDED_CARRIER_PHASES = Object\.freeze\(\[([\s\S]*?)\]\);/,
+    "runner bounded phases",
+  ), boundedPhases);
+  assert.match(runner,
+    /export const BOUNDED_CAMPAIGN_ENTRY_PROFILE = "bounded-campaign-entry";/);
+  assert.match(runner,
+    /export const BOUNDED_CAMPAIGN_ENTRY_Q8_PROFILE = "bounded-campaign-entry-q8";/);
+  assert.match(runner,
+    /export const BOUNDED_CAMPAIGN_ENTRY_BF16_PROFILE = "bounded-campaign-entry-bf16";/);
+  assert.match(runner,
+    /phaseProfile: "bounded-campaign-entry",\n\s*childName: `\$\{boundedSpec\.story\}-\$\{boundedSpec\.tier\}-bounded-campaign-entry`/);
+
+  assert.deepEqual(quotedValues(
+    adapter,
+    /const LTX_PROVIDER_PHASE_NAMES: \[&str; 10\] = \[([\s\S]*?)\];/,
+    "Rust campaign-entry phases",
+  ), campaignPhases);
+  assert.deepEqual(quotedValues(
+    adapter,
+    /const LTX_BOUNDED_CARRIER_PHASE_NAMES: \[&str; 5\] = \[([\s\S]*?)\];/,
+    "Rust bounded phases",
+  ), boundedPhases);
+  assert.match(adapter,
+    /const LTX_BOUNDED_CAMPAIGN_PHASE_PROFILE: &str = "bounded-campaign-entry";/);
+  assert.match(adapter,
+    /Some\(LTX_BOUNDED_CAMPAIGN_ACTION\) => Some\(\(\n\s*LTX_BOUNDED_CAMPAIGN_PHASE_PROFILE,\n\s*&LTX_BOUNDED_CARRIER_PHASE_NAMES,/);
 });
 
 test("the MLX FLUX.2-dev calibration arm is bound to the direct reference-free T2I contract", async () => {
@@ -2872,4 +3593,451 @@ test("MLX-lane guard steps stay reachable and cannot be degraded into warnings",
       .statements.includes("set -euo pipefail"),
     `${MLX_LANE}: the restamp check must keep \`set -euo pipefail\``,
   );
+});
+
+// SC-18902 historical acceptance evidence. The real Windows/CUDA baseline proved the former Eros
+// Candle route unusable. The published cond_safe LoRA was not a valid candidate for Candle's adapter
+// surface (3,320 source keys versus 768 accepted keys), so the retained harness pins the exact
+// rejected baseline rather than pretending a partial adapter is usable. The mutation loop is load-bearing:
+// each historically plausible drift is injected into an in-memory copy and must make this same
+// validator fail, proving the positive assertions are sensitive rather than decorative.
+test("the rejected LTX Eros CUDA baseline keeps renderer and product timelines distinct", async () => {
+  const documents = {
+    manifestText: await source("config/manifests/builtin.models.jsonc"),
+    workflow: await source(".github/workflows/windows-candle.yml"),
+    harness: await source("crates/sceneworks-worker/src/ltx_eros_gpu_smoke.rs"),
+    workerLib: await source("crates/sceneworks-worker/src/lib.rs"),
+  };
+
+  const validate = ({ manifestText, workflow, harness, workerLib }) => {
+    const manifest = JSON.parse(stripJsoncComments(manifestText));
+    const base = manifest.models.find((entry) => entry.id === "ltx_2_3");
+    const eros = manifest.models.find((entry) => entry.id === "ltx_2_3_eros");
+    assert.ok(base, "the base ltx_2_3 manifest route must remain present");
+    assert.ok(eros, "the ltx_2_3_eros manifest route must remain present");
+    const shippedDefaults = {
+      duration: 6,
+      fps: 25,
+      resolution: "768x512",
+      quality: "balanced",
+      steps: 8,
+    };
+    assert.deepEqual(eros.defaults, shippedDefaults, "Eros manifest defaults must stay fixed");
+    assert.deepEqual(base.defaults, shippedDefaults, "base LTX manifest defaults must stay untouched");
+    assert.equal(
+      base.mlx?.autoDistillLora,
+      undefined,
+      "the evidence harness must not add the Eros distill recipe to base ltx_2_3",
+    );
+    assert.deepEqual(
+      eros.mlx?.autoDistillLora,
+      { stage1Strength: 1, stage2Strength: 0.4 },
+      "the existing MLX-only two-pass recipe is context, not a Candle recipe to copy",
+    );
+
+    assert.match(
+      workflow,
+      /run_ltx_eros_acceptance:\s+description:[^\n]+\s+required: false\s+type: boolean\s+default: false/,
+      "the expensive real-weight capture must be explicit and off by default",
+    );
+    assert.doesNotMatch(
+      `${workflow}\n${harness}`,
+      /AdapterKind|AdapterSpec|LTX_EROS_RECIPE|LTX_EROS_DISTILL_LORA|ltx_eros_recipe|single-pass-distill|DISTILL_(?:REPOSITORY|REVISION|FILE)/,
+      "the baseline harness must not expose or construct an unsupported filtered-LoRA candidate",
+    );
+    assert.match(
+      workflow,
+      /timeout-minutes: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.run_ltx_eros_acceptance && 360 \|\|/,
+      "the real-weight render needs the guarded six-hour ceiling",
+    );
+    for (const [repository, revision] of [
+      ["TenStrip/LTX2.3-10Eros", "84a05a13610d78dbe4340d1be23fd8185e10f697"],
+      ["SceneWorks/ltx-2.3-mlx", "01df27d308466533aa09d251e3aebdcc627d07eb"],
+    ]) {
+      assert.ok(workflow.includes(`repo_id="${repository}"`), `${repository} must be exact`);
+      assert.ok(workflow.includes(revision), `${repository} must use its exact revision`);
+    }
+    const provisioning = workflow.slice(
+      workflow.indexOf("- name: Provision exact public LTX Eros acceptance artifacts"),
+      workflow.indexOf("- name: Render the fixed LTX Eros CUDA acceptance artifact"),
+    );
+    assert.equal(
+      provisioning.match(/token=False/g)?.length,
+      2,
+      "both HF downloads must explicitly refuse implicit credentials",
+    );
+    assert.match(provisioning, /HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"/);
+    assert.doesNotMatch(
+      provisioning,
+      /secrets\.|HF_TOKEN|HUGGING_FACE_HUB_TOKEN|google\/gemma/,
+      "the harness must not use a secret or a gated Gemma source",
+    );
+    assert.match(
+      workflow,
+      /cargo test -p sceneworks-worker --features backend-candle --release ltx_eros_candle_gpu_smoke -- --ignored --nocapture --test-threads=1/,
+    );
+    assert.match(
+      workflow,
+      /ffmpeg [^\n]*-framerate 25[^\n]*-c:v libx264[^\n]*-r 25 \$videoOnly/,
+      "the source frames must first be encoded as the product's H.264 video stream",
+    );
+    assert.match(
+      workflow,
+      /ffmpeg [^\n]*-i \$videoOnly -i \$audio[^\n]*-c:v copy[^\n]*-c:a aac[^\n]*-shortest[^\n]*-map_metadata 0[^\n]*\$mp4/,
+      "the evidence MP4 must use the product's copy-video/AAC/-shortest mux contract",
+    );
+    assert.match(
+      workflow,
+      /\$videoOnly = Join-Path \$out 'ltx_eros\.rendered-frames\.mp4'/,
+      "the complete 153-frame renderer output must survive beside the product-faithful MP4",
+    );
+    assert.match(workflow, /stream=index,codec_name,codec_type[^'\n]+duration:format=duration/);
+    assert.match(
+      workflow,
+      /\$video\.codec_name -ne 'h264'/,
+      "the MP4 verifier must require the production H.264 video codec",
+    );
+    assert.match(
+      workflow,
+      /\$sound\.codec_name -ne 'aac'/,
+      "the MP4 verifier must require the production AAC audio codec",
+    );
+    assert.match(
+      workflow,
+      /\$wavAudio\.codec_name -ne 'pcm_s16le'/,
+      "the source audio verifier must require the worker's PCM16 WAV codec",
+    );
+    assert.match(
+      workflow,
+      /\$renderedVideo\.r_frame_rate -ne '25\/1' -or \[int\]\$renderedVideo\.nb_read_frames -ne 153/,
+      "the complete renderer output must still prove all 153 frames",
+    );
+    assert.match(
+      workflow,
+      /\$productFrames -lt 150 -or \$productFrames -gt 151/,
+      "the product-faithful mux must end at the six-second audio boundary",
+    );
+    assert.match(workflow, /\$renderedDurationSeconds = 153\.0 \/ 25\.0/);
+    assert.match(workflow, /\$requestedProductDurationSeconds = 6\.0/);
+    assert.match(
+      workflow,
+      /\$audioDurationSeconds = \[Convert\]::ToDouble\(\$metadata\.result\.audio\.durationSeconds, \[Globalization\.CultureInfo\]::InvariantCulture\)/,
+      "the synchronized audio timeline must come from renderer metadata",
+    );
+    assert.match(
+      workflow,
+      /\$audioDurationSeconds -lt \$requestedProductDurationSeconds -or \$audioDurationSeconds -gt \$renderedDurationSeconds/,
+      "renderer audio must remain bounded by the request and rendered-frame timelines",
+    );
+    assert.match(workflow, /\$productBoundarySeconds = \[Math\]::Min\(\$renderedDurationSeconds, \$audioDurationSeconds\)/);
+    assert.match(workflow, /\$productVideoDurationSeconds = \$productFrames \/ 25\.0/);
+    assert.match(
+      workflow,
+      /\$durationToleranceSeconds = 1\.0 \/ 25\.0/,
+      "duration tolerance must remain exactly one output frame",
+    );
+    for (const invocation of [
+      "Assert-DurationNear 'complete rendered-frame video stream' $renderedVideo.duration $renderedDurationSeconds",
+      "Assert-DurationNear 'complete rendered-frame container' $renderedProbe.format.duration $renderedDurationSeconds",
+      "Assert-DurationNear 'source WAV stream' $wavAudio.duration $audioDurationSeconds",
+      "Assert-DurationNear 'source WAV container' $wavProbe.format.duration $audioDurationSeconds",
+      "Assert-DurationNear 'product MP4 video stream' $video.duration $productVideoDurationSeconds",
+      "Assert-DurationNear 'product MP4 audio stream' $sound.duration $productBoundarySeconds",
+      "Assert-DurationNear 'product MP4 container' $probe.format.duration $productBoundarySeconds",
+    ]) {
+      assert.ok(workflow.includes(invocation), `${invocation} must remain exact`);
+    }
+    assert.match(workflow, /ffprobe-mp4\.json/);
+    assert.match(workflow, /ffprobe-rendered-frames\.json/);
+    assert.match(workflow, /ffprobe-wav\.json/);
+    assert.match(
+      workflow,
+      /sc-18902-ltx-eros-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}\/ltx_eros\.rendered-frames\.mp4/,
+      "the inspected artifact must include the untrimmed renderer output",
+    );
+    assert.match(
+      workflow,
+      /"\$productHash  ltx_eros\.mp4"\s+"\$renderedHash  ltx_eros\.rendered-frames\.mp4"/,
+      "the checksum manifest must bind both inspectable MP4s",
+    );
+    assert.match(
+      workflow,
+      /\$productHash = \(Get-FileHash -Algorithm SHA256 -LiteralPath \$mp4\)\.Hash\.ToLowerInvariant\(\)/,
+      "the product checksum must hash the product-faithful MP4",
+    );
+    assert.match(
+      workflow,
+      /\$renderedHash = \(Get-FileHash -Algorithm SHA256 -LiteralPath \$videoOnly\)\.Hash\.ToLowerInvariant\(\)/,
+      "the renderer checksum must hash the complete rendered-frame MP4",
+    );
+    assert.match(
+      workflow,
+      /\$metadata\.captureKind -ne 'current-candle-route-baseline'/,
+      "uploaded metadata must identify the product-neutral current-route baseline",
+    );
+    assert.match(
+      workflow,
+      /\$ffmpegVersionLines = @\(& ffmpeg -version\)\s+if \(\$LASTEXITCODE -ne 0\) \{ throw 'ffmpeg version probe failed' \}\s+\$ffmpegVersion = \(\$ffmpegVersionLines \| Select-Object -First 1\)\.Trim\(\)/,
+      "the runner probe must consume ffmpeg output before selecting its version line",
+    );
+    assert.doesNotMatch(
+      workflow,
+      /ffmpeg -version \| Select-Object -First 1/,
+      "an early-closing native pipeline must not leak exit code 1 into the Actions wrapper",
+    );
+    assert.match(workflow, /ffmpeg = \$ffmpegVersion/);
+    assert.match(
+      workflow,
+      /if: \$\{\{ success\(\) && github\.event_name == 'workflow_dispatch' && inputs\.run_ltx_eros_acceptance \}\}\s+uses: actions\/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a/,
+      "only a verified capture may publish the MP4/stills/metadata bundle",
+    );
+
+    for (const declaration of [
+      "const WIDTH: u32 = 768;",
+      "const HEIGHT: u32 = 512;",
+      "const DURATION_SECONDS: u32 = 6;",
+      "const FPS: u32 = 25;",
+      "const STEPS: u32 = 8;",
+      "const RENDERED_FRAMES: u32 = 153;",
+      "const SEED: u64 = 18_902;",
+      "assert_eq!(request.sampler, None);",
+      'const CAPTURE_KIND: &str = "current-candle-route-baseline";',
+    ]) {
+      assert.ok(harness.includes(declaration), `fixed harness contract missing: ${declaration}`);
+    }
+    assert.doesNotMatch(
+      harness,
+      /sampler:\s*Some\(/,
+      "the current-route baseline must preserve the manifest-default absent sampler",
+    );
+    assert.match(
+      harness,
+      /"sampler": null/,
+      "capture metadata must record the manifest-default absent sampler",
+    );
+    assert.match(harness, /const PROMPT: &str = "A wide locked camera shot of a red fox/);
+    assert.doesNotMatch(
+      `${workflow}\n${harness}`,
+      /LTX_EROS_(?:PROMPT|SEED|WIDTH|HEIGHT|DURATION|FPS|STEPS)/,
+      "evidence-defining request fields must not be environment-overridable",
+    );
+    assert.match(harness, /fn load_spec\(eros_dir: PathBuf, gemma_dir: PathBuf\) -> LoadSpec/);
+    assert.doesNotMatch(harness, /\.with_adapters\(/);
+    assert.match(harness, /assert!\(spec\.adapters\.is_empty\(\)\)/);
+    assert.match(harness, /"captureKind": CAPTURE_KIND/);
+    assert.match(harness, /adapter_reports\.is_empty\(\)/);
+    assert.match(harness, /"pairDeltas": pair_deltas/);
+    assert.match(harness, /"frameStats": frame_stats/);
+    assert.match(harness, /"renderedFramesDurationSeconds": RENDERED_FRAMES as f64 \/ FPS as f64/);
+    assert.match(harness, /"productDurationSeconds": DURATION_SECONDS/);
+    assert.doesNotMatch(harness, /"encodedDurationSeconds"/);
+    assert.match(harness, /audio\.expect\("Candle LTX Eros must return its synchronized audio track"\)/);
+    assert.match(
+      workerLib,
+      /#\[cfg\(all\(test, not\(target_os = "macos"\), feature = "backend-candle"\)\)\]\s*\nmod ltx_eros_gpu_smoke;/,
+      "the ignored real-weight test must compile on the actual Windows Candle lane",
+    );
+  };
+
+  assert.doesNotThrow(() => validate(documents));
+
+  const manifestObject = JSON.parse(stripJsoncComments(documents.manifestText));
+  const manifestMutation = (mutate) => {
+    const copy = structuredClone(manifestObject);
+    mutate(copy);
+    return JSON.stringify(copy);
+  };
+  const mutations = [
+    {
+      name: "manifest duration drift",
+      expected: /Eros manifest defaults must stay fixed/,
+      documents: {
+        ...documents,
+        manifestText: manifestMutation((copy) => {
+          copy.models.find((entry) => entry.id === "ltx_2_3_eros").defaults.duration = 5;
+        }),
+      },
+    },
+    {
+      name: "base route contamination",
+      expected: /must not add the Eros distill recipe to base/,
+      documents: {
+        ...documents,
+        manifestText: manifestMutation((copy) => {
+          copy.models.find((entry) => entry.id === "ltx_2_3").mlx.autoDistillLora = {
+            stage1Strength: 1,
+            stage2Strength: 0.4,
+          };
+        }),
+      },
+    },
+    {
+      name: "auto-dispatch regression",
+      expected: /must be explicit and off by default/,
+      documents: {
+        ...documents,
+        workflow: documents.workflow.replace(
+          /(run_ltx_eros_acceptance:[\s\S]*?default:) false/,
+          "$1 true",
+        ),
+      },
+    },
+    {
+      name: "credentialed HF regression",
+      expected: /both HF downloads must explicitly refuse implicit credentials/,
+      documents: {
+        ...documents,
+        workflow: documents.workflow.replace(
+          /(repo_id="TenStrip\/LTX2\.3-10Eros"[\s\S]*?)token=False/,
+          "$1token=True",
+        ),
+      },
+    },
+    {
+      name: "unsupported candidate mode introduced",
+      expected: /must not expose or construct an unsupported filtered-LoRA candidate/,
+      documents: {
+        ...documents,
+        workflow: `${documents.workflow}\nltx_eros_recipe: single-pass-distill`,
+      },
+    },
+    {
+      name: "production shortest mux removed",
+      expected: /copy-video\/AAC\/-shortest mux contract/,
+      documents: {
+        ...documents,
+        workflow: documents.workflow.replace(
+          "-b:a 192k -shortest -map_metadata",
+          "-b:a 192k -map_metadata",
+        ),
+      },
+    },
+    {
+      name: "H.264 verification weakened",
+      expected: /must require the production H\.264 video codec/,
+      documents: {
+        ...documents,
+        workflow: documents.workflow.replace(
+          "$video.codec_name -ne 'h264'",
+          "$video.codec_name -ne 'hevc'",
+        ),
+      },
+    },
+    {
+      name: "duration tolerance widened",
+      expected: /duration tolerance must remain exactly one output frame/,
+      documents: {
+        ...documents,
+        workflow: documents.workflow.replace(
+          "$durationToleranceSeconds = 1.0 / 25.0",
+          "$durationToleranceSeconds = 2.0 / 25.0",
+        ),
+      },
+    },
+    {
+      name: "product MP4 audio duration verification removed",
+      expected: /product MP4 audio stream.*must remain exact/,
+      documents: {
+        ...documents,
+        workflow: documents.workflow.replace(
+          "Assert-DurationNear 'product MP4 audio stream' $sound.duration $productBoundarySeconds",
+          "",
+        ),
+      },
+    },
+    {
+      name: "renderer duration wired to the product timeline",
+      expected: /complete rendered-frame video stream.*must remain exact/,
+      documents: {
+        ...documents,
+        workflow: documents.workflow.replace(
+          "Assert-DurationNear 'complete rendered-frame video stream' $renderedVideo.duration $renderedDurationSeconds",
+          "Assert-DurationNear 'complete rendered-frame video stream' $renderedVideo.duration $productBoundarySeconds",
+        ),
+      },
+    },
+    {
+      name: "product duration wired to the renderer timeline",
+      expected: /product MP4 container.*must remain exact/,
+      documents: {
+        ...documents,
+        workflow: documents.workflow.replace(
+          "Assert-DurationNear 'product MP4 container' $probe.format.duration $productBoundarySeconds",
+          "Assert-DurationNear 'product MP4 container' $probe.format.duration $renderedDurationSeconds",
+        ),
+      },
+    },
+    {
+      name: "early-closing ffmpeg version pipeline restored",
+      expected: /must consume ffmpeg output before selecting its version line|must not leak exit code 1/,
+      documents: {
+        ...documents,
+        workflow: documents.workflow
+          .replace("$ffmpegVersionLines = @(& ffmpeg -version)", "$ffmpegVersionLines = & ffmpeg -version | Select-Object -First 1")
+          .replace("$ffmpegVersion = ($ffmpegVersionLines | Select-Object -First 1).Trim()", "$ffmpegVersion = $ffmpegVersionLines.Trim()"),
+      },
+    },
+    {
+      name: "renderer checksum omitted",
+      expected: /checksum manifest must bind both inspectable MP4s/,
+      documents: {
+        ...documents,
+        workflow: documents.workflow.replace(
+          '            "$renderedHash  ltx_eros.rendered-frames.mp4"\n',
+          "",
+        ),
+      },
+    },
+    {
+      name: "renderer checksum hashes the product MP4",
+      expected: /renderer checksum must hash the complete rendered-frame MP4/,
+      documents: {
+        ...documents,
+        workflow: documents.workflow.replace(
+          "$renderedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $videoOnly)",
+          "$renderedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $mp4)",
+        ),
+      },
+    },
+    {
+      name: "complete renderer frame assertion weakened",
+      expected: /must still prove all 153 frames/,
+      documents: {
+        ...documents,
+        workflow: documents.workflow.replace(
+          "[int]$renderedVideo.nb_read_frames -ne 153",
+          "[int]$renderedVideo.nb_read_frames -lt 150",
+        ),
+      },
+    },
+    {
+      name: "product mux accepts the untrimmed lattice",
+      expected: /must end at the six-second audio boundary/,
+      documents: {
+        ...documents,
+        workflow: documents.workflow.replace(
+          "$productFrames -gt 151",
+          "$productFrames -gt 153",
+        ),
+      },
+    },
+    {
+      name: "explicit sampler alias reintroduced",
+      expected: /manifest-default absent sampler/,
+      documents: {
+        ...documents,
+        harness: documents.harness.replace(
+          "steps: Some(STEPS),",
+          'steps: Some(STEPS),\n        sampler: Some("rectified-flow".to_owned()),',
+        ),
+      },
+    },
+  ];
+  for (const mutation of mutations) {
+    assert.throws(
+      () => validate(mutation.documents),
+      mutation.expected,
+      `${mutation.name} must be killed by the acceptance contract`,
+    );
+  }
 });

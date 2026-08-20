@@ -1166,7 +1166,7 @@ describe("SceneWorks app shell", () => {
       expect.objectContaining({
         mode: "character_image",
         model: "instantid_realvisxl",
-        loras: [expect.objectContaining({ id: "kelsie-lora", weight: 0.8 })],
+        loras: [expect.objectContaining({ id: "kelsie-lora", weight: 1.0 })],
       }),
     );
   });
@@ -1242,7 +1242,7 @@ describe("SceneWorks app shell", () => {
       expect.objectContaining({
         mode: "character_image",
         model: "instantid_realvisxl",
-        loras: [expect.objectContaining({ id: "kelsie-lora", weight: 0.8 })],
+        loras: [expect.objectContaining({ id: "kelsie-lora", weight: 1.0 })],
       }),
     );
   });

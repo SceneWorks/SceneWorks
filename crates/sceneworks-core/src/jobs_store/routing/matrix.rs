@@ -271,6 +271,11 @@ struct ManifestModel {
     candle: Value,
     #[serde(rename = "loraCompatibility", default)]
     lora_compatibility: Value,
+    /// Declarative non-routability (sc-19708): the entry is an installable component bundle
+    /// loaded by owning routes, never a routable `model` of any job. Keyed on manifest data so
+    /// adding component entries never adds a model-id branch here.
+    #[serde(rename = "componentOnly", default)]
+    component_only: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -685,7 +690,28 @@ fn imported_preview_sink(family: &str, source: &str) -> bool {
         // Each file compiles one shared sink-bearing request closure around backend-specific MLX
         // and Candle loader arms. Ordered, comment-stripped fragments keep an unrelated helper or
         // comment from preserving this claim after the production request drops its sink.
-        "krea_2" | "sdxl" => source_has_ordered_fragments(
+        // Imported Krea builds its request in helper functions that sit ABOVE the per-item driver
+        // and generates through the memory-scoped seam rather than calling `model.generate`
+        // directly, so both the fragments and their order differ from the SDXL lane. The claim
+        // being proven is unchanged: the production request literal carries `preview`, that request
+        // is what actually generates, and the per-item driver is what supplies the live sink.
+        // The chain is required TWICE because this lane has two production request builders — the
+        // single-pass renderer and the multi-phase one — and a live preview that reaches only one
+        // of them is a half-wired sink. Demanding the pair also keeps the check fail-closed against
+        // a single removal, which a one-shot chain would survive by matching the other builder.
+        "krea_2" => source_has_ordered_fragments(
+            source,
+            &[
+                "let mut request = GenerationRequest {",
+                "preview,",
+                "generate_with_scope(",
+                "let mut request = GenerationRequest {",
+                "preview,",
+                "generate_with_scope(",
+                "drive_gen_items(tx, work, move |_index, (seed, prompt), preview, on_progress|",
+            ],
+        ),
+        "sdxl" => source_has_ordered_fragments(
             source,
             &[
                 "drive_gen_items(tx, work, move |_index, (seed, prompt), preview, on_progress|",
@@ -716,10 +742,24 @@ fn imported_family_rows(
     let mut rows = Vec::new();
     for family in crate::base_weights::IMPORT_SUPPORTED_FAMILIES {
         let synthetic_model_id = format!("sc18481_import_probe_{}", family.replace('-', "_"));
+        // The on-disk shape a real imported entry of this family records. Imported routing resolves
+        // its provider from (family, source, operation), so a probe without this field selects no
+        // route at all and would silently prove nothing about every family at once.
+        let source_shape = match *family {
+            "krea_2" => "transformer_file",
+            "sdxl" => "fused_checkpoint",
+            "mage-flow" => "transformer_directory",
+            other => {
+                return Err(format!(
+                    "unmapped imported probe source shape for {other:?}"
+                ))
+            }
+        };
         let mut entry = json!({
             "id": synthetic_model_id.clone(),
             "family": family,
             "type": "image",
+            "importSourceShape": source_shape,
             "modelPath": "/probe/imported-model.safetensors"
         })
         .as_object()
@@ -740,10 +780,31 @@ fn imported_family_rows(
                 backend_supports(&job, candle_facts)?,
                 gap_for(&model.id, "operation", operation),
             );
-            if support.mlx != Some(true) || support.candle != Some(true) {
-                return Err(format!(
-                    "supported imported family {family:?} default {operation:?} does not route on both native backends"
-                ));
+            // The expectation is DERIVED from each backend's engine facts, not asserted as "both".
+            // The two native engines genuinely declare different imported coverage — candle
+            // registers no `mage-flow` imported model, and no `krea_2` Pose provider — so demanding
+            // parity here asserted a declaration neither engine backs.
+            //
+            // This stays a real gate, and a two-sided one:
+            //   * declared but NOT routable  -> a lane the facts promise and the worker cannot reach
+            //   * routable but NOT declared  -> a lane reachable without any declaration behind it
+            // Both are failures. Only "declared and routable" or "undeclared and unroutable" pass.
+            for (backend, routable) in [("mlx", support.mlx), ("candle", support.candle)] {
+                let declared =
+                    super::catalog::imported_backend_declares_route(&job.payload, backend);
+                let routable = routable == Some(true);
+                if declared && !routable {
+                    return Err(format!(
+                        "imported family {family:?} default {operation:?} is DECLARED by the {backend} \
+                         engine facts but does not route on {backend}"
+                    ));
+                }
+                if routable && !declared {
+                    return Err(format!(
+                        "imported family {family:?} default {operation:?} routes on {backend} but no \
+                         {backend} engine fact declares that imported provider"
+                    ));
+                }
             }
             operation_and_mode.push(support);
         }
@@ -765,10 +826,37 @@ fn imported_family_rows(
                 backend_supports(&job, candle_facts)?,
                 gap_for(&model.id, "conditioning", shape),
             );
-            if support.mlx != Some(true) || support.candle != Some(true) {
-                return Err(format!(
-                    "supported imported family {family:?} default conditioning {shape:?} does not route on both native backends"
-                ));
+            // Same two-sided, facts-derived rule as the operation loop above, one level finer: the
+            // declaration here is the conditioning kind on the route the payload selects, so a
+            // backend whose facts omit `multi_reference` is expected NOT to route it.
+            let declared_kind = match shape {
+                "reference" => "reference",
+                "multiReference" => "multi_reference",
+                other => {
+                    return Err(format!(
+                        "unmapped imported conditioning probe shape {other:?}"
+                    ))
+                }
+            };
+            for (backend, routable) in [("mlx", support.mlx), ("candle", support.candle)] {
+                let declared =
+                    super::catalog::imported_backend_declared_route(&job.payload, backend)
+                        .is_some_and(|route| {
+                            route.conditioning.iter().any(|kind| kind == declared_kind)
+                        });
+                let routable = routable == Some(true);
+                if declared && !routable {
+                    return Err(format!(
+                        "imported family {family:?} conditioning {shape:?} is DECLARED by the \
+                         {backend} engine facts but does not route on {backend}"
+                    ));
+                }
+                if routable && !declared {
+                    return Err(format!(
+                        "imported family {family:?} conditioning {shape:?} routes on {backend} but \
+                         no {backend} engine fact declares that conditioning"
+                    ));
+                }
             }
             conditioning_shape.push(support);
         }
@@ -2060,8 +2148,10 @@ fn utility_model_cells(
     candle_facts: &RuntimeDescriptorFacts,
 ) -> Result<Vec<CapabilityCell>, String> {
     // PiD rows are decoder overlays loaded by their owning image model; they are not standalone
-    // person detectors (or any other independently routable utility job).
-    if model.id.starts_with("pid_") {
+    // person detectors (or any other independently routable utility job). `componentOnly` entries
+    // (sc-19708) declare the same shape in manifest data: an installable component bundle staged
+    // by owning lanes (the InstantID face stack), never a routable `model` of any job.
+    if model.id.starts_with("pid_") || model.component_only {
         return Ok(Vec::new());
     }
     let engine_request = match model.id.as_str() {
@@ -2248,12 +2338,57 @@ fn video_job_type(mode: &str) -> JobType {
     }
 }
 
+/// Stamp the optional asset carriers the API sends on EVERY request of this family, in the shape it
+/// sends them when the user supplied none: an `Option<String>` carrier serializes as an explicit
+/// `null` and a `Vec<String>` carrier as `[]` (`ImageJobRequest` / `VideoJobRequest` in
+/// `apps/rust-api/src/dto.rs` — neither field carries `skip_serializing_if`). Only keys the probe
+/// left ABSENT are filled, so a probe that populates a carrier keeps its own value.
+///
+/// sc-20530 batch item A. The probes used to spell only the carriers a mode needs and leave the rest
+/// missing, which is an encoding NO production request ever has. That gap is what let the sc-20525
+/// defect class hide: a gate that read `null` as "malformed" enforce-failed every real SANA
+/// text-to-image submission while this matrix — probing with the key absent — reported the cell
+/// supported. Probing in the production encoding is what makes the matrix able to see that class.
+fn stamp_absent_optional_carriers(job_type: &JobType, payload: &mut Map<String, Value>) {
+    let (scalars, plurals): (&[&str], &[&str]) = match job_type {
+        JobType::ImageGenerate | JobType::ImageEdit => (
+            &["sourceAssetId", "referenceAssetId", "maskAssetId"],
+            &["referenceAssetIds"],
+        ),
+        JobType::VideoGenerate
+        | JobType::VideoExtend
+        | JobType::VideoBridge
+        | JobType::PersonReplace => (
+            &[
+                "sourceAssetId",
+                "lastFrameAssetId",
+                "sourceClipAssetId",
+                "bridgeRightClipAssetId",
+                "referenceClipAssetId",
+            ],
+            &["referenceAssetIds", "sourceClipAssetIds"],
+        ),
+        // Every other probed job type has a required-carrier request shape (VQA/interleave/detail)
+        // or no asset carriers at all; nothing to normalize.
+        _ => (&[], &[]),
+    };
+    for key in scalars {
+        payload.entry((*key).to_owned()).or_insert(Value::Null);
+    }
+    for key in plurals {
+        payload
+            .entry((*key).to_owned())
+            .or_insert_with(|| Value::Array(Vec::new()));
+    }
+}
+
 fn probe_job(job_type: JobType, model: &str, payload: Value) -> Result<JobSnapshot, String> {
     let mut payload = payload
         .as_object()
         .cloned()
         .ok_or_else(|| "probe payload must be an object".to_owned())?;
     payload.insert("model".to_owned(), Value::String(model.to_owned()));
+    stamp_absent_optional_carriers(&job_type, &mut payload);
     validate_probe_structure(&job_type, &payload)?;
     Ok(JobSnapshot {
         id: "capability-matrix-probe".to_owned(),
@@ -3147,15 +3282,206 @@ mod tests {
 
     const CHECKED_IN: &str = include_str!("../../../../../config/backend-capabilities/matrix.json");
 
+    fn valid_capture_digest(value: &str) -> bool {
+        value.len() == 64
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    }
+
+    /// Compare the durable capability claim independently from capture-time source provenance.
+    ///
+    /// `sources` records which authoritative inputs were captured and their hashes when the
+    /// checked-in artifact was produced. A non-capability edit inside one of those whole-file
+    /// inputs legitimately changes its live hash without changing a capability cell (sc-19708:
+    /// the API jobs/lib and worker dispatch files are hashed inputs, and the model-source seam
+    /// edits them without moving a single cell). The key set and digest shape remain strict so
+    /// sources cannot disappear, appear unreviewed, or carry malformed provenance; every
+    /// semantic field remains exact.
+    fn checked_in_matrix_matches_live(
+        mut checked_in: BackendCapabilityMatrix,
+        mut live: BackendCapabilityMatrix,
+    ) -> Result<(), String> {
+        if checked_in.sources.keys().collect::<Vec<_>>() != live.sources.keys().collect::<Vec<_>>()
+        {
+            return Err("capability source key set drifted".to_owned());
+        }
+        for (origin, sources) in [("checked-in", &checked_in.sources), ("live", &live.sources)] {
+            for (name, digest) in sources {
+                if !valid_capture_digest(digest) {
+                    return Err(format!(
+                        "{origin} capability source {name:?} has an invalid capture digest"
+                    ));
+                }
+            }
+        }
+        checked_in.sources.clear();
+        live.sources.clear();
+        if checked_in != live {
+            return Err("capability semantics drifted".to_owned());
+        }
+        Ok(())
+    }
+
     #[test]
     fn checked_in_matrix_matches_all_authoritative_sources() {
         let expected: BackendCapabilityMatrix =
             serde_json::from_str(CHECKED_IN).expect("checked-in capability matrix parses");
         let actual = backend_capability_matrix().expect("capability matrix generates");
+        checked_in_matrix_matches_live(expected, actual).unwrap_or_else(|error| {
+            panic!(
+                "backend capability matrix drifted ({error}); run `{GENERATOR} > config/backend-capabilities/matrix.json` only for an intentional capability recapture"
+            )
+        });
+    }
+
+    #[test]
+    fn source_capture_digest_values_are_provenance_not_semantics() {
+        let checked_in: BackendCapabilityMatrix = serde_json::from_str(CHECKED_IN).unwrap();
+        let mut live = checked_in.clone();
+        let digest = live.sources.values_mut().next().unwrap();
+        *digest = "0".repeat(64);
+        assert!(checked_in_matrix_matches_live(checked_in, live).is_ok());
+    }
+
+    /// sc-20530 (adversarial review). `stamp_absent_optional_carriers` is the whole reason this
+    /// matrix can see the sc-20525 defect class — a gate that misreads the `null` the API stamps on
+    /// every unset optional carrier. It was completely unpinned when it landed: deleting the
+    /// function left every test in the crate green, because with sc-20525 merged no CELL value
+    /// moves. Cell drift therefore cannot witness it; the probe payload itself has to be asserted.
+    ///
+    /// The probe must carry the production encoding: an `Option<String>` carrier serializes as an
+    /// explicit `null` and a `Vec<String>` carrier as `[]` (`ImageJobRequest` / `VideoJobRequest`,
+    /// `apps/rust-api/src/dto.rs` — neither field carries `skip_serializing_if`).
+    #[test]
+    fn probes_carry_the_production_optional_carrier_encoding() {
+        let image = probe_job(
+            JobType::ImageGenerate,
+            "sana_1600m",
+            json!({ "mode": "text_to_image", "prompt": "p" }),
+        )
+        .expect("image probe is structurally valid");
+        for key in ["sourceAssetId", "referenceAssetId", "maskAssetId"] {
+            assert_eq!(
+                image.payload.get(key),
+                Some(&Value::Null),
+                "an image probe must stamp {key} as the explicit null production sends, not omit it"
+            );
+        }
         assert_eq!(
-            expected, actual,
-            "backend capability matrix drifted; run `{GENERATOR} > config/backend-capabilities/matrix.json`"
+            image.payload.get("referenceAssetIds"),
+            Some(&Value::Array(Vec::new())),
+            "the plural image carrier is a Vec<String>, so production sends [] not null"
         );
+
+        let video = probe_job(
+            JobType::VideoGenerate,
+            "wan_2_2",
+            json!({ "mode": "text_to_video", "prompt": "p" }),
+        )
+        .expect("video probe is structurally valid");
+        for key in [
+            "sourceAssetId",
+            "lastFrameAssetId",
+            "sourceClipAssetId",
+            "bridgeRightClipAssetId",
+            "referenceClipAssetId",
+        ] {
+            assert_eq!(
+                video.payload.get(key),
+                Some(&Value::Null),
+                "a video probe must stamp {key} as the explicit null production sends"
+            );
+        }
+        for key in ["referenceAssetIds", "sourceClipAssetIds"] {
+            assert_eq!(
+                video.payload.get(key),
+                Some(&Value::Array(Vec::new())),
+                "{key} is a Vec<String>, so production sends [] not null"
+            );
+        }
+
+        // A carrier the probe SUPPLIES is never overwritten — stamping is fill-the-absent only, or
+        // every conditioned probe in the matrix would silently degrade to an unconditioned one.
+        let edit = probe_job(
+            JobType::ImageEdit,
+            "sdxl",
+            json!({ "mode": "edit_image", "prompt": "p", "sourceAssetId": "asset_1" }),
+        )
+        .expect("edit probe is structurally valid");
+        assert_eq!(
+            edit.payload.get("sourceAssetId").and_then(Value::as_str),
+            Some("asset_1"),
+            "a probe-supplied carrier must survive the stamp"
+        );
+        assert_eq!(edit.payload.get("maskAssetId"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn source_capture_contract_rejects_key_and_digest_shape_mutations() {
+        let checked_in: BackendCapabilityMatrix = serde_json::from_str(CHECKED_IN).unwrap();
+        for mutation in ["missing", "extra", "empty", "short", "uppercase", "nonhex"] {
+            let mut live = checked_in.clone();
+            let first = live.sources.keys().next().unwrap().clone();
+            match mutation {
+                "missing" => {
+                    live.sources.remove(&first);
+                }
+                "extra" => {
+                    live.sources
+                        .insert("unreviewedSource".to_owned(), "0".repeat(64));
+                }
+                "empty" => {
+                    live.sources.insert(first, String::new());
+                }
+                "short" => {
+                    live.sources.insert(first, "0".repeat(63));
+                }
+                "uppercase" => {
+                    live.sources.insert(first, "A".repeat(64));
+                }
+                "nonhex" => {
+                    live.sources.insert(first, "g".repeat(64));
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                checked_in_matrix_matches_live(checked_in.clone(), live).is_err(),
+                "{mutation} source provenance must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn every_capability_semantic_field_remains_exact() {
+        let checked_in: BackendCapabilityMatrix = serde_json::from_str(CHECKED_IN).unwrap();
+        for mutation in [
+            "schema",
+            "generator",
+            "summary",
+            "model",
+            "imported-family",
+            "gpu-job",
+            "training-kernel",
+            "exception",
+        ] {
+            let mut live = checked_in.clone();
+            match mutation {
+                "schema" => live.schema_version += 1,
+                "generator" => live.generated_by.push_str(" --changed"),
+                "summary" => live.summary.cell_count += 1,
+                "model" => live.models[0].id.push_str("_changed"),
+                "imported-family" => live.imported_families[0].family.push_str("_changed"),
+                "gpu-job" => live.gpu_job_types[0].job_type.push_str("_changed"),
+                "training-kernel" => live.training_kernels[0].kernel.push_str("_changed"),
+                "exception" => live.exceptions[0].evidence.push_str(" changed"),
+                _ => unreachable!(),
+            }
+            assert!(
+                checked_in_matrix_matches_live(checked_in.clone(), live).is_err(),
+                "{mutation} capability semantics must fail closed"
+            );
+        }
     }
 
     #[test]
@@ -3447,15 +3773,26 @@ mod tests {
                 "imported {} UI-derived operation set drifted",
                 row.family
             );
+            // Per-backend, not parity. Candle's engine facts declare no `mage-flow` imported
+            // provider at all, so its cells are legitimately false there and MLX-only — which is
+            // exactly what a parity obligation records. Spelled out per family so a silent
+            // capability LOSS still flips a tuple and fails.
+            let candle_serves = row.family != "mage-flow";
             for cell in &row.operation_and_mode {
                 assert_eq!(
                     (cell.mlx, cell.candle),
-                    (Some(true), Some(true)),
-                    "imported {}/{} must traverse the live family route on both backends",
+                    (Some(true), Some(candle_serves)),
+                    "imported {}/{} must match the live per-backend family route",
                     row.family,
                     cell.capability
                 );
-                assert!(cell.parity_obligation.is_none());
+                assert_eq!(
+                    cell.parity_obligation.is_none(),
+                    candle_serves,
+                    "imported {}/{} must carry a parity obligation exactly when MLX serves it alone",
+                    row.family,
+                    cell.capability
+                );
             }
             let expected_conditioning = if row.family == "krea_2" {
                 &["multiReference", "reference"][..]
@@ -3487,8 +3824,9 @@ mod tests {
             assert!(row.guidance_method.is_empty());
             assert_eq!(
                 (row.preview.mlx, row.preview.candle),
-                (Some(true), Some(true)),
-                "imported {} preview must retain its production worker sink",
+                (Some(true), Some(candle_serves)),
+                "imported {} preview must retain its production worker sink on every backend that \
+                 serves the family",
                 row.family
             );
         }
@@ -3496,15 +3834,22 @@ mod tests {
 
     #[test]
     fn imported_preview_rows_fail_closed_when_the_production_sink_is_removed() {
-        for (family, source) in [
-            ("krea_2", WORKER_IMAGE_KREA_IMPORTED),
-            ("sdxl", WORKER_IMAGE_SDXL_IMPORTED),
+        // The indent is part of the fixture, not decoration: it is what pins the mutation to the
+        // real request literal instead of some similarly-worded block. Imported Krea builds its
+        // request inside a helper function (8 spaces); the SDXL lane builds it inline in the
+        // per-item closure (20). A mutation that silently fails to apply would make this test pass
+        // while proving nothing, which is why the "mutation must apply" assertion is here.
+        for (family, source, indent) in [
+            ("krea_2", WORKER_IMAGE_KREA_IMPORTED, "        "),
+            ("sdxl", WORKER_IMAGE_SDXL_IMPORTED, "                    "),
         ] {
             assert!(imported_preview_sink(family, source));
             let normalized = source.replace("\r\n", "\n");
             let without_request_sink = normalized.replacen(
-                "                    preview,\n                    cancel: cancel.clone(),\n                    ..Default::default()",
-                "                    cancel: cancel.clone(),\n                    ..Default::default()",
+                &format!(
+                    "{indent}preview,\n{indent}cancel: cancel.clone(),\n{indent}..Default::default()"
+                ),
+                &format!("{indent}cancel: cancel.clone(),\n{indent}..Default::default()"),
                 1,
             );
             assert_ne!(
@@ -3978,7 +4323,8 @@ mod tests {
 
         // LTX clip append/control routes require the IC-LoRA carried by the canonical probe. The
         // operation matrix must evaluate that complete runnable shape, not rebuild a bare payload
-        // that both production routers correctly reject.
+        // that both production routers correctly reject. SC-18902's failed exact-head CUDA render
+        // withdrew Eros from every Candle lane; the newer advanced routes must not restore it.
         for model_id in ["ltx_2_3", "ltx_2_3_eros"] {
             let row = matrix.models.iter().find(|row| row.id == model_id).unwrap();
             for mode in ["extend_clip", "video_bridge", "replace_person"] {
@@ -3989,10 +4335,12 @@ mod tests {
                     .unwrap_or_else(|| panic!("{model_id}/{mode} is represented"));
                 assert_eq!(
                     (cell.mlx, cell.candle),
-                    (Some(true), Some(true)),
-                    "{model_id}/{mode} uses the complete IC-LoRA probe on both backends"
+                    (Some(true), Some(model_id == "ltx_2_3")),
+                    "{model_id}/{mode} uses the complete IC-LoRA probe while honoring the Eros withdrawal"
                 );
-                assert!(cell.parity_obligation.is_none());
+                if model_id == "ltx_2_3" {
+                    assert!(cell.parity_obligation.is_none());
+                }
             }
         }
 
@@ -4403,7 +4751,7 @@ mod tests {
         validate_exceptions(&register).expect("approved exception register validates");
 
         assert_eq!(register.schema_version, 2);
-        assert_eq!(register.authorized_approvers.len(), 5);
+        assert_eq!(register.authorized_approvers.len(), 6);
         let authorized: BTreeSet<_> = register
             .authorized_approvers
             .iter()
@@ -4420,10 +4768,11 @@ mod tests {
                 // first time (75d66db5 is the first revision registering the MLX provider), and
                 // the same regeneration surfaced the two Qwen edit preview cells.
                 ("Michael Trefry", "epic-17137"),
+                ("Michael Trefry", "epic-18803"),
             ])
         );
 
-        assert_eq!(register.records.len(), 11);
+        assert_eq!(register.records.len(), 15);
         let expected_groups = BTreeMap::from([
             (("epic-9083", "precision"), 27usize),
             (("epic-8433", "operation"), 3usize),
@@ -4436,6 +4785,10 @@ mod tests {
             (("epic-17137", "conditioning"), 2usize),
             (("epic-17137", "precision"), 3usize),
             (("epic-17137", "adapter"), 2usize),
+            (("epic-18803", "operation"), 6usize),
+            (("epic-18803", "conditioning"), 4usize),
+            (("epic-18803", "adapter"), 2usize),
+            (("epic-18803", "precision"), 1usize),
         ]);
         let actual_groups: BTreeMap<_, _> = register
             .records
@@ -4447,7 +4800,8 @@ mod tests {
                 // epic-17137's, on a different day with its own citation — could not be recorded
                 // without editing the guard. What actually matters is that every record carries a
                 // well-formed date and cites a real approval, and that is what is asserted.
-                assert_eq!(record.decision_type, DecisionType::SequencingChoice);
+                // epic-18803's Eros Candle withdrawal is the one product decision in the register;
+                // its record-specific evidence citations are kept verbatim from that epic's guard.
                 assert_eq!(
                     record.approved_date.len(),
                     10,
@@ -4463,11 +4817,19 @@ mod tests {
                     "approvedDate must be YYYY-MM-DD: {}",
                     record.approved_date
                 );
-                assert!(record.evidence.contains("directly approved"));
-                assert!(
-                    record.evidence.contains("#activity-") || record.evidence.contains("epic-"),
-                    "evidence must cite the approval it records"
-                );
+                if record.authority == "epic-18803" {
+                    assert_eq!(record.decision_type, DecisionType::ProductDecision);
+                    assert!(record.evidence.contains("SC-18902"));
+                    assert!(record.evidence.contains("run 31766800005"));
+                    assert!(record.evidence.contains("artifact 9207109616"));
+                } else {
+                    assert_eq!(record.decision_type, DecisionType::SequencingChoice);
+                    assert!(record.evidence.contains("directly approved"));
+                    assert!(
+                        record.evidence.contains("#activity-") || record.evidence.contains("epic-"),
+                        "evidence must cite the approval it records"
+                    );
+                }
                 assert!(record.user_facing_behavior.contains("hidden or disabled"));
                 assert!(record.user_facing_behavior.contains("explanation"));
                 assert!(record.user_facing_behavior.contains("fail closed"));
@@ -4487,11 +4849,12 @@ mod tests {
             .iter()
             .flat_map(|record| record.cells.iter().cloned())
             .collect();
-        // 47 + epic-17137's 10 (MiniMax-H3 became visible to the matrix at pin 75d66db5). The set is compared against the
+        // 47 + epic-17137's 10 (MiniMax-H3 became visible to the matrix at pin 75d66db5) +
+        // epic-18803's 13 (the Eros Candle withdrawal). The set is compared against the
         // generated residual above, so this only pins that no cell is approved TWICE.
         assert_eq!(
             exception_paths.len(),
-            57,
+            70,
             "every approved cell appears once"
         );
         assert_eq!(
@@ -4505,8 +4868,9 @@ mod tests {
         );
 
         let matrix = backend_capability_matrix().expect("capability matrix generates");
-        // 7 + epic-17137's 4 MiniMax-H3 records (operation/conditioning/precision/adapter).
-        assert_eq!(matrix.summary.exception_count, 11);
+        // 7 + epic-17137's 4 MiniMax-H3 records (operation/conditioning/precision/adapter)
+        // + epic-18803's 4 Eros Candle withdrawal records.
+        assert_eq!(matrix.summary.exception_count, 15);
         let mut residual_paths = BTreeSet::new();
         for model in &matrix.models {
             for (axis, cells) in [
@@ -4762,12 +5126,19 @@ mod tests {
         let mlx = runtime_facts(MLX_RUNTIME_FACTS, "mlx").unwrap();
         let candle = runtime_facts(CANDLE_RUNTIME_FACTS, "candle").unwrap();
         for original in [&mlx, &candle] {
+            let mut routed_mappings = 0;
             for index in 0..original.video_model_mappings.len() {
                 let mapping = &original.video_model_mappings[index];
                 let job =
                     super::super::canonical_video_route_probe(&mapping.model_id, &mapping.mode)
                         .unwrap();
-                assert!(backend_supports(&job, original).unwrap());
+                // Runtime descriptors can retain a provider that product routing intentionally
+                // rejects (Eros/Candle after SC-18902). Only a mapping that participates in a live
+                // route is a valid subject for this deletion mutation.
+                if !backend_supports(&job, original).unwrap() {
+                    continue;
+                }
+                routed_mappings += 1;
                 let mut mutated = original.clone();
                 mutated.video_model_mappings.remove(index);
                 assert!(routed_cell(
@@ -4789,6 +5160,11 @@ mod tests {
                 )
                 .is_err());
             }
+            assert!(
+                routed_mappings > 0,
+                "{} must exercise at least one routed video mapping",
+                original.snapshot.backend
+            );
         }
     }
 

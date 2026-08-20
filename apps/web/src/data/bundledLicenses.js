@@ -22,6 +22,7 @@ import wanI2vA14bApache from "../../../desktop/licenses/wan2.2-i2v-a14b/Apache-2
 import wanT2vA14bApache from "../../../desktop/licenses/wan2.2-t2v-a14b/Apache-2.0.txt?raw";
 import ltxLicense from "../../../desktop/licenses/ltx-2.3/LTX-2-Community-License.txt?raw";
 import ltxGemma from "../../../desktop/licenses/ltx-2.3/Gemma-Terms.txt?raw";
+import ltx23IcLorasNotice from "../../../desktop/licenses/ltx-2.3-ic-loras/NOTICE.txt?raw";
 // Audio model weights (epic 13400, sc-13402). All permissive (Apache-2.0 / MIT) —
 // downloaded on first use from the upstream Hugging Face repos and run natively
 // (Candle) on every platform.
@@ -96,6 +97,7 @@ import kreaRealtimeApache20 from "../../../desktop/licenses/krea-realtime/Apache
 import minimaxH3Notice from "../../../desktop/licenses/minimax-h3/NOTICE.txt?raw";
 import minimaxH3CommunityLicense from "../../../desktop/licenses/minimax-h3/MiniMax-H3-Community-License.txt?raw";
 import minimaxH3QwenApache20 from "../../../desktop/licenses/minimax-h3/Apache-2.0.txt?raw";
+import wan21VaeApache20 from "../../../desktop/licenses/wan2_1_t2v_14b_diffusers/Apache-2.0.txt?raw";
 import scail2MIT from "../../../desktop/licenses/scail2/MIT.txt?raw";
 import svdStableVideoDiffusionCommunityLicense from "../../../desktop/licenses/svd/Stable-Video-Diffusion-Community-License.txt?raw";
 import wan22VaceFunApache20 from "../../../desktop/licenses/wan2.2-vace-fun/Apache-2.0.txt?raw";
@@ -112,6 +114,11 @@ import seedvr2Apache20 from "../../../desktop/licenses/seedvr2/Apache-2.0.txt?ra
 // "Copyright 2018-2020 Open-MMLab. All rights reserved." notice, which is the attribution that has
 // to travel with the two ONNX graphs SceneWorks re-hosts at SceneWorks/dwpose-onnx.
 import dwposeApache20 from "../../../desktop/licenses/dwpose/Apache-2.0.txt?raw";
+// InsightFace SCRFD + ArcFace weights (sc-19708): upstream publishes NO standalone weights
+// license — the governing terms live in the project README, so the notice reproduces those
+// statements VERBATIM (code MIT; models trained on InsightFace's annotated data are for
+// non-commercial research purposes only). Not a generic license template on purpose.
+import insightfaceModelNotice from "../../../desktop/licenses/insightface/InsightFace-Model-License-Notice.txt?raw";
 // Production third-party source/data compiled into the inference runtimes (sc-14403).
 import cephesBsd3Clause from "../../../desktop/licenses/cephes/BSD-3-Clause.txt?raw";
 import mageMit from "../../../desktop/licenses/mage/MIT.txt?raw";
@@ -135,6 +142,7 @@ const DOCUMENT_TEXT = {
   "wan2.2-t2v-a14b-apache": wanT2vA14bApache,
   "ltx-2.3-license": ltxLicense,
   "ltx-2.3-gemma": ltxGemma,
+  "ltx-2.3-ic-loras-notice": ltx23IcLorasNotice,
   "kokoro-82m-apache": kokoroApache,
   "moss-soundeffect-v2-apache": mossApache,
   "acestep-v15-turbo-mit": acestepMit,
@@ -178,6 +186,7 @@ const DOCUMENT_TEXT = {
   "minimax-h3-notice": minimaxH3Notice,
   "minimax-h3-community-license": minimaxH3CommunityLicense,
   "minimax-h3-qwen-apache": minimaxH3QwenApache20,
+  "wan2.1-vae-alternate-apache": wan21VaeApache20,
   "scail2-mit": scail2MIT,
   "svd-stable-video-diffusion-community-license": svdStableVideoDiffusionCommunityLicense,
   "wan2.2-vace-fun-apache": wan22VaceFunApache20,
@@ -191,6 +200,7 @@ const DOCUMENT_TEXT = {
   "qwen3-vl-caption-apache": qwen3VlCaptionApache20,
   "seedvr2-apache": seedvr2Apache20,
   "dwpose-apache": dwposeApache20,
+  "insightface-model-notice": insightfaceModelNotice,
   "cephes-bsd-3-clause": cephesBsd3Clause,
   "mage-mit": mageMit,
   "cmudict-bsd-2-clause": cmudictBsd2Clause,

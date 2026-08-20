@@ -8,6 +8,9 @@ publish = false
 [dependencies]
 directories = "5"
 fs2 = "0.4"
+# sc-19708: exact-file requirement selection matches receipt files against the manifest's
+# declared download patterns with the same glob semantics the API install path uses.
+glob = "0.3"
 getrandom = "0.3"
 parking_lot = "0.12"
 rusqlite = { version = "0.32", features = ["bundled", "functions"] }
@@ -40,12 +43,19 @@ tracing-subscriber = { workspace = true }
 trash = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
+# Safe NtCreateFile-backed relative operations prevent Windows junction/reparse TOCTOU escapes.
+fs_at = "0.2.1"
+# Deletes children through already-open Windows handles rather than a racy recursive path walk.
+remove_dir_all = "=0.8.4"
 # Safe wrapper around GetFileInformationByHandle. The recent-project registry
 # cache uses volume + file index to distinguish atomic replacement.
 winapi-util = "0.1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+# Descriptor-relative filesystem operations keep resolved-cache staging publication and cleanup
+# confined even when a managed path is concurrently replaced.
+rustix = { version = "1", features = ["fs"] }
 
 [dev-dependencies]
 tempfile = "3.13"

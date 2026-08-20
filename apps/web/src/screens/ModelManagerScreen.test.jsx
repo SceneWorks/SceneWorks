@@ -1826,18 +1826,37 @@ describe("ModelManagerScreen convert-at-install Update button", () => {
     await selectTab(container, "Video Models"); // convertModel is a video model
     const updateButton = mlxButtons().find((button) => button.textContent === "Update");
     expect(updateButton).toBeTruthy();
-    // The stale converted state does NOT also render the disabled "MLX ready" button.
-    expect(mlxButtons().some((button) => button.textContent === "MLX ready")).toBe(false);
+    // The stale converted state does NOT also render the disabled "Converted" button.
+    expect(mlxButtons().some((button) => button.textContent === "Converted")).toBe(false);
     await click(updateButton);
     expect(createModelDownloadJob).toHaveBeenCalledWith(expect.objectContaining({ id: "ltx_2_3_eros" }));
   });
 
-  it("shows the normal MLX-ready state (no Update button) when up to date", async () => {
+  it("shows the normal converted state (no Update button) when up to date", async () => {
     await render([convertModel({ updateAvailable: false })]);
     await selectTab(container, "Video Models"); // convertModel is a video model
     expect(mlxButtons().some((button) => button.textContent === "Update")).toBe(false);
-    expect(mlxButtons().some((button) => button.textContent === "MLX ready")).toBe(true);
+    expect(mlxButtons().some((button) => button.textContent === "Converted")).toBe(true);
     expect(createModelDownloadJob).not.toHaveBeenCalled();
+  });
+
+  // sc-20529: the conversion block is no longer macOS-only. `apply_mac_and_mlx_fields` emits
+  // `mlxConversionState` on Windows/Linux for a convert-at-install model whose converter has a real
+  // candle twin (`flux2_klein_9b_true_v2`), where the candle converter writes a diffusers dir for
+  // CUDA — so every string this block renders must name the ACTION, not the macOS backend.
+  // Mutation witness: restore any of "Convert to MLX" / "MLX ready" / "convert it to MLX" /
+  // "Converted to MLX and ready." / the "MLX" badge and this goes red.
+  it("keeps the conversion block's copy device-neutral", async () => {
+    for (const state of ["ready", "needs_source", "needs_conversion", "converted"]) {
+      await render([convertModel({ mlxConversionState: state, updateAvailable: false })]);
+      await selectTab(container, "Video Models"); // convertModel is a video model
+      const block = container.querySelector(".mlx-status");
+      expect(block, `${state}: the conversion block must render`).toBeTruthy();
+      expect(
+        block.textContent.includes("MLX"),
+        `${state}: conversion copy must not name MLX — this block renders on Windows/Linux too (got ${JSON.stringify(block.textContent)})`,
+      ).toBe(false);
+    }
   });
 
   it("shows and runs the update action for a usable stale non-converted model", async () => {
@@ -1930,6 +1949,7 @@ describe("ModelManagerScreen model & LoRA delete confirms (sc-12068)", () => {
     name: "Z-Image-Turbo",
     type: "image",
     family: "z-image",
+    catalogScope: "builtin",
     capabilities: ["text_to_image"],
     installState: "installed",
     removable: true,
@@ -1937,6 +1957,32 @@ describe("ModelManagerScreen model & LoRA delete confirms (sc-12068)", () => {
 
   const modelDeleteButton = () =>
     [...container.querySelectorAll(".model-card .danger-action")].find((button) => button.textContent === "Delete");
+
+  it("renders complete and partial cleanup tombstones as delete-only cards", async () => {
+    for (const [installState, cacheState] of [
+      ["installed", "complete"],
+      ["missing", "incomplete"],
+    ]) {
+      await render({
+        models: [{
+          id: "ltx_2_3_eros",
+          name: "LTX-2.3 10Eros",
+          type: "video",
+          family: "ltx-video",
+          installState,
+          cacheState,
+          platformCleanupOnly: true,
+          downloadable: false,
+          removable: true,
+        }],
+      });
+      await selectTab(container, "Video Models");
+      const card = container.querySelector(".model-card");
+      expect(card?.textContent).toContain("no longer available on this platform");
+      expect(modelDeleteButton()).toBeTruthy();
+      expect([...card.querySelectorAll("button")].map((button) => button.textContent)).toEqual(["Delete"]);
+    }
+  });
 
   it("confirms a model delete via appConfirm (danger) and removes it when accepted", async () => {
     appConfirmMock.mockReset();
@@ -1949,7 +1995,13 @@ describe("ModelManagerScreen model & LoRA delete confirms (sc-12068)", () => {
     await flushConfirm();
 
     expect(appConfirmMock).toHaveBeenCalledWith(
-      expect.objectContaining({ title: "Delete model?", tone: "danger" }),
+      expect.objectContaining({
+        title: "Delete model?",
+        tone: "danger",
+        message: expect.stringContaining(
+          "Deleting removes a user overlay or SceneWorks-owned local files when present",
+        ),
+      }),
     );
     expect(deleteModel).toHaveBeenCalledWith(expect.objectContaining({ id: "z_image_turbo" }));
   });

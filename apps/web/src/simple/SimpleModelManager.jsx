@@ -65,7 +65,7 @@ export function SimpleModelManager() {
         id: lora.id,
         name: lora.name ?? lora.id,
         meta: [sizeLabel(lora), lora.baseModel ?? lora.family].filter(Boolean).join(" · "),
-        installed: lora.installState === "installed",
+        manageOnly: lora.installState === "installed",
         entry: lora,
         kind: "lora",
       }));
@@ -80,7 +80,7 @@ export function SimpleModelManager() {
         id: model.id,
         name: model.name ?? model.id,
         meta: [sizeLabel(model), needsLabel(model, tierOptions)].filter(Boolean).join(" · "),
-        installed: model.installState === "installed",
+        manageOnly: model.installState === "installed" || model.platformCleanupOnly === true,
         entry: model,
         kind: "model",
       }));
@@ -159,7 +159,7 @@ export function SimpleModelManager() {
                 <span className="su-row-title">{row.name}</span>
                 <span className="su-row-meta">{row.meta || "—"}</span>
               </span>
-              {row.installed ? (
+              {row.manageOnly ? (
                 <button
                   className="su-row-action"
                   onClick={() => openInAdvanced("Models")}

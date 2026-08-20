@@ -49,6 +49,10 @@ fn video_job(job_type: &str, payload: Value) -> JobSnapshot {
     .expect("valid video job")
 }
 
+fn person_replace_job(payload: Value) -> JobSnapshot {
+    video_job("person_replace", payload)
+}
+
 fn mlx_worker() -> WorkerSnapshot {
     serde_json::from_value(json!({
         "id": "worker_mlx",
@@ -70,6 +74,7 @@ fn imported_krea_family_plain_single_file_job_is_mlx_eligible() {
         "prompt": "a red fox",
         "modelManifestEntry": {
             "family": "krea_2",
+            "importSourceShape": "transformer_file",
             "paths": { "model": "/app/models/imports/kreamania_variant4" }
         }
     });
@@ -100,6 +105,7 @@ fn imported_krea_family_plain_single_file_job_is_mlx_eligible() {
     // claim-eligible via the family fallback.
     let entry = json!({
         "family": "krea_2",
+        "importSourceShape": "transformer_file",
         "paths": { "model": "/app/models/imports/kreamania_variant4" }
     });
     for (label, extra) in [
@@ -108,6 +114,17 @@ fn imported_krea_family_plain_single_file_job_is_mlx_eligible() {
         (
             "edit",
             json!({ "mode": "edit_image", "sourceAssetId": "source_1" }),
+        ),
+        (
+            "multi-reference edit",
+            json!({ "mode": "edit_image", "referenceAssetIds": ["scene_1", "person_1"] }),
+        ),
+        (
+            "multi-phase",
+            json!({
+                "loras": [{ "id": "adapter_1" }],
+                "advanced": { "phases": [{ "steps": 4, "loras": [{ "index": 0, "weight": 0.8 }] }] }
+            }),
         ),
     ] {
         let mut payload = json!({ "model": "kreamania_variant4", "prompt": "a red fox" });
@@ -133,9 +150,67 @@ fn imported_krea_family_plain_single_file_job_is_mlx_eligible() {
         "advanced": { "poses": [{ "id": "pose_1" }] },
         "modelManifestEntry": {
             "family": "krea_2",
+            "importSourceShape": "transformer_file",
             "paths": { "model": "/app/models/imports/kreamania_variant4" }
         }
     }))));
+    assert!(!image_job_is_mlx_eligible(&image_generate_job(json!({
+        "model": "kreamania_variant4",
+        "advanced": {
+            "poses": [{ "id": "pose_1" }],
+            "controlMode": "canny"
+        },
+        "modelManifestEntry": {
+            "family": "krea_2",
+            "importSourceShape": "transformer_file",
+            "paths": { "model": "/app/models/imports/kreamania_variant4" }
+        }
+    }))));
+    // A control map/mode is material intent, never a hint from which to invent Pose. Without a
+    // non-empty pose set it must not flatten into the Generate operation; with the exact registered
+    // Krea Pose shape it remains admitted so the worker can consume `controlImage` verbatim.
+    for advanced in [
+        json!({ "controlImage": "control_1" }),
+        json!({ "controlMode": "pose" }),
+        json!({ "controlMode": " canny " }),
+    ] {
+        assert!(!image_job_is_mlx_eligible(&image_generate_job(json!({
+            "model": "kreamania_variant4",
+            "advanced": advanced,
+            "modelManifestEntry": {
+                "family": "krea_2",
+                "importSourceShape": "transformer_file",
+                "paths": { "model": "/app/models/imports/kreamania_variant4" }
+            }
+        }))));
+    }
+    assert!(image_job_is_mlx_eligible(&image_generate_job(json!({
+        "model": "kreamania_variant4",
+        "advanced": {
+            "poses": [{ "id": "pose_1" }],
+            "controlImage": "control_1",
+            "controlMode": "pose"
+        },
+        "modelManifestEntry": {
+            "family": "krea_2",
+            "importSourceShape": "transformer_file",
+            "paths": { "model": "/app/models/imports/kreamania_variant4" }
+        }
+    }))));
+    for advanced in [
+        json!({ "controlImage": null }),
+        json!({ "controlMode": "  " }),
+    ] {
+        assert!(image_job_is_mlx_eligible(&image_generate_job(json!({
+            "model": "kreamania_variant4",
+            "advanced": advanced,
+            "modelManifestEntry": {
+                "family": "krea_2",
+                "importSourceShape": "transformer_file",
+                "paths": { "model": "/app/models/imports/kreamania_variant4" }
+            }
+        }))));
+    }
     // A shape the pose render loop would silently drop (the plural edit reference set) and a
     // manifest entry with no installed path stay ineligible.
     assert!(!image_job_is_mlx_eligible(&image_generate_job(json!({
@@ -144,12 +219,24 @@ fn imported_krea_family_plain_single_file_job_is_mlx_eligible() {
         "advanced": { "poses": [{ "id": "pose_1" }] },
         "modelManifestEntry": {
             "family": "krea_2",
+            "importSourceShape": "transformer_file",
             "paths": { "model": "/app/models/imports/kreamania_variant4" }
         }
     }))));
     assert!(!image_job_is_mlx_eligible(&image_generate_job(json!({
         "model": "kreamania_variant4",
-        "modelManifestEntry": { "family": "krea_2" }
+        "modelManifestEntry": {
+            "family": "krea_2",
+            "importSourceShape": "transformer_file"
+        }
+    }))));
+    assert!(!image_job_is_mlx_eligible(&image_generate_job(json!({
+        "model": "kreamania_variant4",
+        "modelManifestEntry": {
+            "family": "krea_2",
+            "importSourceShape": "fused_checkpoint",
+            "paths": { "model": "/app/models/imports/kreamania_variant4" }
+        }
     }))));
 }
 
@@ -189,6 +276,15 @@ fn sana_variants_accept_single_reference_img2img_and_reject_malformed_shapes() {
         ));
         for empty_carriers in [
             json!({ "controls": [], "controlnets": [], "referenceAssetIds": [] }),
+            // sc-19712 F-1: the API normalizes every unset optional asset carrier to an explicit
+            // `null` before storing the job, so this is the shape EVERY real SANA text-to-image
+            // submission arrives in. Reading it as "not a valid reference" made the job
+            // unclaimable by any MLX worker.
+            json!({ "referenceAssetId": null, "prompt": "p" }),
+            // sc-20525: a BLANK id is the same "not supplied" encoding — the worker already treats
+            // it as absent, and the Candle twin routes it to plain txt2img. Failing it closed here
+            // only made the same payload unclaimable on Mac.
+            json!({ "referenceAssetId": " ", "prompt": "p" }),
             json!({
                 "referenceAssetId": "reference-1",
                 "controls": null,
@@ -220,7 +316,8 @@ fn sana_variants_accept_single_reference_img2img_and_reject_malformed_shapes() {
             json!({ "mode": "edit_image", "sourceAssetId": "source-1" }),
             json!({ "referenceAssetIds": ["reference-1"] }),
             json!({ "referenceAssetId": 7 }),
-            json!({ "referenceAssetId": " " }),
+            json!({ "referenceAssetId": { "id": "reference-1" } }),
+            json!({ "referenceAssetId": ["reference-1"] }),
             json!({ "referenceAssetId": "reference-1", "sourceAssetId": "source-1" }),
             json!({ "referenceAssetId": "reference-1", "maskAssetId": "mask-1" }),
             json!({ "referenceAssetId": "reference-1", "loras": [{ "id": "lora-1" }] }),
@@ -882,10 +979,10 @@ fn wan5_mlx_routing_requires_an_exact_source_shape_for_each_base_mode() {
 #[test]
 fn video_mode_eligibility_admits_flf_only_on_flf_capable_engines() {
     // image_to_video is MLX on every routed model EXCEPT Bernini (text_to_video only — its
-    // renderer is Wan2.2-T2V, no still-image-to-video), SCAIL-2 (animate_character only) and
-    // Mochi (text_to_video only — `conditioning: []` on both descriptors, sc-11991);
-    // text_to_video on every routed model EXCEPT SVD (image-conditioned only, sc-3523) and
-    // SCAIL-2 (animate_character only — sc-5448).
+    // renderer is Wan2.2-T2V, no still-image-to-video), SCAIL-2 (animation/person replacement —
+    // sc-5448/sc-5452) and Mochi (text_to_video only — `conditioning: []` on both descriptors,
+    // sc-11991); text_to_video on every routed model EXCEPT SVD (image-conditioned only, sc-3523)
+    // and SCAIL-2.
     // The models with their OWN arm, which the two generic-arm assertions below must exclude:
     // bernini / scail2_14b / mochi_1 (as above), `wan_2_2_vace_fun_14b` (replace_person ONLY — the
     // dual-expert control checkpoint, sc-3458) and `minimax_h3_ref` (reference_to_video ONLY — the
@@ -894,8 +991,8 @@ fn video_mode_eligibility_admits_flf_only_on_flf_capable_engines() {
     //
     // The Wan A14B t2v/i2v split is the other exclusion, and it came from main rather than from this
     // epic: `wan_2_2_t2v_14b` is text-to-video only and `wan_2_2_i2v_14b` is image-to-video only, so
-    // each is excluded from exactly the mode the other serves. Both sets of exclusions are true at
-    // once, so the lists below are the UNION of the two sides of the sc-17137 sync merge — taking
+    // each is excluded from exactly the mode the other serves. All of these exclusions are true at
+    // once, so the lists below are the UNION of the two sides of the sc-17137 sync merges — taking
     // either side alone would have dropped the other's arm and reported a false capability.
     for model in VIDEO_MLX_ROUTED_MODELS {
         assert_eq!(
@@ -1128,6 +1225,70 @@ fn video_mode_eligibility_admits_flf_only_on_flf_capable_engines() {
     }
     // Unknown modes are never eligible.
     assert!(!video_mode_is_mlx_eligible("ltx_2_3", "nonsense"));
+}
+
+/// SC-18826 closes both halves of the VACE-Fun routing gap: catalog membership and the exact
+/// mode-level claim. The dedicated engine implements only person replacement, so accepting a base
+/// video mode is just as wrong as rejecting `PersonReplace`.
+#[test]
+fn wan_vace_fun_is_mlx_routed_and_serves_only_replace_person() {
+    const MODEL: &str = "wan_2_2_vace_fun_14b";
+    assert!(
+        VIDEO_MLX_ROUTED_MODELS.contains(&MODEL),
+        "the real VACE-Fun MLX engine must be reachable from the scheduler"
+    );
+    assert!(video_mode_is_mlx_eligible(MODEL, "replace_person"));
+    for mode in [
+        "text_to_video",
+        "image_to_video",
+        "first_last_frame",
+        "extend_clip",
+        "video_bridge",
+        "animate_character",
+        "video_to_video",
+        "reference_to_video",
+        "reference_video_to_video",
+        "multi_video_to_video",
+        "ads2v",
+        "nonsense",
+    ] {
+        assert!(
+            !video_mode_is_mlx_eligible(MODEL, mode),
+            "VACE-Fun has no {mode} engine path"
+        );
+    }
+
+    // Advanced job types derive their mode from the type, not from a possibly absent/stale payload
+    // field. This is the scheduler boundary that was still rejecting the real engine after the
+    // VIDEO_MODEL_CAPS row was added.
+    assert!(video_job_is_mlx_eligible(&person_replace_job(json!({
+        "model": MODEL,
+        "mode": "text_to_video",
+    }))));
+
+    let support = model_mac_support(MODEL, "video", None);
+    assert!(support.supported, "VACE-Fun must be visible on Mac");
+    assert!(support.reason.is_none());
+    for (mode, expected) in [
+        ("replace_person", true),
+        ("text_to_video", false),
+        ("image_to_video", false),
+        ("first_last_frame", false),
+        ("extend_clip", false),
+        ("video_bridge", false),
+        ("animate_character", false),
+        ("video_to_video", false),
+        ("reference_to_video", false),
+        ("reference_video_to_video", false),
+        ("multi_video_to_video", false),
+        ("ads2v", false),
+    ] {
+        assert_eq!(
+            support.features.video_modes.get(mode),
+            Some(&expected),
+            "Mac support mode {mode} must match the dedicated VACE-Fun surface"
+        );
+    }
 }
 
 /// sc-8444 (epic 8431) — Krea Realtime 14B is MLX-ROUTED and serves exactly the three modes its

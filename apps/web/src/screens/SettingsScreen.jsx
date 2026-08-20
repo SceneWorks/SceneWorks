@@ -17,6 +17,19 @@ import {
   writeDefaultGenerationQuality,
 } from "../generationQuality.js";
 import { writeClipboardText } from "../clipboard.js";
+import { appConfirm } from "../appConfirm.jsx";
+import { formatBytes } from "../formatting.js";
+import {
+  bytesToGib,
+  daysToSeconds,
+  describeDisableConsequence,
+  describeLimitConsequence,
+  fetchModelCache,
+  gibToBytes,
+  policyNeedsRestart,
+  secondsToDays,
+} from "../modelCache.js";
+import { useCacheConvergence } from "../hooks/useCacheConvergence.js";
 import { WorkPanel } from "../components/WorkPanel.jsx";
 import { Icon } from "../components/Icons.jsx";
 import { ModeTabs } from "../components/generationStudio.jsx";
@@ -114,6 +127,17 @@ export function SettingsScreen({
   // q8 by default.
   const [defaultQuality, setDefaultQuality] = useState(readDefaultGenerationQuality);
   const defaultQualityRequest = useRef(0);
+  // Resolved-model hot cache (epic 19703, sc-19711). `cache` is the API's authoritative snapshot:
+  // the policy the RUNNING sidecars captured at spawn, plus the store's own usage accounting.
+  // Fetched on mount, re-fetched after any action that could have changed it, and re-read on a
+  // bounded cadence ONLY while the store still has an entry in flight — so the storage totals
+  // converge while a promotion runs, and a settled cache is still read exactly once. A timer that
+  // ran unconditionally would put back the per-row read cost sc-19708 removed from the catalog.
+  const [cache, setCache] = useState(null);
+  const [cacheError, setCacheError] = useState("");
+  // Draft limit/interval so typing doesn't fire a save per keystroke; committed on blur / Apply.
+  const [cacheLimitGb, setCacheLimitGb] = useState("");
+  const [cacheDays, setCacheDays] = useState("");
 
   const refresh = useCallback(async () => {
     try {
@@ -147,6 +171,44 @@ export function SettingsScreen({
   useEffect(() => {
     if (settings) setGpuLimitPercent(fractionToPercent(settings.gpuMemoryLimitFraction));
   }, [settings]);
+
+  const refreshCache = useCallback(async () => {
+    try {
+      const snapshot = await fetchModelCache();
+      setCache(snapshot);
+      setCacheError("");
+      return snapshot;
+    } catch (error) {
+      // Report the failure rather than rendering a reassuring empty cache.
+      setCache(null);
+      setCacheError(String(error?.message ?? error));
+      return null;
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshCache();
+  }, [refreshCache]);
+
+  // Bounded convergence refresh — the same one the Model Manager runs, so the two surfaces cannot
+  // disagree about when the app stops polling. It re-reads only while an entry is still moving.
+  useCacheConvergence(cache, refreshCache);
+
+  // The persisted (shell-owned) policy seeds the editable fields. On a non-desktop deployment
+  // there is no shell to ask, so the running policy is both what is persisted and what applies.
+  const persistedPolicy = isDesktop ? (settings?.resolvedCache ?? null) : (cache?.policy ?? null);
+  // Re-seed only when the persisted VALUES change, never on the containing object's identity:
+  // `settings` is a fresh object after every `get_app_settings`, so depending on the policy object
+  // would clobber whatever the user is mid-way through typing on each refresh. The primitives are
+  // lifted into their own bindings so that intent survives `react-hooks/exhaustive-deps` instead
+  // of being expressed as a dependency list the rule can't verify.
+  const persistedMaxBytes = persistedPolicy?.maxBytes;
+  const persistedInactivitySeconds = persistedPolicy?.inactivitySeconds;
+  useEffect(() => {
+    if (persistedMaxBytes === undefined || persistedInactivitySeconds === undefined) return;
+    setCacheLimitGb(String(Math.round(bytesToGib(persistedMaxBytes))));
+    setCacheDays(String(Math.round(secondsToDays(persistedInactivitySeconds))));
+  }, [persistedMaxBytes, persistedInactivitySeconds]);
 
   // Poll live MLX memory telemetry while the GPU card is visible (epic 7819, sc-7825). macOS-only —
   // the worker only publishes the snapshot on the MLX path; elsewhere the command returns null.
@@ -290,6 +352,85 @@ export function SettingsScreen({
     }
   }
 
+  // Persist a resolved-cache policy through the shell (the durable copy the sidecars read at
+  // spawn). Every caller passes a COMPLETE policy so a partial write can never leave the store
+  // running under a half-applied rule. The status line says "after a restart" because that is
+  // literally when it takes effect — the three sidecar processes captured their policy at spawn.
+  async function commitCachePolicy(policy, message) {
+    try {
+      const updated = await invoke("set_resolved_cache_policy", { policy });
+      setSettings(updated);
+      await refreshCache();
+      setStatus(message);
+    } catch (error) {
+      setStatus(String(error));
+    }
+  }
+
+  // Turning the cache OFF is not destructive and does not sweep. Say what actually happens to the
+  // copies already on disk before committing, so nobody discovers it afterwards.
+  async function changeCacheEnabled(enabled) {
+    if (!persistedPolicy) return;
+    if (!enabled) {
+      const proceed = await appConfirm({
+        title: "Stop keeping local copies?",
+        message: describeDisableConsequence(cache),
+        confirmLabel: "Turn off",
+      });
+      if (!proceed) return;
+    }
+    await commitCachePolicy(
+      { ...persistedPolicy, enabled },
+      enabled
+        ? "Local model copies enabled — takes effect after a restart."
+        : "Local model copies disabled — takes effect after a restart. Existing copies stay on disk.",
+    );
+  }
+
+  // Lowering the limit below current usage schedules future cleanup; it never sweeps here. The
+  // confirm spells out how much can actually be reclaimed and how much is kept.
+  async function commitCacheLimit() {
+    if (!persistedPolicy) return;
+    const nextMaxBytes = gibToBytes(cacheLimitGb);
+    if (nextMaxBytes <= 0) {
+      setStatus("The size limit must be at least 1 GiB.");
+      setCacheLimitGb(String(Math.round(bytesToGib(persistedPolicy.maxBytes))));
+      return;
+    }
+    if (nextMaxBytes === Number(persistedPolicy.maxBytes)) return;
+    const consequence = describeLimitConsequence(cache, nextMaxBytes);
+    if (consequence) {
+      const proceed = await appConfirm({
+        title: "Lower the local copy limit?",
+        message: consequence,
+        confirmLabel: "Set limit",
+      });
+      if (!proceed) {
+        setCacheLimitGb(String(Math.round(bytesToGib(persistedPolicy.maxBytes))));
+        return;
+      }
+    }
+    await commitCachePolicy(
+      { ...persistedPolicy, maxBytes: nextMaxBytes },
+      `Local copy limit set to ${formatBytes(nextMaxBytes)} — takes effect after a restart.`,
+    );
+  }
+
+  async function commitCacheInterval() {
+    if (!persistedPolicy) return;
+    const nextSeconds = daysToSeconds(cacheDays);
+    if (nextSeconds <= 0) {
+      setStatus("The unused-for interval must be at least one day.");
+      setCacheDays(String(Math.round(secondsToDays(persistedPolicy.inactivitySeconds))));
+      return;
+    }
+    if (nextSeconds === Number(persistedPolicy.inactivitySeconds)) return;
+    await commitCachePolicy(
+      { ...persistedPolicy, inactivitySeconds: nextSeconds },
+      `Local copies are removed after ${Math.round(secondsToDays(nextSeconds))} unused days — takes effect after a restart.`,
+    );
+  }
+
   async function rerunSetupWizard() {
     try {
       await invoke("reset_setup");
@@ -392,8 +533,14 @@ export function SettingsScreen({
           />
         </div>
 
-        {/* One status line under the tab row — the old full-width band above the panel is gone. */}
-        {status ? <p className="settings-status">{status}</p> : null}
+        {/* One status line under the tab row — the old full-width band above the panel is gone.
+            It is a live region so a change committed by keyboard is announced, not just painted
+            (sc-19711 accessibility parity). */}
+        {status ? (
+          <p aria-live="polite" className="settings-status" role="status">
+            {status}
+          </p>
+        ) : null}
 
         {activeTab === "appearance" ? (
           <div className="settings-tab-body">
@@ -556,6 +703,135 @@ export function SettingsScreen({
                 <div className="work-panel-divider" />
               </>
             ) : null}
+
+            {/* Resolved-model hot cache (epic 19703, sc-19711). The controls are shell-backed and
+                therefore desktop-only, exactly like the data directory above; the usage readout
+                comes from the API and renders in every deployment, because a remote admin still
+                needs to see what the host is holding. */}
+            <div className="settings-group-title">Local model copies</div>
+            <div className="settings-row settings-row--top">
+              <div>
+                <div className="settings-row-title">
+                  Keep a working copy of models from external libraries
+                </div>
+                <div className="settings-row-sub">
+                  Copies models loaded from an attached or network model library into SceneWorks’
+                  own storage, so they keep working when that library is disconnected. Off by
+                  default. Takes effect after a restart.
+                </div>
+              </div>
+              <button
+                aria-checked={Boolean(persistedPolicy?.enabled)}
+                aria-label="Keep a working copy of models from external libraries"
+                className={persistedPolicy?.enabled ? "settings-toggle on" : "settings-toggle"}
+                disabled={!isDesktop || !persistedPolicy}
+                onClick={() => changeCacheEnabled(!persistedPolicy?.enabled)}
+                role="switch"
+                type="button"
+              >
+                <span />
+              </button>
+            </div>
+            {isDesktop && persistedPolicy ? (
+              <div className="settings-field-row">
+                <label className="settings-note" htmlFor="model-cache-limit">
+                  Use at most
+                </label>
+                <input
+                  aria-label="Maximum size for local model copies, in GiB"
+                  className="settings-port"
+                  id="model-cache-limit"
+                  min="1"
+                  onBlur={commitCacheLimit}
+                  onChange={(event) => setCacheLimitGb(event.target.value)}
+                  type="number"
+                  value={cacheLimitGb}
+                />
+                <span className="settings-note">GiB, and remove copies unused for</span>
+                <input
+                  aria-label="Remove local model copies unused for this many days"
+                  className="settings-port"
+                  id="model-cache-days"
+                  min="1"
+                  onBlur={commitCacheInterval}
+                  onChange={(event) => setCacheDays(event.target.value)}
+                  type="number"
+                  value={cacheDays}
+                />
+                <span className="settings-note settings-grow">days.</span>
+              </div>
+            ) : null}
+            {!isDesktop ? (
+              <p className="settings-note">
+                These settings are configured on the machine running SceneWorks.
+              </p>
+            ) : null}
+            {policyNeedsRestart(persistedPolicy, cache?.policy) ? (
+              <p className="settings-note">
+                Saved. SceneWorks is still running under the previous setting — restart to apply
+                it.
+              </p>
+            ) : null}
+            {cacheError ? (
+              <p className="inline-warning">Couldn’t read local copy storage: {cacheError}</p>
+            ) : cache?.error ? (
+              <p className="inline-warning">Couldn’t read local copy storage: {cache.error}</p>
+            ) : cache?.policy ? (
+              <div className="settings-inset settings-inset--spaced">
+                <div className="settings-inset-title">Storage</div>
+                <div className="settings-kv">
+                  <span>Used</span>
+                  <span className="settings-mono">
+                    {formatBytes(cache.usedBytes)} of {formatBytes(cache.policy.maxBytes)}
+                  </span>
+                </div>
+                <div className="settings-kv">
+                  <span>Copies</span>
+                  <span className="settings-mono">{cache.entryCount}</span>
+                </div>
+                <div className="settings-kv">
+                  <span>Can be reclaimed</span>
+                  <span className="settings-mono">{formatBytes(cache.reclaimableBytes)}</span>
+                </div>
+                <div className="settings-kv">
+                  <span>Kept</span>
+                  <span className="settings-mono">{formatBytes(cache.pinnedBytes)}</span>
+                </div>
+                {/* The external library these copies are made FROM. It is the location every other
+                    line here is relative to — and the one the same-volume warning below is about —
+                    so a user who has to act on that warning can see what is actually configured
+                    instead of hunting for "the model library". Reported by the API rather than
+                    re-derived here: the status read compares against this exact path, so showing
+                    anything else could name a location the comparison never used. */}
+                {cache.sourceLibraryPath ? (
+                  <div className="settings-kv">
+                    <span>Library</span>
+                    <span className="settings-mono" title={cache.sourceLibraryPath}>
+                      {cache.sourceLibraryPath}
+                    </span>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+            {/* Same-volume is not an error, but it silently removes the whole point of the
+                feature, so it is stated plainly rather than left for the user to infer — and it
+                names the configured location, because "point the model library elsewhere" is not
+                an actionable instruction to someone who cannot see where it currently points. */}
+            {cache?.sourceVolumeRelation === "same" ? (
+              <div className="settings-notice">
+                <Icon.Warning size={16} />
+                <span>
+                  Local copies are on the same disk as the model library
+                  {cache.sourceLibraryPath ? ` (${cache.sourceLibraryPath})` : ""}, so they protect
+                  against neither a disconnect nor a slow drive — they only use extra space. Point
+                  the model library at a different volume to get the benefit.
+                </span>
+              </div>
+            ) : null}
+            <p className="settings-note">
+              Remove individual copies, or mark one to keep, from a model’s card in Model Manager.
+            </p>
+            <div className="work-panel-divider" />
 
             <div className="settings-group-title">Service credentials</div>
             <p className="settings-note">

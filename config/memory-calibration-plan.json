@@ -33,7 +33,7 @@
       "engagedRungs": [
         "resident"
       ],
-      "calibrationFingerprint": "z-image-mlx-independent-materialization-v3",
+      "calibrationFingerprint": "z-image-mlx-independent-materialization-v4",
       "fixture": "fresh-five-rung-z-image-q4-768-seed16402-step2",
       "cases": [
         {
@@ -65,7 +65,7 @@
         "resident",
         "staged_residency"
       ],
-      "calibrationFingerprint": "z-image-mlx-independent-materialization-v3",
+      "calibrationFingerprint": "z-image-mlx-independent-materialization-v4",
       "fixture": "fresh-five-rung-z-image-q4-768-seed16402-step2",
       "cases": [
         {
@@ -97,7 +97,7 @@
         "resident",
         "bounded_decode"
       ],
-      "calibrationFingerprint": "z-image-mlx-independent-materialization-v3",
+      "calibrationFingerprint": "z-image-mlx-independent-materialization-v4",
       "fixture": "fresh-five-rung-z-image-q4-768-seed16402-step2",
       "cases": [
         {
@@ -133,7 +133,7 @@
         "bounded_decode",
         "bounded_attention"
       ],
-      "calibrationFingerprint": "z-image-mlx-independent-materialization-v3",
+      "calibrationFingerprint": "z-image-mlx-independent-materialization-v4",
       "fixture": "fresh-five-rung-z-image-q4-768-seed16402-step2",
       "cases": [
         {
@@ -171,7 +171,7 @@
         "bounded_attention",
         "bounded_transformer_residency"
       ],
-      "calibrationFingerprint": "z-image-mlx-independent-materialization-v3",
+      "calibrationFingerprint": "z-image-mlx-independent-materialization-v4",
       "fixture": "fresh-five-rung-z-image-q4-768-seed16402-step2",
       "cases": [
         {
@@ -2685,7 +2685,7 @@
       "backend": "candle",
       "loadShape": "deferred_materialization",
       "target": {
-        "provider": "z_image",
+        "provider": "z_image_control",
         "modelId": "z_image",
         "tier": "q4",
         "mode": "text_to_image",
@@ -2716,7 +2716,7 @@
       "backend": "candle",
       "loadShape": "deferred_materialization",
       "target": {
-        "provider": "z_image",
+        "provider": "z_image_control",
         "modelId": "z_image",
         "tier": "q4",
         "mode": "text_to_image",
@@ -2748,7 +2748,7 @@
       "backend": "candle",
       "loadShape": "deferred_materialization",
       "target": {
-        "provider": "z_image",
+        "provider": "z_image_control",
         "modelId": "z_image",
         "tier": "q4",
         "mode": "text_to_image",
@@ -2784,7 +2784,7 @@
       "backend": "candle",
       "loadShape": "deferred_materialization",
       "target": {
-        "provider": "z_image",
+        "provider": "z_image_control",
         "modelId": "z_image",
         "tier": "q4",
         "mode": "text_to_image",
@@ -2822,7 +2822,7 @@
       "backend": "candle",
       "loadShape": "deferred_materialization",
       "target": {
-        "provider": "z_image",
+        "provider": "z_image_control",
         "modelId": "z_image",
         "tier": "q4",
         "mode": "text_to_image",
@@ -3747,7 +3747,7 @@
       "backend": "candle",
       "loadShape": "deferred_materialization",
       "target": {
-        "provider": "z_image",
+        "provider": "z_image_control",
         "modelId": "z_image",
         "tier": "q8",
         "mode": "text_to_image",
@@ -3778,7 +3778,7 @@
       "backend": "candle",
       "loadShape": "deferred_materialization",
       "target": {
-        "provider": "z_image",
+        "provider": "z_image_control",
         "modelId": "z_image",
         "tier": "q8",
         "mode": "text_to_image",
@@ -3810,7 +3810,7 @@
       "backend": "candle",
       "loadShape": "deferred_materialization",
       "target": {
-        "provider": "z_image",
+        "provider": "z_image_control",
         "modelId": "z_image",
         "tier": "q8",
         "mode": "text_to_image",
@@ -3846,7 +3846,7 @@
       "backend": "candle",
       "loadShape": "deferred_materialization",
       "target": {
-        "provider": "z_image",
+        "provider": "z_image_control",
         "modelId": "z_image",
         "tier": "q8",
         "mode": "text_to_image",
@@ -3884,7 +3884,7 @@
       "backend": "candle",
       "loadShape": "deferred_materialization",
       "target": {
-        "provider": "z_image",
+        "provider": "z_image_control",
         "modelId": "z_image",
         "tier": "q8",
         "mode": "text_to_image",
@@ -4809,7 +4809,7 @@
       "backend": "candle",
       "loadShape": "deferred_materialization",
       "target": {
-        "provider": "z_image",
+        "provider": "z_image_control",
         "modelId": "z_image",
         "tier": "bf16",
         "mode": "text_to_image",
@@ -4840,7 +4840,7 @@
       "backend": "candle",
       "loadShape": "deferred_materialization",
       "target": {
-        "provider": "z_image",
+        "provider": "z_image_control",
         "modelId": "z_image",
         "tier": "bf16",
         "mode": "text_to_image",
@@ -4872,7 +4872,7 @@
       "backend": "candle",
       "loadShape": "deferred_materialization",
       "target": {
-        "provider": "z_image",
+        "provider": "z_image_control",
         "modelId": "z_image",
         "tier": "bf16",
         "mode": "text_to_image",
@@ -4908,7 +4908,7 @@
       "backend": "candle",
       "loadShape": "deferred_materialization",
       "target": {
-        "provider": "z_image",
+        "provider": "z_image_control",
         "modelId": "z_image",
         "tier": "bf16",
         "mode": "text_to_image",
@@ -4946,7 +4946,7 @@
       "backend": "candle",
       "loadShape": "deferred_materialization",
       "target": {
-        "provider": "z_image",
+        "provider": "z_image_control",
         "modelId": "z_image",
         "tier": "bf16",
         "mode": "text_to_image",

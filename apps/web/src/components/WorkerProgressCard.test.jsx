@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   WorkerProgressCard,
+  deriveFullJobTitle,
   deriveJobTitle,
   getJobTypeChip,
   useLiveJobElapsedSeconds,
@@ -82,6 +83,16 @@ describe("deriveJobTitle", () => {
     expect(title.length).toBeLessThan(120);
   });
 
+  it("reconstructs the full prompt when the server title is already truncated", () => {
+    const prompt = "A wide cinematic establishing shot of a lighthouse during a violent midnight storm";
+    const job = {
+      type: "video_generate",
+      title: "Generate Video — A wide cinematic establishing shot…",
+      payload: { prompt },
+    };
+    expect(deriveFullJobTitle(job)).toBe(`Generate Video — ${prompt}`);
+  });
+
   it("formats character turnaround when characterId is set", () => {
     const job = {
       type: "image_generate",
@@ -150,6 +161,52 @@ describe("WorkerProgressCard layout", () => {
     );
     expect(card.querySelector(".worker-progress-card__id").getAttribute("title")).toBe("job-abcdef123456");
     expect(card.querySelector(".worker-progress-card__id").textContent).toBe("job-ab…3456");
+  });
+
+  it("expands and collapses a shortened prompt when enabled", () => {
+    const prompt = "A detailed portrait of a lighthouse keeper watching waves break across the harbor wall at midnight";
+    const shortenedTitle = "Generate Image — A detailed portrait of a lighthouse keeper…";
+    const job = {
+      id: "job-long-prompt",
+      type: "image_generate",
+      title: shortenedTitle,
+      status: "queued",
+      progress: 0,
+      attempts: 1,
+      payload: { prompt },
+    };
+    api = render(<WorkerProgressCard job={job} allowTitleExpansion />, makeContext([]));
+
+    const title = api.container.querySelector(".worker-progress-card__title");
+    const toggle = api.container.querySelector(".worker-progress-card__title-toggle");
+    expect(title.textContent).toBe(shortenedTitle);
+    expect(title.getAttribute("title")).toBe(`Generate Image — ${prompt}`);
+    expect(toggle.textContent).toBe("Show full prompt");
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+
+    act(() => toggle.click());
+    expect(title.textContent).toBe(`Generate Image — ${prompt}`);
+    expect(title.classList.contains("expanded")).toBe(true);
+    expect(toggle.textContent).toBe("Show less");
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+
+    act(() => toggle.click());
+    expect(title.textContent).toBe(shortenedTitle);
+    expect(title.classList.contains("expanded")).toBe(false);
+  });
+
+  it("does not offer prompt expansion outside opted-in Queue cards", () => {
+    const job = {
+      id: "job-long-prompt",
+      type: "image_generate",
+      title: "Generate Image — shortened…",
+      status: "queued",
+      progress: 0,
+      attempts: 1,
+      payload: { prompt: "A much longer original prompt that should remain private to the Queue disclosure control" },
+    };
+    api = render(<WorkerProgressCard job={job} />, makeContext([]));
+    expect(api.container.querySelector(".worker-progress-card__title-toggle")).toBeNull();
   });
 
   it("renders live GPU meters for a running job assigned to a CUDA worker", () => {

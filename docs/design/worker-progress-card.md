@@ -59,6 +59,7 @@ Terminal statuses (`completed`, `canceled`, `failed`, `interrupted`) are non-pul
 
 - **Job Title** (left) — human-readable, derived per type (see [Job Title rules](#job-title-rules))
 - **Job ID** (right, monospace) — copyable on click; truncated middle-ellipsis if needed
+- **Queue prompt expansion** — prompt-based titles on the Queue include a `Show full prompt` control when the original prompt was shortened. Expanding affects only that card and does not change the job title stored by the server.
 
 ### Row 3 — Hardware
 
@@ -200,6 +201,7 @@ type WorkerProgressCardProps = {
   onRetry?: (job: Job) => void;
   onDuplicate?: (job: Job) => void;
   onOpenQueue?: (job: Job) => void;          // omitted on the queue screen itself
+  allowTitleExpansion?: boolean;             // Queue-only full-prompt disclosure
   onThumbnailClick?: (asset: Asset) => void; // opens full asset view
   className?: string;
 };
@@ -235,6 +237,13 @@ Keep `.progress-track` and `.worker-meter` as low-level primitives (used inside 
 - ≥ 768px: rows render as drawn above
 - 480–768px: Hardware row wraps so meters drop below the device/vendor/arch pills
 - < 480px: Title and Job ID stack vertically; action buttons become a full-width row
+
+## Queue priority
+
+- Pending cards on the Queue screen have a selection checkbox and a **Move to top** bulk action.
+- Priority is durable worker scheduling state, not only a visual sort; it survives API restarts.
+- `prompt_refine` jobs receive priority automatically when they are enqueued.
+- Only `queued` / `pending_caption` jobs can be promoted. Worker-owned work is never interrupted.
 
 ## Out of scope
 

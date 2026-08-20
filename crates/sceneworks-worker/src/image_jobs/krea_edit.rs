@@ -105,13 +105,15 @@ fn krea_edit_generate_one(
     seed: i64,
     steps: u32,
     guidance: Option<f32>,
+    use_pid: bool,
     conditioning: Vec<Conditioning>,
     text_style_gain: Option<f32>,
+    memory_evaluation: &crate::mlx_fit_gate::MlxRequestEvaluation,
     preview: gen_core::PreviewSink,
     cancel: &CancelFlag,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(u32, u32, Vec<u8>)> {
-    let request = GenerationRequest {
+    let mut request = GenerationRequest {
         prompt: prompt.to_owned(),
         negative_prompt,
         width,
@@ -120,14 +122,20 @@ fn krea_edit_generate_one(
         seed: Some(seed as u64),
         steps: Some(steps),
         guidance,
+        use_pid,
         conditioning,
         text_style_gain,
+        memory: Some(memory_evaluation.memory),
         preview,
         cancel: cancel.clone(),
         ..Default::default()
     };
-    let output = generator
-        .generate(&request, on_progress)
+    let output = crate::memory_strategy::generate_with_scope(
+        generator,
+        &mut request,
+        Some(&memory_evaluation.context),
+        on_progress,
+    )
         .map_err(|error| WorkerError::Engine(format!("Krea edit generation failed: {error}")))?;
     match output {
         GenerationOutput::Images(mut images) => {
@@ -179,6 +187,14 @@ async fn generate_krea_edit_stream(
     let guidance = resolve_guidance(request, &model);
     let negative_prompt = resolve_negative_prompt(request, &model);
     let adapters = resolve_adapters(request, settings)?;
+    let pid_weights = resolve_pid_weights(request, &settings.data_dir, &request.model)?;
+    let use_pid = pid_weights.is_some();
+    let (width, height) = pid_effective_dims(
+        request.width,
+        request.height,
+        use_pid,
+        pid_output_tier(request),
+    );
     let repo = model_repo(request, &model);
     let adapter_label = model.adapter_label();
 
@@ -211,7 +227,7 @@ async fn generate_krea_edit_stream(
     // Pre-fit each source to the target W×H (crop / pad / outpaint→pad) so an off-aspect source isn't
     // squished into the latent grid; `stretch` keeps the legacy resize. Fixed order preserved. Shared
     // with the other edit lanes.
-    let sources = fit_edit_references(sources, request, request.width, request.height)?;
+    let sources = fit_edit_references(sources, request, width, height)?;
     let reference_count = sources.len();
 
     // Plain per-image work: `request.count` edits of the same source(s), each its own seed + the base
@@ -223,25 +239,108 @@ async fn generate_krea_edit_stream(
     let raw_settings =
         krea_edit_raw_settings(request, &repo, steps, quant_bits, guidance, reference_count);
 
-    let (width, height) = (request.width, request.height);
     let adapter_count = adapters.len();
-    let spec = load_spec(weights_dir, quant, adapters, None);
     // Raw → `krea_2_edit` (full-CFG); Turbo → `krea_2_turbo_edit` (CFG-free distilled, sc-11640).
     let engine_id = krea_edit_engine_id(&request.model);
+    #[cfg(target_os = "macos")]
+    let load_quant = mlx_load_quant_for_resolved_artifact(engine_id, quant);
+    #[cfg(not(target_os = "macos"))]
+    let load_quant = quant;
+    let mut spec = load_spec(weights_dir.clone(), load_quant, adapters, None)
+        .with_resolved_route(request.model.clone());
+    if let Some(pid) = pid_weights {
+        spec = spec.with_pid(pid.checkpoint, pid.gemma);
+    }
+    let spec = attach_selected_decoder(
+        spec,
+        engine_id,
+        request,
+        settings,
+    )?;
+    let spec = attach_manifest_text_encoder(spec, engine_id, request, settings)?;
+    let resolved_tier = resolved_mlx_artifact_tier(&weights_dir, quant_bits);
+    let route_mode = crate::memory_route_registry::MemoryRouteMode::EditImage;
+    let spec = crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request(
+        engine_id,
+        resolved_tier,
+        Some(route_mode),
+        &request.model_manifest_entry,
+        spec,
+        crate::memory_route_registry::MemoryRouteRequestContext {
+            mode: route_mode,
+            reference_count: u32::try_from(reference_count).unwrap_or(u32::MAX),
+            use_pid,
+            has_phases: false,
+        },
+    );
+    if let Some(warning) =
+        crate::memory_route_registry::mlx_load_shape_declaration_warning(&spec)
+    {
+        tracing::warn!(
+            event = "mlx_load_shape_declaration_warning",
+            provider = engine_id,
+            ?warning,
+            "provider refused deferred materialization; retaining the safe eager edit load path"
+        );
+    }
+    let memory_plan = crate::mlx_fit_gate::MlxRequestPlan::for_spec_and_manifest(
+        engine_id,
+        &request.model,
+        &spec,
+        Some(&request.model_manifest_entry),
+        None,
+    )
+    .with_resolved_artifact_tier(resolved_tier)?;
+    let memory_inputs = crate::mlx_fit_gate::MlxRequestInputs {
+        width,
+        height,
+        count: request.count,
+        mode: request.mode.clone(),
+        overlay: (adapter_count > 0).then(|| format!("adapters:{adapter_count}")),
+        adapter_count,
+        has_reference: true,
+        reference_count: u32::try_from(reference_count).unwrap_or(u32::MAX),
+        use_pid,
+        has_phases: false,
+    };
     // Krea "text style" tap-reweight gain (sc-12009) — self-gates on `ui.textStyleGain` (Krea only),
     // applied to the edit lane's POSITIVE grounded context by the engine (inference sc-12009).
     let text_style_gain = resolve_text_style_gain(request);
-    let (cancel, rx, blocking) = start_cached_gen_stream(
+    let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state(
         job.id.clone(),
         engine_id,
         adapter_count,
         spec,
         format!("{engine_id} load failed"),
-        move |generator, tx, cancel| {
+        move |generator,
+              cache_state,
+              loaded_policy,
+              warm_policy,
+              external_committed_bytes,
+              tx,
+              cancel| {
+            let mut request_cache_state = cache_state;
+            // sc-18317: ONE warm hit is ONE decision, but this lane evaluates the request once per
+            // item. Hand the real proposal to the first evaluation and an inert one to the rest, so a
+            // multi-image job settles exactly one decision and emits exactly one event.
+            let mut warm_policy = crate::execution_planner::WarmPolicyOnce::new(warm_policy);
             drive_gen_items(tx, work, move |_index, (seed, prompt), preview, on_progress| {
                 if cancel.is_cancelled() {
                     return Ok(None);
                 }
+                let memory_evaluation = crate::mlx_fit_gate::evaluate_request(
+                    generator,
+                    &memory_plan,
+                    &memory_inputs,
+                    request_cache_state,
+                    loaded_policy.offload_policy,
+                    warm_policy.take(),
+                    external_committed_bytes,
+                )?;
+                request_cache_state = gen_core::MemoryCacheState::Warm;
+                let _request_memory_limit = memory_evaluation
+                    .process_limit_bytes
+                    .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
                 let conditioning = build_edit_conditioning(&sources);
                 let (out_w, out_h, pixels) = krea_edit_generate_one(
                     generator,
@@ -252,8 +351,10 @@ async fn generate_krea_edit_stream(
                     seed,
                     steps,
                     guidance,
+                    use_pid,
                     conditioning,
                     text_style_gain,
+                    &memory_evaluation,
                     preview,
                     &cancel,
                     on_progress,

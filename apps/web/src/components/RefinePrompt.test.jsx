@@ -141,7 +141,7 @@ describe("RefinePromptControl", () => {
 
   it("offers to download the refinement model when it isn't installed (sc-5605)", async () => {
     const refinePrompt = vi.fn(async () => {
-      throw new Error("prompt-refine model path snapshot is not cached for huihui-ai/Llama-3.2-3B-Instruct-abliterated.");
+      throw new Error("prompt-refine model path snapshot is not cached for TheDrummer/Anubis-Mini-8B-v1.");
     });
     const onDownloadRefineModel = vi.fn(async () => ({ id: "job-1" }));
     render(

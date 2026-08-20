@@ -1,9 +1,9 @@
 DFN5B-CLIP conditioner — Apple Machine Learning Research Model License
 ======================================================================
 
-MMAudio's semantic conditioner is the DFN5B-CLIP ViT-H/14-384 encoder from
-apple/DFN5B-CLIP-ViT-H-14-384
-(https://huggingface.co/apple/DFN5B-CLIP-ViT-H-14-384), © Apple Inc. It is
+MMAudio's semantic conditioner is the DFN5B-CLIP ViT-H/14 encoder with a 378px input from
+apple/DFN5B-CLIP-ViT-H-14-378
+(https://huggingface.co/apple/DFN5B-CLIP-ViT-H-14-378), © Apple Inc. It is
 distributed under the
 
   Apple Machine Learning Research Model License (apple-amlr)

@@ -253,6 +253,10 @@ pub struct AppSettings {
     /// only today — the candle/Windows path is tracked separately (sc-7826).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu_memory_limit_fraction: Option<f32>,
+    /// App-owned resolved-model hot-cache policy. Nested serde defaults preserve upgrades from
+    /// settings files written before the cache existed. Disabled by default.
+    #[serde(default)]
+    pub resolved_cache: sceneworks_core::model_artifacts::resolved_cache::ResolvedCachePolicy,
 }
 
 fn settings_path() -> PathBuf {
@@ -305,10 +309,11 @@ fn sanitize_storage_overrides(settings: &mut AppSettings, linux_absolute: bool) 
 }
 
 pub fn load_settings() -> AppSettings {
-    let settings = std::fs::read_to_string(settings_path())
+    let mut settings: AppSettings = std::fs::read_to_string(settings_path())
         .ok()
         .and_then(|body| serde_json::from_str(&body).ok())
         .unwrap_or_default();
+    sanitize_resolved_cache_policy(&mut settings);
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         let mut settings = settings;
@@ -318,6 +323,13 @@ pub fn load_settings() -> AppSettings {
     #[cfg(not(all(unix, not(target_os = "macos"))))]
     {
         settings
+    }
+}
+
+fn sanitize_resolved_cache_policy(settings: &mut AppSettings) {
+    if let Err(error) = settings.resolved_cache.validate() {
+        eprintln!("invalid persisted resolved-cache policy; disabling cache: {error}");
+        settings.resolved_cache = Default::default();
     }
 }
 
@@ -794,6 +806,19 @@ pub fn set_gpu_memory_limit(fraction: Option<f32>) -> Result<AppSettings, String
     Ok(settings)
 }
 
+/// Persist a validated resolved-model cache policy. The three process environments are captured
+/// when the API/MLX/Candle sidecars start, so callers should present this as requiring restart.
+#[tauri::command]
+pub fn set_resolved_cache_policy(
+    policy: sceneworks_core::model_artifacts::resolved_cache::ResolvedCachePolicy,
+) -> Result<AppSettings, String> {
+    policy.validate().map_err(|error| error.to_string())?;
+    let mut settings = load_settings();
+    settings.resolved_cache = policy;
+    save_settings(&settings)?;
+    Ok(settings)
+}
+
 /// Write the resolved byte ceiling (or `0` for "no limit") to the live-handoff file the running MLX
 /// worker re-reads between jobs (epic 7819, sc-7824), so a slider change applies without a worker
 /// restart. Best-effort: a write failure just means the change waits for the next worker restart
@@ -918,6 +943,34 @@ pub fn set_data_dir(path: String) -> Result<AppSettings, String> {
 #[tauri::command]
 pub async fn choose_data_dir(app: AppHandle) -> Option<String> {
     pick_folder(&app)
+}
+
+/// Persist a relocated model library (sc-19709).
+///
+/// The API has already validated the chosen root and re-bound its durable identity; it returns the
+/// exact `HF_HOME` that resolves to that library, and this is the ONE place it becomes durable.
+/// Deliberately the same field, normalization and file as the first-run storage step — relocation
+/// is a change to the existing library-path configuration, not a parallel setting. Like the data
+/// directory, the sidecars receive it as spawn environment, so it applies on the next launch.
+#[tauri::command]
+pub fn set_model_library(path: String) -> Result<AppSettings, String> {
+    let mut settings = load_settings();
+    settings.hf_home = Some(model_library_override_for(
+        &path,
+        cfg!(all(unix, not(target_os = "macos"))),
+    )?);
+    save_settings(&settings)?;
+    Ok(settings)
+}
+
+/// The pure decision behind [`set_model_library`], with the Linux absolute-path rule as an explicit
+/// argument so it is testable on every platform. Relocation always names a concrete folder, so —
+/// unlike the first-run storage step — an empty value is a rejection rather than "use the default":
+/// silently reverting to the platform default would leave the user pointed at a library that is not
+/// the one they just chose.
+fn model_library_override_for(path: &str, linux_absolute: bool) -> Result<String, String> {
+    storage_override_input_for("Model library folder", path, linux_absolute)?
+        .ok_or_else(|| "A model library folder is required.".to_owned())
 }
 
 #[tauri::command]
@@ -1259,6 +1312,18 @@ pub fn restart_worker(app: AppHandle) {
     crate::setup::restart_gpu_worker(&app);
 }
 
+/// Relaunch the whole app so a spawn-environment setting takes effect (sc-19709).
+///
+/// The relocated model library reaches the API and GPU worker as `HF_HOME` at spawn, so it cannot
+/// apply to the running sidecars. This is the "Restart now" the disclosure offers: the SAME
+/// graceful teardown as quitting — SIGTERM then grace, never an immediate force-kill of a worker
+/// that may be mid-render — followed by a relaunch. Idempotent: a second call while a teardown is
+/// already running is a no-op, so a double click cannot start two.
+#[tauri::command]
+pub fn restart_app(app: AppHandle) {
+    crate::setup::begin_restart(&app);
+}
+
 #[tauri::command]
 pub fn get_gpu_info() -> GpuInfo {
     #[cfg(target_os = "macos")]
@@ -1380,6 +1445,23 @@ mod tests {
         let hf_error = storage_override_input_for("HF cache", "./huggingface", true)
             .expect_err("relative Linux HF cache must be rejected");
         assert!(hf_error.contains("absolute path on Linux"));
+    }
+
+    /// sc-19709: relocating the model library writes the SAME `hf_home` override the first-run
+    /// storage step writes, with the same normalization — but an empty choice is a rejection, not a
+    /// silent revert to the platform default (the user just picked a specific library).
+    #[test]
+    fn relocating_the_model_library_normalizes_and_refuses_an_empty_choice() {
+        assert_eq!(
+            model_library_override_for(" /Volumes/Models/hf ", true).expect("absolute path"),
+            "/Volumes/Models/hf".to_owned()
+        );
+        let empty = model_library_override_for("   ", false)
+            .expect_err("an empty folder must not clear the override");
+        assert!(empty.contains("required"), "{empty}");
+        let relative = model_library_override_for("./models", true)
+            .expect_err("relative Linux library root must be rejected");
+        assert!(relative.contains("absolute path on Linux"), "{relative}");
     }
 
     #[test]
@@ -2105,5 +2187,55 @@ mod tests {
             !remote_access_change_needs_confirmation(false),
             "disabling is fail-safe and must not be gated"
         );
+    }
+
+    #[test]
+    fn resolved_cache_settings_upgrade_round_trip_and_invalid_values_fail_closed() {
+        let legacy: AppSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            legacy.resolved_cache,
+            sceneworks_core::model_artifacts::resolved_cache::ResolvedCachePolicy::default()
+        );
+        assert!(!legacy.resolved_cache.enabled);
+
+        let policy = sceneworks_core::model_artifacts::resolved_cache::ResolvedCachePolicy {
+            enabled: true,
+            max_bytes: 8_589_934_592,
+            inactivity_seconds: 86_400,
+        };
+        let settings = AppSettings {
+            resolved_cache: policy.clone(),
+            ..AppSettings::default()
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        assert!(json.contains("resolvedCache"));
+        assert_eq!(
+            serde_json::from_str::<AppSettings>(&json)
+                .unwrap()
+                .resolved_cache,
+            policy
+        );
+
+        let mut invalid = AppSettings {
+            resolved_cache: sceneworks_core::model_artifacts::resolved_cache::ResolvedCachePolicy {
+                enabled: true,
+                max_bytes: 0,
+                inactivity_seconds: 0,
+            },
+            ..AppSettings::default()
+        };
+        sanitize_resolved_cache_policy(&mut invalid);
+        assert_eq!(invalid.resolved_cache, Default::default());
+        assert!(!invalid.resolved_cache.enabled);
+    }
+
+    #[test]
+    fn resolved_cache_setter_is_registered_and_granted() {
+        let capability = include_str!("../capabilities/default.json");
+        assert!(capability.contains("allow-set-resolved-cache-policy"));
+        let build = include_str!("../build.rs");
+        assert!(build.contains("\"set_resolved_cache_policy\""));
+        let main = include_str!("main.rs");
+        assert!(main.contains("settings::set_resolved_cache_policy"));
     }
 }

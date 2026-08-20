@@ -527,7 +527,10 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
 /// `models` array. Shared by the manifest-gating catalog-eligibility tests so the ~15-line
 /// load→strip-comments→parse→get-array boilerplate lives in ONE place (sc-8926 dedupe of the
 /// near-verbatim copies that had drifted between the SD3.5 / SANA / SANA-Sprint gate tests).
-fn builtin_models_manifest() -> Vec<Value> {
+// `pub(crate)` so the `image_jobs::tests` module reads the SAME shipped bytes rather than growing a
+// second load→strip→parse copy (sc-20529: its klein guards must be driven off the real builtin
+// entries, not a synthetic stand-in that can pass vacuously).
+pub(crate) fn builtin_models_manifest() -> Vec<Value> {
     use sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS;
     use sceneworks_core::jsonc::strip_jsonc_comments;
 
@@ -548,7 +551,7 @@ fn builtin_models_manifest() -> Vec<Value> {
 /// The builtin-manifest entry for `id`, panicking with a clear hint if the id is absent. Shared by
 /// the manifest-gating tests (sc-8926) so each gate test asserts on the entry directly instead of
 /// re-implementing the manifest lookup.
-fn builtin_model_entry(id: &str) -> Value {
+pub(crate) fn builtin_model_entry(id: &str) -> Value {
     builtin_models_manifest()
         .into_iter()
         .find(|m| m.get("id").and_then(Value::as_str) == Some(id))

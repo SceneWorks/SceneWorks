@@ -161,12 +161,33 @@ pub(crate) fn memory_mode_from_mode_key(key: &str) -> MemoryMode {
 
 /// Execute one provider request through the adopted safety/lifecycle seam. A created scope receives
 /// exactly one explicit terminal outcome; its Drop remains only a panic/unwind backstop.
+///
+/// This is also where the typed execution domains are planned onto the request (sc-18317): every
+/// image and video generation on either backend passes through here, including the no-context early
+/// return, so one call site covers the MLX fit gate, the candle memory strategy, and every bespoke
+/// control/edit lane that assembles its own `GenerationRequest`.
 pub fn generate_with_scope(
     generator: &dyn gen_core::Generator,
     request: &mut gen_core::GenerationRequest,
     context: Option<&gen_core::MemoryRunContext>,
     on_progress: &mut dyn FnMut(gen_core::Progress),
 ) -> gen_core::Result<gen_core::GenerationOutput> {
+    let execution_domains =
+        crate::execution_planner::plan_request_execution_domains(generator, request);
+    if !execution_domains.is_empty() {
+        tracing::info!(
+            event = "execution_domains_selected",
+            engine = generator.descriptor().id,
+            graphEvalCadenceBlocks = execution_domains
+                .graph_eval_cadence
+                .map(gen_core::GraphEvalCadence::blocks),
+            ffnChunkRows = execution_domains.ffn_chunk.map(gen_core::FfnChunk::rows),
+            cfgBatching = execution_domains
+                .cfg_batching
+                .map(gen_core::CfgBatching::label),
+            "selected typed execution domains from the provider's declaration"
+        );
+    }
     let Some(context) = context else {
         return generator.generate(request, on_progress);
     };
@@ -287,7 +308,7 @@ const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 /// Evidence stores an integer byte ceiling. Admission converts that canonical value (after any
 /// stale-margin widening, which happens in integer bytes) to GiB exactly once; callers cannot
 /// submit a second floating-point estimate with a lower coefficient.
-fn peak_bytes_to_gb(peak_bytes: u64) -> f64 {
+pub(crate) fn peak_bytes_to_gb(peak_bytes: u64) -> f64 {
     peak_bytes as f64 / BYTES_PER_GIB
 }
 
@@ -326,7 +347,7 @@ const fn stale_measured_margin(backend: MemoryBackend) -> f64 {
 
 /// The estimate margin for one backend (sc-18094 derivation, consumed here by sc-18096). Same
 /// exhaustive-match rationale as [`stale_measured_margin`].
-const fn estimate_margin(backend: MemoryBackend) -> f64 {
+pub(crate) const fn estimate_margin(backend: MemoryBackend) -> f64 {
     match backend {
         MemoryBackend::Candle => CANDLE_ESTIMATE_MARGIN,
         MemoryBackend::Mlx => MLX_ESTIMATE_MARGIN,
@@ -337,7 +358,7 @@ const fn estimate_margin(backend: MemoryBackend) -> f64 {
 /// (sc-18095/sc-18096). The widening happens in integer bytes with a ceil, so the admitted ceiling
 /// is never under the exact `peak * (1 + margin)` product and the GiB conversion stays a single
 /// downstream step.
-fn widened_peak_bytes(peak_bytes: u64, margin: f64) -> u64 {
+pub(crate) fn widened_peak_bytes(peak_bytes: u64, margin: f64) -> u64 {
     (peak_bytes as f64 * (1.0 + margin))
         .ceil()
         .clamp(0.0, u64::MAX as f64) as u64
@@ -1756,6 +1777,8 @@ mod tests {
                     backend: "candle",
                     modality: gen_core::Modality::Image,
                     capabilities: Default::default(),
+                    encoder_contract: None,
+                    denoiser_output_latent_space: None,
                     required_components: &[],
                     control_kinds: None,
                 },
@@ -1812,6 +1835,7 @@ mod tests {
                 parameters: Default::default(),
                 tier: tier(),
             },
+            optimization_authority: gen_core::MemoryOptimizationAuthority::Calibrated,
             // sc-16590 hardened the handshake: with a calibration identity on the contract, the
             // context must match its abi, fingerprint, and load shape exactly or the provider
             // safety check rejects before generate.
@@ -2569,7 +2593,7 @@ mod tests {
     }
 
     /// sc-18095: the stale margin is per-backend. The budget sits between the candle-widened and
-    /// mlx-widened peaks of the same 10 GiB cell, so grading an MLX lane with the (narrower) candle
+    /// MLX-widened peaks of the same 10 GiB cell, so grading an MLX lane with the (narrower) Candle
     /// margin — or with no margin — flips the first arm.
     #[test]
     fn mlx_stale_admission_uses_the_mlx_margin() {
@@ -2605,18 +2629,18 @@ mod tests {
                 reserved_headroom_gb: 0.0,
             })
         };
-        // candle widening: 10.2 GiB; mlx widening: 10.5 GiB. 10.3 GiB must NOT fit on mlx.
+        // Candle widening: 10.2 GiB; MLX widening: ~12.52 GiB. 11 GiB must NOT fit on MLX.
         assert!(
             matches!(
-                select_strategy(scope, &provider, budget(10.3), &[candidate]),
+                select_strategy(scope, &provider, budget(11.0), &[candidate]),
                 Selection::Reject { .. }
             ),
-            "10.3 GiB fits a candle-widened 10 GiB cell but must not fit the MLX-widened one"
+            "11 GiB fits a Candle-widened 10 GiB cell but must not fit the MLX-widened one"
         );
         let Selection::Selected { needed_gb, .. } =
-            select_strategy(scope, &provider, budget(11.0), &[candidate])
+            select_strategy(scope, &provider, budget(13.0), &[candidate])
         else {
-            panic!("the MLX-widened peak fits an 11 GiB budget");
+            panic!("the MLX-widened peak fits a 13 GiB budget");
         };
         let expected_widened_bytes =
             (raw_peak_bytes as f64 * (1.0 + MLX_STALE_MEASURED_MARGIN)).ceil();
@@ -2628,6 +2652,10 @@ mod tests {
     #[test]
     fn tracing_records_stale_admission_and_the_widened_peak() {
         use std::io::Write;
+
+        // Concurrent subscriber-less tests also drive these callsites; without the floor their
+        // first hit can cache `Interest::never` and silently empty this capture (see test_env).
+        crate::test_env::install_tracing_interest_floor();
 
         #[derive(Clone, Default)]
         struct Capture(Arc<Mutex<Vec<u8>>>);
@@ -2957,6 +2985,10 @@ mod tests {
     #[test]
     fn tracing_records_estimate_admission_with_its_basis_and_the_widened_peak() {
         use std::io::Write;
+
+        // Concurrent subscriber-less tests also drive these callsites; without the floor their
+        // first hit can cache `Interest::never` and silently empty this capture (see test_env).
+        crate::test_env::install_tracing_interest_floor();
 
         #[derive(Clone, Default)]
         struct Capture(Arc<Mutex<Vec<u8>>>);

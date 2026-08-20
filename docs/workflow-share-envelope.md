@@ -392,6 +392,7 @@ smuggled under a scalar key.
 | `guidanceMethod` | `Scalar` | Guidance method (CFG / CFG++). |
 | `enhancePrompt` | `Scalar` | Caption-upsampling opt-in — it changes the prompt the model sees. |
 | `usePid` | `Scalar` | PiD decoder opt-in. Changes the produced image, and is its non-commercial marker. |
+| `decoder` | `Scalar` | Experimental alternate terminal decoder id. Native is omitted. |
 | `pidTarget` | `Scalar` | PiD output tier (2k / 4k). |
 | `ipAdapterScale` | `Scalar` | Reference strength. |
 | `controlnetConditioningScale` | `Scalar` | Identity-structure strength (InstantID). |
@@ -725,7 +726,7 @@ key with no row is treated as not restored — rendered and marked, never silent
 either direction.
 
 That guardrail exists because the first cut of the panel displayed ten knobs — `enhancePrompt`,
-`usePid`, `pidTarget`, `strength`, `textStyleGain`, `faceRestore`, `controlMode`, `controlScale`,
+`usePid`, `decoder`, `pidTarget`, `strength`, `textStyleGain`, `faceRestore`, `controlMode`, `controlScale`,
 `poses`, `phases` — as ordinary settings rows while none of them reached a control. Being told a
 recipe replayed faithfully when it did not is the failure this whole contract exists to prevent.
 

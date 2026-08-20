@@ -50,6 +50,7 @@ pub(crate) async fn create_lora_download_job(
         .ok_or_else(|| ApiError {
             status: StatusCode::NOT_FOUND,
             detail: "LoRA not found".to_owned(),
+            context: None,
             code: None,
         })?;
     if lora.get("installState").and_then(Value::as_str) == Some("installed")
@@ -65,6 +66,7 @@ pub(crate) async fn create_lora_download_job(
         return Err(ApiError {
             status: StatusCode::BAD_REQUEST,
             detail: "LoRA is already installed".to_owned(),
+            context: None,
             code: Some("lora_already_installed"),
         });
     }
@@ -186,7 +188,7 @@ pub(crate) async fn create_lora_download_job(
         requested_gpu_or_auto(payload.requested_gpu),
     )
     .await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 pub(crate) async fn delete_lora(
@@ -206,6 +208,7 @@ pub(crate) async fn delete_lora(
         .ok_or_else(|| ApiError {
             status: StatusCode::NOT_FOUND,
             detail: "LoRA not found".to_owned(),
+            context: None,
             code: None,
         })?;
     let scope = query
@@ -362,6 +365,7 @@ pub(crate) async fn update_lora(
         .ok_or_else(|| ApiError {
             status: StatusCode::NOT_FOUND,
             detail: "LoRA not found".to_owned(),
+            context: None,
             code: None,
         })?;
     let scope = query
@@ -429,6 +433,7 @@ pub(crate) async fn update_lora(
     updated.map(Json).ok_or_else(|| ApiError {
         status: StatusCode::NOT_FOUND,
         detail: "LoRA has no editable manifest entry in this scope".to_owned(),
+        context: None,
         code: None,
     })
 }
@@ -454,6 +459,7 @@ pub(crate) async fn lora_embedded_tags(
         .ok_or_else(|| ApiError {
             status: StatusCode::NOT_FOUND,
             detail: "LoRA not found".to_owned(),
+            context: None,
             code: None,
         })?;
     let Some(installed_path) = lora
@@ -1186,7 +1192,7 @@ pub(crate) async fn queue_lora_import_job(
         "auto".to_owned(),
     )
     .await?;
-    Ok((StatusCode::CREATED, Json(job)))
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
 pub(crate) async fn lora_import_request_from_multipart(
@@ -1960,17 +1966,13 @@ fn lora_huggingface_source(lora: &Value) -> Option<(&str, Option<&str>, &str)> {
 
 fn lora_huggingface_requested_file(lora: &Value, data_dir: &FsPath) -> Option<PathBuf> {
     let (repo, file_name, revision) = lora_huggingface_source(lora)?;
-    let repo_root = huggingface_repo_cache_path(data_dir, repo)?;
-    if !repo_root.exists() {
-        return None;
-    }
     if let Some(file_name) = file_name {
-        let resolved = std::fs::read_to_string(repo_root.join("refs").join(revision))
-            .ok()
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| revision.to_owned());
-        let candidate = repo_root.join("snapshots").join(resolved).join(file_name);
+        sceneworks_core::model_artifacts::ArtifactFile::new(file_name).ok()?;
+        let resolver = sceneworks_core::model_artifacts::ModelArtifactResolver::new(
+            sceneworks_core::hf_home::model_source_library(data_dir),
+        );
+        let (_, snapshot) = resolver.discover_source_reference(repo, revision).ok()?;
+        let candidate = snapshot.join(file_name);
         return candidate.is_file().then_some(candidate);
     }
     None
@@ -1989,7 +1991,9 @@ fn lora_huggingface_receipted_file(lora: &Value, data_dir: &FsPath) -> Option<Pa
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_else(|| vec![value]);
-    let repo_root = huggingface_repo_cache_path(data_dir, repo)?;
+    let resolver = sceneworks_core::model_artifacts::ModelArtifactResolver::new(
+        sceneworks_core::hf_home::model_source_library(data_dir),
+    );
     for receipt in entries.iter().rev() {
         if receipt.get("repo").and_then(Value::as_str) != Some(repo) {
             continue;
@@ -1997,28 +2001,17 @@ fn lora_huggingface_receipted_file(lora: &Value, data_dir: &FsPath) -> Option<Pa
         let Some(revision) = receipt.get("snapshotRevision").and_then(Value::as_str) else {
             continue;
         };
-        let revision_path = FsPath::new(revision);
-        if revision_path.is_absolute()
-            || revision_path
-                .components()
-                .any(|component| !matches!(component, std::path::Component::Normal(_)))
-        {
+        let Ok((_, snapshot)) = resolver.discover_source_snapshot(repo, Some(revision)) else {
             continue;
-        }
+        };
         let Some(files) = receipt.get("resolvedFiles").and_then(Value::as_array) else {
             continue;
         };
-        let snapshot = repo_root.join("snapshots").join(revision);
         for file in files.iter().filter_map(Value::as_str) {
-            let file_path = FsPath::new(file);
-            if file_path.is_absolute()
-                || file_path
-                    .components()
-                    .any(|component| !matches!(component, std::path::Component::Normal(_)))
-            {
+            if sceneworks_core::model_artifacts::ArtifactFile::new(file).is_err() {
                 continue;
             }
-            let candidate = snapshot.join(file_path);
+            let candidate = snapshot.join(file);
             if candidate.is_file()
                 && candidate.extension().and_then(|ext| ext.to_str()) == Some("safetensors")
             {
@@ -2155,10 +2148,11 @@ mod huggingface_receipt_tests {
         let data_dir = temp.path();
         let repo = "author/style";
         let repo_root = huggingface_repo_cache_path(data_dir, repo).unwrap();
-        let snapshot = repo_root.join("snapshots").join("revision");
+        let revision = "0123456789abcdef0123456789abcdef01234567";
+        let snapshot = repo_root.join("snapshots").join(revision);
         std::fs::create_dir_all(&snapshot).unwrap();
         std::fs::create_dir_all(repo_root.join("refs")).unwrap();
-        std::fs::write(repo_root.join("refs").join("main"), "revision").unwrap();
+        std::fs::write(repo_root.join("refs").join("main"), revision).unwrap();
         let file = snapshot.join("style.safetensors");
         std::fs::write(&file, b"hub adapter bytes").unwrap();
         let metadata = std::fs::metadata(&file).unwrap();
@@ -2214,7 +2208,8 @@ mod huggingface_receipt_tests {
         let data_dir = temp.path();
         let repo = "SceneWorks/krea-edit";
         let repo_root = huggingface_repo_cache_path(data_dir, repo).unwrap();
-        let snapshot = repo_root.join("snapshots").join("old-revision");
+        let revision = "1111111111111111111111111111111111111111";
+        let snapshot = repo_root.join("snapshots").join(revision);
         std::fs::create_dir_all(&snapshot).unwrap();
         std::fs::write(snapshot.join("v1.1.safetensors"), b"old").unwrap();
         let lora = json!({
@@ -2231,7 +2226,7 @@ mod huggingface_receipt_tests {
         std::fs::write(
             marker_dir.join(".sceneworks-download-complete.json"),
             serde_json::to_vec(&json!({
-                "schemaVersion": 2, "repo": repo, "snapshotRevision": "old-revision",
+                "schemaVersion": 2, "repo": repo, "snapshotRevision": revision,
                 "resolvedFiles": ["v1.1.safetensors"]
             }))
             .unwrap(),
@@ -2263,10 +2258,11 @@ mod huggingface_receipt_tests {
         let temp = tempfile::tempdir().unwrap();
         let data_dir = temp.path();
         let repo = "SceneWorks/krea-edit";
+        let revision = "2222222222222222222222222222222222222222";
         let snapshot = huggingface_repo_cache_path(data_dir, repo)
             .unwrap()
             .join("snapshots")
-            .join("current-revision");
+            .join(revision);
         std::fs::create_dir_all(&snapshot).unwrap();
         std::fs::write(snapshot.join("v1.2.safetensors"), b"new").unwrap();
         std::fs::create_dir_all(snapshot.parent().unwrap().parent().unwrap().join("refs")).unwrap();
@@ -2278,7 +2274,7 @@ mod huggingface_receipt_tests {
                 .unwrap()
                 .join("refs")
                 .join("main"),
-            "current-revision",
+            revision,
         )
         .unwrap();
         let normalized = normalize_lora_entry(

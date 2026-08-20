@@ -2250,7 +2250,7 @@ describe("SceneWorks app shell", () => {
     expect(pickNames).toContain("LTX Style");
     expect(pickNames).not.toContain("Z Glow");
 
-    // Adding a LoRA drops in a slot with its weight slider, defaulting to the LoRA weight (0.8).
+    // Adding a LoRA drops in a slot with its weight slider, defaulting to the global 1.0.
     await act(async () => {
       [...document.body.querySelectorAll(".lora-pick-row")]
         .find((button) => button.textContent.includes("LTX Style"))
@@ -2265,7 +2265,7 @@ describe("SceneWorks app shell", () => {
     // LoRA stuck at the old center of 0 generated at scale 0 and looked "not applied").
     expect(weightSlider.getAttribute("min")).toBe("-2");
     expect(weightSlider.getAttribute("max")).toBe("2");
-    expect(document.body.querySelector(".lora-slot-weight-value").textContent).toBe("0.80");
+    expect(document.body.querySelector(".lora-slot-weight-value").textContent).toBe("1.00");
     await changeField(weightSlider, "0.5");
 
     const generate = [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Render clip");

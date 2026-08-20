@@ -22,6 +22,9 @@ function offState(overrides = {}) {
     stepsOverride: "",
     guidanceOverride: "",
     guidanceMethod: "cfg",
+    supportsTextEncoderSelection: false,
+    textEncoderModel: "default",
+    defaultTextEncoderId: "default",
     flashAttn: true,
     promptEnhance: false,
     enhancePrompt: false,
@@ -31,6 +34,8 @@ function offState(overrides = {}) {
     quantTier: "default",
     showPidToggle: false,
     usePid: false,
+    showDecoderPicker: false,
+    decoder: "native",
     mode: "text_to_image",
     referenceAssetId: null,
     hideReferenceStrength: false,
@@ -73,6 +78,39 @@ describe("buildImageJobAdvanced", () => {
     const custom = buildImageJobAdvanced(offState({ sampler: "euler", scheduler: "karras" }));
     expect(custom.sampler).toBe("euler");
     expect(custom.scheduler).toBe("karras");
+  });
+
+  it("omits the bundled encoder and emits only an explicit alternate encoder", () => {
+    expect(
+      buildImageJobAdvanced(
+        offState({
+          supportsTextEncoderSelection: true,
+          textEncoderModel: "default",
+          defaultTextEncoderId: "default",
+        }),
+      ),
+    ).not.toHaveProperty("textEncoderModel");
+
+    expect(
+      buildImageJobAdvanced(
+        offState({
+          supportsTextEncoderSelection: true,
+          textEncoderModel: "text_encoder_0123456789abcdef0123456789abcdef",
+          defaultTextEncoderId: "default",
+        }),
+      ).textEncoderModel,
+    ).toBe("text_encoder_0123456789abcdef0123456789abcdef");
+  });
+
+  it("preserves an unavailable authored encoder id so the API can fail closed", () => {
+    const advanced = buildImageJobAdvanced(
+      offState({
+        supportsTextEncoderSelection: true,
+        textEncoderModel: "text_encoder_removed",
+        defaultTextEncoderId: "default",
+      }),
+    );
+    expect(advanced.textEncoderModel).toBe("text_encoder_removed");
   });
 
   it("emits advanced.strength only for an img2img model with a reference (sc-8593)", () => {
@@ -277,6 +315,26 @@ describe("buildImageJobAdvanced", () => {
   it("emits usePid only when the PiD toggle is shown and on", () => {
     expect(buildImageJobAdvanced(offState({ showPidToggle: false, usePid: true }))).not.toHaveProperty("usePid");
     expect(buildImageJobAdvanced(offState({ showPidToggle: true, usePid: true })).usePid).toBe(true);
+  });
+
+  it("emits an alternate decoder only for an available picker selection and never with PiD", () => {
+    expect(buildImageJobAdvanced(offState({ decoder: "wan_2_1_vae" }))).not.toHaveProperty("decoder");
+    expect(buildImageJobAdvanced(offState({ showDecoderPicker: true, decoder: "native" }))).not.toHaveProperty(
+      "decoder",
+    );
+    expect(
+      buildImageJobAdvanced(offState({ showDecoderPicker: true, decoder: "wan_2_1_vae" })).decoder,
+    ).toBe("wan_2_1_vae");
+    expect(
+      buildImageJobAdvanced(
+        offState({
+          showDecoderPicker: true,
+          decoder: "wan_2_1_vae",
+          showPidToggle: true,
+          usePid: true,
+        }),
+      ),
+    ).not.toHaveProperty("decoder");
   });
 
   it("emits pidTarget only for a shown+on PiD toggle set to 2k (4k is the worker default)", () => {

@@ -707,6 +707,7 @@ const seededFallbackModels = [
     id: "ltx_2_3_eros",
     name: "LTX-2.3 10Eros",
     type: "video",
+    macOnly: true,
     capabilities: ["image_to_video", "text_to_video", "first_last_frame", "extend_clip", "video_bridge", "replace_person"],
     defaults: { duration: 6, fps: 25, resolution: "768x512", quality: "balanced", steps: 8 },
     limits: {

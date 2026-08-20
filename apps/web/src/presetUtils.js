@@ -215,8 +215,9 @@ export function loraMatchesModel(lora, model) {
     return false;
   }
   // The API WITHDREW this model's synthesized LoRA advertisement because no backend lane on this
-  // deployment can honour it — currently a Mage-Flow full fine-tune, whose native single-file
-  // loaders deliberately reject inference adapters, or a future backend-specific deployment gap.
+  // deployment can honour it — a Mage-Flow full fine-tune, whose native single-file loaders
+  // deliberately reject inference adapters, or a ComfyUI Qwen-Image tree whose registered
+  // provider accepts the imported transformer assembly but advertises no adapter format.
   // Fail CLOSED, and check this BEFORE the family test: the withdrawal also empties
   // `loraCompatibility.families`, which would otherwise fall into the "cannot gate" permissive
   // branch below and keep offering every LoRA — a selection the API now 400s on. The models the
@@ -416,17 +417,21 @@ export function presetLoraId(presetLora) {
   return typeof presetLora === "string" ? presetLora : presetLora?.id ?? presetLora?.loraId;
 }
 
-// Krea 2's distilled, CFG-free Turbo attenuates Raw-trained LoRAs (sc-7579 / sc-7932): the generic
-// 0.8 default under-expresses on the few-step student, so a krea-2-family LoRA defaults to a higher
-// apply weight (real-weight-validated coherent through scale 4). This is still a DEFAULT — an explicit
-// preset weight, a stored `defaultWeight`, or the LoRA's own `weight` still wins. Family token is the
-// normalized form (`normalizeLoraFamily`: krea_2 → krea-2).
-const KREA_LORA_DEFAULT_WEIGHT = 1.5;
+// The apply weight a LoRA starts at when nothing explicit is recorded for it — ONE neutral 1.0 for
+// every family. There is deliberately no per-family table: the sole exception used to be krea-2 at
+// 1.5 (sc-7579 / sc-7932 — Krea 2's distilled, CFG-free Turbo attenuates Raw-trained LoRAs), which
+// overshot in practice and landed fresh picks over-applied. A model that genuinely wants a
+// different starting point should ship `defaultWeight` on the LoRA's own manifest entry rather than
+// reintroduce a family branch here.
+//
+// ⚠️ Mirrored by the API's `DEFAULT_LORA_WEIGHT` (apps/rust-api/src/recipe_presets.rs); the two MUST
+// agree or a preset applies at a weight the studio never showed. This is still a DEFAULT — an
+// explicit preset weight, a stored `defaultWeight`, or the LoRA's own `weight` still wins.
+const DEFAULT_LORA_WEIGHT = 1.0;
 
 export function loraWeight(lora, presetLora = {}) {
-  const fallback = loraFamilies(lora).includes("krea-2") ? KREA_LORA_DEFAULT_WEIGHT : 0.8;
-  const value = Number(presetLora.weight ?? lora?.defaultWeight ?? lora?.weight ?? fallback);
-  return Number.isFinite(value) ? value : fallback;
+  const value = Number(presetLora.weight ?? lora?.defaultWeight ?? lora?.weight ?? DEFAULT_LORA_WEIGHT);
+  return Number.isFinite(value) ? value : DEFAULT_LORA_WEIGHT;
 }
 
 // Resolve a preset's declared LoRAs into [{ id, weight }] entries ready to seed into the

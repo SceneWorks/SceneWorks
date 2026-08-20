@@ -5,15 +5,15 @@ use serde_json::{Map, Value};
 
 use crate::contracts::{JobSnapshot, JobType};
 use crate::jobs_store::routing::catalog::{
-    imported_image_request_family_eligible, MLX_IMPORTED_CAPS, MLX_ONLY_TRAINING_KERNELS,
-    MLX_ROUTED_FAMILIES, MLX_ROUTED_MODELS, MLX_ROUTED_TRAINING_KERNELS, VIDEO_MLX_ROUTED_MODELS,
+    imported_image_request_provider_eligible, MLX_ONLY_TRAINING_KERNELS, MLX_ROUTED_MODELS,
+    MLX_ROUTED_TRAINING_KERNELS, VIDEO_MLX_ROUTED_MODELS,
 };
 use crate::jobs_store::routing::{
-    conditioned_reference_count, has_malformed_optional_nested_number, has_nonempty_array,
-    has_nonempty_nested_array, has_nonempty_or_malformed_array,
-    has_nonempty_or_malformed_nested_array, has_nonempty_or_malformed_string, has_nonempty_string,
-    has_nonnull_or_malformed_nested_carrier, krea_edit_has_unsupported_carrier,
-    SENSENOVA_MODEL_IDS,
+    conditioned_reference_count, has_malformed_optional_nested_number,
+    has_malformed_optional_string, has_nonempty_array, has_nonempty_nested_array,
+    has_nonempty_or_malformed_array, has_nonempty_or_malformed_nested_array,
+    has_nonempty_or_malformed_string, has_nonempty_string, has_nonnull_or_malformed_nested_carrier,
+    krea_edit_has_unsupported_carrier, SENSENOVA_MODEL_IDS,
 };
 
 /// Epic 3018 routing — does this image job belong on the in-process Rust MLX
@@ -47,29 +47,19 @@ pub(crate) fn image_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     image_request_mlx_eligible(model, &job.payload)
 }
 
-/// Per-model image MLX-eligibility dispatch, factored out of [`image_job_is_mlx_eligible`] so the
-/// UI gating oracle ([`model_mac_support`], sc-3486) can probe the same per-family predicates with
-/// synthetic payloads — one dispatch table, no divergence between routing and what the UI hides.
+/// Per-model image MLX-eligibility dispatch. Builtins use the id-keyed arms below; imported rows
+/// carry their full manifest entry and select an exact family + source-shaped provider route. The
+/// API projects the same provider facts into imported catalog affordances, while
+/// [`model_mac_support`] remains the builtin-default probe.
 pub(crate) fn image_request_mlx_eligible(model: &str, payload: &Map<String, Value>) -> bool {
     if !MLX_ROUTED_MODELS.contains(&model) {
-        // Route-by-family fallback for a non-builtin (imported/user) image model whose novel id is in
-        // no routing table (sc-14109, epic 14015). S0d (sc-14019) made only the display badge
-        // (`image_model_mac_support`) family-aware, so an imported checkpoint showed as usable yet its
-        // job was never claimed at THIS predicate — it stranded on "Waiting for an available GPU
-        // worker." A builtin always keeps its id-keyed verdict: `!is_builtin_image_model` mirrors the
-        // display badge's guard so the router and the badge agree, and it keeps a (hypothetical
-        // future) candle-only builtin — a builtin id absent from `MLX_ROUTED_MODELS` — not-eligible
-        // here rather than family-routed. Today every builtin is `mlx_routed`, so this branch is only
-        // ever reached by imported ids; the guard is defensive parity, not live behavior.
-        // `MLX_IMPORTED_CAPS`: the MLX native single-file loader takes an adapter slice
-        // (inference #211) — LoRAs (sc-14111) + Kontext edit (sc-14119) — and assembles the Krea
-        // pose control branch around the file-loaded DiT (strict-pose sets on the krea_2 family).
-        return imported_image_request_family_eligible(
-            model,
-            payload,
-            MLX_ROUTED_FAMILIES,
-            MLX_IMPORTED_CAPS,
-        );
+        // Exact imported-provider fallback for a novel id outside the builtin table (sc-14109,
+        // refined by sc-18312). The stamped manifest family is necessary but insufficient: the
+        // structural `importSourceShape` and requested operation must match one generated MLX
+        // registry row, including its conditioning, adapter, and quant capabilities. Missing or
+        // sibling source identity therefore fails closed. `is_builtin_image_model` inside the
+        // provider gate keeps any future non-MLX builtin from inheriting an imported route.
+        return imported_image_request_provider_eligible(model, payload, "mlx");
     }
     match model {
         "z_image_turbo" | "z_image_edit" => z_image_mlx_eligible(payload),
@@ -621,12 +611,19 @@ pub(crate) fn sd3_5_mlx_eligible(payload: &Map<String, Value>) -> bool {
 /// share this gate. Edit, control, multiple-reference, adapter, pose, phase, and malformed unsupported
 /// carriers are rejected instead of being silently ignored. This keeps `model_mac_support`'s
 /// `features.edit` false (it probes with `mode: edit_image`). Off-Mac no MLX worker registers.
+///
+/// The singular reference is OPTIONAL on this one gate — the engine serves plain text-to-image AND
+/// singular-reference latent-init img2img — so only a malformed non-string carrier may fail closed
+/// ([`has_malformed_optional_string`]). The distinction that matters is `null`: the API normalizes
+/// every unset optional asset carrier to an explicit `null` before the job is stored, and an earlier
+/// `.map(..).unwrap_or(true)` form handled only the MISSING key, so every real text-to-image
+/// submission read as "not a valid reference" and no MLX worker would claim it (sc-19712 F-1,
+/// observed live). sc-20525 finished the job: the replacement still rejected a BLANK string, which
+/// contradicted both its own doc and the worker's convention that a blank asset id is absent, and
+/// left the Mac lane disagreeing with the Candle twin on the same payload.
 pub(crate) fn sana_mlx_eligible(payload: &Map<String, Value>) -> bool {
     payload.get("mode").and_then(Value::as_str) != Some("edit_image")
-        && payload
-            .get("referenceAssetId")
-            .map(|value| value.as_str().is_some_and(|id| !id.trim().is_empty()))
-            .unwrap_or(true)
+        && !has_malformed_optional_string(payload, "referenceAssetId")
         && !has_nonempty_or_malformed_string(payload, "sourceAssetId")
         && !["referenceAssetIds", "controls", "controlnets"]
             .iter()
@@ -810,7 +807,7 @@ pub(crate) fn video_mode_is_mlx_eligible(model: &str, mode: &str) -> bool {
     }
     // VACE-Fun is a shipped, dedicated dual-expert replacement engine. It must not fall into the
     // generic Wan text/image generation arm: the worker dispatches only `replace_person` to
-    // `wan2_2_vace_fun_14b`, and explicitly refuses the model off-Mac.
+    // `wan2_2_vace_fun_14b`.
     if model == "wan_2_2_vace_fun_14b" {
         return mode == "replace_person";
     }
@@ -1297,11 +1294,12 @@ mod tests {
     /// sc-14109 (epic 14015): an imported/user Krea 2 single-file checkpoint carries a novel id in NO
     /// routing table, but the full catalog entry the API stamps into the job (`modelManifestEntry`)
     /// declares `family: "krea_2"` — the MLX-routed family whose builtins already run in-process. A
-    /// plain t2i job MUST be claim-eligible via the route-by-family fallback, or the mlx worker never
-    /// claims it (`worker_supports_job`) and, with no torch/candle Krea lane on Mac, it strands on
+    /// plain t2i job MUST be claim-eligible via the exact imported-provider fallback, or
+    /// `worker_supports_job` never lets the MLX worker claim it. With no torch/candle Krea lane on
+    /// Mac, it strands on
     /// "Waiting for an available GPU worker." forever — exactly the bug this story fixes. S0d
-    /// (sc-14019) had made only the display badge family-aware, leaving this claim-time predicate
-    /// blindly `false` for the same id.
+    /// The manifest's stamped `transformer_file` source proves which Krea provider is authoritative;
+    /// family identity without that structural source remains ineligible.
     #[test]
     fn imported_krea_family_t2i_is_mlx_eligible() {
         let imported_id = "user_kreamania_variant5"; // a novel id, never a builtin
@@ -1313,6 +1311,7 @@ mod tests {
             "modelManifestEntry": {
                 "id": imported_id,
                 "family": "krea_2",
+                "importSourceShape": "transformer_file",
                 "paths": { "model": "/app/models/imports/kreamania_variant4" }
             },
         });
@@ -1327,6 +1326,7 @@ mod tests {
             "modelManifestEntry": {
                 "id": imported_id,
                 "family": "krea_2",
+                "importSourceShape": "transformer_file",
                 "modelPath": "/app/models/imports/kreamania_variant4.safetensors"
             },
         });
@@ -1336,15 +1336,14 @@ mod tests {
         ));
     }
 
-    /// The route-by-family fallback fires ONLY for an MLX-routed family with a readable manifest
-    /// entry. A non-routed family (the detector's `z-image`, an unsupported import), a missing
-    /// manifest entry, and a manifest entry with no `family` key all stay not-eligible — unchanged
-    /// from the pre-sc-14109 blanket `false`, so nothing new becomes claimable by accident.
+    /// The imported-provider fallback fires only for an exact registered family + source-shaped
+    /// manifest entry. An unregistered family, a missing entry, or an entry without family/source
+    /// identity remains ineligible, so nothing becomes claimable by inference from its id.
     #[test]
     fn imported_model_without_routed_family_is_not_mlx_eligible() {
         let imported_id = "user_zimage_import";
 
-        // z-image is a real detector family but NOT in MLX_ROUTED_FAMILIES → no family fallback.
+        // z-image is a real detector family but has no exact MLX provider registration.
         let z_image = json!({
             "model": imported_id,
             "mode": "text_to_image",
@@ -1388,6 +1387,7 @@ mod tests {
         let entry = json!({
             "id": imported_id,
             "family": "krea_2",
+            "importSourceShape": "transformer_file",
             "paths": { "model": "/app/models/imports/kreamania_variant4" }
         });
 
