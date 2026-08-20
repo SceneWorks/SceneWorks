@@ -3091,10 +3091,11 @@ test("an out-of-matrix record has to date the tree its evidence resolves in (sc-
   // matching cannot turn that comparison into `undefined !== "79f02e..."` and pass vacuously.
   const pin = /rev = "([0-9a-f]{40})"/.exec(cargo)?.[1];
   // sc-19721 moved the pin onto the inference sc-17137 feature head; the 2026-08-19 main sync
-  // re-stamped it to main's sc-20523 pin. The literal is re-stamped rather than relaxed to a shape
-  // check: the assertion below only means something while the pin is known, and
-  // `assert.notEqual(revision, pin)` is the claim this exists to make.
-  assert.equal(pin, "2881696cd728c37a83f9fdc43cc6f01b01b71576");
+  // re-stamped it to main's sc-20523 pin; sc-18650 (the epic-final bump) re-stamped it to the
+  // inference-main merge of that head (f17c82544, tree-identical to 2881696cd). The literal is
+  // re-stamped rather than relaxed to a shape check: the assertion below only means something
+  // while the pin is known, and `assert.notEqual(revision, pin)` is the claim this exists to make.
+  assert.equal(pin, "f17c82544558666f8d843b4e344e3efa0fd08ed7");
 
   // The two backends now resolve at DIFFERENT revisions, per field's own definition: sc-18662's
   // streamed-request measurement re-surveyed the MLX record against the story branch, while the
