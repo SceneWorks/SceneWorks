@@ -2,23 +2,18 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://sceneworks.ai/schemas/video-memory-curves.schema.json",
   "title": "SceneWorks fitted video-memory curves",
-  "description": "Backend-neutral, lane-tagged and closure-bound per-phase residual-bounded affine cross curves. Runtime consumers must still enforce the complete identity, source handshake, and measured geometry hull.",
+  "description": "Backend-neutral, lane-tagged and closure-bound per-phase residual-bounded affine cross curves. The container is MULTI-LANE (epic 19048 R1/R4): an MLX curve and a candle curve coexist here, each carrying its own `sourceFit` fit-report provenance, and a promotion of one lane preserves the other. Runtime consumers must still enforce the complete identity, source handshake, and measured geometry hull.",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "schemaVersion",
     "generatedBy",
-    "sourceFit",
     "sourceCatalog",
     "curves"
   ],
   "properties": {
-    "schemaVersion": { "const": 2 },
+    "schemaVersion": { "const": 3 },
     "generatedBy": { "const": "scripts/fit-ltx-temporal-form.mjs" },
-    "sourceFit": {
-      "type": "string",
-      "pattern": "^docs/generated/ltx-temporal-form-fit-sc-[0-9]+\\.json$"
-    },
     "sourceCatalog": {
       "type": "array",
       "minItems": 1,
@@ -63,6 +58,7 @@
         "calibrationAbi",
         "calibrationFingerprint",
         "decodePass",
+        "sourceFit",
         "measuredGeometryHull",
         "phases",
         "evidence"
@@ -92,6 +88,11 @@
         "calibrationAbi": { "const": 3 },
         "calibrationFingerprint": { "type": "string", "minLength": 1 },
         "decodePass": { "enum": ["single_pass", "tiled", "unmodelled"] },
+        "sourceFit": {
+          "description": "The temporal-form fit report THIS curve's coefficients were promoted from. Per-curve rather than per-bundle since schema v3, because the container holds more than one lane and each lane is fitted from its own capture campaign's report. The pattern is the family of temporal-form fit reports under docs/generated - `<family>-temporal-form-fit-sc-<story>.json` - so a Wan candle report and an LTX MLX report are both expressible while a traversal, an absolute path, a nested directory, or a report with no story number all stay refused. Mirrored by `is_canonical_video_memory_curve_fit_path` in crates/sceneworks-core/src/video_memory_curves.rs.",
+          "type": "string",
+          "pattern": "^docs/generated/[a-z0-9]+(?:-[a-z0-9]+)*-temporal-form-fit-sc-[0-9]+\\.json$"
+        },
         "measuredGeometryHull": {
           "type": "array",
           "minItems": 3,

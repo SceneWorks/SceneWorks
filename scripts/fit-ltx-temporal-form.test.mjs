@@ -19,6 +19,7 @@ import {
   latentTemporalDepth,
   latentTokens,
   leastSquares,
+  mergeVideoMemoryCurveLane,
   noiseFloor,
   phaseFlipVerdict,
   pointsFrom,
@@ -99,6 +100,199 @@ function mixedCurveInputs() {
   ];
   return { bounded, mixedReport, q4, records, sources };
 }
+
+const MLX_FIT = "docs/generated/ltx-temporal-form-fit-sc-18810.json";
+const CANDLE_FIT = "docs/generated/wan-temporal-form-fit-sc-19057.json";
+const CANDLE_SOURCE_PATH = "docs/generated/wan-candle-video-sc-19057.json";
+const COMMITTED_BUNDLE = JSON.parse(
+  readFileSync(path.join(ROOT, "docs/generated/video-memory-curves.json"), "utf8"),
+);
+
+/**
+ * A synthetic `candle:wan2_2_ti2v_5b` promotion: the committed MLX sweep relabelled onto the Wan
+ * candle identity sc-19057 will actually capture, with its own evidence file and its own fit
+ * report. The COEFFICIENTS are irrelevant here — what these tests exercise is the container's
+ * ability to hold this lane beside the MLX one.
+ */
+function candleLaneInputs() {
+  const records = structuredClone(DATASET.records).map((record) => {
+    record.id = `imc-${createHash("sha256").update(`${record.id}:candle`).digest("hex").slice(0, 20)}`;
+    record.backend = "candle";
+    record.target.modelId = "wan_2_2";
+    record.target.provider = "wan2_2_ti2v_5b";
+    record.calibrationFingerprint = "sc-19057-wan-2-2-ti2v-5b-candle-t2v-staged-capture-v1";
+    return record;
+  });
+  return {
+    records,
+    report: buildReport(pointsFrom(records, rolesFromPlan(PLAN), MANIFEST)),
+    sources: [{
+      path: CANDLE_SOURCE_PATH,
+      raw: `${JSON.stringify({ records }, null, 2)}\n`,
+    }],
+    sourceFit: CANDLE_FIT,
+  };
+}
+
+const promoteCandleOnto = (existing) => {
+  const { report, records, sources, sourceFit } = candleLaneInputs();
+  return buildVideoMemoryCurveBundle(report, records, MANIFEST, sources, sourceFit, existing);
+};
+
+test("promoting the candle lane preserves the committed MLX curve exactly", () => {
+  assert.equal(COMMITTED_BUNDLE.curves.length, 1, "the committed bundle is the MLX lane alone");
+  const merged = promoteCandleOnto(COMMITTED_BUNDLE);
+
+  assert.deepEqual(
+    merged.curves.map((curve) => curve.backend).sort(),
+    ["candle", "mlx"],
+    "both lanes coexist — this is the whole point of schema v3",
+  );
+  const preservedMlx = merged.curves.find((curve) => curve.backend === "mlx");
+  assert.deepEqual(
+    preservedMlx,
+    COMMITTED_BUNDLE.curves[0],
+    "the MLX curve survives a foreign-lane promotion byte-for-byte, coefficients included",
+  );
+  assert.equal(preservedMlx.sourceFit, MLX_FIT);
+  assert.equal(merged.curves.find((curve) => curve.backend === "candle").sourceFit, CANDLE_FIT);
+  assert.deepEqual(
+    merged.sourceCatalog,
+    [
+      COMMITTED_BUNDLE.sourceCatalog[0],
+      {
+        path: CANDLE_SOURCE_PATH,
+        sha256: createHash("sha256")
+          .update(candleLaneInputs().sources[0].raw)
+          .digest("hex"),
+      },
+    ].sort((left, right) => (left.path < right.path ? -1 : 1)),
+    "the preserved lane's evidence source stays in the catalog beside the promoted lane's",
+  );
+  assert.deepEqual(
+    merged.curves.map((curve) => curve.id),
+    merged.curves.map((curve) => curve.id).slice().sort(),
+    "the merged curve list stays deterministically ordered by id",
+  );
+
+  // The symmetric direction: re-promoting MLX must not delete the candle lane either.
+  const report = JSON.parse(
+    readFileSync(path.join(ROOT, "docs/generated/ltx-temporal-form-fit-sc-18810.json"), "utf8"),
+  );
+  const reMlx = buildVideoMemoryCurveBundle(
+    report,
+    DATASET.records,
+    MANIFEST,
+    DATASET_SOURCES,
+    MLX_FIT,
+    merged,
+  );
+  assert.deepEqual(reMlx, merged, "re-running one lane's fitter is idempotent for the other lane");
+});
+
+test("a lane promotion replaces its OWN lane rather than accumulating stale curves", () => {
+  const merged = promoteCandleOnto(COMMITTED_BUNDLE);
+  const { report, records, sources } = candleLaneInputs();
+  // A second candle campaign, at a different closure, promoted from a different report.
+  const nextRecords = structuredClone(records).map((record) => {
+    record.repositories.inference.closureDigest = "a".repeat(64);
+    return record;
+  });
+  const nextSources = [{
+    path: "docs/generated/wan-candle-video-sc-19999.json",
+    raw: `${JSON.stringify({ records: nextRecords }, null, 2)}\n`,
+  }];
+  const reCandle = buildVideoMemoryCurveBundle(
+    buildReport(pointsFrom(nextRecords, rolesFromPlan(PLAN), MANIFEST)),
+    nextRecords,
+    MANIFEST,
+    nextSources,
+    "docs/generated/wan-temporal-form-fit-sc-19999.json",
+    merged,
+  );
+  assert.equal(reCandle.curves.filter((curve) => curve.backend === "candle").length, 1);
+  assert.equal(
+    reCandle.curves.find((curve) => curve.backend === "candle").closureDigest,
+    "a".repeat(64),
+    "the superseded candle curve is gone, not left beside its replacement",
+  );
+  assert.deepEqual(
+    reCandle.curves.find((curve) => curve.backend === "mlx"),
+    COMMITTED_BUNDLE.curves[0],
+    "replacing the candle lane twice still leaves MLX untouched",
+  );
+  assert.deepEqual(
+    reCandle.sourceCatalog.map(({ path: sourcePath }) => sourcePath),
+    ["docs/generated/ltx-mlx-geometry-sweep-sc-18810.json", "docs/generated/wan-candle-video-sc-19999.json"],
+    "the replaced lane's evidence source leaves the catalog with it, rather than being orphaned",
+  );
+  assert.ok(report && sources, "fixture builder returns its inputs");
+});
+
+test("a merge cannot silently resolve a cross-lane conflict", () => {
+  const merged = promoteCandleOnto(COMMITTED_BUNDLE);
+  const twoLanePromotion = { ...merged, sourceCatalog: merged.sourceCatalog, curves: merged.curves };
+  assert.throws(
+    () => mergeVideoMemoryCurveLane(COMMITTED_BUNDLE, twoLanePromotion),
+    /replaces exactly one measurement lane, got 2/,
+    "a promotion spanning two lanes has no well-defined replace target",
+  );
+
+  const straddling = structuredClone(merged);
+  straddling.curves = straddling.curves.filter((curve) => curve.backend === "candle");
+  straddling.sourceCatalog = [COMMITTED_BUNDLE.sourceCatalog[0]];
+  assert.throws(
+    () => mergeVideoMemoryCurveLane(COMMITTED_BUNDLE, straddling),
+    /may not straddle two lanes/,
+    "one evidence file feeding both lanes would orphan records the moment either lane is replaced",
+  );
+
+  const legacy = { ...COMMITTED_BUNDLE, schemaVersion: 2 };
+  assert.throws(
+    () => promoteCandleOnto(legacy),
+    /schema v2, not v3/,
+    "merging across schema versions must be an explicit migration, never a silent one",
+  );
+
+  const unattributed = structuredClone(COMMITTED_BUNDLE);
+  delete unattributed.curves[0].sourceFit;
+  assert.throws(
+    () => promoteCandleOnto(unattributed),
+    /carries no canonical fit provenance/,
+    "a preserved curve with no fit report may not be carried forward unattributed",
+  );
+
+  const detachedCatalog = structuredClone(COMMITTED_BUNDLE);
+  detachedCatalog.sourceCatalog[0].sha256 = "0".repeat(64);
+  assert.throws(
+    () => promoteCandleOnto(detachedCatalog),
+    /has two digests between the catalog and/,
+    "a preserved source whose catalog digest disagrees with its curve is not preserved on trust",
+  );
+
+  assert.throws(
+    () => promoteCandleOnto({ ...COMMITTED_BUNDLE, generatedBy: "scripts/other.mjs" }),
+    /produced by another generator/,
+  );
+  assert.throws(() => promoteCandleOnto([]), /not a curve container/);
+});
+
+test("a promoted curve may not name a fit report outside the canonical family", () => {
+  const { report, records, sources } = candleLaneInputs();
+  for (const spelling of [
+    "docs/generated/wan-temporal-form-fit.json",
+    "docs/generated/nested/wan-temporal-form-fit-sc-19057.json",
+    "../docs/generated/wan-temporal-form-fit-sc-19057.json",
+    "docs/generated/WAN-temporal-form-fit-sc-19057.json",
+    "",
+  ]) {
+    assert.throws(
+      () => buildVideoMemoryCurveBundle(report, records, MANIFEST, sources, spelling, null),
+      /sourceFit must be a canonical temporal-form fit report/,
+      `${JSON.stringify(spelling)} must not be promotable as provenance`,
+    );
+  }
+});
 
 test("held-out tier analysis uses only the exact staged single-pass selector", () => {
   const { records } = mixedCurveInputs();
@@ -293,9 +487,11 @@ test("the promoted curve container is derived from the exact sc-18810 identity a
     readFileSync(path.join(ROOT, "docs/generated/ltx-temporal-form-fit-sc-18810.json"), "utf8"),
   );
   const bundle = buildVideoMemoryCurveBundle(report, DATASET.records, MANIFEST, DATASET_SOURCES);
-  assert.equal(bundle.schemaVersion, 2);
+  assert.equal(bundle.schemaVersion, 3);
+  assert.equal(bundle.sourceFit, undefined, "fit provenance is per-curve since v3, not per-bundle");
   assert.equal(bundle.curves.length, 1);
   const curve = bundle.curves[0];
+  assert.equal(curve.sourceFit, "docs/generated/ltx-temporal-form-fit-sc-18810.json");
   assert.deepEqual(
     {
       modelId: curve.modelId,
@@ -381,16 +577,21 @@ test("the persisted video curve has an explicit strict schema contract", () => {
     readFileSync(path.join(ROOT, "docs/generated/video-memory-curves.json"), "utf8"),
   );
   assert.equal(schema.$schema, "https://json-schema.org/draft/2020-12/schema");
-  assert.equal(schema.properties.schemaVersion.const, 2);
+  assert.equal(schema.properties.schemaVersion.const, 3);
   assert.equal(schema.properties.generatedBy.const, "scripts/fit-ltx-temporal-form.mjs");
   assert.equal(
-    schema.properties.sourceFit.pattern,
-    "^docs/generated/ltx-temporal-form-fit-sc-[0-9]+\\.json$",
+    schema.properties.sourceFit,
+    undefined,
+    "v3 moved fit provenance onto the curve so the container can hold more than one lane",
   );
+  assert.equal(
+    schema.$defs.curve.properties.sourceFit.pattern,
+    "^docs/generated/[a-z0-9]+(?:-[a-z0-9]+)*-temporal-form-fit-sc-[0-9]+\\.json$",
+  );
+  assert.ok(schema.$defs.curve.required.includes("sourceFit"));
   assert.deepEqual(schema.required, [
     "schemaVersion",
     "generatedBy",
-    "sourceFit",
     "sourceCatalog",
     "curves",
   ]);
@@ -403,6 +604,40 @@ test("the persisted video curve has an explicit strict schema contract", () => {
   const staleAbi = structuredClone(bundle);
   staleAbi.curves[0].calibrationAbi += 1;
   assert.match(videoCurveSchemaErrors(schema, staleAbi).join("\n"), /expected constant 3/);
+  // The generalized pattern is still a constraint, not a rubber stamp.
+  const bundleLevel = structuredClone(bundle);
+  delete bundleLevel.curves[0].sourceFit;
+  bundleLevel.sourceFit = "docs/generated/ltx-temporal-form-fit-sc-18810.json";
+  assert.match(
+    videoCurveSchemaErrors(schema, bundleLevel).join("\n"),
+    /unknown property "sourceFit"[\s\S]*missing required property "sourceFit"/,
+    "a v2-shaped bundle-level sourceFit is refused at BOTH ends",
+  );
+  for (const spelling of [
+    "docs/generated/wan-temporal-form-fit.json",
+    "docs/generated/nested/wan-temporal-form-fit-sc-19057.json",
+    "../docs/generated/wan-temporal-form-fit-sc-19057.json",
+    "docs/generated/WAN-temporal-form-fit-sc-19057.json",
+  ]) {
+    const malformed = structuredClone(bundle);
+    malformed.curves[0].sourceFit = spelling;
+    assert.match(
+      videoCurveSchemaErrors(schema, malformed).join("\n"),
+      /sourceFit: does not match/,
+      `${spelling} must fail the fit-report family pattern`,
+    );
+  }
+  assert.deepEqual(
+    videoCurveSchemaErrors(schema, {
+      ...bundle,
+      curves: bundle.curves.map((curve) => ({
+        ...curve,
+        sourceFit: "docs/generated/wan2-2-ti2v-5b-temporal-form-fit-sc-19057.json",
+      })),
+    }),
+    [],
+    "a candle campaign's own report name is expressible, which v2's ltx- pin made impossible",
+  );
 });
 
 test("the applicability hull is the convex measured area-by-voxel hull, not a loose bounding box", () => {
@@ -540,7 +775,11 @@ test("multi-dataset CLI output stays current when source order is reversed", () 
     assert.equal(generatedReport.story, "sc-18946");
     assert.ok(generatedReport.coefficientTransfer);
     assert.ok(generatedReport.phaseFlip);
-    assert.equal(JSON.parse(readFileSync(curvePath, "utf8")).sourceFit, "docs/generated/ltx-temporal-form-fit-sc-18946.json");
+    assert.deepEqual(
+      [...new Set(JSON.parse(readFileSync(curvePath, "utf8")).curves.map((curve) => curve.sourceFit))],
+      ["docs/generated/ltx-temporal-form-fit-sc-18946.json"],
+      "every curve this campaign promoted names this campaign's report",
+    );
     assert.equal(generatedReport.selectorFits.length, 3);
     assert.deepEqual(generatedReport.legacyFitsOmittedForTiers, ["q8"]);
     assert.equal(
