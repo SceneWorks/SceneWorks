@@ -363,6 +363,11 @@ fn validate_video_memory_curve_bundle_ref(
     let mut ids = BTreeSet::new();
     let mut selectors = BTreeSet::new();
     let mut referenced_records = BTreeSet::new();
+    // One lane is promoted from ONE campaign, so every curve in a lane must name the same fit
+    // report. The producer replaces a lane wholesale and cannot emit a mixture, but that is a
+    // property of the producer; enforcing it here makes it a property of the ARTIFACT, so a
+    // hand-edited or half-merged bundle that blends two campaigns into one lane fails closed.
+    let mut lane_fit: BTreeMap<&str, &str> = BTreeMap::new();
     for curve in &bundle.curves {
         if !curve_is_valid(curve) {
             return Err(format!("video-memory curve {:?} is invalid", curve.id));
@@ -408,6 +413,23 @@ fn validate_video_memory_curve_bundle_ref(
                     return Err(format!(
                         "video-memory evidence record {:?} from {:?} feeds more than one curve",
                         record_id, source.path
+                    ));
+                }
+            }
+        }
+    }
+    for curve in &bundle.curves {
+        match lane_fit.entry(curve.backend.as_key()) {
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert(curve.source_fit.as_str());
+            }
+            std::collections::btree_map::Entry::Occupied(slot) => {
+                if *slot.get() != curve.source_fit.as_str() {
+                    return Err(format!(
+                        "video-memory lane {:?} mixes fit reports {:?} and {:?}; one lane is                          promoted from one campaign",
+                        curve.backend.as_key(),
+                        slot.get(),
+                        curve.source_fit
                     ));
                 }
             }
@@ -924,7 +946,16 @@ mod tests {
     fn packaged_curve_is_strict_and_evaluates_all_three_phases() {
         let bundle = load_video_memory_curves(PACKAGED_VIDEO_MEMORY_CURVES)
             .unwrap_or_else(|error| panic!("packaged curve bundle parses: {error}"));
-        assert_eq!(bundle.curves.len(), 1);
+        // Lane-scoped, not bundle-scoped: the container is multi-lane since v3, so a candle
+        // promotion must not red this MLX assertion (epic 19048).
+        assert_eq!(
+            bundle
+                .curves
+                .iter()
+                .filter(|curve| curve.backend == VideoCurveBackend::Mlx)
+                .count(),
+            1
+        );
         let evaluation = bundle
             .evaluate(packaged_query())
             .expect("q8 LTX curve matches");
@@ -1181,6 +1212,11 @@ mod tests {
         );
     }
 
+    const CANDLE_FIT: &str = "docs/generated/wan-temporal-form-fit-sc-19057.json";
+    const CANDLE_CLOSURE: &str = "b4a29108bbbbcccc0123456789abcdef0123456789abcdef0123456789abcdef";
+    const CANDLE_FINGERPRINT: &str = "sc-19057-wan-2-2-ti2v-5b-candle-t2v-staged-capture-v1";
+    const CANDLE_SOURCE_PATH: &str = "docs/generated/wan-candle-video-sc-19057.json";
+
     /// One MLX curve and one candle curve, each bound to its own evidence source and its own fit
     /// report, in a single bundle. Returns `(sources, bundle)`; the candle records are the packaged
     /// MLX records relabelled onto the `candle:wan2_2_ti2v_5b` identity with scaled coefficients, so
@@ -1188,11 +1224,8 @@ mod tests {
     fn two_lane_bundle() -> (
         BTreeMap<String, PackagedSourceHandshake>,
         VideoMemoryCurveBundle,
+        String,
     ) {
-        const CANDLE_FIT: &str = "docs/generated/wan-temporal-form-fit-sc-19057.json";
-        const CANDLE_CLOSURE: &str =
-            "b4a29108bbbbcccc0123456789abcdef0123456789abcdef0123456789abcdef";
-        const CANDLE_FINGERPRINT: &str = "sc-19057-wan-2-2-ti2v-5b-candle-t2v-staged-capture-v1";
         let mlx_source =
             compute_packaged_source_handshake(PACKAGED_VIDEO_MEMORY_CURVE_SOURCES[0].1)
                 .expect("packaged source parses");
@@ -1222,10 +1255,7 @@ mod tests {
                 PACKAGED_VIDEO_MEMORY_CURVE_SOURCES[0].0,
                 PACKAGED_VIDEO_MEMORY_CURVE_SOURCES[0].1,
             ),
-            (
-                "docs/generated/wan-candle-video-sc-19057.json",
-                candle_raw.as_str(),
-            ),
+            (CANDLE_SOURCE_PATH, candle_raw.as_str()),
         ])
         .expect("the two-lane source catalog validates");
         let families = packaged_model_families().expect("model-family catalog");
@@ -1266,14 +1296,14 @@ mod tests {
                 .collect(),
             curves,
         };
-        (sources, bundle)
+        (sources, bundle, candle_raw)
     }
 
     /// Epic 19048 R1/R4: one container, two bases. Before v3 the bundle could name exactly one fit
     /// report, so these two curves could not have coexisted with their provenance intact.
     #[test]
     fn both_lanes_coexist_and_neither_can_read_the_others_coefficients() {
-        let (sources, bundle) = two_lane_bundle();
+        let (sources, bundle, _candle_raw) = two_lane_bundle();
         let families = packaged_model_families().expect("model-family catalog");
         let bundle = validate_video_memory_curve_bundle(bundle, &sources, families)
             .expect("a two-lane bundle validates against both lanes' compiled evidence");
@@ -1337,9 +1367,109 @@ mod tests {
         );
     }
 
+    /// F5: the one-lane-one-report invariant is ENFORCED, not merely produced.
+    ///
+    /// The mix has to be a LEGITIMATE second curve in the same lane — a distinct complete selector
+    /// with its own exact evidence subset — or the duplicate-selector check fires first and the
+    /// test proves nothing about provenance.
+    #[test]
+    fn a_lane_may_not_mix_two_fit_reports() {
+        const CANDLE_FIT: &str = "docs/generated/wan-temporal-form-fit-sc-19057.json";
+        let (base_sources, base, candle_raw) = two_lane_bundle();
+        let families = packaged_model_families().expect("model-family catalog");
+        let candle = base
+            .curves
+            .iter()
+            .find(|curve| curve.backend == VideoCurveBackend::Candle)
+            .expect("the fixture has a candle curve")
+            .clone();
+
+        // A second candle CELL: same lane, different tier, its own evidence file.
+        let q4_records = base_sources
+            .get(CANDLE_SOURCE_PATH)
+            .expect("the candle source is in the fixture catalog")
+            .records
+            .iter()
+            .enumerate()
+            .map(|(index, record)| {
+                let mut record = record.clone();
+                record["id"] = serde_json::json!(format!("imc-{:020x}", 0xc4_0000_usize + index));
+                record["target"]["tier"] = serde_json::json!("q4");
+                record
+            })
+            .collect::<Vec<_>>();
+        let q4_raw = format!(
+            "{}
+",
+            serde_json::to_string_pretty(&serde_json::json!({ "records": q4_records }))
+                .expect("synthetic q4 candle source serializes")
+        );
+        let sources = source_handshakes([
+            (
+                PACKAGED_VIDEO_MEMORY_CURVE_SOURCES[0].0,
+                PACKAGED_VIDEO_MEMORY_CURVE_SOURCES[0].1,
+            ),
+            (CANDLE_SOURCE_PATH, candle_raw.as_str()),
+            (
+                "docs/generated/wan-candle-video-sc-19999.json",
+                q4_raw.as_str(),
+            ),
+        ])
+        .expect("the three-source catalog validates");
+
+        let mut q4 = candle.clone();
+        q4.id = format!("{}:q4", q4.id);
+        q4.tier = "q4".to_owned();
+        q4.evidence.sources = expected_curve_evidence_sources(&q4, &sources, families);
+        q4.evidence.records = q4
+            .evidence
+            .sources
+            .iter()
+            .map(|source| source.record_ids.len() as u32)
+            .sum();
+        q4.evidence.fit_points = 7;
+        q4.evidence.held_out_points = q4.evidence.records.saturating_sub(7);
+
+        let rebuild = |q4_fit: &str| {
+            let mut q4 = q4.clone();
+            q4.source_fit = q4_fit.to_owned();
+            let mut curves = base.curves.clone();
+            curves.push(q4);
+            curves.sort_by(|left, right| left.id.cmp(&right.id));
+            VideoMemoryCurveBundle {
+                schema_version: VIDEO_MEMORY_CURVE_SCHEMA_VERSION,
+                generated_by: PACKAGED_VIDEO_MEMORY_CURVE_GENERATOR.to_owned(),
+                source_catalog: sources
+                    .iter()
+                    .map(|(path, source)| VideoCurveSourceCatalogEntry {
+                        path: path.clone(),
+                        sha256: source.evidence_sha256.clone(),
+                    })
+                    .collect(),
+                curves,
+            }
+        };
+
+        // Same report across the lane: valid.
+        validate_video_memory_curve_bundle(rebuild(CANDLE_FIT), &sources, families)
+            .expect("two cells of one lane from ONE campaign are valid");
+
+        // Different report inside the same lane: refused.
+        let error = validate_video_memory_curve_bundle(
+            rebuild("docs/generated/wan-temporal-form-fit-sc-19999.json"),
+            &sources,
+            families,
+        )
+        .expect_err("a lane blending two campaigns must fail closed");
+        assert!(
+            error.contains("mixes fit reports"),
+            "the diagnostic must name the defect, got {error:?}"
+        );
+    }
+
     #[test]
     fn a_curve_without_canonical_fit_provenance_invalidates_the_bundle() {
-        let (sources, bundle) = two_lane_bundle();
+        let (sources, bundle, _candle_raw) = two_lane_bundle();
         let families = packaged_model_families().expect("model-family catalog");
         for spelling in [
             "",

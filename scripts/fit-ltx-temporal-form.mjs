@@ -61,8 +61,12 @@ const isCanonicalRepoPath = (value) =>
  * and the `sourceFit` pattern in `packages/schemas/video-memory-curves.schema.json`; a producer
  * that emitted something outside it would write a bundle the runtime reader refuses to load.
  */
-export const VIDEO_MEMORY_CURVE_FIT_PATH_PATTERN =
-  /^docs\/generated\/[a-z0-9]+(?:-[a-z0-9]+)*-temporal-form-fit-sc-[0-9]+\.json$/;
+// Built from a STRING rather than a regex literal so `.source` is byte-comparable with the schema's
+// own `pattern` — a literal would escape the slashes and make the two look different when they are
+// the same contract.
+export const VIDEO_MEMORY_CURVE_FIT_PATH_PATTERN = new RegExp(
+  "^docs/generated/[a-z0-9]+(?:-[a-z0-9]+)*-temporal-form-fit-sc-[0-9]+\\.json$",
+);
 export const VIDEO_MEMORY_CURVE_SCHEMA_VERSION = 3;
 export const VIDEO_MEMORY_CURVE_GENERATOR = "scripts/fit-ltx-temporal-form.mjs";
 // Kept in lockstep with `sceneworks_core::memory_calibration::MEMORY_CALIBRATION_ABI`, whose
@@ -1241,7 +1245,9 @@ export function geometryHull(geometries) {
  * The container holds one curve set per measurement lane. A capture campaign runs on exactly one
  * backend, so a promotion REPLACES that lane wholesale — every curve it previously contributed
  * disappears, so a lane is never a mixture of two fit reports — and PRESERVES every other lane
- * verbatim, together with the source-catalog entries those preserved curves consume.
+ * verbatim, together with the source-catalog entries those preserved curves consume. That
+ * one-lane-one-report property is not left to construction: the Rust validator rejects a bundle
+ * whose lane mixes fit reports, so a hand-edited artifact fails closed too.
  *
  * Preservation is explicit rather than incidental: the promoted lane is derived from the incoming
  * curves and asserted to be singular, the preserved source catalog is REDERIVED from the preserved
@@ -1251,6 +1257,16 @@ export function geometryHull(geometries) {
  * provenance — throws instead of silently resolving.
  */
 export function mergeVideoMemoryCurveLane(existingBundle, promotion) {
+  // Hoisted ABOVE the first-promotion early return: "a promotion carries exactly one measurement
+  // lane" is a property of the promotion itself, not of the merge, so a from-scratch bundle must
+  // not be the one path that can emit a mixed-lane or empty container.
+  const promotedLanes = [...new Set(promotion.curves.map((curve) => curve.backend))].sort(compareText);
+  if (promotedLanes.length !== 1) {
+    throw new Error(
+      `a promotion replaces exactly one measurement lane, got ${promotedLanes.length}: ${promotedLanes.join(", ")}`,
+    );
+  }
+  const [promotedLane] = promotedLanes;
   if (existingBundle === null || existingBundle === undefined) return promotion;
   if (
     !existingBundle ||
@@ -1270,14 +1286,11 @@ export function mergeVideoMemoryCurveLane(existingBundle, promotion) {
   if (existingBundle.generatedBy !== VIDEO_MEMORY_CURVE_GENERATOR) {
     throw new Error("the existing video curve bundle was produced by another generator");
   }
-  const promotedLanes = [...new Set(promotion.curves.map((curve) => curve.backend))].sort(compareText);
-  if (promotedLanes.length !== 1) {
-    throw new Error(
-      `a promotion replaces exactly one measurement lane, got ${promotedLanes.length}: ${promotedLanes.join(", ")}`,
-    );
-  }
-  const [promotedLane] = promotedLanes;
-  const preserved = existingBundle.curves.filter((curve) => curve.backend !== promotedLane);
+  // F7: clone rather than alias. The merged bundle must not share curve objects with the caller's
+  // input, or a later mutation of either would silently reach into the other.
+  const preserved = structuredClone(
+    existingBundle.curves.filter((curve) => curve.backend !== promotedLane),
+  );
   for (const curve of preserved) {
     if (typeof curve.sourceFit !== "string" || !VIDEO_MEMORY_CURVE_FIT_PATH_PATTERN.test(curve.sourceFit)) {
       throw new Error(

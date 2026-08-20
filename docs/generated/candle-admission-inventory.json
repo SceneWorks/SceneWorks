@@ -3,7 +3,7 @@
   "generatedBy": "scripts/generate-candle-admission-inventory.mjs",
   "story": "sc-19049",
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:faade8a88add5caa75e9b0d40477efc01e9a9c9138830271a61c6bfc71c22bf3",
+    "sceneWorksRevision": "source-tree:b1ad970c1c9f68e14d576f6865e5ac6097190bd0573c05a4767e2fec4bd13c18",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -59,7 +59,7 @@
       },
       "videoMemoryCurves": {
         "path": "crates/sceneworks-core/src/video_memory_curves.rs",
-        "sha256": "4fad6d61da527d3fd14854738b4b2b0d544f83618069110fdf97a54b72bb99ef"
+        "sha256": "52f697fedfba24c0283fc5fe9133e9d41b8ce5a9d185074cb264913ce22096ab"
       },
       "videoMemoryCurvesData": {
         "path": "docs/generated/video-memory-curves.json",

@@ -26,6 +26,7 @@ import {
   rolesFromPlan,
   sessionsFrom,
   VIDEO_MEMORY_CURVE_CALIBRATION_ABI,
+  VIDEO_MEMORY_CURVE_FIT_PATH_PATTERN,
   videoCurveSchemaErrors,
 } from "./fit-ltx-temporal-form.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
@@ -107,6 +108,13 @@ const CANDLE_SOURCE_PATH = "docs/generated/wan-candle-video-sc-19057.json";
 const COMMITTED_BUNDLE = JSON.parse(
   readFileSync(path.join(ROOT, "docs/generated/video-memory-curves.json"), "utf8"),
 );
+/** The committed MLX lane, selected BY LANE — the container is multi-lane, so a positional
+ * `curves[0]` would silently start asserting about a candle curve once sc-19057 lands. */
+const COMMITTED_MLX = COMMITTED_BUNDLE.curves.find((curve) => curve.backend === "mlx");
+/** Catalog entries that survive a candle promotion: everything the MLX lane still consumes. */
+const COMMITTED_MLX_SOURCES = COMMITTED_BUNDLE.sourceCatalog.filter((entry) =>
+  COMMITTED_MLX.evidence.sources.some((source) => source.path === entry.path),
+);
 
 /**
  * A synthetic `candle:wan2_2_ti2v_5b` promotion: the committed MLX sweep relabelled onto the Wan
@@ -140,7 +148,14 @@ const promoteCandleOnto = (existing) => {
 };
 
 test("promoting the candle lane preserves the committed MLX curve exactly", () => {
-  assert.equal(COMMITTED_BUNDLE.curves.length, 1, "the committed bundle is the MLX lane alone");
+  // Lane-scoped: this test is about the MLX lane surviving a candle promotion, not about the
+  // container holding nothing else. Once sc-19057 commits its candle curve the bundle holds two
+  // lanes, and asserting a total of 1 here would red the very capture this container exists for.
+  assert.equal(
+    COMMITTED_BUNDLE.curves.filter((curve) => curve.backend === "mlx").length,
+    1,
+    "the committed bundle carries exactly one MLX curve",
+  );
   const merged = promoteCandleOnto(COMMITTED_BUNDLE);
 
   assert.deepEqual(
@@ -151,7 +166,7 @@ test("promoting the candle lane preserves the committed MLX curve exactly", () =
   const preservedMlx = merged.curves.find((curve) => curve.backend === "mlx");
   assert.deepEqual(
     preservedMlx,
-    COMMITTED_BUNDLE.curves[0],
+    COMMITTED_MLX,
     "the MLX curve survives a foreign-lane promotion byte-for-byte, coefficients included",
   );
   assert.equal(preservedMlx.sourceFit, MLX_FIT);
@@ -159,7 +174,7 @@ test("promoting the candle lane preserves the committed MLX curve exactly", () =
   assert.deepEqual(
     merged.sourceCatalog,
     [
-      COMMITTED_BUNDLE.sourceCatalog[0],
+      ...COMMITTED_MLX_SOURCES,
       {
         path: CANDLE_SOURCE_PATH,
         sha256: createHash("sha256")
@@ -218,12 +233,13 @@ test("a lane promotion replaces its OWN lane rather than accumulating stale curv
   );
   assert.deepEqual(
     reCandle.curves.find((curve) => curve.backend === "mlx"),
-    COMMITTED_BUNDLE.curves[0],
+    COMMITTED_MLX,
     "replacing the candle lane twice still leaves MLX untouched",
   );
   assert.deepEqual(
     reCandle.sourceCatalog.map(({ path: sourcePath }) => sourcePath),
-    ["docs/generated/ltx-mlx-geometry-sweep-sc-18810.json", "docs/generated/wan-candle-video-sc-19999.json"],
+    [...COMMITTED_MLX_SOURCES.map(({ path: sourcePath }) => sourcePath),
+      "docs/generated/wan-candle-video-sc-19999.json"].sort(),
     "the replaced lane's evidence source leaves the catalog with it, rather than being orphaned",
   );
   assert.ok(report && sources, "fixture builder returns its inputs");
@@ -255,7 +271,9 @@ test("a merge cannot silently resolve a cross-lane conflict", () => {
   );
 
   const unattributed = structuredClone(COMMITTED_BUNDLE);
-  delete unattributed.curves[0].sourceFit;
+  // Strip provenance from a PRESERVED (non-candle) curve; stripping it from a curve the promotion
+  // is about to replace would prove nothing.
+  delete unattributed.curves.find((curve) => curve.backend === "mlx").sourceFit;
   assert.throws(
     () => promoteCandleOnto(unattributed),
     /carries no canonical fit provenance/,
@@ -263,7 +281,9 @@ test("a merge cannot silently resolve a cross-lane conflict", () => {
   );
 
   const detachedCatalog = structuredClone(COMMITTED_BUNDLE);
-  detachedCatalog.sourceCatalog[0].sha256 = "0".repeat(64);
+  detachedCatalog.sourceCatalog.find(
+    (entry) => entry.path === COMMITTED_MLX_SOURCES[0].path,
+  ).sha256 = "0".repeat(64);
   assert.throws(
     () => promoteCandleOnto(detachedCatalog),
     /has two digests between the catalog and/,
@@ -275,6 +295,20 @@ test("a merge cannot silently resolve a cross-lane conflict", () => {
     /produced by another generator/,
   );
   assert.throws(() => promoteCandleOnto([]), /not a curve container/);
+
+  // F4: the single-lane guard is a property of the PROMOTION, so a first-ever bundle (no existing
+  // container to merge into) must not be the one path that can emit a mixed or empty one.
+  const merged2 = promoteCandleOnto(COMMITTED_BUNDLE);
+  assert.throws(
+    () => mergeVideoMemoryCurveLane(null, merged2),
+    /replaces exactly one measurement lane, got 2/,
+    "a from-scratch two-lane promotion is refused, not waved through by the early return",
+  );
+  assert.throws(
+    () => mergeVideoMemoryCurveLane(null, { ...merged2, curves: [] }),
+    /replaces exactly one measurement lane, got 0/,
+    "a from-scratch empty promotion is refused too",
+  );
 });
 
 test("a promoted curve may not name a fit report outside the canonical family", () => {
@@ -587,6 +621,16 @@ test("the persisted video curve has an explicit strict schema contract", () => {
   assert.equal(
     schema.$defs.curve.properties.sourceFit.pattern,
     "^docs/generated/[a-z0-9]+(?:-[a-z0-9]+)*-temporal-form-fit-sc-[0-9]+\\.json$",
+  );
+  // F6: tie the producer's own predicate to the schema pattern. Without this, a producer that
+  // drifted STRICTER than the schema would never be caught — schema validation at promotion only
+  // catches a producer that drifted looser.
+  // Compared through the same RegExp normalization on both sides: `.source` escapes forward
+  // slashes, so comparing it against the raw schema string would fail on spelling alone.
+  assert.equal(
+    VIDEO_MEMORY_CURVE_FIT_PATH_PATTERN.source,
+    new RegExp(schema.$defs.curve.properties.sourceFit.pattern).source,
+    "the producer predicate and the schema pattern are one contract, not two spellings",
   );
   assert.ok(schema.$defs.curve.required.includes("sourceFit"));
   assert.deepEqual(schema.required, [
