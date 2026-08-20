@@ -15,14 +15,16 @@
 // `krea_2_raw`, both in `MODEL_TABLE`) resolves through `mlx_model` and loads from its snapshot turnkey —
 // `resolve_imported_krea_dit` returns `None` for it, so the existing snapshot-dir Krea path is untouched.
 //
-// Scope (S0c + sc-14023 + sc-14071): dense bf16 or descriptor-gated plain-int8-per-row single-file DiT,
+// Scope (S0c + sc-14023 + sc-14071): dense bf16, descriptor-gated plain-int8-per-row, or native
+// NVIDIA Kitchen NVFP4 single-file DiT,
 // txt2img plus img2img (reference-guided latent-init off a single `referenceAssetId` + strength, resolved
 // through the shared cross-platform `resolve_img2img_init_generic` on the SAME Turbo t2i descriptor — the
 // engine keys img2img off a `Conditioning::Reference` on a non-edit descriptor, so BOTH the MLX and candle
 // imported lanes get img2img). Both native backends also claim adapters, Kontext edit, and strict pose
 // conditioning through the pinned runtime's file-loaded entrypoints. Descriptor contents and per-row
 // scale shapes are validated by the inference loader before dequantization; ConvRot descriptors remain
-// on their separate loader arm.
+// on their separate loader arm. Native NVFP4 is deliberately narrower: Candle/NVIDIA t2i + img2img,
+// without adapters, edit, pose, or multi-phase assembly.
 
 /// The adapter/engine id recorded on imported-Krea assets + telemetry (distinct from the registry
 /// `krea_2_turbo` / `krea_2_raw` builtins and their bespoke edit/control/multi-phase lanes).
@@ -40,6 +42,14 @@ fn krea_imported_operation(request: &ImageRequest) -> gen_core::ImportedModelOpe
     } else {
         gen_core::ImportedModelOperation::Generate
     }
+}
+
+fn krea_imported_native_nvfp4(request: &ImageRequest) -> bool {
+    request
+        .model_manifest_entry
+        .get("importQuantFormat")
+        .and_then(Value::as_str)
+        .is_some_and(|format| format.eq_ignore_ascii_case("nvfp4"))
 }
 
 /// Resolve the exact imported source shape and operation through the live provider registry. An
@@ -310,6 +320,13 @@ fn dir_has_safetensors(dir: &Path) -> bool {
 /// Mirrors the shape of the other `…_available` predicates.
 fn krea_imported_request_shape_available(request: &ImageRequest) -> bool {
     let operation = krea_imported_operation(request);
+    if krea_imported_native_nvfp4(request) {
+        #[cfg(target_os = "macos")]
+        return false;
+        if operation != gen_core::ImportedModelOperation::Generate || !request.loras.is_empty() {
+            return false;
+        }
+    }
     if sceneworks_core::jobs_store::imported_control_intent_is_material(&request.advanced)
         && operation != gen_core::ImportedModelOperation::Pose
     {
@@ -1173,7 +1190,22 @@ fn imported_model_quant(
             .as_i64()
             .or_else(|| value.as_str()?.trim().parse().ok())
     });
-    let selected = if let Some(named) = named.as_deref() {
+    let selected = if krea_imported_native_nvfp4(request) {
+        match named.as_deref() {
+            None if bits.is_none() => Some(Quant::Nvfp4),
+            Some("nvfp4") if bits.is_none() => Some(Quant::Nvfp4),
+            Some(other) => {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "{label} is stored as native NVFP4 and cannot be loaded as '{other}'."
+                )))
+            }
+            None => {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "{label} is stored as native NVFP4 and does not accept mlxQuantize."
+                )))
+            }
+        }
+    } else if let Some(named) = named.as_deref() {
         match named {
             "nvfp4" => Some(Quant::Nvfp4),
             "q4" => Some(Quant::Q4),
@@ -1181,7 +1213,7 @@ fn imported_model_quant(
             "bf16" | "dense" => None,
             other => {
                 return Err(WorkerError::InvalidPayload(format!(
-                    "{label} quant tier '{other}' is unknown; use bf16, q8, or q4."
+                    "{label} quant tier '{other}' is unknown; use bf16, nvfp4, q8, or q4."
                 )))
             }
         }
