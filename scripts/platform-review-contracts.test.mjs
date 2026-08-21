@@ -200,8 +200,9 @@ test("windows-candle provisioning is model-parameterized, not Krea-hardcoded", a
   const { names, defaults } = dispatchInputs(workflow);
 
   // GitHub rejects a workflow_dispatch with more than 10 inputs. The Krea inputs were RENAMED
-  // rather than shadowed by a parallel provision_* family precisely to stay under that cap;
-  // a future story that adds an input needs the headroom this preserves.
+  // rather than shadowed by a parallel provision_* family precisely to stay under that cap. The
+  // two terminal acceptance switches now consume the remaining slots; future routes must reuse
+  // the parameterized inputs or move to a separate workflow.
   assert.ok(names.length <= 10, `workflow_dispatch allows at most 10 inputs, found ${names.length}`);
 
   for (const gone of ["provision_krea_snapshot", "krea_repository", "krea_revision"]) {
@@ -290,7 +291,7 @@ test("windows-candle keeps the provisioning and five-rung timeout budgets", asyn
     workflow,
     // The LTX Eros acceptance arm (SC-18902, from main) rides ahead of the provisioning budget;
     // the provisioning / five-rung / default budgets keep their exact prior values behind it.
-    /timeout-minutes: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.run_ltx_eros_acceptance && 360 \|\| github\.event_name == 'workflow_dispatch' && inputs\.provision_snapshot && 240 \|\| github\.event_name == 'workflow_dispatch' && inputs\.run_five_rung_reference && 120 \|\| 45 \}\}/,
+    /timeout-minutes: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.run_ltx_eros_acceptance && 360 \|\| github\.event_name == 'workflow_dispatch' && inputs\.run_sc19054_flux_acceptance && 240 \|\| github\.event_name == 'workflow_dispatch' && inputs\.provision_snapshot && 240 \|\| github\.event_name == 'workflow_dispatch' && inputs\.run_five_rung_reference && 120 \|\| 45 \}\}/,
   );
 });
 
@@ -347,7 +348,7 @@ test("windows-candle routes weights dispatches to a real-weights runner, like th
   // `real-weights`; a provisioning job on the other half finds no snapshot.
   assert.match(
     candle,
-    /runs-on: \$\{\{ \(github\.event_name == 'workflow_dispatch' && \(inputs\.provision_snapshot \|\| inputs\.run_five_rung_reference\)\) && fromJSON\('\["self-hosted","Windows","X64","cuda","real-weights"\]'\) \|\| fromJSON\('\["self-hosted","Windows","X64","cuda"\]'\) \}\}/,
+    /runs-on: \$\{\{ \(github\.event_name == 'workflow_dispatch' && \(inputs\.provision_snapshot \|\| inputs\.run_five_rung_reference \|\| inputs\.run_sc19054_flux_acceptance\)\) && fromJSON\('\["self-hosted","Windows","X64","cuda","real-weights"\]'\) \|\| fromJSON\('\["self-hosted","Windows","X64","cuda"\]'\) \}\}/,
   );
   // Ordinary PR/push runs must NOT be narrowed to the real-weights half: that would cut the
   // available pool for this ~24m lane in half for no coverage.
@@ -640,13 +641,12 @@ test("windows-candle provisions before it compiles anything", async () => {
 test("a weights-only dispatch skips the entire compile chain, pinned per step", async () => {
   const workflow = await source(".github/workflows/windows-candle.yml");
 
-  // The WHOLE expression. A weights-only dispatch is `provision_snapshot` true AND
-  // `run_five_rung_reference` false; every other shape must still compile. Half of this is not a
-  // weaker version of it -- dropping `&& !inputs.run_five_rung_reference` would strip the compile
-  // chain off Krea's five-rung capture too, which this story's scope guard forbids, and dropping
-  // `github.event_name == 'workflow_dispatch'` would strip it off every PR and push.
+  // The WHOLE expression. A weights-only dispatch is `provision_snapshot` true with neither a
+  // five-rung nor SC-19054 consumer; every other shape must still compile. Half of this is not a
+  // weaker version of it -- dropping either consumer exception would strip its compile chain, and
+  // dropping `github.event_name == 'workflow_dispatch'` would strip it off every PR and push.
   const skip =
-    /^        if: \$\{\{ !\(github\.event_name == 'workflow_dispatch' && inputs\.provision_snapshot && !inputs\.run_five_rung_reference\) \}\}$/m;
+    /^        if: \$\{\{ !\(github\.event_name == 'workflow_dispatch' && inputs\.provision_snapshot && !inputs\.run_five_rung_reference && !inputs\.run_sc19054_flux_acceptance\) \}\}$/m;
 
   // SCOPED PER STEP. The expression is byte-identical on all six steps, so one file-wide
   // `assert.match` is satisfied by any single survivor and a narrowing mutation on the other five
@@ -663,8 +663,140 @@ test("a weights-only dispatch skips the entire compile chain, pinned per step", 
   for (const step of jobSteps(workflow).filter((candidate) => candidate.cargo)) {
     assert.ok(
       skip.test(step.body) ||
-        /if: \$\{\{[^\n]*inputs\.(run_five_rung_reference|run_ltx_eros_acceptance)/.test(step.body),
+        /if: \$\{\{[^\n]*inputs\.(run_five_rung_reference|run_ltx_eros_acceptance|run_sc19054_flux_acceptance)/.test(step.body),
       `${step.name} would compile on a weights-only dispatch; guard it or gate it`,
+    );
+  }
+});
+
+function assertSc19054FluxAcceptanceContract({ workflow, rust }, context = "SC-19054") {
+  const { names } = dispatchInputs(workflow);
+  assert.ok(names.includes("run_sc19054_flux_acceptance"), `${context}: dispatch input missing`);
+  assert.match(
+    workflow,
+    /runs-on: \$\{\{ \(github\.event_name == 'workflow_dispatch' && \(inputs\.provision_snapshot \|\| inputs\.run_five_rung_reference \|\| inputs\.run_sc19054_flux_acceptance\)\)/,
+    `${context}: real-weight runner routing drifted`,
+  );
+
+  const validate = stepBody(workflow, "Validate dispatch inputs");
+  for (const exact of [
+    "run_sc19054_flux_acceptance requires provision_snapshot=true",
+    "4013049764172ee7dc707101c7da8c83c1483f2d",
+    "SceneWorks/flux1-schnell-mlx",
+    "bba3ae01dfd94089f173c05edd4e1a4c551f2599",
+    "q4/**",
+    "INFERENCE_RUNTIME_REVISION",
+  ]) {
+    assert.ok(validate.includes(exact), `${context}: dispatch validation lost ${exact}`);
+  }
+  assert.match(
+    validate,
+    /RUN_FIVE_RUNG_REFERENCE -eq 'true' -or \$env:RUN_LTX_EROS_ACCEPTANCE -eq 'true'/,
+    `${context}: acceptance modes must be mutually exclusive`,
+  );
+
+  const seal = stepBody(workflow, "Seal the SC-19054 FLUX acceptance identity");
+  for (const exact of [
+    "git rev-parse HEAD",
+    "$head -ne $env:GITHUB_SHA",
+    "nvidia-smi --query-gpu=name,uuid,driver_version,memory.total",
+    "Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256",
+    "SC19054_FLUX_Q4_ROOT=$env:SCENEWORKS_PROVISIONED_ROOT",
+  ]) {
+    assert.ok(seal.includes(exact), `${context}: identity receipt lost ${exact}`);
+  }
+  const run = stepBody(workflow, "Run the exact SC-19054 admission-to-FLUX render");
+  assert.match(
+    run,
+    /cargo test -p sceneworks-worker --features backend-candle --lib sc19054_flux_acceptance::sc19054_flux_candle_acceptance -- --ignored --exact --nocapture/,
+    `${context}: workflow no longer invokes the exact ignored product test`,
+  );
+  assert.match(run, /SCENEWORKS_CUDA_VRAM_CAP_GB: "24"/, `${context}: runtime cap drifted`);
+  const verify = stepBody(workflow, "Verify and hash the SC-19054 acceptance evidence");
+  for (const exact of [
+    "$events.Count -ne 1",
+    "$event.modelId -ne 'flux_schnell'",
+    "$event.engineId -ne 'flux1_schnell'",
+    "$event.tier -ne 'q4'",
+    "$event.geometry.width -ne 1024",
+    "$event.budgetGb -ne 24",
+    "$event.sequentialCapable -ne $true",
+    "$event.oldPlan -ne 'resident'",
+    "$event.selectedPlan -ne 'sequential'",
+    "$event.widenedResidentPeakGb -ne 24.232",
+    "$event.widenedSequentialPeakGb -ne 21.216",
+    "$receipt.runtime.offloadPolicy -ne 'sequential'",
+    "$receipt.runtime.backend -ne 'candle'",
+    "$receipt.runtime.vramCapGb -ne 24",
+    "Get-FileHash -LiteralPath $imagePath -Algorithm SHA256",
+  ]) {
+    assert.ok(verify.includes(exact), `${context}: evidence verifier lost ${exact}`);
+  }
+  assert.match(
+    stepBody(workflow, "Upload the SC-19054 FLUX acceptance evidence"),
+    /if: \$\{\{ always\(\) && github\.event_name == 'workflow_dispatch' && inputs\.run_sc19054_flux_acceptance \}\}/,
+  );
+  assert.match(
+    stepBody(workflow, "Clean up the SC-19054 FLUX acceptance scratch"),
+    /StartsWith\('sc19054-flux-acceptance-'\)/,
+  );
+
+  for (const exact of [
+    'const MODEL_ID: &str = "flux_schnell";',
+    'const ENGINE_ID: &str = "flux1_schnell";',
+    'const TIER: &str = "q4";',
+    "const WIDTH: u32 = 1024;",
+    "const HEIGHT: u32 = 1024;",
+    "const BUDGET_GB: f64 = 24.0;",
+    "candle_scalar_gate::predicted_peak_gb_for_request(",
+    "candle_scalar_gate::predicted_sequential_peak_gb_for_request(",
+    ".with_quant(Quant::Q4)",
+    ".with_offload_policy(OffloadPolicy::Sequential)",
+    "crate::inference_runtime::media_descriptor(ENGINE_ID)",
+    'assert_eq!(descriptor.backend, "candle", "acceptance requires Candle");',
+    'crate::inference_runtime::load(ENGINE_ID, &spec)',
+  ]) {
+    assert.ok(rust.includes(exact), `${context}: Rust route lost ${exact}`);
+  }
+  const descriptor = rust.indexOf("crate::inference_runtime::media_descriptor(ENGINE_ID)");
+  const admission = rust.indexOf(
+    "let admission = admission_contract(descriptor.capabilities.supports_sequential_offload);",
+    descriptor,
+  );
+  const spec = rust.indexOf("let spec = acceptance_load_spec(&root, admission);", admission);
+  const load = rust.indexOf("crate::inference_runtime::load(ENGINE_ID, &spec)", spec);
+  assert.ok(
+    descriptor >= 0 && descriptor < admission && admission < spec && spec < load,
+    `${context}: linked capability admission must construct the loaded spec`,
+  );
+}
+
+test("SC-19054 FLUX acceptance binds the exact admission cell to one real Candle render", async () => {
+  const documents = {
+    workflow: await source(".github/workflows/windows-candle.yml"),
+    rust: await source("crates/sceneworks-worker/src/sc19054_flux_acceptance.rs"),
+  };
+  assertSc19054FluxAcceptanceContract(documents);
+
+  const mutations = [
+    ["wrong repository", "workflow", "SceneWorks/flux1-schnell-mlx", "SceneWorks/other-model"],
+    ["wrong inference pin", "workflow", "4013049764172ee7dc707101c7da8c83c1483f2d", "0000000000000000000000000000000000000000"],
+    ["wrong tier", "rust", 'const TIER: &str = "q4";', 'const TIER: &str = "q8";'],
+    ["wrong geometry", "rust", "const WIDTH: u32 = 1024;", "const WIDTH: u32 = 768;"],
+    ["wrong cap", "rust", "const BUDGET_GB: f64 = 24.0;", "const BUDGET_GB: f64 = 32.0;"],
+    ["wrong engine", "rust", 'const ENGINE_ID: &str = "flux1_schnell";', 'const ENGINE_ID: &str = "flux1_dev";'],
+    ["wrong quantization", "rust", ".with_quant(Quant::Q4)", ".with_quant(Quant::Q8)"],
+    ["wrong offload", "rust", ".with_offload_policy(OffloadPolicy::Sequential)", ".with_offload_policy(OffloadPolicy::Full)"],
+    ["hardcoded sequential capability", "rust", "admission_contract(descriptor.capabilities.supports_sequential_offload)", "admission_contract(true)"],
+    ["disconnected admission", "rust", "let spec = acceptance_load_spec(&root, admission);", "let spec = LoadSpec::new(WeightsSource::Dir(root.clone()));"],
+  ];
+  for (const [name, key, from, to] of mutations) {
+    const mutated = { ...documents, [key]: documents[key].replaceAll(from, to) };
+    assert.notEqual(mutated[key], documents[key], `${name}: mutation did not apply`);
+    assert.throws(
+      () => assertSc19054FluxAcceptanceContract(mutated, name),
+      undefined,
+      `${name} must be killed by the acceptance contract`,
     );
   }
 });
@@ -686,7 +818,7 @@ test("every failure mode a weights-only dispatch can hit is still fatal", async 
     // (segment shape + canonical probe), subdir shape, subdir traversal, cache-dir newline,
     // cache-dir absoluteness, and the three five-rung guards (inference_revision shape, the fixed
     // Krea repository, INFERENCE_PIN agreement).
-    "Validate dispatch inputs": 13,
+    "Validate dispatch inputs": 20,
     // Pure derivation: it writes GITHUB_ENV and throws nothing.
     "Resolve snapshot provisioning parameters": 0,
     // A non-zero `python --version`, and a minor version below 12.

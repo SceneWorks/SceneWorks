@@ -373,6 +373,11 @@ mod lora_train_driver;
     )
 ))]
 mod smoke_support;
+// SC-19054 terminal acceptance: pure admission/load-binding contracts compile on every test lane;
+// the ignored real-weight arm inside the module is itself gated to the off-Mac Candle bundle and is
+// invoked only by an explicit windows-candle workflow dispatch.
+#[cfg(test)]
+mod sc19054_flux_acceptance;
 // sc-12409: parity guard tying the shipped video manifest's `limits.maxPixels` to the area cap of
 // the ENGINE PINNED by Cargo.toml (mlx via `runtime-macos` on macOS, candle via `runtime-cuda`
 // off-mac under backend-candle). Not a smoke — no weights, no GPU; just the shipped manifest bytes
