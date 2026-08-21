@@ -160,16 +160,18 @@ test("the committed evidence grades the real catalog clean", async () => {
 // (`SceneWorks/instantid-mlx`, the SCRFD + ArcFace pair), which landed on the epic branch while
 // this gate landed on main, so neither PR could see the other. The census is a shape assertion —
 // it moves whenever the catalog gains or loses a repo@revision key, together with a re-record.
-test("all 96 real download keys are pinned to immutable lowercase commit SHAs", async () => {
+// 96 -> 97 on sc-20747: `controlnet_openpose_sdxl` added the pinned
+// `xinsir/controlnet-openpose-sdxl-1.0` component used by SDXL ControlNet jobs.
+test("all 97 real download keys are pinned to immutable lowercase commit SHAs", async () => {
   const { claims, evidence } = await realInputs();
   const immutableRevision = /^[0-9a-f]{40}$/u;
   const keys = new Set(claims.map((claim) => claimKey(claim.repo, claim.revision)));
 
-  assert.equal(keys.size, 96, "update the 96/96 disclosure when the real key census changes");
+  assert.equal(keys.size, 97, "update the 97/97 disclosure when the real key census changes");
   assert.equal(
     evidence.repos.length,
-    96,
-    "the evidence census must stay aligned with the 96/96 disclosure",
+    97,
+    "the evidence census must stay aligned with the 97/97 disclosure",
   );
   for (const claim of claims) {
     assert.match(
