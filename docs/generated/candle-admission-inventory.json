@@ -3,11 +3,11 @@
   "generatedBy": "scripts/generate-candle-admission-inventory.mjs",
   "story": "sc-19049",
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:a9760090b9b97563c5b0b9c982945823f7bcef13489f6653c0932a654e604889",
+    "sceneWorksRevision": "source-tree:417d92271d4c4b1e94b010f80d2daebd0f38277296de46111950fe3b7c9cfd89",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "0c49ac7397a5e3553555f0c59037f421dcb7f20fd1b68a18e9cbf2f30d40368c"
+        "sha256": "2a30ce46dee9533fc79136546cc40f40b980814d3fe1786f4c7c25c7331a88a4"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -31,7 +31,7 @@
       },
       "candleScalarGate": {
         "path": "crates/sceneworks-worker/src/candle_scalar_gate.rs",
-        "sha256": "59af6f5e548c6a8419929b1ee4c47d697068a6fc08ca7921b3fa3af49dba5331"
+        "sha256": "9b4f6bd4cb150b8730352ce80e33bd5e0b8c1b67db47967e4997ff0e68343d33"
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
@@ -39,7 +39,7 @@
       },
       "candleMemoryStrategy": {
         "path": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
-        "sha256": "3fe01266a776860ea950fb8dcb3d746d6af519048437dbccfbf3d10c22b25ab1"
+        "sha256": "1fd1b50d2ae1f904f74b89cb9659097e059cce2f4a9339c4d1ea3cea0e2f2258"
       },
       "memoryRouteRegistry": {
         "path": "crates/sceneworks-worker/src/memory_route_registry.rs",
@@ -55,7 +55,7 @@
       },
       "videoAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
-        "sha256": "c713daa8f27c2bf838a1b1f6ed3516b860b96ba9e74be49454a6eb5faa8cfcc6"
+        "sha256": "2fdff9b9b087517ce7fa7bfa53a50fa8285d7c430ac51acb140cb0365d8d8c6c"
       },
       "videoMemoryCurves": {
         "path": "crates/sceneworks-core/src/video_memory_curves.rs",
@@ -67,11 +67,11 @@
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "d9c682ca6b7fba149376c1bb62b4f487b1c681a3917333d48e770dacdcbdb3f1"
+        "sha256": "93c1db6de5eb598547f01c3a12a533f21748be5137e108fa40dfe9ba56730c27"
       },
       "imageBaseAdmission": {
         "path": "crates/sceneworks-worker/src/image_jobs/base_admission.rs",
-        "sha256": "d27ec420e7d8263c57928a16582f6be8e02bb6e32f2b3e6b9329b0b912e6c049"
+        "sha256": "dacae2107cca6cde6ddc18bbf61f528b6fb45915ee1ab00b5a879f00ae18a1df"
       },
       "imageConditioningGate": {
         "path": "crates/sceneworks-worker/src/image_jobs/conditioning_gate.rs",
@@ -129,6 +129,10 @@
         "path": "crates/sceneworks-worker/src/image_jobs/instantid.rs",
         "sha256": "f1d41d4e349c95771fb801821e31cb183a91d3dc88ddb1f842d28b038880eed1"
       },
+      "imageBernini": {
+        "path": "crates/sceneworks-worker/src/image_jobs/bernini.rs",
+        "sha256": "d2fe39d72f9507f4dc361181035e6ae5ea4bae28a323df9473eae4fdca10503e"
+      },
       "imagePulid": {
         "path": "crates/sceneworks-worker/src/image_jobs/pulid_candle.rs",
         "sha256": "0949a34a5f9758cd430aa386d01acb09fd624cb898d8f444d5d4b122c1c216f4"
@@ -140,6 +144,10 @@
       "videoRouteCandle": {
         "path": "crates/sceneworks-worker/src/video_jobs/candle.rs",
         "sha256": "e6b721bf143823d064c4a41ad73ac0faaf936bde3c900b7146d9aca0ffad92b0"
+      },
+      "videoRouteBernini": {
+        "path": "crates/sceneworks-worker/src/video_jobs/bernini.rs",
+        "sha256": "6379dd23de4af0dc84f367315f1bdb41e2295e3407088049f88c3d5bf4d765df"
       }
     }
   },
@@ -538,6 +546,50 @@
     {
       "id": "shared_selector_structural_floor_compatibility",
       "summary": "Resident-only shared-selector compatibility candidate carrying a source-backed structural lower bound with no calibration claim or estimate widening.",
+      "definedIn": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
+      "definitionSymbols": [
+        "select_compatibility_resident"
+      ],
+      "symbols": [
+        {
+          "symbol": "select_compatibility_resident",
+          "geometryAware": true,
+          "geometryAxes": [
+            "frames",
+            "height",
+            "width"
+          ],
+          "reachedVia": [
+            "struct_parameter:geometry:MemoryGeometry"
+          ],
+          "unresolvedParameterTypes": [
+            {
+              "parameter": "basis",
+              "type": "CandidateBasis"
+            }
+          ]
+        }
+      ],
+      "geometryAware": true,
+      "geometryAxes": [
+        "frames",
+        "height",
+        "width"
+      ],
+      "geometryAwareSymbols": [
+        "select_compatibility_resident"
+      ],
+      "geometryBlindSymbols": [],
+      "calledFrom": [
+        "crates/sceneworks-worker/src/conditioning_fit.rs",
+        "crates/sceneworks-worker/src/image_jobs/base_admission.rs",
+        "crates/sceneworks-worker/src/image_jobs/base.rs",
+        "crates/sceneworks-worker/src/video_admission.rs"
+      ]
+    },
+    {
+      "id": "shared_selector_unverified_compatibility",
+      "summary": "Evidence-free resident route submitted to the shared selector with no candidate; its Unverified verdict preserves the legacy best-effort resident execution.",
       "definedIn": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
       "definitionSymbols": [
         "select_compatibility_resident"
@@ -1354,7 +1406,7 @@
     },
     {
       "gate": "select_compatibility_resident",
-      "mechanism": "shared_selector_structural_floor_compatibility",
+      "mechanism": "shared_selector_unverified_compatibility",
       "definedIn": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
       "geometryAware": true,
       "geometryAxes": [
@@ -1683,17 +1735,18 @@
       "conditionedLanes": [],
       "overlayLanes": [],
       "sharedSelector": {
-        "reached": false,
-        "via": null,
+        "reached": true,
+        "via": "unverified_compatibility",
         "evidenceRevision": null
       },
       "videoFitSymbol": null,
       "mechanisms": [
-        "unreached"
+        "shared_selector_unverified_compatibility"
       ],
       "evidence": {
         "hasCandleBlock": false,
         "measured": null,
+        "measurementLane": null,
         "measuredTiers": [],
         "sequentialTiers": [],
         "minMemoryGb": null,
@@ -1712,17 +1765,18 @@
       "conditionedLanes": [],
       "overlayLanes": [],
       "sharedSelector": {
-        "reached": false,
-        "via": null,
+        "reached": true,
+        "via": "unverified_compatibility",
         "evidenceRevision": null
       },
       "videoFitSymbol": null,
       "mechanisms": [
-        "unreached"
+        "shared_selector_unverified_compatibility"
       ],
       "evidence": {
         "hasCandleBlock": false,
         "measured": null,
+        "measurementLane": null,
         "measuredTiers": [],
         "sequentialTiers": [],
         "minMemoryGb": null,
@@ -1741,17 +1795,18 @@
       "conditionedLanes": [],
       "overlayLanes": [],
       "sharedSelector": {
-        "reached": false,
-        "via": null,
+        "reached": true,
+        "via": "unverified_compatibility",
         "evidenceRevision": null
       },
       "videoFitSymbol": null,
       "mechanisms": [
-        "unreached"
+        "shared_selector_unverified_compatibility"
       ],
       "evidence": {
         "hasCandleBlock": false,
         "measured": null,
+        "measurementLane": null,
         "measuredTiers": [],
         "sequentialTiers": [],
         "minMemoryGb": null,
@@ -1770,17 +1825,18 @@
       "conditionedLanes": [],
       "overlayLanes": [],
       "sharedSelector": {
-        "reached": false,
-        "via": null,
-        "evidenceRevision": null
+        "reached": true,
+        "via": "structural_floor_compatibility",
+        "evidenceRevision": "sc-19055-candle-compatibility-v1"
       },
       "videoFitSymbol": null,
       "mechanisms": [
-        "unreached"
+        "shared_selector_structural_floor_compatibility"
       ],
       "evidence": {
         "hasCandleBlock": false,
         "measured": null,
+        "measurementLane": null,
         "measuredTiers": [],
         "sequentialTiers": [],
         "minMemoryGb": null,
@@ -1812,6 +1868,7 @@
       "evidence": {
         "hasCandleBlock": false,
         "measured": null,
+        "measurementLane": null,
         "measuredTiers": [],
         "sequentialTiers": [],
         "minMemoryGb": null,
@@ -1844,6 +1901,7 @@
       "evidence": {
         "hasCandleBlock": true,
         "measured": true,
+        "measurementLane": "candle",
         "measuredTiers": [
           "bf16",
           "q4",
@@ -1868,17 +1926,18 @@
       ],
       "overlayLanes": [],
       "sharedSelector": {
-        "reached": false,
-        "via": null,
+        "reached": true,
+        "via": "unverified_compatibility",
         "evidenceRevision": null
       },
       "videoFitSymbol": null,
       "mechanisms": [
-        "unreached"
+        "shared_selector_unverified_compatibility"
       ],
       "evidence": {
         "hasCandleBlock": false,
         "measured": null,
+        "measurementLane": null,
         "measuredTiers": [],
         "sequentialTiers": [],
         "minMemoryGb": null,
@@ -1911,6 +1970,7 @@
       "evidence": {
         "hasCandleBlock": true,
         "measured": true,
+        "measurementLane": "candle",
         "measuredTiers": [
           "bf16",
           "q4",
@@ -1933,17 +1993,18 @@
       "conditionedLanes": [],
       "overlayLanes": [],
       "sharedSelector": {
-        "reached": false,
-        "via": null,
+        "reached": true,
+        "via": "unverified_compatibility",
         "evidenceRevision": null
       },
       "videoFitSymbol": null,
       "mechanisms": [
-        "unreached"
+        "shared_selector_unverified_compatibility"
       ],
       "evidence": {
         "hasCandleBlock": false,
         "measured": null,
+        "measurementLane": null,
         "measuredTiers": [],
         "sequentialTiers": [],
         "minMemoryGb": null,
@@ -1962,17 +2023,18 @@
       "conditionedLanes": [],
       "overlayLanes": [],
       "sharedSelector": {
-        "reached": false,
-        "via": null,
+        "reached": true,
+        "via": "unverified_compatibility",
         "evidenceRevision": null
       },
       "videoFitSymbol": null,
       "mechanisms": [
-        "unreached"
+        "shared_selector_unverified_compatibility"
       ],
       "evidence": {
         "hasCandleBlock": false,
         "measured": null,
+        "measurementLane": null,
         "measuredTiers": [],
         "sequentialTiers": [],
         "minMemoryGb": null,
@@ -1991,17 +2053,18 @@
       "conditionedLanes": [],
       "overlayLanes": [],
       "sharedSelector": {
-        "reached": false,
-        "via": null,
+        "reached": true,
+        "via": "unverified_compatibility",
         "evidenceRevision": null
       },
       "videoFitSymbol": null,
       "mechanisms": [
-        "unreached"
+        "shared_selector_unverified_compatibility"
       ],
       "evidence": {
         "hasCandleBlock": false,
         "measured": null,
+        "measurementLane": null,
         "measuredTiers": [],
         "sequentialTiers": [],
         "minMemoryGb": null,
@@ -2039,6 +2102,7 @@
       "evidence": {
         "hasCandleBlock": true,
         "measured": false,
+        "measurementLane": "candle",
         "measuredTiers": [
           "q4",
           "q8"
@@ -2079,6 +2143,7 @@
       "evidence": {
         "hasCandleBlock": true,
         "measured": true,
+        "measurementLane": "candle",
         "measuredTiers": [
           "bf16",
           "q4",
@@ -2120,6 +2185,7 @@
       "evidence": {
         "hasCandleBlock": true,
         "measured": null,
+        "measurementLane": null,
         "measuredTiers": [],
         "sequentialTiers": [],
         "minMemoryGb": null,
@@ -2153,6 +2219,7 @@
       "evidence": {
         "hasCandleBlock": true,
         "measured": null,
+        "measurementLane": null,
         "measuredTiers": [],
         "sequentialTiers": [],
         "minMemoryGb": null,
@@ -2189,6 +2256,7 @@
       "evidence": {
         "hasCandleBlock": true,
         "measured": true,
+        "measurementLane": "candle",
         "measuredTiers": [
           "q4",
           "q8"
@@ -2229,6 +2297,7 @@
       "evidence": {
         "hasCandleBlock": true,
         "measured": false,
+        "measurementLane": "candle",
         "measuredTiers": [
           "q4",
           "q8"
@@ -2268,6 +2337,7 @@
       "evidence": {
         "hasCandleBlock": true,
         "measured": true,
+        "measurementLane": "candle",
         "measuredTiers": [
           "bf16",
           "q4",
@@ -2305,6 +2375,7 @@
       "evidence": {
         "hasCandleBlock": true,
         "measured": true,
+        "measurementLane": "candle",
         "measuredTiers": [
           "bf16",
           "q4",
@@ -2330,17 +2401,18 @@
       ],
       "overlayLanes": [],
       "sharedSelector": {
-        "reached": false,
-        "via": null,
+        "reached": true,
+        "via": "unverified_compatibility",
         "evidenceRevision": null
       },
       "videoFitSymbol": null,
       "mechanisms": [
-        "unreached"
+        "shared_selector_unverified_compatibility"
       ],
       "evidence": {
         "hasCandleBlock": false,
         "measured": null,
+        "measurementLane": null,
         "measuredTiers": [],
         "sequentialTiers": [],
         "minMemoryGb": null,
@@ -2362,17 +2434,18 @@
       ],
       "overlayLanes": [],
       "sharedSelector": {
-        "reached": false,
-        "via": null,
+        "reached": true,
+        "via": "unverified_compatibility",
         "evidenceRevision": null
       },
       "videoFitSymbol": null,
       "mechanisms": [
-        "unreached"
+        "shared_selector_unverified_compatibility"
       ],
       "evidence": {
         "hasCandleBlock": false,
         "measured": null,
+        "measurementLane": null,
         "measuredTiers": [],
         "sequentialTiers": [],
         "minMemoryGb": null,
@@ -2407,6 +2480,7 @@
       "evidence": {
         "hasCandleBlock": false,
         "measured": null,
+        "measurementLane": null,
         "measuredTiers": [],
         "sequentialTiers": [],
         "minMemoryGb": null,
@@ -2444,6 +2518,7 @@
       "evidence": {
         "hasCandleBlock": true,
         "measured": true,
+        "measurementLane": "candle",
         "measuredTiers": [
           "bf16",
           "q4",
@@ -2483,6 +2558,7 @@
       "evidence": {
         "hasCandleBlock": true,
         "measured": false,
+        "measurementLane": "candle",
         "measuredTiers": [
           "bf16",
           "q4",
@@ -2527,6 +2603,7 @@
       "evidence": {
         "hasCandleBlock": true,
         "measured": true,
+        "measurementLane": "candle",
         "measuredTiers": [
           "bf16",
           "int8-convrot",
@@ -2566,6 +2643,7 @@
       "evidence": {
         "hasCandleBlock": true,
         "measured": null,
+        "measurementLane": null,
         "measuredTiers": [],
         "sequentialTiers": [],
         "minMemoryGb": null,
@@ -2596,6 +2674,7 @@
       "evidence": {
         "hasCandleBlock": true,
         "measured": false,
+        "measurementLane": "candle",
         "measuredTiers": [
           "bf16",
           "q4",
@@ -2630,6 +2709,7 @@
       "evidence": {
         "hasCandleBlock": false,
         "measured": null,
+        "measurementLane": null,
         "measuredTiers": [],
         "sequentialTiers": [],
         "minMemoryGb": null,
@@ -2660,6 +2740,7 @@
       "evidence": {
         "hasCandleBlock": true,
         "measured": false,
+        "measurementLane": "candle",
         "measuredTiers": [
           "bf16",
           "q4",
@@ -2694,6 +2775,7 @@
       "evidence": {
         "hasCandleBlock": true,
         "measured": false,
+        "measurementLane": "candle",
         "measuredTiers": [
           "bf16",
           "q4",
@@ -2730,6 +2812,7 @@
       "evidence": {
         "hasCandleBlock": true,
         "measured": false,
+        "measurementLane": "candle",
         "measuredTiers": [
           "bf16",
           "q4",
@@ -2766,6 +2849,7 @@
       "evidence": {
         "hasCandleBlock": true,
         "measured": false,
+        "measurementLane": "candle",
         "measuredTiers": [
           "bf16",
           "q4",
@@ -2802,6 +2886,7 @@
       "evidence": {
         "hasCandleBlock": true,
         "measured": false,
+        "measurementLane": "candle",
         "measuredTiers": [
           "bf16",
           "q4",
@@ -2836,6 +2921,7 @@
       "evidence": {
         "hasCandleBlock": true,
         "measured": false,
+        "measurementLane": "candle",
         "measuredTiers": [
           "bf16",
           "q4",
@@ -2870,6 +2956,7 @@
       "evidence": {
         "hasCandleBlock": false,
         "measured": null,
+        "measurementLane": null,
         "measuredTiers": [],
         "sequentialTiers": [],
         "minMemoryGb": null,
@@ -2904,6 +2991,7 @@
       "evidence": {
         "hasCandleBlock": true,
         "measured": null,
+        "measurementLane": null,
         "measuredTiers": [],
         "sequentialTiers": [],
         "minMemoryGb": null,
@@ -2939,6 +3027,7 @@
       "evidence": {
         "hasCandleBlock": true,
         "measured": true,
+        "measurementLane": "candle",
         "measuredTiers": [
           "bf16",
           "q4",
@@ -2980,6 +3069,7 @@
       "evidence": {
         "hasCandleBlock": false,
         "measured": null,
+        "measurementLane": null,
         "measuredTiers": [],
         "sequentialTiers": [],
         "minMemoryGb": null,
@@ -3013,6 +3103,7 @@
       "evidence": {
         "hasCandleBlock": false,
         "measured": null,
+        "measurementLane": null,
         "measuredTiers": [],
         "sequentialTiers": [],
         "minMemoryGb": null,
@@ -3047,6 +3138,7 @@
       "evidence": {
         "hasCandleBlock": true,
         "measured": true,
+        "measurementLane": "candle",
         "measuredTiers": [
           "bf16",
           "q4",
@@ -3089,6 +3181,7 @@
       "evidence": {
         "hasCandleBlock": true,
         "measured": true,
+        "measurementLane": "candle",
         "measuredTiers": [
           "bf16",
           "q4",
@@ -3118,17 +3211,18 @@
       ],
       "overlayLanes": [],
       "sharedSelector": {
-        "reached": false,
-        "via": null,
+        "reached": true,
+        "via": "unverified_compatibility",
         "evidenceRevision": null
       },
       "videoFitSymbol": null,
       "mechanisms": [
-        "unreached"
+        "shared_selector_unverified_compatibility"
       ],
       "evidence": {
         "hasCandleBlock": false,
         "measured": null,
+        "measurementLane": null,
         "measuredTiers": [],
         "sequentialTiers": [],
         "minMemoryGb": null,
@@ -3147,17 +3241,18 @@
       "conditionedLanes": [],
       "overlayLanes": [],
       "sharedSelector": {
-        "reached": false,
-        "via": null,
+        "reached": true,
+        "via": "unverified_compatibility",
         "evidenceRevision": null
       },
       "videoFitSymbol": null,
       "mechanisms": [
-        "unreached"
+        "shared_selector_unverified_compatibility"
       ],
       "evidence": {
         "hasCandleBlock": false,
         "measured": null,
+        "measurementLane": null,
         "measuredTiers": [],
         "sequentialTiers": [],
         "minMemoryGb": null,
@@ -3178,17 +3273,18 @@
       ],
       "overlayLanes": [],
       "sharedSelector": {
-        "reached": false,
-        "via": null,
+        "reached": true,
+        "via": "unverified_compatibility",
         "evidenceRevision": null
       },
       "videoFitSymbol": null,
       "mechanisms": [
-        "unreached"
+        "shared_selector_unverified_compatibility"
       ],
       "evidence": {
         "hasCandleBlock": false,
         "measured": null,
+        "measurementLane": null,
         "measuredTiers": [],
         "sequentialTiers": [],
         "minMemoryGb": null,
@@ -3209,17 +3305,18 @@
       ],
       "overlayLanes": [],
       "sharedSelector": {
-        "reached": false,
-        "via": null,
+        "reached": true,
+        "via": "unverified_compatibility",
         "evidenceRevision": null
       },
       "videoFitSymbol": null,
       "mechanisms": [
-        "unreached"
+        "shared_selector_unverified_compatibility"
       ],
       "evidence": {
         "hasCandleBlock": false,
         "measured": null,
+        "measurementLane": null,
         "measuredTiers": [],
         "sequentialTiers": [],
         "minMemoryGb": null,
@@ -3250,6 +3347,7 @@
       "evidence": {
         "hasCandleBlock": true,
         "measured": true,
+        "measurementLane": "candle",
         "measuredTiers": [
           "bf16"
         ],
@@ -3284,6 +3382,7 @@
       "evidence": {
         "hasCandleBlock": true,
         "measured": true,
+        "measurementLane": "candle",
         "measuredTiers": [
           "bf16",
           "q4"
@@ -3319,6 +3418,7 @@
       "evidence": {
         "hasCandleBlock": true,
         "measured": false,
+        "measurementLane": "candle",
         "measuredTiers": [
           "bf16",
           "q4"
@@ -3354,6 +3454,7 @@
       "evidence": {
         "hasCandleBlock": true,
         "measured": false,
+        "measurementLane": "candle",
         "measuredTiers": [
           "bf16",
           "q4"
@@ -3378,17 +3479,18 @@
       ],
       "overlayLanes": [],
       "sharedSelector": {
-        "reached": false,
-        "via": null,
+        "reached": true,
+        "via": "unverified_compatibility",
         "evidenceRevision": null
       },
       "videoFitSymbol": null,
       "mechanisms": [
-        "unreached"
+        "shared_selector_unverified_compatibility"
       ],
       "evidence": {
         "hasCandleBlock": false,
         "measured": null,
+        "measurementLane": null,
         "measuredTiers": [],
         "sequentialTiers": [],
         "minMemoryGb": null,
@@ -3421,6 +3523,7 @@
       "evidence": {
         "hasCandleBlock": true,
         "measured": true,
+        "measurementLane": "candle",
         "measuredTiers": [
           "bf16",
           "q4",
@@ -3457,6 +3560,7 @@
       "evidence": {
         "hasCandleBlock": true,
         "measured": true,
+        "measurementLane": "candle",
         "measuredTiers": [
           "bf16",
           "q4",
@@ -3493,6 +3597,7 @@
       "evidence": {
         "hasCandleBlock": true,
         "measured": true,
+        "measurementLane": "candle",
         "measuredTiers": [
           "bf16",
           "q4",
@@ -3529,6 +3634,7 @@
       "evidence": {
         "hasCandleBlock": true,
         "measured": true,
+        "measurementLane": "candle",
         "measuredTiers": [
           "bf16",
           "q4",
@@ -3565,6 +3671,7 @@
       "evidence": {
         "hasCandleBlock": true,
         "measured": true,
+        "measurementLane": "candle",
         "measuredTiers": [
           "bf16",
           "q4",
@@ -3601,6 +3708,7 @@
       "evidence": {
         "hasCandleBlock": true,
         "measured": true,
+        "measurementLane": "candle",
         "measuredTiers": [
           "bf16",
           "q4",
@@ -3635,6 +3743,7 @@
       "evidence": {
         "hasCandleBlock": false,
         "measured": null,
+        "measurementLane": null,
         "measuredTiers": [],
         "sequentialTiers": [],
         "minMemoryGb": null,
@@ -3665,6 +3774,7 @@
       "evidence": {
         "hasCandleBlock": true,
         "measured": true,
+        "measurementLane": "candle",
         "measuredTiers": [
           "bf16",
           "q4",
@@ -3699,6 +3809,7 @@
       "evidence": {
         "hasCandleBlock": true,
         "measured": true,
+        "measurementLane": "candle",
         "measuredTiers": [
           "bf16",
           "q4",
@@ -3733,6 +3844,7 @@
       "evidence": {
         "hasCandleBlock": true,
         "measured": true,
+        "measurementLane": "candle",
         "measuredTiers": [
           "bf16",
           "q4",
@@ -3773,6 +3885,7 @@
       "evidence": {
         "hasCandleBlock": true,
         "measured": true,
+        "measurementLane": "candle",
         "measuredTiers": [
           "bf16",
           "q4",
@@ -3812,6 +3925,7 @@
       "evidence": {
         "hasCandleBlock": true,
         "measured": null,
+        "measurementLane": null,
         "measuredTiers": [],
         "sequentialTiers": [],
         "minMemoryGb": null,
@@ -3850,6 +3964,7 @@
       "evidence": {
         "hasCandleBlock": true,
         "measured": true,
+        "measurementLane": "candle",
         "measuredTiers": [
           "bf16",
           "q4",
@@ -3904,23 +4019,25 @@
       "shared_selector_bespoke_override": 1,
       "shared_selector_declaration_catch_all": 4,
       "shared_selector_legacy_scalar_compatibility": 14,
-      "shared_selector_structural_floor_compatibility": 2,
+      "shared_selector_structural_floor_compatibility": 3,
+      "shared_selector_unverified_compatibility": 14,
       "shared_selector_legacy_video_compatibility": 7,
       "krea_turbo_fit": 1,
       "krea_control_fit": 1,
       "conditioning_fit": 8,
       "flat_video_fit_error": 7,
       "video_memory_curve_bundle": 0,
-      "unreached": 15
+      "unreached": 0
     },
     "sharedSelector": {
       "namedRevision": 20,
       "declarationCatchAll": 4,
       "bespokeOverride": 1,
       "legacyScalarCompatibility": 14,
-      "structuralFloorCompatibility": 2,
+      "unverifiedCompatibility": 14,
+      "structuralFloorCompatibility": 3,
       "legacyVideoCompatibility": 7,
-      "unreached": 15
+      "unreached": 0
     },
     "geometryAwareMechanisms": [
       "legacy_scalar_gate",
@@ -3929,6 +4046,7 @@
       "shared_selector_declaration_catch_all",
       "shared_selector_legacy_scalar_compatibility",
       "shared_selector_structural_floor_compatibility",
+      "shared_selector_unverified_compatibility",
       "shared_selector_legacy_video_compatibility",
       "krea_turbo_fit",
       "krea_control_fit",
@@ -4073,81 +4191,6 @@
       "detail": "the router serves a candle lane for this id, but the builtin manifest has no entry, so no declared number and no provider contract can be read for it"
     },
     {
-      "kind": "shared_selector_unreached",
-      "modelId": "anima_aesthetic",
-      "detail": "no named request scope for engine \"anima_aesthetic\" and no candle.memoryStrategyContract"
-    },
-    {
-      "kind": "shared_selector_unreached",
-      "modelId": "anima_base",
-      "detail": "no named request scope for engine \"anima_base\" and no candle.memoryStrategyContract"
-    },
-    {
-      "kind": "shared_selector_unreached",
-      "modelId": "anima_turbo",
-      "detail": "no named request scope for engine \"anima_turbo\" and no candle.memoryStrategyContract"
-    },
-    {
-      "kind": "shared_selector_unreached",
-      "modelId": "bernini",
-      "detail": "no named request scope for engine \"<unrouted>\" and no candle.memoryStrategyContract"
-    },
-    {
-      "kind": "shared_selector_unreached",
-      "modelId": "boogu_image_edit",
-      "detail": "no named request scope for engine \"boogu_image_edit\" and no candle.memoryStrategyContract"
-    },
-    {
-      "kind": "shared_selector_unreached",
-      "modelId": "chroma1_base",
-      "detail": "no named request scope for engine \"chroma1_base\" and no candle.memoryStrategyContract"
-    },
-    {
-      "kind": "shared_selector_unreached",
-      "modelId": "chroma1_flash",
-      "detail": "no named request scope for engine \"chroma1_flash\" and no candle.memoryStrategyContract"
-    },
-    {
-      "kind": "shared_selector_unreached",
-      "modelId": "chroma1_hd",
-      "detail": "no named request scope for engine \"chroma1_hd\" and no candle.memoryStrategyContract"
-    },
-    {
-      "kind": "shared_selector_unreached",
-      "modelId": "illustrious_xl_v1",
-      "detail": "no named request scope for engine \"sdxl\" and no candle.memoryStrategyContract"
-    },
-    {
-      "kind": "shared_selector_unreached",
-      "modelId": "illustrious_xl_v2",
-      "detail": "no named request scope for engine \"sdxl\" and no candle.memoryStrategyContract"
-    },
-    {
-      "kind": "shared_selector_unreached",
-      "modelId": "realvisxl",
-      "detail": "no named request scope for engine \"sdxl\" and no candle.memoryStrategyContract"
-    },
-    {
-      "kind": "shared_selector_unreached",
-      "modelId": "realvisxl_lightning",
-      "detail": "no named request scope for engine \"sdxl\" and no candle.memoryStrategyContract"
-    },
-    {
-      "kind": "shared_selector_unreached",
-      "modelId": "sana_1600m",
-      "detail": "no named request scope for engine \"sana_1600m\" and no candle.memoryStrategyContract"
-    },
-    {
-      "kind": "shared_selector_unreached",
-      "modelId": "sana_sprint_1600m",
-      "detail": "no named request scope for engine \"sana_sprint_1600m\" and no candle.memoryStrategyContract"
-    },
-    {
-      "kind": "shared_selector_unreached",
-      "modelId": "sdxl",
-      "detail": "no named request scope for engine \"sdxl\" and no candle.memoryStrategyContract"
-    },
-    {
       "kind": "shared_selector_via_catch_all",
       "modelId": "krea_2_raw",
       "detail": "reaches the selector only through DECLARATION_REQUEST_EVIDENCE_REVISION, with no engine-keyed evidence revision"
@@ -4166,11 +4209,6 @@
       "kind": "shared_selector_via_catch_all",
       "modelId": "lens_turbo",
       "detail": "reaches the selector only through DECLARATION_REQUEST_EVIDENCE_REVISION, with no engine-keyed evidence revision"
-    },
-    {
-      "kind": "video_route_without_fit_gate",
-      "modelId": "bernini",
-      "detail": "the routing catalog serves a candle video lane for this id, but candle_video_engine_id produces no engine for it and no flat fit error is bound to it, so none of the enumerated admission gates covers this route"
     }
   ],
   "knownGaps": [
@@ -4187,7 +4225,7 @@
       "id": "zero-candle-video-memory-curves-packaged",
       "owner": "sc-19057",
       "severity": "high",
-      "detail": "sceneworks-core's lane-tagged VideoMemoryCurveBundle exists and fails closed on a foreign lane, but the packaged curve data covers {\"mlx\":1} â€” there are no candle curves at all, so every candle video route falls back to the weights+headroom lower bound.",
+      "detail": "sceneworks-core's lane-tagged VideoMemoryCurveBundle exists and fails closed on a foreign lane, but the packaged curve data covers {\"mlx\":1} â€” there are no candle curves at all. Optimized Candle candidates are therefore Unverified; the seven legacy ceilings and Bernini's T2V structural pre-load floor remain the only source-backed resident admission inputs.",
       "paths": [
         "docs/generated/video-memory-curves.json"
       ]

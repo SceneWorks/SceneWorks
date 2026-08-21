@@ -3,12 +3,12 @@
 This is the source-level and decision-diff record for the integrated feature head. It is deliberately
 not a claim that SC-19059 is complete. The CPU-only acceptance pass can close generator provenance,
 exercise the promotion plumbing, and enumerate what the repository proves. Real Candle capture,
-CUDA-linked capability resolution, privileged workflows, and the unresolved owner decisions below
+CUDA-linked capability resolution, privileged workflows, and the remaining D2/D3/C3 decisions below
 remain terminal gates.
 
 ## Frozen integration point
 
-- SceneWorks feature head: `5a6b46762a238df26b97e27027306f5249f33f4a`.
+- Owner-policy implementation base: `c116d5f20fca95bf4a9acd9359b01a7c14e84cd0`.
 - Reviewed main-to-feature sync head: `ed60f55e0483bf44d7bd1b797bcd31cde4f08b07`.
 - Synced SceneWorks main: `a74ba399923aeb52c5fff5ad5d1887ca9ea32813`.
 - Inference pin: `4013049764172ee7dc707101c7da8c83c1483f2d`.
@@ -35,11 +35,18 @@ The non-owner-choice portion of SC-19055 was resumed from feature head
   `wan_2_2_i2v_14b`, and `wan_2_2_t2v_14b`. The selector adds neither another 4% grade nor another
   reserve.
 
-The inventory parses these exact source-owned 14 + 2 + 7 sets and validates the production calls,
+The approved owner-policy slice completes that migration with 14 evidence-free image routes and
+Bernini video. The image routes submit no candidate, receive `Unverified` from the shared selector,
+and preserve the legacy resident execution. Bernini now contributes a third structural route: only
+plain T2V with zero references submits its exact resolved tier-directory plus adapter-residency
+floor; V2V, R2V, RV2V, MV2V, and ADS2V submit no candidate and preserve execution.
+
+The inventory parses the exact source-owned 14 + 14 + 3 + 7 sets and validates the production calls,
 typed Candle lane, and `reserved_headroom_gb: 0.0` normalization. The regenerated inventory reports
-20 named, 4 declaration-catch-all, 1 bespoke, 14 scalar-compatibility, 2 structural-floor, 7
-legacy-video, and 15 unreached routes. The remaining set is exactly 14 evidence-free image routes
-plus Bernini video. Their fallback-versus-disable policy remains an owner decision.
+20 named, 4 declaration-catch-all, 1 bespoke, 14 scalar-compatibility, 14 unverified-compatibility,
+3 structural-floor, 7 legacy-video, and **zero route-level unreached** routes. The separate 17
+conditioned image-lane binding gaps remain explicitly reported and must not be conflated with the
+route-level selector census.
 
 The non-circular Rust decision producer remains byte-identical at digest
 `sha256:2aecbc27a99e467d78488df09441452434d72ddcf0cb432613fb611581125bc9`.
@@ -61,31 +68,17 @@ npm run generate:candle-admission
 ```
 
 At the frozen head the derived route inventory contains 63 Candle routes: 55 image and 8 video.
-The generated artifact is the exhaustive route-level record; its important unresolved classes are:
+The generated artifact is the exhaustive route-level record. All 63 routes reach the shared
+selector: 20 named, 4 declaration-catch-all, 1 bespoke, 14 legacy-scalar compatibility, 14
+evidence-free Unverified compatibility, 3 structural-floor compatibility, and 7 legacy-video
+compatibility. Every resident-only compatibility contract is inference's no-fabrication
+`MemoryProviderContract::compatibility_default`; empty candidate sets produce an actual shared
+`Selection::Unverified`, not a locally synthesized verdict.
 
-- The shared selector is unreached for **38** routes: **30 image + 8 video**. This count is distinct
-  from `summary.byMechanism.unreached = 16`; the latter means no admission mechanism at all, while a
-  legacy scalar, conditioning, or flat-video gate may still leave the shared selector unreached.
-- The 30 image routes split exactly into four disjoint classes:
-  - 15 have no admission mechanism: `anima_aesthetic`, `anima_base`, `anima_turbo`,
-    `bernini_image`, `boogu_image_edit`, `chroma1_base`, `chroma1_flash`, `chroma1_hd`,
-    `illustrious_xl_v1`, `illustrious_xl_v2`, `realvisxl`, `realvisxl_lightning`, `sana_1600m`,
-    `sana_sprint_1600m`, and `sdxl`;
-  - 13 reach only the legacy scalar gate: `boogu_image`, `boogu_image_turbo`, `ideogram_4`,
-    `ideogram_4_turbo`, `sd3_5_large`, `sd3_5_large_turbo`, `sd3_5_medium`, and the six
-    `sensenova_u1_8b*` manifest routes;
-  - `kolors` reaches conditioning plus the legacy scalar gate; and
-  - `instantid_realvisxl` reaches conditioning only.
-- The 8 video routes are the seven route-local flat-fit users (`ltx_2_3`, `mochi_1`, `scail2_14b`,
-  `svd`, `wan_2_2`, `wan_2_2_i2v_14b`, and `wan_2_2_t2v_14b`) plus served Bernini, which has no
-  Candle manifest block, fit symbol, or pre-load admission gate.
-- All 38 records declare no Candle provider contract, but contract absence is not a reason to bypass
-  the selector. Pinned inference already supplies `MemoryProviderContract::compatibility_default`:
-  an honest resident-only contract with every optimized rung `Missing`, no calibration identity,
-  and no fabricated evidence. A route can therefore enter the selector with that compatibility
-  view and its existing sourced scalar/floor as the base estimate. The owner decision is narrower:
-  when selection returns `Unverified`, preserve the current legacy fallback or disable/refuse the
-  route. SC-19059 must not silently choose between those product behaviors.
+All **45** shipped Candle scalar containers (36 with `vramGbByTier`, 9 min-only including VACE and
+the audio routes) now declare `measurementLane: candle`. Missing or foreign third-party provenance
+submits no scalar candidate and resolves Unverified, while the legacy scalar arithmetic remains
+unchanged so approved best-effort execution is preserved.
 
 The memory matrix now fingerprints every named production input SC-19059 inherited:
 
@@ -130,15 +123,15 @@ The following search surfaces were reviewed: prediction/evaluation arithmetic in
 `video_memory_curves.rs`; manifest-to-number parsing in `payload.rs`; provider contracts; and every
 generated known-gap entry. The inventory is not empty.
 
-### Prediction-law residuals requiring an owner decision
+### Prediction-law residuals and approved dispositions
 
 | ID | Residual | Effect | Minimum honest disposition |
 | --- | --- | --- | --- |
-| D1 | `video_memory_curves::VideoPhaseCurve::evaluate` is a second affine evaluator outside `estimate_synthesis`. | It associates `pixels / 1e6` before multiplication, adds a phase residual, rejects zero pixels/frames, and ceils GiB to bytes. The shared evaluator uses a deliberately different floating-point association and has different boundary semantics. Mechanical unification would change decisions. | Choose and diff one canonical contract, or explicitly approve this cross-crate typed residual. |
+| D1 | `video_memory_curves::VideoPhaseCurve::evaluate` is a second affine evaluator outside `estimate_synthesis`. | It associates `pixels / 1e6` before multiplication, adds a phase residual, rejects zero pixels/frames, and ceils GiB to bytes. The shared evaluator uses a deliberately different floating-point association and has different boundary semantics. Mechanical unification would change decisions. | **Owner-approved intentional cross-crate typed residual.** Keep its existing tests and semantics; do not describe it as duplicate arithmetic. |
 | D2 | `KreaTurboPhasePeaks::peak_gb` and `estimate_synthesis::binding_phase` disagree on NaN. | `f64::max` discards a NaN operand while the argmax can keep a first-position NaN as the binding label. Numeric strings reach this path through `payload::json_f64` without a finite guard, so peak and label can disagree. | Prefer a finite guard when constructing the triple, or specify one fail-closed NaN rule and record its decision diff. |
 | D3 | The Krea Turbo entry point checks the area hull but not the voxel hull. | It is inert for today's image-only `frames = 1` manifest, but a future temporal or tighter-voxel declaration could be admitted under a contract the generic mechanism would refuse. | Specify whether the entry point is permanently image-only or adopt the full generic hull conjunct with a decision ledger. |
-| D4 | `mlx_fit_gate::spec_headroom_bytes` supplies an MLX-calibrated allowance to `video_admission::floor_phase_peaks` on both lanes. | On Candle the imported allowance is floor-additive and therefore conservative: it can over-refuse but cannot create an over-admit. It is still an untagged cross-lane numeric input. | Measure/declare a Candle allowance, parameterize the lane, or owner-approve the conservative residual. |
-| D5 | The ultimate Candle image fallback still consumes manifest `vramGbByTier` as a legacy scalar without a runtime lane tag. | This is the designed fail-closed destination when a fitted basis is missing, malformed, stale, or foreign. It preserves the pre-epic floor but is not evidence-classed. | Owner-approve the legacy destination explicitly, or replace it only with a sourced lane-tagged floor. |
+| D4 | MLX's 18 GiB activation allowance previously supplied Candle video floor candidates. | Candle no longer synthesizes an optimized candidate when no exact Candle fitted curve exists. It reaches the selector as Unverified; the seven legacy pre-load ceilings remain numerically unchanged. | **Resolved by approved lane separation.** No MLX allowance is consumed by Candle. |
+| D5 | Candle scalar fallback previously inferred measurement provenance from its container key. | Every shipped scalar container is Candle-tagged. Missing or foreign third-party tags submit no shared candidate and preserve the approved legacy resident execution. | **Resolved by explicit provenance plus Unverified fallback.** C3's evidence-class granularity remains separate. |
 
 For D1, the capability choices are concrete and incompatible:
 
@@ -150,17 +143,17 @@ For D1, the capability choices are concrete and incompatible:
 3. Retain both evaluators and approve D1 as an intentional cross-crate residual, with tests pinning
    the semantic differences so neither is later described as pure duplication.
 
-There is no repository source of truth choosing among these. SC-19059 must not silently make this
-product decision under the label of refactoring.
+Michael selected option 3 for D1 in Shortcut activities 20987/20988. D2 and D3 remain genuine
+product decisions and are not changed by this slice.
 
 ### Capability, evidence, and coverage residuals
 
 | ID | Residual | Current effect / terminal requirement |
 | --- | --- | --- |
-| C1 | Selector reach and compatibility contracts | The 23 source-backed routes described above now reach the shared selector through resident-only no-fabrication compatibility contracts. Fifteen remain unreached: 14 evidence-free image routes plus Bernini video. Their fallback-versus-disable policy is still unresolved and was not chosen here. |
-| C2 | Bernini Candle video | A real served route has no Candle block, fit symbol, or pre-load gate. It remains entirely ungated. |
+| C1 | Selector reach and compatibility contracts | **Resolved at route level:** all 63 routes reach the selector. Fourteen evidence-free image routes produce Unverified and preserve resident execution under the approved policy. The 17 conditioned-lane binding gaps remain separately enumerated. |
+| C2 | Bernini Candle video | **Resolved for approved truth:** actual tier files, adapter residency, mode, width, height, normalized frames, and reference count reach a pre-load selector seam. Only T2V/no-reference carries the structural floor; all five conditioned mode families are Unverified/fallthrough. |
 | C3 | Bare `measured` boolean | The manifest cannot distinguish a fitted curve, a single measured point, and a declared floor. No evidence-class producer exists to adopt. |
-| C4 | No packaged Candle video curve before capture | The bundle contains one MLX curve and zero Candle curves. The real SC-19057 campaign must add, validate, and bind the first Candle curve; synthetic evidence must not be retained. |
+| C4 | No packaged Candle video curve before capture | The bundle contains one MLX curve and zero Candle curves. Optimized Candle candidates are Unverified until the real SC-19057 campaign adds, validates, and binds the first Candle curve; synthetic evidence must not be retained. |
 | C5 | Linked Candle sequential capability | The CPU lane cannot resolve the actual `engine_supports_sequential` answers because the Candle provider bundle needs CUDA to link. The baseline therefore records both capability inputs. Resolve in the privileged Candle lane. |
 | C6 | `bounded_by` on Candle | The composition law and tests exist, but no current Candle provider declares a non-`None` `bounded_by`; this is unexercised future-contract behavior, not production Candle coverage. |
 | C7 | Decision artifact blind spots | Video and Krea-runtime rows are `not_evaluated`. Their admission evidence lives in focused tests and reviewed ledgers until the generator has a non-fabricated evaluable context. Do not infer stability from byte-identical JSON. |
@@ -202,6 +195,12 @@ The committed image artifact cannot witness the video changes. The reviewed vide
   boundary verdict flip in the tested shipped budgets. LTX and SVD deliberately retain their
   pre-existing ungraded postures for documented, route-specific reasons.
 
+The approved owner-policy slice adds **zero** further decision flips. Comparing the pre-slice and
+post-slice 2,540 Candle rows finds no change to predicted resident/sequential peaks, fit verdicts,
+or capable/incapable load plans. Exactly 676 rows change only the `mechanisms` and
+`sharedSelectorVia` provenance fields as evidence-free routes become explicitly Unverified; row
+order and all 272 MLX rows are unchanged.
+
 After the real Candle curve is promoted, this ledger is necessarily provisional. A correctly bound
 curve is expected to move the captured route from `EstimateFloor` to `EstimateFittedCurve`. Zero
 movement is suspicious and requires checking the inference closure handshake. The Rust producer and
@@ -225,9 +224,10 @@ the full ledger must be rerun at the final head.
 
 ## Remaining terminal gates
 
-- Owner disposition for D1-D5, the 14 evidence-free image routes' C1
-  `Unverified` fallback-versus-disable choice, and Bernini non-T2V/C2-C3; the inventory is currently
-  non-empty.
+- Owner disposition remains required only for D2, D3, and C3. D1, D4, D5, route-level C1, and
+  Bernini C2 are resolved by the approved policy; the truthful divergence inventory remains
+  non-empty because 17 conditioned image-lane bindings and the explicitly retained residuals are
+  still reported.
 - Real SC-19057 Candle capture and promotion, with no synthetic curve or fabricated closure retained.
 - CUDA-linked sequential-capability resolution and Candle acceptance.
 - Final-head macOS MLX and Windows Candle workflow URLs with terminal required CI.

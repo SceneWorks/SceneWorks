@@ -572,6 +572,7 @@ async fn generate_candle_bernini_image_stream(
                 frames: 1,
                 reference_count: u32::from(task == "i2i"),
             },
+            structural_floor_applies: task == "t2i",
         },
     )
     .await?;

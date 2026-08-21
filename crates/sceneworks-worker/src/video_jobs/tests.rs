@@ -7208,6 +7208,23 @@ fn bernini_engine_video_mode_maps_each_sceneworks_mode() {
     // Unknown / unset falls back to plain text-to-video.
     assert_eq!(bernini_engine_video_mode("image_to_video"), "t2v");
     assert_eq!(bernini_engine_video_mode(""), "t2v");
+
+    for (mode, expected) in [
+        ("text_to_video", true),
+        ("video_to_video", false),
+        ("reference_to_video", false),
+        ("reference_video_to_video", false),
+        ("multi_video_to_video", false),
+        ("ads2v", false),
+    ] {
+        let engine_mode = bernini_engine_video_mode(mode);
+        assert_eq!(
+            bernini_structural_floor_applies(engine_mode, u32::from(mode != "text_to_video")),
+            expected,
+            "mode={mode}; this policy is intentionally independent of Bernini's 16 fps"
+        );
+    }
+    assert!(!bernini_structural_floor_applies("t2v", 1));
 }
 
 /// Only the `bernini` catalog id routes to the Bernini engine (sc-4707). Other video

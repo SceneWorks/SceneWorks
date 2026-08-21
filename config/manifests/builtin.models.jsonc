@@ -246,6 +246,7 @@
         // sc-16025 changes the q4/q8 numeric profile (Q8 LM layers + transformer head). Preserve the
         // historical figures for comparison, but do not authorize them as current evidence until
         // the CUDA real-weight lane remeasures the converged provider.
+        "measurementLane": "candle",
         "measured": false,
         // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
         // Engine-derived rung x tier coverage for mage_flow_edit_base.
@@ -525,6 +526,7 @@
         "minMemoryGb": 17,
         "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
         "vramMeasuredPixels": 1048576,
+        "measurementLane": "candle",
         "measured": false,
         // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
         // Engine-derived rung x tier coverage for mage_flow_edit.
@@ -812,6 +814,7 @@
         "minMemoryGb": 17,
         "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
         "vramMeasuredPixels": 1048576,
+        "measurementLane": "candle",
         "measured": false,
         // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
         // Engine-derived rung x tier coverage for mage_flow_edit_turbo.
@@ -1074,6 +1077,7 @@
         "minMemoryGb": 17,
         "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
         "vramMeasuredPixels": 1048576,
+        "measurementLane": "candle",
         "measured": false,
         // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
         // Engine-derived rung x tier coverage for mage_flow_base.
@@ -1330,6 +1334,7 @@
         "minMemoryGb": 17,
         "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
         "vramMeasuredPixels": 1048576,
+        "measurementLane": "candle",
         "measured": false,
         // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
         // Engine-derived rung x tier coverage for mage_flow.
@@ -1594,6 +1599,7 @@
         "minMemoryGb": 17,
         "vramGbByTier": { "q4": 14.67, "q8": 16.95, "bf16": 20.41 },
         "vramMeasuredPixels": 1048576,
+        "measurementLane": "candle",
         "measured": false,
         // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
         // Engine-derived rung x tier coverage for mage_flow_turbo.
@@ -2057,6 +2063,7 @@
         "vramGbByTier": { "q4": 18.4, "q8": 24.2, "bf16": 32.2 },
         "vramMeasuredPixels": 1048576,
         "sequentialPeakGb": { "q4": 5.7, "q8": 9.8, "bf16": 13.9 },
+        "measurementLane": "candle",
         "measured": true
       },
       "ui": {
@@ -2404,6 +2411,7 @@
         "vramGbByTier": { "q4": 27.2, "q8": 32.1, "bf16": 40.7 },
         "vramMeasuredPixels": 1048576,
         "sequentialPeakGb": { "q4": 16.9, "q8": 19.9, "bf16": 25.4 },
+        "measurementLane": "candle",
         "measured": true
       },
       "ui": {
@@ -2929,6 +2937,7 @@
         "vramGbByTier": { "q4": 53.7, "q8": 65.3, "bf16": 82.5 },
         "vramMeasuredPixels": 1048576,
         "sequentialPeakGb": { "q4": 30.3, "q8": 38.7, "bf16": 71.7 },
+        "measurementLane": "candle",
         "measured": true,
         // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
         // Engine-derived rung x tier coverage for qwen_image.
@@ -3205,6 +3214,7 @@
         "vramGbByTier": { "q4": 56.7, "q8": 69.0, "bf16": 81.7 },
         "vramMeasuredPixels": 1048576,
         "sequentialPeakGb": { "q4": 36.9, "q8": 39.3, "bf16": 52.2 },
+        "measurementLane": "candle",
         "measured": true,
         // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
         // Engine-derived rung x tier coverage for qwen_image_edit.
@@ -3443,6 +3453,7 @@
         "vramGbByTier": { "q4": 57.0, "q8": 65.8, "bf16": 87.4 },
         "vramMeasuredPixels": 1048576,
         "sequentialPeakGb": { "q4": 33.1, "q8": 39.3, "bf16": 53.2 },
+        "measurementLane": "candle",
         "measured": true
       },
       "ui": {
@@ -3894,6 +3905,7 @@
         "minMemoryGb": 44,
         "vramGbByTier": { "q4": 37.3, "q8": 42.0, "bf16": 52.0 },
         "vramMeasuredPixels": 1048576,
+        "measurementLane": "candle",
         "measured": false,
         // SC-15819: exact packed q4/q8, no-overlay routes expose the shared Candle/CUDA ladder.
         // This is implementation inventory only. SC-15874 still owns Lens-Turbo calibration and
@@ -4082,6 +4094,7 @@
         "minMemoryGb": 16,
         "vramGbByTier": { "q4": 14.8, "q8": 22.5, "bf16": 36.7 },
         "vramMeasuredPixels": 1048576,
+        "measurementLane": "candle",
         "measured": true
       },
       "mlx": {
@@ -4223,6 +4236,7 @@
         "minMemoryGb": 16,
         "vramGbByTier": { "q4": 14.8, "q8": 22.5, "bf16": 36.7 },
         "vramMeasuredPixels": 1048576,
+        "measurementLane": "candle",
         "measured": true
       },
       "mlx": {
@@ -4351,6 +4365,7 @@
         "minMemoryGb": 16,
         "vramGbByTier": { "q4": 14.8, "q8": 22.5, "bf16": 36.7 },
         "vramMeasuredPixels": 1048576,
+        "measurementLane": "candle",
         "measured": true
       },
       "mlx": {
@@ -4483,6 +4498,7 @@
         "minMemoryGb": 16,
         "vramGbByTier": { "q4": 14.8, "q8": 22.5, "bf16": 36.7 },
         "vramMeasuredPixels": 1048576,
+        "measurementLane": "candle",
         "measured": true
       },
       "mlx": {
@@ -4628,6 +4644,7 @@
         "minMemoryGb": 16,
         "vramGbByTier": { "q4": 14.8, "q8": 22.5, "bf16": 36.7 },
         "vramMeasuredPixels": 1048576,
+        "measurementLane": "candle",
         "measured": true
       },
       "mlx": {
@@ -4765,6 +4782,7 @@
         "minMemoryGb": 16,
         "vramGbByTier": { "q4": 14.8, "q8": 22.5, "bf16": 36.7 },
         "vramMeasuredPixels": 1048576,
+        "measurementLane": "candle",
         "measured": true
       },
       "mlx": {
@@ -5066,6 +5084,7 @@
         "vramGbByTier": { "q4": 21.3, "q8": 31.8 },
         "vramMeasuredPixels": 1048576,
         "sequentialPeakGb": { "q4": 18.4, "q8": 26.4 },
+        "measurementLane": "candle",
         "measured": false,
         // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
         // Engine-derived rung x tier coverage for flux1_schnell.
@@ -5322,6 +5341,7 @@
         "vramGbByTier": { "q4": 21.3, "q8": 31.8 },
         "vramMeasuredPixels": 1048576,
         "sequentialPeakGb": { "q4": 18.4, "q8": 26.4 },
+        "measurementLane": "candle",
         "measured": true,
         // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
         // Engine-derived rung x tier coverage for flux1_dev.
@@ -5568,6 +5588,7 @@
         "minMemoryGb": 46,
         "vramGbByTier": { "q4": 38.5, "q8": 55.3, "bf16": 74.1 },
         "vramMeasuredPixels": 1048576,
+        "measurementLane": "candle",
         "measured": true
       },
       // Ideogram Non-Commercial Model Agreement (gated): accept the license at the source repo and
@@ -5734,6 +5755,7 @@
         "minMemoryGb": 30,
         "vramGbByTier": { "q4": 33.5, "q8": 43.9, "bf16": 56.3 },
         "vramMeasuredPixels": 1048576,
+        "measurementLane": "candle",
         "measured": true
       },
       "gated": true,
@@ -5868,6 +5890,7 @@
         "minMemoryGb": 44,
         "vramGbByTier": { "q4": 31.7, "q8": 42.0, "bf16": 54.4 },
         "vramMeasuredPixels": 1048576,
+        "measurementLane": "candle",
         "measured": true
       },
       "licenseUrl": "https://huggingface.co/Boogu/Boogu-Image-0.1-Base",
@@ -5994,6 +6017,7 @@
         "minMemoryGb": 44,
         "vramGbByTier": { "q4": 31.6, "q8": 42.1, "bf16": 54.5 },
         "vramMeasuredPixels": 1048576,
+        "measurementLane": "candle",
         "measured": true
       },
       "licenseUrl": "https://huggingface.co/Boogu/Boogu-Image-0.1-Turbo",
@@ -7506,6 +7530,7 @@
             }
           }
         },
+        "measurementLane": "candle",
         "measured": true,
         // Pose-ControlNet lane VRAM fit ladder (sc-11754, epic 8459 → epic 10765). The control lane loads
         // the base at the installed tier PLUS the trained control branch, so its render peak (the
@@ -7942,6 +7967,7 @@
         "minMemoryGb": 32,
         "vramGbByTier": { "q4": 28.8, "q8": 33.4, "bf16": 46.4 },
         "vramMeasuredPixels": 1048576,
+        "measurementLane": "candle",
         "measured": false,
         // SC-18462: request-scoped component staging is an exact provider contract, independent of
         // deferred/BTR load shaping. The ordinary Raw route and its registered Kontext edit sibling
@@ -8320,6 +8346,7 @@
         "vramGbByTier": { "q4": 46.2, "q8": 50.6, "bf16": 75.5 },
         "vramMeasuredPixels": 1048576,
         "sequentialPeakGb": { "q4": 24.2, "q8": 28.7, "bf16": 53.3 },
+        "measurementLane": "candle",
         "measured": true,
         // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
         // Engine-derived rung x tier coverage for flux2_klein_9b.
@@ -9284,6 +9311,7 @@
         "vramGbByTier": { "q4": 42.7, "q8": 70.8 },
         "vramMeasuredPixels": 65536,
         "sequentialPeakGb": { "q4": 42.7, "q8": 70.8 },
+        "measurementLane": "candle",
         "measured": false,
         // BEGIN generated-from-engine-capabilities — scripts/generate-manifest-memory-declarations.mjs
         // Engine-derived rung x tier coverage for flux2_dev.
@@ -11559,6 +11587,7 @@
         "minMemoryGb": 29,
         "vramGbByTier": { "q4": 26.7, "q8": 30.4, "bf16": 63.7 },
         "vramMeasuredPixels": 1048576,
+        "measurementLane": "candle",
         "measured": true
       },
       "ui": {
@@ -11692,6 +11721,7 @@
         "minMemoryGb": 48,
         "vramGbByTier": { "q4": 33.9, "bf16": 41.3 },
         "vramMeasuredPixels": 1048576,
+        "measurementLane": "candle",
         "measured": true
       },
       "gated": false,
@@ -11821,6 +11851,7 @@
         "minMemoryGb": 48,
         "vramGbByTier": { "q4": 33.9, "bf16": 41.3 },
         "vramMeasuredPixels": 1048576,
+        "measurementLane": "candle",
         "measured": false
       },
       "gated": false,
@@ -11945,6 +11976,7 @@
         "minMemoryGb": 36,
         "vramGbByTier": { "q4": 28.5, "bf16": 33.0 },
         "vramMeasuredPixels": 1048576,
+        "measurementLane": "candle",
         "measured": false
       },
       "gated": false,
@@ -18876,6 +18908,7 @@
         "minMemoryGb": 14,
         "vramGbByTier": { "q4": 12.1, "q8": 12.1, "bf16": 14.5 },
         "vramMeasuredPixels": 1048576,
+        "measurementLane": "candle",
         "measured": true
       },
       "ui": {
@@ -19170,6 +19203,7 @@
         "minMemoryGb": 24,
         "vramGbByTier": { "q4": 22.13, "q8": 27.95, "bf16": 38.56 },
         "vramMeasuredPixels": 1048576,
+        "measurementLane": "candle",
         "measured": true
       },
       "ui": {
@@ -19416,6 +19450,7 @@
         "minMemoryGb": 24,
         "vramGbByTier": { "q4": 22.20, "q8": 28.02, "bf16": 38.62 },
         "vramMeasuredPixels": 1048576,
+        "measurementLane": "candle",
         "measured": true
       },
       "ui": {
@@ -19544,6 +19579,7 @@
       },
       "candle": {
         "minMemoryGb": 96,
+        "measurementLane": "candle",
         "measured": false,
         "limits": {
           "samplers": ["default", "uni_pc", "euler"],
@@ -20038,6 +20074,7 @@
         "minMemoryGb": 109,
         "vramGbByTier": { "bf16": 102.115 },
         "vramMeasuredPixels": 399360,
+        "measurementLane": "candle",
         "measured": true
       },
       "ui": {
@@ -22936,6 +22973,7 @@
       },
       "candle": {
         "minMemoryGb": 2,
+        "measurementLane": "candle",
         "measured": false
       },
       "licenseUrl": "https://huggingface.co/hexgrad/Kokoro-82M",
@@ -23006,6 +23044,7 @@
       },
       "candle": {
         "minMemoryGb": 12,
+        "measurementLane": "candle",
         "measured": false
       },
       "licenseUrl": "https://huggingface.co/OpenMOSS-Team/MOSS-SoundEffect-v2.0",
@@ -23158,6 +23197,7 @@
       },
       "candle": {
         "minMemoryGb": 12,
+        "measurementLane": "candle",
         "measured": false
       },
       "licenseUrl": "https://huggingface.co/ACE-Step/acestep-v15-xl-turbo-diffusers",
@@ -23284,6 +23324,7 @@
       },
       "candle": {
         "minMemoryGb": 14,
+        "measurementLane": "candle",
         "measured": false
       },
       "licenseUrl": "https://huggingface.co/OpenMOSS-Team/MOSS-TTS-Realtime",
@@ -23422,6 +23463,7 @@
       },
       "candle": {
         "minMemoryGb": 12,
+        "measurementLane": "candle",
         "measured": false
       },
       "licenseUrl": "https://huggingface.co/OpenMOSS-Team/MOSS-TTSD-v0.5",
@@ -23486,6 +23528,7 @@
       },
       "candle": {
         "minMemoryGb": 2,
+        "measurementLane": "candle",
         "measured": false
       },
       "licenseUrl": "https://huggingface.co/myshell-ai/OpenVoiceV2",
@@ -23637,6 +23680,7 @@
       },
       "candle": {
         "minMemoryGb": 6,
+        "measurementLane": "candle",
         "measured": false
       },
       "licenseUrl": "https://huggingface.co/ResembleAI/chatterbox",
@@ -23704,6 +23748,7 @@
       },
       "candle": {
         "minMemoryGb": 1,
+        "measurementLane": "candle",
         "measured": false
       },
       "licenseUrl": "https://huggingface.co/ResembleAI/chatterbox",

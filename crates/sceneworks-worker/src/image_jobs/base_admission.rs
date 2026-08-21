@@ -289,11 +289,15 @@ fn candle_base_floor_gb(paths: &[&Path], resident_overlay_bytes: u64) -> Option<
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(super) struct BaseFloorSelectorScope<'a> {
-    pub(super) route: &'a str,
-    pub(super) tier_key: &'a str,
-    pub(super) mode_key: &'a str,
-    pub(super) geometry: gen_core::MemoryGeometry,
+pub(crate) struct BaseFloorSelectorScope<'a> {
+    pub(crate) route: &'a str,
+    pub(crate) tier_key: &'a str,
+    pub(crate) mode_key: &'a str,
+    pub(crate) geometry: gen_core::MemoryGeometry,
+    /// Whether this request mode is covered by the route's structural pre-load floor. `false`
+    /// still reaches the selector, but with no candidate, so unsupported edit/reference modes are
+    /// explicitly Unverified before the unchanged floor-only fallback runs.
+    pub(crate) structural_floor_applies: bool,
 }
 
 /// Gate an uncataloged base on its on-disk weights plus any independently resident overlay bytes.
@@ -351,7 +355,7 @@ async fn admit_candle_base_floor_with_resident_overlay_inner(
                 scope.mode_key,
                 scope.geometry,
                 budget,
-                needed,
+                scope.structural_floor_applies.then_some(floor_gb),
                 crate::memory_strategy::CandidateBasis::StructuralFloor,
             ) {
                 crate::memory_strategy::Selection::Selected { .. } => LoadPlan::Resident,
@@ -392,7 +396,7 @@ async fn admit_candle_base_floor_with_resident_overlay_inner(
 /// Bernini still-image has no calibrated Candle contract, but its resolved tier and adapter paths
 /// produce an exact structural lower bound. Bind that floor to the compatibility selector while
 /// retaining the established floor-only admission result and error wording.
-pub(super) async fn admit_candle_base_floor_with_resident_overlay_via_selector(
+pub(crate) async fn admit_candle_base_floor_with_resident_overlay_via_selector(
     model: &str,
     lane: &'static str,
     settings: &Settings,

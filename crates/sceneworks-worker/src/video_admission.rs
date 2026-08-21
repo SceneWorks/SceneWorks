@@ -671,18 +671,20 @@ fn curve_decode_pass(decode_pass: VideoDecodePass) -> VideoCurveDecodePass {
 /// There is deliberately no binding-phase flip band here. Each phase has its own fitted law and the
 /// scalar is the max over those three evaluations at this exact geometry, so a phase crossing is a
 /// result of the measured curves rather than an extrapolation away from one scalar anchor.
-fn fitted_or_floor_phase_peaks<'a>(
-    selector: &LadderVideoSelector<'a>,
-    geometry: VideoAdmissionGeometry,
-    strategy: MemoryStrategy,
-    engaged: &[MemoryStrategy],
-) -> (
+type VideoPhaseCandidate<'a> = (
     PhasePeaks,
     CandidateBasis,
     &'a str,
     Option<&'a str>,
     Option<&'static str>,
-) {
+);
+
+fn fitted_or_floor_phase_peaks<'a>(
+    selector: &LadderVideoSelector<'a>,
+    geometry: VideoAdmissionGeometry,
+    strategy: MemoryStrategy,
+    engaged: &[MemoryStrategy],
+) -> Option<VideoPhaseCandidate<'a>> {
     let fitted = selector
         .curves
         .zip(selector.contract.calibration.as_ref())
@@ -715,7 +717,7 @@ fn fitted_or_floor_phase_peaks<'a>(
         // This candidate is the narrowly ratified binding-phase exemption documented and pinned in
         // `ladder_margin_policy`: every phase has its own residual-bounded law and the scalar below
         // is their request-geometry maximum.
-        return (
+        return Some((
             PhasePeaks {
                 conditioning_bytes: evaluation.phases.conditioning,
                 denoise_bytes: evaluation.phases.denoise,
@@ -725,7 +727,13 @@ fn fitted_or_floor_phase_peaks<'a>(
             evaluation.closure_digest,
             Some(evaluation.curve_id),
             None,
-        );
+        ));
+    }
+    // Candle's historical 18 GiB activation allowance was measured on MLX and is not portable
+    // evidence. Until this exact Candle cell has a fitted curve, offer no optimized candidate: the
+    // shared selector returns Unverified and the established resident execution remains unchanged.
+    if selector.identity.lane == VideoLane::Candle {
+        return None;
     }
     let selection = MemorySelection {
         strategy,
@@ -738,13 +746,13 @@ fn fitted_or_floor_phase_peaks<'a>(
     };
     let (floor, profile_revision) =
         profiled_floor_phase_peaks(selector, geometry, selection, engaged);
-    (
+    Some((
         floor,
         CandidateBasis::EstimateFloor,
         selector.identity.expected_closure_digest,
         None,
         profile_revision,
-    )
+    ))
 }
 
 /// The gen-core geometry for one video admission cell.
@@ -806,8 +814,11 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
             };
             // Phase-resolved for as long as possible: the scalar is taken only here, where
             // gen-core's evidence type forces one.
-            let (phase_peaks, basis, closure_digest, curve_id, profile_revision) =
-                fitted_or_floor_phase_peaks(self, geometry, strategy, &engaged);
+            let Some((phase_peaks, basis, closure_digest, curve_id, profile_revision)) =
+                fitted_or_floor_phase_peaks(self, geometry, strategy, &engaged)
+            else {
+                continue;
+            };
             if self.profile_error.borrow().is_some() {
                 return VideoRungSelection::Undecidable;
             }
@@ -849,10 +860,6 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
                 profile_revision,
             ));
         }
-        if synthesized.is_empty() {
-            return VideoRungSelection::Undecidable;
-        }
-
         let candidates = synthesized
             .iter()
             .map(

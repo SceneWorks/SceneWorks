@@ -305,6 +305,10 @@ impl VideoAffineCrossCurve {
         .all(|value| value.is_finite() && value >= 0.0)
     }
 
+    /// Owner-approved SC-19059 R1 residual: this typed video-curve boundary intentionally retains
+    /// its phase residual, zero-geometry rejection, `pixels / 1e6` association, and GiB-to-byte
+    /// ceiling semantics. They differ from the generic estimator and are pinned here because
+    /// mechanically unifying them would change admission decisions.
     fn evaluate(self, pixels: u64, frames: u32) -> Option<u64> {
         if !self.is_valid() || pixels == 0 || frames == 0 {
             return None;

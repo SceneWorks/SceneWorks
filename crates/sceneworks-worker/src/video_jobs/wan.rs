@@ -2027,8 +2027,15 @@ pub(super) async fn generate_video_using(
                 let mut input = input;
                 let admission_tier =
                     crate::mlx_fit_gate::resolved_video_numeric_tier(engine_id, &admission_spec)?;
+                // The 18 GiB generic video allowance is MLX measurement, not Candle evidence.
+                // Candle optimized candidates remain Unverified until their own fitted curve is
+                // promoted; legacy pre-load resident admission is independent and unchanged.
                 let spec_headroom_bytes =
-                    crate::mlx_fit_gate::spec_headroom_bytes(engine_id, &admission_spec);
+                    if cfg!(all(not(target_os = "macos"), feature = "backend-candle")) {
+                        0
+                    } else {
+                        crate::mlx_fit_gate::spec_headroom_bytes(engine_id, &admission_spec)
+                    };
                 let reference_count = u32::try_from(input.conditioning.len()).unwrap_or(u32::MAX);
                 let mut overlays = Vec::new();
                 if !input.adapters.is_empty() {

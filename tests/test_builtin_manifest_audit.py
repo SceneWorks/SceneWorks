@@ -2106,6 +2106,38 @@ def test_schema_requires_a_lane_tag_on_the_fit_block_and_admits_one_per_curve():
     ), "a misspelled per-curve lane must be rejected, not silently ignored"
 
 
+def test_all_shipped_candle_scalar_containers_require_explicit_lane_provenance():
+    """SC-19059: scalar capacity evidence is tagged independently of its container key."""
+    manifest = _load_builtin_models_manifest()
+    schema = _load_schema(SCHEMA_PATH)
+    validator = jsonschema.Draft202012Validator(schema)
+    scalar = [
+        model
+        for model in manifest["models"]
+        if model.get("candle")
+        and any(
+            key in model["candle"]
+            for key in ("minMemoryGb", "vramGbByTier", "sequentialPeakGb")
+        )
+    ]
+    assert len(scalar) == 45
+    assert all(model["candle"].get("measurementLane") == "candle" for model in scalar)
+
+    missing = copy.deepcopy(manifest)
+    next(
+        model for model in missing["models"] if model["id"] == scalar[0]["id"]
+    )["candle"].pop("measurementLane")
+    assert list(validator.iter_errors(missing)), "a scalar container without provenance must fail"
+
+    # Foreign provenance remains authorable for third-party manifests; the runtime selector treats
+    # it as Unverified rather than pretending those measurements were taken on Candle.
+    foreign = copy.deepcopy(manifest)
+    next(
+        model for model in foreign["models"] if model["id"] == scalar[0]["id"]
+    )["candle"]["measurementLane"] = "mlx"
+    assert not list(validator.iter_errors(foreign))
+
+
 def _tiers_declaring_a_temporal_curve(turbo_fit: dict) -> set:
     """Tiers whose committed phase curves carry ``perMpxFrameGb`` on any rung or phase."""
     declaring = set()

@@ -174,6 +174,8 @@ test("every route carries exactly one shared-selector verdict, including compati
       ].includes(via)
     ) {
       assert.equal(evidenceRevision, "sc-19055-candle-compatibility-v1");
+    } else if (via === "unverified_compatibility") {
+      assert.equal(evidenceRevision, null);
     } else if (via === "bespoke_override") {
       assert.equal(evidenceRevision, dispatch.overrideOnly[0].value);
     } else if (via === null) {
@@ -188,6 +190,7 @@ test("every route carries exactly one shared-selector verdict, including compati
       summary.declarationCatchAll +
       summary.bespokeOverride +
       summary.legacyScalarCompatibility +
+      summary.unverifiedCompatibility +
       summary.structuralFloorCompatibility +
       summary.legacyVideoCompatibility +
       summary.unreached,
@@ -195,7 +198,7 @@ test("every route carries exactly one shared-selector verdict, including compati
   );
 });
 
-test("the source-owned compatibility sets machine-count exactly the approved 14 + 2 + 7 routes", () => {
+test("the source-owned compatibility sets machine-count exactly the approved 14 + 14 + 3 + 7 routes", () => {
   const scalar = parseCompatibilityRoutes(
     bodies.candleMemoryStrategy,
     "LEGACY_SCALAR_COMPATIBILITY_ROUTES",
@@ -203,6 +206,10 @@ test("the source-owned compatibility sets machine-count exactly the approved 14 
   const structural = parseCompatibilityRoutes(
     bodies.candleMemoryStrategy,
     "STRUCTURAL_FLOOR_COMPATIBILITY_ROUTES",
+  );
+  const unverified = parseCompatibilityRoutes(
+    bodies.candleMemoryStrategy,
+    "UNVERIFIED_IMAGE_COMPATIBILITY_ROUTES",
   );
   const video = parseCompatibilityRoutes(bodies.videoAdmission, "LEGACY_VIDEO_COMPATIBILITY_ROUTES");
   assert.deepEqual(
@@ -224,7 +231,26 @@ test("the source-owned compatibility sets machine-count exactly the approved 14 
       "sensenova_u1_8b_infographic_v3_fast",
     ],
   );
-  assert.deepEqual([...structural].sort(), ["bernini_image", "instantid_realvisxl"]);
+  assert.deepEqual(
+    [...unverified].sort(),
+    [
+      "anima_aesthetic",
+      "anima_base",
+      "anima_turbo",
+      "boogu_image_edit",
+      "chroma1_base",
+      "chroma1_flash",
+      "chroma1_hd",
+      "illustrious_xl_v1",
+      "illustrious_xl_v2",
+      "realvisxl",
+      "realvisxl_lightning",
+      "sana_1600m",
+      "sana_sprint_1600m",
+      "sdxl",
+    ],
+  );
+  assert.deepEqual([...structural].sort(), ["bernini", "bernini_image", "instantid_realvisxl"]);
   assert.deepEqual(
     [...video].sort(),
     [
@@ -238,7 +264,8 @@ test("the source-owned compatibility sets machine-count exactly the approved 14 
     ],
   );
   assert.equal(artifacts.inventory.summary.sharedSelector.legacyScalarCompatibility, 14);
-  assert.equal(artifacts.inventory.summary.sharedSelector.structuralFloorCompatibility, 2);
+  assert.equal(artifacts.inventory.summary.sharedSelector.unverifiedCompatibility, 14);
+  assert.equal(artifacts.inventory.summary.sharedSelector.structuralFloorCompatibility, 3);
   assert.equal(artifacts.inventory.summary.sharedSelector.legacyVideoCompatibility, 7);
 });
 
@@ -252,6 +279,37 @@ test("compatibility reachability disappears when its production route set is mut
   const byId = new Map(inventory.routes.map((route) => [route.modelId, route]));
   assert.equal(byId.get("boogu_image").sharedSelector.reached, false);
   assert.equal(byId.get("ltx_2_3").sharedSelector.reached, false);
+
+  const unverifiedMutation = {
+    ...bodies,
+    candleMemoryStrategy: bodies.candleMemoryStrategy.replace('    "sdxl",\n', ""),
+  };
+  const unverifiedInventory = buildInventory(unverifiedMutation);
+  assert.equal(
+    unverifiedInventory.routes.find((route) => route.modelId === "sdxl").sharedSelector.reached,
+    false,
+  );
+});
+
+test("all 45 shipped Candle scalar manifests carry Candle measurement provenance", () => {
+  const manifest = JSON.parse(stripJsoncComments(bodies.manifest));
+  const scalar = manifest.models.filter((model) => {
+    const candle = model.candle;
+    return Boolean(
+      candle &&
+        ("minMemoryGb" in candle || "vramGbByTier" in candle || "sequentialPeakGb" in candle),
+    );
+  });
+  assert.equal(scalar.length, 45);
+  assert.deepEqual(
+    scalar.filter((model) => model.candle.measurementLane !== "candle").map((model) => model.id),
+    [],
+  );
+  const mutated = {
+    ...bodies,
+    manifest: bodies.manifest.replace('        "measurementLane": "candle",\n', ""),
+  };
+  assert.throws(() => buildInventory(mutated), /measurementLane=candle/);
 });
 
 test("compatibility wiring rejects call, typed-lane, and reserve-normalization mutations", () => {
@@ -262,6 +320,30 @@ test("compatibility wiring rejects call, typed-lane, and reserve-normalization m
     ["vramGate", "select_legacy_video_resident", "removed_compatibility_call"],
     ["videoAdmission", "lane != VideoLane::Candle", "lane != VideoLane::Mlx"],
     ["candleMemoryStrategy", "reserved_headroom_gb: 0.0", "reserved_headroom_gb: 2.0"],
+    ["imageRouting", "is_unverified_image_compatibility_route", "removed_unverified_route"],
+    ["imageRouting", "scalar_measurement_lane_is_candle", "removed_scalar_lane_check"],
+    ["candleMemoryStrategy", "scalar_measurement_lane_is_candle(manifest)", "true"],
+    ["candleScalarGate", '== Some("candle")', '== Some("mlx")'],
+    [
+      "imageBaseAdmission",
+      "scope.structural_floor_applies.then_some(floor_gb)",
+      "Some(floor_gb)",
+    ],
+    [
+      "videoAdmission",
+      "selector.identity.lane == VideoLane::Candle",
+      "selector.identity.lane == VideoLane::Mlx",
+    ],
+    [
+      "videoRouteBernini",
+      "structural_floor_applies: bernini_structural_floor_applies(",
+      "structural_floor_applies: true",
+    ],
+    [
+      "videoRouteBernini",
+      'mode_key == "t2v" && reference_count == 0',
+      "true",
+    ],
   ]) {
     const mutated = { ...bodies, [sourceKey]: bodies[sourceKey].replace(from, to) };
     assert.throws(() => validateCompatibilityWiring(mutated), `${sourceKey}: mutation survived`);
