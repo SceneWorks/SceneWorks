@@ -4835,11 +4835,12 @@ mod download_receipt_tests {
         }
     }
 
-    /// The live SCAIL-2 manifest must give off-Mac users the dense shared package and the catalog's
-    /// install badge must enforce the exact provider-required six-file layout. This binds product
-    /// advertisement, Model Manager filtering, and worker loadability without duplicating weights.
+    /// The live SCAIL-2 manifest must give off-Mac users all three shared package variants and the
+    /// catalog's per-tier install badge must enforce both the provider-required six-file layout and
+    /// the exact precision marker. This binds product advertisement, Model Manager filtering, and
+    /// worker loadability without duplicating weights or enabling a mixed package.
     #[test]
-    fn scail2_shared_bf16_package_is_installable_off_macos_and_fails_closed() {
+    fn scail2_shared_variants_are_installable_off_macos_and_fail_closed() {
         let _env = isolate_hf_cache();
         let data = tempfile::tempdir().unwrap();
         let original = builtin_models_entry("scail2_14b");
@@ -4848,10 +4849,24 @@ mod download_receipt_tests {
             let mut model = original.clone();
             retain_downloads_for_os(&mut model, os);
             let downloads = model["downloads"].as_array().unwrap();
-            assert_eq!(downloads.len(), 1, "{os} must expose one installable tier");
-            assert_eq!(downloads[0]["variant"], "bf16");
-            assert_eq!(downloads[0]["files"], json!(["bf16/*"]));
-            assert_eq!(model_download(&model).unwrap()["variant"], "bf16");
+            assert_eq!(
+                downloads.len(),
+                3,
+                "{os} must expose all three package tiers"
+            );
+            let variants: std::collections::BTreeMap<_, _> = downloads
+                .iter()
+                .map(|download| {
+                    (
+                        download["variant"].as_str().unwrap(),
+                        download["files"].clone(),
+                    )
+                })
+                .collect();
+            assert_eq!(variants["q4"], json!(["q4/*"]));
+            assert_eq!(variants["q8"], json!(["q8/*"]));
+            assert_eq!(variants["bf16"], json!(["bf16/*"]));
+            assert_eq!(model_download(&model).unwrap()["variant"], "q4");
         }
 
         let mut model = original;
@@ -4859,14 +4874,39 @@ mod download_receipt_tests {
         let download = model_download(&model).unwrap();
         let repo = download["repo"].as_str().unwrap();
         let revision = download["revision"].as_str().unwrap();
-        let tier = huggingface_repo_cache_path(data.path(), repo)
+        let snapshot = huggingface_repo_cache_path(data.path(), repo)
             .unwrap()
             .join("snapshots")
-            .join(revision)
-            .join("bf16");
-        std::fs::create_dir_all(&tier).unwrap();
+            .join(revision);
+        let q4 = snapshot.join("q4");
+        let q8 = snapshot.join("q8");
+        let bf16 = snapshot.join("bf16");
 
-        std::fs::write(tier.join("dit.safetensors"), b"").unwrap();
+        let write_tier = |dir: &FsPath, marker: Value| {
+            std::fs::create_dir_all(dir).unwrap();
+            for file in sceneworks_core::mlx_tier_completeness::SCAIL2_TIER_FILES {
+                std::fs::write(dir.join(file), b"").unwrap();
+            }
+            std::fs::write(
+                dir.join("config.json"),
+                serde_json::to_vec(&marker).unwrap(),
+            )
+            .unwrap();
+        };
+        let health = |states: &[ModelVariantState]| {
+            states
+                .iter()
+                .map(|state| {
+                    (
+                        state.variant.clone(),
+                        (state.installed, state.cache_incomplete),
+                    )
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+
+        std::fs::create_dir_all(&q4).unwrap();
+        std::fs::write(q4.join("dit.safetensors"), b"").unwrap();
         let partial =
             install_state_for(model_download_context(&model).unwrap(), &model, data.path());
         assert!(!partial.installed);
@@ -4875,27 +4915,73 @@ mod download_receipt_tests {
             partial
                 .missing_required_files
                 .iter()
-                .any(|file| file.contains("bf16") && file.contains("incomplete")),
+                .any(|file| file.contains("q4") && file.contains("incomplete")),
             "got {:?}",
             partial.missing_required_files
         );
 
-        for file in sceneworks_core::mlx_tier_completeness::SCAIL2_TIER_FILES {
-            std::fs::write(tier.join(file), b"").unwrap();
-        }
-        let installed =
-            install_state_for(model_download_context(&model).unwrap(), &model, data.path());
-        assert!(installed.installed);
-        assert!(!installed.cache_incomplete);
+        write_tier(
+            &q4,
+            json!({ "quantization": { "bits": 4, "group_size": 64 } }),
+        );
+        let states = model_variant_states(&model, data.path());
+        assert_eq!(
+            health(&states),
+            std::collections::BTreeMap::from([
+                ("bf16".to_owned(), (false, false)),
+                ("q4".to_owned(), (true, false)),
+                ("q8".to_owned(), (false, false)),
+            ]),
+            "one complete variant must not make never-downloaded siblings look installed or torn"
+        );
 
-        std::fs::remove_file(tier.join("t5_encoder.safetensors")).unwrap();
-        let torn = install_state_for(model_download_context(&model).unwrap(), &model, data.path());
-        assert!(!torn.installed, "a provider-required file was removed");
-        assert!(torn.cache_incomplete);
+        // Every q8 filename exists, but the q4 marker was mixed into the q8 directory. The coarse
+        // glob sees files; the shared completeness predicate must still keep this tier disabled and
+        // repairable while leaving the independently complete q4 installed.
+        write_tier(
+            &q8,
+            json!({ "quantization": { "bits": 4, "group_size": 64 } }),
+        );
+        let states = model_variant_states(&model, data.path());
+        assert_eq!(
+            health(&states),
+            std::collections::BTreeMap::from([
+                ("bf16".to_owned(), (false, false)),
+                ("q4".to_owned(), (true, false)),
+                ("q8".to_owned(), (false, true)),
+            ])
+        );
+        let mixed = install_state_for(model_download_context(&model).unwrap(), &model, data.path());
+        assert!(mixed.installed, "the valid q4 sibling remains installed");
+        assert!(
+            mixed.cache_incomplete,
+            "the mixed q8 tier remains repairable"
+        );
+
+        write_tier(
+            &q8,
+            json!({ "quantization": { "bits": 8, "group_size": 64 } }),
+        );
+        write_tier(&bf16, json!({}));
+        let states = model_variant_states(&model, data.path());
+        assert!(states.iter().all(|state| state.installed));
+        assert!(states.iter().all(|state| !state.cache_incomplete));
+
+        std::fs::remove_file(q4.join("t5_encoder.safetensors")).unwrap();
+        let states = model_variant_states(&model, data.path());
+        assert_eq!(
+            health(&states),
+            std::collections::BTreeMap::from([
+                ("bf16".to_owned(), (true, false)),
+                ("q4".to_owned(), (false, true)),
+                ("q8".to_owned(), (true, false)),
+            ]),
+            "tearing q4 must not alter the independently installed q8/bf16 states"
+        );
 
         let description = model["ui"]["description"].as_str().unwrap();
         assert!(description.contains("Candle on NVIDIA Windows/Linux"));
-        assert!(!description.contains("macOS native MLX only"));
+        assert!(description.contains("execution remains fail-closed"));
     }
 }
 

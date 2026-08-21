@@ -102,7 +102,10 @@ import {
 
 const ltxVideoModelId = "ltx_2_3";
 const ltxIcLoraModelIds = new Set([ltxVideoModelId, "ltx_2_3_eros"]);
-const candleTierModelIds = new Set(["wan_2_2", "wan_2_2_t2v_14b", "wan_2_2_i2v_14b"]);
+// Keep this list to native Candle engines that publish a real Model Manager variant matrix. The
+// picker only enables entries whose individual install is complete (`installedTiers`); in particular,
+// adding SCAIL-2 here never fabricates q4/q8 for a dense-only or partial local snapshot.
+const candleTierModelIds = new Set(["wan_2_2", "wan_2_2_t2v_14b", "wan_2_2_i2v_14b", "scail2_14b"]);
 const legacyDefaultTextEncoderId = "default";
 const amoralTextEncoderId = "ltx_amoral_gemma_3_12b";
 const ltxIcLoraRequiredModes = new Set(["extend_clip", "video_bridge", "replace_person"]);
