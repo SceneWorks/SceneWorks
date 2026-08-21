@@ -9,7 +9,7 @@ use std::io::{self, Read};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const INFERENCE_PIN: &str = "6f47e6707589158b89d0f238c5ef56be6f1bdd7a";
+pub const INFERENCE_PIN: &str = "4013049764172ee7dc707101c7da8c83c1483f2d";
 pub const QWEN_REPOSITORY: &str = "SceneWorks/qwen-image-mlx";
 pub const FLUX2_REPOSITORY: &str = "SceneWorks/flux2-dev-mlx";
 pub const KREA_REPOSITORY: &str = "SceneWorks/krea-2-turbo-mlx";
@@ -24,6 +24,18 @@ pub const LTX_REPOSITORY: &str = "SceneWorks/ltx-2.3-mlx";
 /// packed-detect loader reads; the dense `bf16` tier is the upstream `Wan-AI/Wan2.2-TI2V-5B-Diffusers`
 /// snapshot, which has no per-tier subdirectory and therefore no artifact identity this arm can bind.
 pub const WAN_CANDLE_REPOSITORY: &str = "SceneWorks/wan2.2-ti2v-5b-candle";
+/// The `mlx:minimax_h3` TIERED artifact (sc-18663). Unlike every repository above it, this rehost
+/// is **not sufficient on its own**: `mlx_gen_minimax_h3::model::load` probes `vae/`, `audio_vae/`,
+/// `tokenizer/` and `FL2VA/audio_vae/` under the spec's own weights root, and this rehost publishes
+/// none of them — it carries only the per-tier `transformer/`, `transformer_ref` and (for q4/q8)
+/// `text_encoder/`. A capture therefore resolves TWO artifact triples, this one and
+/// [`MINIMAX_UPSTREAM_REPOSITORY`], and the record's loadability fingerprint names both.
+pub const MINIMAX_REPOSITORY: &str = "SceneWorks/minimax-h3-mlx";
+/// The upstream `minimax_h3` snapshot the shared partitions come from. It is a DIFFERENT repository
+/// id from [`MINIMAX_REPOSITORY`] with no tier sub-directory, so it is validated through
+/// [`validate_huggingface_revision_root`] rather than being forced through the rehost's
+/// variant-suffixed validator.
+pub const MINIMAX_UPSTREAM_REPOSITORY: &str = "MiniMaxAI/MiniMax-H3";
 pub const COMPARISON_OUTPUT_BIAS_PARAMETER: &str = "comparisonOutputBias";
 /// Persisted-JSON spellings of `gen_core::LoadShape`. Every emitted fragment must state the
 /// materialization shape its run actually used; the harness rejects a fragment that omits it, and

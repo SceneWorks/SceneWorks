@@ -1120,6 +1120,86 @@ pub(super) fn resolve_video_upscale_factor(factor: u8) -> WorkerResult<u32> {
     }
 }
 
+/// The source-audio passthrough mux: copy the upscaled picture untouched, re-encode the source
+/// clip's optional audio as AAC, and **bound the file at the upscaled picture's own length** —
+/// [`picture_bound_seconds`], the same one number the generation mux (`audio_mux_args`) is bounded
+/// by. `-map 1:a:0?` keeps the audio optional, so a silent source yields a clean video-only file
+/// rather than an error.
+///
+/// # Why `-t` and not `-shortest` (sc-19549)
+///
+/// This path muxes the user's OWN source audio onto the user's OWN upscaled picture, so `-shortest`
+/// spends the user's frames to satisfy a soundtrack they supplied and never asked to be
+/// authoritative. MEASURED on this exact argument vector with the bundled ffmpeg 7.1, a 48-frame
+/// 24 fps picture (2.000000 s) against a source clip carrying 1.5 s of audio:
+///
+/// | flag | frames kept | container `Duration:` |
+/// |---|---|---|
+/// | `-shortest` | **33 of 48** | 1.51 s — for 1.375 s of picture |
+/// | none | 48 | 2.00 s |
+/// | `-t 2.000000` | 48 | 2.00 s |
+///
+/// Fifteen frames gone, and the container went on advertising a duration the file does not have —
+/// so a check of the reported duration passes on the damaged file and only a decoded frame count
+/// sees it. Dropping the flag outright fixes that direction and loses the other: with 4.0 s of
+/// source audio the unbounded command produced a 4.01 s container around 2.00 s of picture
+/// (measured, same vector). `-t` is the only one of the three that is right in both directions.
+///
+/// # Variable-frame-rate sources (sc-19549 AC2)
+///
+/// Supported, with a bound that cannot be wrong. The bound is read off input 0 — the upscaled
+/// picture — never off the source clip: `run_seedvr2_stream` decodes the source with
+/// `-fps_mode passthrough` (exact frame count, whatever its timestamps) and `encode_seedvr2_stream`
+/// writes those frames back at a constant `-r fps`, so input 0 holds exactly `frame_count` frames
+/// on a constant timebase BY CONSTRUCTION regardless of how ragged the source's own timestamps
+/// were. Input 1 contributes only `0:a` here; its video stream is not mapped and its variability
+/// cannot reach the bound. MEASURED: a genuinely VFR source (10.67 fps average against a 24 tbr
+/// declaration) carrying 1.5 s of audio muxes to all 48 frames at 2.00 s under `-t`, and to 33
+/// frames at an advertised 1.51 s under `-shortest`.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn seedvr2_audio_mux_args(
+    upscaled: &Path,
+    source: &Path,
+    out: &Path,
+    frame_count: usize,
+    fps: u32,
+) -> Vec<String> {
+    vec![
+        "ffmpeg".to_owned(),
+        "-nostdin".to_owned(),
+        "-y".to_owned(),
+        "-i".to_owned(),
+        upscaled.to_string_lossy().into_owned(),
+        "-i".to_owned(),
+        source.to_string_lossy().into_owned(),
+        "-map".to_owned(),
+        "0:v:0".to_owned(),
+        "-map".to_owned(),
+        "1:a:0?".to_owned(),
+        "-c:v".to_owned(),
+        "copy".to_owned(),
+        "-c:a".to_owned(),
+        "aac".to_owned(),
+        "-t".to_owned(),
+        picture_bound_seconds(frame_count, fps),
+        // Explicit, though it is also ffmpeg's default for a multi-input command: the container
+        // metadata — including the sc-15956 workflow tag the encode above wrote — comes from the
+        // UPSCALED VIDEO (input 0), never from the source clip (input 1). Input 1 is the user's own
+        // source file and may carry container tags of its own; inheriting those is the failure
+        // `media_jobs`'s export exists to refuse. Stated because "the default happens to be right"
+        // is not a property anyone maintains.
+        "-map_metadata".to_owned(),
+        "0".to_owned(),
+        "-movflags".to_owned(),
+        "+faststart".to_owned(),
+        out.to_string_lossy().into_owned(),
+    ]
+}
+
 /// Dispatch handler for `JobType::VideoUpscale`: decode the source clip, run the SeedVR2 upscaler
 /// (native MLX on Mac / candle CUDA on Windows, sc-5928), re-encode, pass the source audio through,
 /// and stream a single upscaled video asset.
@@ -1348,9 +1428,8 @@ pub(crate) async fn run_video_upscale_job(
     let mux_tmp = media_path.with_extension("audiomux.mp4");
     let mut output_guard = Seedvr2OutputGuard::new(&media_path, &mux_tmp);
 
-    // Source-audio passthrough: remux the source's audio onto the upscaled video. `-map 1:a:0?`
-    // makes audio optional, so a source with no audio yields a clean video-only file (no error);
-    // `-c:v copy` keeps the upscaled video stream untouched, `+faststart` is preserved.
+    // Source-audio passthrough: remux the source's audio onto the upscaled video, bounded at the
+    // UPSCALED PICTURE's own length — see `seedvr2_audio_mux_args`.
     update_job(
         api,
         &job.id,
@@ -1367,35 +1446,7 @@ pub(crate) async fn run_video_upscale_job(
     let ctx = FfmpegContext::new(api, settings, &job.id, SEEDVR2_CANCEL_MESSAGE);
     let mux_result: WorkerResult<()> = async {
         run_ffmpeg(
-            vec![
-                "ffmpeg".to_owned(),
-                "-nostdin".to_owned(),
-                "-y".to_owned(),
-                "-i".to_owned(),
-                media_path.to_string_lossy().into_owned(),
-                "-i".to_owned(),
-                source_path.to_string_lossy().into_owned(),
-                "-map".to_owned(),
-                "0:v:0".to_owned(),
-                "-map".to_owned(),
-                "1:a:0?".to_owned(),
-                "-c:v".to_owned(),
-                "copy".to_owned(),
-                "-c:a".to_owned(),
-                "aac".to_owned(),
-                // Explicit, though it is also ffmpeg's default for a multi-input command: the
-                // container metadata — including the sc-15956 workflow tag the encode above wrote
-                // — comes from the UPSCALED VIDEO (input 0), never from the source clip (input 1).
-                // Input 1 is the user's own source file and may carry container tags of its own;
-                // inheriting those is the failure `media_jobs`'s export exists to refuse. Stated
-                // because "the default happens to be right" is not a property anyone maintains.
-                "-map_metadata".to_owned(),
-                "0".to_owned(),
-                "-movflags".to_owned(),
-                "+faststart".to_owned(),
-                "-shortest".to_owned(),
-                mux_tmp.to_string_lossy().into_owned(),
-            ],
+            seedvr2_audio_mux_args(&media_path, &source_path, &mux_tmp, out_count, out_fps),
             Some(ctx),
         )
         .await?;

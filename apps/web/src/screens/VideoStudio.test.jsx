@@ -603,6 +603,19 @@ describe("VideoStudio Bernini task modes", () => {
     expect(payload.referenceAssetIds).toEqual([]);
   });
 
+  // sc-17160: the audio-reference list is on every video job body, present-but-empty when the
+  // user picked none, so a replay reader never has to tell "absent" from "empty" and the picker
+  // (sc-17161) has a field to fill rather than a payload shape to invent.
+  it("carries the audio-reference list on the submitted payload", async () => {
+    const context = baseContext({ videoModels: [BERNINI], assets: [clip], selectedAsset: clip });
+    await render(context);
+    await click(modeButton("Video → Video"));
+    await click(buttonWithText(container, "Render clip"));
+
+    const payload = context.createVideoJob.mock.calls[0][0];
+    expect(payload.referenceAudioAssetIds).toEqual([]);
+  });
+
   it("submits all chosen reference images for reference_to_video", async () => {
     const context = baseContext({ videoModels: [BERNINI], assets: [refA, refB] });
     await render(context);
@@ -850,6 +863,110 @@ describe("VideoStudio SCAIL-2 character animation + replacement backend", () => 
     expect(container.textContent).toContain("SCAIL-2 full-character replacement");
   });
 
+  it("does not offer a Replacement mode SCAIL-2 cannot honor, and never sends one (sc-20262)", async () => {
+    // The knobs sweep (inference #669) found this select rendered and user-settable for SCAIL-2
+    // while EVERY scail2 conditioning site in the worker emits `ReplacementMode::default()`
+    // literally — so the choice never reached the engine. sc-20262 made the engine REFUSE a
+    // non-default mode, which turns a silently-dropped knob into an instant refusal. Hiding it is
+    // the honest surface. sc-20262 is also the story that would make it honored; if that lands,
+    // this test and `replacementModeApplies` go together.
+    //
+    // The panel already carried a guidance strip saying the mode "does not apply" — PROSE IS NOT A
+    // GATE, and that strip is why this looked covered. It is asserted below as copy, alongside the
+    // control's absence, so neither can stand in for the other.
+    const modeLabel = () =>
+      [...container.querySelectorAll("label")].find((el) =>
+        el.textContent.includes("Replacement mode"),
+      );
+
+    // Wan-VACE inpaints the masked region and DOES honor the mode: the control is unchanged there.
+    // This leg is what makes the assertion per-model rather than a global removal.
+    const context = baseContext({ videoModels: [WAN, SCAIL2], assets: [clip] });
+    await render(context);
+    await click(modeButton("Replace person"));
+    expect(modeLabel(), "Wan-VACE honors the mode and must keep the control").toBeTruthy();
+    expect([...modeLabel().querySelector("select").options].map((o) => o.value)).toEqual([
+      "face_only",
+      "full_person_keep_outfit",
+      "full_person_replace_outfit",
+    ]);
+
+    // Switching the engine to SCAIL-2 withdraws it.
+    const engineSelect = [...container.querySelectorAll("label")]
+      .find((el) => el.textContent.includes("Replacement engine"))
+      .querySelector("select");
+    const setSelectValue = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, "value").set;
+    await act(async () => {
+      setSelectValue.call(engineSelect, "scail2_14b");
+      engineSelect.dispatchEvent(new window.Event("change", { bubbles: true }));
+    });
+    expect(modeLabel(), "SCAIL-2 must not offer a mode it cannot honor").toBeFalsy();
+    // The explanation survives the control — withdrawing it silently would be its own gap.
+    expect(container.textContent).toContain("SCAIL-2 full-character replacement");
+    expect(container.textContent).toContain("no Replacement mode to choose");
+
+    // …and switching back restores it, so this is a gate rather than a one-way delete.
+    await act(async () => {
+      setSelectValue.call(engineSelect, "wan_2_2");
+      engineSelect.dispatchEvent(new window.Event("change", { bubbles: true }));
+    });
+    expect(modeLabel(), "the control returns for an engine that honors it").toBeTruthy();
+  });
+
+  it("sends the default Replacement mode for SCAIL-2 even when one was set elsewhere (sc-20262)", async () => {
+    // Hiding a control does not unset the state behind it. A user who picks "Full Person, Keep
+    // Outfit" on Wan-VACE and then switches the engine to SCAIL-2 would otherwise send that value
+    // into a job whose engine now REFUSES it — the same shape `referenceAudioAssetIds` was fixed
+    // for (a selection made on Ref2VA riding into a model with no audio cap once the picker
+    // unmounted). Restored from a snapshot because that is the cheapest way to reach a submittable
+    // replace_person job, and it is also the realistic path: the value is persisted per project.
+    window.localStorage.setItem(
+      "sceneworks-studio-video-project_1",
+      JSON.stringify({
+        mode: "replace_person",
+        model: "scail2_14b",
+        sourceClipAssetId: "vid_src",
+        personTrackId: "track_1",
+        characterId: "char_1",
+        replacementMode: "full_person_keep_outfit",
+      }),
+    );
+    const context = baseContext({
+      videoModels: [WAN, SCAIL2],
+      assets: [clip, character],
+      characters: [{ id: "char_1", name: "Ada", projectId: "project_1" }],
+      personTracks: [
+        {
+          id: "track_1",
+          name: "Selected person",
+          projectId: "project_1",
+          sourceAssetId: "vid_src",
+          status: {},
+          frames: [],
+        },
+      ],
+    });
+    await render(context);
+
+    // Precondition: the snapshot really did restore a NON-default mode, so the assertion below is
+    // about the gate rather than about a value that was never set.
+    expect(context.createVideoJob).not.toHaveBeenCalled();
+    // The submit CTA's LABEL is per-mode ("Replace person" here), so target the CTA by class
+    // rather than by a label that changes with the mode under test.
+    const submitCta = container.querySelector(".prompt-cta");
+    expect(submitCta.disabled, "the restored snapshot must be submittable").toBe(false);
+    await click(submitCta);
+
+    expect(context.createVideoJob).toHaveBeenCalledTimes(1);
+    const payload = context.createVideoJob.mock.calls[0][0];
+    expect(payload.mode).toBe("replace_person");
+    expect(payload.model).toBe("scail2_14b");
+    expect(payload.replacementMode).toBe("face_only");
+    // The recipe's human-readable echo follows the same gate, so a replayed SCAIL-2 recipe cannot
+    // display a mode the job never carried.
+    expect(payload.advanced.replacementModeLabel).toBe("Face Only");
+  });
+
   it("hides the replacement engine picker when only one backend can replace", async () => {
     const context = baseContext({ videoModels: [WAN], assets: [clip] });
     await render(context);
@@ -1010,6 +1127,252 @@ describe("VideoStudio Mac mode gating (sc-5716)", () => {
     await click(modeButton("Replace person"));
     expect([...modelSelect().options].map((o) => o.value)).toEqual(
       expect.arrayContaining(["wan_2_2", "scail2_14b"]),
+    );
+  });
+});
+
+// sc-19570 — the OFF-MAC half of the same gate, at the SCREEN. The predicate-level guards in
+// `modelEligibility.test.js` proved `videoModelServesMode` consults `candleVideoModeBlock`; they
+// could not prove the Advanced Video Studio consults `videoModelServesMode`. It did not: this
+// screen kept a LOCAL `modelServesMode` that read the Mac block only, and `macModeTabBlocked` was
+// `macGating && …`, false off-Mac by construction. So the off-Mac gate shipped in the shared
+// predicate — reaching the Simple studio, the screen gate and the download offers — while the
+// Advanced shell rendered every MLX-only tab and the user only found out at Generate, eating the
+// new 400 instead of never seeing the tab.
+//
+// The observation the other guards never make is ABSENCE: what is NOT on the reachable surface.
+// Asserting a submit is refused would pass on the defect. So this collects the tabs a user can
+// actually click and asserts the stranded five are missing from that set, and collects the model
+// picker's options and asserts the candle-unservable model is missing from those.
+describe("VideoStudio off-Mac mode gating (sc-19570)", () => {
+  let container;
+  let root;
+
+  const ALL_VIDEO_MODES = [
+    "image_to_video",
+    "text_to_video",
+    "first_last_frame",
+    "extend_clip",
+    "video_bridge",
+    "replace_person",
+    "video_to_video",
+    "reference_to_video",
+    "reference_video_to_video",
+    "multi_video_to_video",
+    "ads2v",
+    "animate_character",
+  ];
+
+  // A video model in the shape `GET /api/v1/models` serves it: `capabilities` is what the manifest
+  // DECLARES, `candleSupport` is what `model_candle_support` computed from the real routing
+  // predicate. The two differ for exactly the stranded pairs — declaration is not reachability.
+  const model = (id, name, declared, candleServed) => ({
+    id,
+    name,
+    type: "video",
+    family: id,
+    capabilities: declared,
+    defaults: { duration: 5, resolution: "832x480", fps: 16 },
+    limits: { durations: [3, 4, 5], fps: [16], resolutions: ["832x480", "480x832"] },
+    quantization: {},
+    loraCompatibility: {},
+    ui: {},
+    candleSupport: {
+      supported: candleServed.length > 0,
+      features: {
+        videoModes: Object.fromEntries(
+          ALL_VIDEO_MODES.map((m) => [m, candleServed.includes(m)]),
+        ),
+      },
+    },
+  });
+
+  // LTX 2.3 as shipped: it declares six modes and candle serves only `text_to_video`. The other
+  // five are the pairs that queued forever off-Mac.
+  const LTX_DECLARED = [
+    "text_to_video",
+    "image_to_video",
+    "first_last_frame",
+    "extend_clip",
+    "video_bridge",
+    "replace_person",
+  ];
+  const LTX23 = model("ltx_2_3", "LTX 2.3", LTX_DECLARED, ["text_to_video"]);
+  // `wan_2_2_vace_fun_14b`: its ONLY advertised mode is candle-unclaimable, so the whole model has
+  // no off-Mac lane — `candleSupport.supported: false`, the case `candleAvailableModels` exists for
+  // and which NOTHING imported before this.
+  const VACE_FUN = model("wan_2_2_vace_fun_14b", "Wan 2.2 VACE-Fun 14B", ["replace_person"], []);
+  // Bernini keeps a served non-default mode on the board, so "the stranded tabs are gone" cannot be
+  // satisfied by a gate that simply disabled everything but the active tab.
+  const BERNINI = model("bernini", "Bernini", ["text_to_video", "video_to_video"], [
+    "text_to_video",
+    "video_to_video",
+  ]);
+
+  // Off-Mac: the platform-intrinsic switch the API derives from `!is_mac`. `macGatingActive` stays
+  // false — this is Windows/Linux, where every macGating helper is inert.
+  const OFF_MAC_CAPS = {
+    macGatingActive: false,
+    candleGatingActive: true,
+    platform: "linux",
+    notAvailableLabel: "Not available on Mac (MLX only)",
+    features: {},
+    training: { supportedKernels: [], lokrOnWanSupported: false },
+  };
+  // The same client before `GET /api/v1/capabilities/mac` answers — and the permanent value on a
+  // Mac. Every helper inert; the studio must look exactly as it did.
+  const INERT_CAPS = { ...OFF_MAC_CAPS, candleGatingActive: false, platform: "" };
+
+  const clip = {
+    id: "vid_src",
+    type: "video",
+    projectId: "project_1",
+    displayName: "Driving Clip",
+  };
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    ({ container, root } = mountRoot());
+  });
+
+  afterEach(async () => {
+    await unmountRoot(root, container);
+    vi.clearAllMocks();
+  });
+
+  async function render(context) {
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={context}>
+          <VideoStudio />
+        </AppContext.Provider>,
+      );
+    });
+    await act(async () => {});
+  }
+
+  // The tabs a user can actually reach: rendered AND not disabled. This is the set the assertions
+  // below check for absence in — a disabled tab is not a way into a mode.
+  const reachableModeTabs = () =>
+    [...container.querySelectorAll(".mode-control button")]
+      .filter((button) => !button.disabled)
+      .map((button) => button.textContent.trim());
+  const modeButton = (label) =>
+    [...container.querySelectorAll(".mode-control button")].find(
+      (button) => button.textContent.trim() === label,
+    );
+  const modelSelect = () => container.querySelector(".settings-field-model select");
+
+  const STRANDED_TABS = ["Image → Video", "First → Last", "Extend", "Bridge", "Replace person"];
+
+  it("does not offer an MLX-only mode tab off-Mac", async () => {
+    await render(
+      baseContext({
+        videoModels: [LTX23, BERNINI],
+        assets: [clip],
+        macCapabilities: OFF_MAC_CAPS,
+      }),
+    );
+
+    // ABSENT — not "present but refuses on submit". Every one of these was reachable before.
+    const reachable = reachableModeTabs();
+    for (const label of STRANDED_TABS) {
+      expect(
+        reachable,
+        `"${label}" has no off-Mac lane on any installed model and must not be reachable`,
+      ).not.toContain(label);
+      // Rendered-but-disabled is how this screen has always expressed an unavailable mode, and the
+      // tooltip must name the platform doing the gating — off-Mac the Mac sentence is backwards.
+      expect(modeButton(label).disabled).toBe(true);
+      expect(modeButton(label).title).toBe(
+        "No installed model supports this mode on this platform (macOS/MLX only).",
+      );
+    }
+    // The served modes are untouched, so the gate narrowed the tab list rather than the board.
+    expect(reachable).toContain("Text → Video");
+    expect(reachable).toContain("Video → Video");
+  });
+
+  it("does not list a model with no off-Mac lane at all in the picker", async () => {
+    await render(
+      baseContext({
+        videoModels: [BERNINI, VACE_FUN],
+        assets: [clip],
+        macCapabilities: OFF_MAC_CAPS,
+      }),
+    );
+
+    expect([...modelSelect().options].map((option) => option.value)).not.toContain(
+      "wan_2_2_vace_fun_14b",
+    );
+    // …and its only mode is unreachable too, so the model cannot be reached the long way round.
+    expect(reachableModeTabs()).not.toContain("Replace person");
+  });
+
+  it("engages the sc-5947 download gate when the platform filter empties the catalog", async () => {
+    // `baseVideoModels` was `macVideoModels.length ? macVideoModels : videoModels` — it restored the
+    // UNFILTERED catalog exactly when the platform filter had emptied it. `modelReady` read off it,
+    // so with every installed model off-Mac-unserveable the gate stayed `ready` and the user got the
+    // whole Studio with a picker of models that serve no mode: every tab disabled, no download offer,
+    // and nothing saying why. Degraded rather than hung, but it hid the one screen that could fix it.
+    //
+    // Pre-existing, and unreachable before this story: `macAvailableModels` alone empties the list
+    // only for a Mac user whose every video model is torch-only. `candleAvailableModels` makes it
+    // the ordinary case for a Windows/Linux user with an MLX-only catalog.
+    await render(
+      baseContext({
+        videoModels: [VACE_FUN],
+        assets: [clip],
+        macCapabilities: OFF_MAC_CAPS,
+      }),
+    );
+
+    const gate = container.querySelector(".model-availability-gate");
+    expect(gate, "the sc-5947 gate must replace the studio, not sit alongside it").toBeTruthy();
+    expect(gate.textContent).toContain("Video Studio needs a video model");
+    // The Studio itself must be GONE, not merely covered — the model picker is the tell, because
+    // that is the control the old fallback repopulated with unserveable models.
+    expect(modelSelect(), "the studio's model picker must not render behind the gate").toBeFalsy();
+  });
+
+  it("does not engage the download gate for the same catalog when gating is inert", async () => {
+    // The anti-vacuity leg for the test above: same single model, same `candleSupport.supported:
+    // false`, switch off. Without this, a screen that gated unconditionally — on a Mac, where
+    // VACE-Fun renders fine — would satisfy the assertion above.
+    await render(
+      baseContext({
+        videoModels: [VACE_FUN],
+        assets: [clip],
+        macCapabilities: INERT_CAPS,
+      }),
+    );
+
+    expect(container.querySelector(".model-availability-gate")).toBeFalsy();
+    expect([...modelSelect().options].map((option) => option.value)).toContain(
+      "wan_2_2_vace_fun_14b",
+    );
+  });
+
+  it("leaves every tab and model reachable when off-Mac gating is inert", async () => {
+    await render(
+      baseContext({
+        videoModels: [LTX23, BERNINI, VACE_FUN],
+        assets: [clip],
+        macCapabilities: INERT_CAPS,
+      }),
+    );
+
+    // Same models, same `candleSupport` blocks, gating switch off: nothing is hidden. Without this
+    // leg the assertions above would be satisfied by a screen that hid these unconditionally — on a
+    // Mac, where every one of them renders.
+    const reachable = reachableModeTabs();
+    for (const label of [...STRANDED_TABS, "Text → Video", "Video → Video"]) {
+      expect(reachable, `${label} must stay reachable when gating is inert`).toContain(label);
+    }
+    await click(modeButton("Replace person"));
+    expect([...modelSelect().options].map((option) => option.value)).toContain(
+      "wan_2_2_vace_fun_14b",
     );
   });
 });
@@ -1379,6 +1742,147 @@ describe("VideoStudio Lightning toggle (sc-10048)", () => {
     await act(async () => lightningCheckbox().click());
     expect(labeledInput("Steps").disabled).toBe(false);
     expect(labeledInput("Guidance").disabled).toBe(false);
+  });
+
+  // sc-19502 — a distilled model bakes its sigma waypoints into training, so LTX-2.3 renders at
+  // exactly 8 steps and BOTH backends now refuse anything else. A free Steps box here would let the
+  // user type a number the enqueue gate 400s on, which is the unsatisfiable-control defect the
+  // story names.
+  const DISTILLED_LTX = {
+    ...NON_WAN,
+    defaults: { duration: 6, resolution: "768x512", fps: 25, steps: 8 },
+    limits: { steps: [8] },
+    ui: { label: "LTX-2.3" },
+  };
+
+  it("pins the Steps control for a model that declares a single legal step count", async () => {
+    const context = baseContext({ videoModels: [DISTILLED_LTX] });
+    await render(context);
+    await openAdvanced();
+
+    const steps = labeledInput("Steps");
+    expect(steps.disabled).toBe(true);
+    // The value stays VISIBLE rather than hidden: the user should know the render is 8 steps. This
+    // is the third case in the screen's taxonomy — not the transient Lightning disable, not the
+    // permanently-absent `supportsGuidance` hide.
+    expect(steps.placeholder).toBe("8 (fixed schedule)");
+    expect(steps.title).toMatch(/fixed 8-step schedule/);
+  });
+
+  it("leaves the Steps control free for a model that declares no step menu", async () => {
+    // The overwhelmingly common case. A blanket pin would remove a working control from every
+    // other video model, so this is the half that keeps the test above honest.
+    const context = baseContext({ videoModels: [NON_WAN] });
+    await render(context);
+    await openAdvanced();
+
+    expect(labeledInput("Steps").disabled).toBe(false);
+  });
+
+  it("never emits an off-menu advanced.steps after switching to a pinned model", async () => {
+    // The real path to a stale value: type 30 while an UNPINNED model is selected, then switch to
+    // the distilled one. `stepsOverride` genuinely holds "30" at that point, so this exercises the
+    // suppression rather than an empty box (which would pass no matter what the code did).
+    const unpinned = { ...NON_WAN, id: "wan_2_2", name: "Wan 2.2" };
+    const context = baseContext({ videoModels: [unpinned, DISTILLED_LTX] });
+    await render(context);
+    await openAdvanced();
+
+    const modelPicker = () =>
+      [...container.querySelectorAll("label")]
+        .find((el) => el.textContent.trim().startsWith("Model"))
+        ?.querySelector("select");
+
+    await act(async () => setSelect(modelPicker(), "wan_2_2"));
+    expect(labeledInput("Steps").disabled).toBe(false);
+    await act(async () => setInput(labeledInput("Steps"), "30"));
+    expect(labeledInput("Steps").value).toBe("30");
+
+    // Switch to the distilled model: the control pins and the stale 30 must not reach the payload.
+    await act(async () => setSelect(modelPicker(), "ltx_2_3"));
+    expect(labeledInput("Steps").disabled).toBe(true);
+
+    await click(buttonWithText(container, "Render clip"));
+    const payload = context.createVideoJob.mock.calls[0][0];
+    expect(payload.model).toBe("ltx_2_3");
+    // Omitting `steps` is what tells the engine to run its baked schedule, and it cannot 400.
+    expect(payload.advanced.steps).toBeUndefined();
+  });
+
+  // sc-19502 — the MULTI-entry half of the same constraint. `steps_limit_error` refuses off-menu
+  // counts by MEMBERSHIP, not by a floor, so a two-entry menu makes a free-text box exactly as
+  // unsatisfiable as it is for the pinned case: the user can type 30 and the enqueue gate 400s.
+  // Every other reader on this seam is already set-shaped, so the studio must be too.
+  const MENU_LTX = {
+    ...NON_WAN,
+    id: "ltx_menu",
+    name: "LTX (two schedules)",
+    // Fixed point: `defaults.steps` is ON the menu, the manifest invariant the Rust side asserts
+    // (`shipped_manifest_step_limits_are_what_core_reads`). It is NOT `limits.steps[0]` by
+    // definition — declared second here so a `[0]`-as-default regression cannot pass.
+    defaults: { duration: 6, resolution: "768x512", fps: 25, steps: 12 },
+    limits: { steps: [4, 12] },
+    ui: { label: "LTX Menu" },
+  };
+  const labeledSelect = (label) =>
+    [...container.querySelectorAll("label")]
+      .find((el) => el.textContent.trim().startsWith(label))
+      ?.querySelector("select");
+
+  it("offers a menu-shaped Steps picker for a model declaring more than one legal count", async () => {
+    const context = baseContext({ videoModels: [MENU_LTX] });
+    await render(context);
+    await openAdvanced();
+
+    // A free-text box here would be the "UI looser than the gate" desync. It must be a picker.
+    expect(labeledInput("Steps")).toBeNull();
+    const steps = labeledSelect("Steps");
+    expect(steps).toBeTruthy();
+    expect(steps.disabled).toBe(false);
+    // Exactly the declared menu, in declared order, plus the cleared "model default" entry the
+    // panel's own `cleared values → model default` hint promises. Nothing else is renderable.
+    expect([...steps.options].map((option) => option.value)).toEqual(["", "4", "12"]);
+    // The cleared entry shows `defaults.steps` (12) — NOT `limits.steps[0]` (4). If the empty option
+    // ever started advertising the menu's first entry, this is the assertion that catches it.
+    expect(steps.options[0].textContent).toBe("12 (model default)");
+    expect(steps.value).toBe("");
+    expect(steps.title).toMatch(/renders at 4 or 12 steps only/);
+  });
+
+  it("never emits an off-menu advanced.steps for a multi-entry menu, and does emit an on-menu one", async () => {
+    // Same real staleness path as the pinned case: type 30 against an unmenued model, then switch.
+    const unmenued = { ...NON_WAN, id: "wan_2_2", name: "Wan 2.2" };
+    const context = baseContext({ videoModels: [unmenued, MENU_LTX] });
+    await render(context);
+    await openAdvanced();
+
+    const modelPicker = () =>
+      [...container.querySelectorAll("label")]
+        .find((el) => el.textContent.trim().startsWith("Model"))
+        ?.querySelector("select");
+
+    await act(async () => setSelect(modelPicker(), "wan_2_2"));
+    await act(async () => setInput(labeledInput("Steps"), "30"));
+    expect(labeledInput("Steps").value).toBe("30");
+
+    await act(async () => setSelect(modelPicker(), "ltx_menu"));
+    // The stale 30 is off this model's menu, so the picker falls back to the cleared entry rather
+    // than to the menu's first option — which is what a `<select>` with an unmatched value shows,
+    // and would silently assert `limits.steps[0]` is the default.
+    expect(labeledSelect("Steps").value).toBe("");
+
+    await click(buttonWithText(container, "Render clip"));
+    const stale = context.createVideoJob.mock.calls[0][0];
+    expect(stale.model).toBe("ltx_menu");
+    expect(stale.advanced.steps).toBeUndefined();
+
+    // …and the picker is a working control, not a decoration: an on-menu pick reaches the payload.
+    // Without this half, suppressing `steps` unconditionally would pass the assertion above.
+    await act(async () => setSelect(labeledSelect("Steps"), "4"));
+    expect(labeledSelect("Steps").value).toBe("4");
+    await click(buttonWithText(container, "Render clip"));
+    const picked = context.createVideoJob.mock.calls[1][0];
+    expect(picked.advanced.steps).toBe(4);
   });
 
   it("does not emit advanced.lightning for a non-Wan engine", async () => {
@@ -2153,11 +2657,17 @@ describe("VideoStudio Krea Realtime 14B surface (sc-8445)", () => {
     expect(shippedSvd?.video).toEqual(SVD.video);
 
     // …and the polarity claim the manifest/schema comments make is checked against the real
-    // population rather than trusted: exactly these two entries declare the block, every other
-    // video model declares nothing and therefore keeps both controls.
+    // population rather than trusted: exactly these entries declare the block, every other video
+    // model declares nothing and therefore keeps both controls.
+    //
+    // Both MiniMax-H3 partitions joined in sc-17158: the sc-17242 spike enumerated the reference
+    // pipeline's complete 19-parameter input surface and neither `guidance_scale` nor
+    // `negative_prompt` is on it, so the axes genuinely do not exist. The non-declaring count is
+    // deliberately asserted separately and did NOT move — a new video entry that keeps both
+    // controls has to be a conscious decision, not a side effect of the list growing.
     const videoEntries = models.filter((entry) => entry.type === "video");
     const declaring = videoEntries.filter((entry) => entry.video).map((entry) => entry.id).sort();
-    expect(declaring).toEqual(["krea_realtime_14b", "svd"]);
+    expect(declaring).toEqual(["krea_realtime_14b", "minimax_h3", "minimax_h3_ref", "svd"]);
     expect(videoEntries.length - declaring.length).toBe(8);
 
     const context = baseContext({ videoModels: [SVD] });

@@ -755,6 +755,14 @@
           },
           "credentialHost": { "type": "string" },
           "licenseUrl": { "type": "string", "format": "uri" },
+          "requiresLicenseAcknowledgment": {
+            "type": "boolean",
+            "description": "Requires an explicit in-app license acknowledgment before the download is allowed (sc-17227). INDEPENDENT of `gated`: `gated` means the download needs a credential on `credentialHost`, this means the user must be shown the terms and accept them. `gated: true` also implies acknowledgment; this flag covers a PUBLIC repo whose license still binds the user (MiniMax-H3)."
+          },
+          "licenseNotice": {
+            "type": "string",
+            "description": "Restrictions the user is notified of at the acknowledgment gate (sc-17227). Plain prose restating the upstream license's own operative terms — territory, acceptable use, revenue ceiling — not a summary invented here. Rendered inside the acknowledgment box."
+          },
           "nonCommercial": { "type": "boolean" },
           "promptless": { "type": "boolean" },
           "structuredPrompt": { "type": "boolean" },
@@ -829,6 +837,27 @@
                 "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "pub fn hard_max_duration" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "if let Some(message) = duration_limit_error(" }, { "path": "crates/sceneworks-worker/src/video_jobs/mod.rs", "anchor": "if let Some(message) = duration_limit_error(" }],
                 "description": "Hard clip-duration ceiling in seconds; API and worker reject rather than clamp."
               },
+              "hardMinDuration": {
+                "type": "number", "exclusiveMinimum": 0,
+                "x-sceneworks-contract": "binding",
+                "x-sceneworks-allow-undeclared": true,
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "pub fn hard_min_duration" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "if let Some(message) = duration_limit_error(" }, { "path": "crates/sceneworks-worker/src/video_jobs/mod.rs", "anchor": "if let Some(message) = duration_limit_error(" }],
+                "description": "Hard clip-duration FLOOR in seconds; API and worker reject rather than lengthen. The mirror of hardMaxDuration, and it exists because a family can have a floor its own engine refuses below rather than pads up to: MiniMax-H3's frame lattice is 17n+5 clamped to 124..=345 frames, so its shortest renderable clip is 124/24 = 5.1667 s and a 3 s request is REFUSED (sc-17158). ABSENT MEANS NO FLOOR, so every model that declares nothing is byte-for-byte unchanged — the same never-block-without-evidence posture hardMaxDuration takes."
+              },
+              "steps": {
+                "type": "array", "items": { "type": "integer", "minimum": 1 }, "minItems": 1,
+                "x-sceneworks-contract": "binding",
+                "x-sceneworks-allow-undeclared": true,
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "pub fn allowed_steps" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "if let Some(message) = steps_limit_error(" }, { "path": "crates/sceneworks-worker/src/video_jobs/mod.rs", "anchor": "steps_limit_error(&request.model, steps" }],
+                "description": "The EXACT set of denoise step counts this model can render; API and worker reject an off-menu request rather than snapping to the nearest legal count. The membership-tested sibling of hardMinSteps, and it exists because a distilled model's step count is not a knob at all: LTX-2.3 bakes its sigma waypoints into training and runs a fixed 8-step stage-1 schedule, so `hardMinSteps: 8` would say 'at least 8' and wrongly admit steps: 30, which the engine refuses (sc-19502). Enforced on the VIDEO enqueue path through the same steps_limit_error gate as hardMinSteps, which is why the two readers named here are the existing ones. Lane-agnostic on purpose: both backends derive the count from a byte-identical STAGE1_SIGMAS table and share gen-core's Capabilities::supported_steps floor, so one declaration binds both. ABSENT MEANS NO MENU, so every model that declares nothing is byte-for-byte unchanged. A declared menu must contain the model's own defaults.steps."
+              },
+              "hardMinSteps": {
+                "type": "integer", "minimum": 1,
+                "x-sceneworks-contract": "binding",
+                "x-sceneworks-allow-undeclared": true,
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "pub fn hard_min_steps" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "if let Some(message) = steps_limit_error(" }, { "path": "crates/sceneworks-worker/src/video_jobs/mod.rs", "anchor": "steps_limit_error(&request.model, steps" }],
+                "description": "Hard FLOOR on `advanced.steps` (denoise / sampling steps); API and worker reject rather than raise the count. The sampling-axis sibling of hardMinDuration. THE UNIT IS MODEL EVALUATIONS (NFE) — the same unit `defaults.steps`, `advanced.steps` and a turbo adapter's `sampling.steps` carry: MiniMax-H3's engine builds its sigma grid as linspace(1, 0, steps + 1), appending the terminal 0 ITSELF (`JointSchedule::with_shifts(evaluations + 1, ..)`), so nothing in SceneWorks adds or subtracts one and `steps: 1` is a legal 2-point grid that RENDERS — as noise, because one evaluation is a single Euler jump from pure randomness. H3's floor of 2, the smallest schedule with an intermediate sigma, is therefore a PRODUCT judgement rather than an engine limit (sc-19426, corrected sc-18726); the retracted \"N steps drive N-1 model evaluations, so 1 is unrenderable\" reading described diffusers' `num_inference_steps` grid-point convention, which is NOT what this key counts. Enforced on the VIDEO enqueue path — the two gates named in x-sceneworks-readers are the only per-model rejection seams in the app, and the image lane has no counterpart. ABSENT MEANS NO FLOOR, so every model that declares nothing is byte-for-byte unchanged, the same never-block-without-evidence posture hardMinDuration takes. A declared floor must not exceed the model's own defaults.steps."
+              },
               "maxPixels": {
                 "type": "integer", "minimum": 1,
                 "x-sceneworks-contract": "binding",
@@ -846,6 +875,34 @@
                 "x-sceneworks-contract": "advisory",
                 "x-sceneworks-readers": [{ "path": "apps/web/src/screens/VideoStudio.jsx", "anchor": "selectedModel.limits.recommendedMaxDuration" }],
                 "description": "Non-blocking UI recommendation; intentionally not enforced."
+              },
+              "maxReferenceAssets": {
+                "type": "integer", "minimum": 0,
+                "x-sceneworks-contract": "binding",
+                "x-sceneworks-allow-undeclared": true,
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "pub fn reference_caps(" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "if let Some(message) = reference_limit_error(" }, { "path": "crates/sceneworks-worker/src/video_jobs/mod.rs", "anchor": "if let Some(message) = reference_limit_error(" }],
+                "description": "Maximum still-image references (`referenceAssetIds`) this model conditions on; API and worker reject an over-cap request rather than dropping the extras. ABSENT MEANS 8, the ceiling every video family shipped before sc-17160 enforced, so an undeclared model is byte-for-byte unchanged. Declared only by a family whose real cap differs (MiniMax-H3 Ref2VA takes 9) — no builtin model needs it yet; sc-17158 is the first."
+              },
+              "maxSourceClipAssets": {
+                "type": "integer", "minimum": 0,
+                "x-sceneworks-contract": "binding",
+                "x-sceneworks-allow-undeclared": true,
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "pub fn reference_caps(" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "if let Some(message) = reference_limit_error(" }, { "path": "crates/sceneworks-worker/src/video_jobs/mod.rs", "anchor": "if let Some(message) = reference_limit_error(" }],
+                "description": "Maximum source/reference video clips (`sourceClipAssetIds`) this model conditions on. ABSENT MEANS 8, the pre-sc-17160 ceiling. Declared by a family whose real cap differs (MiniMax-H3 Ref2VA takes 3) — no builtin model needs it yet; sc-17158 is the first."
+              },
+              "maxReferenceAudioAssets": {
+                "type": "integer", "minimum": 0,
+                "x-sceneworks-contract": "binding",
+                "x-sceneworks-allow-undeclared": true,
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "pub fn reference_caps(" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "if let Some(message) = reference_limit_error(" }, { "path": "crates/sceneworks-worker/src/video_jobs/mod.rs", "anchor": "if let Some(message) = reference_limit_error(" }],
+                "description": "Maximum AUDIO references (`referenceAudioAssetIds`, sc-17160) this model conditions on. ABSENT MEANS 0 — unlike the two caps above, the default is a refusal, because the payload field is newer than every shipped video family and an engine handed conditioning it cannot consume renders unconditioned, which is invisible in the output. A model must declare that it takes audio references before one can reach it. No builtin model needs it yet; sc-17158 is the first."
+              },
+              "maxCombinedReferenceAssets": {
+                "type": "integer", "minimum": 0,
+                "x-sceneworks-contract": "binding",
+                "x-sceneworks-allow-undeclared": true,
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "pub fn reference_caps(" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "if let Some(message) = reference_limit_error(" }, { "path": "crates/sceneworks-worker/src/video_jobs/mod.rs", "anchor": "if let Some(message) = reference_limit_error(" }],
+                "description": "Maximum reference FILES in total across `referenceAssetIds` + `sourceClipAssetIds` + `referenceAudioAssetIds` (sc-17160). NOT derivable from the three per-list caps — MiniMax-H3 Ref2VA takes 9 + 3 + 3 per list but only 12 files together — which is why it is its own key: it is the only cap that can refuse a request in which every individual list fits. ABSENT MEANS NO COMBINED CEILING, so an undeclared model is unchanged. No builtin model needs it yet; sc-17158 is the first."
               },
               "samplers": {
                 "type": "array",
@@ -881,6 +938,10 @@
             "description": "Display metadata for model catalog and studio surfaces.",
             "properties": {
               "label": { "type": "string" },
+              "attribution": {
+                "type": "string",
+                "description": "Attribution line the upstream license REQUIRES on the user interface (sc-17227) — e.g. MiniMax H3 Community License §IV.2 \"You shall prominently display 'MiniMax H3' on the user interface\". Rendered prominently above the description on the model card, not folded into prose."
+              },
               "description": { "type": "string" },
               "durationHint": { "type": "string" },
               "promptHint": { "type": "string" },

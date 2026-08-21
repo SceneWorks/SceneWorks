@@ -471,7 +471,7 @@ impl KreaRuntimeEvidenceContext {
 /// below, both load-bearing:
 ///
 /// 1. Every multi-megabyte `.safetensors` the testkit writes is converted to a SPARSE file right
-///    after its tier is written (`crate::tests::sparsify_fixture_weights_tail`, the shared
+///    after its tier is written (`crate::test_fixture_disk::sparsify_written_safetensors`, the shared
 ///    sc-20606 home of this discipline): `fsutil sparse setflag` +
 ///    `setrange` over the never-written tail past the safetensors header deallocates it while the
 ///    logical size — and every byte the header actually stores — stays exactly as written. This is
@@ -534,7 +534,7 @@ fn krea_test_artifact_root(tier: &str) -> std::path::PathBuf {
             .expect("write sparse Krea encoder fixture");
             // Per tier, not once at the end: the transient full allocation (doc comment above) is
             // then bounded by ONE tier's encoder file rather than all three.
-            crate::tests::sparsify_fixture_weights_tail(&tier_root.join("text_encoder"));
+            crate::test_fixture_disk::sparsify_written_safetensors(&tier_root.join("text_encoder"));
             if let Some(bits) = bits {
                 let transformer = tier_root.join("transformer");
                 std::fs::create_dir_all(&transformer).expect("Krea transformer fixture dir");
@@ -5763,7 +5763,7 @@ mod tests {
         for tier in ["q4", "q8"] {
             for component in ["transformer", "transformer_2", "text_encoder", "vae"] {
                 let path = root.join(tier).join(component).join("model.safetensors");
-                crate::tests::set_sparse_len(&path, 5_000_000_000);
+                crate::test_fixture_disk::create_sparse_weights(&path, 5_000_000_000);
             }
         }
 

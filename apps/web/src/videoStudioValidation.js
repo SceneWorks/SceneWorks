@@ -10,6 +10,31 @@ import { presetLoraIssues } from "./generationValidation.js";
 import { promptBudget } from "./styleComposer.js";
 import { issue } from "./validation/issues.js";
 
+// SCAIL-2's catalog id, named once so the panel that HIDES the Replacement mode control and the
+// studio that stops SENDING it key on one spelling rather than two literals that can drift.
+export const SCAIL2_MODEL_ID = "scail2_14b";
+
+// Whether a replacement engine actually consumes `replacementMode`. Today it is a single negative
+// fact rather than a per-model table: SCAIL-2 re-renders the whole tracked person from the character
+// reference, so face-only / keep-outfit has nothing to select, and every scail2 conditioning site in
+// the worker emits `ReplacementMode::default()` LITERALLY — the user's choice never reached the
+// engine. The engine now refuses a non-default mode outright (sc-20262), so a control that can still
+// set one is a refusal waiting to happen rather than a knob. The Wan-VACE inpainting engines DO
+// honor it and are unchanged.
+//
+// It lives HERE, rather than beside the control in `ReplacePersonPanel.jsx`, for two reasons that
+// both point the same way. `ReplacePersonPanel.jsx` imports this module and not the reverse, so
+// there is no cycle; and this file is a fingerprinted source of `config/backend-capabilities/
+// matrix.json` (`webVideoValidation`) while the panel is not — a predicate that decides what the
+// studio SENDS must sit inside that fingerprint, or it could be edited without the derived matrix
+// noticing. `VideoStudio.jsx` is fingerprinted too, so both readers are covered.
+//
+// sc-20262 is the story that would make the mode honored. If it lands, delete this predicate rather
+// than adding a second model to it.
+export function replacementModeApplies(modelId) {
+  return modelId !== SCAIL2_MODEL_ID;
+}
+
 export function videoGenerateValidation({
   activeProject,
   promptless,
@@ -20,6 +45,19 @@ export function videoGenerateValidation({
   requiresLtxIcLora,
   hasLtxIcLora,
   replaceReady,
+  // sc-17161: the refusal from `referenceLimitError` for a reference selection past what the model
+  // declares (`limits.max{Reference,SourceClip,ReferenceAudio,CombinedReference}Assets`), or null.
+  // An ERROR, not a silent requirement: the pickers all look satisfied — MiniMax-H3 Ref2VA's
+  // combined cap refuses selections in which every individual picker is inside its own cap — so
+  // nothing else on the form explains why Generate is dead.
+  referenceLimitMessage = null,
+  // sc-19574: `reference_to_video` with audio references selected and NO image or video reference.
+  // An ERROR rather than the silent `inputs` requirement, for `referenceLimitMessage`'s reason: the
+  // audio picker is visibly full, so an empty image zone next to it reads as optional. The rule is
+  // the reference implementation's own — diffusers `MiniMaxH3` raises on `set(kinds) == {"audio"}`,
+  // because an audio reference never reaches the visual conditioner — and both the API and the
+  // worker refuse the same shape, so saying it here is where the user finds out first.
+  audioOnlyReferenceSet = false,
   modelName,
   // sc-13136: the COMPOSED outgoing prompt (Subject:/Style: wrap + preset fold) and whether a
   // Style Catalog entry is active. `composedPrompt` is the exact string that will be sent — the same
@@ -72,6 +110,17 @@ export function videoGenerateValidation({
   }
   if (!replaceReady) {
     issues.push(issue.error(null, "No live GPU worker can run person replacement yet."));
+  }
+  if (referenceLimitMessage) {
+    issues.push(issue.error(null, referenceLimitMessage));
+  }
+  if (audioOnlyReferenceSet) {
+    issues.push(
+      issue.error(
+        null,
+        "An audio reference can't be the only reference — add a reference image or video clip. Audio conditions the soundtrack, not the picture.",
+      ),
+    );
   }
   issues.push(...presetLoraIssues({ presetMissing, presetIncompatible, loraIncompatible, modelName }));
   return issues;

@@ -239,12 +239,12 @@ fn krea2_base_dit_safetensors_keys() -> Vec<String> {
 }
 
 #[test]
-fn imported_base_krea_dit_gets_family_from_the_base_weight_verdict() {
+fn imported_base_krea_dit_gets_family_from_header_and_base_weight_verdict() {
     // sc-14108 regression: a bare single-file Krea 2 DiT is neither a diffusers directory nor a
-    // LoRA, so the LoRA-oriented `detect_model_family` returns None. `run_model_import_job` therefore
-    // falls back to the base-weight gate's verdict — `detect_model_family(dir).or(base_weight_family)`
-    // — to stamp `krea_2`. Without the fallback the imported model persists family-less, so the
-    // catalog shows "Needs Family" / "Not On Mac" and it cannot be selected in the Image Studio.
+    // LoRA, but its Krea-exclusive `txtfusion` namespace is visible to both the shared header
+    // detector and the base-weight gate. `run_model_import_job` composes those signals as
+    // `detect_model_family(dir).or(base_weight_family)`; they must agree on `krea_2` so the imported
+    // model never persists family-less as "Needs Family" / "Not On Mac".
     use sceneworks_core::base_weights::{detect_base_weight_file, BaseWeightDetection};
     use sceneworks_core::lora_family::{detect_model_family, first_safetensors_path};
 
@@ -254,13 +254,15 @@ fn imported_base_krea_dit_gets_family_from_the_base_weight_verdict() {
         &krea2_base_dit_safetensors_keys(),
     );
 
-    // (1) The LoRA/diffusers detector cannot classify a bare base DiT.
+    // (1) The shared LoRA/base-header detector recognizes Krea's exclusive namespace.
     assert_eq!(
-        detect_model_family(dir.path()).expect("detect_model_family runs"),
-        None,
+        detect_model_family(dir.path())
+            .expect("detect_model_family runs")
+            .as_deref(),
+        Some("krea_2"),
     );
 
-    // (2) The base-weight gate verdict supplies the family the import falls back to.
+    // (2) The independent base-weight gate reaches the same verdict.
     let file = first_safetensors_path(dir.path()).expect("a safetensors file");
     let base_weight_family = match detect_base_weight_file(&file).expect("classifies") {
         BaseWeightDetection::Recognized(verdict) => verdict.family,

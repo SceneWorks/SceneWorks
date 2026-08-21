@@ -23,11 +23,21 @@ import {
   catalogFamilyBackends,
   isImplemented,
   isPublishableCell,
+  memoryCharacterization,
+  OUT_OF_MATRIX_CELL_STATES,
   plannedCellIds,
   RUNG4_APPLICABILITIES,
   RUNG4_IMPLEMENTATIONS,
   RUNG4_REQUEST_PEAKS,
+  SHARED_RUNG4_PREREQUISITES,
+  assertGeneratorSourceDoesNotRestateTheRemovedEdge,
+  assertRung4CalibrationsDeclareTheRequiredLoadShape,
+  assertRung4PrerequisiteRecordsCoverEveryFamily,
+  deriveOutOfMatrixApplicability,
   familyGroup,
+  parseRung4ContractPrerequisites,
+  parseRung4Survey,
+  rung4ContractAdmits,
   familyStory,
   parseVideoEngineIds,
   parseVideoRoutes,
@@ -40,7 +50,6 @@ import {
   UNROUTED_CATALOG_ENTRIES,
   VIDEO_FAMILY_STORIES,
   measuredGeometryKey,
-  memoryCharacterization,
   mlxRequiredHostBytes,
   observedPeakBytes,
   modelStory,
@@ -49,7 +58,7 @@ import {
   stagedResidencyIsAvailable,
   strategyStatus,
 } from "./generate-memory-matrix.mjs";
-import { recordId } from "./memory-calibration-harness.mjs";
+import { logicalCaseId, recordId } from "./memory-calibration-harness.mjs";
 import { recordsNeedingDigest } from "./backfill-closure-digests.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 import { stripInertLines } from "./lib/source-revision.mjs";
@@ -332,6 +341,9 @@ test("the fingerprint covers every declared source, and the artifact publishes t
     "routingCandle",
     "routingCatalog",
     "routingMlx",
+    // sc-19542: the rung-4 arm admits from these per-provider prerequisite records, so they decide
+    // cell state and belong inside the fingerprint like every other deciding source.
+    "rung4ContractPrerequisites",
     "rung4Survey",
     // sc-18815: the video lane's route resolvers. Each `*_engine_id` function is where a video
     // model-id -> provider-id mapping actually lives, so the fingerprint watches them for the same
@@ -814,20 +826,27 @@ test("Qwen MLX static ladder contracts expose every shipped entry and promote on
   // Exact per-cell counts, because `>= 1` would accept a cell that had silently lost evidence.
   //
   // q8 carries three records per bound rung because the fixture re-stamps the superseded q8 records
-  // and also includes SC-18237's production-deferred pair. The q4/bf16 cells carry one exact record
-  // each. Exact counts keep both facts visible.
+  // and also includes SC-18237's production-deferred pair. The new q4/bf16 cells carry one exact
+  // current record each. Exact counts keep both facts visible.
+  //
+  // sc-19721 bumped the inference pin 014134e3 -> 75d66db5, which staled every one of these cells
+  // (the closure digest is what currency keys on, and mlx-gen/src/residency.rs moved +272 lines).
+  // The re-capture adds exactly ONE current record per cell, so every count below rises by one and
+  // no other shape changes. The uniform +1 is the signature of a clean sweep: a partial or
+  // duplicated ingest would show a ragged delta here, and the seven-cell SET assertion above still
+  // pins which cells may appear at all.
   assert.deepEqual(
     Object.fromEntries(
       verified.map((cell) => [cell.id, cell.evidence.currentEnvironmentVerification.length]),
     ),
     {
-      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_attention": 1,
-      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_decode": 1,
-      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_transformer_residency": 1,
-      "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_attention": 1,
-      "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_transformer_residency": 1,
-      "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_attention": 3,
-      "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_transformer_residency": 3,
+      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_attention": 2,
+      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_decode": 2,
+      "qwen_image:qwen_image:mlx:bf16:text_to_image:none:bounded_transformer_residency": 2,
+      "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_attention": 2,
+      "qwen_image:qwen_image:mlx:q4:text_to_image:none:bounded_transformer_residency": 2,
+      "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_attention": 4,
+      "qwen_image:qwen_image:mlx:q8:text_to_image:none:bounded_transformer_residency": 4,
     },
     "every Verified Qwen cell must carry its exact dynamic evidence",
   );
@@ -944,6 +963,11 @@ test("FLUX.2-dev MLX exposes only the captured q4/q8 T2I Resident cells and keep
     ],
     "BF16 and every sibling mode, overlay, and rung must remain Missing",
   );
+  // TWO retained cohorts per cell after the sc-17137 main sync: SC-18218's originals (10831e4ca)
+  // and sc-19721's re-captures (75d66db5), each covering the 768 and 1024 geometries — four
+  // historical rows per cell. The sc-20523 pin moved the shared gen-core closure past BOTH, so
+  // neither cohort is re-stamped current: the superseded captures stay historical until a real
+  // re-capture arrives, which is the property this has always been protecting.
   assert.ok(
     shippedCells
       .filter((cell) => cell.state !== "Missing")
@@ -952,9 +976,9 @@ test("FLUX.2-dev MLX exposes only the captured q4/q8 T2I Resident cells and keep
           cell.state === "Implemented/unverified" &&
           cell.calibrationFingerprint === "sc-18218-flux2-dev-t2i-resident-evidence-v1" &&
           cell.evidence.currentEnvironmentVerification.length === 0 &&
-          cell.evidence.historicalVerification.length === 2,
+          cell.evidence.historicalVerification.length === 4,
       ),
-    "the exact 768 and 1024 captures must remain attributable but historical after the shared gen-core closure moved",
+    "the exact 768 and 1024 captures of both cohorts must remain attributable but historical after the shared gen-core closure moved",
   );
 
   // Promotion is tested against a mechanically re-stamped fixture. The checked-in physical
@@ -981,7 +1005,7 @@ test("FLUX.2-dev MLX exposes only the captured q4/q8 T2I Resident cells and keep
       (cell) =>
         cell.state === "Runtime verified" &&
         cell.calibrationFingerprint === "sc-18218-flux2-dev-t2i-resident-evidence-v1" &&
-        cell.evidence.currentEnvironmentVerification.length === 2,
+        cell.evidence.currentEnvironmentVerification.length === 4,
     ),
     "each admitted cell must be backed by its exact 768 and 1024 current captures",
   );
@@ -2275,46 +2299,136 @@ test("Candle Krea's Implemented cells report the shared backend that makes them 
   assert.doesNotMatch(serialized, /does not go through.*BlockWindowBackend/i);
 });
 
-test("rung 4 is not claimed on MLX where its declared rung-1 prerequisite is absent", async () => {
-  // gen_core::memory_strategy makes rung 1 a prerequisite of rung 4, so a family with a perfectly
-  // windowable trunk still reports Missing where the entry cannot stage its phases. Mage-Flow and
-  // SenseNova are the epic's own uncovered-rung-1 MLX families; Candle capability is independent.
-  const matrix = await buildMatrix({ publish: false });
-  for (const modelId of ["mage_flow", "sensenova_u1_8b"]) {
-    const staged = matrix.cells.filter(
-      (cell) =>
-        cell.modelId === modelId &&
-        cell.backend === "mlx" &&
-        cell.rung === "staged_residency",
-    );
-    assert.ok(staged.length > 0);
-    assert.ok(
-      staged.every((cell) => cell.state === "Missing"),
-      `${modelId}: fixture assumes rung 1 is unavailable`,
-    );
-    const rung4 = matrix.cells.filter(
-      (cell) =>
-        cell.modelId === modelId &&
-        cell.backend === "mlx" &&
-        cell.rung === "bounded_transformer_residency",
-    );
-    assert.ok(
-      rung4.every((cell) => cell.state === "Missing"),
-      `${modelId}: rung 4 cannot be reachable without rung 1`,
-    );
-    assert.ok(
-      rung4.every((cell) => cell.rung4Survey.structuralApplicability !== "none"),
-      `${modelId}: the architecture is fine — the verdict must not read as Structurally N/A`,
-    );
+// ---------------------------------------------------------------------------
+// sc-19542 — the rung-4 arm admits from each provider's OWN declared prerequisite graph.
+// ---------------------------------------------------------------------------
+
+const PREREQUISITES_URL = new URL("../config/rung4-contract-prerequisites.json", import.meta.url);
+
+async function prerequisitesFixture() {
+  return JSON.parse(await readFile(PREREQUISITES_URL, "utf8"));
+}
+
+/** `${group}:${backend}` -> whether that provider appends the rung-1 edge at the pinned revision. */
+async function declaredRung1Edges() {
+  const records = await prerequisitesFixture();
+  const declares = new Map();
+  for (const [group, family] of Object.entries(records.families)) {
+    for (const [backend, record] of Object.entries(family.backends)) {
+      declares.set(
+        `${group}:${backend}`,
+        record.additionalPrerequisites.some(
+          (edge) => edge.kind === "rung" && edge.rung === "staged_residency",
+        ),
+      );
+    }
   }
+  return declares;
+}
+
+test("rung 4 is refused exactly where the family's OWN prerequisite graph refuses it", async () => {
+  // sc-19542. The arm used to apply `stagedResidencyIsAvailable` to every family — a rung-1
+  // AVAILABILITY proxy, where rung 4's shared contract rule
+  // (`BOUNDED_TRANSFORMER_RESIDENCY_REQUIRES`) names `LoadShape::DeferredMaterialization` and no
+  // rung edge at all. The rung-1 edge is real but PER PROVIDER: it is appended through
+  // `MemoryProviderContract::additional_prerequisites`, and 21 of the 40 (family, backend) pairs
+  // append it while 19 do not.
+  //
+  // The expectation below is read out of those records rather than listed here, so this test
+  // maintains no names and no counts: whichever families declare the edge are the families the
+  // rung-1 predicate may hold back.
+  //
+  // What this one actually grades, stated so it is not over-read: the RECORDS' discrimination
+  // against the live catalog. Collapse them so every provider declares the edge — which is the data
+  // form of the blanket proxy — and the `exempt` branch empties and this reds. It does NOT catch the
+  // code-level regression: the two tests below it do, and were each mutation-checked against a
+  // restored blanket call site and against a neutered rung evaluator.
+  const matrix = await buildMatrix({ publish: false });
+  const declares = await declaredRung1Edges();
+  const cellsOf = (modelId, backend, rung) =>
+    matrix.cells.filter(
+      (cell) => cell.modelId === modelId && cell.backend === backend && cell.rung === rung,
+    );
+
+  const lanes = [
+    ...new Set(matrix.cells.map((cell) => `${cell.modelId}:${cell.backend}`)),
+  ].map((lane) => {
+    const [modelId, backend] = lane.split(":");
+    return { modelId, backend, key: `${familyGroup(modelId)}:${backend}` };
+  });
+
+  let heldBack = 0;
+  let exempt = 0;
+  for (const { modelId, backend, key } of lanes) {
+    const rung1 = cellsOf(modelId, backend, "staged_residency");
+    if (!rung1.length || rung1.some((cell) => cell.state !== "Missing")) continue;
+    if (declares.get(key)) {
+      heldBack += 1;
+      assert.ok(
+        cellsOf(modelId, backend, "bounded_transformer_residency").every(
+          (cell) => cell.state === "Missing",
+        ),
+        `${modelId}:${backend} appends the rung-1 edge and cannot stage, so rung 4 must be Missing`,
+      );
+    } else {
+      exempt += 1;
+    }
+  }
+  // Both partitions have to be occupied or the assertion above grades nothing — a lane set that is
+  // all-declaring would make it a restatement of the old blanket proxy, and an all-exempt one would
+  // make its loop body unreachable.
+  assert.ok(heldBack > 0, "no lane exercises the held-back branch");
+  assert.ok(exempt > 0, "no lane exercises the exempt branch — the gate would be indistinguishable from the blanket proxy");
 });
 
-test("the rung-1 prerequisite gates the rung-4 claim, and is the ONLY thing separating these two families", async () => {
-  // The mutation check for the prerequisite. Both fixtures below claim a rung-4 implementation the
-  // real providers do not have; the ONLY difference between them is whether the entry advertises
-  // rung 1. Mage-Flow does not (the epic's uncovered-rung-1 set), SANA does. If the rung-4 arm
-  // stopped consulting `stagedResidencyIsAvailable`, the Mage-Flow half would go green — which is
-  // exactly the false claim `gen_core::memory_strategy`'s prerequisite edge exists to prevent.
+test("the rung-1 predicate reaches exactly the families whose provider declares that edge", async () => {
+  // AC5 as a behavioural property rather than a source-text convention, and the direct mutation
+  // check for the defect: switch the arm back to a blanket `stagedResidencyIsAvailable` and every
+  // record becomes sensitive, so the 19 that declare no edge fail here; drop the predicate entirely
+  // and the 21 that do declare one fail. The expectation is each record's own prerequisite list —
+  // the gate's own predicate — so there is nothing to keep in step by hand.
+  const declares = await declaredRung1Edges();
+  const records = await prerequisitesFixture();
+  const context = (rung1Available) => ({
+    backend: "candle",
+    // A Candle lane, because `stagedResidencyIsAvailable` reads its answer off the manifest block
+    // there, which makes the two contexts differ in exactly one fact.
+    model: { id: "fixture", candle: rung1Available ? { supportsSequentialOffload: true } : {} },
+    route: { engine: "fixture" },
+    sequentialEngines: new Set(),
+    manifestById: new Map(),
+  });
+
+  let sensitive = 0;
+  let insensitive = 0;
+  for (const [group, family] of Object.entries(records.families)) {
+    for (const [backend, record] of Object.entries(family.backends)) {
+      const key = `${group}:${backend}`;
+      const withRung1 = rung4ContractAdmits(record, context(true));
+      const withoutRung1 = rung4ContractAdmits(record, context(false));
+      assert.equal(
+        withRung1 !== withoutRung1,
+        declares.get(key),
+        `${family.name} (${backend}): the gate's sensitivity to rung-1 availability must match ` +
+          "whether this provider appends that edge",
+      );
+      if (withRung1 !== withoutRung1) sensitive += 1;
+      else insensitive += 1;
+    }
+  }
+  assert.ok(sensitive > 0 && insensitive > 0, "both branches must be occupied or this grades nothing");
+});
+
+test("a rung-4 implementation claim survives an absent rung 1 exactly when the provider allows it", async () => {
+  // The same property end to end, through the real generator. Three lanes, each claiming a rung-4
+  // implementation the real provider does not have:
+  //
+  //   Mage-Flow MLX     appends the rung-1 edge, cannot stage  -> refused
+  //   SenseNova U1 MLX  appends none,             cannot stage  -> HONOURED (this is the arm that
+  //                                                               reds if the blanket proxy returns)
+  //   SANA MLX          appends the rung-1 edge,  can stage     -> honoured (so the refusal above is
+  //                                                               about the prerequisite, not about
+  //                                                               the claim being ignored)
   const claimImplemented = async (group, entry) => {
     const survey = await surveyFixture();
     const verdict = survey.families[group].backends.mlx;
@@ -2332,30 +2446,1013 @@ test("the rung-1 prerequisite gates the rung-4 claim, and is the ONLY thing sepa
       );
     return { rung1: of("staged_residency"), rung4: of("bounded_transformer_residency") };
   };
+  const declares = await declaredRung1Edges();
 
-  const withoutRung1 = await claimImplemented("15509", "mage_flow");
-  assert.ok(withoutRung1.rung1.length > 0 && withoutRung1.rung4.length > 0);
+  assert.equal(declares.get("15509:mlx"), true, "fixture assumes Mage-Flow MLX appends the edge");
+  const heldBack = await claimImplemented("15509", "mage_flow");
+  assert.ok(heldBack.rung1.length > 0 && heldBack.rung4.length > 0);
   assert.ok(
-    withoutRung1.rung1.every((cell) => cell.state === "Missing"),
+    heldBack.rung1.every((cell) => cell.state === "Missing"),
     "fixture assumes Mage-Flow advertises no MLX rung 1",
   );
   assert.ok(
-    withoutRung1.rung4.every((cell) => cell.state === "Missing"),
-    "a rung-4 implementation claim must not survive an absent rung-1 prerequisite",
+    heldBack.rung4.every((cell) => cell.state === "Missing"),
+    "a rung-4 claim must not survive an absent rung 1 where the provider declares that edge",
   );
 
-  const withRung1 = await claimImplemented("15523", "sana_1600m");
+  assert.equal(declares.get("15513:mlx"), false, "fixture assumes SenseNova MLX appends no edge");
+  const exempt = await claimImplemented("15513", "sensenova_u1_8b");
   assert.ok(
-    withRung1.rung1.every((cell) => cell.state === "Implemented/unverified"),
-    "fixture assumes SANA advertises MLX rung 1",
+    exempt.rung1.every((cell) => cell.state === "Missing"),
+    "fixture assumes SenseNova advertises no MLX rung 1 either",
   );
   assert.ok(
-    withRung1.rung4.every(
+    exempt.rung4.every(
       (cell) =>
         cell.state === "Implemented/unverified" &&
         cell.strategyParameters.transformerWindowSize === 1,
     ),
-    "with the prerequisite present the same claim IS honoured — so the assertion above is not vacuous",
+    "a provider that appends no rung-1 edge must not be held back by one — this is the cell the " +
+      "blanket proxy got wrong",
+  );
+
+  assert.equal(declares.get("15523:mlx"), true, "fixture assumes SANA MLX appends the edge");
+  const satisfied = await claimImplemented("15523", "sana_1600m");
+  assert.ok(
+    satisfied.rung1.every((cell) => cell.state === "Implemented/unverified"),
+    "fixture assumes SANA advertises MLX rung 1",
+  );
+  assert.ok(
+    satisfied.rung4.every(
+      (cell) =>
+        cell.state === "Implemented/unverified" &&
+        cell.strategyParameters.transformerWindowSize === 1,
+    ),
+    "with the prerequisite satisfied the same claim IS honoured — so the refusal above is not vacuous",
+  );
+});
+
+test("a structurally-N/A rung 1 satisfies the provider's own rung-4 edge vacuously", async () => {
+  // `validate_selection` has TWO accepting arms for a `Rung { .. EngagedInSameRequest }` edge, and
+  // the gate shipped only the first. inference
+  // `crates/contracts/gen-core/src/memory_strategy.rs` at pinned `75d66db5` (`1468-1481` at
+  // the `014134e3` this was written against):
+  //
+  //     if self.engages(selection.strategy, rung) { continue; }
+  //     // `StructurallyNotApplicable` satisfies the edge vacuously: it asserts the
+  //     // architecture has no such component to shed.
+  //     if matches!(self.support(rung), Some(StructurallyNotApplicable { .. })) { continue; }
+  //
+  // Missing arm 2, a provider that both appends the edge and declares rung 1 structurally N/A is
+  // UNDER-admitted: the contract accepts the composition and the matrix reports it Missing.
+  //
+  // MUTATION: delete the `structurally_not_applicable` line from the `rung` evaluator and the first
+  // assertion below reds. Nothing else in the suite moves, which is the point — the arm is
+  // unreachable on today's records (`mlx-gen-sensenova` is the only N/A declarer and it appends no
+  // edge), so only a test that CONSTRUCTS the combination can grade it.
+  const edge = {
+    kind: "rung",
+    rung: "staged_residency",
+    scope: "engaged_in_same_request",
+    source: "crates/media/mlx-gen/mlx-gen-fixture/src/memory_strategy.rs",
+    conditional: false,
+  };
+  // A context in which rung 1 is NOT available, so arm 1 cannot be what admits.
+  const cannotStage = {
+    backend: "candle",
+    model: { id: "fixture", candle: {} },
+    route: { engine: "fixture" },
+    sequentialEngines: new Set(),
+    manifestById: new Map(),
+  };
+  const admits = (stagedResidencySupport) =>
+    rung4ContractAdmits(
+      { crate: "crates/media/mlx-gen/mlx-gen-fixture", additionalPrerequisites: [edge], stagedResidencySupport },
+      cannotStage,
+    );
+
+  assert.equal(admits("structurally_not_applicable"), true, "arm 2 must satisfy the edge");
+  // Each of the other declarations individually, because "N/A admits" would also hold if the gate
+  // simply stopped consulting the record at all.
+  assert.equal(admits("implemented"), false);
+  assert.equal(admits("missing"), false);
+  assert.equal(
+    admits(null),
+    false,
+    "an unreadable declaration must fall through to the engagement term, never admit",
+  );
+  // ...and arm 1 still admits on its own when rung 1 IS available, so arm 2 is an addition rather
+  // than a replacement.
+  assert.equal(
+    rung4ContractAdmits(
+      {
+        crate: "crates/media/mlx-gen/mlx-gen-fixture",
+        additionalPrerequisites: [edge],
+        stagedResidencySupport: "implemented",
+      },
+      { ...cannotStage, model: { id: "fixture", candle: { supportsSequentialOffload: true } } },
+    ),
+    true,
+  );
+  // The declaration this arm exists for is a fact about a REAL provider, not an invented one: the
+  // records must still carry exactly the N/A declaration the pinned tree contains.
+  const records = await prerequisitesFixture();
+  const naLanes = Object.entries(records.families).flatMap(([group, family]) =>
+    Object.entries(family.backends)
+      .filter(([, record]) => record.stagedResidencySupport === "structurally_not_applicable")
+      .map(([backend]) => `${group}:${backend}`),
+  );
+  assert.ok(
+    naLanes.length > 0,
+    "no record declares rung 1 structurally N/A, so the extractor half of this arm grades nothing",
+  );
+  // Stated rather than assumed: those lanes append no rung edge today, so the arm is currently
+  // unreachable through `buildMatrix` and the assertions above are the only thing grading it.
+  for (const lane of naLanes) {
+    const [group, backend] = lane.split(":");
+    assert.equal(
+      records.families[group].backends[backend].additionalPrerequisites.length,
+      0,
+      `${lane} now appends an edge, so the N/A arm is reachable end to end — grade it there too`,
+    );
+  }
+});
+
+test("the rung-4 prerequisite records cover every advertised lane, exactly and currently", async () => {
+  const matrix = await buildMatrix({ publish: false });
+  // The IMAGE half of the universe, matching the fence's own scope: the derivation script walks
+  // the 20 image families, and the video lanes sc-18815 admitted fall back to the direct
+  // predicate until their provider graphs are derived (sc-17137 main-sync reconciliation — the
+  // fence's comment carries the full account).
+  const advertised = new Set(
+    matrix.models
+      .filter((model) => model.modality === "image")
+      .flatMap((model) => model.backends.map((backend) => `${familyGroup(model.id)}:${backend}`)),
+  );
+  const base = await prerequisitesFixture();
+  const parse = (mutate) => {
+    const records = JSON.parse(JSON.stringify(base));
+    mutate(records);
+    return parseRung4ContractPrerequisites(JSON.stringify(records), {
+      pin: records.inferenceRevision,
+    });
+  };
+  const cover = (mutate) =>
+    assertRung4PrerequisiteRecordsCoverEveryFamily(parse(mutate), matrix.models);
+
+  // The clean file parses and covers every advertised lane, so each rejection below is graded
+  // against a passing baseline rather than against another failure.
+  assert.equal(parse(() => {}).size, advertised.size);
+  assert.doesNotThrow(() => cover(() => {}));
+
+  // Each guard mutated individually — a set-wide mutation would prove the set, not the members.
+  const anyGroup = Object.keys(base.families)[0];
+  assert.throws(
+    () =>
+      cover((records) => {
+        delete records.families[anyGroup].backends.mlx;
+      }),
+    /has no mlx rung-4 contract-prerequisite record/,
+  );
+  assert.throws(
+    () =>
+      cover((records) => {
+        records.families["99999"] = {
+          name: "invented",
+          backends: { mlx: { crate: "x", additionalPrerequisites: [] } },
+        };
+      }),
+    /the record reaches no cell/,
+  );
+  assert.throws(
+    () =>
+      parseRung4ContractPrerequisites(JSON.stringify(base), {
+        pin: "0".repeat(40),
+      }),
+    /is keyed to .* but Cargo pins/,
+  );
+  assert.throws(
+    () =>
+      parse((records) => {
+        records.families[anyGroup].backends.mlx.additionalPrerequisites = [
+          { kind: "invented-kind", source: "x" },
+        ];
+      }),
+    /has no evaluator in this gate/,
+  );
+  assert.throws(
+    () =>
+      parse((records) => {
+        delete records.families[anyGroup].backends.mlx.additionalPrerequisites;
+      }),
+    /must be an array/,
+  );
+  assert.throws(
+    () =>
+      parse((records) => {
+        delete records.families[anyGroup].backends.mlx.crate;
+      }),
+    /must name the inference crate/,
+  );
+  assert.throws(
+    () =>
+      parse((records) => {
+        records.families[anyGroup].backends.mlx.additionalPrerequisites = [
+          { kind: "rung", rung: "staged_residency", scope: "engaged_in_same_request" },
+        ];
+      }),
+    /must cite the provider file/,
+  );
+  // sc-19542 review: an absent `conditional` is a CLAIM that the construction is unconditional, so
+  // it may not be defaulted in. Same for a support spelling this gate has no arm for.
+  assert.throws(
+    () =>
+      parse((records) => {
+        records.families[anyGroup].backends.mlx.additionalPrerequisites = [
+          {
+            kind: "rung",
+            rung: "staged_residency",
+            scope: "engaged_in_same_request",
+            source: "crates/x/src/lib.rs",
+          },
+        ];
+      }),
+    /must say whether the construction that appends it is conditional/,
+  );
+  assert.throws(
+    () =>
+      parse((records) => {
+        records.families[anyGroup].backends.mlx.stagedResidencySupport = "probably-not";
+      }),
+    /is not a gen-core MemoryStrategySupport this gate knows/,
+  );
+
+  // ...and the fence is WIRED, not merely correct. The assertions above call it directly, so they
+  // would all stay green if nothing in the generator ran it; this drives the same mutation through
+  // `buildMatrix`.
+  const dropped = JSON.parse(JSON.stringify(base));
+  delete dropped.families[anyGroup].backends.mlx;
+  await assert.rejects(
+    buildMatrix({
+      publish: false,
+      sourceOverrides: { rung4ContractPrerequisites: JSON.stringify(dropped) },
+    }),
+    /rung-4 contract-prerequisite record/,
+  );
+});
+
+test("rung 4's shared LoadShape edge is graded on every declared rung-4 calibration binding", async () => {
+  // The shared half of the prerequisite graph. `rung4ContractAdmits` cannot demote a coordinate on
+  // it — a cell has no load shape — but a calibration BINDING does, and today's rung-4 bindings
+  // carry `deferred_materialization` while their rungs 0-3 siblings carry `eager_materialization`.
+  const manifest = JSON.parse(
+    stripJsoncComments(await readFile(new URL(`../${SOURCE_PATHS.manifest}`, import.meta.url), "utf8")),
+  );
+  const images = manifest.models.filter((model) => model.type === "image");
+  const rung4Bindings = images.flatMap((model) =>
+    ["mlx", "candle"].flatMap((backend) =>
+      (model[backend]?.calibrations ?? []).filter(
+        (binding) => binding.rung === "bounded_transformer_residency",
+      ),
+    ),
+  );
+  // Non-vacuity, derived: with no rung-4 binding in the catalog the guard would grade nothing and
+  // stay green forever.
+  assert.ok(rung4Bindings.length > 0, "the catalog declares no rung-4 calibration binding to grade");
+  assert.doesNotThrow(() => assertRung4CalibrationsDeclareTheRequiredLoadShape(images));
+
+  // ...and it bites. Mutate ONE binding's load shape to the shape rung 4's shared edge forbids.
+  const mutated = JSON.parse(JSON.stringify(images));
+  const target = mutated
+    .flatMap((model) =>
+      ["mlx", "candle"].flatMap((backend) => model[backend]?.calibrations ?? []),
+    )
+    .find((binding) => binding.rung === "bounded_transformer_residency");
+  target.loadShape = "eager_materialization";
+  assert.throws(
+    () => assertRung4CalibrationsDeclareTheRequiredLoadShape(mutated),
+    /rung 4's shared prerequisite requires deferred_materialization/,
+  );
+
+  // The required shape is READ OUT OF the gate's constant, not restated in the guard.
+  assert.deepEqual(
+    SHARED_RUNG4_PREREQUISITES.map((prerequisite) => prerequisite.kind),
+    ["load-shape"],
+  );
+
+  // ...and it is WIRED. The assertions above call the guard directly and would all stay green if
+  // nothing in the generator ran it, so the same mutation is driven through `buildMatrix` — through
+  // the JSONC manifest, which is the form the generator actually reads.
+  const manifestBody = await readFile(
+    new URL(`../${SOURCE_PATHS.manifest}`, import.meta.url),
+    "utf8",
+  );
+  const eager = manifestBody.replace(
+    /"loadShape": "deferred_materialization"/,
+    '"loadShape": "eager_materialization"',
+  );
+  assert.notEqual(eager, manifestBody, "the manifest fixture must actually change");
+  await assert.rejects(
+    buildMatrix({ publish: false, sourceOverrides: { manifest: eager } }),
+    /rung 4's shared prerequisite requires deferred_materialization/,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// sc-18664 — the corrected prerequisite note, and the families the matrix cannot carry.
+// ---------------------------------------------------------------------------
+
+const surveyRejects = async (mutate, pattern) => {
+  const survey = await surveyFixture();
+  mutate(survey);
+  await assert.rejects(
+    buildMatrix({ publish: false, sourceOverrides: { rung4Survey: JSON.stringify(survey) } }),
+    pattern,
+  );
+};
+
+const h3 = (survey) => survey.outOfMatrixFamilies["17137"];
+
+// The projection the generator's derive-check compares against `memoryCharacterization(...)` — the
+// three image-shaped keys, PLUS `coveredFrameBound` whenever the record carries one (sc-18663). It
+// is spelled once here because a test that hard-coded three keys would keep passing while the
+// generator compared four, which is the shape of the defect sc-18663 fixed.
+const declaredCharacterization = (characterization) => ({
+  status: characterization.status,
+  measuredGeometries: characterization.measuredGeometries,
+  coveredPixelBound: characterization.coveredPixelBound,
+  ...(Object.hasOwn(characterization, "coveredFrameBound")
+    ? { coveredFrameBound: characterization.coveredFrameBound }
+    : {}),
+});
+
+// One temporal characterization, derived by the shipped helper rather than hand-written, so a test
+// fixture can never assert a bound the geometries do not support.
+const temporalCharacterization = (record, geometries) => ({
+  ...record.memoryCharacterization,
+  ...memoryCharacterization(geometries),
+});
+
+// The out-of-matrix catalog entries, read through the generator's own parse rather than re-spelled
+// here: it is the set `buildMatrix` subtracts from the coordinate universe AND the set the
+// calibration-plan guard exempts, and a test that spelled its own could green-light an exemption
+// production does not make (sc-18663).
+const shippedOutOfMatrixEntries = (body) =>
+  parseRung4Survey(body, { familyGroups: familyGroup }).outOfMatrixCatalogEntries;
+
+test("the survey's notes state rung 4's real prerequisite and cannot restate the removed one", async () => {
+  const survey = await surveyFixture();
+  const notes = survey.notes.join("\n");
+
+  // The positive half. `BOUNDED_TRANSFORMER_RESIDENCY_REQUIRES` names exactly one edge at the pinned
+  // revision (gen-core memory_strategy.rs:290-293), and SC-15998 is the story that made it so.
+  assert.match(notes, /LoadShape::DeferredMaterialization/);
+  assert.match(notes, /SC-15998/);
+  assert.doesNotMatch(notes, /rung 4 requires rung 1/i);
+
+  // Each guard mutated on its own, so a green suite is evidence about every one of them rather than
+  // about the set. All four run through the real generator, which is what proves the reach.
+  await surveyRejects((mutated) => {
+    mutated.notes.push("Rung 4 requires rung 1 engaged in the same request.");
+  }, /restate the rung-1 prerequisite SC-15998 removed/);
+  await surveyRejects((mutated) => {
+    mutated.notes.push("The window additionally requires rung 1 engaged in the same request.");
+  }, /restate the rung-1 prerequisite SC-15998 removed/);
+  await surveyRejects((mutated) => {
+    mutated.notes = mutated.notes.map((note) =>
+      note.replaceAll("LoadShape::DeferredMaterialization", "a deferred load"),
+    );
+  }, /must name LoadShape::DeferredMaterialization/);
+  await surveyRejects((mutated) => {
+    mutated.notes = mutated.notes.map((note) => note.replaceAll("SC-15998", "an earlier story"));
+  }, /must name SC-15998/);
+});
+
+test("a provider's OWN rung-1 edge stays sayable per family — the ban is on the blanket claim", async () => {
+  // The scope of the guard is the point, not an accident. mlx-gen-anima pushes a
+  // `BoundedTransformerResidency -> StagedResidency (EngagedInSameRequest)` edge through
+  // `additional_prerequisites` when the load is streamable, so Anima's entry saying its window needs
+  // rung 1 in the same request is TRUE. A document-wide ban would have forced that correct verdict to
+  // be rewritten, which is precisely what sc-18664 was told not to do.
+  const survey = await surveyFixture();
+  const anima = survey.families["15524"].backends.mlx;
+  assert.match(anima.summary, /rung 1 engaged in the same request/);
+  await buildMatrix({ publish: false, sourceOverrides: { rung4Survey: JSON.stringify(survey) } });
+});
+
+test("MiniMax-H3 is surveyed per stack, and the family verdict is derived from those stacks", async () => {
+  const survey = await surveyFixture();
+  const record = h3(survey);
+  assert.deepEqual(record.catalogEntries, ["minimax_h3", "minimax_h3_ref"]);
+  assert.throws(() => familyGroup("minimax_h3"), /no family story/);
+
+  for (const backend of ["mlx", "candle"]) {
+    const verdict = record.backends[backend];
+    // `partial` is the honest answer and it is COMPUTED: three-plus separately-indexed windowable
+    // stacks needing a plan each, and a conv remainder that cannot be windowed at all.
+    assert.equal(verdict.structuralApplicability, "partial");
+    assert.equal(deriveOutOfMatrixApplicability(verdict.stacks), "partial");
+    // sc-18662 landed the MLX arm on the shared `gen_core::block_window` driver, so the two backends
+    // no longer agree here. Asserted per backend rather than loosened to "whatever it says": a
+    // backend-local reimplementation is the review failure SC-15792 records, so `shared-primitive`
+    // is the specific value that must hold once MLX claims an implementation at all.
+    assert.equal(
+      verdict.implementation,
+      backend === "mlx" ? "shared-primitive" : "none",
+    );
+    if (backend === "mlx") {
+      // sc-18662 closed this axis on MLX: `generate_impl` now routes a whole render through the
+      // deferred loaders when the request selects the rung, and one streamed t2va request was
+      // measured end to end — 5.80 GB against the resident request's 53.07 GB conditioning mark,
+      // decode-bound. `moves` is the specific value that must hold, and the reason must carry the
+      // measured figure and its scope (the q4/q4 cell), not restate the phase-arm cells.
+      assert.equal(verdict.requestPeak.finding, "moves");
+      assert.match(verdict.requestPeak.reason, /5\.80 GB/);
+      assert.match(verdict.requestPeak.reason, /RUNG4_REQUEST_PEAK_Q4_BYTES/);
+      assert.ok(
+        verdict.requestPeak.evidence?.some((entry) =>
+          entry.source.includes("streamed_generate_real.rs"),
+        ),
+        "the requestPeak verdict must cite the end-to-end streamed harness",
+      );
+      // sc-18662 landed both deferred loaders, so the shape rung 4 requires is now satisfiable and
+      // the contract implements it on a `DeferredMaterialization` load.
+      assert.equal(verdict.contractSupport, "implemented");
+      assert.match(verdict.contractReason, /DeferredMaterialization/);
+      assert.match(verdict.contractReason, /transformer_window_sizes: \[1\]/);
+      // `Both`, not `Dit` — the encoder arm is the larger absolute saving and AC3 refuses a
+      // DiT-only result.
+      assert.match(verdict.contractReason, /Both/);
+    } else {
+      // Candle's REQUEST axis stays `unmeasured`: the rung-3 lesson is that a measurement does not
+      // transfer across backends, and candle has no deferred loader to route a request through.
+      assert.equal(verdict.requestPeak.finding, "unmeasured");
+      // Candle is untouched: the rung-3 lesson is that a verdict does not transfer across backends,
+      // and neither does an implementation.
+      assert.equal(verdict.contractSupport, "missing");
+      assert.match(verdict.contractReason, /EagerMaterialization/);
+    }
+    assert.deepEqual(verdict.nonWindowableStacks, ["vae.encoder", "audio_vae.decode"]);
+    assert.ok(verdict.stacks.every((stack) => stack.reason));
+  }
+
+  const mlx = record.backends.mlx;
+  // The DiT trunk and the conditioning tower are separate stacks with separate answers, which is the
+  // whole reason a single family-level verdict would have been wrong in one direction or the other.
+  const byId = new Map(mlx.stacks.map((stack) => [stack.id, stack]));
+  assert.equal(byId.get("transformer.blocks").structuralApplicability, "full");
+  assert.equal(byId.get("text_encoder.language_model").structuralApplicability, "full");
+  assert.equal(byId.get("vae.decoder").structuralApplicability, "full");
+  assert.equal(byId.get("audio_vae.decode").windowable, false);
+  assert.ok(byId.get("vae.encoder").structural.length > 0);
+  // The candle crate ships no text encoder (sc-17156), so its stack list must not inherit one.
+  assert.ok(record.backends.candle.stacks.every((stack) => !stack.id.startsWith("text_encoder.")));
+
+  // The retraction rides the row rather than living only in a story comment.
+  assert.match(mlx.requestPeak.reason, /RETRACTED/);
+});
+
+test("the MiniMax-H3 record is validated on every generation, not merely stored", async () => {
+  // Each guard mutated ALONE. A record nothing reads is not a delivered record, so every one of
+  // these goes through `buildMatrix` — the same path `--check` and the pre-push hook take.
+  await surveyRejects((survey) => {
+    h3(survey).backends.mlx.structuralApplicability = "full";
+  }, /its stacks derive partial/);
+  await surveyRejects((survey) => {
+    h3(survey).backends.mlx.nonWindowableStacks = ["vae.encoder"];
+  }, /nonWindowableStacks is/);
+  await surveyRejects((survey) => {
+    h3(survey).backends.mlx.contractSupport = "structurally-not-applicable";
+  }, /StructurallyNotApplicable while this survey names a windowable stack/);
+  // sc-18662 made this record `contractSupport: "implemented"`, and the guard below only applies
+  // when the contract does NOT implement rung 4 — so the non-implemented state is restored as the
+  // mutation's PRECONDITION and the deleted field stays the sole variable. The control arm proves
+  // the precondition alone does not reject, or these two would pass with the guard deleted.
+  const notImplemented = (survey) => {
+    h3(survey).backends.mlx.contractSupport = "missing";
+    h3(survey).backends.mlx.implementation = "none";
+    // sc-17153: `state` must agree with `contractSupport` under isImplemented(), so the
+    // precondition flips it too — keeping the field under test the sole variable, as before.
+    h3(survey).backends.mlx.state = "Missing";
+  };
+  {
+    const control = await surveyFixture();
+    notImplemented(control);
+    await buildMatrix({
+      publish: false,
+      sourceOverrides: { rung4Survey: JSON.stringify(control) },
+    });
+  }
+  await surveyRejects((survey) => {
+    notImplemented(survey);
+    delete h3(survey).backends.mlx.contractReason;
+  }, /record contractSource and contractReason/);
+  await surveyRejects((survey) => {
+    // The guard fires only when the contract does NOT implement rung 4, which the MLX record now
+    // does (sc-18662) — so the mutation claims an implementation on the CANDLE arm, which is still
+    // `missing`. Same guard, same single variable, and it stays exercisable without weakening the
+    // MLX record.
+    h3(survey).backends.candle.implementation = "shared-primitive";
+  }, /while the contract does not declare rung 4 Implemented/);
+  await surveyRejects((survey) => {
+    const stack = h3(survey).backends.mlx.stacks.find((entry) => entry.id === "audio_vae.decode");
+    delete stack.structural;
+  }, /Structurally N\/A claim, which the epic accepts only with static provider evidence/);
+  await surveyRejects((survey) => {
+    h3(survey).backends.mlx.stacks.find((entry) => entry.id === "vae.encoder").windowable = true;
+  }, /contradicts structuralApplicability/);
+  await surveyRejects((survey) => {
+    delete h3(survey).backends.mlx.stacks[0].reason;
+  }, /a per-stack verdict without a stated reason is an assertion/);
+  await surveyRejects((survey) => {
+    h3(survey).backends.mlx.stacks[1].id = h3(survey).backends.mlx.stacks[0].id;
+  }, /ids must not repeat/);
+  await surveyRejects((survey) => {
+    h3(survey).backends.mlx.stacks = [];
+  }, /the family verdict is derived from per-stack verdicts/);
+  await surveyRejects((survey) => {
+    delete h3(survey).backends.mlx.evidence;
+  }, /must cite at least one source/);
+});
+
+test("the out-of-matrix record carries the cell's two distinct claims, and each is validated (sc-17153)", async () => {
+  // The positive half: the shipped record parses through the real generator with both claims
+  // present, in the cell vocabulary, and the CODE claim classifies through the shared predicate —
+  // the same `isImplemented()` every coverage surface uses — rather than by string comparison.
+  const survey = await surveyFixture();
+  const mlx = h3(survey).backends.mlx;
+  const candle = h3(survey).backends.candle;
+  // sc-18663: the MLX row is the one epic 17137's terminal campaign measures, so what is pinned
+  // about it is the RELATIONSHIP between its two claims, never a snapshot of either value. The
+  // candle row is the opposite — `Missing` is permanent, and everything about it is pinned exactly.
+  assert.ok(isImplemented(mlx.state), "the MLX code claim classifies as implemented");
+  assert.equal(candle.state, "Missing");
+  assert.ok(!isImplemented(candle.state), "the candle code claim classifies as not implemented");
+  for (const backend of [mlx, candle]) {
+    assert.ok(OUT_OF_MATRIX_CELL_STATES.includes(backend.state));
+    // The PEAKS claim is a FUNCTION of the measured geometries, whatever they turn out to be. The
+    // projection must carry `coveredFrameBound` too (sc-18663): the shared helper emits it as soon
+    // as a geometry is temporal, and a three-key projection would silently stop comparing the whole
+    // claim the moment the campaign records its first `WxHxfF` point.
+    assert.deepEqual(
+      declaredCharacterization(backend.memoryCharacterization),
+      memoryCharacterization(backend.memoryCharacterization.measuredGeometries),
+    );
+    // ...and peaks may only be characterized where the CODE claim says the rung works.
+    if (backend.memoryCharacterization.status !== "unmeasured") {
+      assert.ok(
+        isImplemented(backend.state),
+        `${backend.state}: a characterized record must carry an implemented state`,
+      );
+    }
+  }
+  // Candle must stay `unmeasured` forever — the validator refuses a characterized non-implemented
+  // record — and must say WHY, which is the half a status alone cannot carry.
+  assert.equal(candle.memoryCharacterization.status, "unmeasured");
+  assert.match(candle.memoryCharacterization.reason, /not implemented/i);
+  // MLX: while the numbers are still owed, the reason names who owes them. Once the campaign fills
+  // the row in, the derivation above is what keeps the claim honest.
+  if (mlx.memoryCharacterization.status === "unmeasured") {
+    assert.match(mlx.memoryCharacterization.reason, /terminal/i);
+  }
+  await buildMatrix({ publish: false, sourceOverrides: { rung4Survey: JSON.stringify(survey) } });
+
+  // Each guard mutated ALONE, through the real generator — the same path `--check` takes.
+  await surveyRejects((mutated) => {
+    delete h3(mutated).backends.mlx.state;
+  }, /unknown state/);
+  await surveyRejects((mutated) => {
+    // A receipt-backed state on a contract that does not implement the rung: the two claims
+    // describe one contract and must agree UNDER THE PREDICATE (both `Verified` and
+    // `Implemented/unverified` are implemented states, so either would contradict candle).
+    h3(mutated).backends.candle.state = "Verified";
+  }, /disagrees with contractSupport/);
+  await surveyRejects((mutated) => {
+    h3(mutated).backends.mlx.state = "Missing";
+  }, /disagrees with contractSupport/);
+  await surveyRejects((mutated) => {
+    delete h3(mutated).backends.mlx.memoryCharacterization;
+  }, /memoryCharacterization with a non-empty reason is required/);
+  await surveyRejects((mutated) => {
+    h3(mutated).backends.mlx.memoryCharacterization.reason = "";
+  }, /memoryCharacterization with a non-empty reason is required/);
+  await surveyRejects((mutated) => {
+    // Asserting a status the geometries do not support: `point` with zero measured geometries is
+    // exactly the drift the derivation rule exists to refuse.
+    h3(mutated).backends.mlx.memoryCharacterization.status = "point";
+  }, /does not derive from its measuredGeometries/);
+  await surveyRejects((mutated) => {
+    // A single geometry DOES derive `point` — so this mutation isolates the other rule: peaks on
+    // a non-implemented state are refused, mirroring the published matrix's own cell rule.
+    h3(mutated).backends.candle.memoryCharacterization = {
+      ...h3(mutated).backends.candle.memoryCharacterization,
+      status: "point",
+      measuredGeometries: ["384x224"],
+      coveredPixelBound: null,
+    };
+  }, /while the state is not implemented/);
+});
+
+test("an out-of-matrix record can record TEMPORAL coverage, and cannot assert it (sc-18663)", async () => {
+  // The defect: the derive-check projected three keys while `memoryCharacterization()` emits a
+  // FOURTH — `coveredFrameBound` — as soon as any geometry is temporal. The declared side could
+  // therefore never equal the derived side for a multi-frame record, so a video family could not
+  // record the temporal coverage epic 17137's terminal campaign exists to produce. The helper's
+  // shape is asserted first, or the rest of this test would be pinning a defect that moved.
+  assert.ok(
+    Object.hasOwn(memoryCharacterization(["1344x768xf124"]), "coveredFrameBound"),
+    "a temporal geometry makes the derived characterization four-keyed",
+  );
+  assert.ok(!Object.hasOwn(memoryCharacterization(["1344x768"]), "coveredFrameBound"));
+
+  // Positive half, through the real generator: one temporal point, and a temporal FIT crossing two
+  // areas and two frame counts — the rank-3 design `memoryCharacterization` grades against.
+  const fitted = ["1344x768xf124", "1344x768xf61", "832x480xf124"];
+  for (const geometries of [["1344x768xf124"], fitted]) {
+    const survey = await surveyFixture();
+    const mlx = h3(survey).backends.mlx;
+    mlx.memoryCharacterization = temporalCharacterization(mlx, geometries);
+    // The fixture is the campaign's own shape: the MLX row measured, the frame bound present.
+    assert.equal(mlx.memoryCharacterization.status, geometries.length === 1 ? "point" : "fitted");
+    assert.ok(Object.hasOwn(mlx.memoryCharacterization, "coveredFrameBound"));
+    await buildMatrix({ publish: false, sourceOverrides: { rung4Survey: JSON.stringify(survey) } });
+  }
+  const fittedRecord = (survey) => {
+    const mlx = h3(survey).backends.mlx;
+    mlx.memoryCharacterization = temporalCharacterization(mlx, fitted);
+    return mlx.memoryCharacterization;
+  };
+  assert.deepEqual(
+    memoryCharacterization(fitted),
+    { status: "fitted", measuredGeometries: fitted, coveredPixelBound: 1032192, coveredFrameBound: 124 },
+    "the fixture's own bounds come from the shipped helper, not from this file",
+  );
+
+  // Negative half. Each guard mutated ALONE, through the real generator — a frame bound that does
+  // not follow from the geometries is refused in every direction it can be wrong in.
+  await surveyRejects((mutated) => {
+    delete fittedRecord(mutated).coveredFrameBound;
+  }, /does not derive from its measuredGeometries/);
+  await surveyRejects((mutated) => {
+    fittedRecord(mutated).coveredFrameBound = 61;
+  }, /does not derive from its measuredGeometries/);
+  await surveyRejects((mutated) => {
+    // Smuggled the other way: a frame bound on a record whose geometries carry no frame axis at
+    // all. The derived object has no such key, so the claim is the record's own.
+    const mlx = h3(mutated).backends.mlx;
+    mlx.memoryCharacterization = {
+      ...temporalCharacterization(mlx, ["1344x768"]),
+      coveredFrameBound: null,
+    };
+  }, /does not derive from its measuredGeometries/);
+  await surveyRejects((mutated) => {
+    // The status still follows from the geometries on the temporal axis too: three points at ONE
+    // area cannot determine three coefficients, so `fitted` there is an assertion.
+    const mlx = h3(mutated).backends.mlx;
+    mlx.memoryCharacterization = {
+      ...temporalCharacterization(mlx, ["1344x768xf121", "1344x768xf124", "1344x768xf61"]),
+      status: "fitted",
+      coveredPixelBound: 1032192,
+      coveredFrameBound: 124,
+    };
+  }, /does not derive from its measuredGeometries/);
+
+  // `sortedUnique` is part of the comparison, so ordering and repeats are part of the claim — and
+  // the diagnostic has to SAY so rather than report two arrays that read as identical.
+  await surveyRejects((mutated) => {
+    fittedRecord(mutated).measuredGeometries = ["832x480xf124", "1344x768xf124", "1344x768xf61"];
+  }, /must be an array that is sorted and duplicate-free/);
+  await surveyRejects((mutated) => {
+    const mlx = h3(mutated).backends.mlx;
+    mlx.memoryCharacterization = {
+      ...temporalCharacterization(mlx, ["1344x768xf124"]),
+      measuredGeometries: ["1344x768xf124", "1344x768xf124"],
+    };
+  }, /must be an array that is sorted and duplicate-free/);
+
+  // And the OTHER claim still fences it: a measured record on a backend whose state is not
+  // implemented is refused, temporal or not. Candle's `Missing` row may never carry these numbers.
+  await surveyRejects((mutated) => {
+    const candle = h3(mutated).backends.candle;
+    candle.memoryCharacterization = temporalCharacterization(candle, ["1344x768xf124"]);
+  }, /while the state is not implemented/);
+});
+
+test("every remaining out-of-matrix throw site is mutated on its own (sc-18664 review)", async () => {
+  // The rest of `parseOutOfMatrixRung4Families`. Split from the block above only for readability —
+  // the rule is the same and it is the whole point of the file: ONE mutation per throw site, so a
+  // green run is evidence about each guard rather than about the set. Every one of these went red
+  // on its own before this test was committed.
+
+  // The record has to say what it is a survey OF. An empty array, not a delete: `?.length` treats
+  // them alike, and the empty array is the mutation a careless edit actually produces.
+  await surveyRejects((survey) => {
+    h3(survey).catalogEntries = [];
+  }, /must name the catalog entries it is a survey OF/);
+
+  // The three verdict-level vocabularies, each alone. `RUNG4_APPLICABILITIES` /
+  // `RUNG4_IMPLEMENTATIONS` / `RUNG4_REQUEST_PEAKS` are the same frozen lists the `families`
+  // verdicts are held to, and an out-of-matrix record has to be held to them too or the two halves
+  // of the survey drift into different vocabularies.
+  await surveyRejects((survey) => {
+    h3(survey).backends.mlx.structuralApplicability = "mostly";
+  }, /\(mlx\): unknown structuralApplicability "mostly"/);
+  await surveyRejects((survey) => {
+    h3(survey).backends.mlx.implementation = "partial";
+  }, /unknown implementation "partial"/);
+  await surveyRejects((survey) => {
+    h3(survey).backends.mlx.requestPeak.finding = "probably-moves";
+  }, /unknown requestPeak finding "probably-moves"/);
+
+  // The stack-level vocabulary is a separate throw site from the verdict-level one, and the match
+  // is anchored on the `stacks[...]` prefix so this cannot pass by hitting the verdict-level guard.
+  await surveyRejects((survey) => {
+    h3(survey).backends.mlx.stacks.find((entry) => entry.id === "vae.decoder").structuralApplicability =
+      "windowable-ish";
+  }, /stacks\["vae\.decoder"\]: unknown structuralApplicability "windowable-ish"/);
+
+  // `contractSupport` mirrors `gen_core::MemoryStrategySupport`, so its vocabulary is closed too.
+  await surveyRejects((survey) => {
+    h3(survey).backends.mlx.contractSupport = "not-yet";
+  }, /unknown contractSupport "not-yet"/);
+
+  // `contractSource` deleted INDEPENDENTLY of `contractReason`. The guard is `!(reason && source)`,
+  // so deleting only the reason (covered above) proves one conjunct and this proves the other.
+  await surveyRejects((survey) => {
+    // Same precondition restoration as the `contractReason` twin above (sc-18662).
+    h3(survey).backends.mlx.contractSupport = "missing";
+    h3(survey).backends.mlx.implementation = "none";
+    delete h3(survey).backends.mlx.contractSource;
+  }, /record contractSource and contractReason/);
+
+  // The `implemented && derived === "none"` contradiction. Reachable, so it is tested rather than
+  // deleted — but only by driving the whole record to a consistent `none`, which is why it had no
+  // coverage: every stack unwindowable with its own structural evidence, the family verdict `none`
+  // to match the derivation, `nonWindowableStacks` naming all of them, and only THEN the contract
+  // claiming Implemented. Every earlier guard passes; this one is what catches it.
+  await surveyRejects((survey) => {
+    const verdict = h3(survey).backends.mlx;
+    verdict.stacks = verdict.stacks.map((stack) => ({
+      ...stack,
+      structuralApplicability: "none",
+      windowable: false,
+      structural: stack.structural ?? [{ source: "inference:fixture", reason: "fixture" }],
+    }));
+    verdict.structuralApplicability = "none";
+    verdict.nonWindowableStacks = verdict.stacks.map((stack) => stack.id);
+    verdict.contractSupport = "implemented";
+  }, /Implemented while this survey finds no windowable stack/);
+});
+
+test("an out-of-matrix record has to date the tree its evidence resolves in (sc-18664 review)", async () => {
+  // The record cites crates the matrix's own pin does not contain, so `generatedFrom.
+  // inferenceRevision` does not date it and something on the record has to.
+  const survey = await surveyFixture();
+  const cargo = await readFile(new URL("../Cargo.toml", import.meta.url), "utf8");
+  // ANTI-VACUITY, not a snapshot. This used to read
+  // `assert.equal(pin, "014134e3035ad7e4eca5c2ed7bded2375dc3c071")`, which pinned a literal that
+  // carries no meaning of its own and goes stale on every inference bump — the exact defect class
+  // sc-19751/sc-19758 removed elsewhere. The load-bearing assertion is `notEqual(revision, pin)`
+  // below; all this needs to establish is that a pin was really parsed, so a regex that stopped
+  // matching cannot turn that comparison into `undefined !== "79f02e..."` and pass vacuously.
+  const pin = /rev = "([0-9a-f]{40})"/.exec(cargo)?.[1];
+  // sc-19721 moved the pin onto the inference sc-17137 feature head; the 2026-08-19 main sync
+  // re-stamped it to main's sc-20523 pin; sc-18650 (the epic-final bump) re-stamped it to the
+  // inference-main merge of that head (f17c82544, tree-identical to 2881696cd); the true epic-final
+  // bump re-stamped it again to the #726 inference-main merge (4013049764). The literal is
+  // re-stamped rather than relaxed to a shape check: the assertion below only means something
+  // while the pin is known, and `assert.notEqual(revision, pin)` is the claim this exists to make.
+  assert.equal(pin, "4013049764172ee7dc707101c7da8c83c1483f2d");
+
+  // The two backends now resolve at DIFFERENT revisions, per field's own definition: sc-18662's
+  // streamed-request measurement re-surveyed the MLX record against the story branch, while the
+  // Candle record was last surveyed at 79f02e6d0 and re-stamping it without re-surveying would be
+  // provenance theater.
+  const expected = {
+    mlx: "e09f46aafb10126b14172a148acb26c619cf9213",
+    candle: "79f02e6d0eaca861a0698ee490b70daa7441e321",
+  };
+  for (const backend of ["mlx", "candle"]) {
+    const revision = h3(survey).backends[backend].contractRevision;
+    assert.equal(revision, expected[backend]);
+    // The field earns its place only because it DIFFERS from the pin. Asserting a value that
+    // happened to equal the pin would be a green that proves nothing.
+    assert.notEqual(revision, pin);
+  }
+  // And the divergence is stated in prose too, not left for a reader to infer from two shas —
+  // BOTH revisions, since the record's paths no longer date at a single one.
+  assert.match(h3(survey).whyOutOfMatrix, /e09f46aafb10126b14172a148acb26c619cf9213/);
+  assert.match(h3(survey).whyOutOfMatrix, /79f02e6d0eaca861a0698ee490b70daa7441e321/);
+
+  // Each guard mutated alone.
+  await surveyRejects((mutated) => {
+    delete h3(mutated).backends.mlx.contractRevision;
+  }, /contractRevision must name the inference revision/);
+  await surveyRejects((mutated) => {
+    h3(mutated).backends.candle.contractRevision = "main";
+  }, /contractRevision must name the inference revision/);
+  await surveyRejects((mutated) => {
+    // Too short to identify a commit unambiguously — a 7-character abbreviation is not provenance.
+    h3(mutated).backends.mlx.contractRevision = "79f02e6";
+  }, /at least 9 hex characters/);
+});
+
+test("the out-of-matrix record self-invalidates the day the matrix learns the family", async () => {
+  // The guard that keeps this section from becoming a museum. It is keyed by epic id precisely
+  // because `familyGroup` has no answer for a video entry; if it ever gains one, the record has to
+  // move into `families`, where the coverage fence can see it.
+  await surveyRejects((survey) => {
+    h3(survey).catalogEntries = ["sdxl"];
+  }, /familyGroup now resolves sdxl to family SC-15525/);
+  await surveyRejects((survey) => {
+    survey.outOfMatrixFamilies["15525"] = h3(survey);
+  }, /is also a `families` key/);
+
+  // And the reason it cannot simply live in `families` today: withdrawing the out-of-matrix record
+  // admits the MiniMax entries into the modality-aware universe (the sc-17137 main sync keyed the
+  // universe exclusion on these records), where route resolution fails outright — `familyGroup` has
+  // no arm and no video-route resolver row exists — rather than sitting inert.
+  await surveyRejects((survey) => {
+    delete survey.outOfMatrixFamilies["17137"];
+    survey.families["17137"] = {
+      name: "MiniMax-H3",
+      backends: {
+        mlx: {
+          structuralApplicability: "partial",
+          implementation: "none",
+          requestPeak: { finding: "unmeasured" },
+          evidence: [{ source: "inference:crates/media/mlx-gen/mlx-gen-minimax-h3/src/memory_strategy.rs" }],
+        },
+      },
+    };
+  }, /minimax_h3: no resolved route\/provider/);
+});
+
+test("deriveOutOfMatrixApplicability restates the survey's vocabulary for unconditionally resident stacks", () => {
+  const stack = (structuralApplicability) => ({ structuralApplicability });
+  assert.equal(deriveOutOfMatrixApplicability([stack("full")]), "full");
+  // Two separately-indexed stacks need a plan each, which is `partial` by the vocabulary's first
+  // clause even though both are individually uniform.
+  assert.equal(deriveOutOfMatrixApplicability([stack("full"), stack("full")]), "partial");
+  // A remainder that cannot be windowed is `partial` by its third clause.
+  assert.equal(deriveOutOfMatrixApplicability([stack("full"), stack("none")]), "partial");
+  assert.equal(deriveOutOfMatrixApplicability([stack("partial")]), "partial");
+  assert.equal(deriveOutOfMatrixApplicability([stack("none"), stack("none")]), "none");
+});
+
+test("the derivation reproduces 38 of the 40 `families` verdicts, and route scoping is the exception", async () => {
+  // sc-18664 review. The claim used to be that this function is simply the survey's vocabulary
+  // restated. It is not quite, so the gap is measured here rather than asserted away. Applying the
+  // derivation to every verdict `families` already carries — `blockStacks[].windowable` mapped onto
+  // the applicability vocabulary — reproduces all but Qwen-Image's two.
+  const survey = await surveyFixture();
+  const disagreements = [];
+  let verdicts = 0;
+  for (const [group, family] of Object.entries(survey.families)) {
+    for (const [backend, verdict] of Object.entries(family.backends ?? {})) {
+      verdicts += 1;
+      const stacks = (verdict.blockStacks ?? []).map((entry) => ({
+        structuralApplicability: entry.windowable ? "full" : "none",
+        routeScoped: (entry.entries ?? []).length > 0,
+      }));
+      assert.ok(stacks.length, `SC-${group} ${backend} carries no blockStacks to derive from`);
+      const derived = deriveOutOfMatrixApplicability(stacks);
+      if (derived !== verdict.structuralApplicability) {
+        disagreements.push({ group, backend, derived, recorded: verdict.structuralApplicability, stacks });
+      }
+    }
+  }
+  // 40 image-lane verdicts plus the 9 video (family, backend) verdicts sc-18815 added on main;
+  // the two route-scoped disagreements below are unchanged.
+  assert.equal(verdicts, 49);
+  assert.equal(verdicts - disagreements.length, 47);
+
+  // And the two are the SAME family on both backends, disagreeing for the SAME reason: the second
+  // stack is control-route-only, so it is not resident on the routes the `full` verdict covers, and
+  // this function has no route axis to see that with.
+  assert.deepEqual(
+    disagreements.map((entry) => `${entry.group}:${entry.backend}`).sort(),
+    ["15511:candle", "15511:mlx"],
+  );
+  for (const entry of disagreements) {
+    assert.equal(entry.recorded, "full");
+    assert.equal(entry.derived, "partial");
+    assert.equal(entry.stacks.filter((stack) => stack.routeScoped).length, 1);
+  }
+  for (const backend of ["mlx", "candle"]) {
+    assert.deepEqual(survey.families["15511"].backends[backend].blockStacks[1].entries, [
+      "qwen_image_control",
+    ]);
+  }
+
+  // Why route scoping is not added rather than merely undone: no out-of-matrix record needs it.
+  // MiniMax-H3 has a route-conditional stack of its own — `text_encoder.vision_tower`, the `fl2va`
+  // keyframe path only — and drops out to the same answer with it removed, because its conv
+  // remainder and its several separately-indexed denoise stacks each force `partial` unaided.
+  const mlx = h3(survey).backends.mlx;
+  const vision = mlx.stacks.find((stack) => stack.id === "text_encoder.vision_tower");
+  assert.match(vision.blocks, /`fl2va` keyframe path only/);
+  assert.equal(deriveOutOfMatrixApplicability(mlx.stacks), "partial");
+  assert.equal(
+    deriveOutOfMatrixApplicability(mlx.stacks.filter((stack) => stack !== vision)),
+    "partial",
+  );
+});
+
+test("the ban on the removed rung-1 claim reaches the generator's OWN prose, not just the notes", async () => {
+  // sc-18664 review. The corrected sentence survived ~500 lines below the guard that bans it, in
+  // the `stagedResidencyIsAvailable` docstring — the site a reader of the gate itself lands on.
+  // Banning a sentence in the data file while it lives on in the file the guard is written in is
+  // the "one half of a pair moved" defect, so the generator's own source is now scanned too.
+  const source = await readFile(new URL("./generate-memory-matrix.mjs", import.meta.url), "utf8");
+  assertGeneratorSourceDoesNotRestateTheRemovedEdge(source);
+  // The generator's prose names rung 4's actual sole shared prerequisite, and names the constant it
+  // comes from. sc-19542 moved that statement from the `stagedResidencyIsAvailable` docstring — where
+  // it described a proxy — onto `SHARED_RUNG4_PREREQUISITES`, which is the gate's own copy of it, so
+  // the value is asserted as a VALUE here rather than only as prose.
+  assert.match(source, /BOUNDED_TRANSFORMER_RESIDENCY_REQUIRES/);
+  assert.match(
+    source,
+    /`&\[MemoryStrategyPrerequisite::LoadShape\(LoadShape::DeferredMaterialization\)\]`/,
+  );
+  assert.deepEqual(
+    SHARED_RUNG4_PREREQUISITES.map((prerequisite) => [prerequisite.kind, prerequisite.shape]),
+    [["load-shape", "deferred_materialization"]],
+  );
+  assert.match(source, /additional_prerequisites/);
+
+  // The exact text the review found, verbatim from the pre-correction docstring and wrapped across
+  // two comment lines exactly as it was.
+  const RESTORED = [
+    " * Whether this entry advertises rung 1 on this backend. Rung 4 requires rung 1 engaged in the same",
+    " * request (`gen_core::memory_strategy`'s `BOUNDED_TRANSFORMER_RESIDENCY_REQUIRES`), so the rung-4 arm",
+    " * below reads the prerequisite from the SAME predicate the rung-1 arm uses.",
+  ].join("\n");
+  assert.throws(
+    () => assertGeneratorSourceDoesNotRestateTheRemovedEdge(`/**\n${RESTORED}\n */\n`),
+    /restates the rung-1 prerequisite SC-15998 removed/,
+  );
+
+  // Each pattern in the shared set proven on its own, so a green run is evidence about both rather
+  // than about the set.
+  assert.throws(
+    () => assertGeneratorSourceDoesNotRestateTheRemovedEdge("// rung 4 requires rung 1.\n"),
+    /rung 4 requires rung 1/,
+  );
+  assert.throws(
+    () =>
+      assertGeneratorSourceDoesNotRestateTheRemovedEdge(
+        "// The window also requires rung 1 engaged in the same request.\n",
+      ),
+    /requires rung 1 engaged in the same request/,
+  );
+
+  // The flattening, proven on its OWN. The fixture above does not prove it: its first line carries
+  // `Rung 4 requires rung 1` whole, so the shorter pattern catches it line-oriented and the guard
+  // stays green with the flattening deleted — which is what a mutation run of this file showed.
+  // This fixture trips ONLY the long pattern and only once comment continuations are joined, so it
+  // is the one that goes green if the flattening is removed. It is also the real defect's shape:
+  // the surviving docstring wrapped between `same` and `request`, which is exactly why a
+  // line-oriented grep of the generator reported no match at all.
+  const WRAPPED_ONLY = "/**\n * The window additionally requires rung 1 engaged in the same\n * request, per this provider's own edge.\n */\n";
+  assert.doesNotMatch(WRAPPED_ONLY, /rung 4 requires rung 1/i, "must not trip the short pattern");
+  assert.doesNotMatch(
+    WRAPPED_ONLY,
+    /requires rung 1 engaged in the same request/i,
+    "and must be invisible to a line-oriented scan before flattening",
+  );
+  assert.throws(
+    () => assertGeneratorSourceDoesNotRestateTheRemovedEdge(WRAPPED_ONLY),
+    /requires rung 1 engaged in the same request/,
+  );
+
+  // The excision that lets the file scan itself fails CLOSED. Rename the pattern constant and the
+  // literals stop being excised, so the guard throws instead of going quietly green — the failure
+  // direction that matters for a self-scanning gate.
+  assert.throws(
+    () =>
+      assertGeneratorSourceDoesNotRestateTheRemovedEdge(
+        source.replace(
+          "export const STALE_RUNG1_PREREQUISITE_PATTERNS = Object.freeze([",
+          "export const RENAMED_PATTERNS = Object.freeze([",
+        ),
+      ),
+    /restates the rung-1 prerequisite SC-15998 removed/,
+  );
+
+  // Reach. `parseRung4Survey` is what `buildMatrix` calls on every generation — every other survey
+  // mutation in this file proves that edge — so wiring the source scan into it is what puts the
+  // generator's prose behind `--check` and the pre-push hook. Injecting the source proves the call
+  // happens without touching the real file.
+  const survey = await readFile(SURVEY_URL, "utf8");
+  parseRung4Survey(survey, { familyGroups: familyGroup, generatorSource: source });
+  assert.throws(
+    () =>
+      parseRung4Survey(survey, {
+        familyGroups: familyGroup,
+        generatorSource: `${source}\n// rung 4 requires rung 1.\n`,
+      }),
+    /restates the rung-1 prerequisite SC-15998 removed/,
   );
 });
 
@@ -3142,7 +4239,8 @@ async function currentManifestCalibrationFixture({
   return JSON.stringify(parsed);
 }
 
-/// Retained Qwen production-deferred records using the shared fingerprint, re-stamped current.
+/// Qwen records re-stamped current: the retained q8 rung-4 fixture, plus SC-18353's physical
+/// captures.
 ///
 /// Selected by their calibration fingerprint, which is what separates them from the 22 older Qwen
 /// records in the bundle: the rung-4 ingest and SC-18237's production-deferred pair carry the bare
@@ -3155,9 +4253,9 @@ const qwenRung4OnCurrentPin = () =>
   currentEvidenceFixture({
     select: (record) =>
       record.target.provider === "qwen_image" &&
-      record.calibrationFingerprint === QWEN_RUNG4_FINGERPRINT &&
-      (record.target.tier === "q8" ||
-        record.repositories.inference.revision === QWEN_PRODUCTION_DEFERRED_REVISION),
+      (record.sourceProvenance === "physical_mlx_v1" ||
+        (record.target.tier === "q8" &&
+          record.calibrationFingerprint === QWEN_RUNG4_FINGERPRINT)),
   });
 
 test("current evidence promotes a cell to Verified, and historical evidence does not (sc-16060)", async () => {
@@ -3204,6 +4302,9 @@ test("current evidence promotes a cell to Verified, and historical evidence does
     9,
     "every re-stamped Qwen binding must verify once evidence and manifest share the live closure",
   );
+  // sc-19721 re-captured at pin 75d66db5, so the shipped bundle verifies all nine bindings on its
+  // own now. The captures stayed historical until a real re-capture arrived rather than being
+  // re-stamped, which is the property this protects.
   assert.equal(
     verifiedQwen(shipped),
     0,
@@ -3283,6 +4384,13 @@ test("current evidence promotes a cell to Verified, and historical evidence does
     mutate(next.providers);
     return JSON.stringify(next, null, 2);
   };
+  // sc-19542: the rung-4 prerequisite records are keyed to the pin the same way the closures are, so
+  // a moved-pin fixture has to re-key both or generation fails on the stale-config guard before it
+  // reaches the currency question this test is about.
+  const prerequisitesOnMovedPin = JSON.stringify({
+    ...(await prerequisitesFixture()),
+    inferenceRevision: movedPin,
+  });
 
   const pinOnlyQwen = await buildMatrix({
     publish: false,
@@ -3290,6 +4398,7 @@ test("current evidence promotes a cell to Verified, and historical evidence does
       calibrationEvidence: qwenOnCurrentPin,
       manifest: qwenManifestOnCurrentPin,
       cargo: withPin(movedPin),
+      rung4ContractPrerequisites: prerequisitesOnMovedPin,
       inferenceClosures: withClosures(() => {}),
       ...movedMemoryContractSources,
     },
@@ -3306,6 +4415,7 @@ test("current evidence promotes a cell to Verified, and historical evidence does
       calibrationEvidence: qwenOnCurrentPin,
       manifest: qwenManifestOnCurrentPin,
       cargo: withPin(movedPin),
+      rung4ContractPrerequisites: prerequisitesOnMovedPin,
       inferenceClosures: withClosures((providers) => {
         providers["mlx:z_image_turbo"].digest = "f".repeat(64);
       }),
@@ -3324,6 +4434,7 @@ test("current evidence promotes a cell to Verified, and historical evidence does
       calibrationEvidence: qwenOnCurrentPin,
       manifest: qwenManifestOnCurrentPin,
       cargo: withPin(movedPin),
+      rung4ContractPrerequisites: prerequisitesOnMovedPin,
       inferenceClosures: withClosures((providers) => {
         providers["mlx:qwen_image"].digest = "e".repeat(64);
       }),
@@ -3584,17 +4695,18 @@ test("publication keeps every planned, measured, bound and cited coordinate — 
     assert.ok(resolved.cells.some(arm), `the "${name}" arm admits no coordinate at all`);
   }
 
-  // The seventh arm, `currentEnvironmentVerification`, now admits exactly the five freshly captured
-  // Z-Image rungs. SC-18311 still moves the Qwen and FLUX.2 provider closures, so their prior
-  // captures remain historical until they are re-run. Two facts keep this assertion useful:
+  // The seventh arm, `currentEnvironmentVerification`, admits NOTHING at the sc-20523 pin: it moved
+  // every provider closure past every retained capture — SC-18218's and sc-19721's FLUX.2 cohorts,
+  // the Qwen ladder re-capture, and SC-19753's Z-Image rungs alike — so every capture is historical
+  // until the bump-time re-capture. Two facts keep this assertion useful:
   //
-  //   1. It is exact: only the new Z-Image capture may be current; no historical Qwen or FLUX.2 row
-  //      may survive the closure change as current.
+  //   1. It is exact: NO row may survive the closure change as current — a record silently keeping
+  //      currency across a pin bump is the failure this pins.
   //   2. It is SUBSUMED. A current run is an eligible run, and `memoryCharacterization` counts every
   //      eligible run's geometry, so a cell carrying current evidence is `point` or `fitted` and the
   //      measured arm already admits it. The arm therefore cannot uniquely admit or elide anything.
   //
-  // Asserted as an exact set so another recapture flips this test rather than silently passing, and
+  // Asserted as an exact set so a recapture flips this test rather than silently passing, and
   // the field's presence is asserted separately so a rename cannot make the arm quietly vanish.
   assert.deepEqual(
     resolved.cells
@@ -3602,7 +4714,7 @@ test("publication keeps every planned, measured, bound and cited coordinate — 
       .map((cell) => cell.id)
       .sort(),
     [],
-    "provider closure drift must demote every formerly current capture without re-stamping it",
+    "no retained capture may carry current evidence at a pin whose closures have moved past it; a historical row surviving as current is the failure this pins",
   );
   assert.ok(
     resolved.cells.every((cell) => Array.isArray(cell.evidence.currentEnvironmentVerification)),
@@ -3926,9 +5038,14 @@ test("a calibration-plan entry that addresses no coordinate fails generation (sc
     "retired product modes are excluded from the active calibration plan",
   );
 
-  // The shipped plan is clean, which is the property worth pinning: every entry addresses something.
+  // The shipped plan is clean, which is the property worth pinning: every entry addresses something
+  // — or names a family the matrix cannot carry a coordinate for at all (sc-18663), which is the
+  // set the generator itself exempts and is read here from the same parse the generator reads.
   const resolved = await buildMatrix({ publish: false });
-  assert.doesNotThrow(() => assertCalibrationPlanTargetsResolvedCoordinates(plan, resolved.cells));
+  const outOfMatrixEntries = shippedOutOfMatrixEntries(await readFile(SURVEY_URL, "utf8"));
+  assert.doesNotThrow(() =>
+    assertCalibrationPlanTargetsResolvedCoordinates(plan, resolved.cells, { outOfMatrixEntries }),
+  );
 
   // And the guard discriminates, on each axis independently — a guard that only caught `mode` would
   // be a fix for one typo rather than for the class.
@@ -3968,6 +5085,159 @@ test("a calibration-plan entry that addresses no coordinate fails generation (sc
     assert.ok(
       matrix.cells.some((cell) => planEntryTargetsCoordinate(entry, cell)),
       `${entry.name} is a shipped plan target, so its coordinate must be published`,
+    );
+  }
+});
+
+test("a plan row for an OUT-OF-MATRIX family is exempt, and nothing else is (sc-18663)", async () => {
+  // The category error: `buildMatrix` subtracts the survey's declared out-of-matrix catalog entries
+  // from the coordinate universe, so a MiniMax-H3 row can never match a coordinate — and the
+  // sc-18099 guard read that as "addresses nothing" and threw. Epic 17137's terminal campaign has to
+  // plan captures against exactly those entries, so the first such row failed generation outright.
+  const resolved = await buildMatrix({ publish: false });
+  const outOfMatrixEntries = shippedOutOfMatrixEntries(await readFile(SURVEY_URL, "utf8"));
+  assert.ok(outOfMatrixEntries.has("minimax_h3") && outOfMatrixEntries.has("minimax_h3_ref"));
+  // The premise of the exemption, asserted rather than assumed: these entries resolve to no cell.
+  for (const id of outOfMatrixEntries) {
+    assert.equal(
+      resolved.cells.filter((cell) => cell.modelId === id).length,
+      0,
+      `${id}: an out-of-matrix entry may not carry a coordinate — the exemption would then hide a real cell`,
+    );
+  }
+
+  const plan = activeCalibrationPlan(
+    JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url), "utf8")),
+  );
+  const minimaxRow = (over = {}) => ({
+    name: "mlx-minimax-h3-q4-t2va-window",
+    evidenceScope: "authoritative",
+    backend: "mlx",
+    loadShape: "deferred_materialization",
+    rung: "bounded_transformer_residency",
+    engagedRungs: ["bounded_transformer_residency"],
+    calibrationFingerprint: "minimax-h3-mlx-deferred-v1",
+    fixture: "minimax-h3-q4-1344x768-f124",
+    cases: [{ parameters: {}, expectedResult: "passed" }],
+    ...over,
+    target: {
+      provider: "minimax_h3",
+      modelId: "minimax_h3",
+      tier: "q4",
+      mode: "text_to_video_audio",
+      overlay: "none",
+      geometry: { width: 1344, height: 768, batch: 1, frames: 124 },
+      ...over.target,
+    },
+  });
+  const withRow = (over) => {
+    const mutated = JSON.parse(JSON.stringify(plan));
+    mutated.providers.push(minimaxRow(over));
+    return mutated;
+  };
+
+  // The fix, at both entry points: exported guard and the generation path `--check` takes.
+  for (const modelId of ["minimax_h3", "minimax_h3_ref"]) {
+    const planned = withRow({ target: { modelId } });
+    assert.doesNotThrow(() =>
+      assertCalibrationPlanTargetsResolvedCoordinates(planned, resolved.cells, { outOfMatrixEntries }),
+    );
+    await buildMatrix({
+      publish: false,
+      sourceOverrides: { calibrationPlan: JSON.stringify(planned) },
+    });
+  }
+
+  // ...and it is an exemption, not a hole. A family in NEITHER the matrix nor the survey's
+  // out-of-matrix set still fails closed, and so does a row that merely borrows the exempt family's
+  // provider — the exemption is keyed on `target.modelId`, the same field the subtraction is.
+  for (const [label, over] of [
+    ["a family in neither set", { target: { modelId: "hailuo_4", provider: "hailuo_4" } }],
+    ["an exempt provider on an unknown model", { target: { modelId: "not_a_catalog_entry" } }],
+  ]) {
+    const planned = withRow(over);
+    assert.throws(
+      () =>
+        assertCalibrationPlanTargetsResolvedCoordinates(planned, resolved.cells, { outOfMatrixEntries }),
+      /match no resolved matrix coordinate/,
+      `${label} must still fail closed`,
+    );
+    await assert.rejects(
+      buildMatrix({ publish: false, sourceOverrides: { calibrationPlan: JSON.stringify(planned) } }),
+      /match no resolved matrix coordinate/,
+    );
+  }
+
+  // The exemption is opt-in and defaults to the strict behaviour, so a caller that forgets to pass
+  // the set gets the old guard rather than a silently widened one.
+  assert.throws(
+    () => assertCalibrationPlanTargetsResolvedCoordinates(withRow({}), resolved.cells),
+    /match no resolved matrix coordinate/,
+  );
+});
+
+test("an out-of-matrix family's RECEIPT is unbound rather than fatal (sc-18663)", async () => {
+  // The same category error one step later, and the wall the campaign hits immediately after the
+  // plan one: `calibrationRuns` binds every bundle record to a cell, and an out-of-matrix family has
+  // no cell BY CONSTRUCTION, so the first MiniMax-H3 receipt failed generation outright. The record
+  // is skipped instead — its numbers live on the family's derived `memoryCharacterization` — while a
+  // record naming a family in NEITHER set still throws.
+  const bundle = JSON.parse(
+    await readFile(new URL("../docs/generated/memory-calibration-evidence.json", import.meta.url), "utf8"),
+  );
+  const donor = bundle.records.find((record) => record.backend === "mlx");
+  assert.ok(donor, "the shipped bundle must carry an MLX record to re-target");
+  // Re-targeted through the harness's OWN identity functions: the bundle is schema- and
+  // identity-validated before the generator ever reaches the binding step, so a hand-written id
+  // would fail somewhere else and this test would pin the wrong wall.
+  const withRecord = (modelId, provider) => {
+    const clone = JSON.parse(JSON.stringify(donor));
+    clone.target.modelId = modelId;
+    clone.target.provider = provider;
+    clone.logicalCaseId = logicalCaseId(clone);
+    clone.id = recordId(clone);
+    const copy = JSON.parse(JSON.stringify(bundle));
+    copy.records.push(clone);
+    return { body: JSON.stringify(copy), id: clone.id };
+  };
+
+  const baseline = await buildMatrix({ publish: false });
+  assert.equal(
+    baseline.calibrationRuns.length,
+    baseline.summary.calibrationRuns,
+    "today every shipped receipt binds, so the two counts start equal",
+  );
+
+  for (const modelId of ["minimax_h3", "minimax_h3_ref"]) {
+    const { body, id } = withRecord(modelId, "minimax_h3");
+    const matrix = await buildMatrix({
+      publish: false,
+      sourceOverrides: { calibrationEvidence: body },
+    });
+    assert.ok(
+      !matrix.calibrationRuns.some((run) => run.record.id === id),
+      `${modelId}: an out-of-matrix receipt binds to no cell`,
+    );
+    assert.equal(matrix.calibrationRuns.length, baseline.calibrationRuns.length);
+    // The pair stays honest in both halves: the bundle count still sees the receipt, the bound
+    // count does not. A skip that quietly shrank BOTH would hide the receipt entirely.
+    assert.equal(matrix.summary.calibrationRuns, baseline.summary.calibrationRuns + 1);
+  }
+
+  // ...and the requirement is narrowed, not removed. Both arms matter, and the second is what pins
+  // the KEY: the skip reads `target.modelId`, the same field the universe subtraction reads. Keying
+  // it on `target.provider` instead would agree on every well-formed row — `minimax_h3_ref` rides
+  // provider `minimax_h3` — and silently swallow this one, which is precisely the drift the
+  // shared-field rule exists to prevent.
+  for (const [label, modelId, provider] of [
+    ["a family in neither set", "hailuo_4", "hailuo_4"],
+    ["an exempt provider on an unknown model", "hailuo_4", "minimax_h3"],
+  ]) {
+    const unbindable = withRecord(modelId, provider);
+    await assert.rejects(
+      buildMatrix({ publish: false, sourceOverrides: { calibrationEvidence: unbindable.body } }),
+      /calibration record does not map to a matrix cell/,
+      `${label} must still fail closed`,
     );
   }
 });
@@ -4205,8 +5475,21 @@ test("the universe is modality-aware, and every video entry is IN it (sc-18815)"
     new URL("../config/manifests/builtin.models.jsonc", import.meta.url),
     "utf8",
   );
+  // MINUS the survey's declared out-of-matrix entries (sc-18664 x sc-18815, reconciled by the
+  // sc-17137 main sync): MiniMax-H3's two video entries are validated out-of-matrix records —
+  // `familyGroup` has no arm and no route resolver row exists — so the universe deliberately
+  // excludes them until the epic promotes the family (the record's own guard forces the move).
+  const surveyBody = await readFile(
+    new URL("../config/rung4-applicability-survey.json", import.meta.url),
+    "utf8",
+  );
+  const outOfMatrixEntries = new Set(
+    Object.values(JSON.parse(surveyBody).outOfMatrixFamilies ?? {}).flatMap(
+      (family) => family.catalogEntries ?? [],
+    ),
+  );
   const manifestVideo = JSON.parse(stripJsoncComments(manifestBody))
-    .models.filter((model) => model.type === "video")
+    .models.filter((model) => model.type === "video" && !outOfMatrixEntries.has(model.id))
     .map((model) => model.id)
     .sort();
   assert.equal(manifestVideo.length, 10);

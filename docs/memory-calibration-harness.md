@@ -150,6 +150,36 @@ node scripts/memory-calibration-harness.mjs plan \
   --resume docs/generated/memory-calibration-evidence.json
 ```
 
+`plan --resume` answers "what has NEVER been attempted". For a RE-capture — evidence that exists but
+has been staled by a pin bump — drop `--resume`, or it will report nothing outstanding and you will
+hold a GPU window for a no-op. Run it both ways and diff the fixture lists; the difference IS the set
+of cells whose records exist but are no longer current.
+
+### ALWAYS `plan` BEFORE HOLDING A CAPTURE WINDOW
+
+`plan` is the only cheap way to learn what `run` will actually execute, and the answer is routinely
+not what you expect. Read the case count out of its output and confirm the fixtures you intend to
+capture are in it. A GPU window is exclusive — MLX Metal is not thread-safe — so discovering there
+that the runner has nothing to do costs the whole slot.
+
+### `run` takes NO `--resume`. `--resume` belongs on `ingest`.
+
+**This recipe used to pass `--resume` to `run`, and that is a trap severe enough to name: it
+produces NOTHING while exiting 0.**
+
+`--resume` skips cases that were already attempted, and "already attempted" is decided on repository
+IDENTITY with the closure digest deliberately stripped from both sides
+(`memory-calibration-harness.mjs`, `operationallyAttemptedLogicalIds`). The code says why: that check
+decides whether to re-run a multi-hour capture, not whether the evidence is current — currency is
+`evidenceSemantics`, which reads the digest and fails closed. The consequence is exact and
+counter-intuitive: **a record staled by an inference pin bump still counts as already attempted**, so
+`run --resume` no-ops precisely when a pin bump is what made the re-capture necessary.
+
+Measured on sc-19721: with `--resume`, `plan` returned 0 of the 7 fixtures whose cells the pin bump
+had just demoted; without it, all 7 resolved, for 19 cases. `.github/workflows/macos-mlx.yml`'s Qwen
+arm has always omitted `--resume` from `run` for this reason — the workflow was right and this
+document was wrong.
+
 Run an authoritative provider adapter:
 
 ```text
@@ -161,9 +191,11 @@ node scripts/memory-calibration-harness.mjs run \
   --provider-command '["/absolute/path/to/memory-provider-adapter"]' \
   --sceneworks-repo /absolute/path/to/SceneWorks \
   --inference-repo /absolute/path/to/inference \
-  --resume docs/generated/memory-calibration-evidence.json \
-  --output .tmp/authoritative-memory-evidence.json
+  --output /absolute/path/OUTSIDE/the/repo/authoritative-memory-evidence.json
 ```
+
+Use `--resume` only to make a capture RESUMABLE after an interrupted run of the same revision, never
+to re-capture staled evidence. Discard or bypass the prior bundle for that.
 
 One provider process probes one backend-specific hardware shape, so `--backend mlx|candle` is
 required when the config contains both backends. Omitting it from a mixed plan fails before starting
@@ -191,17 +223,25 @@ node scripts/memory-calibration-harness.mjs assess-reuse \
   --output .tmp/reuse-assessment.json
 ```
 
-Validate or merge captured output:
+Validate or merge captured output. **`ingest` is where `--resume` belongs** — here it is the merge
+BASE (the bundle the new records are folded into), which is a different job from `run`'s
+skip-what-was-attempted meaning. Pass `--source-root` alongside `--input` whenever the capture wrote
+raw logs, or the physical source-session derivation cannot be validated:
 
 ```text
 node scripts/memory-calibration-harness.mjs check \
-  --input .tmp/authoritative-memory-evidence.json
+  --input /absolute/path/OUTSIDE/the/repo/authoritative-memory-evidence.json \
+  --source-root /absolute/path/OUTSIDE/the/repo/raw
 
 node scripts/memory-calibration-harness.mjs ingest \
-  --input .tmp/authoritative-memory-evidence.json \
+  --input /absolute/path/OUTSIDE/the/repo/authoritative-memory-evidence.json \
+  --source-root /absolute/path/OUTSIDE/the/repo/raw \
   --resume docs/generated/memory-calibration-evidence.json \
-  --output .tmp/merged-memory-evidence.json
+  --output /absolute/path/OUTSIDE/the/repo/merged-memory-evidence.json
 ```
+
+Chain several fixtures by feeding each `ingest`'s `--output` in as the next one's `--resume`, then
+copy the final bundle over `docs/generated/memory-calibration-evidence.json`.
 
 SceneWorks now contains two real provider-protocol executables. They compile against the same exact
 inference revision as the worker and never convert partial measurements into complete evidence:

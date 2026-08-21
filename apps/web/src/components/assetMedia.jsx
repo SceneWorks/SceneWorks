@@ -209,7 +209,16 @@ function VideoPoster({ asset, className }) {
   );
 }
 
-export const AssetMedia = React.forwardRef(function AssetMedia({ asset, className = "", controls = true, ...mediaProps }, ref) {
+// `muted` is a PROP, defaulting to false (sc-17161). It used to be hard-set on every <video> this
+// component rendered, and no call site overrode it, so every clip in the app played silent — the
+// asset detail, the preview modal, the queue card, the A/B compare. That was survivable while
+// every video model produced a video-only mp4; MiniMax-H3 is a joint audio+video family whose
+// mp4 carries an AAC track (`video_jobs::mod.rs` muxes `-c:a aac` whenever the pipeline returns
+// audio), and a silent player is indistinguishable from a model that generated no sound at all.
+// Surfaces that drive playback from SCRIPT rather than from a user gesture still pass `muted`
+// explicitly — autoplay policy blocks an unmuted programmatic play() — which is why this is a
+// default rather than a removal.
+export const AssetMedia = React.forwardRef(function AssetMedia({ asset, className = "", controls = true, muted = false, ...mediaProps }, ref) {
   if (!asset) {
     return null;
   }
@@ -222,7 +231,7 @@ export const AssetMedia = React.forwardRef(function AssetMedia({ asset, classNam
       <video
         className={className}
         controls={controls}
-        muted
+        muted={muted}
         playsInline
         poster={posterUrl(asset)}
         preload="metadata"
@@ -241,6 +250,7 @@ export const AssetMedia = React.forwardRef(function AssetMedia({ asset, classNam
       <audio
         className={className}
         controls={controls}
+        muted={muted}
         preload="metadata"
         ref={ref}
         src={src}

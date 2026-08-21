@@ -38,12 +38,13 @@ use gen_core::StagedResidencyAvailability;
 use gen_core::{
     GenerationMemory, LoadShapeDeclarationResult, LoadSpec, MemoryBackend,
     MemoryBackendRealization, MemoryBudget, MemoryCacheState, MemoryConformanceState,
-    MemoryDecodeArtifactIdentity, MemoryDecodeGeometryPolicy, MemoryDecodeQualityDisposition,
-    MemoryDecodeQualityFixture, MemoryDecodeQualityRuntimeIdentity, MemoryEvidence,
-    MemoryEvidenceDimensions, MemoryEvidenceKey, MemoryEvidenceVerdict, MemoryGeometry, MemoryMode,
-    MemoryNumericTier, MemoryOptimizationAuthority, MemoryParityContract, MemoryParityResult,
-    MemoryProviderContract, MemoryRunContext, MemorySelection, MemoryStrategy, OffloadPolicy,
-    PerComponentBytes, Precision, Quant, TransformerComponent, WeightsSource,
+    MemoryDecodeArtifactIdentity, MemoryDecodeGeometryPolicy, MemoryDecodePolicyQuery,
+    MemoryDecodeQualityDisposition, MemoryDecodeQualityFixture, MemoryDecodeQualityRuntimeIdentity,
+    MemoryEvidence, MemoryEvidenceDimensions, MemoryEvidenceKey, MemoryEvidenceVerdict,
+    MemoryGeometry, MemoryMode, MemoryNumericTier, MemoryOptimizationAuthority,
+    MemoryParityContract, MemoryParityResult, MemoryProviderContract, MemoryRunContext,
+    MemorySelection, MemoryStrategy, OffloadPolicy, PerComponentBytes, Precision, Quant,
+    TransformerComponent, WeightsSource,
 };
 use sceneworks_core::memory_calibration::{
     Backend as CalibrationBackend, BundleLoad, CalibrationBinding, EvidenceBundle, EvidenceQuery,
@@ -53,54 +54,15 @@ use sceneworks_core::memory_calibration::{
 use serde::Deserialize;
 use serde_json::{Map as JsonObject, Value};
 
-#[cfg(test)]
-use gen_core::MemoryDecodePolicyQuery;
-
-use crate::estimate_synthesis::{
-    basis_geometry_is_scalable, evidence_strategy,
-    synthesize_estimate_ladder as synthesize_generic_estimate_ladder, DecodeQualityRequestDecision,
-    EstimateRequest, MeasuredRungBasis, SynthesizedEstimateLadder, INFERENCE_CONTRACT_REVISION,
-    MLX_LANE, REQUEST_EVIDENCE_REVISION,
-};
 use crate::fit_gate::resolve_offload;
 pub(crate) use crate::fit_gate::FitDecision;
 use crate::memory_strategy::memory_mode_from_mode_key;
 use crate::model_jobs::ResolvedArtifactProvenance;
 use crate::{WorkerError, WorkerResult};
-/// The mage-flow calibration identity this file's request estimator is paired with.
-///
-/// sc-20570: this used to be the SceneWorks literal `mage-flow-generation-peak-v1`, which no
-/// loaded provider could ever publish — the MLX mage crate declares
-/// `mage-flow-mlx-shared-ladder-2026-08-03-v1` — so the pairing check refused every mage request.
-/// The expectation is now READ FROM the provider crate whose estimator it authorizes
-/// (`providers::mage::memory::{generation_peak_gb, production_safe_budget_gb}` are called from
-/// [`request_total_peak_bytes`] and [`live_request_budget`]), so a provider-side rename moves both
-/// sides together instead of bricking the route.
-#[cfg(target_os = "macos")]
-const MAGE_CALIBRATION_FINGERPRINT: &str =
-    runtime_macos::providers::mage::model::MEMORY_CALIBRATION_FINGERPRINT;
-/// Off-Mac mirror of the constant above.
-///
-/// `mlx-gen-mage` compiles only on macOS, so off-Mac there is nothing to derive from — and no MLX
-/// mage provider to admit either. The value exists so the cross-platform request-selector tests
-/// still model the production shape. macOS is authority:
-/// `mage_calibration_expectation_is_read_from_the_provider_crate` fails the Mac test suite (this
-/// box is also the `nax-macos` CI runner) if this mirror ever disagrees with the provider crate.
-#[cfg(any(test, not(target_os = "macos")))]
-const MAGE_CALIBRATION_FINGERPRINT_OFF_MAC_MIRROR: &str =
-    "mage-flow-mlx-shared-ladder-2026-08-03-v1";
-#[cfg(not(target_os = "macos"))]
-const MAGE_CALIBRATION_FINGERPRINT: &str = MAGE_CALIBRATION_FINGERPRINT_OFF_MAC_MIRROR;
 
-/// Whether the loaded provider is the calibration identity the mage-flow request estimator was
-/// measured under. A mismatch costs the request its verified claim (see the degrade site in
-/// [`evaluate_request_with_budget_using_bundle`]); it is never grounds for refusing the request.
-fn mage_estimator_is_paired(contract: &MemoryProviderContract) -> bool {
-    contract.calibration.as_ref().is_some_and(|identity| {
-        identity.abi == gen_core::MEMORY_CALIBRATION_ABI
-            && identity.fingerprint == MAGE_CALIBRATION_FINGERPRINT
-    })
-}
+const REQUEST_EVIDENCE_REVISION: &str = "sc-15507-request-scope-v1";
+const INFERENCE_CONTRACT_REVISION: &str = "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82";
+const MAGE_CALIBRATION_FINGERPRINT: &str = "mage-flow-generation-peak-v1";
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -779,6 +741,13 @@ impl MlxRequestPlan {
     /// component contract. `spec_component_bytes` folds raw control and resident adapter sources
     /// into the legacy scalar. A typed declaration replaces the corresponding raw source bytes with
     /// the provider's load-exact residency. Non-adopting providers retain the legacy scalar.
+    ///
+    /// A [`gen_core::MemoryComponentResidency::PrecomputedThenEvicted`] declaration deliberately
+    /// does NOT move this figure (sc-19721). This is the resident BASELINE's peak: it is the one
+    /// candidate that must always cover the widest instant of the whole pipeline, and the precompute
+    /// instant — where the evictable sub-stack is fully materialized — is inside it. The eviction is
+    /// a steady-state fact and reaches the floor candidates through
+    /// [`estimate_floor_weights_bytes`], never this leg.
     fn contract_base_peak_bytes(
         &self,
         legacy_total_peak_bytes: u64,
@@ -1200,6 +1169,46 @@ struct VerifiedGeometryAlternative {
     engaged_composition: Vec<MemoryStrategy>,
 }
 
+/// One verified measured cell usable as the extrapolation basis for a fitted-curve estimate
+/// (sc-18096): same provider, tier, mode, and overlay as the request, artifact-current AND
+/// closure-current binding, but a DIFFERENT geometry — the cell the request itself could not be
+/// admitted on.
+///
+/// Closure-current is a deliberate restriction, not an oversight: `MLX_ESTIMATE_MARGIN` was
+/// derived to cover extrapolation error on top of same-closure re-capture variance
+/// (`crates/sceneworks-worker/src/ladder_margin_policy.rs`). A stale-closure record already carries
+/// its own corpus-derived drift allowance on the MEASURED path; stacking that drift under an
+/// extrapolation would spend the estimate margin twice, and no derivation covers the sum — so a
+/// stale record may keep serving its own cell behind the stale margin (sc-18095) but may not seed
+/// an extrapolated estimate.
+///
+/// Everything the extrapolation, the binding-phase constraint, and the loaded-provider identity
+/// gate need is captured here, so the synthesis step never re-reads the bundle.
+#[derive(Clone, Debug)]
+struct MeasuredRungBasis {
+    rung: StrategyRung,
+    parameters: gen_core::MemoryStrategyParameters,
+    engaged_composition: Vec<MemoryStrategy>,
+    load_shape: gen_core::LoadShape,
+    /// The calibration identity the basis binding was measured under. `synthesize_estimate_ladder`
+    /// requires it to equal the LOADED contract's identity: a provider whose estimator drifted
+    /// from the packaged records must not receive fitted candidates built from them (sc-18096
+    /// review). This gate cannot be left to the `carries_verified_claim` demotion, which only
+    /// fires when the route carries a verified claim (`Evidence` path or a named lower
+    /// alternative) — bases ride on legacy routes where neither may hold.
+    calibration_abi: u32,
+    calibration_fingerprint: String,
+    geometry: CalibrationGeometry,
+    /// Per-phase predicted peaks from the measured record, in canonical phase order
+    /// (conditioning, denoise, decode). The binding phase is their argmax.
+    conditioning_peak_bytes: u64,
+    denoise_peak_bytes: u64,
+    decode_peak_bytes: u64,
+    /// The measured admission envelope peak the extrapolated estimate scales.
+    envelope_peak_bytes: u64,
+    record_id: String,
+}
+
 #[derive(Clone, Debug)]
 struct AdmissionRoute {
     path: AdmissionPath,
@@ -1546,6 +1555,16 @@ fn stronger_fallback_reason(
         candidate
     } else {
         current
+    }
+}
+
+fn evidence_strategy(rung: StrategyRung) -> MemoryStrategy {
+    match rung {
+        StrategyRung::Resident => MemoryStrategy::Resident,
+        StrategyRung::StagedResidency => MemoryStrategy::StagedResidency,
+        StrategyRung::BoundedDecode => MemoryStrategy::BoundedDecode,
+        StrategyRung::BoundedAttention => MemoryStrategy::BoundedAttention,
+        StrategyRung::BoundedTransformerResidency => MemoryStrategy::BoundedTransformerResidency,
     }
 }
 
@@ -1972,11 +1991,6 @@ fn evidence_admission_route(
 /// own geometry. The per-phase peaks ride along so the binding-phase constraint can be applied at
 /// synthesis time. See [`MeasuredRungBasis`] for why a stale-closure record is not a legitimate
 /// extrapolation basis even though it remains admissible for its own cell.
-///
-/// The MLX BINDING TABLE walk stays here — `MlxCalibrationBinding` is this lane's own type — while
-/// the two things that are mechanism law both live in [`crate::estimate_synthesis`]: which geometry
-/// axes an extrapolation may span ([`basis_geometry_is_scalable`]) and the shape of a basis
-/// ([`MeasuredRungBasis`]).
 fn collect_estimate_bases(
     bundle: &EvidenceBundle,
     plan: &MlxRequestPlan,
@@ -1992,7 +2006,11 @@ fn collect_estimate_bases(
             binding.query.inference_closure_digest == expected_closure_digest
                 && binding.mode == mode_key
                 && binding.overlay == overlay
-                && basis_geometry_is_scalable(binding.geometry, request_cell_geometry)
+                && binding.geometry != request_cell_geometry
+                // A phase curve extrapolates over output AREA; a different batch or frame count is
+                // a different workload shape, not a scalable geometry.
+                && binding.geometry.batch == request_cell_geometry.batch
+                && binding.geometry.frames == request_cell_geometry.frames
         })
         .filter_map(|binding| {
             let query = EvidenceQuery {
@@ -2018,12 +2036,6 @@ fn collect_estimate_bases(
                 _ => return None,
             };
             Some(MeasuredRungBasis {
-                // sc-19056: the lane is READ OFF THE RECORD, not restated from the query above.
-                // The two cannot differ today — `evidence_for` matches `record.backend` against
-                // `query.backend` — and that is exactly why deriving it costs nothing and asserting
-                // it would be a second declaration free to drift. What it buys is that a future
-                // edit widening this walk to other lanes tags each basis correctly by construction.
-                lane: crate::estimate_synthesis::lane_of(record.backend),
                 rung: binding.rung,
                 parameters: binding.selection_parameters,
                 engaged_composition: record
@@ -2047,17 +2059,541 @@ fn collect_estimate_bases(
         .collect()
 }
 
-/// **The MLX lane's binder onto the generic mechanism** (sc-19050, epic 19048 R1).
+/// One estimate-backed candidate synthesized for an implemented-but-unmeasured rung (sc-18096).
+#[derive(Clone, Debug)]
+struct SynthesizedEstimate {
+    selection: MemorySelection,
+    evidence: MemoryEvidence,
+    basis: crate::memory_strategy::CandidateBasis,
+    decode_quality: DecodeQualityRequestDecision,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DecodeQualityRequestDecision {
+    NotDeclared,
+    NotEngaged {
+        strategy: MemoryStrategy,
+    },
+    Admitted {
+        strategy: MemoryStrategy,
+        tile_edge: u32,
+        overlap: u32,
+        evidence_sha256: String,
+    },
+    Refused {
+        strategy: MemoryStrategy,
+        tile_edge: Option<u32>,
+        overlap: Option<u32>,
+        evidence_sha256: Option<String>,
+        reason: String,
+    },
+    Unmeasured {
+        strategy: MemoryStrategy,
+        reason: String,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct EstimateParameterCandidate {
+    parameters: gen_core::MemoryStrategyParameters,
+    decode_quality: DecodeQualityRequestDecision,
+}
+
+#[derive(Default)]
+struct SynthesizedEstimateLadder {
+    estimates: Vec<SynthesizedEstimate>,
+    decode_quality_decisions: Vec<DecodeQualityRequestDecision>,
+}
+
+const fn strategy_rung(strategy: MemoryStrategy) -> StrategyRung {
+    match strategy {
+        MemoryStrategy::Resident => StrategyRung::Resident,
+        MemoryStrategy::StagedResidency => StrategyRung::StagedResidency,
+        MemoryStrategy::BoundedDecode => StrategyRung::BoundedDecode,
+        MemoryStrategy::BoundedAttention => StrategyRung::BoundedAttention,
+        MemoryStrategy::BoundedTransformerResidency => StrategyRung::BoundedTransformerResidency,
+    }
+}
+
+/// The canonical measurement phases, in ladder order, used for the binding-phase comparison.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EstimatePhase {
+    Conditioning,
+    Denoise,
+    Decode,
+}
+
+/// The phase carrying the peak of a `(conditioning, denoise, decode)` triple. Ties resolve to the
+/// LATER phase deterministically; the comparison below only ever contrasts two triples scaled by
+/// the same per-phase rule, so tie handling cannot manufacture a flip on its own.
+fn binding_phase(conditioning: u64, denoise: u64, decode: u64) -> EstimatePhase {
+    let mut phase = EstimatePhase::Conditioning;
+    let mut peak = conditioning;
+    if denoise >= peak {
+        phase = EstimatePhase::Denoise;
+        peak = denoise;
+    }
+    if decode >= peak {
+        phase = EstimatePhase::Decode;
+    }
+    phase
+}
+
+/// Fabricated evidence for a synthesized estimate candidate, following the
+/// [`generic_mlx_shared_observation`] / [`resident_evidence`] pattern: `ImplementedUnverified`
+/// conformance, no observed peak, parity not run — the record claims exactly what an estimate can
+/// claim and nothing more. The selector's estimate-scoped eligibility wrap (sc-18096,
+/// `memory_strategy::candidate_exclusion`) is what admits it.
+/// `backend` is a parameter rather than a constant because sc-18814 routes the VIDEO lane through
+/// this same shape on both backends; every image caller here passes [`MemoryBackend::Mlx`], which
+/// is what the field was hardcoded to before.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn estimate_evidence(
+    contract: &MemoryProviderContract,
+    backend: gen_core::MemoryBackend,
+    tier: MemoryNumericTier,
+    mode: &str,
+    overlay: Option<&str>,
+    geometry: MemoryGeometry,
+    selection: MemorySelection,
+    predicted_peak_bytes: u64,
+    calibration_fingerprint: Option<&str>,
+) -> MemoryEvidence {
+    MemoryEvidence {
+        key: MemoryEvidenceKey {
+            resolved_route: contract.provider_id.clone(),
+            backend,
+            tier,
+            load_shape: contract.load_shape,
+            mode: memory_mode_from_mode_key(mode),
+            overlay: overlay.map(str::to_owned),
+            geometry,
+            strategy: selection.strategy,
+            engaged_composition: contract.engaged_composition_for_selection(&selection),
+            parameters: selection.parameters,
+        },
+        conformance: MemoryConformanceState::ImplementedUnverified,
+        dimensions: MemoryEvidenceDimensions {
+            static_implementation: MemoryEvidenceVerdict::Satisfied,
+            declared_calibration: MemoryEvidenceVerdict::Missing,
+            historical_verification: MemoryEvidenceVerdict::Missing,
+            current_environment_verification: MemoryEvidenceVerdict::Missing,
+            canonical_route_loadability: MemoryEvidenceVerdict::Unverified,
+            exact_strategy_parameters: MemoryEvidenceVerdict::Satisfied,
+        },
+        calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
+        calibration_fingerprint: calibration_fingerprint.unwrap_or_default().to_owned(),
+        sceneworks_revision: REQUEST_EVIDENCE_REVISION.to_owned(),
+        inference_revision: INFERENCE_CONTRACT_REVISION.to_owned(),
+        harness_version: String::new(),
+        predicted_peak_bytes,
+        observed_peak_bytes: None,
+        parity: MemoryParityContract::Exact,
+        parity_result: MemoryParityResult::NotRun,
+    }
+}
+
+/// Bytes the provider declares it drops from INSIDE `asset_facts.transformer_bytes` before the
+/// declaring phase reaches steady state — gen-core's
+/// [`MemoryComponentKind::TransformerSubStack`] + [`MemoryComponentResidency::PrecomputedThenEvicted`]
+/// pair (SC-18665), read through [`MemoryProviderContract::steady_state_transformer_bytes`].
 ///
-/// Everything this function does is supply MLX's own parameters —
-/// [`crate::estimate_synthesis::MLX_LANE`] (backend, tracing label, the derived MLX estimate margin,
-/// and the fatal-abort failure posture that is *why* that margin is the wider one) and MLX's
-/// headroom law ([`MlxRequestPlan::generic_headroom_bytes`], the exact same headroom convention the
-/// resident baseline charges, so only the weights term differs per rung) — and then hand off. The
-/// prediction law itself lives in [`crate::estimate_synthesis::synthesize_estimate_ladder`].
+/// **Zero for all 23 providers that have not adopted the sub-stack vocabulary**, because the
+/// accessor returns `asset_facts.transformer_bytes` unchanged for them. That is what makes this
+/// term safe to fold into a shared floor: a non-adopting contract is byte-identical to the
+/// pre-sc-19721 arithmetic.
 ///
-/// Called only on legacy admission routes: a covered cell is authorized by its exact measured
-/// ladder and gets no synthetic sibling.
+/// Deliberately NOT [`MemoryProviderContract::evicted_component_bytes`], which sums the drop over
+/// EVERY declared component including auxiliary networks. Those bytes are not inside
+/// `transformer_bytes`, so subtracting them from the transformer's own term would remove bytes the
+/// transformer never held.
+fn intra_transformer_evicted_bytes(contract: &MemoryProviderContract) -> u64 {
+    contract
+        .asset_facts
+        .transformer_bytes
+        .saturating_sub(contract.steady_state_transformer_bytes())
+}
+
+/// The floor's per-rung WEIGHTS term, derived only from the provider contract's own declarations
+/// (sc-18096). Nothing here is a tuned coefficient:
+///
+/// * `StagedResidency` engaged ⇒ the co-residency drop the rung exists for: the resident working
+///   set is the larger of the conditioning stack and everything else, exactly the
+///   `staged_weights_gb` split the load-time gate has always used.
+/// * `BoundedTransformerResidency` engaged ⇒ the transformer's declared bytes leave the resident
+///   floor: the rung windows them, and the window slice plus scratch is carried by the headroom
+///   term and the estimate margin, not by a guessed window fraction.
+/// * Rungs 2 and 3 bound TRANSIENTS, not weights, so they take no weights reduction here — and
+///   deliberately no transient reduction either, because no measured basis for one exists on an
+///   unmeasured cell. Their floor equals rung 1's, which keeps them selectable without ever
+///   promising an unmeasured saving.
+/// * Auxiliary components (control branches, adapter stacks, …) stay resident unless the contract
+///   itself declares them `bounded_by` a rung the composition engages.
+/// * A declared intra-transformer eviction ([`intra_transformer_evicted_bytes`]) leaves the floor
+///   only on the STAGED branch, and only down to the load-exact transformer (sc-19721). Both
+///   restrictions are the same rule: **the drop lowers the steady state, not the peak.** The
+///   declaring phase still holds the whole sub-stack at the precompute instant — MiniMax-H3's
+///   denoise runs 64.56 GB → 38.70 GB *across* it — so the evicted bytes may only be removed from
+///   bytes that are provably NOT co-resident with that instant.
+///   * Without `StagedResidency` nothing is staged out of it: the conditioning stack, the
+///     transformer and the decoder are all charged as one co-residency, and that co-residency
+///     includes the instant. Removing anything there would under-charge it by the whole eviction —
+///     the OOM direction, and the exact asymmetry the provider's `retained_bytes` declaration is
+///     chosen to avoid.
+///   * With it engaged, `heavy` is still a lumped charge for the transformer plus every later
+///     phase's component (the decoder). Clamping the reduced lump at `transformer_bytes` — the
+///     load-exact figure, sub-stack included — keeps the precompute instant covered while letting
+///     the drop cancel against the later phases' bytes, which are not resident at that instant.
+///     The reduction is therefore `min(evicted, base_bytes − conditioning − transformer)`, never
+///     the raw eviction, and this leg is deliberately not an un-lumping of the staged phases: no
+///     measured basis for that exists here (epic 18093 owns it).
+///   * `BoundedTransformerResidency` subtracts the load-exact `transformer_bytes` from the
+///     LOAD-EXACT lump and takes NO eviction reduction at all, because that rung windows the whole
+///     transformer — the evictable sub-stack is inside the window it just removed, so reducing by
+///     the eviction as well deducts the same bytes twice. Both legs must remove the transformer,
+///     which leaves `decoder`; taking the reduction first and the window second leaves
+///     `max(0, decoder − evicted)` instead, and at bf16 the `.max(transformer_bytes)` clamp binds
+///     so that is exactly **0** — MiniMax-H3's whole 11.02 GB video+audio VAE pair vanishing from
+///     the floor, the OOM direction (sc-18650 pre-merge review).
+///
+/// The auxiliary fold deliberately charges `resident_bytes`, not
+/// `MemoryResidentComponent::steady_state_bytes`: an auxiliary network stands beside the base model
+/// rather than inside a staged phase, so nothing here establishes that its widest instant is not
+/// co-resident with the rest of the floor. No shipped provider declares an evicting auxiliary
+/// component today, so the two readings are byte-identical; this comment records which one is meant
+/// if one ever does.
+pub(crate) fn estimate_floor_weights_bytes(
+    contract: &MemoryProviderContract,
+    engaged: &[MemoryStrategy],
+) -> u64 {
+    let facts = contract.asset_facts;
+    let conditioning = facts.conditioning_bytes;
+    let staged = engaged.contains(&MemoryStrategy::StagedResidency);
+    // The load-exact non-conditioning working set: what the transformer's own phase holds while the
+    // evictable sub-stack is still materialized.
+    let heavy_load_exact = facts.base_bytes.saturating_sub(conditioning);
+    let bounded_transformer = engaged.contains(&MemoryStrategy::BoundedTransformerResidency);
+    // The two reductions are EXCLUSIVE, not sequential. The staged reduction's clamp holds the lump
+    // at `transformer_bytes` precisely so the precompute instant stays covered — and rung 4 then
+    // removes that same `transformer_bytes`, sub-stack included. Applying both leaves
+    // `max(0, decoder − evicted)` where the answer is `decoder`.
+    let heavy = if staged && !bounded_transformer {
+        heavy_load_exact
+            .saturating_sub(intra_transformer_evicted_bytes(contract))
+            .max(facts.transformer_bytes)
+    } else if bounded_transformer {
+        heavy_load_exact.saturating_sub(facts.transformer_bytes)
+    } else {
+        heavy_load_exact
+    };
+    let base = if staged {
+        conditioning.max(heavy)
+    } else {
+        conditioning.saturating_add(heavy)
+    };
+    let auxiliary = contract
+        .resident_components()
+        .iter()
+        .filter(|component| component.kind.is_auxiliary())
+        .filter(|component| match component.bounded_by {
+            Some(bounding) => !engaged.contains(&bounding),
+            None => true,
+        })
+        .fold(0_u64, |total, component| {
+            total.saturating_add(component.resident_bytes)
+        });
+    base.saturating_add(auxiliary)
+}
+
+/// The smallest declared value for every numeric knob the engaged composition requires — the most
+/// deeply bounding parameters the provider publishes, which keeps the true runtime transient as
+/// far below the floor's unreduced headroom charge as the provider allows. `None` when a required
+/// knob has no declared range: such a selection cannot be validated, so no candidate is
+/// synthesized for the rung.
+/// The smallest declared value for every numeric knob the engaged composition requires — the most
+/// deeply bounding parameters the provider publishes, which keeps the true runtime transient as
+/// far below the floor's unreduced headroom charge as the provider allows. `None` when a required
+/// knob has no declared range: such a selection cannot be validated, so no candidate is
+/// synthesized for the rung. This is the video-lane floor shape (`video_admission`); the image
+/// lane's per-candidate builder below carries decode-quality decisions the video lane has no use
+/// for.
+pub(crate) fn estimate_floor_smallest_parameters(
+    contract: &MemoryProviderContract,
+    engaged: &[MemoryStrategy],
+) -> Option<gen_core::MemoryStrategyParameters> {
+    let smallest = |strategy: MemoryStrategy,
+                    pick: fn(&gen_core::MemoryParameterRanges) -> &Vec<u32>|
+     -> Option<Option<u32>> {
+        if !engaged.contains(&strategy) {
+            return Some(None);
+        }
+        pick(&contract.capability(strategy)?.parameters)
+            .iter()
+            .copied()
+            .min()
+            .map(Some)
+    };
+    Some(gen_core::MemoryStrategyParameters {
+        decode_tile_edge: smallest(MemoryStrategy::BoundedDecode, |ranges| {
+            &ranges.decode_tile_edges
+        })?,
+        decode_overlap: smallest(MemoryStrategy::BoundedDecode, |ranges| {
+            &ranges.decode_overlaps
+        })?,
+        attention_chunk_size: smallest(MemoryStrategy::BoundedAttention, |ranges| {
+            &ranges.attention_chunk_sizes
+        })?,
+        transformer_window_size: smallest(MemoryStrategy::BoundedTransformerResidency, |ranges| {
+            &ranges.transformer_window_sizes
+        })?,
+        transformer_window_component: None,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn estimate_floor_parameters(
+    contract: &MemoryProviderContract,
+    engaged: &[MemoryStrategy],
+    strategy: MemoryStrategy,
+    tier: MemoryNumericTier,
+    mode_key: &str,
+    overlay: Option<&str>,
+    geometry: MemoryGeometry,
+    use_pid: bool,
+) -> (
+    Vec<EstimateParameterCandidate>,
+    Vec<DecodeQualityRequestDecision>,
+) {
+    let smallest = |strategy: MemoryStrategy,
+                    pick: fn(&gen_core::MemoryParameterRanges) -> &Vec<u32>|
+     -> Option<Option<u32>> {
+        if !engaged.contains(&strategy) {
+            return Some(None);
+        }
+        pick(&contract.capability(strategy)?.parameters)
+            .iter()
+            .copied()
+            .min()
+            .map(Some)
+    };
+    let Some(attention_chunk_size) = smallest(MemoryStrategy::BoundedAttention, |ranges| {
+        &ranges.attention_chunk_sizes
+    }) else {
+        return (
+            Vec::new(),
+            vec![DecodeQualityRequestDecision::Refused {
+                strategy,
+                tile_edge: None,
+                overlap: None,
+                evidence_sha256: None,
+                reason: "required attention chunk range is empty".to_owned(),
+            }],
+        );
+    };
+    let Some(transformer_window_size) =
+        smallest(MemoryStrategy::BoundedTransformerResidency, |ranges| {
+            &ranges.transformer_window_sizes
+        })
+    else {
+        return (
+            Vec::new(),
+            vec![DecodeQualityRequestDecision::Refused {
+                strategy,
+                tile_edge: None,
+                overlap: None,
+                evidence_sha256: None,
+                reason: "required transformer window range is empty".to_owned(),
+            }],
+        );
+    };
+    let base_parameters = gen_core::MemoryStrategyParameters {
+        decode_tile_edge: None,
+        decode_overlap: None,
+        attention_chunk_size,
+        transformer_window_size,
+        transformer_window_component: None,
+    };
+    if !engaged.contains(&MemoryStrategy::BoundedDecode) {
+        return (
+            vec![EstimateParameterCandidate {
+                parameters: base_parameters,
+                decode_quality: DecodeQualityRequestDecision::NotEngaged { strategy },
+            }],
+            Vec::new(),
+        );
+    }
+    let Some(decode) = contract.capability(MemoryStrategy::BoundedDecode) else {
+        return (
+            Vec::new(),
+            vec![DecodeQualityRequestDecision::Refused {
+                strategy,
+                tile_edge: None,
+                overlap: None,
+                evidence_sha256: None,
+                reason: "bounded decode capability is absent".to_owned(),
+            }],
+        );
+    };
+    if decode.parameters.decode_geometry_policies.is_empty() {
+        if contract.decode_geometry_policy_authoritative {
+            let refusal = DecodeQualityRequestDecision::Refused {
+                strategy,
+                tile_edge: None,
+                overlap: None,
+                evidence_sha256: None,
+                reason: "bounded decode has a declared quality scope but no applicable row for the loaded tier/load shape"
+                    .to_owned(),
+            };
+            // The decode rung itself has no exact authority. A higher independent rung retains its
+            // own estimate with decode omitted, so request-selection-aware engagement cannot
+            // accidentally resurrect the route-blind tile domain.
+            let candidates = (strategy != MemoryStrategy::BoundedDecode)
+                .then_some(EstimateParameterCandidate {
+                    parameters: base_parameters,
+                    decode_quality: DecodeQualityRequestDecision::NotEngaged { strategy },
+                })
+                .into_iter()
+                .collect();
+            return (candidates, vec![refusal]);
+        }
+        let pair = if let Some(routes) = &contract.pid_decode_routes {
+            let route = if use_pid { &routes.pid } else { &routes.native };
+            route
+                .tile_edges
+                .iter()
+                .copied()
+                .min()
+                .zip(Some(route.tile_overlap))
+        } else {
+            decode
+                .parameters
+                .decode_tile_edges
+                .iter()
+                .copied()
+                .min()
+                .zip(decode.parameters.decode_overlaps.iter().copied().min())
+        };
+        let Some((tile_edge, overlap)) = pair else {
+            return (
+                Vec::new(),
+                vec![DecodeQualityRequestDecision::Refused {
+                    strategy,
+                    tile_edge: None,
+                    overlap: None,
+                    evidence_sha256: None,
+                    reason: "legacy bounded decode has no complete edge/overlap pair".to_owned(),
+                }],
+            );
+        };
+        let mut parameters = base_parameters;
+        parameters.decode_tile_edge = Some(tile_edge);
+        parameters.decode_overlap = Some(overlap);
+        return (
+            vec![EstimateParameterCandidate {
+                parameters,
+                decode_quality: DecodeQualityRequestDecision::NotDeclared,
+            }],
+            Vec::new(),
+        );
+    }
+
+    let query = MemoryDecodePolicyQuery {
+        tier,
+        load_shape: contract.load_shape,
+        mode_key,
+        overlay,
+        geometry,
+        use_pid,
+    };
+    let rows = match contract.decode_geometry_policies_for_request(query) {
+        Ok(rows) => rows,
+        Err(error) => {
+            return (
+                Vec::new(),
+                vec![DecodeQualityRequestDecision::Refused {
+                    strategy,
+                    tile_edge: None,
+                    overlap: None,
+                    evidence_sha256: None,
+                    reason: error.to_string(),
+                }],
+            )
+        }
+    };
+    let mut rows = rows;
+    rows.sort_by_key(|policy| (policy.tile_edge, policy.overlap));
+    let mut candidates = Vec::new();
+    let mut decisions = Vec::new();
+    for policy in rows {
+        match &policy.disposition {
+            MemoryDecodeQualityDisposition::Admitted => {
+                let mut parameters = base_parameters;
+                parameters.decode_tile_edge = Some(policy.tile_edge);
+                parameters.decode_overlap = Some(policy.overlap);
+                candidates.push(EstimateParameterCandidate {
+                    parameters,
+                    decode_quality: DecodeQualityRequestDecision::Admitted {
+                        strategy,
+                        tile_edge: policy.tile_edge,
+                        overlap: policy.overlap,
+                        evidence_sha256: policy.production_evidence_sha256.clone(),
+                    },
+                });
+            }
+            MemoryDecodeQualityDisposition::Refused { reason } => {
+                decisions.push(DecodeQualityRequestDecision::Refused {
+                    strategy,
+                    tile_edge: Some(policy.tile_edge),
+                    overlap: Some(policy.overlap),
+                    evidence_sha256: Some(policy.production_evidence_sha256.clone()),
+                    reason: reason.clone(),
+                });
+            }
+        }
+    }
+    if candidates.is_empty() {
+        if decisions.is_empty() {
+            decisions.push(DecodeQualityRequestDecision::Unmeasured {
+                strategy,
+                reason: format!(
+                    "no exact production-latent row for {}x{} load_shape={:?} mode={} overlay={overlay:?} use_pid={use_pid}",
+                    geometry.width, geometry.height, contract.load_shape, mode_key,
+                ),
+            });
+        }
+        // Bounded decode itself cannot exist without an admitted pair. A higher independent rung
+        // keeps its own parameters and omits decode so selection-aware engagement excludes rung 2.
+        if strategy != MemoryStrategy::BoundedDecode {
+            candidates.push(EstimateParameterCandidate {
+                parameters: base_parameters,
+                decode_quality: DecodeQualityRequestDecision::NotEngaged { strategy },
+            });
+        }
+    }
+    (candidates, decisions)
+}
+
+/// Synthesize estimate-backed candidates for every optimized rung the provider contract marks
+/// `Implemented` (sc-18096, epic 18093 R1a). Called only on legacy admission routes — a covered
+/// cell is authorized by its exact measured ladder and gets no synthetic sibling.
+///
+/// Peak source per rung, in preference order:
+///
+/// 1. **Fitted curve** — a verified measured cell of the same provider/tier/mode/overlay at a
+///    different geometry ([`MeasuredRungBasis`]), extrapolated over output area: the conditioning
+///    peak is area-flat (text encoding does not grow with the render target) while denoise,
+///    decode, and the admission envelope scale by the area ratio, floored at 1.0 so a
+///    smaller-than-measured request never predicts below the measurement. Gated by
+///    [`crate::ladder_margin_policy::ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE`]: if the
+///    extrapolated triple's binding phase differs from the measured cell's, the fitted candidate
+///    is NOT emitted (no per-phase variance re-derivation exists) and the rung falls back to the
+///    floor, whose no-measured-basis path the constraint's scope sentence explicitly exempts.
+/// 2. **Weights + headroom floor** — [`estimate_floor_weights_bytes`] plus the exact same
+///    fixed-reserve + area-scaled headroom the resident baseline charges
+///    ([`MlxRequestPlan::generic_headroom_bytes`]).
+///
+/// The MLX-conservative estimate margin is NOT applied here — the selector owns margin widening
+/// (`memory_strategy::select_strategy`), exactly as it owns the sc-18095 stale widening.
 #[allow(clippy::too_many_arguments)]
 fn synthesize_estimate_ladder(
     contract: &MemoryProviderContract,
@@ -2069,24 +2605,202 @@ fn synthesize_estimate_ladder(
     calibration_fingerprint: Option<&str>,
     bases: &[MeasuredRungBasis],
 ) -> SynthesizedEstimateLadder {
-    synthesize_generic_estimate_ladder(
-        &EstimateRequest {
-            lane: MLX_LANE,
+    use crate::ladder_margin_policy::ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE;
+    use crate::memory_strategy::CandidateBasis;
+
+    let request_area = f64::from(geometry.width) * f64::from(geometry.height);
+    let mut ladder = SynthesizedEstimateLadder::default();
+    for strategy in MemoryStrategy::ALL {
+        if strategy == MemoryStrategy::Resident {
+            // The resident baseline candidate already exists on every legacy route.
+            continue;
+        }
+        if !matches!(
+            contract.capability(strategy).map(|cap| &cap.support),
+            Some(gen_core::MemoryStrategySupport::Implemented)
+        ) {
+            continue;
+        }
+        let declared_engaged = contract.engaged_composition(strategy);
+        let (parameter_candidates, decisions) = estimate_floor_parameters(
             contract,
-            tier: plan.tier,
+            &declared_engaged,
+            strategy,
+            plan.tier,
             mode_key,
             overlay,
             geometry,
             use_pid,
-            calibration_fingerprint,
-            headroom_bytes: plan.generic_headroom_bytes(geometry),
-            // The MLX resident baseline already carries its geometry law (weights plus the
-            // area-scaled `generic_headroom_bytes` transient), so no fitted resident sibling is
-            // synthesized (sc-19054; see `EstimateRequest::synthesize_resident`).
-            synthesize_resident: false,
-        },
-        bases,
-    )
+        );
+        ladder.decode_quality_decisions.extend(decisions);
+
+        for parameter_candidate in parameter_candidates {
+            let floor_selection = MemorySelection {
+                strategy,
+                parameters: parameter_candidate.parameters,
+                tier: plan.tier,
+            };
+            let engaged = contract.engaged_composition_for_selection(&floor_selection);
+
+            // 1. Fitted-curve basis: the closest measured geometry below the request, else the
+            //    smallest above it (whose clamp-at-1.0 scaling degenerates to the measurement itself).
+            //    The basis must have been measured under the LOADED provider's exact calibration
+            //    identity: a drifted estimator invalidates the measured numbers as an extrapolation
+            //    seed, and this is the only gate on legacy routes (the `carries_verified_claim`
+            //    demotion never fires without a verified claim on the route). A contract with no
+            //    calibration identity gets no fitted candidates at all — fail closed.
+            //
+            //    The load-shape conjunct compares CONTRACT shape only — deliberately, and unlike the
+            //    Evidence-path filter's measured-candidate leg, which also compares `identity
+            //    .load_shape` (sc-18251). An estimate-basis candidate is graded downstream by the
+            //    estimate wrap of `optimized_eligibility`, which short-circuits at the conformance
+            //    gate's `Unverified` BEFORE the identity load-shape comparison ever runs, so the
+            //    identity's shape is never consulted for an estimate. Adding the conjunct here would
+            //    be stricter than the gate this filter anticipates.
+            let fitted = bases
+                .iter()
+                .filter(|basis| {
+                    basis.rung == strategy_rung(strategy)
+                        && basis.load_shape == contract.load_shape
+                        && basis.engaged_composition == engaged
+                        && contract.calibration.as_ref().is_some_and(|identity| {
+                            identity.abi == basis.calibration_abi
+                                && identity.fingerprint == basis.calibration_fingerprint
+                        })
+                })
+                .max_by_key(|basis| {
+                    let area = u64::from(basis.geometry.width) * u64::from(basis.geometry.height);
+                    let below = area as f64 <= request_area;
+                    // Rank every below-request basis above every above-request one; among "below" take
+                    // the largest area, among "above" the smallest.
+                    (below, if below { area as i128 } else { -(area as i128) })
+                })
+                .and_then(|basis| {
+                    let mut parameters = basis.parameters;
+                    parameters.decode_tile_edge = parameter_candidate.parameters.decode_tile_edge;
+                    parameters.decode_overlap = parameter_candidate.parameters.decode_overlap;
+                    let selection = MemorySelection {
+                        strategy,
+                        parameters,
+                        tier: plan.tier,
+                    };
+                    if contract.validate_selection(&selection).is_err() {
+                        return None;
+                    }
+                    let measured_area =
+                        f64::from(basis.geometry.width) * f64::from(basis.geometry.height);
+                    let scale = (request_area / measured_area).max(1.0);
+                    let scaled = |bytes: u64| {
+                        (bytes as f64 * scale).ceil().clamp(0.0, u64::MAX as f64) as u64
+                    };
+                    let measured_binding = binding_phase(
+                        basis.conditioning_peak_bytes,
+                        basis.denoise_peak_bytes,
+                        basis.decode_peak_bytes,
+                    );
+                    let extrapolated_binding = binding_phase(
+                        basis.conditioning_peak_bytes,
+                        scaled(basis.denoise_peak_bytes),
+                        scaled(basis.decode_peak_bytes),
+                    );
+                    if ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE
+                        && extrapolated_binding != measured_binding
+                    {
+                        // The pinned sc-18094 constraint: the corpus shows a 17.14% per-phase
+                        // re-capture spread that no margin in the policy absorbs, so an extrapolation
+                        // that moves the request peak onto a different phase than the one measured is
+                        // refused rather than margined. The rung falls back to the floor path below.
+                        tracing::info!(
+                            route = contract.provider_id,
+                            backend = "mlx",
+                            ?strategy,
+                            basis_record = basis.record_id,
+                            measured_binding_phase = ?measured_binding,
+                            extrapolated_binding_phase = ?extrapolated_binding,
+                            "fitted-curve estimate rejected: extrapolation flips the binding phase \
+                             (ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE)"
+                        );
+                        return None;
+                    }
+                    let predicted_peak_bytes = scaled(basis.envelope_peak_bytes);
+                    tracing::info!(
+                        route = contract.provider_id,
+                        backend = "mlx",
+                        ?strategy,
+                        basis_record = basis.record_id,
+                        basis_geometry =
+                            format!("{}x{}", basis.geometry.width, basis.geometry.height),
+                        raw_peak_bytes = predicted_peak_bytes,
+                        area_scale = scale,
+                        "synthesized fitted-curve estimate candidate from a measured cell"
+                    );
+                    Some(SynthesizedEstimate {
+                        selection,
+                        evidence: estimate_evidence(
+                            contract,
+                            gen_core::MemoryBackend::Mlx,
+                            plan.tier,
+                            mode_key,
+                            overlay,
+                            geometry,
+                            selection,
+                            predicted_peak_bytes,
+                            calibration_fingerprint,
+                        ),
+                        basis: CandidateBasis::EstimateFittedCurve,
+                        decode_quality: parameter_candidate.decode_quality.clone(),
+                    })
+                });
+            if let Some(candidate) = fitted {
+                ladder
+                    .decode_quality_decisions
+                    .push(candidate.decode_quality.clone());
+                ladder.estimates.push(candidate);
+                continue;
+            }
+
+            // 2. Weights + headroom floor — no measured basis, so the binding-phase constraint does
+            //    not gate it (scope sentence on the constraint's doc).
+            let selection = MemorySelection {
+                strategy,
+                parameters: parameter_candidate.parameters,
+                tier: plan.tier,
+            };
+            if contract.validate_selection(&selection).is_err() {
+                continue;
+            }
+            let predicted_peak_bytes = estimate_floor_weights_bytes(contract, &engaged)
+                .saturating_add(plan.generic_headroom_bytes(geometry));
+            tracing::info!(
+                route = contract.provider_id,
+                backend = "mlx",
+                ?strategy,
+                raw_peak_bytes = predicted_peak_bytes,
+                "synthesized weights+headroom floor estimate candidate"
+            );
+            let candidate = SynthesizedEstimate {
+                selection,
+                evidence: estimate_evidence(
+                    contract,
+                    gen_core::MemoryBackend::Mlx,
+                    plan.tier,
+                    mode_key,
+                    overlay,
+                    geometry,
+                    selection,
+                    predicted_peak_bytes,
+                    calibration_fingerprint,
+                ),
+                basis: CandidateBasis::EstimateFloor,
+                decode_quality: parameter_candidate.decode_quality,
+            };
+            ladder
+                .decode_quality_decisions
+                .push(candidate.decode_quality.clone());
+            ladder.estimates.push(candidate);
+        }
+    }
+    ladder
 }
 
 /// Select the largest strictly lower, same-aspect geometry backed by a current exact record that
@@ -2589,44 +3303,6 @@ fn evaluate_request_with_budget_using_bundle(
             lower_alternative: None,
         };
     }
-    // sc-20570: mage-flow is the one route whose request peak and budget are quoted by the
-    // PROVIDER's own analytic estimator (`request_total_peak_bytes` and `live_request_budget` call
-    // `providers::mage::memory::{generation_peak_gb, production_safe_budget_gb}`) rather than this
-    // file's generic model. That estimator is only authorized by the calibration identity it was
-    // measured under, so an unpaired identity must not carry a verified claim — but it must not
-    // brick the route either. This used to `return Err`, which made mage the only engine that
-    // hard-failed on a calibration-identity mismatch; a provider-side rename therefore refused
-    // EVERY mage request instead of costing it its evidence. Degrade exactly like the generic
-    // identity check above.
-    if plan.engine_id.starts_with("mage_flow") && !mage_estimator_is_paired(contract) {
-        let loaded_abi_display = contract
-            .calibration
-            .as_ref()
-            .map_or_else(|| "none".to_string(), |identity| identity.abi.to_string());
-        tracing::warn!(
-            event = "mlx_mage_calibration_unpaired",
-            route = plan.engine_id,
-            model = plan.model_id,
-            expected_abi = gen_core::MEMORY_CALIBRATION_ABI,
-            expected_fingerprint = MAGE_CALIBRATION_FINGERPRINT,
-            loaded_abi = loaded_abi_display.as_str(),
-            loaded_fingerprint = contract
-                .calibration
-                .as_ref()
-                .map_or("none", |identity| identity.fingerprint.as_str()),
-            "loaded mage provider calibration is not the identity this estimator was paired with; \
-             degrading to the legacy estimate ladder"
-        );
-        admission = AdmissionRoute {
-            path: AdmissionPath::Legacy,
-            fallback_reason: Some(LegacyAdmissionReason::StaleIdentity),
-            evidence: Vec::new(),
-            estimate_bases: Vec::new(),
-            evidence_revision: None,
-            process_limit_bytes: None,
-            lower_alternative: None,
-        };
-    }
     // The selector and provider request context must use the same evidence-derived foreign demand
     // as the fail-closed precheck and the request-scoped MLX ceiling. Otherwise a covered request
     // with existing committed memory could be admitted against the legacy 2 GiB reserve even though
@@ -2644,6 +3320,22 @@ fn evaluate_request_with_budget_using_bundle(
         count = inputs.count.max(1),
         "selected MLX memory-admission path"
     );
+    if plan.engine_id.starts_with("mage_flow")
+        && !matches!(
+            contract.calibration.as_ref(),
+            Some(identity)
+                if identity.abi == gen_core::MEMORY_CALIBRATION_ABI
+                    && identity.fingerprint == MAGE_CALIBRATION_FINGERPRINT
+        )
+    {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{} loaded provider calibration does not match ABI {} / fingerprint {}; refusing \
+             request admission against an unpaired estimator",
+            plan.engine_id,
+            gen_core::MEMORY_CALIBRATION_ABI,
+            MAGE_CALIBRATION_FINGERPRINT
+        )));
+    }
     // The caller estimates the base-model pipeline. Let the provider's canonical contract seam add
     // any separately declared auxiliary networks before either fit selection or warm-cache credit.
     // Exact evidence already describes the whole request peak and therefore remains authoritative.
@@ -2661,6 +3353,13 @@ fn evaluate_request_with_budget_using_bundle(
     // process's current state. Only bytes above the cache-recorded pre-load external baseline, and
     // no more than the provider-declared total resident envelope, may be credited as already
     // present. Unrelated process allocations therefore remain charged on the available side.
+    //
+    // sc-19721: `total_resident_bytes()` stays the LOAD-EXACT envelope on a provider that declares
+    // an eviction. It is a ceiling on a credit, and the credit is already floored by what the
+    // process has actually committed — so a provider caught before its precompute-and-evict is
+    // credited for what it really holds, while one caught after is bounded by `committed_bytes`
+    // anyway. Lowering the ceiling to the steady state would only refuse credit that is genuinely
+    // resident.
     let attributable_resident_bytes = budget
         .committed_bytes
         .saturating_sub(external_committed_bytes)
@@ -2868,13 +3567,6 @@ fn evaluate_request_with_budget_using_bundle(
         geometry,
         expected_closure_digest: &live_closure_digest,
     };
-    // Scope note (sc-20571): the Evidence path deliberately zeroes `reserved_headroom_gb` — a
-    // calibrated candidate is graded against the foreign reserve CAPTURED with its measurement
-    // (`VerifiedAdmissionCandidate::foreign_reserve_bytes`), so charging the live host reserve on top
-    // would double-count. That is prior design, unchanged here. It also means the live foreign-usage
-    // reserve `live_request_budget` now folds in reaches the Legacy/estimate routes ONLY — which is
-    // precisely the incident class (an uncalibrated `basis=floor` estimate admitted against total
-    // RAM); calibrated admissions remain blind to live foreign residency by that earlier design.
     let selector_budget = Some(Budget {
         available_gb: budget.total_bytes.saturating_sub(budget.committed_bytes) as f64
             / BYTES_PER_GIB,
@@ -3159,144 +3851,6 @@ fn evaluate_request_with_budget_using_bundle(
     Ok(evaluation)
 }
 
-/// Non-worker resident memory to withhold from admission, in bytes: everything system-wide `vm_stat`
-/// reports as used (App + Wired + Compressed — Activity Monitor's "Memory Used"), minus what this
-/// worker itself already accounts for via `committed_bytes`, minus whatever share of the machine the
-/// caller's `total_bytes` ceiling has ALREADY excluded. On unified memory every other process — the
-/// desktop app, a browser, a concurrent `mlx-gen` real-weights run — draws from the SAME pool MLX
-/// allocates from, so its footprint must shrink the admitted ceiling exactly like this worker's own
-/// committed bytes already do.
-///
-/// sc-20571: without this, [`live_request_budget`]'s ceiling was effectively the machine's TOTAL
-/// unified memory minus only a flat, engine-independent reserve (2 GiB) — blind to whatever else was
-/// actually resident. A `basis=floor` estimate widened by the ~50% MLX estimate margin (already the
-/// conservative direction: it can only make an estimate HARDER to admit, never easier) still cleared
-/// that ceiling — 122.65 GiB admitted on a 128 GiB Mac that also had the desktop app, a browser, and a
-/// concurrent real-weights test resident — because the margin scales with the (possibly very wrong)
-/// estimate, not with what the host actually has free. This closes the gap on the ceiling side instead:
-/// the reserve now tracks live foreign usage rather than a constant nobody's other process respects.
-///
-/// **Why `total_bytes` and `machine_total_bytes` are both parameters (sc-20571 review):** the live
-/// `vm_stat` reading is HOST-scoped, but not every caller's `total_bytes` is. `mage_flow`'s ceiling is
-/// an engine-derated safe budget (`limit × SAFE_FRAC`) and an `MLX_MEMORY_CAP` ceiling is a smaller-Mac
-/// emulation — both already sit BELOW the machine's physical memory. Subtracting a host-scoped `used`
-/// from such a ceiling charges the derated share twice and manufactures spurious refusals near the
-/// boundary. So the term subtracted is only the foreign residency the ceiling has NOT already given
-/// away: `max(0, used − committed − (machine_total − total_bytes))`.
-///
-/// Pure arithmetic so the policy is unit-testable without a live probe. Every subtraction saturates:
-/// a stale or momentarily low live sample, or a `total_bytes` that exceeds the probed machine total,
-/// must never manufacture a NEGATIVE reserve that would WIDEN the ceiling. `machine_total_bytes` of
-/// `None` (the `sysctl` probe failed) means the derated share is unknowable, so the whole term is
-/// dropped — the same fail-open posture as a missing `system_used_bytes`, since guessing here would
-/// double-charge exactly the derated callers this parameter exists for.
-pub(crate) fn live_foreign_reserve_bytes(
-    total_bytes: u64,
-    machine_total_bytes: Option<u64>,
-    system_used_bytes: Option<u64>,
-    committed_bytes: u64,
-) -> u64 {
-    let (Some(used), Some(machine_total)) = (system_used_bytes, machine_total_bytes) else {
-        return 0;
-    };
-    let already_excluded = machine_total.saturating_sub(total_bytes);
-    used.saturating_sub(committed_bytes)
-        .saturating_sub(already_excluded)
-}
-
-/// Pure composition of a [`MemoryBudget`] from already-probed inputs — the whole of
-/// [`live_request_budget`]'s policy, with the probes lifted out so it is unit-testable off-device.
-/// The live foreign-usage reserve ([`live_foreign_reserve_bytes`]) is folded ON TOP of whichever
-/// flat/engine-derived `reserved_headroom_bytes` the caller's branch chose, since the "other processes
-/// are also using this machine" risk is host-scoped, not engine-scoped.
-///
-/// sc-20571 review: this exists because the fold itself — not just the arithmetic behind it — needs
-/// coverage. With the fold inlined in the `#[cfg(target_os = "macos")]`, `mlx_rs`-touching shell,
-/// deleting it left the whole suite green.
-pub(crate) fn compose_live_request_budget(
-    total_bytes: u64,
-    machine_total_bytes: Option<u64>,
-    system_used_bytes: Option<u64>,
-    committed_bytes: u64,
-    reclaimable_bytes: u64,
-    flat_reserved_headroom_bytes: u64,
-) -> MemoryBudget {
-    let foreign_reserve = live_foreign_reserve_bytes(
-        total_bytes,
-        machine_total_bytes,
-        system_used_bytes,
-        committed_bytes,
-    );
-    MemoryBudget {
-        total_bytes,
-        committed_bytes,
-        reclaimable_bytes,
-        reserved_headroom_bytes: flat_reserved_headroom_bytes.saturating_add(foreign_reserve),
-    }
-}
-
-/// How long the blocking `vm_stat` probe may run before it is killed. Matches
-/// [`crate::gpu`]'s async `vm_stat_used_mb` bound (sc-20571 review): this probe runs in exactly the
-/// wedged-host conditions the fix targets, where a hung subprocess would stall the generator-cache
-/// thread indefinitely. A blown deadline is treated like any other probe failure — no signal.
-#[cfg(target_os = "macos")]
-const SYSTEM_USED_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
-
-/// Blocking system-wide "Memory Used" probe (`vm_stat`) for [`live_foreign_reserve_bytes`]'s live
-/// input. Reuses [`crate::gpu::system_used_mb_from_vm_stat`] — the same parser the async utilization
-/// heartbeat samples for telemetry — as a one-shot blocking call, matching
-/// [`probe_total_unified_memory_gib`]'s rationale: `live_request_budget` runs on the generator-cache
-/// thread, which is already blocking on the weight load, so a one-shot subprocess probe here is free.
-/// `None` off macOS or when the probe fails ⇒ zero foreign reserve ⇒ admission falls back to the
-/// pre-fix total-RAM-minus-flat-reserve ceiling rather than ever refusing without a signal (the same
-/// fail-open posture `resolve_budget`/`probe_total_unified_memory_gib` already take).
-///
-/// Bounded by [`SYSTEM_USED_PROBE_TIMEOUT`] and killed on expiry. The child is polled rather than
-/// read-blocked because `vm_stat`'s output is a couple of KiB — far below the pipe buffer — so it can
-/// never wedge writing while we wait, and stdout is drained only after the process has exited.
-#[cfg(target_os = "macos")]
-fn probe_system_used_bytes() -> Option<u64> {
-    use std::io::Read;
-
-    let mut child = std::process::Command::new("vm_stat")
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()?;
-    let deadline = std::time::Instant::now() + SYSTEM_USED_PROBE_TIMEOUT;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                if !status.success() {
-                    return None;
-                }
-                break;
-            }
-            Ok(None) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
-            // Deadline blown, or the wait itself failed: kill and reap, then report no signal.
-            Ok(None) | Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-        }
-    }
-    let mut stdout = String::new();
-    child.stdout.take()?.read_to_string(&mut stdout).ok()?;
-    crate::gpu::system_used_mb_from_vm_stat(&stdout).map(|mb| mb * 1024 * 1024)
-}
-
-/// No `vm_stat` off macOS ⇒ no live signal ⇒ the ceilings that consume it keep their pre-sc-20571
-/// shape. Needed because the LOAD-time cold-load gate ([`decide_residency_for_spec`]) compiles on
-/// every platform, unlike the macOS-only [`live_request_budget`].
-#[cfg(not(target_os = "macos"))]
-fn probe_system_used_bytes() -> Option<u64> {
-    None
-}
-
-/// Thin shell: probe, then hand everything to [`compose_live_request_budget`], which owns the policy.
 #[cfg(target_os = "macos")]
 pub(crate) fn live_request_budget(engine_id: &str) -> WorkerResult<MemoryBudget> {
     // Reclaim only allocator-cache buffers from prior geometries; live arrays (the cached weights)
@@ -3320,16 +3874,12 @@ pub(crate) fn live_request_budget(engine_id: &str) -> WorkerResult<MemoryBudget>
         let reserve = crate::fit_gate::legacy_unified_reserve(total_gib);
         (gib_to_bytes(total_gib), gib_to_bytes(reserve.gb))
     };
-    Ok(compose_live_request_budget(
+    Ok(MemoryBudget {
         total_bytes,
-        // The machine's physical unified memory, NOT the (possibly derated or capped) ceiling above —
-        // it is what makes the host-scoped live reading comparable to this engine's budget.
-        probe_total_unified_memory_bytes(),
-        probe_system_used_bytes(),
         committed_bytes,
         reclaimable_bytes,
         reserved_headroom_bytes,
-    ))
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -3400,11 +3950,35 @@ pub(crate) fn evaluate_request(
 /// carries: MLX providers are explicitly anchored on macOS, while the CUDA bundle exposes its explicit
 /// Candle catalog. The same query is shared by the MLX fit gate (sc-10840) and Candle fit gate
 /// (sc-12130), so adding a truthful provider capability needs no worker allowlist edit.
+/// **Two descriptor bits, one question (sc-19721).** gen-core split the attestation in two, and this
+/// gate's question is the disjunction:
+///
+/// * `supports_sequential_offload` — the SELECTABLE [`OffloadPolicy::Sequential`] is honoured.
+/// * `unconditionally_engages_staged_residency` — the provider stages eligible components through a
+///   load/use/drop lifecycle on EVERY generation, with or without a policy request.
+///
+/// Either one makes "peak is the dominant component, not the sum" true, which is the only thing this
+/// gate reads the bit for. The pair is not redundant: MLX Bernini holds no component weights on the
+/// generator at all, so it never had a selectable control to honour — it advertised
+/// `supports_sequential_offload: true` purely to reach this gate, and inference corrected that to the
+/// second bit. Reading only the first would have charged Bernini the SUM of the Qwen2.5-VL planner,
+/// the UMT5-XXL encoder and the two MoE experts — a co-residency `generate_impl` never creates — and
+/// refused a model that fits, silently, on a pin bump. The `false` default still means "no
+/// attestation", so an unwired engine (sensenova's fused MoT) is still never offered `Sequential`.
+///
+/// Requesting `Sequential` from a provider that stages unconditionally but exposes no selectable
+/// control is safe in the direction that matters: the policy is *advisory* (gen-core treats an
+/// unwired request as `Resident`, never an error), and here the staged behaviour the prediction
+/// assumes is what the provider physically does regardless.
 pub(crate) fn engine_supports_sequential(engine_id: &str) -> bool {
     crate::inference_runtime::media()
         .generators()
         .find(|reg| (reg.descriptor)().id == engine_id)
-        .is_some_and(|reg| (reg.descriptor)().capabilities.supports_sequential_offload)
+        .is_some_and(|reg| {
+            let capabilities = (reg.descriptor)().capabilities;
+            capabilities.supports_sequential_offload
+                || capabilities.unconditionally_engages_staged_residency
+        })
 }
 
 /// Whether `engine_id` physically stages heavyweight phases, either because the provider exposes
@@ -4200,102 +4774,6 @@ pub(crate) enum ResidencyOutcome {
     },
 }
 
-/// What the host actually looked like when the cold-load gate ran (sc-20571, cold-load route).
-///
-/// Both fields are `Option` because both probes fail open: off macOS, or when `sysctl` / `vm_stat`
-/// cannot be read, there is no live signal and the ceiling falls back byte-for-byte to its pre-fix
-/// shape rather than refusing on a guess. [`LiveHostMemory::UNKNOWN`] is that no-signal value.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct LiveHostMemory {
-    /// The machine's physical unified memory (`sysctl hw.memsize`) — NOT the possibly capped or
-    /// derated admission ceiling. It is what makes the host-scoped `system_used_bytes` reading
-    /// comparable to a budget that may already sit below physical memory.
-    pub machine_total_bytes: Option<u64>,
-    /// System-wide "Memory Used" (`vm_stat`'s App + Wired + Compressed — Activity Monitor's figure).
-    pub system_used_bytes: Option<u64>,
-}
-
-impl LiveHostMemory {
-    /// No live signal: the ceiling keeps its pre-sc-20571 total-RAM shape.
-    ///
-    /// Deliberately `#[cfg(test)]`. Production reaches the no-signal shape only by the probes
-    /// themselves failing (or by being off macOS), never by a caller opting out — so a future edit
-    /// that wanted to hand the waterfall a blind budget would have to write the two `None`s out by
-    /// hand rather than deleting one call and staying green.
-    #[cfg(test)]
-    pub(crate) const UNKNOWN: Self = Self {
-        machine_total_bytes: None,
-        system_used_bytes: None,
-    };
-}
-
-/// Shrink the LOAD-time budget to what is actually available on this host right now (sc-20571).
-///
-/// The cold-load waterfall's ceiling was the machine's TOTAL unified memory — `resolve_budget`
-/// returns `hw.memsize` (or the `MLX_MEMORY_CAP` emulation) and every layer below compared against
-/// it directly, so nothing subtracted what was already resident. That is the same defect sc-20571
-/// fixed for the per-request path in [`live_request_budget`], on the route the incident actually
-/// took: `bernini`'s image and video handlers never reach `evaluate_request`, only this waterfall
-/// (telemetry `route:"generic_mlx_cold_load"`), which is why the incident's exact estimate
-/// (`raw_peak_bytes = 87_563_634_463`, widened to 122.65 GiB) was admitted on a 128 GiB Mac whose
-/// desktop app, browser and a concurrent real-weights test were all resident — and why it still
-/// admitted identically on an idle vs. a loaded host after that fix
-/// (<https://github.com/SceneWorks/SceneWorks/pull/2437#issuecomment-5345589210>).
-///
-/// The reserve itself is [`live_foreign_reserve_bytes`] — the SAME pure policy the fixed
-/// per-request path uses, deliberately called rather than re-derived, so the two ceilings can never
-/// disagree about what "already resident" means (including its derate clamp, which keeps a
-/// `MLX_MEMORY_CAP` ceiling from being charged twice for the share it has already given away).
-///
-/// `own_resident_bytes` is the caller's statement of how much of the live reading is THIS spec's
-/// own model, already resident in this process — the cold-load mirror of `evaluate_request`'s
-/// attributable-resident credit (sc-20571 review). The host-scoped `vm_stat` reading cannot tell a
-/// foreign process's memory from a model this worker itself is holding warm, so without the credit
-/// a warm repeat of a large model charges its own weights twice — once as the load's `needed` and
-/// once inside the foreign reserve — and is refused or downtiered until eviction, on the very host
-/// state that just served it. The two call-site classes fix the value differently:
-///
-/// - the generator cache's LOADER seams pass **zero**
-///   ([`COLD_LOADER_SEAM_OWN_RESIDENT_BYTES`]): they run only on a cache MISS, immediately before
-///   `crate::inference_runtime::load` allocates, after the previous resident entry (if any) has
-///   already been dropped — so no byte of the live reading is this load's own model, and every
-///   live byte is genuinely unavailable. (Known and accepted conservatism: the just-dropped
-///   generator's buffers may still sit in the MLX allocator cache, which `vm_stat` counts even
-///   though `generator_cache::capture_backend_committed_bytes` clears it moments later. That errs
-///   toward refusal, which is the correct direction for a lane whose failure mode is a poisoned
-///   Metal submission queue and a SIGABRTed worker rather than a catchable error.)
-/// - the PER-REQUEST sites (the sc-10733 downtier chooser and the imported-SDXL / Mage-Flow
-///   fine-tune pre-gates) run BEFORE the generator-cache lookup, so when the probed spec's model is
-///   already warm-resident its own bytes are inside the live reading. They pass
-///   [`crate::generator_cache::ResidentGeneratorAttribution::credit_for`]'s figure — the resident
-///   entry's live committed bytes above its recorded pre-load external baseline, and only when the
-///   resident identity is the probed spec's own — so unrelated process allocations remain charged,
-///   exactly as `evaluate_request` keeps them charged on the available side.
-///
-/// Saturating in both directions: a stale or momentarily low reading, or an over-stated credit,
-/// can never WIDEN the ceiling past the budget (the credit is additionally clamped to the spec's
-/// own charged bytes in [`decide_residency_with_headroom`], mirroring `evaluate_request`'s
-/// `total_resident_bytes` envelope clamp).
-pub(crate) fn cold_load_budget_for_live_host(
-    budget: Option<MlxMemoryBudget>,
-    live: LiveHostMemory,
-    own_resident_bytes: u64,
-) -> Option<MlxMemoryBudget> {
-    let budget = budget?;
-    let total_bytes = gib_to_bytes(budget.total_gb);
-    let foreign = live_foreign_reserve_bytes(
-        total_bytes,
-        live.machine_total_bytes,
-        live.system_used_bytes,
-        // See the doc comment: bytes the caller proved are this spec's own resident model are the
-        // ONLY live bytes accounted for elsewhere; everything else stays charged.
-        own_resident_bytes,
-    );
-    Some(MlxMemoryBudget {
-        total_gb: total_bytes.saturating_sub(foreign) as f64 / BYTES_PER_GIB,
-    })
-}
-
 /// The pure residency decision: given the model's whole-model + text-encoder on-disk bytes, the
 /// (possibly emulated) budget, and whether the provider stages components, choose Resident /
 /// Sequential / Reject (sc-10839). No IO, no globals — the live [`apply_residency_policy`] resolves
@@ -4311,32 +4789,6 @@ pub(crate) fn decide_residency(
         total_bytes,
         te_bytes,
         budget,
-        LiveHostMemory::UNKNOWN,
-        0,
-        sequential_capable,
-        HEADROOM_GB,
-    )
-}
-
-/// [`decide_residency`] against a stated live host (sc-20571) — the seam the cold-load
-/// live-availability tests drive, so they exercise the REAL waterfall (all three layers plus the
-/// fold) rather than a re-implementation of it. `own_resident_bytes` is the per-request
-/// attributable-resident credit (sc-20571 review); loader-seam-shaped scenarios pass `0`.
-#[cfg(test)]
-pub(crate) fn decide_residency_on_live_host(
-    total_bytes: u64,
-    te_bytes: u64,
-    budget: Option<MlxMemoryBudget>,
-    live: LiveHostMemory,
-    own_resident_bytes: u64,
-    sequential_capable: bool,
-) -> ResidencyOutcome {
-    decide_residency_with_headroom(
-        total_bytes,
-        te_bytes,
-        budget,
-        live,
-        own_resident_bytes,
         sequential_capable,
         HEADROOM_GB,
     )
@@ -4346,24 +4798,9 @@ fn decide_residency_with_headroom(
     total_bytes: u64,
     te_bytes: u64,
     budget: Option<MlxMemoryBudget>,
-    live: LiveHostMemory,
-    own_resident_bytes: u64,
     sequential_capable: bool,
     headroom_gb: f64,
 ) -> ResidencyOutcome {
-    // sc-20571 (cold-load route): the LOAD-BEARING wiring. Every layer below — the peak check, the
-    // staged-peak overflow check, and the `weights_floor_load_admission` floor — compares against
-    // this one budget, so folding live availability in here (rather than at each comparison) is
-    // what makes all three honor it. `live` is threaded through the signature deliberately: a
-    // caller cannot resolve a budget for this waterfall without saying what it knows about the
-    // host, so forgetting the fold is a visible `UNKNOWN`, not an omission.
-    //
-    // The own-residency credit is clamped to the spec's own charged bytes (sc-20571 review): the
-    // credit exists to stop a warm-resident model's weights from being charged twice, so it can
-    // never exceed what this decision charges for them — the cold-load mirror of
-    // `evaluate_request`'s `.min(contract.total_resident_bytes())` envelope clamp. An over-stated
-    // credit (a mis-attributed reading) therefore cannot manufacture ceiling out of foreign bytes.
-    let budget = cold_load_budget_for_live_host(budget, live, own_resident_bytes.min(total_bytes));
     let peak = decide_residency_by_peak_with_headroom(
         total_bytes,
         te_bytes,
@@ -4624,44 +5061,7 @@ fn with_selected_sequential_shape(engine_id: &str, spec: LoadSpec) -> LoadSpec {
 ///
 /// `engine_id` is both the [`engine_supports_sequential`] key and the human-facing model name in the
 /// rejection message.
-///
-/// This entry is the generator cache's LOADER seam (miss-only): it probes the live host itself,
-/// once per cold load, and claims **no** own-residency credit
-/// ([`COLD_LOADER_SEAM_OWN_RESIDENT_BYTES`]) — on a miss the previous resident entry has already
-/// been dropped, so nothing in the live reading is this load's own model. Per-request callers that
-/// run BEFORE the cache lookup use [`apply_residency_policy_on_live_host`] with the resident
-/// attribution credit instead (sc-20571 review).
 pub(crate) fn apply_residency_policy(spec: LoadSpec, engine_id: &str) -> WorkerResult<LoadSpec> {
-    apply_residency_policy_on_live_host(
-        spec,
-        engine_id,
-        probe_live_host_memory(),
-        COLD_LOADER_SEAM_OWN_RESIDENT_BYTES,
-    )
-}
-
-/// The own-residency credit the generator cache's LOADER seams claim: **zero**, by contract.
-///
-/// Those seams run only on a cache MISS, after the previous resident entry has been dropped and
-/// immediately before `crate::inference_runtime::load` allocates — the incoming weights land on top
-/// of everything the live probe still sees, so crediting any of it would over-admit the exact
-/// over-commit sc-20571 exists to prevent. The sc-20571 review verified zero as correct here while
-/// requiring the attributable-resident credit at the per-request sites; a test pins this constant
-/// so the two contracts cannot silently swap.
-pub(crate) const COLD_LOADER_SEAM_OWN_RESIDENT_BYTES: u64 = 0;
-
-/// [`apply_residency_policy`] for the PER-REQUEST pre-gates (sc-20571 review): the imported-SDXL and
-/// Mage-Flow fine-tune handlers gate a request-shaped spec BEFORE the generator-cache lookup, so a
-/// warm-resident repeat of the same model sees its own weights inside the live `vm_stat` reading.
-/// The caller probes the host once and passes the resident attribution credit
-/// ([`crate::generator_cache::ResidentGeneratorAttribution::credit_for`]) so those bytes are not
-/// charged twice — see [`cold_load_budget_for_live_host`].
-pub(crate) fn apply_residency_policy_on_live_host(
-    spec: LoadSpec,
-    engine_id: &str,
-    live: LiveHostMemory,
-    own_resident_bytes: u64,
-) -> WorkerResult<LoadSpec> {
     if spec.prepared_file_pins().is_prepared() {
         spec.validate_prepared_file_pins().map_err(|error| {
             crate::classify_engine_error("MLX residency source validation failed", error)
@@ -4673,9 +5073,9 @@ pub(crate) fn apply_residency_policy_on_live_host(
         return Ok(spec);
     }
     let outcome = if spec.prepared_file_pins().is_prepared() {
-        try_decide_residency_for_spec(engine_id, &spec, live, own_resident_bytes)?
+        try_decide_residency_for_spec(engine_id, &spec)?
     } else {
-        decide_residency_for_spec(engine_id, &spec, live, own_resident_bytes)
+        decide_residency_for_spec(engine_id, &spec)
     };
     match outcome {
         ResidencyOutcome::Resident => Ok(spec),
@@ -4923,19 +5323,7 @@ fn packed_quant_bits(root: &std::path::Path, component: &str) -> Option<i64> {
 /// capability downtier (sc-10733) can evaluate a candidate tier's fit at the base.rs seam WITHOUT
 /// building the final spec twice. Same budget + component-byte + sequential-capability inputs the live
 /// gate uses, so the seam's downtier choice and the cache's admission never disagree.
-///
-/// `live` is caller-probed (sc-20571 review): the downtier chooser scores several candidate tiers
-/// per request, and probing inside this function spawned one bounded `vm_stat` subprocess per
-/// candidate. Probing once at the request boundary also means every candidate is scored against the
-/// SAME host snapshot, so the chooser cannot be skewed by the reading moving mid-loop.
-/// `own_resident_bytes` is the per-request attributable-resident credit — see
-/// [`cold_load_budget_for_live_host`] for who passes what.
-pub(crate) fn decide_residency_for_spec(
-    engine_id: &str,
-    spec: &LoadSpec,
-    live: LiveHostMemory,
-    own_resident_bytes: u64,
-) -> ResidencyOutcome {
+pub(crate) fn decide_residency_for_spec(engine_id: &str, spec: &LoadSpec) -> ResidencyOutcome {
     let budget = resolve_budget(probe_total_unified_memory_gib(), mlx_memory_cap_gb());
     let (total_bytes, te_bytes, headroom) = spec_component_bytes(engine_id, spec);
     // The LOAD-time gate is resolution-blind, so it budgets the family's whole flat allowance and
@@ -4944,8 +5332,6 @@ pub(crate) fn decide_residency_for_spec(
         total_bytes,
         te_bytes,
         budget,
-        live,
-        own_resident_bytes,
         engine_supports_sequential(engine_id),
         headroom.total_gb,
     )
@@ -4954,8 +5340,6 @@ pub(crate) fn decide_residency_for_spec(
 fn try_decide_residency_for_spec(
     engine_id: &str,
     spec: &LoadSpec,
-    live: LiveHostMemory,
-    own_resident_bytes: u64,
 ) -> WorkerResult<ResidencyOutcome> {
     let budget = resolve_budget(probe_total_unified_memory_gib(), mlx_memory_cap_gb());
     let (total_bytes, te_bytes, headroom) = spec_component_bytes_checked(engine_id, spec)?;
@@ -4963,27 +5347,9 @@ fn try_decide_residency_for_spec(
         total_bytes,
         te_bytes,
         budget,
-        live,
-        own_resident_bytes,
         engine_supports_sequential(engine_id),
         headroom.total_gb,
     ))
-}
-
-/// Thin probe shell for [`cold_load_budget_for_live_host`] (sc-20571): reads the same two live
-/// signals the fixed per-request path reads, via the same functions
-/// ([`probe_total_unified_memory_bytes`], [`probe_system_used_bytes`]) — no second `sysctl`/`vm_stat`
-/// parser. Both fail open to `None`, and off macOS both are `None` by construction, so a non-Mac
-/// build keeps the pre-fix ceiling exactly.
-///
-/// `pub(crate)` so per-request callers (the sc-10733 downtier chooser, the imported-SDXL and
-/// Mage-Flow fine-tune pre-gates) probe ONCE per request and thread the snapshot through
-/// (sc-20571 review), instead of this being re-probed per residency decision.
-pub(crate) fn probe_live_host_memory() -> LiveHostMemory {
-    LiveHostMemory {
-        machine_total_bytes: probe_total_unified_memory_bytes(),
-        system_used_bytes: probe_system_used_bytes(),
-    }
 }
 
 /// The residency outcome for a candidate tier's WEIGHTS DIR — a bare-`Dir` convenience over
@@ -4998,7 +5364,7 @@ pub(crate) fn residency_for_dir(
     weights_dir: &std::path::Path,
 ) -> ResidencyOutcome {
     let spec = LoadSpec::new(WeightsSource::Dir(weights_dir.to_path_buf()));
-    decide_residency_for_spec(engine_id, &spec, probe_live_host_memory(), 0)
+    decide_residency_for_spec(engine_id, &spec)
 }
 
 /// The on-disk WEIGHT bytes (GiB) a `spec` loads — the weights half of the number
@@ -5030,15 +5396,10 @@ fn too_big_error(
         ),
         None => String::new(),
     };
-    // sc-20571: `available_gb` is no longer "what this machine HAS" — since the cold-load ceiling
-    // subtracts live host residency, it is what is safely available RIGHT NOW. The wording says so,
-    // and names closing other memory holders first, because on a loaded host that is the action
-    // that actually changes the number.
     WorkerError::InvalidPayload(format!(
         "{model_label} needs ~{needed} GB of unified memory{staged_note} (model weights plus \
-         headroom for activations and the OS) but only ~{available} GB is safely available right \
-         now. Close other apps or models holding memory, choose a smaller quant tier, lower the \
-         output resolution, or run on a Mac with more memory.",
+         headroom for activations and the OS) but this machine has ~{available} GB. Choose a \
+         smaller quant tier, lower the output resolution, or run on a Mac with more memory.",
         needed = needed_gb.round() as i64,
         available = available_gb.round() as i64,
     ))
@@ -7792,73 +8153,6 @@ mod tests {
         (bundle, plan)
     }
 
-    /// The MLX binding walk asks the MECHANISM which geometries an extrapolation may span
-    /// (sc-19050, epic 19048 R1) — it does not carry its own copy of the axis law.
-    ///
-    /// Written because the delegation is otherwise invisible: on today's image lane every binding
-    /// and every request is `batch = 1, frames = 1`, so replacing
-    /// `basis_geometry_is_scalable(binding, request)` with a bare `binding != request` survives the
-    /// entire suite. It is the sc-18829 FRAMES axis and the batch axis the weaker expression drops,
-    /// and this is where they are held.
-    #[test]
-    fn the_basis_walk_applies_the_shared_scalable_axis_law() {
-        let (bundle, plan) = fixture_ladder();
-        let MlxCalibrationConfig::Valid(calibration) = &plan.calibration else {
-            panic!("fixture calibration");
-        };
-        let matches: Vec<&MlxCalibrationBinding> = calibration.bindings.iter().collect();
-        let digest = fixture_closure_digest();
-        let collect = |geometry: CalibrationGeometry| {
-            collect_estimate_bases(
-                &bundle,
-                &plan,
-                &matches,
-                "text_to_image",
-                "none",
-                geometry,
-                &digest,
-            )
-        };
-        // Same batch and frames, larger area: the 1024 squared cells ARE legitimate bases.
-        let scalable = CalibrationGeometry {
-            width: 2048,
-            height: 2048,
-            batch: 1,
-            frames: 1,
-        };
-        assert!(
-            !collect(scalable).is_empty(),
-            "the scalable-axis fixture produced no basis, so the off-axis assertions below would \
-             be vacuous"
-        );
-        // A different frame count or batch is a different workload SHAPE, never a scalable
-        // geometry — no per-axis term has been fitted for either.
-        for off_axis in [
-            CalibrationGeometry {
-                frames: 2,
-                ..scalable
-            },
-            CalibrationGeometry {
-                batch: 2,
-                ..scalable
-            },
-        ] {
-            assert!(
-                collect(off_axis).is_empty(),
-                "{off_axis:?} differs from the measured cells on an axis the regressor does not \
-                 span, so it must not seed a fitted estimate"
-            );
-        }
-        // And the request's own cell is exact evidence, not a basis.
-        assert!(collect(CalibrationGeometry {
-            width: 1024,
-            height: 1024,
-            batch: 1,
-            frames: 1,
-        })
-        .is_empty());
-    }
-
     #[test]
     fn verified_lower_geometry_requires_exact_current_identity_and_geometry() {
         let mut bundle = fixture_bundle();
@@ -9864,7 +10158,6 @@ mod tests {
         // 12 GiB denoise and 5 GiB decode) — the exact shape of the corpus example behind the
         // constraint.
         let basis = MeasuredRungBasis {
-            lane: gen_core::MemoryBackend::Mlx,
             rung: StrategyRung::BoundedDecode,
             parameters: gen_core::MemoryStrategyParameters {
                 decode_tile_edge: Some(512),
@@ -9954,6 +10247,103 @@ mod tests {
             "the fitted estimate's raw peak is the area-scaled measured envelope (the estimate \
              margin is applied later, by the selector)"
         );
+    }
+
+    /// sc-17153 — `synthesize_estimate_ladder` emits NO candidate for a non-implemented rung,
+    /// asserted at the synthesis seam itself.
+    ///
+    /// The sc-17153 pre-dispatch survey flagged this property as unverified. What this pins is
+    /// the seam's BEHAVIOR, per non-implemented variant, with a control that proves each mutation
+    /// is the sole reason the candidate disappears:
+    ///
+    ///  * control: the fixture contract's implemented optimized rungs each synthesize a candidate
+    ///    (floor basis — no measured bases are supplied), and its `Missing` rung 4 synthesizes
+    ///    none;
+    ///  * flipping one implemented rung to `Missing` removes exactly that rung's candidate;
+    ///  * flipping it to `StructurallyNotApplicable` removes it identically — positive-match
+    ///    semantics, not a denylist a new support variant could slip past.
+    ///
+    /// ⚠️ What this test does NOT isolate: WHICH layer refuses. The synthesis loop's explicit
+    /// `matches!(.., Some(MemoryStrategySupport::Implemented))` filter is redundant
+    /// defense-in-depth with `contract.validate_selection`, which also refuses a selection on a
+    /// non-implemented rung — deleting the filter outright leaves this test green because the
+    /// deeper check catches the same mutation (measured during sc-17153's review). The same
+    /// caveat applies to the sc-18096 `Missing`-mutation arm above, which reaches the seam only
+    /// through `evaluate`'s full reject path. Do not read either test as the guard that keeps
+    /// `validate_selection`'s refusal removable, or vice versa: the pinned property is the
+    /// behavior, and BOTH layers currently enforce it.
+    #[test]
+    fn synthesize_estimate_ladder_admits_only_implemented_rungs() {
+        let generator = fixture_generator();
+        let contract = generator.contract.as_ref().expect("fixture contract");
+        let plan = fixture_plan();
+        let geometry = MemoryGeometry {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        };
+        let strategies = |contract: &MemoryProviderContract| -> Vec<MemoryStrategy> {
+            synthesize_estimate_ladder(
+                contract,
+                &plan,
+                "text_to_image",
+                None,
+                geometry,
+                false,
+                None,
+                &[],
+            )
+            .estimates
+            .iter()
+            .map(|estimate| estimate.selection.strategy)
+            .collect()
+        };
+
+        // Control: every implemented optimized rung gets a floor candidate; the resident baseline
+        // is deliberately absent (it exists on every legacy route already) and the fixture's
+        // Missing rung 4 is never synthesized.
+        let control = strategies(contract);
+        assert_eq!(
+            control,
+            vec![
+                MemoryStrategy::StagedResidency,
+                MemoryStrategy::BoundedDecode,
+                MemoryStrategy::BoundedAttention,
+            ],
+            "the fixture's implemented rungs, and only those, are estimate-admissible"
+        );
+
+        for support in [
+            gen_core::MemoryStrategySupport::Missing,
+            gen_core::MemoryStrategySupport::StructurallyNotApplicable {
+                reason: "sc-17153 mutation: the architecture lacks what the rung optimizes"
+                    .to_owned(),
+            },
+        ] {
+            let mut mutated = contract.clone();
+            mutated
+                .strategies
+                .iter_mut()
+                .find(|capability| capability.strategy == MemoryStrategy::BoundedDecode)
+                .expect("bounded decode capability")
+                .support = support.clone();
+            let survivors = strategies(&mutated);
+            assert!(
+                !survivors.contains(&MemoryStrategy::BoundedDecode),
+                "a rung declared {support:?} must synthesize no candidate"
+            );
+            assert_eq!(
+                survivors,
+                vec![
+                    MemoryStrategy::StagedResidency,
+                    MemoryStrategy::BoundedAttention,
+                ],
+                "the mutation removes exactly the de-implemented rung — the other implemented \
+                 rungs keep their floor candidates, so the control pair isolates the filter"
+            );
+        }
     }
 
     #[test]
@@ -12153,12 +12543,6 @@ mod tests {
         ))
     }
 
-    // The shared sc-20606 sparse-fixture helpers; this module's callers are all macOS-only today,
-    // but the discipline (flag sparse BEFORE the multi-GB `set_len`) is what keeps these fixtures
-    // free on NTFS should a lane ever widen.
-    #[cfg(target_os = "macos")]
-    use crate::tests::{set_sparse_len, set_sparse_valid_safetensor};
-
     /// Build the exact FLUX.2 encoder/config/tokenizer admission surface used by the source-bound
     /// audit without loading a tensor. Klein's Qwen3 stays dense across every DiT tier; Dev follows
     /// the selected tier and its base route also retains the builtin Pixtral vision surface.
@@ -12501,6 +12885,7 @@ mod tests {
         base_asset_bytes: u64,
         control_bytes: u64,
     ) -> Result<(tempfile::TempDir, LoadSpec), String> {
+        use crate::test_fixture_disk::{create_sparse_weights, set_sparse_valid_safetensor};
         use gen_core::Quant;
 
         let fixture = tempfile::tempdir().map_err(|error| error.to_string())?;
@@ -12536,11 +12921,11 @@ mod tests {
                     "Lens bf16 asset {base_asset_bytes} is smaller than its source encoder"
                 ));
             }
-            set_sparse_len(
+            create_sparse_weights(
                 &weights.join("text_encoder/model.safetensors"),
                 LENS_BF16_TEXT_ENCODER_DISK_BYTES,
             );
-            set_sparse_len(
+            create_sparse_weights(
                 &weights.join("transformer/model.safetensors"),
                 base_asset_bytes - LENS_BF16_TEXT_ENCODER_DISK_BYTES,
             );
@@ -12566,7 +12951,7 @@ mod tests {
             )?;
             set_sparse_valid_safetensor(&weights.join("vae/model.safetensors"), vae_bytes)?;
         } else {
-            set_sparse_len(&weights.join("model.safetensors"), base_asset_bytes);
+            create_sparse_weights(&weights.join("model.safetensors"), base_asset_bytes);
         }
         let spec = match tier {
             "q4" => LoadSpec::new(WeightsSource::Dir(weights)).with_quant(Quant::Q4),
@@ -12578,7 +12963,7 @@ mod tests {
             spec
         } else {
             let control = fixture.path().join("control.safetensors");
-            set_sparse_len(&control, control_bytes);
+            create_sparse_weights(&control, control_bytes);
             spec.with_control(WeightsSource::File(control))
         };
         Ok((
@@ -14480,7 +14865,8 @@ mod tests {
     #[test]
     fn production_control_spec_replaces_raw_checkpoint_with_one_typed_residency() {
         use gen_core::{
-            MemoryComponentKind, MemoryFormulaKind, MemoryFormulaVariable, MemoryResidentComponent,
+            MemoryComponentKind, MemoryComponentResidency, MemoryFormulaKind,
+            MemoryFormulaVariable, MemoryResidentComponent,
         };
         use std::fs::File;
 
@@ -14536,6 +14922,7 @@ mod tests {
                     kind: MemoryComponentKind::ControlBranch,
                     resident_bytes: CONTROL_RESIDENT_BYTES,
                     bounded_by: None,
+                    residency: MemoryComponentResidency::WholeRender,
                 }],
             };
         }
@@ -14651,12 +15038,9 @@ mod tests {
         assert_eq!(add_post_load_external_delta(u64::MAX - 1, 0, 10), u64::MAX);
     }
 
-    /// sc-20570: a mage-flow provider that declares NO calibration identity at all is still
-    /// unpaired with this file's estimator, and still must not be refused. Before the fix this
-    /// arm returned `Err`, which is how a production `mage_flow_base` request died.
     #[test]
-    fn mage_resident_path_admits_an_unpaired_provider_on_the_legacy_ladder() {
-        let evaluation = evaluate_request_with_budget(
+    fn mage_resident_path_requires_the_provider_calibration_handshake() {
+        let error = evaluate_request_with_budget(
             &request_generator(None),
             &request_plan(),
             &request_inputs(512, 512, 1),
@@ -14672,157 +15056,20 @@ mod tests {
             0,
             &[],
         )
-        .expect("an unpaired mage provider must degrade, not refuse the request");
+        .unwrap_err()
+        .to_string();
         assert!(
-            !mage_estimator_is_paired(&MemoryProviderContract::compatibility_default(
-                "mage_flow",
-                MemoryBackendRealization::MlxMetal {
-                    bounded_wired_residency: true,
-                    lazy_or_mmap_materialization: true,
-                    explicit_evaluation_and_synchronization: true,
-                    cache_eviction: true,
-                },
-            )),
-            "precondition: a contract with no calibration identity is unpaired, so the arm above \
-             is the degrade path and not a vacuous pass"
-        );
-        assert_eq!(
-            evaluation.process_limit_bytes, None,
-            "an unpaired estimator must not claim a verified record's request-scoped ceiling"
-        );
-    }
-
-    /// sc-20570 — the constant this file compares against must be READ FROM the provider crate it
-    /// authorizes, not restated. The bug was a SceneWorks literal (`mage-flow-generation-peak-v1`)
-    /// that no `mlx-gen-mage` build could ever publish, so every mage request was refused.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn mage_calibration_expectation_is_read_from_the_provider_crate() {
-        assert_eq!(
-            MAGE_CALIBRATION_FINGERPRINT,
-            runtime_macos::providers::mage::model::MEMORY_CALIBRATION_FINGERPRINT,
-            "the expectation must track the provider crate, not a SceneWorks literal"
-        );
-        assert_eq!(
-            MAGE_CALIBRATION_FINGERPRINT_OFF_MAC_MIRROR, MAGE_CALIBRATION_FINGERPRINT,
-            "the off-Mac mirror drifted from the provider crate; update it so the cross-platform \
-             request-selector tests keep modelling the production shape"
-        );
-    }
-
-    /// The fixture evidence lane relabelled onto one chosen calibration identity, so a mage route
-    /// can reach the Evidence path in a cross-platform test. Both the RECORD and the BINDING carry
-    /// the identity: `EvidenceBundle::evidence_for` compares them, so relabelling only one side
-    /// would make every arm below fall to Legacy for an unrelated reason.
-    fn mage_fixture_bundle(fingerprint: &str) -> EvidenceBundle {
-        let mut bundle = fixture_bundle();
-        for record in &mut bundle.records {
-            record.target.provider = "mage_flow".to_owned();
-            record.calibration_fingerprint = fingerprint.to_owned();
-        }
-        bundle
-    }
-
-    fn mage_fixture_plan(fingerprint: &str) -> MlxRequestPlan {
-        let mut plan = fixture_plan();
-        plan.engine_id = "mage_flow";
-        let MlxCalibrationConfig::Valid(calibration) = &mut plan.calibration else {
-            panic!("the fixture plan opts in to calibration");
-        };
-        for binding in &mut calibration.bindings {
-            binding.provider = "mage_flow".to_owned();
-            binding.query.fingerprint = fingerprint.to_owned();
-        }
-        plan
-    }
-
-    fn mage_fixture_generator(fingerprint: &str) -> RequestGenerator {
-        let mut generator = fixture_generator();
-        generator.descriptor.id = "mage_flow";
-        let contract = generator.contract.as_mut().expect("fixture contract");
-        // The selector's structural filter requires `resolved_route == contract.provider_id`, so a
-        // contract still calling itself `fixture_provider` would exclude every candidate as
-        // `Invalid` and both arms would refuse for a reason that has nothing to do with pairing.
-        contract.provider_id = "mage_flow".to_owned();
-        contract.calibration = Some(gen_core::MemoryCalibrationIdentity::new(
-            fingerprint,
-            gen_core::LoadShape::EagerMaterialization,
-        ));
-        generator
-    }
-
-    fn evaluate_mage_fixture(fingerprint: &str) -> WorkerResult<MlxRequestEvaluation> {
-        evaluate_request_with_budget_using_bundle(
-            &mage_fixture_generator(fingerprint),
-            &mage_fixture_plan(fingerprint),
-            &fixture_inputs(1024, 1024),
-            MemoryCacheState::Cold,
-            OffloadPolicy::Resident,
-            crate::execution_planner::WarmPolicyProposal::inert("fixture"),
-            fixture_budget(64.0),
-            gib_to_bytes(9.0),
-            0,
-            &[],
-            Some(&mage_fixture_bundle(fingerprint)),
-            Some(&|_backend: &str, _provider: &str| Some(FIXTURE_CLOSURE_DIGEST.to_owned())),
-        )
-    }
-
-    /// sc-20570, the pairing seam itself. Both arms run the SAME evaluation with the SAME evidence
-    /// lane; only the calibration identity differs, and in BOTH arms the contract agrees with its
-    /// own evidence — so the generic identity check twenty lines earlier passes either way and the
-    /// mage degrade is the only thing that can separate them.
-    ///
-    /// The renamed arm is the post-rename world the bug came from: the provider moves to a new
-    /// fingerprint and re-captures evidence under it, so nothing is internally inconsistent — the
-    /// SceneWorks estimator is simply no longer the one that was measured. That must cost the
-    /// request its verified claim, never the request itself.
-    #[test]
-    fn a_renamed_mage_calibration_identity_degrades_instead_of_refusing() {
-        let paired = evaluate_mage_fixture(MAGE_CALIBRATION_FINGERPRINT)
-            .expect("the paired identity is admitted");
-        assert!(
-            paired.process_limit_bytes.is_some(),
-            "precondition: the paired identity must reach the Evidence path, or the renamed arm \
-             below proves nothing"
-        );
-
-        let renamed = evaluate_mage_fixture("mage-flow-mlx-shared-ladder-renamed-v9")
-            .expect("a renamed provider identity must degrade, not refuse the request");
-        assert_eq!(
-            renamed.process_limit_bytes, None,
-            "an unpaired estimator must be demoted to the legacy estimate ladder"
-        );
-    }
-
-    /// The pairing predicate rejects an ABI move as well as a rename — a same-named identity at a
-    /// different calibration ABI is not the estimator's measurement either.
-    #[test]
-    fn mage_pairing_requires_both_the_live_abi_and_the_provider_fingerprint() {
-        let mut contract = mage_request_contract();
-        assert!(mage_estimator_is_paired(&contract));
-
-        let identity = contract.calibration.as_mut().expect("fixture identity");
-        identity.abi = gen_core::MEMORY_CALIBRATION_ABI + 1;
-        assert!(
-            !mage_estimator_is_paired(&contract),
-            "an ABI move must break the pairing"
-        );
-
-        let identity = contract.calibration.as_mut().expect("fixture identity");
-        identity.abi = gen_core::MEMORY_CALIBRATION_ABI;
-        identity.fingerprint = "mage-flow-generation-peak-v1".to_owned();
-        assert!(
-            !mage_estimator_is_paired(&contract),
-            "the retired SceneWorks literal is not a provider identity"
+            error.contains(MAGE_CALIBRATION_FINGERPRINT),
+            "the production Resident path must compare the loaded provider fingerprint: {error}"
         );
     }
 
     #[test]
     fn mage_adapter_requests_require_and_consume_declared_residency() {
         use gen_core::{
-            ComponentPrecisionFloor, MemoryComponentKind, MemoryFormulaKind, MemoryFormulaVariable,
-            MemoryResidentComponent, PrecisionFloorComponent,
+            ComponentPrecisionFloor, MemoryComponentKind, MemoryComponentResidency,
+            MemoryFormulaKind, MemoryFormulaVariable, MemoryResidentComponent,
+            PrecisionFloorComponent,
         };
 
         let mut inputs = request_inputs(512, 512, 1);
@@ -14883,6 +15130,7 @@ mod tests {
                 kind: MemoryComponentKind::AdapterStack,
                 resident_bytes: gib_to_bytes(ADAPTER_GIB),
                 bounded_by: None,
+                residency: MemoryComponentResidency::WholeRender,
             }],
         };
         const PRECISION_FLOORS: &[ComponentPrecisionFloor] = &[ComponentPrecisionFloor {
@@ -15284,199 +15532,6 @@ mod tests {
         );
         // No signal at all ⇒ no budget ⇒ gate no-ops.
         assert_eq!(resolve_budget(None, None), None);
-    }
-
-    /// sc-20571: `live_foreign_reserve_bytes` is the pure arithmetic behind
-    /// [`live_request_budget`]'s live ceiling fix — everything else already resident on the host,
-    /// minus what this worker itself accounts for via `committed_bytes`. Undecorated case: the
-    /// ceiling IS the machine total, so nothing has been excluded in advance.
-    #[test]
-    fn foreign_reserve_bytes_is_live_used_minus_this_workers_own_committed() {
-        const MACHINE_TOTAL: u64 = 128 * 1024 * 1024 * 1024;
-
-        // No live signal ⇒ no reserve ⇒ falls back to the pre-fix ceiling rather than ever
-        // refusing without a probe (the same fail-open posture as `resolve_budget`).
-        assert_eq!(
-            live_foreign_reserve_bytes(MACHINE_TOTAL, Some(MACHINE_TOTAL), None, 0),
-            0
-        );
-        assert_eq!(
-            live_foreign_reserve_bytes(
-                MACHINE_TOTAL,
-                Some(MACHINE_TOTAL),
-                None,
-                40 * 1024 * 1024 * 1024
-            ),
-            0
-        );
-        // No machine total (the `sysctl` probe failed) ⇒ the already-excluded share is unknowable ⇒
-        // drop the term rather than risk double-charging a derated ceiling.
-        assert_eq!(
-            live_foreign_reserve_bytes(
-                MACHINE_TOTAL,
-                None,
-                Some(90 * 1024 * 1024 * 1024),
-                10 * 1024 * 1024 * 1024
-            ),
-            0
-        );
-
-        // System-wide used exceeds this worker's own committed bytes ⇒ the difference is what
-        // OTHER processes hold resident.
-        let system_used = 90 * 1024 * 1024 * 1024_u64;
-        let committed = 10 * 1024 * 1024 * 1024_u64;
-        assert_eq!(
-            live_foreign_reserve_bytes(
-                MACHINE_TOTAL,
-                Some(MACHINE_TOTAL),
-                Some(system_used),
-                committed
-            ),
-            80 * 1024 * 1024 * 1024
-        );
-
-        // This worker's own committed bytes meet or exceed the live sample (a stale/racy read) ⇒
-        // saturate to zero, never manufacture a NEGATIVE reserve that would widen the ceiling.
-        assert_eq!(
-            live_foreign_reserve_bytes(
-                MACHINE_TOTAL,
-                Some(MACHINE_TOTAL),
-                Some(5),
-                10 * 1024 * 1024 * 1024
-            ),
-            0
-        );
-        assert_eq!(
-            live_foreign_reserve_bytes(
-                MACHINE_TOTAL,
-                Some(MACHINE_TOTAL),
-                Some(10 * 1024 * 1024 * 1024),
-                10 * 1024 * 1024 * 1024
-            ),
-            0
-        );
-        // A `total_bytes` ABOVE the probed machine total (nonsensical, but arithmetic must not wrap)
-        // simply means nothing was excluded in advance.
-        assert_eq!(
-            live_foreign_reserve_bytes(
-                MACHINE_TOTAL * 2,
-                Some(MACHINE_TOTAL),
-                Some(system_used),
-                committed
-            ),
-            80 * 1024 * 1024 * 1024
-        );
-    }
-
-    /// sc-20571 review (minor 3): a DERATED ceiling — `mage_flow`'s `limit × SAFE_FRAC` safe budget,
-    /// or an `MLX_MEMORY_CAP` smaller-Mac emulation — has already given away part of the machine.
-    /// Subtracting a host-scoped `used` from it whole would charge that share twice and refuse
-    /// requests that actually fit. Only foreign residency in EXCESS of the derate may be withheld.
-    #[test]
-    fn a_derated_total_is_not_double_charged_for_the_share_it_already_gave_up() {
-        const GIB: u64 = 1024 * 1024 * 1024;
-        const MACHINE_TOTAL: u64 = 128 * GIB;
-        // Engine-derated ceiling: 96 GiB of a 128 GiB Mac — 32 GiB already withheld.
-        const DERATED_TOTAL: u64 = 96 * GIB;
-
-        // Foreign residency (20 GiB net of this worker's own 5 GiB) is SMALLER than the 32 GiB the
-        // derate already excluded ⇒ the derate covers it ⇒ no extra reserve. The naive
-        // `used − committed` fold would have withheld a second 20 GiB from an already-shrunken
-        // ceiling — 96 − 20 = 76 GiB usable on a host with 108 GiB genuinely free.
-        assert_eq!(
-            live_foreign_reserve_bytes(DERATED_TOTAL, Some(MACHINE_TOTAL), Some(25 * GIB), 5 * GIB),
-            0
-        );
-
-        // Foreign residency (50 GiB net of this worker's own 5 GiB) EXCEEDS the derate ⇒ only the
-        // 18 GiB the ceiling has not already accounted for is withheld.
-        assert_eq!(
-            live_foreign_reserve_bytes(DERATED_TOTAL, Some(MACHINE_TOTAL), Some(55 * GIB), 5 * GIB),
-            18 * GIB
-        );
-
-        // The undecorated ceiling on the same host withholds the full 50 GiB — i.e. the clamp above
-        // is the derate's doing, not a blanket weakening of the fix.
-        assert_eq!(
-            live_foreign_reserve_bytes(MACHINE_TOTAL, Some(MACHINE_TOTAL), Some(55 * GIB), 5 * GIB),
-            50 * GIB
-        );
-    }
-
-    /// sc-20571 review (major): coverage for the FOLD itself, not just the arithmetic behind it.
-    /// [`compose_live_request_budget`] is the whole of [`live_request_budget`]'s policy with the
-    /// probes lifted out; the returned `reserved_headroom_bytes` must be the caller's flat reserve
-    /// PLUS the live foreign reserve. Deleting the `saturating_add` (the exact mutation the reviewer
-    /// applied to the inlined version, which left the suite green) turns this red.
-    #[test]
-    fn composed_budget_reserved_headroom_is_the_flat_reserve_plus_live_foreign_usage() {
-        const GIB: u64 = 1024 * 1024 * 1024;
-        const MACHINE_TOTAL: u64 = 128 * GIB;
-        const FLAT_RESERVE: u64 = 2 * GIB;
-
-        // Loaded host: 60 GiB used system-wide, 8 GiB of it this worker's own committed bytes.
-        let budget = compose_live_request_budget(
-            MACHINE_TOTAL,
-            Some(MACHINE_TOTAL),
-            Some(60 * GIB),
-            8 * GIB,
-            3 * GIB,
-            FLAT_RESERVE,
-        );
-        assert_eq!(budget.total_bytes, MACHINE_TOTAL);
-        assert_eq!(budget.committed_bytes, 8 * GIB);
-        assert_eq!(budget.reclaimable_bytes, 3 * GIB);
-        assert_eq!(
-            budget.reserved_headroom_bytes,
-            FLAT_RESERVE + (60 * GIB - 8 * GIB),
-            "reserved headroom must be flat + (used − committed)"
-        );
-        // Strictly greater than the flat reserve alone — the pre-fix shape.
-        assert!(budget.reserved_headroom_bytes > FLAT_RESERVE);
-
-        // Idle host / failed probe ⇒ exactly the pre-fix shape, never a refusal without a signal.
-        let unprobed = compose_live_request_budget(
-            MACHINE_TOTAL,
-            Some(MACHINE_TOTAL),
-            None,
-            8 * GIB,
-            3 * GIB,
-            FLAT_RESERVE,
-        );
-        assert_eq!(unprobed.reserved_headroom_bytes, FLAT_RESERVE);
-
-        // mage_flow's branch passes a zero flat reserve and a derated total: the fold still applies,
-        // and it is the derate-aware term that lands.
-        let derated = compose_live_request_budget(
-            96 * GIB,
-            Some(MACHINE_TOTAL),
-            Some(55 * GIB),
-            5 * GIB,
-            0,
-            0,
-        );
-        assert_eq!(derated.reserved_headroom_bytes, 18 * GIB);
-    }
-
-    /// Mutation check: a reserve that ignored `system_used_bytes` entirely (always returning 0, i.e.
-    /// the pre-sc-20571 shape) must not report a positive reserve for a loaded host — proving the
-    /// live signal, not just `committed_bytes`, is what drives the result.
-    #[test]
-    fn zeroing_the_live_signal_would_flip_a_positive_reserve_to_zero() {
-        const MACHINE_TOTAL: u64 = 128 * 1024 * 1024 * 1024;
-        let system_used = Some(60 * 1024 * 1024 * 1024_u64);
-        let committed = 0_u64;
-        assert!(
-            live_foreign_reserve_bytes(MACHINE_TOTAL, Some(MACHINE_TOTAL), system_used, committed)
-                > 0,
-            "a fully idle worker on a 60 GiB-used host must still carry a foreign reserve"
-        );
-        // The mutated shape (`system_used_bytes` ignored) is exactly the `None` case, asserted to be
-        // zero above — restating it here ties the two assertions to the same guard.
-        assert_eq!(
-            live_foreign_reserve_bytes(MACHINE_TOTAL, Some(MACHINE_TOTAL), None, committed),
-            0
-        );
     }
 
     #[test]
@@ -15988,12 +16043,42 @@ mod tests {
         let bernini_capabilities = (bernini.descriptor)().capabilities;
         assert!(!bernini_capabilities.supports_sequential_offload);
         assert!(bernini_capabilities.unconditionally_engages_staged_residency);
-        assert!(!engine_supports_sequential("bernini"));
+        // The DESCRIPTOR still does not advertise the selectable Sequential control — that is the
+        // assertion directly above, and it is what keeps the knob off Bernini. `engine_supports_
+        // sequential` is a different question: it feeds `decide_residency_with_headroom`, i.e. how
+        // much memory to CHARGE. sc-19721 widened it to the disjunction because reading only
+        // `supports_sequential_offload` made Bernini charge the SUM of planner + UMT5-XXL + both
+        // experts — a co-residency `generate_impl` never creates. Unconditional staging is
+        // sequential for accounting purposes even though it is not offerable as a control.
+        assert!(engine_supports_sequential("bernini"));
         // A REGISTERED engine that does NOT advertise the bit stays false: sensenova's encoder is fused
         // into a unified MoT (`footprint` te=0) — no separable text encoder to drop, so residency buys
         // nothing and Sequential would be a no-op that OOMs. This proves the query reads the descriptor
         // BIT, not mere registry membership.
         assert!(!engine_supports_sequential("sensenova_u1_8b"));
+
+        // sc-19721: WHICH engines reach `true` through the second bit rather than the first, pinned
+        // as a set so the disjunction cannot quietly widen. Every one of these declares
+        // `unconditionally_engages_staged_residency: true` and `supports_sequential_offload: false`
+        // at the pinned revision: they stage physically on every generation and expose no selectable
+        // control to honour. Bernini is here because inference moved it between the two bits, which
+        // is what made the disjunction necessary.
+        for id in ["bernini", "krea_realtime_14b", "ltx_2_3", "scail2_14b"] {
+            let capabilities = crate::inference_runtime::media()
+                .generators()
+                .find(|reg| (reg.descriptor)().id == id)
+                .map(|reg| (reg.descriptor)().capabilities)
+                .unwrap_or_else(|| panic!("{id} is registered in the pinned bundle"));
+            assert!(
+                !capabilities.supports_sequential_offload,
+                "{id}: this set is specifically the engines the FIRST bit does not cover"
+            );
+            assert!(
+                capabilities.unconditionally_engages_staged_residency,
+                "{id}: reaches the gate only through the unconditional-staging bit"
+            );
+            assert!(engine_supports_sequential(id));
+        }
     }
 
     /// Static ladder publication needs the broader descriptor fact: a provider may physically
@@ -16381,353 +16466,6 @@ mod tests {
             decide_residency(total, te, None, true),
             ResidencyOutcome::Resident
         );
-    }
-
-    // -----------------------------------------------------------------------------------------
-    // sc-20571 (cold-load route): the LOAD-time waterfall's ceiling must reflect live availability
-    // -----------------------------------------------------------------------------------------
-    //
-    // PR #2437 fixed the per-request path (`live_request_budget` → `select_strategy`). Coordinator
-    // device verification then proved the incident's own route never reaches it: `bernini`'s image
-    // and video handlers only reach this waterfall (telemetry `route:"generic_mlx_cold_load"`), and
-    // the incident's exact estimate admitted IDENTICALLY on an idle vs. a ~35 GiB-loaded host —
-    // https://github.com/SceneWorks/SceneWorks/pull/2437#issuecomment-5345589210
-    //
-    // These drive the REAL waterfall (`decide_residency_with_headroom` — the peak layer, the
-    // staged-overflow layer and the `weights_floor_load_admission` floor, in that order) through
-    // `decide_residency_on_live_host`, not a re-implementation of it.
-
-    /// The incident's Σ-weights figure: `raw_peak_bytes` from the 2026-08-19 bernini cold-load log
-    /// line (81.55 GiB), which `generic_mlx_shared_observation` reports as `predicted_peak_bytes`
-    /// and the estimate margin widened to the admitted 122.65 GiB.
-    const BERNINI_INCIDENT_WEIGHT_BYTES: u64 = 87_563_634_463;
-    /// The incident host: `hw.memsize` = 128.00 GiB.
-    const INCIDENT_MACHINE_TOTAL_BYTES: u64 = 128 * 1024 * 1024 * 1024;
-
-    fn incident_live_host(used_gib: u64) -> LiveHostMemory {
-        LiveHostMemory {
-            machine_total_bytes: Some(INCIDENT_MACHINE_TOTAL_BYTES),
-            system_used_bytes: Some(used_gib * 1024 * 1024 * 1024),
-        }
-    }
-
-    /// The story's requirement on the route the incident actually took: a cold load whose predicted
-    /// peak exceeds what is LIVE-available is refused, where before it was admitted against total
-    /// RAM. Needed = 81.55 GiB weights + `HEADROOM_GB` = 99.55 GiB against a 128 GiB Mac.
-    ///
-    /// This is the wiring-removal guard: delete the `cold_load_budget_for_live_host` fold from
-    /// `decide_residency_with_headroom` and the loaded-host leg admits `Resident`, reproducing the
-    /// production over-admission.
-    #[test]
-    fn bernini_cold_load_estimate_is_refused_once_the_ceiling_reflects_live_host_residency() {
-        for sequential_capable in [false, true] {
-            // ~50 GiB of foreign residency (the ballast level at which device verification saw the
-            // fixed per-request path refuse) ⇒ ceiling 78 GiB, under which neither the peak layer
-            // (99.55 needed) nor the weights floor (81.55 GiB of bare weights vs 78 − 2 = 76) fits.
-            let outcome = decide_residency_on_live_host(
-                BERNINI_INCIDENT_WEIGHT_BYTES,
-                0,
-                Some(MlxMemoryBudget { total_gb: 128.0 }),
-                incident_live_host(50),
-                0,
-                sequential_capable,
-            );
-            let ResidencyOutcome::Reject {
-                needed_gb,
-                available_gb,
-                ..
-            } = outcome
-            else {
-                panic!("a 99.55 GiB cold load must not be admitted with ~50 GiB already resident, got {outcome:?}");
-            };
-            // The refusal is actionable: it names what the load needs and what is actually free,
-            // and `available_gb` tracks the LIVE ceiling rather than `hw.memsize`.
-            assert!(
-                (needed_gb - (BERNINI_INCIDENT_WEIGHT_BYTES as f64 / BYTES_PER_GIB + HEADROOM_GB))
-                    .abs()
-                    < 0.01,
-                "needed names weights + headroom: {needed_gb}"
-            );
-            assert!(
-                (available_gb - 78.0).abs() < 0.01,
-                "available is the live ceiling (128 − 50), not total RAM: {available_gb}"
-            );
-            let WorkerError::InvalidPayload(message) =
-                too_big_error("bernini", needed_gb, available_gb, None)
-            else {
-                panic!("expected InvalidPayload");
-            };
-            assert!(message.contains("100"), "names the need: {message}");
-            assert!(message.contains("78"), "names what is free: {message}");
-            assert!(
-                message.contains("safely available right now"),
-                "says the number is live, not the machine's size: {message}"
-            );
-        }
-    }
-
-    /// The mutation companion / characterization of the production bug: the SAME candidate against
-    /// the pre-fix ceiling shape (no live signal ⇒ total RAM) is ADMITTED — which is exactly what
-    /// the 2026-08-19 log recorded, and what device verification reproduced on a loaded host.
-    #[test]
-    fn without_a_live_signal_the_bernini_cold_load_is_admitted_exactly_as_it_was_in_production() {
-        assert_eq!(
-            decide_residency_on_live_host(
-                BERNINI_INCIDENT_WEIGHT_BYTES,
-                0,
-                Some(MlxMemoryBudget { total_gb: 128.0 }),
-                LiveHostMemory::UNKNOWN,
-                0,
-                false,
-            ),
-            ResidencyOutcome::Resident,
-            "no live signal must fail OPEN to the pre-fix behavior, never refuse on a guess"
-        );
-    }
-
-    /// Negative control + preserved semantics: the same load on an idle host still admits, and the
-    /// three-layer waterfall is otherwise untouched — in the band where the peak layer rejects but
-    /// the bare weights still fit the legacy floor, the floor still rescues the load exactly as it
-    /// did before. Only the ceiling those layers compare against moved.
-    #[test]
-    fn the_cold_load_waterfall_keeps_admitting_what_still_fits_the_live_host() {
-        let budget = Some(MlxMemoryBudget { total_gb: 128.0 });
-
-        // Idle-ish host (~20 GiB used, this Mac's ambient) ⇒ ceiling 108 ≥ 99.55 needed: the PEAK
-        // layer itself admits, no floor rescue involved.
-        assert_eq!(
-            decide_residency_on_live_host(
-                BERNINI_INCIDENT_WEIGHT_BYTES,
-                0,
-                budget,
-                incident_live_host(20),
-                0,
-                false,
-            ),
-            ResidencyOutcome::Resident
-        );
-
-        // Middle band (~30 GiB used ⇒ ceiling 98): the peak layer rejects (99.55 > 98) but the bare
-        // 81.55 GiB of weights still fit 98 − 2, so `weights_floor_load_admission` admits — the
-        // sc-12179 "never wall-reject a machine that used to work" floor, unchanged.
-        assert_eq!(
-            decide_residency_on_live_host(
-                BERNINI_INCIDENT_WEIGHT_BYTES,
-                0,
-                budget,
-                incident_live_host(30),
-                0,
-                false,
-            ),
-            ResidencyOutcome::Resident
-        );
-        // ...and its sequential sibling still selects staged residency rather than rejecting.
-        assert_eq!(
-            decide_residency_on_live_host(
-                BERNINI_INCIDENT_WEIGHT_BYTES,
-                0,
-                budget,
-                incident_live_host(30),
-                0,
-                true,
-            ),
-            ResidencyOutcome::Sequential
-        );
-    }
-
-    /// The probe shell is wired to BOTH live signals (sc-20571). Asserts presence, never values, so
-    /// it is machine-independent: on macOS both probes must return something (`sysctl hw.memsize`
-    /// and `vm_stat` are always readable there), so replacing either with `None` — the mutation
-    /// that would silently restore the total-RAM ceiling — goes red here. Off macOS both are `None`
-    /// by construction and the pre-fix ceiling is the correct, asserted behavior.
-    #[test]
-    fn the_cold_load_probe_shell_reads_both_live_signals() {
-        let live = probe_live_host_memory();
-        if cfg!(target_os = "macos") {
-            assert!(
-                live.machine_total_bytes.is_some_and(|bytes| bytes > 0),
-                "macOS must probe hw.memsize for the cold-load ceiling"
-            );
-            assert!(
-                live.system_used_bytes.is_some_and(|bytes| bytes > 0),
-                "macOS must probe vm_stat 'Memory Used' for the cold-load ceiling"
-            );
-        } else {
-            assert_eq!(live, LiveHostMemory::UNKNOWN);
-        }
-    }
-
-    /// The ceiling arithmetic itself, in isolation: it reuses the per-request path's
-    /// `live_foreign_reserve_bytes` (derate clamp and saturation included) rather than deriving a
-    /// second policy, and it never WIDENS a budget.
-    #[test]
-    fn cold_load_budget_shrinks_by_live_host_residency_and_never_widens() {
-        let gib = 1024 * 1024 * 1024_u64;
-        let budget = Some(MlxMemoryBudget { total_gb: 128.0 });
-
-        // No budget at all ⇒ still no budget (the gate no-ops; a live reading cannot invent one).
-        assert_eq!(
-            cold_load_budget_for_live_host(None, incident_live_host(50), 0),
-            None
-        );
-        // No live signal, or no machine total ⇒ the budget is returned unchanged (fail open).
-        assert_eq!(
-            cold_load_budget_for_live_host(budget, LiveHostMemory::UNKNOWN, 0),
-            budget
-        );
-        assert_eq!(
-            cold_load_budget_for_live_host(
-                budget,
-                LiveHostMemory {
-                    machine_total_bytes: None,
-                    system_used_bytes: Some(50 * gib),
-                },
-                0,
-            ),
-            budget
-        );
-        // Live residency shrinks it one-for-one.
-        assert_eq!(
-            cold_load_budget_for_live_host(budget, incident_live_host(50), 0),
-            Some(MlxMemoryBudget { total_gb: 78.0 })
-        );
-        // An own-residency credit (sc-20571 review) is subtracted from the live reading BEFORE the
-        // reserve is derived — 30 of the 50 GiB are the probed spec's own resident model, so only
-        // the 20 foreign GiB are withheld. Same `live_foreign_reserve_bytes` `committed` semantics
-        // as the fixed per-request path.
-        assert_eq!(
-            cold_load_budget_for_live_host(budget, incident_live_host(50), 30 * gib),
-            Some(MlxMemoryBudget { total_gb: 108.0 })
-        );
-        // A DERATED ceiling (an `MLX_MEMORY_CAP=96` smaller-Mac emulation on the same 128 GiB Mac)
-        // is not charged twice for the 32 GiB it already gave up: 20 GiB of foreign residency sits
-        // inside that share, so nothing further is withheld.
-        let capped = Some(MlxMemoryBudget { total_gb: 96.0 });
-        assert_eq!(
-            cold_load_budget_for_live_host(capped, incident_live_host(20), 0),
-            capped
-        );
-        // Only the excess beyond the derated share is withheld (50 − 32 = 18).
-        assert_eq!(
-            cold_load_budget_for_live_host(capped, incident_live_host(50), 0),
-            Some(MlxMemoryBudget { total_gb: 78.0 })
-        );
-        // Saturating: a reading larger than the whole machine floors the budget at zero rather
-        // than wrapping into an enormous one.
-        assert_eq!(
-            cold_load_budget_for_live_host(budget, incident_live_host(200), 0),
-            Some(MlxMemoryBudget { total_gb: 0.0 })
-        );
-        // ...and a credit larger than the live reading only zeroes the reserve; it can never widen
-        // the ceiling past the budget itself.
-        assert_eq!(
-            cold_load_budget_for_live_host(budget, incident_live_host(50), u64::MAX),
-            budget
-        );
-    }
-
-    /// The sc-20571-review MAJOR finding, at the real waterfall: a warm-resident repeat of the same
-    /// model must admit exactly as its first admission did. Before the attributable-resident credit,
-    /// the repeat's own materialized weights sat inside `vm_stat` "used" with nothing subtracted, so
-    /// the model was charged twice — `needed = weights + headroom` AND `available = total − ambient
-    /// − its own weights` — and every warm repeat of a large model on a live host was refused (or
-    /// silently downtiered) until eviction.
-    ///
-    /// This is the mutation guard for the credit wiring: force `own_resident_bytes` back to `0` in
-    /// `decide_residency_with_headroom`'s fold (or make the per-request sites' resident match
-    /// always-false, which produces the same `0`) and the `credited` leg goes red.
-    #[test]
-    fn warm_resident_repeat_admits_exactly_as_the_first_admission_did() {
-        let gib = 1024 * 1024 * 1024_u64;
-        let budget = Some(MlxMemoryBudget { total_gb: 128.0 });
-        let ambient_used = 20 * gib;
-
-        // First admission: idle-ish host (20 GiB ambient), nothing of ours resident yet.
-        let first = decide_residency_on_live_host(
-            BERNINI_INCIDENT_WEIGHT_BYTES,
-            0,
-            budget,
-            LiveHostMemory {
-                machine_total_bytes: Some(INCIDENT_MACHINE_TOTAL_BYTES),
-                system_used_bytes: Some(ambient_used),
-            },
-            0,
-            false,
-        );
-        assert_eq!(first, ResidencyOutcome::Resident, "first admission fits");
-
-        // Warm repeat: the same host, but the model's own 81.55 GiB have materialized into the
-        // host-scoped reading. Same ambient foreign load — nothing else changed.
-        let warm_host = LiveHostMemory {
-            machine_total_bytes: Some(INCIDENT_MACHINE_TOTAL_BYTES),
-            system_used_bytes: Some(ambient_used + BERNINI_INCIDENT_WEIGHT_BYTES),
-        };
-
-        // The double-count this fix removes: with no credit the repeat is REFUSED on the very host
-        // state that just served it (ceiling 128 − 20 − 81.55 ≈ 26.45 GiB < the 81.55 GiB floor).
-        assert!(
-            matches!(
-                decide_residency_on_live_host(
-                    BERNINI_INCIDENT_WEIGHT_BYTES,
-                    0,
-                    budget,
-                    warm_host,
-                    0,
-                    false,
-                ),
-                ResidencyOutcome::Reject { .. }
-            ),
-            "characterizes the bug: an uncredited warm repeat charges its own weights twice"
-        );
-
-        // Crediting exactly the resident model's attributable bytes restores the first admission's
-        // ceiling (128 − 20 = 108 GiB), so the repeat admits IDENTICALLY.
-        assert_eq!(
-            decide_residency_on_live_host(
-                BERNINI_INCIDENT_WEIGHT_BYTES,
-                0,
-                budget,
-                warm_host,
-                BERNINI_INCIDENT_WEIGHT_BYTES,
-                false,
-            ),
-            first,
-            "a warm-resident repeat must admit exactly as the first admission did"
-        );
-    }
-
-    /// The credit's envelope clamp (sc-20571 review): the waterfall caps `own_resident_bytes` at
-    /// the spec's own charged bytes — the cold-load mirror of `evaluate_request`'s
-    /// `.min(contract.total_resident_bytes())` — so a mis-attributed or over-stated credit cannot
-    /// launder FOREIGN residency into ceiling. Here the whole 128 GiB machine is in use; an
-    /// unbounded credit would restore the full 128 GiB ceiling and admit, while the clamped credit
-    /// leaves 128 − (128 − 81.55) ≈ 81.55 GiB, under both the peak layer and the weights floor.
-    #[test]
-    fn own_residency_credit_is_clamped_to_the_specs_own_charged_bytes() {
-        assert!(
-            matches!(
-                decide_residency_on_live_host(
-                    BERNINI_INCIDENT_WEIGHT_BYTES,
-                    0,
-                    Some(MlxMemoryBudget { total_gb: 128.0 }),
-                    incident_live_host(128),
-                    u64::MAX,
-                    false,
-                ),
-                ResidencyOutcome::Reject { .. }
-            ),
-            "a credit beyond the spec's own charge must not admit against a fully used host"
-        );
-    }
-
-    /// The generator cache's LOADER seams keep `own_resident_bytes = 0`, by contract (sc-20571
-    /// review): they run miss-only, after the previous resident entry was dropped, so nothing in
-    /// the live reading is the incoming load's own model. Pinned so the loader-seam and
-    /// per-request contracts cannot silently swap — if this constant moves, the admission ledger
-    /// in [`cold_load_budget_for_live_host`]'s doc is wrong and the change needs its own review.
-    #[test]
-    fn the_generator_cache_loader_seam_claims_no_own_residency_credit() {
-        assert_eq!(COLD_LOADER_SEAM_OWN_RESIDENT_BYTES, 0);
     }
 
     /// Decision 1's existing 8 GiB policy guard, preserved byte-for-byte through sc-18096: the
@@ -17381,5 +17119,584 @@ mod tests {
             900,
             "a self-contained snapshot counts its own components exactly once"
         );
+    }
+
+    /// sc-19721 — the AdaLN exclusion, at the only consumer that can honour it.
+    ///
+    /// gen-core landed `MemoryComponentKind::TransformerSubStack` +
+    /// `MemoryComponentResidency::PrecomputedThenEvicted` (SC-18665) with **zero** non-test callers,
+    /// so the declaration moved no estimate by a byte. These grade the consumer, and they grade the
+    /// half that is easy to get wrong in the OOM direction: the drop lowers the STEADY STATE, and
+    /// the declaring phase still holds the whole sub-stack at the precompute instant.
+    ///
+    /// Every figure is MiniMax-H3's own declaration, tied to the pinned engine's public constants by
+    /// [`the_h3_eviction_figures_are_the_pinned_engines_own`]. Nothing is asserted against a default:
+    /// `evicted_component_bytes()` is asserted non-zero and equal to `resident − retained` first, so
+    /// a contract that declared no component (or a build with the feature deleted) cannot pass by
+    /// comparing zero with zero.
+    mod adaln_exclusion_reaches_the_estimate_floor {
+        use super::*;
+
+        /// Qwen3-VL-32B, the dense conditioning stack — `mlx_gen_minimax_h3::TEXT_ENCODER_BYTES`.
+        const TEXT_ENCODER_BYTES: u64 = 66_714_912_872;
+        /// One bf16 33B DiT partition — `DIT_BF16_BYTES`. A render loads exactly one.
+        const DIT_BF16_BYTES: u64 = 66_280_504_216;
+        /// Video VAE + audio VAE: the decode-phase components, i.e. the part of the `heavy` lump
+        /// that is NOT the transformer.
+        const VAE_BYTES: u64 = 10_415_558_888 + 605_429_340;
+        /// The 50-block `adaln_proj` stack at bf16 — `ADALN_EVICTED_BYTES`.
+        const ADALN_RESIDENT_BF16_BYTES: u64 = 26_020_915_200;
+        /// The same 50 projections on the packed q4 tier — `ADALN_EVICTED_Q4_BYTES`. **The lever is
+        /// tier-scaled**, which is why q4 is graded here and not only bf16.
+        const ADALN_RESIDENT_Q4_BYTES: u64 = 7_325_337_600;
+        /// What the precompute keeps in the projections' place —
+        /// `ADALN_MODULATION_TABLE_MAX_BYTES`. Deliberately **not** tier-scaled: the table's dtype is
+        /// the compute dtype, not the tier's bit width. Applying one factor to both would be wrong at
+        /// every tier but bf16, and this pair is what makes that visible.
+        const ADALN_RETAINED_BYTES: u64 = 3_870_720_000;
+
+        /// A packed conditioning tier (sc-19120 re-hosts one). Used as a STAND-IN so the DiT-side
+        /// arithmetic is observable at all: with the dense encoder above, `max(conditioning, heavy)`
+        /// is pinned by the conditioner at q4 and the whole exclusion is invisible at the floor —
+        /// itself a finding, graded by [`q4_with_the_dense_conditioner_moves_nothing`].
+        const PACKED_TEXT_ENCODER_BYTES: u64 = TEXT_ENCODER_BYTES / 4;
+
+        /// A conditioning stack SHORTER than the decoder — the stand-in
+        /// [`rung_four_deducts_the_transformer_once_not_twice`] needs, one step past
+        /// [`PACKED_TEXT_ENCODER_BYTES`].
+        ///
+        /// The staged branch's floor is `conditioning.max(heavy)`. Above `VAE_BYTES` the conditioner
+        /// wins that `max` and `heavy` is INVISIBLE — which is exactly how the rung-4 test passed
+        /// for arithmetic that had erased the decoder from `heavy` entirely (sc-18650 pre-merge
+        /// review). Below `VAE_BYTES`, `heavy` is the binding leg and the assertion reads the number
+        /// it names.
+        const SUB_DECODER_CONDITIONER_BYTES: u64 = PACKED_TEXT_ENCODER_BYTES / 2;
+
+        const STAGED: &[MemoryStrategy] = &[MemoryStrategy::StagedResidency];
+        const CO_RESIDENT: &[MemoryStrategy] = &[];
+        const STAGED_PLUS_RUNG4: &[MemoryStrategy] = &[
+            MemoryStrategy::StagedResidency,
+            MemoryStrategy::BoundedTransformerResidency,
+        ];
+
+        /// MiniMax-H3's contract shape: three base components, and one `TransformerSubStack`
+        /// component inside `transformer_bytes` that is precomputed and evicted during Denoise.
+        /// `evicting = false` builds the byte-identical contract a provider had before SC-18665
+        /// existed — the control every delta below is measured against.
+        fn h3_shaped_contract(
+            conditioning_bytes: u64,
+            dit_bytes: u64,
+            adaln_resident_bytes: u64,
+            evicting: bool,
+        ) -> MemoryProviderContract {
+            let mut contract = MemoryProviderContract::compatibility_default(
+                "minimax_h3",
+                MemoryBackendRealization::MlxMetal {
+                    bounded_wired_residency: false,
+                    lazy_or_mmap_materialization: true,
+                    explicit_evaluation_and_synchronization: false,
+                    cache_eviction: true,
+                },
+            );
+            contract.asset_facts.conditioning_bytes = conditioning_bytes;
+            contract.asset_facts.transformer_bytes = dit_bytes;
+            contract.asset_facts.decoder_bytes = VAE_BYTES;
+            contract.asset_facts.base_bytes = conditioning_bytes + dit_bytes + VAE_BYTES;
+            let phases = contract.lifecycle.phases.clone();
+            contract.formula = gen_core::MemoryFormulaKind::ComponentPhaseEnvelope {
+                phases,
+                variables: vec![gen_core::MemoryFormulaVariable::AssetBytes],
+                resident_components: vec![gen_core::MemoryResidentComponent {
+                    id: "dit_adaln_proj_stack".to_owned(),
+                    kind: gen_core::MemoryComponentKind::TransformerSubStack(
+                        TransformerComponent::Dit,
+                    ),
+                    resident_bytes: adaln_resident_bytes,
+                    bounded_by: None,
+                    residency: if evicting {
+                        gen_core::MemoryComponentResidency::PrecomputedThenEvicted {
+                            precomputed_in: gen_core::MemoryPhase::Denoise,
+                            retained_bytes: ADALN_RETAINED_BYTES,
+                            evidence: "sc-19721 fixture mirroring \
+                                       mlx-gen-minimax-h3::memory_strategy::adaln_component"
+                                .to_owned(),
+                        }
+                    } else {
+                        gen_core::MemoryComponentResidency::WholeRender
+                    },
+                }],
+            };
+            contract
+        }
+
+        /// The declared drop, read off the contract rather than recomputed — and proved non-zero and
+        /// equal to the provider's own `resident − retained`, so none of the deltas below can be a
+        /// zero-versus-zero pass.
+        fn declared_eviction(contract: &MemoryProviderContract, adaln_resident: u64) -> u64 {
+            let evicted = contract.evicted_component_bytes();
+            assert_eq!(
+                evicted,
+                adaln_resident - ADALN_RETAINED_BYTES,
+                "the fixture must declare the NET drop the provider declares: the precompute keeps \
+                 a modulation table in the projections' place, and a gross declaration claims a \
+                 saving the runtime does not deliver"
+            );
+            assert!(
+                evicted > 0,
+                "a zero drop would make every delta below vacuous"
+            );
+            assert_eq!(
+                contract.steady_state_transformer_bytes(),
+                contract.asset_facts.transformer_bytes - evicted,
+                "the accessor under test must correct transformer_bytes by exactly that drop"
+            );
+            evicted
+        }
+
+        /// bf16 + the dense Qwen3-VL-32B conditioner: the shipped cell today.
+        ///
+        /// The lump `heavy = transformer + decoder` is 77.30 GB against a 66.71 GB conditioner, so
+        /// the staged floor is the lump. The drop cancels against the decoder's bytes — which the
+        /// denoise phase does not hold — until it hits the load-exact transformer, and there the
+        /// clamp stops it. The conditioner is then the taller leg, so the floor lands on it.
+        #[test]
+        fn bf16_staged_floor_falls_to_the_conditioning_stack_and_never_below_the_transformer() {
+            let legacy = h3_shaped_contract(
+                TEXT_ENCODER_BYTES,
+                DIT_BF16_BYTES,
+                ADALN_RESIDENT_BF16_BYTES,
+                false,
+            );
+            let adopted = h3_shaped_contract(
+                TEXT_ENCODER_BYTES,
+                DIT_BF16_BYTES,
+                ADALN_RESIDENT_BF16_BYTES,
+                true,
+            );
+            let evicted = declared_eviction(&adopted, ADALN_RESIDENT_BF16_BYTES);
+            assert_eq!(
+                legacy.evicted_component_bytes(),
+                0,
+                "the control declares WholeRender, so it drops nothing"
+            );
+
+            let before = estimate_floor_weights_bytes(&legacy, STAGED);
+            let after = estimate_floor_weights_bytes(&adopted, STAGED);
+            assert_eq!(
+                before,
+                DIT_BF16_BYTES + VAE_BYTES,
+                "before: the staged floor is the transformer+decoder lump"
+            );
+            assert_eq!(
+                after, TEXT_ENCODER_BYTES,
+                "after: the lump falls below the conditioning stack, which becomes the binding leg"
+            );
+            assert!(
+                before > after,
+                "a configuration between {after} and {before} bytes was refused and now fits"
+            );
+            assert!(
+                after >= DIT_BF16_BYTES,
+                "the precompute instant holds the WHOLE DiT ({DIT_BF16_BYTES} B, sub-stack \
+                 included). A floor below it under-charges that instant by up to {evicted} B — the \
+                 OOM direction, and the exact asymmetry ADALN_MODULATION_TABLE_MAX_BYTES exists to \
+                 avoid."
+            );
+        }
+
+        /// bf16 + a packed conditioner: the clamp is the ONLY thing stopping the fall, and the floor
+        /// lands exactly on the load-exact transformer. This is the cell that would go silently
+        /// wrong if the eviction were subtracted raw.
+        #[test]
+        fn bf16_staged_floor_stops_exactly_at_the_load_exact_transformer() {
+            let legacy = h3_shaped_contract(
+                PACKED_TEXT_ENCODER_BYTES,
+                DIT_BF16_BYTES,
+                ADALN_RESIDENT_BF16_BYTES,
+                false,
+            );
+            let adopted = h3_shaped_contract(
+                PACKED_TEXT_ENCODER_BYTES,
+                DIT_BF16_BYTES,
+                ADALN_RESIDENT_BF16_BYTES,
+                true,
+            );
+            let evicted = declared_eviction(&adopted, ADALN_RESIDENT_BF16_BYTES);
+            assert!(
+                evicted > VAE_BYTES,
+                "this cell only means something while the drop is bigger than the decode-phase \
+                 bytes it can cancel against"
+            );
+
+            let before = estimate_floor_weights_bytes(&legacy, STAGED);
+            let after = estimate_floor_weights_bytes(&adopted, STAGED);
+            assert_eq!(before, DIT_BF16_BYTES + VAE_BYTES);
+            assert_eq!(
+                after, DIT_BF16_BYTES,
+                "the fall stops at the load-exact transformer — the precompute instant — so the \
+                 reduction is the decode-phase bytes ({VAE_BYTES}), never the raw drop ({evicted})"
+            );
+            assert_eq!(before - after, VAE_BYTES);
+        }
+
+        /// q4 + a packed conditioner: neither clamp binds, so the floor falls by EXACTLY
+        /// `evicted_component_bytes()`. Grading a second tier is not redundant — the resident side
+        /// is tier-scaled (26.02 → 7.33 GB) while the retained table is not, so a single factor
+        /// applied to both would be right at bf16 and wrong here.
+        #[test]
+        fn q4_staged_floor_falls_by_exactly_the_declared_eviction() {
+            let legacy = h3_shaped_contract(
+                PACKED_TEXT_ENCODER_BYTES,
+                DIT_BF16_BYTES / 4,
+                ADALN_RESIDENT_Q4_BYTES,
+                false,
+            );
+            let adopted = h3_shaped_contract(
+                PACKED_TEXT_ENCODER_BYTES,
+                DIT_BF16_BYTES / 4,
+                ADALN_RESIDENT_Q4_BYTES,
+                true,
+            );
+            let evicted = declared_eviction(&adopted, ADALN_RESIDENT_Q4_BYTES);
+            assert!(
+                evicted < VAE_BYTES,
+                "at q4 the drop is smaller than the decode-phase bytes, so the clamp does not bind \
+                 and the whole declared exclusion reaches the floor"
+            );
+            assert_ne!(
+                evicted,
+                ADALN_RESIDENT_BF16_BYTES - ADALN_RETAINED_BYTES,
+                "the exclusion must be tier-scaled; a q4 drop equal to bf16's is the error this \
+                 cell exists to catch"
+            );
+
+            let before = estimate_floor_weights_bytes(&legacy, STAGED);
+            let after = estimate_floor_weights_bytes(&adopted, STAGED);
+            assert_eq!(
+                before - after,
+                evicted,
+                "the whole declared exclusion reaches the fit gate at this cell"
+            );
+            assert_eq!(after, DIT_BF16_BYTES / 4 + VAE_BYTES - evicted);
+        }
+
+        /// q4 + the dense conditioner: the floor does NOT move, because the 66.71 GB conditioning
+        /// stack is taller than the whole packed DiT pipeline. Pinned rather than left unsaid: it is
+        /// why sc-19120's packed text encoder and this change are a pair, and why a q4 assertion
+        /// against the shipped dense encoder would have looked like the fix doing nothing.
+        #[test]
+        fn q4_with_the_dense_conditioner_moves_nothing() {
+            let legacy = h3_shaped_contract(
+                TEXT_ENCODER_BYTES,
+                DIT_BF16_BYTES / 4,
+                ADALN_RESIDENT_Q4_BYTES,
+                false,
+            );
+            let adopted = h3_shaped_contract(
+                TEXT_ENCODER_BYTES,
+                DIT_BF16_BYTES / 4,
+                ADALN_RESIDENT_Q4_BYTES,
+                true,
+            );
+            declared_eviction(&adopted, ADALN_RESIDENT_Q4_BYTES);
+            assert_eq!(
+                estimate_floor_weights_bytes(&legacy, STAGED),
+                TEXT_ENCODER_BYTES
+            );
+            assert_eq!(
+                estimate_floor_weights_bytes(&adopted, STAGED),
+                TEXT_ENCODER_BYTES,
+                "the dense conditioning stack still binds; the DiT-side win is real but invisible \
+                 here"
+            );
+        }
+
+        /// Without `StagedResidency` nothing is staged out of the precompute instant: the
+        /// conditioner, the transformer and the decoder are charged as ONE co-residency, and that
+        /// co-residency includes the instant. The floor must not move by a byte.
+        #[test]
+        fn a_co_resident_composition_takes_no_reduction_at_all() {
+            for (conditioning, dit, adaln) in [
+                (
+                    TEXT_ENCODER_BYTES,
+                    DIT_BF16_BYTES,
+                    ADALN_RESIDENT_BF16_BYTES,
+                ),
+                (
+                    PACKED_TEXT_ENCODER_BYTES,
+                    DIT_BF16_BYTES,
+                    ADALN_RESIDENT_BF16_BYTES,
+                ),
+                (
+                    PACKED_TEXT_ENCODER_BYTES,
+                    DIT_BF16_BYTES / 4,
+                    ADALN_RESIDENT_Q4_BYTES,
+                ),
+            ] {
+                let legacy = h3_shaped_contract(conditioning, dit, adaln, false);
+                let adopted = h3_shaped_contract(conditioning, dit, adaln, true);
+                declared_eviction(&adopted, adaln);
+                assert_eq!(
+                    estimate_floor_weights_bytes(&adopted, CO_RESIDENT),
+                    estimate_floor_weights_bytes(&legacy, CO_RESIDENT),
+                    "co-resident floor moved for conditioning={conditioning} dit={dit}: the \
+                     precompute instant is inside this charge and would be under-charged"
+                );
+                assert_eq!(
+                    estimate_floor_weights_bytes(&adopted, CO_RESIDENT),
+                    conditioning + dit + VAE_BYTES
+                );
+            }
+        }
+
+        /// Declare the rung-4 → rung-1 edge on an [`h3_shaped_contract`], so the composition under
+        /// test is one a SELECTOR can produce rather than a hand-written slice.
+        ///
+        /// `MemoryStrategy::engages` deliberately does not make rung 4 engage rung 1 — the shared
+        /// prerequisite is `LoadShape::DeferredMaterialization`, which needs no residency policy —
+        /// so `staged + rung 4` exists only where a provider appends the edge through
+        /// `additional_prerequisites`. Thirteen shipped MLX providers do (sana, flux, flux2, chroma,
+        /// kolors, krea ×2, lens, mage, qwen-image, sd3, sdxl, anima), each pushing exactly this
+        /// pair. MiniMax-H3 itself declares `additional_prerequisites: Vec::new()`, which is why
+        /// this composition moves no live admission TODAY and why the arithmetic it grades is one
+        /// provider declaration away from mattering.
+        fn rung4_edge_contract(mut contract: MemoryProviderContract) -> MemoryProviderContract {
+            for rung in [
+                MemoryStrategy::StagedResidency,
+                MemoryStrategy::BoundedTransformerResidency,
+            ] {
+                contract
+                    .strategies
+                    .iter_mut()
+                    .find(|capability| capability.strategy == rung)
+                    .expect("the compatibility contract declares every rung's capability")
+                    .support = gen_core::MemoryStrategySupport::Implemented;
+            }
+            contract.additional_prerequisites.push((
+                MemoryStrategy::BoundedTransformerResidency,
+                gen_core::MemoryStrategyPrerequisite::Rung {
+                    rung: MemoryStrategy::StagedResidency,
+                    scope: gen_core::MemoryPrerequisiteScope::EngagedInSameRequest,
+                },
+            ));
+            contract
+        }
+
+        /// Rung 4 windows the WHOLE transformer, sub-stack included, so the eviction must not be
+        /// deducted a second time on top of it. BOTH legs remove the transformer, and what is left
+        /// is the DECODER — the component rung 4 does not window and which stays resident.
+        ///
+        /// # This test was a false green until sc-18650's pre-merge review
+        ///
+        /// It ran on [`PACKED_TEXT_ENCODER_BYTES`], which is TALLER than [`VAE_BYTES`], so the
+        /// staged branch's `conditioning.max(heavy)` threw `heavy` away and both arms collapsed onto
+        /// the conditioner. It passed whether the arithmetic deducted the transformer once or
+        /// twice — and it was deducting it twice, leaving `max(0, decoder − evicted)`, which at bf16
+        /// is exactly **0**: MiniMax-H3's whole 11.02 GB video+audio VAE pair gone from the floor.
+        /// Its own expected value, `PACKED_TEXT_ENCODER_BYTES.max(VAE_BYTES)`, was inert for the
+        /// same reason — the `.max` never chose its right-hand side.
+        ///
+        /// So the conditioner is now deliberately BELOW the decoder, which puts `heavy` on the
+        /// binding side of that `max`, and the composition is read off `engaged_composition` on a
+        /// contract that declares the edge instead of being written out by hand.
+        #[test]
+        fn rung_four_deducts_the_transformer_once_not_twice() {
+            let legacy = rung4_edge_contract(h3_shaped_contract(
+                SUB_DECODER_CONDITIONER_BYTES,
+                DIT_BF16_BYTES,
+                ADALN_RESIDENT_BF16_BYTES,
+                false,
+            ));
+            let adopted = rung4_edge_contract(h3_shaped_contract(
+                SUB_DECODER_CONDITIONER_BYTES,
+                DIT_BF16_BYTES,
+                ADALN_RESIDENT_BF16_BYTES,
+                true,
+            ));
+            // The two properties that make this fixture able to SEE the arithmetic, asserted off the
+            // contract's own facts so a later constant edit cannot quietly re-mask the test.
+            assert!(
+                adopted.asset_facts.conditioning_bytes < adopted.asset_facts.decoder_bytes,
+                "the conditioner has to be the SHORTER leg of `conditioning.max(heavy)`, or that \
+                 `max` hides the answer this test exists to read ({} vs {})",
+                adopted.asset_facts.conditioning_bytes,
+                adopted.asset_facts.decoder_bytes
+            );
+            let evicted = declared_eviction(&adopted, ADALN_RESIDENT_BF16_BYTES);
+            assert!(
+                evicted > adopted.asset_facts.decoder_bytes,
+                "the eviction must be able to swallow the decoder whole ({evicted} vs {}), or a \
+                 double deduction would understate the floor partially rather than erasing the \
+                 decode phase outright",
+                adopted.asset_facts.decoder_bytes
+            );
+
+            // The composition is the PROVIDER'S, not this test's. Without the declared edge rung 4
+            // engages rungs 2 and 3 but never rung 1, so `StagedResidency` appearing here is the
+            // edge doing its job — and `estimate_floor_weights_bytes` reads exactly these two.
+            let composition =
+                adopted.engaged_composition(MemoryStrategy::BoundedTransformerResidency);
+            assert_eq!(
+                composition,
+                vec![
+                    MemoryStrategy::Resident,
+                    MemoryStrategy::StagedResidency,
+                    MemoryStrategy::BoundedTransformerResidency,
+                ],
+                "the declared rung-4 -> rung-1 edge is what makes this composition reachable"
+            );
+            assert_eq!(
+                legacy.engaged_composition(MemoryStrategy::BoundedTransformerResidency),
+                composition,
+                "adopting the sub-stack vocabulary must not change which rungs engage"
+            );
+
+            assert_eq!(
+                estimate_floor_weights_bytes(&adopted, &composition),
+                estimate_floor_weights_bytes(&legacy, &composition),
+                "the declared eviction lives INSIDE the window rung 4 removes, so adopting the \
+                 vocabulary must not move this floor by a byte"
+            );
+            assert_eq!(
+                estimate_floor_weights_bytes(&adopted, &composition),
+                VAE_BYTES,
+                "the windowed transformer leaves the floor exactly once, and what remains is the \
+                 decoder rung 4 does not window"
+            );
+        }
+
+        /// The 23 providers that never adopted the sub-stack vocabulary must be byte-identical.
+        /// `steady_state_transformer_bytes()` returns `asset_facts.transformer_bytes` unchanged for
+        /// them, which is the property that makes this change safe to land at the shared floor.
+        #[test]
+        fn a_provider_that_declares_no_sub_stack_is_byte_identical() {
+            let mut contract = MemoryProviderContract::compatibility_default(
+                "fixture_provider",
+                MemoryBackendRealization::MlxMetal {
+                    bounded_wired_residency: false,
+                    lazy_or_mmap_materialization: true,
+                    explicit_evaluation_and_synchronization: false,
+                    cache_eviction: true,
+                },
+            );
+            contract.asset_facts.conditioning_bytes = gib_to_bytes(1.0);
+            contract.asset_facts.transformer_bytes = gib_to_bytes(5.0);
+            contract.asset_facts.decoder_bytes = gib_to_bytes(2.0);
+            contract.asset_facts.base_bytes = gib_to_bytes(8.0);
+            assert!(contract.resident_components().is_empty());
+            assert_eq!(contract.evicted_component_bytes(), 0);
+            assert_eq!(
+                contract.steady_state_transformer_bytes(),
+                contract.asset_facts.transformer_bytes
+            );
+            assert_eq!(intra_transformer_evicted_bytes(&contract), 0);
+
+            assert_eq!(
+                estimate_floor_weights_bytes(&contract, STAGED),
+                gib_to_bytes(7.0),
+                "staged: max(conditioning, transformer + decoder)"
+            );
+            assert_eq!(
+                estimate_floor_weights_bytes(&contract, CO_RESIDENT),
+                gib_to_bytes(8.0),
+                "co-resident: the whole base"
+            );
+            assert_eq!(
+                estimate_floor_weights_bytes(&contract, STAGED_PLUS_RUNG4),
+                gib_to_bytes(2.0),
+                "rung 4: max(conditioning, decoder) with the transformer windowed out"
+            );
+        }
+
+        /// An eviction declared on an AUXILIARY network is not inside `transformer_bytes`, so it
+        /// must not be subtracted from the transformer's term. This is the distinction between
+        /// `steady_state_transformer_bytes()` and `evicted_component_bytes()`, and swapping one for
+        /// the other is invisible on MiniMax-H3 (whose only component is the sub-stack) — which is
+        /// exactly why it is graded on a contract that has both.
+        #[test]
+        fn an_evicting_auxiliary_component_does_not_move_the_transformer_term() {
+            const CONTROL_RESIDENT: u64 = 4_000_000_000;
+            const CONTROL_RETAINED: u64 = 1_000_000_000;
+            let mut contract = h3_shaped_contract(
+                PACKED_TEXT_ENCODER_BYTES,
+                DIT_BF16_BYTES / 4,
+                ADALN_RESIDENT_Q4_BYTES,
+                true,
+            );
+            let sub_stack_only = estimate_floor_weights_bytes(&contract, STAGED);
+            let intra = intra_transformer_evicted_bytes(&contract);
+
+            if let gen_core::MemoryFormulaKind::ComponentPhaseEnvelope {
+                resident_components,
+                ..
+            } = &mut contract.formula
+            {
+                resident_components.push(gen_core::MemoryResidentComponent {
+                    id: "fixture.control".to_owned(),
+                    kind: gen_core::MemoryComponentKind::ControlBranch,
+                    resident_bytes: CONTROL_RESIDENT,
+                    bounded_by: None,
+                    residency: gen_core::MemoryComponentResidency::PrecomputedThenEvicted {
+                        precomputed_in: gen_core::MemoryPhase::Denoise,
+                        retained_bytes: CONTROL_RETAINED,
+                        evidence: "sc-19721 fixture: an evicting auxiliary network".to_owned(),
+                    },
+                });
+            } else {
+                panic!("fixture declares a ComponentPhaseEnvelope formula");
+            }
+
+            assert_eq!(
+                contract.evicted_component_bytes(),
+                intra + (CONTROL_RESIDENT - CONTROL_RETAINED),
+                "the contract-wide accessor now sums BOTH drops"
+            );
+            assert_eq!(
+                intra_transformer_evicted_bytes(&contract),
+                intra,
+                "…but only the sub-stack's drop is inside transformer_bytes"
+            );
+            assert_eq!(
+                estimate_floor_weights_bytes(&contract, STAGED),
+                sub_stack_only + CONTROL_RESIDENT,
+                "the auxiliary network adds its LOAD-EXACT residency and removes nothing from the \
+                 transformer term; reading evicted_component_bytes() here would take {} B off a \
+                 stack that never held them",
+                CONTROL_RESIDENT - CONTROL_RETAINED
+            );
+        }
+
+        /// The fixture figures above are the PINNED engine's own constants, not transcriptions that
+        /// can drift from it. Gated to the lanes that have a provider bundle in scope, exactly like
+        /// `pinned_engine_geometry`.
+        #[cfg(any(
+            target_os = "macos",
+            all(not(target_os = "macos"), feature = "backend-candle")
+        ))]
+        #[test]
+        fn the_h3_eviction_figures_are_the_pinned_engines_own() {
+            use platform_runtime::providers::minimax_h3::memory_strategy as h3;
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+            use runtime_cuda as platform_runtime;
+            #[cfg(target_os = "macos")]
+            use runtime_macos as platform_runtime;
+
+            assert_eq!(TEXT_ENCODER_BYTES, h3::TEXT_ENCODER_BYTES);
+            assert_eq!(DIT_BF16_BYTES, h3::DIT_BF16_BYTES);
+            assert_eq!(VAE_BYTES, h3::VIDEO_VAE_BYTES + h3::AUDIO_VAE_BYTES);
+            assert_eq!(ADALN_RESIDENT_BF16_BYTES, h3::ADALN_EVICTED_BYTES);
+            // The tier-scaled sub-stack figures are declared by the MLX engine only: the candle
+            // sibling's `memory_strategy` carries the bf16 constant plus a private
+            // `resolved_adaln_bytes` that scales it from the staged tier, and publishes no q4
+            // `pub const` to bind to. Nothing to tie on that lane, so the tie is macOS-only.
+            #[cfg(target_os = "macos")]
+            assert_eq!(ADALN_RESIDENT_Q4_BYTES, h3::ADALN_EVICTED_Q4_BYTES);
+            assert_eq!(
+                ADALN_RETAINED_BYTES,
+                h3::ADALN_MODULATION_TABLE_MAX_BYTES,
+                "the retained table is NOT tier-scaled; if this constant moves, every tier cell \
+                 above changes and must be re-derived rather than re-stamped"
+            );
+        }
     }
 }
