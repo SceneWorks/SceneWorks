@@ -329,8 +329,15 @@ pub(super) fn mochi_vram_precheck(
     // The COERCED count — the frames the decode will really pay for, exactly as `mochi_vram_preflight`
     // computes it. Pre-checking the raw request would gate on a length the engine never renders.
     let frames = video_frame_count(model, raw_frames);
+    let tier_key = match mochi_tier_quant(tier_dir) {
+        Some(Quant::Q4) => "q4",
+        Some(Quant::Q8) => "q8",
+        Some(Quant::Nvfp4) => "nvfp4",
+        None => "bf16",
+    };
     match crate::vram_gate::mochi_fit_error(
         engine_id,
+        tier_key,
         crate::mlx_fit_gate::mochi_resident_bytes(tier_dir),
         frames,
         width,

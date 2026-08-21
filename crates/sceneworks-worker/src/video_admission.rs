@@ -39,6 +39,74 @@ use sceneworks_core::video_request::{
 
 use crate::memory_strategy::{Budget, Candidate, CandidateBasis, RequestScope, Selection};
 
+/// Flat Candle-video pre-load routes whose existing gate owns a truthful resident ceiling.
+///
+/// This exact source set is consumed by the generated Candle inventory. The route mapping below
+/// deliberately excludes VACE-Fun and Bernini video: neither has an approved compatibility truth
+/// in SC-19055, even though both happen to share nearby pre-load helpers.
+#[allow(dead_code)] // production-consumed on backend-candle; source-consumed by the inventory here
+pub(crate) const LEGACY_VIDEO_COMPATIBILITY_ROUTES: &[&str] = &[
+    "ltx_2_3",
+    "mochi_1",
+    "scail2_14b",
+    "svd",
+    "wan_2_2",
+    "wan_2_2_i2v_14b",
+    "wan_2_2_t2v_14b",
+];
+
+/// Resolve the production engine label to the inventory route whose legacy ceiling it carries.
+/// Returning `None` is load-bearing: a newly adjacent video route must not inherit compatibility
+/// evidence just because it calls the same weights-floor function.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn legacy_video_route(model_label: &str) -> Option<&'static str> {
+    match model_label {
+        "ltx_2_3" | "ltx_2_3_distilled" => Some("ltx_2_3"),
+        "mochi_1" => Some("mochi_1"),
+        "scail2_14b" => Some("scail2_14b"),
+        "svd" | "svd_xt" => Some("svd"),
+        "wan_2_2" | "wan2_2_ti2v_5b" => Some("wan_2_2"),
+        "wan_2_2_i2v_14b" | "wan2_2_i2v_14b" => Some("wan_2_2_i2v_14b"),
+        "wan_2_2_t2v_14b" | "wan2_2_t2v_14b" => Some("wan_2_2_t2v_14b"),
+        _ => None,
+    }
+}
+
+/// Bind one already-normalized flat-video ceiling to the shared selector on the typed Candle lane.
+///
+/// `needed_gb` is intentionally not re-graded here. Each legacy producer already owns its reserve
+/// and any historical padding; [`CandidateBasis::LegacyVideo`] carries no estimate widening and
+/// [`crate::candle_memory_strategy::select_compatibility_resident`] adds no reserve. The result is
+/// therefore a routing migration with the same comparison threshold.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+pub(crate) fn select_legacy_video_resident(
+    model_label: &str,
+    lane: VideoLane,
+    tier_key: &str,
+    mode_key: &str,
+    geometry: MemoryGeometry,
+    budget: Option<crate::vram_gate::VramBudget>,
+    needed_gb: Option<f64>,
+) -> Option<Selection> {
+    let route = legacy_video_route(model_label)?;
+    if lane != VideoLane::Candle {
+        return Some(Selection::Unverified {
+            reason: gen_core::MemoryEvidenceVerdict::Invalid,
+        });
+    }
+    Some(
+        crate::candle_memory_strategy::select_compatibility_resident(
+            route,
+            tier_key,
+            mode_key,
+            geometry,
+            budget,
+            needed_gb,
+            CandidateBasis::LegacyVideo,
+        ),
+    )
+}
+
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // The PRE-LOAD declared-scalar arm of the video mechanism (sc-19055, epic 19048 R1/R2/R3)
 //

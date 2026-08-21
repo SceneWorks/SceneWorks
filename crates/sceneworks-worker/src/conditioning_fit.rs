@@ -98,13 +98,12 @@
 //! * **No geometry axis.** On-disk weight bytes do not vary with width, height or frames, so
 //!   claiming this gate reads geometry would be a false claim in a generated artifact. `no` in the
 //!   inventory's geometry column is the correct answer for a weights floor, and it stays `no`.
-//! * **No shared SELECTOR.** [`crate::memory_strategy::select_strategy`] grades candidates against a
-//!   `MemoryProviderContract`, and these lanes have none to give it — that is the premise of this
-//!   whole module (see "Why these lanes cannot use the existing gates"). Reaching the selector here
-//!   is blocked upstream, in the same way and for the same reason as the unreached image class
-//!   `candle_admission_decisions::no_unreached_image_route_declares_a_provider_contract`
-//!   pins: no provider contract, no candidates. Sharing the composition law is what IS reachable at
-//!   this pin, and it is what makes the eventual selector migration a rewiring rather than a rewrite.
+//! * **A resident-only compatibility SELECTOR for InstantID.** SC-19055 binds InstantID's exact
+//!   source-backed composition to inference's `MemoryProviderContract::compatibility_default`.
+//!   That contract truthfully advertises Resident only and no calibration identity; the candidate is
+//!   `StructuralFloor`, never `Measured` or `EstimateFloor`, so the selector applies neither an
+//!   invented activation margin nor a second reserve. Other conditioning lanes keep this module's
+//!   established gate until their own source truth is approved for migration.
 //!
 //! Everything here is pure and unit-tested; the live `nvidia-smi` reading lives in [`crate::gpu`] and
 //! the per-lane wiring is in `image_jobs/conditioning_gate.rs`.
@@ -353,6 +352,17 @@ pub(crate) enum ConditioningFit {
     TooBig { floor_gb: f64, available_gb: f64 },
 }
 
+/// Exact selector identity for the one conditioning route whose on-disk composition is the only
+/// available admission truth (`instantid_realvisxl`). The floor is geometry-invariant, but the
+/// request axes remain typed so the selector event is attributable to the production request.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ConditioningSelectorScope<'a> {
+    pub(crate) route: &'a str,
+    pub(crate) tier_key: &'a str,
+    pub(crate) mode_key: &'a str,
+    pub(crate) geometry: gen_core::MemoryGeometry,
+}
+
 /// The pure conditioning admission decision. Both "no signal" arms admit and are DISTINGUISHED (rather
 /// than collapsed into one `Unknown`) so the caller's log line names which evidence was missing.
 pub(crate) fn decide(
@@ -375,6 +385,45 @@ pub(crate) fn decide(
             floor_gb,
             available_gb: budget.free_gb,
         }
+    }
+}
+
+/// Bind a truth-bearing conditioning lower bound to the shared selector without changing the
+/// route's established fail-open behavior. A source-backed floor plus a valid budget yields a real
+/// `Selected`/`Reject`; missing weight or budget evidence remains `Unverified` and falls back to the
+/// distinguished legacy no-signal outcome.
+pub(crate) fn decide_via_compatibility_selector(
+    footprint: &ConditioningFootprint,
+    budget: Option<VramBudget>,
+    scope: ConditioningSelectorScope<'_>,
+) -> ConditioningFit {
+    let legacy = decide(footprint, budget);
+    let floor_gb = conditioning_floor_gb(footprint);
+    match crate::candle_memory_strategy::select_compatibility_resident(
+        scope.route,
+        scope.tier_key,
+        scope.mode_key,
+        scope.geometry,
+        budget,
+        floor_gb,
+        crate::memory_strategy::CandidateBasis::StructuralFloor,
+    ) {
+        crate::memory_strategy::Selection::Selected {
+            needed_gb,
+            available_gb,
+            ..
+        } => ConditioningFit::Fits {
+            floor_gb: needed_gb,
+            available_gb,
+        },
+        crate::memory_strategy::Selection::Reject {
+            needed_gb,
+            available_gb,
+        } => ConditioningFit::TooBig {
+            floor_gb: needed_gb,
+            available_gb,
+        },
+        crate::memory_strategy::Selection::Unverified { .. } => legacy,
     }
 }
 

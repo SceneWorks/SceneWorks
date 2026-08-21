@@ -547,14 +547,32 @@ async fn generate_candle_bernini_image_stream(
     let (weights_dir, quant) = resolve_candle_bernini_tier_dir_and_quant(settings, tier_bits)?;
     let adapters = resolve_adapters(request, settings)?;
     let adapter_resident_bytes = bernini_adapter_resident_bytes(&adapters, quant)?;
+    let tier_key = match quant {
+        Some(Quant::Q4) => "q4",
+        Some(Quant::Q8) => "q8",
+        None => "bf16",
+        Some(_) => "bf16",
+    };
     // Bernini still-image tiers have not been CUDA-calibrated. Keep the exact load-time weight and
     // independently resident packed-adapter floor live until the catalog gains measured tier rows.
-    admit_candle_base_floor_with_resident_overlay(
+    admit_candle_base_floor_with_resident_overlay_via_selector(
         &request.model,
         "Bernini still image",
         settings,
         &[weights_dir.as_path()],
         adapter_resident_bytes,
+        BaseFloorSelectorScope {
+            route: "bernini_image",
+            tier_key,
+            mode_key: task,
+            geometry: gen_core::MemoryGeometry {
+                width: request.width,
+                height: request.height,
+                batch: 1,
+                frames: 1,
+                reference_count: u32::from(task == "i2i"),
+            },
+        },
     )
     .await?;
     let offload_policy = gen_core::OffloadPolicy::Resident;

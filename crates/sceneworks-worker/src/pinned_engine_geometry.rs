@@ -365,48 +365,75 @@ const BY_DESIGN_PRE_FILTERS: &[&str] = &["wan", "ltx", "chroma"];
 // In particular, the six shipped SenseNova ids now admit manifest cells at pin `401304976`; every
 // probed provider is therefore required to pass the ordinary non-empty-intersection assertion.
 
-/// Shipped image models that ARE gate-bearing but that this sweep cannot reach, named here rather
-/// than left as a silent hole in the census.
-///
-/// Both run the **bespoke lane**: they have no [`crate::engines::MODEL_TABLE`] row, so
-/// [`crate::engines::engine_id_for_model`] returns `None` and the sweep below records them as
-/// `unprobed` before it ever consults the registry. Their engine ids are not the SceneWorks model id
-/// either — they are per-lane private constants inside the `include!`d, `cfg`-gated job modules
-/// (`image_jobs/instantid.rs`'s `INSTANTID_ENGINE` = `mlx_instantid` / `candle_instantid`;
-/// `image_jobs/pulid.rs`'s `PULID_ENGINE_ID` = `pulid_flux` vs `image_jobs/pulid_candle.rs`'s
-/// `PULID_CANDLE_ENGINE` = `candle_pulid_flux`) — so reaching them means teaching this module a
-/// second, lane-split id map for two models, and then landing two never-before-probed models on the
-/// hosted macOS lane sight-unseen (MLX does not build on the Windows box this was written from).
-/// That trade was judged worse than an explicit, self-expiring exclusion.
-///
-/// `mlx-gen-pulid` does carry a calibration-scoped 1024x1024 / batch-1 envelope, and both manifests
-/// advertise `1024x1024` with `count` including 1, so neither is believed to be in the sc-20569
-/// empty-intersection class today — but that is reasoning, not a measurement, which is exactly why
-/// the exclusion is named instead of assumed.
-///
-/// The exclusion cannot outlive its reason: [`bespoke_lane_exclusion_still_has_no_model_table_row`]
-/// goes RED the moment either id GAINS a `MODEL_TABLE` row, because at that point the sweep can
-/// resolve its engine and the entry must be deleted rather than kept.
-const KNOWN_UNSWEPT_GATE_BEARING_MODELS: &[&str] = &["instantid_realvisxl", "pulid_flux_dev"];
+/// The pinned provider id for the bespoke PuLID route on this lane. PuLID deliberately has no
+/// [`crate::engines::MODEL_TABLE`] row: MLX owns a registered `pulid_flux` generator while Candle
+/// owns a path-shaped provider API with the same memory provider id.
+#[cfg(target_os = "macos")]
+const PULID_MEMORY_PROVIDER_ID: &str = platform_runtime::providers::pulid::pulid_flux::MODEL_ID;
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+const PULID_MEMORY_PROVIDER_ID: &str =
+    platform_runtime::providers::pulid::memory_strategy::PROVIDER_ID;
 
-/// [`KNOWN_UNSWEPT_GATE_BEARING_MODELS`] is excused only because the bespoke lane gives it no
-/// `MODEL_TABLE` row. The day either model gains one, the sweep CAN reach it — so fail here and make
-/// the reader delete the entry instead of leaving a stale hole behind.
+/// The product-visible disposition of an image model that bypasses `MODEL_TABLE`.
+///
+/// This is deliberately explicit rather than an exclusion list. InstantID owns no calibration-
+/// scoped memory gate on either lane, so there is no envelope to intersect. PuLID does own one and
+/// must be dispatched to its lane-specific provider surface at the exact shipped campaign cell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BespokeImageGateDispatch {
+    NotCalibrationScoped,
+    CalibrationScoped {
+        provider_id: &'static str,
+        width: u32,
+        height: u32,
+        count: u32,
+        authority: MemoryOptimizationAuthority,
+    },
+}
+
+fn bespoke_image_gate_dispatch(model_id: &str) -> Option<BespokeImageGateDispatch> {
+    match model_id {
+        "instantid_realvisxl" => Some(BespokeImageGateDispatch::NotCalibrationScoped),
+        "pulid_flux_dev" => Some(BespokeImageGateDispatch::CalibrationScoped {
+            provider_id: PULID_MEMORY_PROVIDER_ID,
+            width: 1024,
+            height: 1024,
+            count: 1,
+            authority: MemoryOptimizationAuthority::Calibrated,
+        }),
+        _ => None,
+    }
+}
+
+/// Mutation-sensitive ownership check for both bespoke image models. This fails if either dispatch
+/// disappears, if PuLID is pointed at a base-FLUX/worker telemetry id, or if its exact manifest cell
+/// or evidence authority is widened. It also records the product decision that InstantID is not a
+/// calibration-scoped route rather than pretending it owns an envelope that can be probed.
 #[test]
-fn bespoke_lane_exclusion_still_has_no_model_table_row() {
-    for id in KNOWN_UNSWEPT_GATE_BEARING_MODELS {
-        assert!(
-            EXPECTED_IMAGE_IDS.contains(id),
-            "{id} is excluded from the sc-20573 sweep but is no longer a shipped image model — \
-             drop it from KNOWN_UNSWEPT_GATE_BEARING_MODELS"
-        );
+fn bespoke_image_gate_dispatch_is_complete_and_exact() {
+    assert_eq!(
+        bespoke_image_gate_dispatch("instantid_realvisxl"),
+        Some(BespokeImageGateDispatch::NotCalibrationScoped),
+        "InstantID has no calibration-scoped memory gate on either lane"
+    );
+    assert_eq!(
+        bespoke_image_gate_dispatch("pulid_flux_dev"),
+        Some(BespokeImageGateDispatch::CalibrationScoped {
+            provider_id: "pulid_flux",
+            width: 1024,
+            height: 1024,
+            count: 1,
+            authority: MemoryOptimizationAuthority::Calibrated,
+        }),
+        "PuLID must reach its provider-owned calibration surface at the exact shipped cell"
+    );
+    for id in ["instantid_realvisxl", "pulid_flux_dev"] {
+        assert!(EXPECTED_IMAGE_IDS.contains(&id), "{id} must remain shipped");
         assert_eq!(
             crate::engines::engine_id_for_model(id),
             None,
-            "{id} now has a MODEL_TABLE row, so `engine_id_for_model` resolves it and the \
-             envelope ∩ manifest sweep can probe it like every other engine-backed family. DELETE \
-             {id:?} from KNOWN_UNSWEPT_GATE_BEARING_MODELS — the exclusion existed only for the \
-             bespoke lane's missing row (sc-20573)."
+            "{id} gained a MODEL_TABLE row; delete its bespoke dispatch and let the ordinary \
+             registry sweep own it"
         );
     }
 }
@@ -421,10 +448,9 @@ fn bespoke_lane_exclusion_still_has_no_model_table_row() {
 /// pair in a pin bump moves this list *deliberately*, in the same commit, with the census on stderr
 /// as the evidence. What it forbids is that movement happening silently.
 ///
-/// Everything else on this lane is `unprobed` for one structural reason: `candle-gen-*` publishes no
-/// weights-free gate+fixture pair for it (sensenova, sdxl, sana, sd3, chroma, kolors, anima, boogu,
-/// ideogram, bernini) or the model has no `MODEL_TABLE` row at all (see
-/// [`KNOWN_UNSWEPT_GATE_BEARING_MODELS`]).
+/// Everything else on this lane is `unprobed` because `candle-gen-*` publishes no weights-free
+/// gate+fixture pair for it (sensenova, sdxl, sana, sd3, chroma, kolors, anima, boogu, ideogram,
+/// bernini), or because its bespoke route is explicitly non-calibration-scoped (InstantID).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 const EXPECTED_PROBED_IMAGE_MODELS: &[&str] = &[
     "flux2_dev",
@@ -443,6 +469,7 @@ const EXPECTED_PROBED_IMAGE_MODELS: &[&str] = &[
     "mage_flow_edit_base",
     "mage_flow_edit_turbo",
     "mage_flow_turbo",
+    "pulid_flux_dev",
     "qwen_image",
     "qwen_image_edit_2511",
     "qwen_image_edit_2511_lightning",
@@ -479,6 +506,7 @@ fn assert_probe_census(
 /// sources would be a guess whose only failure mode is reddening the hosted macOS lane on a change
 /// that broke nothing. So the mlx lane asserts the part that is PROVABLE off-Mac instead:
 ///
+/// * PuLID must be probed through its explicit provider dispatch; and
 /// * these six SenseNova ids must be probed. All six resolve (via `MODEL_TABLE`) to two engines;
 ///   `mlx-gen-sensenova` registers both a `MemoryRegistration`
 ///   and a `MemoryBehaviorRegistration` for each, its fixtures come from gen-core's shared
@@ -491,6 +519,7 @@ fn assert_probe_census(
 /// census here, and switch this lane's [`assert_probe_census`] to the candle lane's `assert_eq!`.
 #[cfg(target_os = "macos")]
 const REQUIRED_PROBED_IMAGE_MODELS: &[&str] = &[
+    "pulid_flux_dev",
     "sensenova_u1_8b",
     "sensenova_u1_8b_fast",
     "sensenova_u1_8b_infographic_v2",
@@ -672,6 +701,192 @@ fn geometry_probes(
     probes
 }
 
+fn require_pulid_manifest_cell(
+    id: &str,
+    limits: &Value,
+    width: u32,
+    height: u32,
+    count: u32,
+) -> Result<(), String> {
+    let resolutions = manifest_resolutions(id, limits);
+    let counts = manifest_counts(id, limits);
+    if !resolutions.contains(&(width, height)) || !counts.contains(&count) {
+        return Err(format!(
+            "{id}: bespoke PuLID provider requires the exact {width}x{height} count {count} \
+             intersection, but the shipped manifest advertises {resolutions:?} x {counts:?}"
+        ));
+    }
+    Ok(())
+}
+
+/// MLX owns an ordinary provider registration for PuLID even though SceneWorks deliberately keeps
+/// the model out of `MODEL_TABLE`. Drive that registration's weights-free contract and provider-
+/// owned fixture directly so this remains the same gate the production generator delegates to.
+#[cfg(target_os = "macos")]
+fn probe_bespoke_pulid_manifest_cell(
+    id: &str,
+    limits: &Value,
+    provider_id: &str,
+    width: u32,
+    height: u32,
+    count: u32,
+    authority: MemoryOptimizationAuthority,
+) -> Result<String, String> {
+    require_pulid_manifest_cell(id, limits, width, height, count)?;
+    let registry = platform_runtime::providers::pulid::provider_registry()
+        .map_err(|error| format!("{id}: build MLX PuLID registry: {error}"))?;
+    let registration = registry
+        .memory_strategy_registrations()
+        .find(|registration| registration.provider_id == provider_id)
+        .ok_or_else(|| {
+            format!("{id}: MLX PuLID registry has no memory registration {provider_id:?}")
+        })?;
+    let behavior = registry
+        .memory_behavior_registrations()
+        .find(|registration| registration.provider_id == provider_id)
+        .ok_or_else(|| {
+            format!("{id}: MLX PuLID registry has no behavior registration {provider_id:?}")
+        })?;
+    let surfaces = registry
+        .memory_contract_surfaces()
+        .map_err(|error| format!("{id}: build MLX PuLID weights-free surfaces: {error}"))?;
+
+    let mut checked = 0_usize;
+    let mut refusals = Vec::new();
+    for surface in &surfaces {
+        if surface.contract.provider_id != provider_id {
+            continue;
+        }
+        for mut context in geometry_probes(registration, behavior, &surface.spec, &surface.contract)
+        {
+            checked += 1;
+            context.optimization_authority = authority;
+            context.geometry.width = width;
+            context.geometry.height = height;
+            context.geometry.batch = count;
+            match (registration.safety_check)(&surface.spec, &surface.contract, &context) {
+                MemorySafetyDecision::Accept => {
+                    return Ok(format!(
+                        "{width}x{height} count {count} {authority:?} via {provider_id}"
+                    ));
+                }
+                MemorySafetyDecision::Reject { reason } => {
+                    if refusals.len() < 4 {
+                        refusals.push(reason);
+                    }
+                }
+            }
+        }
+    }
+    Err(format!(
+        "{id}: MLX provider {provider_id:?} supplied {checked} accepted weights-free fixtures, but \
+         refused the exact shipped {width}x{height} count {count} {authority:?} cell: {refusals:?}"
+    ))
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn write_pulid_safetensors_fixture(path: &std::path::Path) -> Result<(), String> {
+    std::fs::create_dir_all(
+        path.parent()
+            .ok_or_else(|| format!("{} has no parent", path.display()))?,
+    )
+    .map_err(|error| format!("create {}: {error}", path.display()))?;
+    let mut header = br#"{"weight":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}"#.to_vec();
+    while header.len() % 8 != 0 {
+        header.push(b' ');
+    }
+    let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+    bytes.extend(header);
+    bytes.extend([0_u8; 4]);
+    std::fs::write(path, bytes).map_err(|error| format!("write {}: {error}", path.display()))
+}
+
+/// Candle owns no invented generator registration for PuLID. Its production route constructs a
+/// path-shaped provider contract, so reproduce that exact public API with tiny valid safetensors;
+/// this reads headers only and never constructs weights, touches CUDA, or reaches the network.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn probe_bespoke_pulid_manifest_cell(
+    id: &str,
+    limits: &Value,
+    provider_id: &str,
+    width: u32,
+    height: u32,
+    count: u32,
+    authority: MemoryOptimizationAuthority,
+) -> Result<String, String> {
+    use gen_core::{MemoryBehaviorRoute, MemoryMode, MemoryStrategy};
+
+    require_pulid_manifest_cell(id, limits, width, height, count)?;
+    let temp = tempfile::tempdir().map_err(|error| format!("{id}: tempdir: {error}"))?;
+    let root = temp.path().join("pulid-memory");
+    for component in ["text_encoder", "text_encoder_2", "transformer", "vae"] {
+        write_pulid_safetensors_fixture(
+            &root.join("base").join(component).join("model.safetensors"),
+        )?;
+    }
+    std::fs::write(
+        root.join("base/transformer/config.json"),
+        r#"{"quantization":{"bits":4,"group_size":64}}"#,
+    )
+    .map_err(|error| format!("{id}: write packed FLUX config: {error}"))?;
+    for name in [
+        "scrfd_10g.safetensors",
+        "arcface_iresnet100.safetensors",
+        "bisenet_parsing.safetensors",
+    ] {
+        write_pulid_safetensors_fixture(&root.join("face").join(name))?;
+    }
+    write_pulid_safetensors_fixture(&root.join("pulid.safetensors"))?;
+    write_pulid_safetensors_fixture(&root.join("eva.safetensors"))?;
+
+    let paths = platform_runtime::providers::pulid::PulidFluxPaths {
+        flux_base: root.join("base"),
+        pulid_weights: root.join("pulid.safetensors"),
+        eva_weights: root.join("eva.safetensors"),
+        face_dir: root.join("face"),
+        adapters: Vec::new(),
+    };
+    let contract =
+        platform_runtime::providers::pulid::memory_strategy::provider_contract(&paths)
+            .map_err(|error| format!("{id}: build Candle PuLID provider contract: {error}"))?;
+    if contract.provider_id != provider_id {
+        return Err(format!(
+            "{id}: Candle PuLID contract registered {:?}, expected {provider_id:?}",
+            contract.provider_id
+        ));
+    }
+    let tier = platform_runtime::providers::pulid::memory_strategy::resolved_numeric_tier(&paths)
+        .map_err(|error| format!("{id}: resolve Candle PuLID numeric tier: {error}"))?;
+    let mut context = gen_core::standard_memory_behavior_context(
+        &contract,
+        MemoryStrategy::StagedResidency,
+        tier,
+        MemoryBehaviorRoute {
+            mode: MemoryMode::Other("character_image".to_owned()),
+            reference_count: 1,
+            use_pid: false,
+            has_phases: false,
+            overlay: Some("identity".to_owned()),
+        },
+    )
+    .map_err(|error| format!("{id}: build Candle PuLID weights-free context: {error}"))?;
+    context.optimization_authority = authority;
+    context.geometry.width = width;
+    context.geometry.height = height;
+    context.geometry.batch = count;
+    match platform_runtime::providers::pulid::memory_strategy::safety_check(
+        &paths, &contract, &context,
+    ) {
+        MemorySafetyDecision::Accept => Ok(format!(
+            "{width}x{height} count {count} {authority:?} via {provider_id}"
+        )),
+        MemorySafetyDecision::Reject { reason } => Err(format!(
+            "{id}: Candle provider {provider_id:?} refused the exact shipped {width}x{height} \
+             count {count} {authority:?} cell: {reason}"
+        )),
+    }
+}
+
 /// **The sc-20573 assertion.** For every shipped image model whose engine publishes a
 /// calibration-scoped admission gate in the PINNED bundle, at least one advertised
 /// `limits.resolutions` x `limits.count` cell must be admitted by that gate.
@@ -709,7 +924,37 @@ fn every_calibration_scoped_image_gate_admits_a_shipped_manifest_cell() {
             .get(*id)
             .unwrap_or_else(|| panic!("{id} present in builtin.models.jsonc"));
         let Some(engine_id) = crate::engines::engine_id_for_model(id) else {
-            unprobed.insert(id, "no MODEL_TABLE row (not an engine-backed image family)");
+            match bespoke_image_gate_dispatch(id) {
+                Some(BespokeImageGateDispatch::NotCalibrationScoped) => {
+                    unprobed.insert(id, "bespoke route is explicitly non-calibration-scoped");
+                }
+                Some(BespokeImageGateDispatch::CalibrationScoped {
+                    provider_id,
+                    width,
+                    height,
+                    count,
+                    authority,
+                }) => {
+                    probed.insert(id);
+                    match probe_bespoke_pulid_manifest_cell(
+                        id,
+                        limits,
+                        provider_id,
+                        width,
+                        height,
+                        count,
+                        authority,
+                    ) {
+                        Ok(admitted) => {
+                            eprintln!("sc-20573: {id} bespoke intersection admitted {admitted}");
+                        }
+                        Err(reason) => failures.push((provider_id, reason)),
+                    }
+                }
+                None => {
+                    unprobed.insert(id, "no MODEL_TABLE row and no bespoke gate disposition");
+                }
+            }
             continue;
         };
         let (Some(registration), Some(behavior)) = (
@@ -833,19 +1078,18 @@ fn every_calibration_scoped_image_gate_admits_a_shipped_manifest_cell() {
         rendered_failures.join("\n    "),
     );
 
-    // The bespoke-lane models must stay accounted for as UNPROBED rather than quietly disappearing
-    // from the census in either direction (see KNOWN_UNSWEPT_GATE_BEARING_MODELS).
-    for id in KNOWN_UNSWEPT_GATE_BEARING_MODELS {
-        assert!(
-            unprobed.contains_key(*id),
-            "{id} is declared unsweepable (bespoke lane, no MODEL_TABLE row) but the census does \
-             not list it as unprobed. If the sweep can now reach it, delete it from \
-             KNOWN_UNSWEPT_GATE_BEARING_MODELS (sc-20573). Unprobed: {unprobed:?}"
-        );
-    }
+    assert_eq!(
+        unprobed.get("instantid_realvisxl"),
+        Some(&"bespoke route is explicitly non-calibration-scoped"),
+        "InstantID must remain an explicit non-calibration disposition, not an unswept gate"
+    );
+    assert!(
+        probed.contains("pulid_flux_dev"),
+        "PuLID is calibration-scoped and must reach the bespoke provider probe on this lane"
+    );
 
     // (3) Per-lane expected-probed census — the real vacuity guard. `!probed.is_empty()` would stay
-    // green after 21 of 22 models fell out of the sweep.
+    // green after 22 of 23 models fell out of the sweep.
     assert_probe_census(&probed, &unprobed, gates.len(), behaviors.len());
 }
 

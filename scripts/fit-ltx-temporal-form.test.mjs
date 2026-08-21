@@ -1326,12 +1326,13 @@ test("record terminals are explicit and require clean runtime-complete harness r
   record.status = "runtime_complete";
   record.repositories.sceneWorks.dirty = false;
   record.repositories.inference.dirty = false;
-  const states = recordTerminalStatesFrom([record], PLAN);
+  const oneProviderPlan = { providers: [provider] };
+  const states = recordTerminalStatesFrom([record], oneProviderPlan);
   assert.equal(states.get(provider.name).terminal, "completed");
   assert.equal(states.get(provider.name).oks, 1);
   assert.equal(
     coverageOf(
-      { providers: [provider] },
+      oneProviderPlan,
       pointsFrom([record], rolesFromPlan(PLAN), MANIFEST),
       states,
     ).byState.captured.total,
@@ -1346,10 +1347,21 @@ test("record terminals are explicit and require clean runtime-complete harness r
     const candidate = structuredClone(record);
     mutate(candidate);
     assert.throws(
-      () => recordTerminalStatesFrom([candidate], PLAN),
+      () => recordTerminalStatesFrom([candidate], oneProviderPlan),
       /runtime_complete|dirty repository/,
     );
   }
+
+  assert.throws(
+    () => recordTerminalStatesFrom([], oneProviderPlan),
+    /requires the exact planned fixture set/,
+    "a missing runtime-complete row must not become a not_reached row that still promotes",
+  );
+  assert.throws(
+    () => recordTerminalStatesFrom([{ ...record, fixture: "not-in-the-plan" }], oneProviderPlan),
+    /requires the exact planned fixture set/,
+    "an unexpected runtime-complete row must not be promoted outside the declared plan",
+  );
 });
 
 test("renaming a captured provider is refused rather than silently unlinking it", () => {

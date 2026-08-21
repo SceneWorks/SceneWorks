@@ -51,6 +51,157 @@ pub(crate) struct CandleMemoryEvaluation {
     pub predicted_peak_gb: f64,
 }
 
+/// Image routes whose only production admission truth is the existing Candle scalar gate. They
+/// enter the shared selector through a resident-only compatibility contract, then retain the
+/// established sequential fallback when that resident candidate does not fit.
+///
+/// Kept as a source-owned exact set because the generated Candle inventory parses it directly. A
+/// new scalar-gated route therefore cannot be described as migrated merely by changing generator
+/// prose; it must enter this production set and the call-site mutation guards.
+pub(crate) const LEGACY_SCALAR_COMPATIBILITY_ROUTES: &[&str] = &[
+    "boogu_image",
+    "boogu_image_turbo",
+    "ideogram_4",
+    "ideogram_4_turbo",
+    "kolors",
+    "sd3_5_large",
+    "sd3_5_large_turbo",
+    "sd3_5_medium",
+    "sensenova_u1_8b",
+    "sensenova_u1_8b_fast",
+    "sensenova_u1_8b_infographic_v2",
+    "sensenova_u1_8b_infographic_v2_fast",
+    "sensenova_u1_8b_infographic_v3",
+    "sensenova_u1_8b_infographic_v3_fast",
+];
+
+/// Bespoke image routes with a source-backed on-disk structural lower bound but no calibrated
+/// provider contract. Their exact production gates bind that floor through
+/// [`select_compatibility_resident`]; other evidence-free image routes are intentionally absent.
+#[allow(dead_code)] // source-consumed by the generated inventory; call sites pass the exact routes
+pub(crate) const STRUCTURAL_FLOOR_COMPATIBILITY_ROUTES: &[&str] =
+    &["bernini_image", "instantid_realvisxl"];
+
+pub(crate) fn is_legacy_scalar_compatibility_route(model_id: &str) -> bool {
+    LEGACY_SCALAR_COMPATIBILITY_ROUTES.contains(&model_id)
+}
+
+/// Submit one already-normalized Candle resident ceiling to the shared selector through inference's
+/// honest resident-only [`gen_core::MemoryProviderContract::compatibility_default`].
+///
+/// `peak_gb` is the exact quantity the legacy gate historically compared: callers apply their
+/// source-owned reserve and any pre-existing padding before this boundary. Accordingly the selector
+/// budget carries **zero** additional reserve, and the no-margin compatibility bases do not widen the
+/// peak. Those two invariants are what make this a wiring migration rather than a decision change.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn select_compatibility_resident(
+    route: &str,
+    tier_key: &str,
+    mode_key: &str,
+    geometry: MemoryGeometry,
+    budget: Option<VramBudget>,
+    peak_gb: Option<f64>,
+    basis: crate::memory_strategy::CandidateBasis,
+) -> Selection {
+    if !matches!(
+        basis,
+        crate::memory_strategy::CandidateBasis::LegacyScalar
+            | crate::memory_strategy::CandidateBasis::StructuralFloor
+            | crate::memory_strategy::CandidateBasis::LegacyVideo
+    ) {
+        return Selection::Unverified {
+            reason: MemoryEvidenceVerdict::Invalid,
+        };
+    }
+    let Some(tier) = numeric_tier(route, tier_key) else {
+        return Selection::Unverified {
+            reason: MemoryEvidenceVerdict::Invalid,
+        };
+    };
+    let Some(peak_gb) = peak_gb.filter(|value| value.is_finite() && *value > 0.0) else {
+        return Selection::Unverified {
+            reason: MemoryEvidenceVerdict::Missing,
+        };
+    };
+    let contract = gen_core::MemoryProviderContract::compatibility_default(
+        route,
+        gen_core::MemoryBackendRealization::CandleCuda {
+            device_residency: true,
+            host_backed_weights: true,
+            host_to_device_block_materialization: true,
+            block_materialization: gen_core::MemoryWindowMaterialization::DeviceFormatTransfer,
+        },
+    );
+    let mode = crate::memory_strategy::memory_mode_from_mode_key(mode_key);
+    let selection = MemorySelection {
+        strategy: MemoryStrategy::Resident,
+        parameters: Default::default(),
+        tier,
+    };
+    let evidence = MemoryEvidence {
+        key: MemoryEvidenceKey {
+            resolved_route: route.to_owned(),
+            backend: MemoryBackend::Candle,
+            tier,
+            mode,
+            load_shape: contract.load_shape,
+            overlay: None,
+            geometry,
+            strategy: MemoryStrategy::Resident,
+            engaged_composition: contract.engaged_composition(MemoryStrategy::Resident),
+            parameters: selection.parameters,
+        },
+        conformance: MemoryConformanceState::ImplementedUnverified,
+        dimensions: MemoryEvidenceDimensions {
+            static_implementation: MemoryEvidenceVerdict::Satisfied,
+            declared_calibration: MemoryEvidenceVerdict::Missing,
+            historical_verification: MemoryEvidenceVerdict::Missing,
+            current_environment_verification: MemoryEvidenceVerdict::Missing,
+            canonical_route_loadability: MemoryEvidenceVerdict::Unverified,
+            exact_strategy_parameters: MemoryEvidenceVerdict::Satisfied,
+        },
+        calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
+        calibration_fingerprint: String::new(),
+        sceneworks_revision: "sc-19055-candle-compatibility-v1".to_owned(),
+        inference_revision: crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION.to_owned(),
+        harness_version: String::new(),
+        predicted_peak_bytes: (peak_gb * BYTES_PER_GIB).ceil() as u64,
+        observed_peak_bytes: None,
+        parity: MemoryParityContract::Exact,
+        parity_result: MemoryParityResult::NotRun,
+    };
+    let candidate = Candidate {
+        selection,
+        evidence: &evidence,
+        // No-margin compatibility evidence is source-current by construction and does not enter the
+        // measured-closure currency branch. Keep the field honest and empty instead of fabricating a
+        // calibration closure.
+        closure_digest: "",
+        basis,
+    };
+    crate::memory_strategy::select_strategy(
+        RequestScope {
+            resolved_route: route,
+            backend: "candle",
+            tier,
+            mode: mode_key,
+            overlay: None,
+            geometry,
+            expected_closure_digest: "",
+        },
+        &contract,
+        budget.map(|budget| Budget {
+            available_gb: budget.free_gb,
+            reclaimable_gb: 0.0,
+            total_gb: budget.total_gb,
+            // The route-local ceiling already contains the lane reserve. Applying it here too would
+            // double-charge every migrated route.
+            reserved_headroom_gb: 0.0,
+        }),
+        &[candidate],
+    )
+}
+
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -85,6 +236,7 @@ fn numeric_tier(engine_id: &str, tier: &str) -> Option<MemoryNumericTier> {
     let quant = match tier {
         "q4" => Some(Quant::Q4),
         "q8" => Some(Quant::Q8),
+        "nvfp4" => Some(Quant::Nvfp4),
         "bf16" => None,
         _ => return None,
     };

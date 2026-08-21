@@ -1,6 +1,6 @@
 use super::{gate_with_evict_reclaim, Path, Settings, WorkerResult};
 
-use crate::conditioning_fit::{ConditioningFit, ConditioningFootprint};
+use crate::conditioning_fit::{ConditioningFit, ConditioningFootprint, ConditioningSelectorScope};
 
 // The ONE admission seam every candle conditioning route (ControlNet / IP-Adapter / identity encoder)
 // calls before it allocates (sc-16069, epic 15448). The pure decision lives in
@@ -57,6 +57,14 @@ pub(super) async fn admit_conditioning_overlay(
     settings: &Settings,
     footprint: &ConditioningFootprint,
 ) -> WorkerResult<()> {
+    admit_conditioning_overlay_inner(settings, footprint, None).await
+}
+
+async fn admit_conditioning_overlay_inner(
+    settings: &Settings,
+    footprint: &ConditioningFootprint,
+    selector_scope: Option<ConditioningSelectorScope<'_>>,
+) -> WorkerResult<()> {
     let raw_budget = crate::vram_gate::apply_vram_cap(
         crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
         crate::vram_gate::cuda_vram_cap_gb(),
@@ -64,7 +72,12 @@ pub(super) async fn admit_conditioning_overlay(
     let (fit, _budget) = gate_with_evict_reclaim(
         &settings.gpu_id,
         raw_budget,
-        |budget| crate::conditioning_fit::decide(footprint, budget),
+        |budget| match selector_scope {
+            Some(scope) => {
+                crate::conditioning_fit::decide_via_compatibility_selector(footprint, budget, scope)
+            }
+            None => crate::conditioning_fit::decide(footprint, budget),
+        },
         // Evict the warm txt2img cache ONLY when reclaiming its pool turns a refusal into an admit.
         // Two refusals that differ only in their reported free number are the same non-outcome, and an
         // already-admitting gate has nothing to gain — so neither triggers a pointless evict.
@@ -89,4 +102,20 @@ pub(super) async fn admit_conditioning_paths(
     let footprint =
         ConditioningFootprint::from_paths(model_label, overlay_label, base_dir, overlays);
     admit_conditioning_overlay(settings, &footprint).await
+}
+
+/// InstantID's bespoke Candle path has no provider-owned calibration contract, but its exact
+/// base+identity-stack weights are a source-backed structural floor. Route that floor through the
+/// resident-only compatibility selector before applying the unchanged conditioning-gate outcome.
+pub(super) async fn admit_conditioning_paths_via_compatibility_selector(
+    settings: &Settings,
+    model_label: &str,
+    overlay_label: &'static str,
+    base_dir: &Path,
+    overlays: &[&Path],
+    selector_scope: ConditioningSelectorScope<'_>,
+) -> WorkerResult<()> {
+    let footprint =
+        ConditioningFootprint::from_paths(model_label, overlay_label, base_dir, overlays);
+    admit_conditioning_overlay_inner(settings, &footprint, Some(selector_scope)).await
 }

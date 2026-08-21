@@ -153,9 +153,11 @@ on:
   # binary's contract (`crates/sceneworks-memory-adapter/src/bin/{candle,mlx}.rs` read them
   # via `required_env`), so renaming them would break the five-rung capture at runtime.
   #
-  # GitHub caps workflow_dispatch at 10 inputs. Renaming rather than adding a parallel
-  # provision_* family is what leaves the shared parameterized route at the cap after the two
-  # narrowly scoped terminal acceptance switches below; another route must reuse inputs or move.
+  # GitHub currently caps workflow_dispatch at 25 top-level inputs. Keep one shared provision_*
+  # family rather than adding model-specific path inputs anyway: every real-weight mode must bind
+  # the generic path to its exact audited identity in Validate dispatch inputs below. The
+  # platform-review contract pins the current GitHub limit so the repository does not preserve the
+  # obsolete historical limit of 10 as if it were a safety property.
   workflow_dispatch:
     inputs:
       run_five_rung_reference:
@@ -205,6 +207,14 @@ on:
         required: false
         type: boolean
         default: false
+      run_sc19057_wan_capture:
+        description: "Capture the exact SC-19057 Wan q4 six-row runtime-complete terminal bundle"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
 
 # Cancel superseded PR runs, but never cancel a main-push run: this lane is the
 # ONLY thing that compiles the candle-gated worker code, so a main commit whose
@@ -312,7 +322,7 @@ jobs:
   candle-worker:
     # Same-repo only — never execute untrusted fork code on the self-hosted runner.
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-    # A provisioning or five-rung dispatch additionally requires `real-weights`; ordinary PR and
+    # A provisioning, five-rung, or SC-19057 dispatch additionally requires `real-weights`; ordinary PR and
     # push runs keep the full `cuda` pool (sc-18677). This mirrors macos-mlx.yml:450 exactly, which
     # adds `weights` for `run_memory_calibration || run_five_rung_reference` and is the convention
     # this lane was missing -- the asymmetry epic 17137 recorded as "no weights label and no HF
@@ -325,7 +335,7 @@ jobs:
     # correct the day a `cuda` runner is added on a second machine: without it the job lands on a
     # box with no snapshot and fails at the resolve step, which is loud but wasteful; with it the
     # job simply queues for a box that has the weights.
-    runs-on: ${{ (github.event_name == 'workflow_dispatch' && (inputs.provision_snapshot || inputs.run_five_rung_reference || inputs.run_sc19054_flux_acceptance)) && fromJSON('["self-hosted","Windows","X64","cuda","real-weights"]') || fromJSON('["self-hosted","Windows","X64","cuda"]') }}
+    runs-on: ${{ (github.event_name == 'workflow_dispatch' && (inputs.provision_snapshot || inputs.run_five_rung_reference || inputs.run_sc19054_flux_acceptance || inputs.run_sc19057_wan_capture)) && fromJSON('["self-hosted","Windows","X64","cuda","real-weights"]') || fromJSON('["self-hosted","Windows","X64","cuda"]') }}
     env:
       # Native sm_120 (Blackwell) — this runner IS the RTX PRO 6000 box; nvcc emits
       # SASS directly (no load-time JIT). compute_80 PTX would also forward-JIT.
@@ -344,9 +354,10 @@ jobs:
     # Krea q4's ~14 GB, so it is the branch that most
     # needs the long budget. Krea's two dispatch shapes keep their exact previous values --
     # five-rung + provision 240, five-rung alone 120, everything else 45.
-    # The LTX Eros acceptance capture (sc-18902, from main) keeps its own six-hour ceiling
-    # ahead of the provisioning branch.
-    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && inputs.run_ltx_eros_acceptance && 360 || github.event_name == 'workflow_dispatch' && inputs.run_sc19054_flux_acceptance && 240 || github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && 240 || github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && 120 || 45 }}
+    # The LTX Eros acceptance capture (sc-18902, from main) and SC-19057's six cold Wan loads plus
+    # warm repeats each keep GitHub's maximum six-hour job ceiling ahead of provisioning.
+    # SC-19054's one real FLUX render retains the provisioning-sized four-hour ceiling.
+    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && (inputs.run_ltx_eros_acceptance || inputs.run_sc19057_wan_capture) && 360 || github.event_name == 'workflow_dispatch' && inputs.run_sc19054_flux_acceptance && 240 || github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && 240 || github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && 120 || 45 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # PROVISIONING RUNS BEFORE ANY CARGO INVOCATION (sc-18691). It used to sit BELOW the three
@@ -419,6 +430,7 @@ jobs:
           RUN_FIVE_RUNG_REFERENCE: ${{ inputs.run_five_rung_reference }}
           RUN_SC19054_FLUX_ACCEPTANCE: ${{ inputs.run_sc19054_flux_acceptance }}
           RUN_LTX_EROS_ACCEPTANCE: ${{ inputs.run_ltx_eros_acceptance }}
+          RUN_SC19057_WAN_CAPTURE: ${{ inputs.run_sc19057_wan_capture }}
           PROVISION_SNAPSHOT: ${{ inputs.provision_snapshot }}
           INFERENCE_REVISION: ${{ inputs.inference_revision }}
           PROVISION_REPOSITORY: ${{ inputs.provision_repository }}
@@ -427,13 +439,24 @@ jobs:
           PROVISION_SUBDIR: ${{ inputs.provision_subdir }}
           PROVISION_CACHE_DIR_INPUT: ${{ inputs.provision_cache_dir }}
         run: |
+          # Every real-weight execution mode is explicit and mutually exclusive. When another mode
+          # is added, it must join this list and the mutation-sensitive platform contract; merely
+          # adding another guarded step is not enough because two true inputs would share one GPU.
+          $selectedModes = @()
+          if ($env:RUN_FIVE_RUNG_REFERENCE -eq 'true') { $selectedModes += 'run_five_rung_reference' }
+          if ($env:RUN_LTX_EROS_ACCEPTANCE -eq 'true') { $selectedModes += 'run_ltx_eros_acceptance' }
+          if ($env:RUN_SC19054_FLUX_ACCEPTANCE -eq 'true') { $selectedModes += 'run_sc19054_flux_acceptance' }
+          if ($env:RUN_SC19057_WAN_CAPTURE -eq 'true') { $selectedModes += 'run_sc19057_wan_capture' }
+          if ($selectedModes.Count -gt 1) {
+            throw "real-weight execution modes are mutually exclusive: $($selectedModes -join ', ')"
+          }
           # Gate on the SAME condition as the steps that consume these values (the params and
           # resolve steps run on `run_five_rung_reference || provision_snapshot`), not on
           # provision_snapshot alone. Scoping the containment checks to the provisioning branch
           # left them unreachable for a five-rung-only dispatch, which consumes provision_subdir
           # and provision_patterns just the same -- it failed closed downstream on the EndsWith
           # assertion, but reported a confusing path mismatch instead of the real reason.
-          if ($env:PROVISION_SNAPSHOT -eq 'true' -or $env:RUN_FIVE_RUNG_REFERENCE -eq 'true') {
+          if ($env:PROVISION_SNAPSHOT -eq 'true' -or $env:RUN_FIVE_RUNG_REFERENCE -eq 'true' -or $env:RUN_SC19057_WAN_CAPTURE -eq 'true') {
             if ($env:PROVISION_REPOSITORY -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$') {
               throw 'provision_repository must be a Hugging Face owner/name repo id'
             }
@@ -509,9 +532,6 @@ jobs:
             }
           }
           if ($env:RUN_SC19054_FLUX_ACCEPTANCE -eq 'true') {
-            if ($env:RUN_FIVE_RUNG_REFERENCE -eq 'true' -or $env:RUN_LTX_EROS_ACCEPTANCE -eq 'true') {
-              throw 'run_sc19054_flux_acceptance must be the only real-weight acceptance mode in its dispatch'
-            }
             if ($env:PROVISION_SNAPSHOT -ne 'true') {
               throw 'run_sc19054_flux_acceptance requires provision_snapshot=true so the exact public artifact is resolved before loading'
             }
@@ -532,16 +552,38 @@ jobs:
               throw "input inference_revision does not match the worker's compiled INFERENCE_RUNTIME_REVISION"
             }
           }
-          if ($env:RUN_FIVE_RUNG_REFERENCE -ne 'true') { exit 0 }
-          if ($env:INFERENCE_REVISION -notmatch '^[0-9a-f]{40}$') {
-            throw 'inference_revision must be an exact lowercase 40-hex commit'
+          if ($env:RUN_FIVE_RUNG_REFERENCE -eq 'true' -or $env:RUN_SC19057_WAN_CAPTURE -eq 'true') {
+            if ($env:INFERENCE_REVISION -notmatch '^[0-9a-f]{40}$') {
+              throw 'inference_revision must be an exact lowercase 40-hex commit'
+            }
+            $pinLine = Select-String -Path 'crates/sceneworks-memory-adapter/src/lib.rs' -Pattern '^pub const INFERENCE_PIN: &str = "([0-9a-f]{40})";$'
+            if (-not $pinLine -or $pinLine.Matches[0].Groups[1].Value -ne $env:INFERENCE_REVISION) {
+              throw "input inference_revision does not match the adapter's compiled INFERENCE_PIN"
+            }
           }
-          if ($env:PROVISION_REPOSITORY -ne 'SceneWorks/krea-2-turbo-mlx') {
+          if ($env:RUN_FIVE_RUNG_REFERENCE -eq 'true' -and $env:PROVISION_REPOSITORY -ne 'SceneWorks/krea-2-turbo-mlx') {
             throw 'provision_repository must be the fixed SceneWorks/krea-2-turbo-mlx reference artifact for a five-rung capture'
           }
-          $pinLine = Select-String -Path 'crates/sceneworks-memory-adapter/src/lib.rs' -Pattern '^pub const INFERENCE_PIN: &str = "([0-9a-f]{40})";$'
-          if (-not $pinLine -or $pinLine.Matches[0].Groups[1].Value -ne $env:INFERENCE_REVISION) {
-            throw "input inference_revision does not match the adapter's compiled INFERENCE_PIN"
+          if ($env:RUN_SC19057_WAN_CAPTURE -eq 'true') {
+            if ($env:PROVISION_SNAPSHOT -ne 'true') {
+              throw 'run_sc19057_wan_capture requires provision_snapshot=true so the exact q4 artifact is materialized before capture'
+            }
+            if ($env:INFERENCE_REVISION -ne '4013049764172ee7dc707101c7da8c83c1483f2d') {
+              throw 'SC-19057 inference_revision must equal the audited terminal pin'
+            }
+            if ($env:PROVISION_REPOSITORY -ne 'SceneWorks/wan2.2-ti2v-5b-candle') {
+              throw 'SC-19057 provision_repository must equal the fixed public Wan artifact'
+            }
+            if ($env:PROVISION_REVISION -ne '9b173dc8660334a87a11e67de58939afe68f8cb2') {
+              throw 'SC-19057 provision_revision must equal the immutable Wan q4 artifact revision'
+            }
+            $wanPatterns = @($env:PROVISION_PATTERNS -split '[,\r\n]' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+            if ($wanPatterns.Count -ne 1 -or $wanPatterns[0] -ne 'q4/**') {
+              throw 'SC-19057 provision_patterns must be exactly q4/**'
+            }
+            if ($env:PROVISION_SUBDIR -ne 'q4') {
+              throw 'SC-19057 provision_subdir must be exactly q4'
+            }
           }
       # Derives the cache dir and the exact snapshot suffix ONCE, so the provisioning step and
       # the resolve step below cannot drift apart on where the snapshot is meant to land. That
@@ -586,7 +628,7 @@ jobs:
           Write-Host "cache dir       : $cache"
           Write-Host "snapshot suffix : $suffix"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}
+        if: ${{ github.event_name == 'workflow_dispatch' && (inputs.run_five_rung_reference || inputs.run_sc19057_wan_capture) }}
         with:
           node-version: 22
       - name: Validate runner Python for snapshot provisioning
@@ -711,6 +753,37 @@ jobs:
           if ($isKrea) {
             "SCENEWORKS_KREA_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           }
+      - name: Inventory the exact SC-19057 Wan q4 artifact
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_sc19057_wan_capture }}
+        shell: powershell
+        run: |
+          $root = (Resolve-Path -LiteralPath $env:SCENEWORKS_PROVISIONED_ROOT).Path
+          $files = @(Get-ChildItem -LiteralPath $root -Recurse -File -Force | Sort-Object FullName)
+          $total = ($files | Measure-Object -Property Length -Sum).Sum
+          if ($files.Count -ne 25) {
+            throw "SC-19057's immutable q4 artifact must contain exactly 25 files, found $($files.Count)"
+          }
+          if ($total -ne 17338835457) {
+            throw "SC-19057's immutable q4 artifact must contain exactly 17,338,835,457 bytes, found $total"
+          }
+          $evidence = Join-Path $env:RUNNER_TEMP "sc-19057-wan-$($env:GITHUB_RUN_ID)-$($env:GITHUB_RUN_ATTEMPT)"
+          New-Item -ItemType Directory -Force -Path $evidence | Out-Null
+          $inventory = foreach ($file in $files) {
+            [ordered]@{
+              path = $file.FullName.Substring($root.Length).TrimStart('\').Replace('\', '/')
+              bytes = $file.Length
+              sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()
+            }
+          }
+          [ordered]@{
+            repository = 'SceneWorks/wan2.2-ti2v-5b-candle'
+            revision = '9b173dc8660334a87a11e67de58939afe68f8cb2'
+            variant = 'q4'
+            fileCount = $files.Count
+            totalBytes = $total
+            files = @($inventory)
+          } | ConvertTo-Json -Depth 5 | Out-File -LiteralPath (Join-Path $evidence 'wan-q4-artifact-inventory.json') -Encoding utf8
+          "SC19057_EVIDENCE_DIR=$evidence" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       # sc-13166: point this lane at the REAL rustup toolchain bin and prepend it to
       # PATH, so cargo/rustc/clippy never dispatch through the fragile
       # %USERPROFILE%\.cargo\bin proxies (0-byte symlinks -> rustup.exe that go dangling
@@ -742,10 +815,10 @@ jobs:
           New-Item -ItemType Directory -Force -Path $jobCargoHome | Out-Null
           Add-Content -Path $env:GITHUB_ENV -Value "CARGO_HOME=$jobCargoHome"
       # THE COMPILE CHAIN, skipped for a weights-only dispatch (sc-18691). The condition names
-      # `provision_snapshot` true with neither a five-rung capture nor the SC-19054 consumer, and
-      # excludes only that. Everything else is untouched: PR and push runs (`github.event_name` is
-      # not `workflow_dispatch`, so the inner conjunction is false), a plain no-input dispatch, and
-      # both real-weight consumers, which compile the exact code they execute.
+      # exactly one dispatch shape -- `provision_snapshot` true with neither the five-rung nor the
+      # SC-19054/SC-19057 execution modes selected -- and excludes only that. Everything else is untouched:
+      # PR and push runs (`github.event_name` is not `workflow_dispatch`, so the inner conjunction is
+      # false), a plain no-input dispatch, and every selected execution mode.
       #
       # This is a SKIP, not a swallow. A skipped step cannot mask a failure the way
       # `continue-on-error` can, so a weights-only dispatch's conclusion is decided solely by the
@@ -756,7 +829,7 @@ jobs:
       # byte-identical neighbours are precisely why that scoping exists: sc-18677's third review
       # round found three narrowing mutations green against a file-wide `assert.match`.
       - name: Fetch the pinned inference release
-        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference && !inputs.run_sc19054_flux_acceptance) }}
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference && !inputs.run_sc19054_flux_acceptance && !inputs.run_sc19057_wan_capture) }}
         env:
           CARGO_NET_OFFLINE: "false"
         run: cargo fetch --locked
@@ -768,7 +841,7 @@ jobs:
       # rejects). Load the BuildTools vcvars in-shell, then build+test in the same
       # cmd invocation so the toolchain env survives (each step is a fresh shell).
       - name: Test the candle GPU worker (backend-candle)
-        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference && !inputs.run_sc19054_flux_acceptance) }}
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference && !inputs.run_sc19054_flux_acceptance && !inputs.run_sc19057_wan_capture) }}
         shell: cmd
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
@@ -787,7 +860,7 @@ jobs:
       # release.yml package builds, where web/dist exists. (Release-only codegen/link
       # breaks also still surface first in those builds.)
       - name: Check the candle sidecar builds (rust-api, backend-candle)
-        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference && !inputs.run_sc19054_flux_acceptance) }}
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference && !inputs.run_sc19054_flux_acceptance && !inputs.run_sc19057_wan_capture) }}
         shell: cmd
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
@@ -809,15 +882,20 @@ jobs:
       # ran in zero lanes on either platform. The CHECK step above it keeps its selector on purpose:
       # it is the production-typecheck half and the lib compiles on every platform anyway.
       - name: Check and test the candle memory adapter (lib + memory-candle-adapter)
-        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference && !inputs.run_sc19054_flux_acceptance) }}
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference && !inputs.run_sc19054_flux_acceptance && !inputs.run_sc19057_wan_capture) }}
         shell: cmd
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
           cargo check -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter
           cargo test -p sceneworks-memory-adapter --features candle
+      - name: Exclude nested calibration checkout from SceneWorks status
+        if: ${{ github.event_name == 'workflow_dispatch' && (inputs.run_five_rung_reference || inputs.run_sc19057_wan_capture) }}
+        shell: powershell
+        run: |
+          Add-Content -Path '.git\info\exclude' -Value '.calibration/'
       - name: Check out the exact inference reference source
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}
+        if: ${{ github.event_name == 'workflow_dispatch' && (inputs.run_five_rung_reference || inputs.run_sc19057_wan_capture) }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: SceneWorks/inference
@@ -836,7 +914,6 @@ jobs:
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
-          echo .calibration/>>.git\info\exclude
           cargo build --release --locked -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter
           node scripts\memory-calibration-harness.mjs run --config config\memory-calibration-plan.json --backend candle --fixture fresh-five-rung-krea-q4-1024-seed16402-step2 --fresh-per-case --provider-command "[\"target/release/memory-candle-adapter.exe\"]" --sceneworks-repo "%GITHUB_WORKSPACE%" --inference-repo "%GITHUB_WORKSPACE%\.calibration\inference" --output "%RUNNER_TEMP%\sc-16059-candle-fresh.json"
           node scripts\memory-calibration-harness.mjs run --config config\memory-calibration-plan.json --backend candle --fixture fresh-five-rung-krea-q4-1024-seed16402-step2 --batch-rungs --provider-command "[\"target/release/memory-candle-adapter.exe\"]" --sceneworks-repo "%GITHUB_WORKSPACE%" --inference-repo "%GITHUB_WORKSPACE%\.calibration\inference" --output "%RUNNER_TEMP%\sc-16059-candle-reused.json"
@@ -855,7 +932,7 @@ jobs:
             ${{ runner.temp }}/sc-16059-candle-reuse-comparison.json
           if-no-files-found: error
       - name: Clippy (candle worker)
-        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference && !inputs.run_sc19054_flux_acceptance) }}
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference && !inputs.run_sc19054_flux_acceptance && !inputs.run_sc19057_wan_capture) }}
         shell: cmd
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
@@ -1054,7 +1131,7 @@ jobs:
       # at every pin bump with nothing red). Checking it on both lanes is what turns that argument
       # into a measurement, and it costs nothing either side: the same dumper run already writes it.
       - name: Verify capabilities.candle.json content against a fresh dump
-        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference && !inputs.run_sc19054_flux_acceptance) }}
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference && !inputs.run_sc19054_flux_acceptance && !inputs.run_sc19057_wan_capture) }}
         id: verify_candle_capabilities
         shell: cmd
         run: |
@@ -1103,6 +1180,90 @@ jobs:
           name: backend-capability-facts-candle
           path: ${{ runner.temp }}/engine-capability-facts-verify
           if-no-files-found: warn
+      - name: Verify the exact SC-19057 paired source closure
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_sc19057_wan_capture }}
+        shell: powershell
+        env:
+          INFERENCE_REVISION: ${{ inputs.inference_revision }}
+        run: |
+          $sceneHead = (git rev-parse HEAD).Trim()
+          $inferenceHead = (git -C '.calibration\inference' rev-parse HEAD).Trim()
+          if ($sceneHead -ne $env:GITHUB_SHA) { throw "SceneWorks checkout $sceneHead does not equal GITHUB_SHA $($env:GITHUB_SHA)" }
+          if ($inferenceHead -ne $env:INFERENCE_REVISION) { throw "inference checkout $inferenceHead does not equal $($env:INFERENCE_REVISION)" }
+          if ((git status --porcelain | Out-String).Trim()) { throw 'SceneWorks checkout is dirty before SC-19057 capture' }
+          if ((git -C '.calibration\inference' status --porcelain | Out-String).Trim()) { throw 'inference checkout is dirty before SC-19057 capture' }
+          node scripts\inference-closure-digest.mjs --repo '.calibration\inference' --revision $env:INFERENCE_REVISION --check
+          if ($LASTEXITCODE -ne 0) { throw "inference closure verification failed with exit code $LASTEXITCODE" }
+      - name: Build the release SC-19057 Candle memory adapter
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_sc19057_wan_capture }}
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          cargo build --release --locked -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter
+      - name: Capture and accept the exact SC-19057 six-row terminal bundle
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_sc19057_wan_capture }}
+        shell: powershell
+        env:
+          SCENEWORKS_WAN_REPOSITORY: ${{ inputs.provision_repository }}
+          SCENEWORKS_WAN_REVISION: ${{ inputs.provision_revision }}
+          INFERENCE_REVISION: ${{ inputs.inference_revision }}
+        run: |
+          $env:SCENEWORKS_WAN_ROOT = $env:SCENEWORKS_PROVISIONED_ROOT
+          $adapter = (Resolve-Path -LiteralPath 'target\release\memory-candle-adapter.exe').Path
+          $provider = ConvertTo-Json -Compress -InputObject @($adapter)
+          $capture = Join-Path $env:SC19057_EVIDENCE_DIR 'wan-candle-video-sc-19057.json'
+          $receipt = Join-Path $env:SC19057_EVIDENCE_DIR 'wan-candle-video-sc-19057.acceptance.json'
+          node scripts\memory-calibration-harness.mjs run `
+            --config docs\calibration\sc-19057\wan-candle-video-capture-plan.json `
+            --backend candle `
+            --fresh-per-case `
+            --provider-command $provider `
+            --sceneworks-repo $env:GITHUB_WORKSPACE `
+            --inference-repo "$env:GITHUB_WORKSPACE\.calibration\inference" `
+            --output $capture
+          if ($LASTEXITCODE -ne 0) { throw "SC-19057 capture failed with exit code $LASTEXITCODE" }
+          node scripts\memory-calibration-harness.mjs check --input $capture
+          if ($LASTEXITCODE -ne 0) { throw "SC-19057 harness check failed with exit code $LASTEXITCODE" }
+          node scripts\validate-sc19057-wan-capture.mjs `
+            --input $capture `
+            --plan docs\calibration\sc-19057\wan-candle-video-capture-plan.json `
+            --sceneworks-revision $env:GITHUB_SHA `
+            --inference-revision $env:INFERENCE_REVISION `
+            --write-receipt $receipt
+          if ($LASTEXITCODE -ne 0) { throw "SC-19057 exact 6/6 acceptance failed with exit code $LASTEXITCODE" }
+      - name: Seal the SC-19057 source runner and receipt identity
+        if: ${{ success() && github.event_name == 'workflow_dispatch' && inputs.run_sc19057_wan_capture }}
+        shell: powershell
+        env:
+          INFERENCE_REVISION: ${{ inputs.inference_revision }}
+        run: |
+          if ((git status --porcelain | Out-String).Trim()) { throw 'SceneWorks checkout became dirty during SC-19057 capture' }
+          if ((git -C '.calibration\inference' status --porcelain | Out-String).Trim()) { throw 'inference checkout became dirty during SC-19057 capture' }
+          Copy-Item -LiteralPath 'docs\calibration\sc-19057\wan-candle-video-capture-plan.json' -Destination (Join-Path $env:SC19057_EVIDENCE_DIR 'wan-candle-video-capture-plan.json')
+          $identity = [ordered]@{
+            story = 'SC-19057'
+            githubSha = $env:GITHUB_SHA
+            sceneWorksRevision = (git rev-parse HEAD).Trim()
+            inferenceRevision = (git -C '.calibration\inference' rev-parse HEAD).Trim()
+            requestedInferenceRevision = $env:INFERENCE_REVISION
+            artifactRepository = 'SceneWorks/wan2.2-ti2v-5b-candle'
+            artifactRevision = '9b173dc8660334a87a11e67de58939afe68f8cb2'
+            artifactVariant = 'q4'
+            runId = $env:GITHUB_RUN_ID
+            runAttempt = $env:GITHUB_RUN_ATTEMPT
+            runnerName = $env:RUNNER_NAME
+            gpu = ((& nvidia-smi --query-gpu=name,uuid,driver_version,memory.total --format=csv,noheader | Out-String).Trim())
+            rustc = ((& rustc --version | Out-String).Trim())
+            cargo = ((& cargo --version | Out-String).Trim())
+            node = ((& node --version | Out-String).Trim())
+          }
+          $identity | ConvertTo-Json -Depth 4 | Out-File -LiteralPath (Join-Path $env:SC19057_EVIDENCE_DIR 'run-identity.json') -Encoding utf8
+          $manifest = foreach ($file in (Get-ChildItem -LiteralPath $env:SC19057_EVIDENCE_DIR -File | Where-Object Name -ne 'sha256.txt' | Sort-Object Name)) {
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant()
+            "$hash  $($file.Name)"
+          }
+          $manifest | Out-File -LiteralPath (Join-Path $env:SC19057_EVIDENCE_DIR 'sha256.txt') -Encoding ascii
       # SC-18902's product decision required an actual Eros render, not source inference. These
       # dispatch-only steps are retained only to reproduce that rejected historical baseline; they
       # do not restore an Eros Candle product route. A candidate is intentionally absent: the
@@ -1339,3 +1500,30 @@ jobs:
             ${{ runner.temp }}/sc-18902-ltx-eros-${{ github.run_id }}-${{ github.run_attempt }}/runner.json
             ${{ runner.temp }}/sc-18902-ltx-eros-${{ github.run_id }}-${{ github.run_attempt }}/sha256.txt
           if-no-files-found: error
+      - name: Upload the sealed SC-19057 capture attempt
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_sc19057_wan_capture }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sc-19057-wan-candle-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/sc-19057-wan-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 30
+      - name: Clean bounded SC-19057 job scratch
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_sc19057_wan_capture }}
+        shell: powershell
+        run: |
+          $allowedRoot = [System.IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\') + '\'
+          $targets = @(
+            (Join-Path $env:GITHUB_WORKSPACE '.calibration'),
+            (Join-Path $env:RUNNER_TEMP "sc-19057-wan-$($env:GITHUB_RUN_ID)-$($env:GITHUB_RUN_ATTEMPT)")
+          )
+          foreach ($target in $targets) {
+            if (-not $target) { continue }
+            $full = [System.IO.Path]::GetFullPath($target)
+            $isNestedCheckout = $full -eq [System.IO.Path]::GetFullPath((Join-Path $env:GITHUB_WORKSPACE '.calibration'))
+            $isJobScratch = $full.StartsWith($allowedRoot, [StringComparison]::OrdinalIgnoreCase)
+            if (-not ($isNestedCheckout -or $isJobScratch)) {
+              throw "refusing cleanup outside bounded job scratch: $full"
+            }
+            if (Test-Path -LiteralPath $full) { Remove-Item -LiteralPath $full -Recurse -Force }
+          }

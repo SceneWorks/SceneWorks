@@ -38,6 +38,7 @@ import {
   parseCandleImageLanes,
   parseCandleVideoEngines,
   parseCatalogModalities,
+  parseCompatibilityRoutes,
   parseRequestScopeDispatch,
   predictedPeakGb,
   predictedPeakGbForRequest,
@@ -50,6 +51,7 @@ import {
   scalarPeakClass,
   selfTest,
   sourceRevisionOf,
+  validateCompatibilityWiring,
 } from "./generate-candle-admission-inventory.mjs";
 
 const sources = await readSources();
@@ -151,7 +153,7 @@ test("the route universe reconciles against the routing catalog, not the manifes
   }
 });
 
-test("every route carries exactly one shared-selector verdict, and the three states are distinct", () => {
+test("every route carries exactly one shared-selector verdict, including compatibility bases", () => {
   const dispatch = parseRequestScopeDispatch(bodies.candleMemoryStrategy);
   for (const route of artifacts.inventory.routes) {
     const { reached, via, evidenceRevision } = route.sharedSelector;
@@ -164,15 +166,142 @@ test("every route carries exactly one shared-selector verdict, and the three sta
         route.evidence.declaresProviderContract,
         `${route.modelId}: catch-all scope without a candle.memoryStrategyContract`,
       );
+    } else if (
+      [
+        "legacy_scalar_compatibility",
+        "structural_floor_compatibility",
+        "legacy_video_compatibility",
+      ].includes(via)
+    ) {
+      assert.equal(evidenceRevision, "sc-19055-candle-compatibility-v1");
+    } else if (via === "bespoke_override") {
+      assert.equal(evidenceRevision, dispatch.overrideOnly[0].value);
     } else if (via === null) {
       assert.equal(evidenceRevision, null);
+    } else {
+      assert.fail(`${route.modelId}: unknown shared-selector verdict ${via}`);
     }
   }
   const summary = artifacts.inventory.summary.sharedSelector;
   assert.equal(
-    summary.namedRevision + summary.declarationCatchAll + summary.bespokeOverride + summary.unreached,
+    summary.namedRevision +
+      summary.declarationCatchAll +
+      summary.bespokeOverride +
+      summary.legacyScalarCompatibility +
+      summary.structuralFloorCompatibility +
+      summary.legacyVideoCompatibility +
+      summary.unreached,
     artifacts.inventory.routes.length,
   );
+});
+
+test("the source-owned compatibility sets machine-count exactly the approved 14 + 2 + 7 routes", () => {
+  const scalar = parseCompatibilityRoutes(
+    bodies.candleMemoryStrategy,
+    "LEGACY_SCALAR_COMPATIBILITY_ROUTES",
+  );
+  const structural = parseCompatibilityRoutes(
+    bodies.candleMemoryStrategy,
+    "STRUCTURAL_FLOOR_COMPATIBILITY_ROUTES",
+  );
+  const video = parseCompatibilityRoutes(bodies.videoAdmission, "LEGACY_VIDEO_COMPATIBILITY_ROUTES");
+  assert.deepEqual(
+    [...scalar].sort(),
+    [
+      "boogu_image",
+      "boogu_image_turbo",
+      "ideogram_4",
+      "ideogram_4_turbo",
+      "kolors",
+      "sd3_5_large",
+      "sd3_5_large_turbo",
+      "sd3_5_medium",
+      "sensenova_u1_8b",
+      "sensenova_u1_8b_fast",
+      "sensenova_u1_8b_infographic_v2",
+      "sensenova_u1_8b_infographic_v2_fast",
+      "sensenova_u1_8b_infographic_v3",
+      "sensenova_u1_8b_infographic_v3_fast",
+    ],
+  );
+  assert.deepEqual([...structural].sort(), ["bernini_image", "instantid_realvisxl"]);
+  assert.deepEqual(
+    [...video].sort(),
+    [
+      "ltx_2_3",
+      "mochi_1",
+      "scail2_14b",
+      "svd",
+      "wan_2_2",
+      "wan_2_2_i2v_14b",
+      "wan_2_2_t2v_14b",
+    ],
+  );
+  assert.equal(artifacts.inventory.summary.sharedSelector.legacyScalarCompatibility, 14);
+  assert.equal(artifacts.inventory.summary.sharedSelector.structuralFloorCompatibility, 2);
+  assert.equal(artifacts.inventory.summary.sharedSelector.legacyVideoCompatibility, 7);
+});
+
+test("compatibility reachability disappears when its production route set is mutated", () => {
+  const mutated = {
+    ...bodies,
+    candleMemoryStrategy: bodies.candleMemoryStrategy.replace('    "boogu_image",\n', ""),
+    videoAdmission: bodies.videoAdmission.replace('    "ltx_2_3",\n', ""),
+  };
+  const inventory = buildInventory(mutated);
+  const byId = new Map(inventory.routes.map((route) => [route.modelId, route]));
+  assert.equal(byId.get("boogu_image").sharedSelector.reached, false);
+  assert.equal(byId.get("ltx_2_3").sharedSelector.reached, false);
+});
+
+test("compatibility wiring rejects call, typed-lane, and reserve-normalization mutations", () => {
+  for (const [sourceKey, from, to] of [
+    ["imageRouting", "select_compatibility_resident", "removed_compatibility_call"],
+    ["conditioningFit", "select_compatibility_resident", "removed_compatibility_call"],
+    ["imageBaseAdmission", "select_compatibility_resident", "removed_compatibility_call"],
+    ["vramGate", "select_legacy_video_resident", "removed_compatibility_call"],
+    ["videoAdmission", "lane != VideoLane::Candle", "lane != VideoLane::Mlx"],
+    ["candleMemoryStrategy", "reserved_headroom_gb: 0.0", "reserved_headroom_gb: 2.0"],
+  ]) {
+    const mutated = { ...bodies, [sourceKey]: bodies[sourceKey].replace(from, to) };
+    assert.throws(() => validateCompatibilityWiring(mutated), `${sourceKey}: mutation survived`);
+  }
+});
+
+test("LTX legacy-video evidence rejects placeholder tier, mode, and geometry mutations", () => {
+  const actualModeAndGeometry =
+    "request.mode.as_str(),\n            crate::video_admission::video_gate_geometry(request.width, request.height, frames)";
+  for (const [sourceKey, from, to] of [
+    ["vramGate", "request_scope.tier_key", '"bf16"'],
+    ["vramGate", "request_scope.mode_key", '"text_to_video"'],
+    [
+      "vramGate",
+      "request_scope.geometry",
+      "crate::video_admission::video_gate_geometry(1, 1, 1)",
+    ],
+    [
+      "videoRouteCandle",
+      'ltx_tier_key.expect("an LTX model path must resolve an admission tier")',
+      '"bf16"',
+    ],
+    [
+      "videoRouteCandle",
+      actualModeAndGeometry,
+      actualModeAndGeometry.replace("request.mode.as_str()", '"text_to_video"'),
+    ],
+    [
+      "videoRouteCandle",
+      actualModeAndGeometry,
+      actualModeAndGeometry.replace(
+        "crate::video_admission::video_gate_geometry(request.width, request.height, frames)",
+        "crate::video_admission::video_gate_geometry(1, 1, 1)",
+      ),
+    ],
+  ]) {
+    const mutated = { ...bodies, [sourceKey]: bodies[sourceKey].replace(from, to) };
+    assert.notEqual(mutated[sourceKey], bodies[sourceKey], `${sourceKey}: mutation did not apply`);
+    assert.throws(() => validateCompatibilityWiring(mutated), `${sourceKey}: mutation survived`);
+  }
 });
 
 test("the named request scopes are exactly the dispatch's named arms", () => {
@@ -334,7 +463,7 @@ test("a video fit symbol renamed out of vram_gate.rs is rejected", () => {
         ...bodies,
         vramGate: bodies.vramGate.replaceAll("fn mochi_fit_error", "fn mochi_fit_error_renamed"),
       }),
-    /defines no fn mochi_fit_error/,
+    /(?:defines no fn mochi_fit_error|could not locate production function mochi_fit_error)/,
   );
 });
 
@@ -709,10 +838,10 @@ test("struct-wrapped geometry is seen, and per-symbol facts are never unioned ac
     );
   }
 
-  // The mechanism-union defect: `flat_video_fit_error` names seven symbols and they still do not
+  // The mechanism-union defect: `flat_video_fit_error` names several symbols and they still do not
   // agree, which is the whole reason this stays a per-symbol derivation. Two take geometry scalars;
-  // four take `geometry: MemoryGeometry` since sc-19055 migrated them onto the mechanism; one is
-  // still deliberately resolution-blind and must say so.
+  // the migrated compatibility gates take `geometry: MemoryGeometry`; the explicitly unscoped
+  // VACE-Fun arithmetic entry point remains resolution-blind and must say so.
   for (const symbol of ["svd_fit_error", "mochi_fit_error"]) {
     assert.equal(gates.get(symbol).geometryAware, true, symbol);
     assert.deepEqual(gates.get(symbol).geometryAxes, ["frames", "height", "width"]);
@@ -738,14 +867,12 @@ test("struct-wrapped geometry is seen, and per-symbol facts are never unioned ac
       `${symbol}: sc-19055 threads geometry through a struct parameter, not scalars; got ${gate.reachedVia}`,
     );
   }
-  // The one flat gate sc-19055 deliberately did NOT migrate: its input is an on-disk weights byte
-  // sum, and its dense-tier over-count already wall-rejects a card that renders, so grading it
-  // would deepen a recorded regression. A union from its four migrated siblings would hide that.
-  assert.equal(
-    gates.get("video_weights_fit_error").geometryAware,
-    false,
-    "video_weights_fit_error stays resolution-blind; a mechanism union would relabel it",
-  );
+  // LTX now carries its resolved geometry as selector identity without grading or scaling the
+  // byte floor. VACE-Fun owns no approved compatibility route and remains explicitly unscoped;
+  // a mechanism union would erase that per-symbol distinction.
+  assert.equal(gates.get("video_weights_fit_error").geometryAware, true);
+  assert.deepEqual(gates.get("video_weights_fit_error").geometryAxes, ["frames", "height", "width"]);
+  assert.equal(gates.get("unscoped_video_weights_fit_error").geometryAware, false);
   // The module-qualified scalar-gate label is the sc-19054 COMPOSITION (`load_plan` graded by
   // `predicted_peak_gb_for_request`) and is geometry-aware, while the bare `load_plan` symbol
   // stays signature-derived and blind — the dataflow composition is labelled, never unioned.
