@@ -1400,13 +1400,9 @@ fn boogu_base_and_turbo_img2img_route_to_candle() {
 #[test]
 fn explicit_quantization_routes_only_to_advertised_candle_tiers() {
     // sc-5099: a candle provider that advertises NO quant (supported_quants: &[]) must route an
-    // explicit `advanced.mlxQuantize > 0` is refused rather than silently running dense. chroma1_hd
-    // is such a dense-only candle family (contrast the SDXL family, sc-10767, which now advertises
-    // Q4/Q8 packed tiers and stays on candle — covered by `sdxl_family_quant_and_lora_stay_on_candle`).
-    assert!(!image_request_candle_eligible(
-        "chroma1_hd",
-        &object(json!({ "advanced": { "mlxQuantize": 8 } }))
-    ));
+    // explicit `advanced.mlxQuantize > 0` is refused rather than silently running dense.
+    // `flux_schnell` remains an image-side dense-only counter-example; Chroma's shared q4/q8
+    // turnkey is covered by its own complete three-id matrix immediately after this test.
     // NOTE: qwen_image USED to be a dense-only counter-example here; sc-11020 moved it to
     // CANDLE_QUANT_MODELS (its turnkey q4/q8 packed tiers load off-Mac), so its quant tier-select now
     // STAYS on candle — covered by `qwen_image_quant_and_lora_stay_on_candle`.
@@ -1429,6 +1425,59 @@ fn explicit_quantization_routes_only_to_advertised_candle_tiers() {
         "chroma1_hd",
         &object(json!({ "advanced": { "steps": 30 } }))
     ));
+}
+
+#[test]
+fn chroma_turnkey_q4_q8_tiers_stay_on_candle_without_adapters_or_conditioning() {
+    // sc-20741: each Chroma provider id resolves its own hosted standard-tier snapshot, but all
+    // three share the packed candle-gen-chroma loader. Test BOTH published packed directories for
+    // EVERY id rather than proving one sibling and assuming the catalog aliases the others.
+    for model in ["chroma1_base", "chroma1_flash", "chroma1_hd"] {
+        for bits in [4, 8] {
+            assert!(
+                image_request_candle_eligible(
+                    model,
+                    &object(json!({ "prompt": "a red fox", "advanced": { "mlxQuantize": bits } }))
+                ),
+                "{model} q{bits} packed tier-select must stay on Candle"
+            );
+        }
+
+        assert!(
+            !image_request_candle_eligible(
+                model,
+                &object(json!({ "prompt": "a red fox", "advanced": { "mlxQuantize": 6 } }))
+            ),
+            "{model} must refuse an unpublished q6 tier instead of silently remapping it"
+        );
+
+        // Chroma's packed-tier admission is plain txt2img only. Its catalog still lists LoRA
+        // compatibility for other routes, but no Candle evidence proves composing an adapter with
+        // the q4/q8 packed codes; refuse the adapter rather than silently dropping or dense-folding it.
+        assert!(
+            !image_request_candle_eligible(
+                model,
+                &object(json!({
+                    "advanced": { "mlxQuantize": 4 },
+                    "loras": [{ "name": "unverified", "path": "/tmp/unverified.safetensors" }]
+                }))
+            ),
+            "{model} must refuse an unproven packed-tier LoRA composition"
+        );
+
+        // The native Candle Chroma route is text-to-image only; an image carrier must not be
+        // reinterpreted as an unconditioned q4/q8 request.
+        assert!(
+            !image_request_candle_eligible(
+                model,
+                &object(json!({
+                    "advanced": { "mlxQuantize": 8 },
+                    "referenceAssetId": "asset_1"
+                }))
+            ),
+            "{model} must refuse a conditioned packed-tier shape"
+        );
+    }
 }
 
 #[test]
@@ -4100,19 +4149,13 @@ fn an_unhealthy_worker_is_routed_nothing_even_with_full_capabilities() {
 // family. A message naming a conditioning bug that does not exist sends triage hunting one.
 // ---------------------------------------------------------------------------------------------
 
-/// The five families the sweep caught (`chroma1_*`, `flux_dev`, `flux_schnell`) advertise
+/// The two dense families that remain in this wording regression (`flux_dev`, `flux_schnell`) advertise
 /// `supported_quants: &[]` — dense bf16/fp16 only — so `advanced.mlxQuantize: 4` is correctly
 /// refused rather than silently run dense (sc-5099). The refusal must SAY that: name the requested
 /// tier and what the family does serve, and never claim a conditioning shape the payload lacks.
 #[test]
 fn quant_request_on_a_dense_only_candle_family_names_the_tier_not_a_conditioned_shape() {
-    for model in [
-        "chroma1_base",
-        "chroma1_flash",
-        "chroma1_hd",
-        "flux_dev",
-        "flux_schnell",
-    ] {
+    for model in ["flux_dev", "flux_schnell"] {
         for bits in [4, 8] {
             let job = image_generate_job(json!({
                 "projectId": "project_1",
@@ -4337,7 +4380,7 @@ fn candle_gap(model: &str, payload: Value) -> (String, String) {
     (reason.feature.clone(), reason.detail.clone())
 }
 
-/// Reviewer repro 1. `chroma1_base` t2i with BOTH `advanced.mlxQuantize` and `advanced.phases`: the
+/// Reviewer repro 1. `flux_schnell` t2i with BOTH `advanced.mlxQuantize` and `advanced.phases`: the
 /// gate refuses on phases (candle.rs `Phases`) before it ever reaches the quant check, so blaming
 /// the quant tier attached a remediation ("re-submit without advanced.mlxQuantize and the same
 /// request routes to candle") that is FALSE — phases alone is still refused.
@@ -4348,7 +4391,7 @@ fn phases_are_blamed_before_quant_because_the_gate_refuses_them_first() {
         "mode": "text_to_image",
         "advanced": { "mlxQuantize": 4, "phases": [{ "steps": 4 }] }
     });
-    let (feature, detail) = candle_gap("chroma1_base", both.clone());
+    let (feature, detail) = candle_gap("flux_schnell", both.clone());
     assert!(
         feature.contains("phases"),
         "the FIRST refusing check is advanced.phases, not the quant tier: {feature}"
@@ -4367,7 +4410,7 @@ fn phases_are_blamed_before_quant_because_the_gate_refuses_them_first() {
     // Peel the phases off and the quant tier becomes the first refusal — with its remediation back,
     // because now it really is the only one.
     let (feature, detail) = candle_gap(
-        "chroma1_base",
+        "flux_schnell",
         json!({
             "prompt": "a red fox",
             "mode": "text_to_image",
@@ -4383,22 +4426,22 @@ fn phases_are_blamed_before_quant_because_the_gate_refuses_them_first() {
     // …and peeling the quant off routes it, which is what makes that remediation true.
     assert!(
         image_request_candle_eligible(
-            "chroma1_base",
+            "flux_schnell",
             &object(json!({ "prompt": "a red fox", "mode": "text_to_image" }))
         ),
-        "chroma1_base plain t2i with neither phases nor quant must route to candle"
+        "flux_schnell plain t2i with neither phases nor quant must route to candle"
     );
 }
 
 /// Reviewer repro 2. The gate's reference-only-mode refusal applies ONLY to the families that
 /// reserve those modes for a specialized lane (flux2_* / qwen_image_edit* / sensenova_u1_8b*). On
-/// `chroma1_base` a `style_variations` request with every carrier null is NOT refused for the mode —
+/// `flux_schnell` a `style_variations` request with every carrier null is NOT refused for the mode —
 /// the quant tier is what refuses it — so a "needs a source/reference image" message names a cause
 /// the gate never applied.
 #[test]
 fn a_reference_mode_is_blamed_only_on_the_families_that_reserve_it() {
     let (feature, detail) = candle_gap(
-        "chroma1_base",
+        "flux_schnell",
         json!({
             "prompt": "a red fox",
             "mode": "style_variations",
@@ -4407,7 +4450,7 @@ fn a_reference_mode_is_blamed_only_on_the_families_that_reserve_it() {
     );
     assert!(
         feature.contains("q4 quant tier"),
-        "chroma1 does not reserve style_variations, so the quant tier is the first refusal: \
+        "flux_schnell does not reserve style_variations, so the quant tier is the first refusal: \
          {feature}"
     );
     assert!(
@@ -4471,7 +4514,7 @@ fn a_reference_mode_is_blamed_only_on_the_families_that_reserve_it() {
 
 /// The whole order, peeled one cause at a time. Each step asserts the gate still refuses AND that
 /// the classifier names the check `image_request_candle_eligible` reaches first; removing that one
-/// cause moves the blame to the next. `chroma1_base` advertises inference LoRA but no quant tier,
+/// cause moves the blame to the next. `flux_schnell` advertises inference LoRA but no quant tier,
 /// so its peel covers edit-mode → carrier → poses → phases → quant. The `loras` entry rides along
 /// the whole way to prove a check that does NOT refuse never steals the blame.
 #[test]
@@ -4538,7 +4581,7 @@ fn the_reported_cause_walks_the_gate_order_as_each_cause_is_peeled_off() {
         ),
     ];
     for (payload, expected) in steps {
-        let (feature, _) = candle_gap("chroma1_base", payload.clone());
+        let (feature, _) = candle_gap("flux_schnell", payload.clone());
         assert!(
             feature.contains(expected),
             "expected the {expected:?} check to be blamed for {payload}: got {feature}"
@@ -4546,7 +4589,7 @@ fn the_reported_cause_walks_the_gate_order_as_each_cause_is_peeled_off() {
     }
     // The last peel routes: nothing else in the gate refuses it.
     assert!(image_request_candle_eligible(
-        "chroma1_base",
+        "flux_schnell",
         &object(json!({
             "prompt": "p",
             "mode": "text_to_image",
@@ -4629,11 +4672,11 @@ fn a_malformed_carrier_is_named_only_where_it_is_what_refused() {
     assert!(feature.contains("malformed"), "{feature}");
     assert!(detail.contains("referenceAssetId"), "{detail}");
 
-    // The same malformed carrier on chroma1 does not refuse anything — the gate reads a non-string
-    // scalar as absent — so a chroma request carrying it AND a quant tier is blamed on the quant
+    // The same malformed carrier on flux1 does not refuse anything — the gate reads a non-string
+    // scalar as absent — so a flux request carrying it AND a quant tier is blamed on the quant
     // tier, the check that actually refused.
     let (feature, detail) = candle_gap(
-        "chroma1_base",
+        "flux_schnell",
         json!({
             "prompt": "p",
             "mode": "text_to_image",
@@ -4648,7 +4691,7 @@ fn a_malformed_carrier_is_named_only_where_it_is_what_refused() {
     );
     // Proof that the carrier really is inert on this family: drop the quant tier and it routes.
     assert!(image_request_candle_eligible(
-        "chroma1_base",
+        "flux_schnell",
         &object(json!({ "prompt": "p", "mode": "text_to_image", "sourceAssetId": 42 }))
     ));
 }

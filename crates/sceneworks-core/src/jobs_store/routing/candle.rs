@@ -519,10 +519,16 @@ fn candle_refuses_phases(_model: &str, payload: &Map<String, Value>) -> bool {
 /// (sc-5099). Lens (sc-5126), SD3.5 (sc-7880), Krea (sc-9607/sc-9983), the Ideogram/Boogu packed
 /// families (sc-9607), Qwen-Image (sc-11020), and Z-Image advertise Q4/Q8, so their quant requests
 /// stay on candle. For the packed families the `mlxQuantize` value is a turnkey tier-SELECT (which
-/// pre-quantized q4/q8 subdir to load), a no-op on the loader rather than a runtime quantize — but
-/// the gate is the same: quant-capable → stay.
+/// pre-quantized q4/q8 subdir to load), a no-op on the loader rather than a runtime quantize. Chroma
+/// has exactly those two published packed directories, so it additionally rejects a non-q4/q8 value
+/// instead of letting the downstream directory resolver reinterpret it as another tier.
 fn candle_refuses_quant_tier(model: &str, payload: &Map<String, Value>) -> bool {
-    !candle_family_serves_quant(model) && candle_request_wants_quant(payload)
+    let Some(bits) = candle_requested_quant_bits(payload) else {
+        return false;
+    };
+    !candle_family_serves_quant(model)
+        || (matches!(model, "chroma1_base" | "chroma1_flash" | "chroma1_hd")
+            && !matches!(bits, 4 | 8))
 }
 
 /// The first [`CANDLE_IMAGE_CHECKS`] entry that refuses this request, short-circuiting exactly like

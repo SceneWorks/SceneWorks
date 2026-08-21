@@ -6,10 +6,10 @@ use serde_json::{Map, Value};
 
 use crate::contracts::{JobSnapshot, JobType};
 use crate::jobs_store::routing::candle::{
-    candle_image_refusals, candle_requested_quant_bits, image_job_is_candle_eligible,
-    model_has_candle_pose_lane, training_job_is_candle_eligible, upscale_job_is_candle_eligible,
-    video_job_is_candle_eligible, video_upscale_job_is_candle_eligible, CandleImageRefusal,
-    CANDLE_POSE_MODELS,
+    candle_family_serves_quant, candle_image_refusals, candle_requested_quant_bits,
+    image_job_is_candle_eligible, model_has_candle_pose_lane, training_job_is_candle_eligible,
+    upscale_job_is_candle_eligible, video_job_is_candle_eligible,
+    video_upscale_job_is_candle_eligible, CandleImageRefusal, CANDLE_POSE_MODELS,
 };
 use crate::jobs_store::routing::catalog::{
     CANDLE_VIDEO_ROUTED_MODELS, MLX_ROUTED_MODELS, VIDEO_MLX_ROUTED_MODELS,
@@ -811,6 +811,24 @@ pub(crate) fn classify_candle_image_gap(payload: &Map<String, Value>) -> Unsuppo
         ),
         CandleImageRefusal::QuantTier => {
             let bits = candle_requested_quant_bits(payload).unwrap_or_default();
+            if candle_family_serves_quant(model) {
+                return UnsupportedReason::new(
+                    Some(model),
+                    &format!("unsupported q{bits} packed Candle tier"),
+                    &format!(
+                        "the request asks for q{bits} (advanced.mlxQuantize = {bits}), but this \
+                         model's hosted Candle snapshot publishes only q4 and q8 packed directories. \
+                         Candle refuses rather than silently remapping the requested tier.{remediation}{also}",
+                        remediation = if also.is_empty() {
+                            " This is NOT a conditioning gap: re-submit with advanced.mlxQuantize \
+                             set to 4 or 8 and the same request routes to Candle."
+                        } else {
+                            ""
+                        }
+                    ),
+                    Some("sc-20741"),
+                );
+            }
             UnsupportedReason::new(
                 Some(model),
                 &format!("q{bits} quant tier request on a dense-only candle family"),

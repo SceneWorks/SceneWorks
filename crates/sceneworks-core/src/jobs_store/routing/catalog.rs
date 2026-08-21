@@ -670,10 +670,14 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // PuLID-FLUX on FLUX.1-dev (sc-3344): `character_image` with a reference face runs through native
     // MLX or the bespoke `pulid_flux_candle_eligible` lane, not the plain txt2img gate.
     ModelCaps::new("pulid_flux_dev", true, false, false, false, false),
-    // Chroma (epic 3531 / sc-3843 MLX; epic 3692 / sc-5576 candle). Pure txt2img on candle.
-    ModelCaps::new("chroma1_hd", true, true, false, true, false),
-    ModelCaps::new("chroma1_base", true, true, false, true, false),
-    ModelCaps::new("chroma1_flash", true, true, false, true, false),
+    // Chroma (epic 3531 / sc-3843 MLX; epic 3692 / sc-5576 candle). The hosted standard-tier
+    // snapshots already contain the packed q4/q8 transformer directories and candle-gen-chroma
+    // consumes them without a dense staging fallback (sc-20741). `mlxQuantize` is therefore a
+    // tier-select that must reach Candle for all three provider ids. Keep adapter support out of
+    // this row: the packed-tier adapter composition has not been independently admitted.
+    ModelCaps::new("chroma1_hd", true, true, true, false, false),
+    ModelCaps::new("chroma1_base", true, true, true, false, false),
+    ModelCaps::new("chroma1_flash", true, true, true, false, false),
     // SenseNova-U1 (epic 3180 / sc-3900 MLX; sc-5576 candle). Pure txt2img on candle.
     //
     // sc-14249 (epic 9083): `candle_quant = true` across the whole family. `candle-gen-sensenova`
@@ -1985,6 +1989,9 @@ mod tests {
         "boogu_image",
         "boogu_image_turbo",
         "boogu_image_edit",
+        "chroma1_hd",
+        "chroma1_base",
+        "chroma1_flash",
         // sc-11020: qwen_image's turnkey q4/q8/bf16 packed tiers (sc-8669, measured sc-10969) load on
         // the candle txt2img lane, so a tier-select stays on candle. Qwen now appears in the combined
         // quant+adapter list above.
@@ -2008,9 +2015,6 @@ mod tests {
         "flux_schnell",
         "flux_dev",
         "flux2_klein_9b_true_v2",
-        "chroma1_hd",
-        "chroma1_base",
-        "chroma1_flash",
         "anima_base",
         "anima_aesthetic",
         "anima_turbo",
