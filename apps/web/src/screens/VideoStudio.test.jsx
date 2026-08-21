@@ -753,6 +753,12 @@ describe("VideoStudio SCAIL-2 character animation + replacement backend", () => 
     quantization: {},
     loraCompatibility: {},
     ui: {},
+    hasVariantMatrix: true,
+    variants: [
+      { variant: "q4", installState: "installed" },
+      { variant: "q8", installState: "installed" },
+      { variant: "bf16", installState: "installed" },
+    ],
   };
   const SCAIL2_MULTI_REFERENCE = {
     ...SCAIL2,
@@ -1552,9 +1558,9 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
     expect(context.createVideoJob.mock.calls[0][0].advanced).not.toHaveProperty("quantization");
   });
 
-  it("shows the Candle SCAIL-2 picker only for its real installed package variants", async () => {
+  it("offers only the accepted bf16 execution tier for Candle SCAIL-2", async () => {
     const scail = {
-      ...tieredVideoModel(["q4", "q8"]),
+      ...tieredVideoModel(["q4", "q8", "bf16"]),
       id: "scail2_14b",
       name: "SCAIL-2",
       family: "scail2",
@@ -1565,19 +1571,67 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
 
     expect(tierPicker()).toBeTruthy();
     expect(quantizationPicker()).toBeNull();
+    expect([...tierPicker().options].map((option) => option.value)).toEqual(["bf16"]);
+    expect(tierPicker().value).toBe("bf16");
+    await click(buttonWithText(container, "Render clip"));
+    expect(context.createVideoJob.mock.calls[0][0].advanced).toMatchObject({ mlxQuantize: 0 });
+  });
+
+  it("blocks Candle SCAIL-2 when only its source-ready q4/q8 packages are installed", async () => {
+    const scail = {
+      ...tieredVideoModel(["q4", "q8"]),
+      id: "scail2_14b",
+      name: "SCAIL-2",
+      family: "scail2",
+      adapter: "scail2",
+    };
+    const context = baseContext({ videoModels: [scail], macCapabilities: null });
+    await render(context);
+
+    expect(tierPicker()).toBeNull();
+    const renderButton = buttonWithText(container, "Render clip");
+    expect(renderButton.disabled).toBe(true);
+    expect(container.textContent).toContain(
+      "SCAIL-2 Candle generation currently requires the installed bf16 tier.",
+    );
+    await click(renderButton);
+    await act(async () => {
+      container
+        .querySelector("form")
+        .dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+    });
+    expect(context.createVideoJob).not.toHaveBeenCalled();
+
+    // The engine id alone never creates a selectable precision. A stale/non-matrix catalog row
+    // remains picker-free and blocked instead of manufacturing a payload for an incomplete install.
+    await unmountRoot(root, container);
+    ({ container, root } = mountRoot());
+    const noVariants = { ...scail, hasVariantMatrix: false, variants: [] };
+    const noVariantsContext = baseContext({ videoModels: [noVariants], macCapabilities: null });
+    await render(noVariantsContext);
+    expect(tierPicker()).toBeNull();
+    expect(buttonWithText(container, "Render clip").disabled).toBe(true);
+    expect(noVariantsContext.createVideoJob).not.toHaveBeenCalled();
+  });
+
+  it("keeps installed q4/q8 selectable for SCAIL-2 on MLX", async () => {
+    const scail = {
+      ...tieredVideoModel(["q4", "q8"]),
+      id: "scail2_14b",
+      name: "SCAIL-2",
+      family: "scail2",
+      adapter: "scail2",
+    };
+    const context = baseContext({ videoModels: [scail], macCapabilities: MAC_CAPS });
+    await render(context);
+
     expect([...tierPicker().options].map((option) => option.value)).toEqual(["q4", "q8", "bf16"]);
+    expect(Object.fromEntries([...tierPicker().options].map((option) => [option.value, option.disabled])))
+      .toEqual({ q4: false, q8: false, bf16: true });
     setSelect(tierPicker(), "q8");
     await act(async () => {});
     await click(buttonWithText(container, "Render clip"));
     expect(context.createVideoJob.mock.calls[0][0].advanced).toMatchObject({ mlxQuantize: 8 });
-
-    // The engine id alone never creates a selectable precision. A stale/non-matrix catalog row
-    // remains picker-free instead of manufacturing q4/q8 payloads for an incomplete install.
-    await unmountRoot(root, container);
-    ({ container, root } = mountRoot());
-    const noVariants = { ...scail, hasVariantMatrix: false, variants: [] };
-    await render(baseContext({ videoModels: [noVariants], macCapabilities: null }));
-    expect(tierPicker()).toBeNull();
   });
 
   it("keeps the candle-only NVFP4 tier out of the MLX video picker (sc-11042)", async () => {

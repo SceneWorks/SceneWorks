@@ -60,7 +60,11 @@ import {
 import { ReplacePersonPanel } from "./ReplacePersonPanel.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
-import { replacementModeApplies, videoGenerateValidation } from "../videoStudioValidation.js";
+import {
+  replacementModeApplies,
+  SCAIL2_MODEL_ID,
+  videoGenerateValidation,
+} from "../videoStudioValidation.js";
 import { useValidation } from "../validation/useValidation.js";
 import { ValidationSummary } from "../validation/Validation.jsx";
 import {
@@ -135,6 +139,12 @@ const ltxIcLoraModelIds = new Set([ltxVideoModelId, "ltx_2_3_eros"]);
 // picker only enables entries whose individual install is complete (`installedTiers`); in particular,
 // adding SCAIL-2 here never fabricates q4/q8 for a dense-only or partial local snapshot.
 const candleTierModelIds = new Set(["wan_2_2", "wan_2_2_t2v_14b", "wan_2_2_i2v_14b", "scail2_14b"]);
+// Source availability is broader than product acceptance for SCAIL-2 on Candle: q4/q8 packages
+// remain installable/repairable in Model Manager and advertised by the runtime descriptor, but the
+// corresponding product routes stay fail-closed until terminal acceptance. Keep this execution
+// allowlist literal and local to Video Studio so a future catalog tier cannot become runnable merely
+// by appearing in the manifest. MLX continues to use the complete installed tier set.
+const SCAIL2_CANDLE_PRODUCT_TIERS = Object.freeze(["bf16"]);
 const legacyDefaultTextEncoderId = "default";
 const amoralTextEncoderId = "ltx_amoral_gemma_3_12b";
 const ltxIcLoraRequiredModes = new Set(["extend_clip", "video_bridge", "replace_person"]);
@@ -660,35 +670,70 @@ export function VideoStudio() {
   const nativeTierLane =
     activeBackend === "mlx" ||
     (activeBackend === "candle" && candleTierModelIds.has(selectedModel?.id));
+  const scail2CandleTierLane =
+    activeBackend === "candle" && selectedModel?.id === SCAIL2_MODEL_ID;
+  // A Video Studio-only projection: retain the complete catalog object for every non-tier concern,
+  // but narrow every tier vocabulary the shared picker understands. The original model object still
+  // reaches Model Manager unchanged, so q4/q8 install and repair metadata remain visible there.
+  const executionTierModel = useMemo(() => {
+    if (!scail2CandleTierLane || !selectedModel) {
+      return selectedModel;
+    }
+    const accepted = (tier) => SCAIL2_CANDLE_PRODUCT_TIERS.includes(tier);
+    return {
+      ...selectedModel,
+      variants: Array.isArray(selectedModel.variants)
+        ? selectedModel.variants.filter((variant) => accepted(variant?.variant))
+        : selectedModel.variants,
+      runtimeQuantTiers: Array.isArray(selectedModel.runtimeQuantTiers)
+        ? selectedModel.runtimeQuantTiers.filter(accepted)
+        : selectedModel.runtimeQuantTiers,
+      mlxTiers: Array.isArray(selectedModel.mlxTiers)
+        ? selectedModel.mlxTiers.filter(accepted)
+        : selectedModel.mlxTiers,
+      mlxTierStates: Array.isArray(selectedModel.mlxTierStates)
+        ? selectedModel.mlxTierStates.filter((state) => accepted(state?.tier))
+        : selectedModel.mlxTierStates,
+    };
+  }, [scail2CandleTierLane, selectedModel]);
   const tierOptions = useMemo(
     () => ({ convRotEligible: false, nvfp4Eligible: false }),
     [],
   );
   const availableTiers = useMemo(
-    () => (nativeTierLane ? installedTiers(selectedModel, tierOptions) : []),
-    [nativeTierLane, selectedModel, tierOptions],
+    () => (nativeTierLane ? installedTiers(executionTierModel, tierOptions) : []),
+    [nativeTierLane, executionTierModel, tierOptions],
   );
   // The full display set (all possible tiers, installed or not) + the picker option list with
   // un-downloaded tiers disabled — same show-all/disable-unavailable rule as Image Studio. `availableTiers`
-  // stays the SELECTABLE/send set; the picker shows whenever there is more than one POSSIBLE tier and at
-  // least one is installed to select.
+  // stays the SELECTABLE/send set. Ordinarily the picker needs more than one possible tier; the
+  // explicit SCAIL-2 Candle singleton remains visible so the user can see that bf16 is the only
+  // currently accepted execution tier even while Model Manager carries the broader package set.
   const possibleTiers = useMemo(
-    () => (nativeTierLane ? allPossibleTiers(selectedModel, tierOptions) : []),
-    [nativeTierLane, selectedModel, tierOptions],
+    () => (nativeTierLane ? allPossibleTiers(executionTierModel, tierOptions) : []),
+    [nativeTierLane, executionTierModel, tierOptions],
   );
   const tierPickerItems = useMemo(
-    () => (nativeTierLane ? tierPickerOptions(selectedModel, tierOptions) : []),
-    [nativeTierLane, selectedModel, tierOptions],
+    () => (nativeTierLane ? tierPickerOptions(executionTierModel, tierOptions) : []),
+    [nativeTierLane, executionTierModel, tierOptions],
   );
   const showTierPicker = useMemo(
-    () => nativeTierLane && possibleTiers.length > 1 && availableTiers.length > 0,
-    [nativeTierLane, possibleTiers, availableTiers],
+    () =>
+      nativeTierLane &&
+      possibleTiers.length > 0 &&
+      availableTiers.length > 0 &&
+      (possibleTiers.length > 1 || scail2CandleTierLane),
+    [nativeTierLane, possibleTiers, availableTiers, scail2CandleTierLane],
   );
+  const executionTierBlockMessage =
+    scail2CandleTierLane && !availableTiers.includes("bf16")
+      ? "SCAIL-2 Candle generation currently requires the installed bf16 tier. Install or repair bf16 in Model Manager; q4 and q8 are not yet enabled for Candle generation."
+      : null;
   const hostMemory = useHostMemory();
   const nativeMemoryGb = hostMemoryGbForBackend(hostMemory, activeBackend);
   const autoTier = useMemo(
-    () => suggestTier(selectedModel, nativeMemoryGb, { backend: activeBackend }),
-    [selectedModel, nativeMemoryGb, activeBackend],
+    () => suggestTier(executionTierModel, nativeMemoryGb, { backend: activeBackend }),
+    [executionTierModel, nativeMemoryGb, activeBackend],
   );
   // Seed from the per-(video, model) sticky, then the global quality/Auto policy, clamped to installed.
   // A model transition always re-seeds even when both models happen to expose the same tier list.
@@ -701,7 +746,7 @@ export function VideoStudio() {
   } = useQuantTierPicker({
     screen: TIER_SCREEN,
     model,
-    selectedModel,
+    selectedModel: executionTierModel,
     availableTiers,
     tierOptions,
     autoTier,
@@ -1473,6 +1518,7 @@ export function VideoStudio() {
       scail2ReferenceOverflow,
       referenceLimitMessage,
       audioOnlyReferenceSet,
+      executionTierBlockMessage,
       modelName: selectedModel?.name,
       presetMissing: presetValidationResult.missing,
       presetIncompatible: presetValidationResult.incompatible,
@@ -1493,6 +1539,7 @@ export function VideoStudio() {
       scail2ReferenceOverflow,
       referenceLimitMessage,
       audioOnlyReferenceSet,
+      executionTierBlockMessage,
       selectedModel,
       presetValidationResult,
       selectedLoraValidationResult,
@@ -1515,7 +1562,10 @@ export function VideoStudio() {
 
   async function submit(event) {
     event.preventDefault();
-    if (submitting) {
+    // The button and validation summary already expose this refusal. Keep the submit boundary exact
+    // as well so a direct/stale form submit cannot enqueue a SCAIL-2 Candle request that no product
+    // tier is allowed to claim.
+    if (submitting || executionTierBlockMessage) {
       return;
     }
     setSubmitting(true);
