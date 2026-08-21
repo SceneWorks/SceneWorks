@@ -4215,6 +4215,26 @@ pub(crate) struct LiveHostMemory {
     pub system_used_bytes: Option<u64>,
 }
 
+/// Why the generic MLX residency selector is being evaluated.
+///
+/// Candidate-tier probes run before the generator-cache lookup and never load weights. Keeping
+/// their telemetry on a distinct route leaves `generic_mlx_cold_load` as a machine-countable
+/// cache-miss/load event: one cold request emits it once, while a warm cache hit emits none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GenericMlxObservation {
+    ColdLoad,
+    CandidateEvaluation,
+}
+
+impl GenericMlxObservation {
+    const fn route(self) -> &'static str {
+        match self {
+            Self::ColdLoad => "generic_mlx_cold_load",
+            Self::CandidateEvaluation => "generic_mlx_candidate_evaluation",
+        }
+    }
+}
+
 impl LiveHostMemory {
     /// No live signal: the ceiling keeps its pre-sc-20571 total-RAM shape.
     ///
@@ -4315,6 +4335,7 @@ pub(crate) fn decide_residency(
         0,
         sequential_capable,
         HEADROOM_GB,
+        GenericMlxObservation::ColdLoad,
     )
 }
 
@@ -4339,9 +4360,11 @@ pub(crate) fn decide_residency_on_live_host(
         own_resident_bytes,
         sequential_capable,
         HEADROOM_GB,
+        GenericMlxObservation::ColdLoad,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn decide_residency_with_headroom(
     total_bytes: u64,
     te_bytes: u64,
@@ -4350,6 +4373,7 @@ fn decide_residency_with_headroom(
     own_resident_bytes: u64,
     sequential_capable: bool,
     headroom_gb: f64,
+    observation: GenericMlxObservation,
 ) -> ResidencyOutcome {
     // sc-20571 (cold-load route): the LOAD-BEARING wiring. Every layer below — the peak check, the
     // staged-peak overflow check, and the `weights_floor_load_admission` floor — compares against
@@ -4370,6 +4394,7 @@ fn decide_residency_with_headroom(
         budget,
         sequential_capable,
         headroom_gb,
+        observation,
     );
     match peak {
         ResidencyOutcome::Reject { .. } => {
@@ -4399,6 +4424,7 @@ fn decide_residency_by_peak(
         budget,
         sequential_capable,
         HEADROOM_GB,
+        GenericMlxObservation::ColdLoad,
     )
 }
 
@@ -4408,13 +4434,15 @@ fn decide_residency_by_peak_with_headroom(
     budget: Option<MlxMemoryBudget>,
     sequential_capable: bool,
     headroom_gb: f64,
+    observation: GenericMlxObservation,
 ) -> ResidencyOutcome {
     // Generic MLX has no provider-supplied memory-strategy contract or request-scoped evidence yet.
     // Enter the shared selector explicitly as ImplementedUnverified, then keep the established
     // cold-load gate. This adopts one selector API without manufacturing VERIFIED evidence or
     // copying optimized selection logic; request-aware providers can promote only after exposing
     // their own contract, fingerprint, and exact request evidence.
-    let shared_observation = generic_mlx_shared_observation(total_bytes, budget, headroom_gb);
+    let shared_observation =
+        generic_mlx_shared_observation(total_bytes, budget, headroom_gb, observation);
     debug_assert!(matches!(
         shared_observation,
         crate::memory_strategy::Selection::Selected {
@@ -4462,6 +4490,7 @@ fn generic_mlx_shared_observation(
     total_bytes: u64,
     budget: Option<MlxMemoryBudget>,
     headroom_gb: f64,
+    observation: GenericMlxObservation,
 ) -> crate::memory_strategy::Selection {
     use crate::memory_strategy::{Budget, Candidate, RequestScope};
     use gen_core::{
@@ -4488,9 +4517,10 @@ fn generic_mlx_shared_observation(
         parameters: Default::default(),
         tier,
     };
+    let route = observation.route();
     let evidence = MemoryEvidence {
         key: MemoryEvidenceKey {
-            resolved_route: "generic_mlx_cold_load".into(),
+            resolved_route: route.into(),
             backend: gen_core::MemoryBackend::Mlx,
             tier,
             // The generic estimator models the historical bulk cold load; no generic route
@@ -4523,7 +4553,7 @@ fn generic_mlx_shared_observation(
         parity_result: MemoryParityResult::NotRun,
     };
     let contract = MemoryProviderContract::compatibility_default(
-        "generic_mlx_cold_load",
+        route,
         MemoryBackendRealization::MlxMetal {
             bounded_wired_residency: false,
             lazy_or_mmap_materialization: true,
@@ -4533,7 +4563,7 @@ fn generic_mlx_shared_observation(
     );
     crate::memory_strategy::select_strategy(
         RequestScope {
-            resolved_route: "generic_mlx_cold_load",
+            resolved_route: route,
             backend: "mlx",
             tier,
             mode: "image_generation",
@@ -4918,11 +4948,11 @@ fn packed_quant_bits(root: &std::path::Path, component: &str) -> Option<i64> {
         .as_i64()
 }
 
-/// The residency outcome (Resident / Sequential / Reject) a `spec` would take against this machine's
-/// unified-memory budget — the pure decision behind [`apply_residency_policy`], factored out so the
-/// capability downtier (sc-10733) can evaluate a candidate tier's fit at the base.rs seam WITHOUT
-/// building the final spec twice. Same budget + component-byte + sequential-capability inputs the live
-/// gate uses, so the seam's downtier choice and the cache's admission never disagree.
+/// The residency outcome (Resident / Sequential / Reject) a real cache-miss `spec` would take
+/// against this machine's unified-memory budget — the pure decision behind
+/// [`apply_residency_policy`]. [`decide_residency_for_spec_candidate`] shares the same budget,
+/// component-byte, and sequential-capability inputs for pre-load candidate scoring while keeping
+/// its non-loading telemetry distinct.
 ///
 /// `live` is caller-probed (sc-20571 review): the downtier chooser scores several candidate tiers
 /// per request, and probing inside this function spawned one bounded `vm_stat` subprocess per
@@ -4948,6 +4978,29 @@ pub(crate) fn decide_residency_for_spec(
         own_resident_bytes,
         engine_supports_sequential(engine_id),
         headroom.total_gb,
+        GenericMlxObservation::ColdLoad,
+    )
+}
+
+/// Candidate-only sibling of [`decide_residency_for_spec`]. It uses the same production decision
+/// and budget math, but its selector telemetry cannot masquerade as a cache-miss load.
+pub(crate) fn decide_residency_for_spec_candidate(
+    engine_id: &str,
+    spec: &LoadSpec,
+    live: LiveHostMemory,
+    own_resident_bytes: u64,
+) -> ResidencyOutcome {
+    let budget = resolve_budget(probe_total_unified_memory_gib(), mlx_memory_cap_gb());
+    let (total_bytes, te_bytes, headroom) = spec_component_bytes(engine_id, spec);
+    decide_residency_with_headroom(
+        total_bytes,
+        te_bytes,
+        budget,
+        live,
+        own_resident_bytes,
+        engine_supports_sequential(engine_id),
+        headroom.total_gb,
+        GenericMlxObservation::CandidateEvaluation,
     )
 }
 
@@ -4967,6 +5020,7 @@ fn try_decide_residency_for_spec(
         own_resident_bytes,
         engine_supports_sequential(engine_id),
         headroom.total_gb,
+        GenericMlxObservation::ColdLoad,
     ))
 }
 
@@ -16439,6 +16493,7 @@ mod tests {
             4 * 1024 * 1024 * 1024,
             Some(MlxMemoryBudget { total_gb: 32.0 }),
             HEADROOM_GB,
+            GenericMlxObservation::ColdLoad,
         );
         assert!(matches!(
             observation,
@@ -16450,6 +16505,71 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// Candidate-tier scoring is decision-only and must never inflate the machine-countable cold
+    /// load route. This drives the production selector emission with one cache-miss observation and
+    /// multiple candidate observations: only the real load may retain `generic_mlx_cold_load`.
+    #[test]
+    fn generic_mlx_candidate_telemetry_is_distinct_from_one_cold_load() {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+
+        crate::test_env::install_tracing_interest_floor();
+
+        #[derive(Clone, Default)]
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl Write for Capture {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let capture = Capture::default();
+        let writer = capture.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .without_time()
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            let budget = Some(MlxMemoryBudget { total_gb: 82.0 });
+            let raw_peak_bytes = 57_699_249_390;
+            let _ = generic_mlx_shared_observation(
+                raw_peak_bytes,
+                budget,
+                18.0,
+                GenericMlxObservation::ColdLoad,
+            );
+            for _ in 0..3 {
+                let _ = generic_mlx_shared_observation(
+                    raw_peak_bytes,
+                    budget,
+                    18.0,
+                    GenericMlxObservation::CandidateEvaluation,
+                );
+            }
+        });
+
+        let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+        assert_eq!(
+            output.matches("route=\"generic_mlx_cold_load\"").count(),
+            1,
+            "candidate probes must not masquerade as cold loads: {output}"
+        );
+        assert_eq!(
+            output
+                .matches("route=\"generic_mlx_candidate_evaluation\"")
+                .count(),
+            3,
+            "each candidate evaluation remains visible on its own route: {output}"
+        );
     }
 
     /// The load-time weights floor (`weights_floor_load_admission`, formerly
