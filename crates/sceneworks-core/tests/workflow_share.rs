@@ -372,6 +372,39 @@ fn producer_version_is_strict_semver_and_matches_the_workspace() {
         version, workspace_version,
         "producer.version must be the workspace version"
     );
+
+    // ...and the workspace version must be the PRODUCT version, i.e. the one the npm and Tauri
+    // manifests carry. Comparing only `CARGO_PKG_VERSION` to root `Cargo.toml` compares a value to
+    // itself: both sides move together, so the pair stayed green through two silent regressions of
+    // this branch (sc-18650) where a sync merge took main's older `[workspace.package] version`
+    // with no conflict — main's Cargo.toml blob was byte-identical to the merge base — while
+    // `package.json` and friends kept the newer one. The skew is invisible in every test and every
+    // build, and lands permanently in `project.json`'s `appVersion` and in the workflow-share
+    // envelope of every exported image, which is exactly the string this test exists to protect.
+    //
+    // `scripts/sync-version.mjs` is what keeps these five files in lockstep; this is the assertion
+    // that notices when something bypassed it. Root `package.json` is the script's INPUT, so it is
+    // the one named in the failure message.
+    for manifest in [
+        "package.json",
+        "apps/web/package.json",
+        "apps/desktop/package.json",
+        "apps/desktop/tauri.conf.json",
+    ] {
+        let declared = serde_json::from_str::<Value>(&read_repo_file(manifest))
+            .unwrap_or_else(|error| panic!("{manifest} is not valid JSON: {error}"))
+            .get("version")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("{manifest} declares no top-level \"version\""))
+            .to_owned();
+        assert_eq!(
+            workspace_version, declared,
+            "Cargo.toml [workspace.package] version {workspace_version:?} has drifted from \
+             {manifest}'s {declared:?}. Run `node scripts/sync-version.mjs` after setting root \
+             package.json to the intended version (it rewrites Cargo.toml and refreshes \
+             Cargo.lock), then commit all of them together."
+        );
+    }
 }
 
 #[test]

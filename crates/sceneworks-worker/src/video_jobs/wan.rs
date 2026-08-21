@@ -164,6 +164,25 @@ pub(crate) fn ensure_video_engine_weights(
     if krea_realtime_engine_id(&request.model).is_some() {
         resolve_krea_realtime_tier_dir_and_quant(settings, request)?;
     }
+    // MiniMax-H3 (epic 17137 / sc-19508). Without an arm here a MiniMax-H3 job whose engine or
+    // weights are absent falls to `VideoRoute::Stub` and the user is handed a PROCEDURAL FAKE CLIP
+    // — silently, since a generated-looking mp4 at the requested geometry is indistinguishable from
+    // a real render until watched. That is the degradation sc-4176 added this gate to prevent, and
+    // the same arm Mochi and Krea each needed.
+    //
+    // sc-17159 filled this slot with an UNCONDITIONAL refusal carrying a hard-coded "not in the
+    // pinned inference revision" string, because at that commit there was no dispatch arm to fall
+    // through to. sc-19508 substitutes the real gate rather than deleting the guard: it now asks
+    // the REGISTRY whether the engine is linked, checks the conditioning shape against the entry's
+    // DiT partition, and then runs the real tier + shared-component resolver — so a job still fails
+    // loudly at the current pin, an unprovisioned install still fails loudly after the pin bump,
+    // and each failure names its own cause instead of one string covering all three.
+    //
+    // `crates/sceneworks-worker/src/pinned_engine_geometry.rs` still carries the two mechanisms
+    // that force the GEOMETRY tie-in to be revisited on a pin move: `REV_WITHOUT_MINIMAX_H3` and
+    // `minimax_h3_arrival_tripwire`. Neither is touched here — this arm no longer depends on the
+    // pin being any particular revision, which is the point.
+    super::minimax_h3::ensure_minimax_h3_renderable(request, settings)?;
     Ok(())
 }
 
@@ -1308,6 +1327,29 @@ pub(super) struct VideoGenInput {
     /// takes the bespoke uncached load path (`load_from_comfyui_experts`) instead of the registry
     /// snapshot; `None` on every other job.
     pub(super) comfyui: Option<ComfyuiWanExperts>,
+    /// MiniMax-H3's tiered DiT directory (epic 17137, sc-19508) — staged in
+    /// `LoadSpec::components["transformer"]`. `None` on every other model.
+    ///
+    /// MiniMax-H3 is the first video family whose tiered weights live in a DIFFERENT repo from its
+    /// shared components: the pre-quantized DiT partitions come from `SceneWorks/minimax-h3-mlx`
+    /// while the text encoder, tokenizer and both VAEs come from the upstream `MiniMaxAI/MiniMax-H3`
+    /// snapshot. `model_dir` (⇒ `spec.weights`) can only name one root, so the other has to ride the
+    /// components map — the same mechanism LTX's optional `uncensored_enhancer` uses.
+    pub(super) dit_component_dir: Option<PathBuf>,
+    /// MiniMax-H3's PER-TIER PACKED text encoder (epic 17137, sc-19120 / sc-19506) — staged in
+    /// `LoadSpec::components["text_encoder"]`. `None` on every other model, and `None` for H3 when
+    /// the selected tier ships no packed text encoder (the dense bf16 tier, or a q4/q8 install
+    /// predating the packed co-requisite).
+    ///
+    /// NOT the same field as [`Self::text_encoder_dir`], and the distinction is load-bearing rather
+    /// than stylistic: that one rides `LoadSpec::text_encoder`, which is what the LTX provider
+    /// reads. `mlx-gen-minimax-h3::resolve_text_encoder_dir` reads
+    /// `spec.components["text_encoder"]` and falls back to `<weights>/text_encoder` — the UPSTREAM
+    /// DENSE bf16 Qwen3-VL-32B — when the key is absent. sc-19120 published q4/q8 packed text
+    /// encoders and wired them into the manifest as per-tier co-requisites, but nothing staged them,
+    /// so a q4 render loaded a 53 GB dense conditioner and the tier bought nothing on the largest
+    /// component in the family. This field is that staging.
+    pub(super) text_encoder_component_dir: Option<PathBuf>,
     /// Residency policy for the load (sc-12631). Defaults to [`OffloadPolicy::Resident`] — the historical
     /// video behavior (every component held for the whole run). The candle A14B (two 14B experts swapped
     /// one-resident-at-a-time) and the dense 5B (TE/VAE flushed off-GPU around the denoise, sc-13175) flip
@@ -1376,6 +1418,8 @@ impl Default for VideoGenInput {
             text_encoder_dir: None,
             uncensored_enhancer_dir: None,
             comfyui: None,
+            dit_component_dir: None,
+            text_encoder_component_dir: None,
             offload_policy: OffloadPolicy::Resident,
             #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
             cold_load_admission: None,
@@ -1397,12 +1441,41 @@ pub(super) fn video_load_spec(input: &VideoGenInput) -> LoadSpec {
     spec.text_encoder = input.text_encoder_dir.clone().map(WeightsSource::Dir);
     // Never downgrade a Sequential policy selected by the candle A14B route.
     spec.offload_policy = input.offload_policy;
-    // LTX-2.3's optional uncensored enhancer is the only named video component.
-    spec.components = input
-        .uncensored_enhancer_dir
-        .clone()
-        .map(|dir| BTreeMap::from([("uncensored_enhancer".to_owned(), WeightsSource::Dir(dir))]))
-        .unwrap_or_default();
+    // Named model components (epic 13657). Video providers advertise no `required_components`, so
+    // the map is empty by default. Three OPTIONAL components ride it:
+    //
+    // * LTX-2.3's `uncensored_enhancer` (sc-2845 / sc-13664): when a `useUncensoredEnhancer` job
+    //   resolved the amoral 4-bit Gemma snapshot, stage it here so the provider loads it on demand
+    //   instead of the deleted `$LTX_UNCENSORED_GEMMA_DIR` / HF-cache scan.
+    // * MiniMax-H3's tiered DiT (`"transformer"`, sc-19508): its quantized partitions live in a
+    //   different repo from its shared components, and `weights` can only name one root.
+    // * MiniMax-H3's per-tier PACKED text encoder (`"text_encoder"`, sc-19120 / sc-19506): the
+    //   packed conditioner ships beside the DiT tiers in `SceneWorks/minimax-h3-mlx`, while the
+    //   dense bf16 one comes from upstream, so it is the same different-repo problem the DiT
+    //   has. Absent ⇒ `mlx-gen-minimax-h3` falls back to `<weights>/text_encoder`, the dense
+    //   upstream copy. It does NOT read `LoadSpec::text_encoder` — that field has zero hits in
+    //   the whole engine crate, so staging there would resolve nothing and hard-error inside
+    //   the engine at the `config.json` probe.
+    //
+    // All absent ⇒ empty map, the video load path unchanged. They are collected rather than
+    // branched so adding a fourth cannot silently drop one.
+    spec.components = [
+        input
+            .uncensored_enhancer_dir
+            .clone()
+            .map(|dir| ("uncensored_enhancer".to_owned(), WeightsSource::Dir(dir))),
+        input
+            .dit_component_dir
+            .clone()
+            .map(|dir| ("transformer".to_owned(), WeightsSource::Dir(dir))),
+        input
+            .text_encoder_component_dir
+            .clone()
+            .map(|dir| ("text_encoder".to_owned(), WeightsSource::Dir(dir))),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<BTreeMap<_, _>>();
     spec
 }
 

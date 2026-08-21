@@ -3,7 +3,7 @@
   "generatedBy": "scripts/generate-candle-admission-inventory.mjs",
   "story": "sc-19049",
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:a9f4340e2ca0ec7853311046774b98d858386736997b47e1b91eaec21114a346",
+    "sceneWorksRevision": "source-tree:2e389736e27827e584b80687532b8ca3f25ab6ba3a83796bf159c59211d8bf06",
     "decisions": {
       "path": "docs/generated/candle-admission-decisions.json",
       "digest": "sha256:2aecbc27a99e467d78488df09441452434d72ddcf0cb432613fb611581125bc9",
@@ -71,7 +71,7 @@
     "candleRows": 2540,
     "evaluatedCandleRows": 2496,
     "notEvaluatedCandleRows": 44,
-    "mlxRows": 264,
+    "mlxRows": 272,
     "candlePlansSequentialCapable": {
       "reject": 185,
       "resident": 1750,
@@ -80995,6 +80995,94 @@
       "tierAdvertised": false,
       "declaredPeakGb": null,
       "declaredFloorGb": null,
+      "reachesEvidenceLadder": false,
+      "supportsSequentialOffload": false
+    },
+    {
+      "backend": "mlx",
+      "resolution": "declared",
+      "modelId": "minimax_h3",
+      "tier": "bf16",
+      "tierAdvertised": false,
+      "declaredPeakGb": null,
+      "declaredFloorGb": 64,
+      "reachesEvidenceLadder": false,
+      "supportsSequentialOffload": false
+    },
+    {
+      "backend": "mlx",
+      "resolution": "declared",
+      "modelId": "minimax_h3",
+      "tier": "q8",
+      "tierAdvertised": false,
+      "declaredPeakGb": null,
+      "declaredFloorGb": 64,
+      "reachesEvidenceLadder": false,
+      "supportsSequentialOffload": false
+    },
+    {
+      "backend": "mlx",
+      "resolution": "declared",
+      "modelId": "minimax_h3",
+      "tier": "q4",
+      "tierAdvertised": false,
+      "declaredPeakGb": null,
+      "declaredFloorGb": 64,
+      "reachesEvidenceLadder": false,
+      "supportsSequentialOffload": false
+    },
+    {
+      "backend": "mlx",
+      "resolution": "declared",
+      "modelId": "minimax_h3",
+      "tier": "nvfp4",
+      "tierAdvertised": false,
+      "declaredPeakGb": null,
+      "declaredFloorGb": 64,
+      "reachesEvidenceLadder": false,
+      "supportsSequentialOffload": false
+    },
+    {
+      "backend": "mlx",
+      "resolution": "declared",
+      "modelId": "minimax_h3_ref",
+      "tier": "bf16",
+      "tierAdvertised": false,
+      "declaredPeakGb": null,
+      "declaredFloorGb": 64,
+      "reachesEvidenceLadder": false,
+      "supportsSequentialOffload": false
+    },
+    {
+      "backend": "mlx",
+      "resolution": "declared",
+      "modelId": "minimax_h3_ref",
+      "tier": "q8",
+      "tierAdvertised": false,
+      "declaredPeakGb": null,
+      "declaredFloorGb": 64,
+      "reachesEvidenceLadder": false,
+      "supportsSequentialOffload": false
+    },
+    {
+      "backend": "mlx",
+      "resolution": "declared",
+      "modelId": "minimax_h3_ref",
+      "tier": "q4",
+      "tierAdvertised": false,
+      "declaredPeakGb": null,
+      "declaredFloorGb": 64,
+      "reachesEvidenceLadder": false,
+      "supportsSequentialOffload": false
+    },
+    {
+      "backend": "mlx",
+      "resolution": "declared",
+      "modelId": "minimax_h3_ref",
+      "tier": "nvfp4",
+      "tierAdvertised": false,
+      "declaredPeakGb": null,
+      "declaredFloorGb": 64,
       "reachesEvidenceLadder": false,
       "supportsSequentialOffload": false
     },

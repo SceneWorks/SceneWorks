@@ -44,7 +44,14 @@ pub fn video_mode_conditioning_requirements(mode: &str) -> &'static [&'static [&
         "image_to_video" => &[&["reference"]],
         "first_last_frame" => &[&["keyframe"]],
         "video_to_video" | "multi_video_to_video" => &[&["videoClip"]],
-        "reference_to_video" => &[&["multiReference"]],
+        // Subject-reference conditioning is consumable through EITHER descriptor surface
+        // (sc-18650): the heterogeneous `multiReference` bundle (bernini, and the scail/edit
+        // convention), or the ordered singular `reference` kind — MiniMax-H3's omni-reference
+        // surface, where gen-core has no heterogeneous-reference variant and the engines instead
+        // declare the ordered vec `[Keyframe, Reference, ReferenceVideo, ReferenceAudio]` (the
+        // request's own order carries the semantics). Same in-group alternatives idiom as
+        // `replace_person` below.
+        "reference_to_video" => &[&["multiReference", "reference"]],
         "reference_video_to_video" | "ads2v" => &[&["videoClip"], &["multiReference"]],
         "replace_person" | "animate_character" => {
             &[&["controlClip"], &["reference", "multiReference"]]

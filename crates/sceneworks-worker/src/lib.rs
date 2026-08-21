@@ -2336,6 +2336,12 @@ fn retry_delay(poll_seconds: u64, attempt: u32) -> u64 {
 #[cfg(test)]
 mod test_env;
 
+// NTFS disk discipline for the multi-gigabyte weight fixtures (StorageFull incident, 2026-08-20).
+// The `set_len`-extended fixtures the memory gates need are holes on APFS/ext4 and FULL allocations
+// on NTFS, so on Windows they have to be marked sparse explicitly. See the module docs.
+#[cfg(test)]
+mod test_fixture_disk;
+
 // Reads pinned download entries (repo/revision/files) out of the embedded builtin catalog so
 // provisioning harnesses follow a manifest pin bump instead of mirroring it (sc-13810).
 #[cfg(test)]

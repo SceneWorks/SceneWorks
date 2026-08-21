@@ -2,9 +2,9 @@
 compile_error!("memory-mlx-adapter is supported only on macOS");
 
 use mlx_gen::gen_core::{
-    GenerationMemory, MemoryBudget, MemoryCacheState, MemoryCalibrationIdentity, MemoryGeometry,
-    MemoryMode, MemoryNumericTier, MemoryOptimizationAuthority, MemoryPhase, MemoryRunContext,
-    MemoryRunOutcome, MemorySafetyDecision, MemorySelection, MemoryStrategy,
+    GenerationMemory, LoadPhase, MemoryBudget, MemoryCacheState, MemoryCalibrationIdentity,
+    MemoryGeometry, MemoryMode, MemoryNumericTier, MemoryOptimizationAuthority, MemoryPhase,
+    MemoryRunContext, MemoryRunOutcome, MemorySafetyDecision, MemorySelection, MemoryStrategy,
     MemoryStrategyParameters, TransformerComponent,
 };
 use mlx_gen::tiling::{SpatialTiling, TilingConfig, VaeTiling};
@@ -111,6 +111,10 @@ const LTX_RMS_THRESHOLD: f64 = FLUX2_RMS_THRESHOLD;
 /// validating against LTX's OWN declared envelope instead of accepting any frame count at all.
 const LTX_PROVIDER: &str = "ltx_2_3";
 const LTX_PLAIN_EXECUTION_PATH: &str = "the MLX LTX-2.3 base-only text-to-video path";
+/// How [`diagnostic_video_frames`] names this lane when it refuses a non-video output. Extracted
+/// verbatim from that function's own messages when the second video arm made the label a parameter
+/// (sc-18663), so LTX's refusals are unchanged.
+const LTX_VIDEO_LABEL: &str = "MLX LTX-2.3";
 /// Expected provider-owned identity at the permanent inference pin. The adapter always reads the
 /// loaded registry contract and refuses any mismatch; this local expectation merely prevents a
 /// provider re-fingerprint from silently reusing SC-18946's plan and fixtures.
@@ -396,6 +400,55 @@ const fn ltx_frame_envelope() -> (u32, u32) {
 }
 
 const LTX_FRAME_ENVELOPE: (u32, u32) = ltx_frame_envelope();
+
+/// The `mlx:minimax_h3` lane (sc-18663) — the SECOND video arm, and the first joint audio+video one.
+///
+/// It accepts a multi-frame geometry for the same reason `mlx:ltx_2_3` does, and pays for it the
+/// same way: by validating against MiniMax-H3's OWN envelope. Unlike the LTX arm, that envelope is
+/// not transcribed from the manifest — it is READ from the engine crate this arm links against
+/// ([`minimax_legal_frame_counts`], [`mlx_gen_minimax_h3::SPATIAL_STRIDE`],
+/// [`mlx_gen_minimax_h3::CANVAS_MAX_PIXELS`], [`mlx_gen_minimax_h3::MINIMAX_H3_FPS`]), so it cannot
+/// drift from the pinned provider at all. `minimax_envelope_is_the_pinned_engines_own` pins the
+/// values a plan may rely on, so a pin bump that moves one reds here rather than silently widening
+/// what this arm will capture.
+const MINIMAX_PROVIDER: &str = "minimax_h3";
+const MINIMAX_PLAIN_EXECUTION_PATH: &str =
+    "the MLX MiniMax-H3 base-only t2va text-to-audio-video path";
+/// How this arm names itself in a geometry, target or output-shape refusal.
+const MINIMAX_LABEL: &str = "MLX MiniMax-H3 calibration";
+/// How [`diagnostic_video_frames`] names this lane when it refuses a non-video output.
+const MINIMAX_VIDEO_LABEL: &str = "MLX MiniMax-H3";
+/// Expected provider-owned identity at the permanent inference pin
+/// (`mlx_gen_minimax_h3::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT`). The arm always reads the
+/// loaded registry contract and refuses any mismatch; this local expectation additionally prevents a
+/// provider re-fingerprint from silently reusing the epic's plan and fixtures. The string names
+/// `eager` because the provider chose that spelling before it grew a deferred loader — the RESOLVED
+/// shape travels beside it in `MemoryCalibrationIdentity::load_shape`, not in the fingerprint, and
+/// this arm attests the resolved one.
+const MINIMAX_CALIBRATION_FINGERPRINT: &str = "minimax-h3-mlx-staged-joint-av-eager-abi3-v1";
+/// One fixed seed for every `mlx:minimax_h3` fixture
+/// (`minimax-h3-mlx-<tier>-<width>x<height>-f<frames>-fps<fps>-seed17137`).
+const MINIMAX_SEED: u64 = 17137;
+/// Model evaluations per calibration render. Two is the scheduler's own
+/// `mlx_gen_minimax_h3::MIN_INFERENCE_STEPS` (and the manifest's `limits.hardMinSteps`), and it is
+/// what makes the phase boundaries real: the DiT is mapped and the AdaLN schedule projected before
+/// step 1, and the second step supplies a denoise-only interval before `Decoding`.
+const MINIMAX_STEPS: u32 = 2;
+/// MiniMax-H3 determinism thresholds, in [0,1] units.
+///
+/// These are DELIBERATELY spelled as their own literals rather than aliased onto the FLUX.2 or LTX
+/// constants. The record embeds them as `maximumErrorThreshold` and friends, and an
+/// `mlx:minimax_h3` receipt must not be traceable to a constant that asserts another provider's
+/// provenance (the rule stated at [`LTX_MAX_THRESHOLD`]). The magnitudes match the other lanes
+/// because the CLAIM is the same kind — repeat determinism on one loaded provider with no alternate
+/// code path selected between the two renders — not because the constants are shared.
+///
+/// The envelope is a tolerance, not a prediction: this checkpoint is guidance-distilled and fully
+/// seeded, so a warm repeat is expected to be bit-identical on all three metrics, while the
+/// mandatory broad-bias mutation must breach all three.
+const MINIMAX_MAX_THRESHOLD: f64 = 3.0 / 255.0;
+const MINIMAX_MEAN_THRESHOLD: f64 = 1.0 / 255.0;
+const MINIMAX_RMS_THRESHOLD: f64 = 1.5 / 255.0;
 
 fn command(program: &str, args: &[&str]) -> Result<String, String> {
     let output = Command::new(program)
@@ -727,9 +780,12 @@ mod tests {
 
     /// sc-19115. This is the load-bearing decision test, not merely a count of records with cache.
     /// It evaluates the same host-reserve currency production uses over every committed MLX image
-    /// cell and proves that changing the image basis would loosen 54 shipped admission outcomes.
+    /// cell and proves that changing the image basis would only ever LOOSEN shipped admission —
+    /// never tighten it — which is the whole reason the image basis stays where it is.
+    ///
+    /// The verdict is asserted; the corpus size is not. See the shape assertions at the end.
     #[test]
-    fn resident_peak_counterfactual_would_loosen_55_shipped_image_admission_cells() {
+    fn resident_peak_counterfactual_only_loosens_shipped_image_admission() {
         use sceneworks_core::memory_calibration::{Backend, EvidenceBundle, RequiredNullable};
 
         fn phase(phase: &sceneworks_core::memory_calibration::Phase) -> PhaseMemory {
@@ -779,6 +835,18 @@ mod tests {
                 record.id
             );
             if historical != resident {
+                // The DIRECTION, per record, stated where the pinned totals used to be: the
+                // resident basis drops the reclaimable term, so wherever the two bases disagree
+                // the resident one must predict LESS. That is what makes every admission flip
+                // below a loosening rather than a coincidence of this corpus, and unlike a count
+                // it holds at any corpus size.
+                assert!(
+                    resident < historical,
+                    "{}: the resident basis predicted {resident} against the historical \
+                     {historical} — a resident basis that predicts MORE would tighten admission, \
+                     which is the opposite of the sc-19115 finding",
+                    record.id
+                );
                 changed_records += 1;
             }
 
@@ -811,22 +879,58 @@ mod tests {
             }
         }
 
-        // Renewed for the sc-18304 sync merge: the epic's captures grew the corpus 69 -> 74
-        // (five z-image coordinates among them), moving the counterfactual's derived counts.
-        // The load-bearing claim is the only-loosens assertion in the loop above; these pins
-        // characterize the merged corpus.
-        assert_eq!(image_records, 74);
-        assert_eq!(changed_records, 66);
-        assert_eq!(flipped_cells, 55);
-        assert_eq!(
-            flips_by_provider,
-            std::collections::BTreeMap::from([
-                ("flux2_dev", 7),
-                ("krea_2_turbo_control", 8),
-                ("qwen_image", 38),
-                ("z_image_turbo", 2),
-            ])
+        // The MLX `text_to_image` corpus is NOT frozen. Every calibration campaign and every main
+        // sync adds coordinates, and the counterfactual's derived totals move with it: 69 -> 74 at
+        // the sc-18304 sync, 74 -> 93 at the 2026-08-19 epic-17137 sync that brought epic 18803's
+        // captures across. Pinning those totals recorded only which campaign ran last and went red
+        // for legitimate corpus growth, so this states the SHAPE of the counterfactual instead —
+        // the same treatment the sibling calibration gates got (see `memory_calibration.rs`, where
+        // the re-capture set is held to its shape while only frozen history stays pinned).
+        //
+        // The load-bearing claim is the only-loosens assertion in the loop above. These keep it
+        // from passing vacuously on an empty or half-read corpus, and hold the derived tallies to
+        // the identities that must be true at ANY corpus size.
+        assert!(
+            image_records > 0,
+            "no MLX text_to_image record was read — the counterfactual is vacuous"
         );
+        assert!(
+            changed_records > 0 && changed_records <= image_records,
+            "{changed_records} of {image_records} records changed basis: the resident basis must \
+             move some image predictions, and can never move more than the corpus holds"
+        );
+        assert!(
+            flipped_cells > 0,
+            "the resident basis flipped no admission cell — the decision this test records would \
+             then be a no-op, which is the opposite of what sc-19115 concluded"
+        );
+        assert!(
+            flipped_cells <= changed_records * host_bytes.len(),
+            "{flipped_cells} flips exceed the {} cells the {changed_records} changed records span \
+             — the tally is counting something other than host cells",
+            changed_records * host_bytes.len()
+        );
+        // The per-provider tally is a PARTITION of the flips, not a pinned census: it must sum to
+        // the total and may only name providers this corpus actually carries.
+        assert_eq!(
+            flips_by_provider.values().sum::<usize>(),
+            flipped_cells,
+            "the per-provider tally must partition the flipped cells: {flips_by_provider:?}"
+        );
+        let image_providers = evidence
+            .records
+            .iter()
+            .filter(|record| {
+                record.backend == Backend::Mlx && record.target.mode == "text_to_image"
+            })
+            .map(|record| record.target.provider.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        for provider in flips_by_provider.keys() {
+            assert!(
+                image_providers.contains(provider),
+                "{provider} flipped admission but carries no MLX text_to_image record"
+            );
+        }
     }
 
     /// sc-18864. The emitted phase object must carry ONE named MLX quantity per field. Before this
@@ -964,6 +1068,8 @@ mod tests {
             "flux2_dev",
             // sc-18808: the video arm rides the same dispatch, so it is covered by the same proof.
             "ltx_2_3",
+            // sc-18663: and the second video arm.
+            "minimax_h3",
         ] {
             let request = json!({ "planned": { "target": { "provider": provider } } });
             let error = run(&request)
@@ -980,6 +1086,7 @@ mod tests {
         assert_eq!(KREA_PROVIDER, "krea_2_turbo_control");
         assert_eq!(FLUX2_PROVIDER, "flux2_dev");
         assert_eq!(LTX_PROVIDER, "ltx_2_3");
+        assert_eq!(MINIMAX_PROVIDER, "minimax_h3");
     }
 
     #[test]
@@ -1974,9 +2081,18 @@ fn planned_selection(request: &Value) -> Result<MemorySelection, String> {
         }
         Some(value) => match value.as_str() {
             Some("dit") => Some(TransformerComponent::Dit),
+            // sc-18663: `minimax_h3` publishes `transformer_window_components: [Both]` — its rung 4
+            // streams the text encoder as well as the DiT, and declaring `Dit` alone would leave the
+            // conditioning stage, the taller of the two at every tier, with no lever. This parser is
+            // shared, so accepting the spelling here does NOT widen any other arm: each arm's own
+            // validator still constrains it (`validate_sdxl_selection_parameters` requires an
+            // explicit `Dit`), and `contract.validate_selection` refuses a component the pinned
+            // provider does not declare. `text_encoder` stays unparsed because no pinned MLX
+            // provider declares it.
+            Some("both") => Some(TransformerComponent::Both),
             _ => {
                 return Err(format!(
-                    "planned.strategy.parameters.transformerWindowComponent must be \"dit\" for the implemented MLX adapter arms, got {value}"
+                    "planned.strategy.parameters.transformerWindowComponent must be \"dit\" or \"both\" for the implemented MLX adapter arms, got {value}"
                 ));
             }
         },
@@ -6673,19 +6789,25 @@ struct DiagnosticAudioIdentity {
 
 /// Extract a diagnostic clip while retaining enough audio identity to prove the full default-A/V
 /// decoder returned a non-empty track. The samples themselves drop here, before provider cleanup.
+///
+/// `label` names the calibration in every refusal. It became a parameter with the second video arm
+/// (sc-18663): both A/V providers need this exact unwrapping, and a `minimax_h3` capture must not
+/// refuse a misrouted still under an LTX-worded message. Every LTX call site passes
+/// [`LTX_VIDEO_LABEL`], so those refusals are byte-identical to the ones this function shipped with.
 fn diagnostic_video_frames(
     output: GenerationOutput,
+    label: &str,
 ) -> Result<(Vec<Image>, u32, Option<DiagnosticAudioIdentity>), String> {
     match output {
         GenerationOutput::Video { frames, fps, audio } => {
             if frames.is_empty() {
-                return Err("MLX LTX-2.3 render returned no frames".to_owned());
+                return Err(format!("{label} render returned no frames"));
             }
             let audio = audio
                 .map(|track| {
                     Ok::<_, String>(DiagnosticAudioIdentity {
                         samples: u64::try_from(track.samples.len()).map_err(|_| {
-                            "LTX diagnostic audio sample count must fit u64".to_owned()
+                            format!("{label} diagnostic audio sample count must fit u64")
                         })?,
                         sample_rate: track.sample_rate,
                         channels: track.channels,
@@ -6695,11 +6817,11 @@ fn diagnostic_video_frames(
             Ok((frames, fps, audio))
         }
         GenerationOutput::Images(_) => {
-            Err("MLX LTX-2.3 render returned images, not a video clip".to_owned())
+            Err(format!("{label} render returned images, not a video clip"))
         }
-        GenerationOutput::Audio(_) => {
-            Err("MLX LTX-2.3 render returned an audio track, not a video clip".to_owned())
-        }
+        GenerationOutput::Audio(_) => Err(format!(
+            "{label} render returned an audio track, not a video clip"
+        )),
     }
 }
 
@@ -6900,9 +7022,12 @@ fn ltx_staging_is_proven(
 /// co-existence bound is CONSERVATIVE — it never under-predicts — while switching to `active`
 /// would LOOSEN shipped admission. [`PredictedPeakBasis`] and its image/video constants are the
 /// single policy declaration both lanes consume. The corpus test
-/// `resident_peak_counterfactual_would_loosen_55_shipped_image_admission_cells` pins the decision
-/// against all 69 committed MLX image records and production's scaled foreign-reserve currency:
-/// 62 record predictions change and 54 host-grid decisions flip from refusal to admission.
+/// `resident_peak_counterfactual_only_loosens_shipped_image_admission` re-derives the decision on
+/// every run, against whatever MLX image records the committed corpus currently holds and
+/// production's scaled foreign-reserve currency: some record predictions change and some host-grid
+/// decisions flip, and every flip is refusal -> admission. The totals are deliberately not quoted
+/// here — the corpus grows at each calibration campaign and each main sync (69 records at
+/// sc-19115, 74 at the sc-18304 sync, 93 at the 2026-08-19 epic-17137 sync).
 #[cfg(test)]
 fn ltx_predicted_peak_bytes(
     conditioning: PhaseMemory,
@@ -6999,23 +7124,26 @@ fn verify_ltx_bounded_warm_repeat(
         active: 0,
         cache: 0,
     });
-    let (warm, fps, audio) = diagnostic_video_frames(scoped_generate(
-        generator,
-        ltx_request(input.geometry, input.fps, input.seed),
-        context,
-        None,
-        &mut |progress| match progress {
-            Progress::Step { current: 1, .. } => {
-                conditioning.set(PhaseMemory::capture());
-                reset_peak_memory();
-            }
-            Progress::Decoding => {
-                denoise.set(PhaseMemory::capture());
-                reset_peak_memory();
-            }
-            _ => {}
-        },
-    )?)?;
+    let (warm, fps, audio) = diagnostic_video_frames(
+        scoped_generate(
+            generator,
+            ltx_request(input.geometry, input.fps, input.seed),
+            context,
+            None,
+            &mut |progress| match progress {
+                Progress::Step { current: 1, .. } => {
+                    conditioning.set(PhaseMemory::capture());
+                    reset_peak_memory();
+                }
+                Progress::Decoding => {
+                    denoise.set(PhaseMemory::capture());
+                    reset_peak_memory();
+                }
+                _ => {}
+            },
+        )?,
+        LTX_VIDEO_LABEL,
+    )?;
     let decode = PhaseMemory::capture();
     let conditioning = conditioning.get();
     let denoise = denoise.get();
@@ -7909,7 +8037,7 @@ fn run_ltx_canary_for(request: &Value, profile: LtxCanaryProfile) -> Result<Valu
             &mut observe_progress,
         ),
     }?;
-    let (frames, fps, audio) = diagnostic_video_frames(generated)?;
+    let (frames, fps, audio) = diagnostic_video_frames(generated, LTX_VIDEO_LABEL)?;
     let decode = PhaseMemory::capture();
     let expected_audio = profile == LtxCanaryProfile::ProductEnvelope;
     if frames.len() != profile.frames() as usize || fps != profile.fps() {
@@ -8206,38 +8334,41 @@ fn run_ltx_with_admission(
     let pre_rung_active = get_active_memory() as u64;
     let pre_rung_cache = get_cache_memory() as u64;
     phase_sink.mark("primary_conditioning")?;
-    let (measured, output_fps, audio) = diagnostic_video_frames(scoped_generate(
-        generator.as_ref(),
-        ltx_request(geometry, fps, seed),
-        &context,
-        None,
-        &mut |progress| {
-            match progress {
-                // LTX emits no boundary between the staged text phase and the DiT build, so this
-                // phase legitimately spans BOTH giants' materializations; the staging bound below
-                // is what proves they did not co-reside.
-                Progress::Step { current: 1, .. } => {
-                    if let Err(error) = phase_sink.mark("primary_denoise") {
-                        eprintln!("{error}");
-                        std::process::abort();
+    let (measured, output_fps, audio) = diagnostic_video_frames(
+        scoped_generate(
+            generator.as_ref(),
+            ltx_request(geometry, fps, seed),
+            &context,
+            None,
+            &mut |progress| {
+                match progress {
+                    // LTX emits no boundary between the staged text phase and the DiT build, so
+                    // this phase legitimately spans BOTH giants' materializations; the staging
+                    // bound below is what proves they did not co-reside.
+                    Progress::Step { current: 1, .. } => {
+                        if let Err(error) = phase_sink.mark("primary_denoise") {
+                            eprintln!("{error}");
+                            std::process::abort();
+                        }
+                        conditioning.set(PhaseMemory::capture());
+                        denoise_entry.set(AllocatorState::capture_current());
+                        reset_peak_memory();
                     }
-                    conditioning.set(PhaseMemory::capture());
-                    denoise_entry.set(AllocatorState::capture_current());
-                    reset_peak_memory();
-                }
-                Progress::Decoding => {
-                    if let Err(error) = phase_sink.mark("primary_decode") {
-                        eprintln!("{error}");
-                        std::process::abort();
+                    Progress::Decoding => {
+                        if let Err(error) = phase_sink.mark("primary_decode") {
+                            eprintln!("{error}");
+                            std::process::abort();
+                        }
+                        denoise.set(PhaseMemory::capture());
+                        decode_entry.set(AllocatorState::capture_current());
+                        reset_peak_memory();
                     }
-                    denoise.set(PhaseMemory::capture());
-                    decode_entry.set(AllocatorState::capture_current());
-                    reset_peak_memory();
+                    _ => {}
                 }
-                _ => {}
-            }
-        },
-    )?)?;
+            },
+        )?,
+        LTX_VIDEO_LABEL,
+    )?;
     let decode = PhaseMemory::capture();
     let conditioning = conditioning.get();
     let denoise = denoise.get();
@@ -8908,7 +9039,7 @@ fn run_ltx_bounded_carrier_proof(request: &Value) -> Result<Value, String> {
             _ => {}
         },
     )?;
-    let (frames, fps, audio) = diagnostic_video_frames(generated)?;
+    let (frames, fps, audio) = diagnostic_video_frames(generated, LTX_VIDEO_LABEL)?;
     let decode = PhaseMemory::capture();
     if frames.len() != LTX_CAMPAIGN_ENTRY_FRAMES as usize || fps != LTX_CAMPAIGN_ENTRY_FPS {
         return Err(format!(
@@ -9157,6 +9288,960 @@ fn run_ltx(request: &Value) -> Result<Value, String> {
     run_ltx_with_admission(request, LtxRunAdmission::Ordinary, &mut phases)
 }
 
+// ==== mlx:minimax_h3 (sc-18663) =================================================================
+
+/// The exact target geometry an `mlx:minimax_h3` calibration case renders, plus the two derived
+/// latent counts the joint denoise actually carries.
+///
+/// `fps` is NOT a field, for the same reason it is not one on [`LtxGeometry`]: `GeometryEnvelope`
+/// has no temporal-cadence axis. Here the gap is closed rather than merely reported — this model
+/// generates at 24 fps and nothing else ([`mlx_gen_minimax_h3::MINIMAX_H3_FPS`]), so the fixture's
+/// declared cadence is checked against that single legal value and cannot silently vary a record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MinimaxGeometry {
+    width: u32,
+    height: u32,
+    frames: u32,
+    /// `17n + 5` frames ⇒ `5n + 2` video latent frames.
+    video_latent_frames: u32,
+    /// `round(frames / 24 · 40)` audio latent tokens, denoised jointly with the video in ONE packed
+    /// sequence — so they are part of what every phase peak below is a peak OF.
+    audio_latent_frames: u32,
+}
+
+/// MiniMax-H3's own geometry envelope, which replaces the image arms' `frames == 1` refusal for this
+/// arm. It is the same four-clause gate the pinned provider's `route_gate` applies, read off the
+/// engine crate rather than transcribed:
+///
+/// * the temporal lattice — `frames ∈ LEGAL_FRAME_COUNTS`, i.e. `17n + 5` clamped to the released
+///   checkpoint's hardcoded 5–15 s duration range. `T = 1` is off the lattice and does not render,
+///   so a still geometry is refused here too;
+/// * the spatial stride — `SPATIAL_STRIDE` (32: the VAE's 16x compression times the DiT's width
+///   patch of 2). A 16-aligned canvas survives the VAE and then has an odd latent column count with
+///   no patched representation at all;
+/// * the canvas budget — `CANVAS_MAX_PIXELS` as a **PRODUCT**, not per edge. The published
+///   resolution list contains 1536x672 and 1344x768, whose long edges differ by 192 px and whose
+///   areas are identical; a per-edge cap would refuse the first and admit the second while both sit
+///   exactly at the budget;
+/// * `batch == 1` — the engine renders one clip per request.
+fn validate_minimax_geometry(
+    width: u32,
+    height: u32,
+    frames: u32,
+) -> Result<MinimaxGeometry, String> {
+    let lattice_frames = i32::try_from(frames)
+        .ok()
+        .filter(|frames| mlx_gen_minimax_h3::LEGAL_FRAME_COUNTS.contains(frames))
+        .ok_or_else(|| {
+            format!(
+                "{MINIMAX_LABEL} requires geometry.frames on the 17n+5 lattice {:?}, got {frames}",
+                mlx_gen_minimax_h3::LEGAL_FRAME_COUNTS
+            )
+        })?;
+    let stride = mlx_gen_minimax_h3::SPATIAL_STRIDE;
+    // `%` rather than the engine's own `is_multiple_of`: that method is stable since 1.87 and this
+    // workspace's MSRV is 1.80, so clippy's `incompatible_msrv` refuses it here.
+    if width % stride != 0 || height % stride != 0 {
+        return Err(format!(
+            "{MINIMAX_LABEL} requires geometry divisible by the {stride}px stride, got {width}x{height}"
+        ));
+    }
+    let pixels = width.saturating_mul(height);
+    let budget = mlx_gen_minimax_h3::CANVAS_MAX_PIXELS;
+    if pixels > budget {
+        return Err(format!(
+            "{MINIMAX_LABEL} requires width*height within the {budget}px canvas budget, got \
+             {width}x{height} ({pixels}px)"
+        ));
+    }
+    let video_latent_frames = mlx_gen_minimax_h3::video_latent_num_frames(lattice_frames)
+        .map_err(|error| format!("derive MiniMax-H3 video latent frames: {error}"))
+        .and_then(|latents| {
+            u32::try_from(latents)
+                .map_err(|_| "MiniMax-H3 video latent frame count must fit u32".to_owned())
+        })?;
+    let audio_latent_frames =
+        u32::try_from(mlx_gen_minimax_h3::audio_latent_num_frames(lattice_frames))
+            .map_err(|_| "MiniMax-H3 audio latent count must fit u32".to_owned())?;
+    Ok(MinimaxGeometry {
+        width,
+        height,
+        frames,
+        video_latent_frames,
+        audio_latent_frames,
+    })
+}
+
+/// Read the four declared geometry axes. Like the LTX arm this reads `frames` as a real value rather
+/// than asserting it away, and pins `batch` to 1 before anything derived is computed.
+fn minimax_target_geometry(request: &Value) -> Result<MinimaxGeometry, String> {
+    let geometry = protocol::planned(request)?
+        .pointer("/target/geometry")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "planned.target.geometry must be an object".to_owned())?;
+    let axis = |name: &str| {
+        geometry
+            .get(name)
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| format!("planned.target.geometry.{name} must fit u32"))
+    };
+    let batch = axis("batch")?;
+    if batch != 1 {
+        return Err(format!(
+            "{MINIMAX_LABEL} requires geometry.batch == 1 (the engine renders one clip per \
+             request), got {batch}"
+        ));
+    }
+    validate_minimax_geometry(axis("width")?, axis("height")?, axis("frames")?)
+}
+
+/// Defense-in-depth mirror of `validate_ltx_target`, plus the t2va-specific target shape.
+///
+/// `run` dispatches by provider id today, but this arm hardcodes the MiniMax-H3 contract, so a
+/// foreign caller must be refused BY NAME here — before any environment variable is read, any path
+/// canonicalized, or any weight file opened. The reference surfaces are refused for a sharper
+/// reason than tidiness: `ref2va` is a DIFFERENT CHECKPOINT (`transformer_ref/`), so a record
+/// measured on the base partition may never be filed against a reference-carrying target.
+fn validate_minimax_target(request: &Value) -> Result<MinimaxGeometry, String> {
+    let target = protocol::planned(request)?
+        .get("target")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "planned.target must be an object".to_owned())?;
+    let provider = target
+        .get("provider")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
+    if provider != MINIMAX_PROVIDER {
+        return Err(format!(
+            "{MINIMAX_LABEL} does not implement provider {provider:?}"
+        ));
+    }
+    let model_id = target
+        .get("modelId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
+    if model_id != MINIMAX_PROVIDER {
+        return Err(format!(
+            "{MINIMAX_LABEL} requires modelId {MINIMAX_PROVIDER:?}, got {model_id:?}"
+        ));
+    }
+    let mode = target
+        .get("mode")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.target.mode must be a string".to_owned())?;
+    if mode != "text_to_video" {
+        return Err(format!(
+            "{MINIMAX_LABEL} requires reference-free text_to_video (t2va) mode, got {mode:?}"
+        ));
+    }
+    for field in ["referenceCount", "reference_count"] {
+        if let Some(value) = target.get(field) {
+            if value.as_u64() != Some(0) {
+                return Err(format!(
+                    "{MINIMAX_LABEL} requires {field} == 0 when declared; ref2va runs a different \
+                     DiT partition and cannot be recorded from this one"
+                ));
+            }
+        }
+    }
+    for field in ["hasReference", "has_reference"] {
+        if let Some(value) = target.get(field) {
+            if value.as_bool() != Some(false) {
+                return Err(format!(
+                    "{MINIMAX_LABEL} requires {field} == false when declared; ref2va runs a \
+                     different DiT partition and cannot be recorded from this one"
+                ));
+            }
+        }
+    }
+    minimax_target_geometry(request)
+}
+
+/// Bind the fixture to the planned tier AND the full rendered geometry, recovering the cadence and
+/// the seed. Unlike LTX's, this arm's `fps` has exactly one legal value, so the fixture cannot
+/// declare a cadence the engine would refuse.
+fn planned_minimax_capture(
+    request: &Value,
+    tier: &str,
+    geometry: MinimaxGeometry,
+) -> Result<(u32, u64), String> {
+    let fixture = protocol::planned(request)?
+        .get("fixture")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let prefix = format!(
+        "minimax-h3-mlx-{tier}-{}x{}-f{}-fps",
+        geometry.width, geometry.height, geometry.frames
+    );
+    let remainder = fixture
+        .strip_prefix(&prefix)
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must start with {prefix:?}"))?;
+    let (fps, seed) = remainder
+        .split_once("-seed")
+        .ok_or_else(|| format!("planned.fixture {fixture:?} must end with -seed<seed>"))?;
+    let fps = fps
+        .parse::<u32>()
+        .map_err(|error| format!("parse MiniMax-H3 fixture fps {fps:?}: {error}"))?;
+    let seed = seed
+        .parse::<u64>()
+        .map_err(|error| format!("parse MiniMax-H3 fixture seed {seed:?}: {error}"))?;
+    if f64::from(fps) != mlx_gen_minimax_h3::MINIMAX_H3_FPS {
+        return Err(format!(
+            "planned.fixture declares fps {fps}, but the released MiniMax-H3 checkpoint generates \
+             at {} fps only",
+            mlx_gen_minimax_h3::MINIMAX_H3_FPS
+        ));
+    }
+    if seed != MINIMAX_SEED {
+        return Err(format!(
+            "planned.fixture seed {seed} does not match the MiniMax-H3 calibration seed \
+             {MINIMAX_SEED}"
+        ));
+    }
+    Ok((fps, seed))
+}
+
+/// The text encoder came from the tier tree the DiT did.
+const MINIMAX_TIERED_TEXT_ENCODER: &str = "tier";
+/// The text encoder came from the upstream snapshot, dense.
+const MINIMAX_UPSTREAM_TEXT_ENCODER: &str = "upstream-dense";
+
+/// Which tree a tier's text encoder comes from. Extracted from [`minimax_load_spec`] so the rule is
+/// checkable without an environment: `q4`/`q8` are packed and rehosted, `bf16` is the dense upstream
+/// checkpoint the rehost deliberately does not carry a second copy of.
+fn minimax_text_encoder_source(tier: &str) -> &'static str {
+    if tier == "bf16" {
+        MINIMAX_UPSTREAM_TEXT_ENCODER
+    } else {
+        MINIMAX_TIERED_TEXT_ENCODER
+    }
+}
+
+/// Everything a capture resolved, kept together so the record's provenance is built from the values
+/// the load actually used rather than from the plan.
+struct MinimaxArtifact {
+    repository: String,
+    revision: String,
+    upstream_repository: String,
+    upstream_revision: String,
+    upstream_root: PathBuf,
+    dit_root: PathBuf,
+    text_encoder_root: PathBuf,
+    text_encoder_source: &'static str,
+    spec: LoadSpec,
+}
+
+impl MinimaxArtifact {
+    /// The two artifact triples and the text-encoder provenance in one string. A `mlx:minimax_h3`
+    /// record CANNOT be identified by the rehost triple alone: two captures at the same
+    /// repository, revision and tier differ materially if one took its conditioning stage from the
+    /// packed tier and the other from the dense upstream snapshot.
+    fn resolved_path_fingerprint(&self, tier: &str) -> String {
+        format!(
+            "{}@{}:{tier}+text_encoder:{}+shared:{}@{}",
+            self.repository,
+            self.revision,
+            self.text_encoder_source,
+            self.upstream_repository,
+            self.upstream_revision
+        )
+    }
+}
+
+/// Resolve and validate the `SCENEWORKS_MINIMAX_H3_*` environment family into a tier-exact load spec.
+///
+/// # The env contract, and why it is six variables rather than three
+///
+/// `mlx_gen_minimax_h3::model::load` reads TWO artifacts, so the arm resolves two triples:
+///
+/// * `SCENEWORKS_MINIMAX_H3_{REPOSITORY,REVISION,ROOT}` — the tiered rehost
+///   [`protocol::MINIMAX_REPOSITORY`], whose `ROOT` is the **tier directory**
+///   (`…/snapshots/<revision>/<tier>`), exactly like every other arm's `_ROOT`. It supplies
+///   `transformer/`, its `transformer_ref/` sibling, and — at q4/q8 — `text_encoder/`.
+/// * `SCENEWORKS_MINIMAX_H3_UPSTREAM_{REPOSITORY,REVISION,ROOT}` — the upstream
+///   [`protocol::MINIMAX_UPSTREAM_REPOSITORY`] snapshot ROOT itself, with no tier component. The
+///   loader probes `vae/config.json`, `audio_vae/config.json`, `tokenizer/tokenizer.json` and the
+///   three `FL2VA/audio_vae/` documents under the spec's own weights root, and the rehost publishes
+///   none of them — so the upstream root is what `spec.weights` must be, and the tiered components
+///   are REDIRECTED onto it rather than the other way round.
+///
+/// # There is no text-encoder variable, deliberately
+///
+/// The text encoder's tier is DERIVED from the DiT's, because a tier is a whole-pipeline contract
+/// rather than a per-component knob: `q4`/`q8` take `<tier>/text_encoder` from the rehost, `bf16`
+/// takes the dense `text_encoder/` from upstream — which is exactly what the shipped manifest's
+/// three `componentId: "text_encoder"` co-requisite rows declare, the bf16 one against the upstream
+/// repository. A seventh variable would make the conditioning stage's tier a free axis that the
+/// record's `artifact.variant` could not describe, and the conditioning stage is the tallest phase
+/// this family has at every tier.
+///
+/// Both components are staged EXPLICITLY through `LoadSpec::with_component` even where the loader's
+/// own fallback would find the same directory, because `ComponentBytes::resolve` reads the same map
+/// to build `asset_facts` — an implicitly-resolved component is charged from a path this arm never
+/// stated, and an under-declared conditioning floor admits a render that then OOMs.
+fn minimax_load_spec(
+    request: &Value,
+    tier: &str,
+    selection: &MemorySelection,
+    load_shape: LoadShape,
+) -> Result<MinimaxArtifact, String> {
+    protocol::validate_plain_overlay_target(request, MINIMAX_PLAIN_EXECUTION_PATH)?;
+    let repository = protocol::required_env("SCENEWORKS_MINIMAX_H3_REPOSITORY")?;
+    let revision = protocol::required_env("SCENEWORKS_MINIMAX_H3_REVISION")?;
+    protocol::validate_artifact_identity(&repository, &revision, protocol::MINIMAX_REPOSITORY)?;
+    let tier_root = std::fs::canonicalize(PathBuf::from(protocol::required_env(
+        "SCENEWORKS_MINIMAX_H3_ROOT",
+    )?))
+    .map_err(|error| format!("canonicalize SCENEWORKS_MINIMAX_H3_ROOT: {error}"))?;
+    protocol::validate_huggingface_snapshot_root(
+        &tier_root,
+        &repository,
+        &revision,
+        tier,
+        protocol::MINIMAX_REPOSITORY,
+    )?;
+
+    let upstream_repository = protocol::required_env("SCENEWORKS_MINIMAX_H3_UPSTREAM_REPOSITORY")?;
+    let upstream_revision = protocol::required_env("SCENEWORKS_MINIMAX_H3_UPSTREAM_REVISION")?;
+    protocol::validate_artifact_identity(
+        &upstream_repository,
+        &upstream_revision,
+        protocol::MINIMAX_UPSTREAM_REPOSITORY,
+    )?;
+    let upstream_root = std::fs::canonicalize(PathBuf::from(protocol::required_env(
+        "SCENEWORKS_MINIMAX_H3_UPSTREAM_ROOT",
+    )?))
+    .map_err(|error| format!("canonicalize SCENEWORKS_MINIMAX_H3_UPSTREAM_ROOT: {error}"))?;
+    protocol::validate_huggingface_revision_root(
+        &upstream_root,
+        &upstream_repository,
+        &upstream_revision,
+        protocol::MINIMAX_UPSTREAM_REPOSITORY,
+    )?;
+
+    let dit_root = tier_root.join(mlx_gen_minimax_h3::model::DIT_COMPONENT);
+    let text_encoder_source = minimax_text_encoder_source(tier);
+    let text_encoder_tree = if text_encoder_source == MINIMAX_UPSTREAM_TEXT_ENCODER {
+        &upstream_root
+    } else {
+        &tier_root
+    };
+    let text_encoder_root =
+        text_encoder_tree.join(mlx_gen_minimax_h3::model::TEXT_ENCODER_COMPONENT);
+
+    let mut spec = LoadSpec::new(WeightsSource::Dir(upstream_root.clone()))
+        .with_offload_policy(OffloadPolicy::Resident)
+        .with_load_shape(load_shape)
+        .with_component(
+            mlx_gen_minimax_h3::model::DIT_COMPONENT,
+            WeightsSource::Dir(dit_root.clone()),
+        )
+        .with_component(
+            mlx_gen_minimax_h3::model::TEXT_ENCODER_COMPONENT,
+            WeightsSource::Dir(text_encoder_root.clone()),
+        );
+    // `spec.quantize` never packs anything at load: `model::load` RECONCILES it against the staged
+    // tier's own `config.json` quantization marker and refuses a disagreement. Passing the planned
+    // tier's quant is therefore an assertion about the directory on disk, not an instruction.
+    if let Some(quant) = selection.tier.quant {
+        spec = spec.with_quant(quant);
+    }
+    Ok(MinimaxArtifact {
+        repository,
+        revision,
+        upstream_repository,
+        upstream_revision,
+        upstream_root,
+        dit_root,
+        text_encoder_root,
+        text_encoder_source,
+        spec,
+    })
+}
+
+/// The admission context for the MiniMax-H3 safety scenarios, describing the base t2va route.
+///
+/// `mode` IS AN EVIDENCE KEY, not a label. gen-core's `standard_memory_strategy_safety_check`
+/// builds `MemoryDecodePolicyQuery { mode_key: context.mode.as_key(), .. }` and matches it against
+/// each adopted decode-geometry record's own mode, so a probe run under one spelling cannot answer
+/// a request asked under another. The runtime asks under `text_to_video` for every MiniMax render:
+/// `video_jobs::wan` resolves the admission mode with
+/// `sceneworks_core::video_request::payload_video_mode`, `video_admission` admits only
+/// `"text_to_video"`, and it types that string with `memory_mode_from_mode_key`, which maps every
+/// non-canonical key to [`MemoryMode::Other`]. This capture therefore carries the same `Other`
+/// spelling `ltx_context` does.
+///
+/// This was [`MemoryMode::TextToImage`] until sc-18663, taken from the pinned provider's
+/// `memory_strategy::routes()`, which really does spell t2va with the shared text-to-image key.
+/// That list enumerates the provider's weights-free BEHAVIOR fixtures; it is not the key the
+/// shipped video funnel queries under, and following it made this harness probe `text_to_image`
+/// while the plan it validates ([`validate_minimax_target`] hard-requires `text_to_video`), the
+/// record it emits, and the runtime all said `text_to_video`. The split was inert only because
+/// MiniMax declares `decode_geometry_policy_authoritative: false` with an empty policy table, so
+/// the lookup returns `Ok(None)` under either spelling — the day it declares a policy, the harness
+/// would measure under one key and the runtime ask under the other, silently. Pinned by
+/// `the_minimax_capture_context_binds_the_mode_key_the_runtime_video_route_sends`.
+fn minimax_context(
+    selection: MemorySelection,
+    calibration: &MemoryCalibrationIdentity,
+    fingerprint: &str,
+    geometry: MinimaxGeometry,
+    total_bytes: u64,
+    predicted_peak_bytes: u64,
+) -> MemoryRunContext {
+    MemoryRunContext {
+        selection,
+        optimization_authority: MemoryOptimizationAuthority::Calibrated,
+        calibration_abi: calibration.abi,
+        // A parameter only so the stale-evidence probe can pass a deliberate mismatch; every real
+        // call site passes `calibration.fingerprint`.
+        calibration_fingerprint: fingerprint.to_owned(),
+        load_shape: calibration.load_shape,
+        mode: MemoryMode::Other("text_to_video".to_owned()),
+        has_reference: false,
+        use_pid: false,
+        has_phases: true,
+        geometry: MemoryGeometry {
+            width: geometry.width,
+            height: geometry.height,
+            batch: 1,
+            frames: geometry.frames,
+            reference_count: 0,
+        },
+        overlay: None,
+        budget: MemoryBudget {
+            total_bytes,
+            committed_bytes: 0,
+            reclaimable_bytes: 0,
+            reserved_headroom_bytes: 0,
+        },
+        predicted_peak_bytes,
+        cache_state: MemoryCacheState::Cold,
+        evidence_revision: format!("sc-18663@{}", protocol::INFERENCE_PIN),
+    }
+}
+
+fn minimax_request(geometry: MinimaxGeometry, fps: u32, seed: u64) -> GenerationRequest {
+    GenerationRequest {
+        prompt: "a slow dolly along a rain-slick harbour wall at dusk, gulls calling, cinematic"
+            .to_owned(),
+        width: geometry.width,
+        height: geometry.height,
+        count: 1,
+        seed: Some(seed),
+        frames: Some(geometry.frames),
+        fps: Some(fps),
+        steps: Some(MINIMAX_STEPS),
+        ..Default::default()
+    }
+}
+
+fn minimax_quality_passes(maximum: f64, mean: f64, rms: f64) -> bool {
+    maximum <= MINIMAX_MAX_THRESHOLD
+        && mean <= MINIMAX_MEAN_THRESHOLD
+        && rms <= MINIMAX_RMS_THRESHOLD
+}
+
+/// One exact tuple per plan row. Non-numeric parameters (rung 4's `transformerWindowComponent`) stay
+/// in the case but are not promoted to an axis, the shape `sdxl_runtime_complete_sweep` established:
+/// an axis is a swept numeric range, and a component name is not one.
+fn minimax_complete_sweep(request: &Value) -> Result<Value, String> {
+    let parameters = protocol::strategy_parameters(request)?;
+    let axes = parameters
+        .iter()
+        .filter_map(|(name, value)| value.as_u64().map(|value| (name, value)))
+        .map(|(name, value)| json!({ "parameter": name, "testedValues": [value] }))
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "axes": axes,
+        "cases": [{ "parameters": parameters, "result": "passed" }],
+        "rangeVerified": true,
+    }))
+}
+
+/// The `mlx:minimax_h3` arm (sc-18663) — the first JOINT AUDIO+VIDEO calibration lane.
+///
+/// It reads the registry contract under the exact t2va provider id, proves the loaded generator
+/// exposes the byte-for-byte same contract, runs the four admission probes against the provider's
+/// own registered `safety_check`, and then measures three phase peaks off the boundaries the shipped
+/// `generate` already emits. No rung allowlist is hardcoded: the pinned contract's own
+/// `validate_selection` decides which rungs are capturable, and it answers differently for the two
+/// load shapes (rung 4 is `Implemented` only under `deferred_materialization`).
+fn run_minimax_h3(request: &Value) -> Result<Value, String> {
+    let geometry = validate_minimax_target(request)?;
+    protocol::validate_plain_overlay_target(request, MINIMAX_PLAIN_EXECUTION_PATH)?;
+    let load_shape = planned_load_shape(request)?;
+    let selection = planned_selection(request)?;
+    let tier = planned_qwen_tier(request)?; // shared numeric-tier parser
+    if !matches!(tier, "q4" | "q8" | "bf16") {
+        return Err(format!(
+            "the MLX MiniMax-H3 plan supports only the manifest's q4, q8 and bf16 tiers; tier \
+             {tier:?} is not capturable"
+        ));
+    }
+    let (fps, seed) = planned_minimax_capture(request, tier, geometry)?;
+    // Fingerprint check 1 of 3: the PLAN against this arm's own expectation, before any environment
+    // or weight work. A provider re-fingerprint must not silently reuse the epic's plan.
+    let planned_fingerprint = protocol::planned(request)?
+        .get("calibrationFingerprint")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    if planned_fingerprint != MINIMAX_CALIBRATION_FINGERPRINT {
+        return Err(format!(
+            "plan/adapter calibration mismatch: plan={planned_fingerprint}, MLX MiniMax-H3 arm \
+             implements {MINIMAX_CALIBRATION_FINGERPRINT}"
+        ));
+    }
+    let artifact = minimax_load_spec(request, tier, &selection, load_shape)?;
+    let spec = &artifact.spec;
+    // Read the on-disk component footprints BEFORE the load, for the same reason the LTX arm does:
+    // grounded in the artifact rather than in an allocator reading a broken staging would itself
+    // corrupt — and a mis-staged directory then fails here, before any GPU work, rather than after
+    // three full renders.
+    let staged_dit_bytes = safetensors_bytes(&artifact.dit_root)?;
+    let staged_text_encoder_bytes = safetensors_bytes(&artifact.text_encoder_root)?;
+    let shared_video_vae_bytes = safetensors_bytes(&artifact.upstream_root.join("vae"))?;
+    let shared_audio_vae_bytes = safetensors_bytes(&artifact.upstream_root.join("audio_vae"))?;
+
+    let registry = mlx_gen_minimax_h3::provider_registry()
+        .map_err(|error| format!("build MiniMax-H3 registry: {error}"))?;
+    let contract = registry
+        .memory_strategy_contract(MINIMAX_PROVIDER, spec)
+        .map_err(|error| format!("read {MINIMAX_PROVIDER} memory-strategy contract: {error}"))?
+        .ok_or_else(|| {
+            "pinned MLX MiniMax-H3 provider has no memory-strategy contract".to_owned()
+        })?;
+    contract.validate_selection(&selection).map_err(|error| {
+        format!("pinned MiniMax-H3 contract rejected planned selection: {error}")
+    })?;
+    let strategy = attested_strategy(
+        request,
+        &selection,
+        &contract.engaged_composition(selection.strategy),
+    )?;
+    let calibration = contract
+        .calibration
+        .as_ref()
+        .ok_or_else(|| "pinned MiniMax-H3 contract has no calibration identity".to_owned())?;
+    // Fingerprint check 2 of 3: the PROVIDER contract against this arm's expectation.
+    if calibration.fingerprint != MINIMAX_CALIBRATION_FINGERPRINT {
+        return Err(format!(
+            "pinned MiniMax-H3 contract fingerprint changed: expected \
+             {MINIMAX_CALIBRATION_FINGERPRINT}, got {}",
+            calibration.fingerprint
+        ));
+    }
+    // Fingerprint check 3 of 3: the plan against the provider, so the two cannot agree with the arm
+    // separately while disagreeing with each other.
+    if planned_fingerprint != calibration.fingerprint {
+        return Err(format!(
+            "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",
+            calibration.fingerprint
+        ));
+    }
+    // The contract resolves the SPEC's shape (`resolved_load_shape`), so the identity the record
+    // will carry must be the shape the plan asked for and this arm executed.
+    if calibration.load_shape != load_shape {
+        return Err(format!(
+            "pinned MiniMax-H3 contract resolved load shape {:?} for a plan that declares {:?}",
+            calibration.load_shape, load_shape
+        ));
+    }
+
+    let hardware_bytes = request
+        .pointer("/hardware/memoryBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "run request.hardware.memoryBytes must be an integer".to_owned())?;
+    let wired_limit_bytes = request
+        .pointer("/hardware/wiredLimitBytes")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "run request.hardware.wiredLimitBytes must be an integer".to_owned())?;
+
+    // Admission mutation hygiene BEFORE the expensive load, through the provider's OWN registered
+    // check: the gate must accept a fitting request (so the two rejections are not a blanket
+    // refusal), reject an unknown/zero budget, and reject a mutated calibration fingerprint.
+    let safety = |fingerprint: &str, total_bytes: u64, predicted: u64| {
+        mlx_gen_minimax_h3::memory_strategy::safety_check(
+            spec,
+            &contract,
+            &minimax_context(
+                selection,
+                calibration,
+                fingerprint,
+                geometry,
+                total_bytes,
+                predicted,
+            ),
+        )
+    };
+    if !matches!(
+        safety(&calibration.fingerprint, hardware_bytes, 1),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err(
+            "MiniMax-H3 admission rejected a fitting probe budget; the scenario rejections below \
+             would be a blanket refusal, not evidence"
+                .to_owned(),
+        );
+    }
+    if !matches!(
+        safety(&calibration.fingerprint, 0, 1),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("MiniMax-H3 admission accepted an unknown/zero memory budget".to_owned());
+    }
+    if !matches!(
+        safety("stale-minimax-h3-fingerprint", hardware_bytes, 1),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err("MiniMax-H3 admission accepted stale calibration evidence".to_owned());
+    }
+
+    let generator = registry
+        .load(MINIMAX_PROVIDER, spec)
+        .map_err(|error| format!("load real MiniMax-H3 {tier} provider: {error}"))?;
+    let loaded_contract = generator
+        .memory_strategy_contract()
+        .ok_or_else(|| "loaded MiniMax-H3 generator exposed no memory contract".to_owned())?;
+    if loaded_contract != &contract {
+        return Err(
+            "loaded MiniMax-H3 generator contract differs from the registry contract".to_owned(),
+        );
+    }
+
+    // Three phase peaks off the boundaries the shipped `generate` already emits. The engine emits
+    // FOUR — `Loading(TextEncoder)`, `Loading(Renderer)`, the first `Step` and `Decoding` — and this
+    // arm cuts on the first, second and fourth so each recorded phase is exactly one of the
+    // contract's declared `[Conditioning, Denoise, Decode]`:
+    //
+    // * conditioning = TE map → prompt encode → release, closed at `Loading(Renderer)`;
+    // * denoise = the DiT map, the AdaLN precompute-and-evict, and every step, closed at `Decoding`;
+    // * decode = both VAEs, closed when `generate` returns.
+    //
+    // ORDERING IS LOAD-BEARING at every boundary, and it is the ordering of the engine's own
+    // `tests/te_tier_generate_stages.rs::rotate`: read `get_peak_memory()` AND the `active + cache`
+    // footprint FIRST, and only then `reset_peak_memory()`. Reset early and the closing stage's
+    // high-water leaks into the next one. `get_peak_memory` reports ACTIVE only, so the footprint is
+    // read alongside it rather than instead — a drain that turns into a no-op migrates a shed
+    // component from active into the allocator cache, where active alone cannot see it.
+    let pre_generate = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    let conditioning = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    let denoise = Cell::new(PhaseMemory {
+        active: 0,
+        cache: 0,
+    });
+    // Live allocator readings at the two staging handoffs, distinct from the per-phase PEAKS.
+    let conditioning_close = Cell::new(AllocatorState::default());
+    let denoise_close = Cell::new(AllocatorState::default());
+    clear_cache();
+    reset_peak_memory();
+    let pre_rung_active = get_active_memory() as u64;
+    let pre_rung_cache = get_cache_memory() as u64;
+    let (measured, output_fps, audio) = diagnostic_video_frames(
+        generator
+            .generate(
+                &minimax_request(geometry, fps, seed),
+                &mut |progress| match progress {
+                    Progress::Loading(LoadPhase::TextEncoder) => {
+                        pre_generate.set(PhaseMemory::capture());
+                        reset_peak_memory();
+                    }
+                    Progress::Loading(LoadPhase::Renderer) => {
+                        conditioning.set(PhaseMemory::capture());
+                        conditioning_close.set(AllocatorState::capture_current());
+                        reset_peak_memory();
+                    }
+                    Progress::Decoding => {
+                        denoise.set(PhaseMemory::capture());
+                        denoise_close.set(AllocatorState::capture_current());
+                        reset_peak_memory();
+                    }
+                    _ => {}
+                },
+            )
+            .map_err(|error| format!("generate measured MiniMax-H3 render: {error}"))?,
+        MINIMAX_VIDEO_LABEL,
+    )?;
+    let decode = PhaseMemory::capture();
+    let decode_close = AllocatorState::capture_current();
+    let pre_generate = pre_generate.get();
+    let conditioning = conditioning.get();
+    let denoise = denoise.get();
+    let conditioning_close = conditioning_close.get();
+    let denoise_close = denoise_close.get();
+    if [conditioning.active, denoise.active, decode.active].contains(&0) {
+        return Err(
+            "a synchronized MiniMax-H3 lifecycle phase reported a zero active peak; the engine \
+             stopped emitting a boundary and the attribution collapsed"
+                .to_owned(),
+        );
+    }
+    if measured.len() as u64 != u64::from(geometry.frames) {
+        return Err(format!(
+            "MiniMax-H3 rendered {} frames for a {}-frame request",
+            measured.len(),
+            geometry.frames
+        ));
+    }
+    if output_fps != fps {
+        return Err(format!(
+            "MiniMax-H3 returned fps {output_fps} for a {fps} fps request"
+        ));
+    }
+    // The soundtrack is half of what this family denoises; a record that did not observe one is not
+    // a record of a joint A/V render.
+    let audio = audio
+        .filter(|audio| audio.samples > 0 && audio.sample_rate > 0 && audio.channels > 0)
+        .ok_or_else(|| "MiniMax-H3 render returned no non-empty audio track".to_owned())?;
+    let first = measured
+        .first()
+        .ok_or_else(|| "MiniMax-H3 render returned no first frame".to_owned())?;
+    if first.pixels.is_empty() || first.pixels.iter().all(|pixel| *pixel == first.pixels[0]) {
+        return Err("MiniMax-H3 render returned a degenerate first frame".to_owned());
+    }
+
+    let overall = PhaseMemory::overall(&[conditioning, denoise, decode]);
+    // Video evidence charges the RESIDENT ACTIVE peak: a staged A/V provider leaves an enormous
+    // elastic cache at its phase boundaries, and charging that would make a successful capture
+    // inadmissible on its own capture host.
+    let predicted_peaks = video_predicted_peak_bytes(conditioning, denoise, decode);
+    let predicted = predicted_peaks.overall;
+    // The same two ceilings `memory-calibration-harness.mjs#assertResidencyFitsHardware` applies —
+    // checked HERE so a capture that cannot be admitted fails loudly during the campaign rather
+    // than producing a well-formed record the harness rejects afterwards.
+    if overall.active > hardware_bytes {
+        return Err(format!(
+            "MiniMax-H3 observed overall active {} bytes above the probed hardware memory \
+             {hardware_bytes} bytes",
+            overall.active
+        ));
+    }
+    if overall.active > wired_limit_bytes {
+        return Err(format!(
+            "MiniMax-H3 observed overall active {} bytes above the probed wired ceiling \
+             {wired_limit_bytes} bytes",
+            overall.active
+        ));
+    }
+    // Probe 4 of 4, on the LOADED generator and against the measured evidence: the calibrated
+    // budget admits a request predicted to consume exactly it.
+    let exact_fit = minimax_context(
+        selection,
+        calibration,
+        &calibration.fingerprint,
+        geometry,
+        predicted,
+        predicted,
+    );
+    if !matches!(
+        generator.memory_strategy_safety_check(&exact_fit),
+        MemorySafetyDecision::Accept
+    ) {
+        return Err("MiniMax-H3 admission rejected an exact-fit calibrated budget".to_owned());
+    }
+    // THE EXACT-FIT ACCEPT ABOVE IS NOT SELF-VALIDATING, and on this provider that is not
+    // hypothetical. `Generator::memory_strategy_safety_check` has a TRAIT DEFAULT
+    // (`gen-core/src/generator.rs:58-72`) that, for a generator publishing no contract, accepts ANY
+    // resident selection unconditionally — budget ignored. At the pinned revision
+    // `mlx-gen-minimax-h3`'s generator overrides neither `memory_strategy_contract` nor
+    // `memory_strategy_safety_check`, so a resident capture reaching this line on the default would
+    // record an "exact fit accepted" that tested nothing at all. The contract identity check after
+    // load already fails closed on that path; this is the second, independent guard, and it is the
+    // one that stays meaningful if a future provider publishes a contract but regresses the check:
+    // the same loaded generator must REJECT a zero budget, or its accept is not evidence.
+    let mut unknown_budget = exact_fit.clone();
+    unknown_budget.budget.total_bytes = 0;
+    if !matches!(
+        generator.memory_strategy_safety_check(&unknown_budget),
+        MemorySafetyDecision::Reject { .. }
+    ) {
+        return Err(
+            "the loaded MiniMax-H3 generator accepted a zero/unknown budget, so its exact-fit \
+             accept is a blanket accept rather than admission evidence"
+                .to_owned(),
+        );
+    }
+
+    // Warm repeat determinism + cleanup bounds on this exact loaded provider.
+    clear_cache();
+    reset_peak_memory();
+    let (baseline, _, _) = diagnostic_video_frames(
+        generator
+            .generate(&minimax_request(geometry, fps, seed), &mut |_| {})
+            .map_err(|error| format!("generate warm MiniMax-H3 control: {error}"))?,
+        MINIMAX_VIDEO_LABEL,
+    )?;
+    let clean_warm_peak = get_peak_memory() as u64;
+    clear_cache();
+    let clean_post_cleanup = AllocatorState::capture_current();
+    let cleanup_bounds =
+        LifecycleMemoryBounds::from_clean_warm(clean_warm_peak, clean_post_cleanup);
+    let (maximum_error, mean_error, rms_error) = video_max_mean_rms_abs(&measured, &baseline)?;
+    if !minimax_quality_passes(maximum_error, mean_error, rms_error) {
+        return Err(format!(
+            "MiniMax-H3 warm repeat exceeded the determinism envelope: max={maximum_error:.6}, \
+             mean={mean_error:.6}, rms={rms_error:.6}"
+        ));
+    }
+    reset_peak_memory();
+    let (warm, _, _) = diagnostic_video_frames(
+        generator
+            .generate(&minimax_request(geometry, fps, seed), &mut |_| {})
+            .map_err(|error| format!("generate warm MiniMax-H3 repeat: {error}"))?,
+        MINIMAX_VIDEO_LABEL,
+    )?;
+    let warm_peak = get_peak_memory() as u64;
+    if !cleanup_bounds.allows_warm_peak(warm_peak) {
+        return Err(format!(
+            "MiniMax-H3 warm repeat peaked at {warm_peak} bytes, above the clean warm control \
+             {clean_warm_peak} bytes plus 2%"
+        ));
+    }
+    clear_cache();
+    let warm_post_cleanup = AllocatorState::capture_current();
+    if !cleanup_bounds.allows_retained(warm_post_cleanup) {
+        return Err(format!(
+            "MiniMax-H3 warm repeat retained active/cache bytes {warm_post_cleanup:?} above the \
+             clean warm cleanup {clean_post_cleanup:?} plus {} bytes",
+            cleanup_bounds.tolerance_bytes,
+        ));
+    }
+    let (warm_maximum, warm_mean, warm_rms) = video_max_mean_rms_abs(&measured, &warm)?;
+    if !minimax_quality_passes(warm_maximum, warm_mean, warm_rms) {
+        return Err("MiniMax-H3 second warm repeat changed the deterministic output".to_owned());
+    }
+
+    // Arm-internal negative-mutation falsifiability check. A runtime_complete record must keep
+    // `negativeMutation` null, so the breach is verified here — the capture FAILS if the envelope
+    // cannot be breached — and the measured numbers land in diagnostics rather than in the field.
+    let mutated = measured
+        .iter()
+        .map(qwen_negative_mutation)
+        .collect::<Vec<_>>();
+    let (mutated_maximum, mutated_mean, mutated_rms) = video_max_mean_rms_abs(&mutated, &baseline)?;
+    if minimax_quality_passes(mutated_maximum, mutated_mean, mutated_rms) {
+        return Err(
+            "MiniMax-H3 output mutation did not breach the determinism envelope".to_owned(),
+        );
+    }
+
+    let lifecycle_blocker = concat!(
+        "this arm executes the measured render plus two unscoped warm repeats on the loaded ",
+        "provider; it opens no memory-strategy request scope and injects no calibration fault, so ",
+        "the scoped cancellation and authorized-error scenarios and their recovery renders are ",
+        "unexecuted. The pinned provider does register begin_request, so they are implementable — ",
+        "they are not run here, and this record claims nothing about them"
+    );
+    let mut fragment = json!({
+        "status": "runtime_complete",
+        "strategy": strategy,
+        // From the CONTRACT's own calibration identity, never copied from the plan: a receipt may
+        // only testify to the materialization shape its own run used (sc-16482).
+        "loadShape": load_shape_key(calibration.load_shape),
+        "artifact": {
+            "repository": artifact.repository,
+            "resolvedRevision": artifact.revision,
+            "variant": tier,
+        },
+        "sweep": minimax_complete_sweep(request)?,
+        "scenarios": [
+            { "name": "exact_fit", "result": "passed", "predictedBytes": predicted, "effectiveBudgetBytes": predicted },
+            { "name": "unknown_budget", "result": "passed", "reason": "the registered MiniMax-H3 admission check rejected a zero/unknown budget before load" },
+            { "name": "stale_evidence", "result": "passed", "reason": "the registered MiniMax-H3 admission check rejected a mutated calibration fingerprint before load" },
+            { "name": "warm_repeat", "result": "passed", "reason": "two warm repeats on the loaded provider reproduced the measured clip frame-for-frame inside the declared envelope, within the clean warm peak and cleanup bounds" },
+            { "name": "cancel", "result": "not_run", "reason": lifecycle_blocker },
+            { "name": "error", "result": "not_run", "reason": lifecycle_blocker },
+            { "name": "loadability", "result": "passed" },
+            { "name": "overlay", "result": "not_applicable", "reason": "settled below from the declared reference-free target" }
+        ],
+        "predictedPeakBytes": predicted_peaks.json(),
+        "observedMemory": {
+            "conditioning": conditioning.json(),
+            "denoise": denoise.json(),
+            "decode": decode.json(),
+            "overall": overall.json(),
+        },
+        "quality": {
+            "contract": "identical artifact, prompt, seed, geometry, frames, fps, steps, tier, staged components and loaded provider contract; cold measured clip versus two warm unscoped repeats, compared over every frame",
+            "identicalInputs": true,
+            "result": "passed",
+            "maximumError": maximum_error,
+            "meanError": mean_error,
+            "rootMeanSquareError": rms_error,
+            "maximumErrorThreshold": MINIMAX_MAX_THRESHOLD,
+            "meanErrorThreshold": MINIMAX_MEAN_THRESHOLD,
+            "rootMeanSquareErrorThreshold": MINIMAX_RMS_THRESHOLD,
+        },
+        "negativeMutation": null,
+        "loadability": {
+            "result": "passed",
+            "resolvedPathFingerprint": artifact.resolved_path_fingerprint(tier),
+        },
+        "output": {
+            "frames": geometry.frames,
+            "fps": fps,
+            "videoLatentFrames": geometry.video_latent_frames,
+            "audioLatentFrames": geometry.audio_latent_frames,
+            "audio": {
+                "present": true,
+                "samples": audio.samples,
+                "sampleRate": audio.sample_rate,
+                "channels": audio.channels,
+            },
+            "firstFrameNondegenerate": true,
+        },
+        "diagnostics": protocol::diagnostics(
+            "memory-mlx-adapter:minimax-h3-joint-av",
+            "executed",
+            [lifecycle_blocker.to_owned()],
+            [
+                ("preRungActiveAfterClear", "bytes", pre_rung_active),
+                ("preRungCacheAfterClear", "bytes", pre_rung_cache),
+                ("preGenerateActivePeak", "bytes", pre_generate.active),
+                ("conditioningActivePeak", "bytes", conditioning.active),
+                ("conditioningCloseActive", "bytes", conditioning_close.active),
+                ("conditioningCloseCache", "bytes", conditioning_close.cache),
+                ("denoiseActivePeak", "bytes", denoise.active),
+                ("denoiseCloseActive", "bytes", denoise_close.active),
+                ("denoiseCloseCache", "bytes", denoise_close.cache),
+                ("decodeActivePeak", "bytes", decode.active),
+                ("decodeCloseActive", "bytes", decode_close.active),
+                ("decodeCloseCache", "bytes", decode_close.cache),
+                ("overallAllocatorEnvelope", "bytes", overall.allocator_bytes()),
+                ("predictedOverallCeiling", "bytes", predicted),
+                ("lifecycleCleanWarmPeak", "bytes", clean_warm_peak),
+                ("lifecycleCleanPostCleanupActive", "bytes", clean_post_cleanup.active),
+                ("lifecycleCleanPostCleanupCache", "bytes", clean_post_cleanup.cache),
+                ("lifecycleCleanupTolerance", "bytes", cleanup_bounds.tolerance_bytes),
+                ("lifecycleWarmRepeatPeak", "bytes", warm_peak),
+                ("lifecycleWarmRepeatPostCleanupActive", "bytes", warm_post_cleanup.active),
+                ("lifecycleWarmRepeatPostCleanupCache", "bytes", warm_post_cleanup.cache),
+                ("negativeMutationMaximumErrorPer255", "count", (mutated_maximum * 255.0).round() as u64),
+                ("negativeMutationMeanErrorPer255", "count", (mutated_mean * 255.0).round() as u64),
+                ("negativeMutationRootMeanSquareErrorPer255", "count", (mutated_rms * 255.0).round() as u64),
+                ("videoLatentFrames", "count", u64::from(geometry.video_latent_frames)),
+                ("audioLatentFrames", "count", u64::from(geometry.audio_latent_frames)),
+                ("loadShapeDeferred", "count", u64::from(load_shape == LoadShape::DeferredMaterialization)),
+                ("textEncoderFromTierTree", "count", u64::from(artifact.text_encoder_source == MINIMAX_TIERED_TEXT_ENCODER)),
+                ("stagedDitBytes", "bytes", staged_dit_bytes),
+                ("stagedTextEncoderBytes", "bytes", staged_text_encoder_bytes),
+                ("sharedVideoVaeBytes", "bytes", shared_video_vae_bytes),
+                ("sharedAudioVaeBytes", "bytes", shared_audio_vae_bytes),
+            ],
+        ),
+        "capturedAt": protocol::captured_at(),
+    });
+    protocol::settle_plain_overlay_scenario(request, &mut fragment, MINIMAX_PLAIN_EXECUTION_PATH)?;
+    Ok(fragment)
+}
+
 fn run(request: &Value) -> Result<Value, String> {
     let provider = protocol::planned(request)?
         .pointer("/target/provider")
@@ -9179,6 +10264,10 @@ fn run(request: &Value) -> Result<Value, String> {
         // sc-18808: the first VIDEO arm. Every arm above it refuses `geometry.frames != 1`; this one
         // validates against LTX's own resolution/temporal envelope instead.
         LTX_PROVIDER => run_ltx(request),
+        // sc-18663: the second video arm, and the first joint audio+video one. Same rule as LTX —
+        // it accepts a multi-frame geometry only by validating against MiniMax-H3's own lattice,
+        // stride and canvas budget, read off the pinned engine crate.
+        MINIMAX_PROVIDER => run_minimax_h3(request),
         other => Err(format!(
             "MLX five-rung calibration does not implement provider {other:?}"
         )),
@@ -10010,7 +11099,7 @@ mod sdxl_tests {
             Some(TransformerComponent::Dit)
         );
 
-        for component in ["text_encoder", "both", "unknown"] {
+        for component in ["text_encoder", "unknown"] {
             request["planned"]["strategy"]["parameters"]["transformerWindowComponent"] =
                 json!(component);
             assert!(
@@ -10018,6 +11107,21 @@ mod sdxl_tests {
                 "component {component:?} must not execute as Dit"
             );
         }
+        // sc-18663 taught the SHARED parser `"both"`, because `minimax_h3` declares exactly that.
+        // The SDXL guarantee is unchanged and is asserted here rather than assumed: the parse now
+        // succeeds, it does NOT produce `Dit`, and the SDXL arm still refuses it.
+        request["planned"]["strategy"]["parameters"]["transformerWindowComponent"] = json!("both");
+        let both = planned_selection(&request).expect("the shared parser accepts \"both\"");
+        assert_eq!(
+            both.parameters.transformer_window_component,
+            Some(TransformerComponent::Both),
+            "\"both\" must not execute as Dit"
+        );
+        assert!(
+            validate_sdxl_selection_parameters(&request, &both).is_err(),
+            "the SDXL arm calibrates an explicit Dit window only"
+        );
+        request["planned"]["strategy"]["parameters"]["transformerWindowComponent"] = json!("dit");
         request["planned"]["strategy"]["parameters"] =
             json!({ "transformerWindowComponent": "dit" });
         assert!(planned_selection(&request).is_err());
@@ -12423,11 +13527,18 @@ mod ltx_tests {
         }
     }
 
-    /// AC3, and the reason the video arm is safe to add: EVERY image arm still refuses a
-    /// multi-frame geometry, before it does environment or weight work. Four of the six never
-    /// validated the axis at all before sc-18808 — they read only width/height and hardcoded
-    /// `frames: 1` into the admission context, so a `frames: 2` plan row would have rendered one
-    /// frame and recorded a geometry it was never asked for.
+    /// AC3, and the reason a video arm is safe to add: EVERY image arm still refuses a multi-frame
+    /// geometry, before it does environment or weight work. Four of the six never validated the
+    /// axis at all before sc-18808 — they read only width/height and hardcoded `frames: 1` into the
+    /// admission context, so a `frames: 2` plan row would have rendered one frame and recorded a
+    /// geometry it was never asked for.
+    ///
+    /// The list below is the IMAGE arms, and it stays six long as video arms are added: `ltx_2_3`
+    /// (sc-18808) and `minimax_h3` (sc-18663) are the only two allowed to accept a multi-frame
+    /// geometry, and each buys that by validating against its own engine's lattice rather than by
+    /// dropping the axis — see `the_minimax_arm_accepts_a_multi_frame_geometry_the_image_guard_refuses`
+    /// and `validate_ltx_geometry`. A NEW arm added here without such an envelope is the defect
+    /// this test exists to prevent.
     #[test]
     fn every_image_arm_still_refuses_a_multi_frame_geometry() {
         type Arm = fn(&Value) -> Result<Value, String>;
@@ -12615,5 +13726,705 @@ mod ltx_tests {
         std::fs::write(root.join("model-00002-of-00002.safetensors"), vec![0_u8; 5]).unwrap();
         assert_eq!(safetensors_bytes(&root).unwrap(), 12);
         std::fs::remove_dir_all(root).ok();
+    }
+}
+
+#[cfg(test)]
+mod minimax_tests {
+    use super::*;
+    use mlx_gen::gen_core::MemoryStrategySupport;
+
+    /// An otherwise-valid t2va plan row: the shipped 16:9 canvas at EXACTLY the pixel budget, the
+    /// shortest legal clip, and the one legal cadence. `modelId` stays `minimax_h3` even when
+    /// `provider` is foreign, so the provider guard is the check that fires rather than a
+    /// missing-field complaint standing in for it.
+    fn minimal_request(provider: &str) -> Value {
+        json!({
+            "hardware": {
+                "memoryBytes": 137_438_953_472_u64,
+                "wiredLimitBytes": 96_000_000_000_u64,
+            },
+            "planned": {
+                "target": {
+                    "provider": provider,
+                    "modelId": MINIMAX_PROVIDER,
+                    "tier": "q4",
+                    "mode": "text_to_video",
+                    "overlay": "none",
+                    "geometry": { "width": 1344, "height": 768, "batch": 1, "frames": 124 }
+                },
+                "backend": "mlx",
+                "loadShape": protocol::LOAD_SHAPE_EAGER,
+                "strategy": { "rung": "resident", "engagedRungs": ["resident"], "parameters": {} },
+                "calibrationFingerprint": MINIMAX_CALIBRATION_FINGERPRINT,
+                "fixture": "minimax-h3-mlx-q4-1344x768-f124-fps24-seed17137"
+            }
+        })
+    }
+
+    fn weights_free_spec(quant: Option<Quant>, load_shape: LoadShape) -> LoadSpec {
+        let mut spec = LoadSpec::new(WeightsSource::Dir("/nonexistent".into()))
+            .with_offload_policy(OffloadPolicy::Resident)
+            .with_load_shape(load_shape);
+        if let Some(quant) = quant {
+            spec = spec.with_quant(quant);
+        }
+        spec
+    }
+
+    /// The provider-owned weights-free contract fixture — the same one catalog conformance resolves
+    /// when a snapshot is unavailable, so these pins touch no filesystem and no GPU.
+    fn fixture_contract(
+        quant: Option<Quant>,
+        load_shape: LoadShape,
+    ) -> mlx_gen::gen_core::MemoryProviderContract {
+        let registry = mlx_gen_minimax_h3::provider_registry().unwrap();
+        let fixture = registry
+            .memory_contract_fixture_registrations()
+            .find(|fixture| fixture.provider_id == MINIMAX_PROVIDER)
+            .expect("the provider-owned MiniMax-H3 contract fixture");
+        (fixture.contract)(&weights_free_spec(quant, load_shape)).unwrap()
+    }
+
+    /// The capture harness must probe under the SAME evidence key the shipped runtime queries.
+    ///
+    /// The MiniMax twin of `the_ltx_runtime_context_binds_the_exact_video_route_and_selection`,
+    /// which pins this correspondence for the family that already had it right. sc-18663: this arm
+    /// probed admission under `text_to_image` while the plan it validates, the record it emits and
+    /// `video_admission` all say `text_to_video` — see [`minimax_context`] for why that split is
+    /// currently inert and what makes it stop being inert.
+    ///
+    /// NEITHER SIDE IS RESTATED AS A LITERAL. A test spelling `"text_to_video"` on both sides still
+    /// passes when both sides move together, which is the drift this exists to catch.
+    #[test]
+    fn the_minimax_capture_context_binds_the_mode_key_the_runtime_video_route_sends() {
+        // The runtime side, derived: `video_jobs::wan` resolves every video job's admission mode
+        // with `payload_video_mode`, and `video_admission` types that string with
+        // `memory_mode_from_mode_key`, whose contract is `as_key(from(key)) == key`. So the string
+        // this returns IS the `mode_key` the runtime's decode-policy query carries.
+        let payload = json!({
+            "model": MINIMAX_PROVIDER,
+            "mode": sceneworks_core::contracts::ContractMode::TextToVideo.as_str(),
+        });
+        let runtime_mode_key = sceneworks_core::video_request::payload_video_mode(
+            payload.as_object().expect("the probe payload is an object"),
+        );
+        assert!(
+            sceneworks_core::video_request::is_minimax_h3_model(MINIMAX_PROVIDER),
+            "the payload above must be a MiniMax-H3 video job, or it derives another family's key"
+        );
+
+        // And that really is the only route this arm records: the plan-target gate admits the
+        // derived spelling and refuses the image spelling this context used to carry.
+        let plan_under = |mode: &str| {
+            let mut request = minimal_request(MINIMAX_PROVIDER);
+            request["planned"]["target"]["mode"] = json!(mode);
+            request
+        };
+        assert!(validate_minimax_target(&plan_under(&runtime_mode_key)).is_ok());
+        assert!(validate_minimax_target(&plan_under(MemoryMode::TextToImage.as_key())).is_err());
+
+        // The capture side, from the builder every MiniMax admission probe runs through.
+        let contract = fixture_contract(Some(Quant::Q4), LoadShape::EagerMaterialization);
+        let calibration = contract.calibration.as_ref().unwrap();
+        let context = minimax_context(
+            planned_selection(&minimal_request(MINIMAX_PROVIDER)).unwrap(),
+            calibration,
+            &calibration.fingerprint,
+            validate_minimax_geometry(1344, 768, 124).unwrap(),
+            1 << 40,
+            1,
+        );
+        assert_eq!(context.mode.as_key(), runtime_mode_key);
+    }
+
+    /// The per-arm twin of the sc-18104 provider guard: dispatch routes by name today, but this arm
+    /// hardcodes the MiniMax-H3 contract, so a misrouted target must be refused BY NAME inside the
+    /// arm — and before any environment variable is read, so the refusal cannot read like a
+    /// provisioning problem.
+    #[test]
+    fn the_arm_refuses_a_foreign_provider_by_name_before_any_environment_work() {
+        for provider in ["ltx_2_3", "flux2_dev", "qwen_image", "minimax_h3_ref"] {
+            let error = validate_minimax_target(&minimal_request(provider))
+                .expect_err("a foreign provider must not reach the MiniMax-H3 contract");
+            assert_eq!(
+                error,
+                format!("{MINIMAX_LABEL} does not implement provider {provider:?}")
+            );
+            assert!(
+                !error.contains("SCENEWORKS_")
+                    && !error.contains("fingerprint")
+                    && !error.contains("contract"),
+                "the refusal came from the environment or the contract, so validation let it \
+                 through: {error}"
+            );
+        }
+        assert!(validate_minimax_target(&minimal_request(MINIMAX_PROVIDER)).is_ok());
+    }
+
+    /// The dispatcher must ROUTE `minimax_h3` into this arm rather than refuse it, and must not
+    /// misroute it into a sibling. Proved by the two refusals it does NOT produce, which keeps the
+    /// assertion deterministic whether or not the capture environment happens to be exported.
+    #[test]
+    fn dispatch_routes_the_minimax_provider_into_its_own_arm() {
+        let error = run(&minimal_request(MINIMAX_PROVIDER))
+            .expect_err("no MiniMax-H3 weights are staged during a unit test");
+        assert_ne!(
+            error,
+            format!("MLX five-rung calibration does not implement provider {MINIMAX_PROVIDER:?}"),
+            "the dispatcher still refuses the provider this arm implements"
+        );
+        for foreign in ["LTX", "FLUX.2", "Qwen", "SDXL", "Krea", "Z-Image"] {
+            assert!(
+                !error.contains(foreign),
+                "the request was misrouted into the {foreign} arm: {error}"
+            );
+        }
+    }
+
+    /// The envelope's engine constants, pinned so a pin bump that moves one reds HERE rather than
+    /// silently widening or narrowing what this arm will capture. The lattice is CHECKED as
+    /// `17n + 5` rather than only tabulated, so a table that drifted into a different progression
+    /// could not pass by matching itself.
+    #[test]
+    fn minimax_envelope_is_the_pinned_engines_own() {
+        assert_eq!(mlx_gen_minimax_h3::SPATIAL_STRIDE, 32);
+        assert_eq!(mlx_gen_minimax_h3::CANVAS_MAX_PIXELS, 1_032_192);
+        assert_eq!(mlx_gen_minimax_h3::MINIMAX_H3_FPS, 24.0);
+        assert_eq!(
+            mlx_gen_minimax_h3::LEGAL_FRAME_COUNTS,
+            [124, 141, 158, 175, 192, 209, 226, 243, 260, 277, 294, 311, 328, 345]
+        );
+        for (index, frames) in mlx_gen_minimax_h3::LEGAL_FRAME_COUNTS.iter().enumerate() {
+            assert_eq!(
+                *frames,
+                17 * index as i32 + 124,
+                "the legal frame counts are 17n + 5, not a tabulated list"
+            );
+        }
+        // The budget is a PRODUCT, and the published resolution list proves it cannot be a per-edge
+        // cap: two shipped canvases whose long edges differ by 192px have the identical area.
+        assert_eq!(1536 * 672, mlx_gen_minimax_h3::CANVAS_MAX_PIXELS);
+        assert_eq!(1344 * 768, mlx_gen_minimax_h3::CANVAS_MAX_PIXELS);
+    }
+
+    #[test]
+    fn the_geometry_envelope_refuses_off_lattice_off_stride_and_over_budget_canvases() {
+        let admitted = validate_minimax_geometry(1344, 768, 124).unwrap();
+        assert_eq!(admitted.frames, 124);
+        // 124 = 17·7 + 5 ⇒ 5·7 + 2 video latents, and round(124/24·40) audio tokens.
+        assert_eq!(admitted.video_latent_frames, 37);
+        assert_eq!(admitted.audio_latent_frames, 207);
+
+        // Off-lattice, including a still (`T = 1` does not render at all) and LTX's own `1 + 8k`
+        // lattice, which shares no member with this one inside the legal range.
+        for frames in [0_u32, 1, 97, 121, 123, 125, 305, 346, u32::MAX] {
+            let error = validate_minimax_geometry(1344, 768, frames)
+                .expect_err("an off-lattice frame count must be refused");
+            assert!(error.contains("17n+5 lattice"), "{frames}: {error}");
+        }
+
+        // Off-stride, on both axes, checked before the area so the message names the real defect.
+        for (width, height) in [(1352_u32, 768_u32), (1344, 776), (1330, 768)] {
+            let error = validate_minimax_geometry(width, height, 124)
+                .expect_err("an off-stride canvas must be refused");
+            assert!(error.contains("32px stride"), "{width}x{height}: {error}");
+        }
+
+        // Over budget as a PRODUCT. 1536x704 is on-stride and its long edge is one the model ships,
+        // so only the area check can refuse it.
+        assert!(validate_minimax_geometry(1536, 672, 124).is_ok());
+        assert!(validate_minimax_geometry(576, 320, 345).is_ok());
+        let error = validate_minimax_geometry(1536, 704, 124)
+            .expect_err("an over-budget canvas must be refused");
+        assert!(error.contains("canvas budget"), "{error}");
+    }
+
+    #[test]
+    fn the_geometry_envelope_pins_batch_to_one_clip_per_request() {
+        let mut request = minimal_request(MINIMAX_PROVIDER);
+        for batch in [0_u64, 2, 4] {
+            request["planned"]["target"]["geometry"]["batch"] = json!(batch);
+            let error = minimax_target_geometry(&request)
+                .expect_err("this engine renders one clip per request");
+            assert!(error.contains("geometry.batch == 1"), "{batch}: {error}");
+        }
+        // A missing or non-integer axis fails closed rather than defaulting.
+        request["planned"]["target"]["geometry"]["batch"] = json!("1");
+        assert!(minimax_target_geometry(&request)
+            .unwrap_err()
+            .contains("planned.target.geometry.batch must fit u32"));
+    }
+
+    /// This arm is the SECOND allowed to accept a multi-frame geometry, and it buys that with its
+    /// own envelope rather than by dropping the axis: the shared still guard would refuse the exact
+    /// geometry this arm admits.
+    #[test]
+    fn the_minimax_arm_accepts_a_multi_frame_geometry_the_image_guard_refuses() {
+        let request = minimal_request(MINIMAX_PROVIDER);
+        assert!(validate_minimax_target(&request).is_ok());
+        assert_eq!(
+            protocol::validate_still_geometry(&request, "MLX Qwen base calibration").unwrap_err(),
+            "MLX Qwen base calibration requires geometry.frames == 1, got 124"
+        );
+    }
+
+    #[test]
+    fn a_reference_carrying_or_wrong_mode_target_is_refused_because_ref2va_is_another_checkpoint() {
+        for (field, value) in [
+            ("referenceCount", json!(1)),
+            ("reference_count", json!(2)),
+            ("hasReference", json!(true)),
+            ("has_reference", json!(true)),
+        ] {
+            let mut request = minimal_request(MINIMAX_PROVIDER);
+            request["planned"]["target"][field] = value;
+            let error = validate_minimax_target(&request)
+                .expect_err("a reference surface must be refused by this arm");
+            assert!(error.contains(field) && error.contains("ref2va"), "{error}");
+        }
+        for mode in [
+            "text_to_image",
+            "image_to_video",
+            "first_last_frame",
+            "ref2va",
+        ] {
+            let mut request = minimal_request(MINIMAX_PROVIDER);
+            request["planned"]["target"]["mode"] = json!(mode);
+            let error =
+                validate_minimax_target(&request).expect_err("only t2va is capturable here");
+            assert!(
+                error.contains("text_to_video") && error.contains(mode),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_material_overlay_target_is_refused_rather_than_recorded_as_no_overlay() {
+        for overlay in ["lora", "control", "identity", "control:1"] {
+            let mut request = minimal_request(MINIMAX_PROVIDER);
+            request["planned"]["target"]["overlay"] = json!(overlay);
+            let error = run_minimax_h3(&request).expect_err("a material overlay must be refused");
+            assert!(error.contains(MINIMAX_PLAIN_EXECUTION_PATH), "{error}");
+            assert!(error.contains("refusing"), "{error}");
+        }
+    }
+
+    #[test]
+    fn the_fixture_binds_the_tier_geometry_cadence_and_seed() {
+        let request = minimal_request(MINIMAX_PROVIDER);
+        let geometry = validate_minimax_target(&request).unwrap();
+        assert_eq!(
+            planned_minimax_capture(&request, "q4", geometry).unwrap(),
+            (24, MINIMAX_SEED)
+        );
+        // The tier and every geometry axis are part of the binding.
+        for tier in ["q8", "bf16"] {
+            assert!(planned_minimax_capture(&request, tier, geometry)
+                .unwrap_err()
+                .contains("must start with"));
+        }
+        let mut off = request.clone();
+        off["planned"]["fixture"] = json!("minimax-h3-mlx-q4-1344x768-f141-fps24-seed17137");
+        assert!(planned_minimax_capture(&off, "q4", geometry)
+            .unwrap_err()
+            .contains("must start with"));
+        // The cadence axis the geometry envelope cannot carry has exactly one legal value here.
+        off["planned"]["fixture"] = json!("minimax-h3-mlx-q4-1344x768-f124-fps30-seed17137");
+        assert!(planned_minimax_capture(&off, "q4", geometry)
+            .unwrap_err()
+            .contains("24 fps only"));
+        off["planned"]["fixture"] = json!("minimax-h3-mlx-q4-1344x768-f124-fps24-seed1234");
+        assert!(planned_minimax_capture(&off, "q4", geometry)
+            .unwrap_err()
+            .contains("does not match the MiniMax-H3 calibration seed"));
+    }
+
+    /// Fingerprint check 1 of 3 — the plan against this arm — must fire BEFORE the environment
+    /// contract, so a re-fingerprinted provider cannot be diagnosed as a provisioning failure.
+    /// Checks 2 and 3 (provider-vs-arm and plan-vs-provider) need the loaded registry contract;
+    /// `the_pinned_minimax_contract_declares_rung_support_by_load_shape_not_by_tier` pins the
+    /// constant those two compare against, weights-free.
+    #[test]
+    fn a_plan_naming_another_fingerprint_is_refused_before_any_environment_work() {
+        let mut request = minimal_request(MINIMAX_PROVIDER);
+        request["planned"]["calibrationFingerprint"] = json!("minimax-h3-mlx-deferred-v1");
+        let error = run_minimax_h3(&request).expect_err("a foreign fingerprint must be refused");
+        assert!(
+            error.starts_with("plan/adapter calibration mismatch"),
+            "{error}"
+        );
+        assert!(
+            !error.contains("SCENEWORKS_"),
+            "the refusal must precede the env contract: {error}"
+        );
+    }
+
+    /// The arm's load-bearing premises, pinned against the PINNED provider crate, weights-free.
+    ///
+    /// The finding the campaign has to plan around is that rung support here is a function of the
+    /// resolved LOAD SHAPE, not of the tier: `bounded_attention` is `StructurallyNotApplicable` on
+    /// every shape and tier, and `bounded_transformer_residency` is `Implemented` ONLY under
+    /// `deferred_materialization` and `Missing` under eager. Asserted across all three tiers so a
+    /// tier-shaped assumption cannot survive here either.
+    #[test]
+    fn the_pinned_minimax_contract_declares_rung_support_by_load_shape_not_by_tier() {
+        assert_eq!(
+            MINIMAX_CALIBRATION_FINGERPRINT,
+            mlx_gen_minimax_h3::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT,
+            "the plan entries pin this fingerprint; regenerate them with the provider"
+        );
+        for quant in [Some(Quant::Q4), Some(Quant::Q8), None] {
+            for (load_shape, rung4_implemented) in [
+                (LoadShape::EagerMaterialization, false),
+                (LoadShape::DeferredMaterialization, true),
+            ] {
+                let contract = fixture_contract(quant, load_shape);
+                let where_we_are = format!("{quant:?} at {load_shape:?}");
+                assert_eq!(contract.provider_id, MINIMAX_PROVIDER);
+                for strategy in [
+                    MemoryStrategy::Resident,
+                    MemoryStrategy::StagedResidency,
+                    MemoryStrategy::BoundedDecode,
+                ] {
+                    assert!(
+                        matches!(
+                            contract.capability(strategy).unwrap().support,
+                            MemoryStrategySupport::Implemented
+                        ),
+                        "{strategy:?} is no longer Implemented ({where_we_are})"
+                    );
+                }
+                assert!(
+                    matches!(
+                        contract
+                            .capability(MemoryStrategy::BoundedAttention)
+                            .unwrap()
+                            .support,
+                        MemoryStrategySupport::StructurallyNotApplicable { .. }
+                    ),
+                    "bounded_attention changed disposition ({where_we_are})"
+                );
+                let rung4 = contract
+                    .capability(MemoryStrategy::BoundedTransformerResidency)
+                    .unwrap();
+                if rung4_implemented {
+                    assert!(
+                        matches!(rung4.support, MemoryStrategySupport::Implemented),
+                        "rung 4 must be Implemented on a deferred load ({where_we_are})"
+                    );
+                    assert_eq!(rung4.parameters.transformer_window_sizes, vec![1]);
+                    assert_eq!(
+                        rung4.parameters.transformer_window_components,
+                        vec![TransformerComponent::Both],
+                        "rung 4 streams BOTH transformers here, not the DiT alone"
+                    );
+                } else {
+                    assert!(
+                        matches!(rung4.support, MemoryStrategySupport::Missing),
+                        "rung 4 must be Missing on a resident load ({where_we_are})"
+                    );
+                }
+                // Rung 2's domain is a SINGLETON — the tile geometry is an output-correctness input
+                // copied from the published VAE, not a memory lever a sweep may vary.
+                let decode = contract.capability(MemoryStrategy::BoundedDecode).unwrap();
+                assert_eq!(decode.parameters.decode_tile_edges, vec![256]);
+                assert_eq!(decode.parameters.decode_overlaps, vec![64]);
+                // The calibration identity carries the RESOLVED shape, which is what
+                // `run_minimax_h3` refuses a mismatch against and what the record's `loadShape`
+                // is taken from.
+                let calibration = contract.calibration.as_ref().unwrap();
+                assert_eq!(calibration.fingerprint, MINIMAX_CALIBRATION_FINGERPRINT);
+                assert_eq!(calibration.load_shape, load_shape, "{where_we_are}");
+            }
+        }
+    }
+
+    /// The plan's `engagedRungs` must equal the provider's engaged composition, or
+    /// `attested_strategy` fails every capture at plan/measured comparison time — so the exact
+    /// compositions are pinned here rather than assumed from the ordinal rung order.
+    ///
+    /// TWO of them are NOT what a reader would guess, and a plan written from the LTX shape would
+    /// be rejected by every MiniMax-H3 capture:
+    ///
+    /// * `bounded_decode` engages `[resident, bounded_decode]` — **`staged_residency` is not in
+    ///   it**, unlike LTX's `[resident, staged_residency, bounded_decode]`;
+    /// * `bounded_transformer_residency` engages `bounded_decode`, so a rung-4 row must ALSO carry
+    ///   `decodeTileEdge` / `decodeOverlap` or `validate_selection` refuses it with
+    ///   "decode_tile_edge is required by a strategy rung this selection engages".
+    #[test]
+    fn the_engaged_composition_is_what_the_plan_rows_must_declare() {
+        use MemoryStrategy::{
+            BoundedDecode, BoundedTransformerResidency, Resident, StagedResidency,
+        };
+        for load_shape in [
+            LoadShape::EagerMaterialization,
+            LoadShape::DeferredMaterialization,
+        ] {
+            let contract = fixture_contract(Some(Quant::Q4), load_shape);
+            assert_eq!(contract.engaged_composition(Resident), vec![Resident]);
+            assert_eq!(
+                contract.engaged_composition(StagedResidency),
+                vec![Resident, StagedResidency]
+            );
+            assert_eq!(
+                contract.engaged_composition(BoundedDecode),
+                vec![Resident, BoundedDecode],
+                "bounded_decode does NOT engage staged_residency here ({load_shape:?})"
+            );
+        }
+        assert_eq!(
+            fixture_contract(Some(Quant::Q4), LoadShape::DeferredMaterialization)
+                .engaged_composition(BoundedTransformerResidency),
+            vec![Resident, BoundedDecode, BoundedTransformerResidency],
+            "rung 4 drags rung 2 in, so a rung-4 plan row must declare the decode parameters too"
+        );
+    }
+
+    /// Rung 4 is reachable ONLY under the deferred shape, and it needs the `"both"` window spelling
+    /// the shared parser learned for this provider. Both halves are asserted, in both directions.
+    #[test]
+    fn rung_four_is_capturable_only_under_the_deferred_load_shape() {
+        let mut request = minimal_request(MINIMAX_PROVIDER);
+        request["planned"]["loadShape"] = json!(protocol::LOAD_SHAPE_DEFERRED);
+        // Rung 4 ENGAGES rung 2 here, so the decode parameters are mandatory on a rung-4 row —
+        // omitting them is refused with "decode_tile_edge is required by a strategy rung this
+        // selection engages", which reads like a plan typo and is not one.
+        request["planned"]["strategy"] = json!({
+            "rung": "bounded_transformer_residency",
+            "engagedRungs": ["resident", "bounded_decode", "bounded_transformer_residency"],
+            "parameters": {
+                "decodeTileEdge": 256,
+                "decodeOverlap": 64,
+                "transformerWindowSize": 1,
+                "transformerWindowComponent": "both"
+            }
+        });
+        let selection = planned_selection(&request).expect("the shared parser accepts \"both\"");
+        assert_eq!(
+            selection.parameters.transformer_window_component,
+            Some(TransformerComponent::Both)
+        );
+        fixture_contract(Some(Quant::Q4), LoadShape::DeferredMaterialization)
+            .validate_selection(&selection)
+            .expect("a deferred load implements rung 4");
+        assert!(
+            fixture_contract(Some(Quant::Q4), LoadShape::EagerMaterialization)
+                .validate_selection(&selection)
+                .is_err(),
+            "a resident load does NOT have rung 4's prerequisite shape"
+        );
+
+        // And the decode parameters really are the reason, not incidental: dropping them fails the
+        // deferred contract too.
+        request["planned"]["strategy"]["parameters"] =
+            json!({ "transformerWindowSize": 1, "transformerWindowComponent": "both" });
+        let bare = planned_selection(&request).unwrap();
+        assert!(
+            fixture_contract(Some(Quant::Q4), LoadShape::DeferredMaterialization)
+                .validate_selection(&bare)
+                .unwrap_err()
+                .to_string()
+                .contains("decode_tile_edge")
+        );
+    }
+
+    /// **The campaign blocker, pinned in code.** At the current inference pin the MiniMax-H3 MLX
+    /// generator overrides neither `memory_strategy_contract` nor `memory_strategy_safety_check`,
+    /// so a LOADED generator publishes no contract and inherits a trait default that accepts ANY
+    /// resident selection with the budget ignored. `run_minimax_h3` therefore cannot emit a record
+    /// at this pin: it fails closed immediately after load.
+    ///
+    /// This test asserts the registry half — the contract registration exists and is real — while
+    /// the generator half is what the pending pin bump must fix. When the bump lands, the arm's
+    /// post-load contract comparison and its zero-budget re-probe start passing and NOTHING else in
+    /// this arm needs to change; if instead the bump publishes a contract while regressing the
+    /// check, the zero-budget re-probe is what still catches it.
+    #[test]
+    fn the_registry_contract_exists_even_though_the_loaded_generator_half_is_pending_a_pin_bump() {
+        let registry = mlx_gen_minimax_h3::provider_registry().unwrap();
+        let contract = registry
+            .memory_strategy_contract(
+                MINIMAX_PROVIDER,
+                &weights_free_spec(Some(Quant::Q4), LoadShape::EagerMaterialization),
+            )
+            .expect("the registry resolves a MiniMax-H3 memory-strategy contract")
+            .expect("the MiniMax-H3 memory-strategy registration is present at the pin");
+        assert_eq!(contract.provider_id, MINIMAX_PROVIDER);
+        assert_eq!(
+            contract.calibration.as_ref().unwrap().fingerprint,
+            MINIMAX_CALIBRATION_FINGERPRINT
+        );
+        // The registered admission check is non-vacuous in BOTH directions, weights-free — which is
+        // exactly the property the loaded generator does not yet inherit.
+        let spec = weights_free_spec(Some(Quant::Q4), LoadShape::EagerMaterialization);
+        let selection = planned_selection(&minimal_request(MINIMAX_PROVIDER)).unwrap();
+        let calibration = contract.calibration.as_ref().unwrap();
+        let geometry = validate_minimax_geometry(1344, 768, 124).unwrap();
+        let context = |fingerprint: &str, total: u64| {
+            minimax_context(selection, calibration, fingerprint, geometry, total, 1)
+        };
+        assert!(matches!(
+            mlx_gen_minimax_h3::memory_strategy::safety_check(
+                &spec,
+                &contract,
+                &context(&calibration.fingerprint, 1 << 40)
+            ),
+            MemorySafetyDecision::Accept
+        ));
+        assert!(matches!(
+            mlx_gen_minimax_h3::memory_strategy::safety_check(
+                &spec,
+                &contract,
+                &context(&calibration.fingerprint, 0)
+            ),
+            MemorySafetyDecision::Reject { .. }
+        ));
+        assert!(matches!(
+            mlx_gen_minimax_h3::memory_strategy::safety_check(
+                &spec,
+                &contract,
+                &context("stale-minimax-h3-fingerprint", 1 << 40)
+            ),
+            MemorySafetyDecision::Reject { .. }
+        ));
+        // The route gate is real too: an off-lattice geometry the arm would never send is refused
+        // by the PROVIDER, so the accept above is not a blanket accept.
+        let mut off_lattice = context(&calibration.fingerprint, 1 << 40);
+        off_lattice.geometry.frames = 97;
+        assert!(matches!(
+            mlx_gen_minimax_h3::memory_strategy::safety_check(&spec, &contract, &off_lattice),
+            MemorySafetyDecision::Reject { .. }
+        ));
+    }
+
+    /// The runtime-complete sweep contract the harness checks: `rangeVerified`, exactly one passed
+    /// case, and parameters equal to the plan's own. Rung 4's string component belongs in the case
+    /// and never as a swept axis.
+    #[test]
+    fn the_runtime_complete_sweep_carries_one_passed_case_matching_the_planned_parameters() {
+        let mut request = minimal_request(MINIMAX_PROVIDER);
+        let sweep = minimax_complete_sweep(&request).unwrap();
+        assert_eq!(sweep["rangeVerified"], json!(true));
+        assert_eq!(sweep["axes"], json!([]));
+        assert_eq!(sweep["cases"].as_array().unwrap().len(), 1);
+        assert_eq!(sweep["cases"][0]["result"], json!("passed"));
+        assert_eq!(
+            sweep["cases"][0]["parameters"],
+            request["planned"]["strategy"]["parameters"]
+        );
+
+        request["planned"]["strategy"]["parameters"] =
+            json!({ "transformerWindowSize": 1, "transformerWindowComponent": "both" });
+        let sweep = minimax_complete_sweep(&request).unwrap();
+        assert_eq!(
+            sweep["axes"],
+            json!([{ "parameter": "transformerWindowSize", "testedValues": [1] }]),
+            "a component name is not a swept numeric range"
+        );
+        assert_eq!(
+            sweep["cases"][0]["parameters"],
+            request["planned"]["strategy"]["parameters"]
+        );
+    }
+
+    /// A tier is a WHOLE-PIPELINE contract here: the conditioning stage's tier is derived from the
+    /// DiT's rather than being a free axis the record could not describe.
+    #[test]
+    fn the_text_encoder_tier_is_derived_from_the_dit_tier() {
+        assert_eq!(
+            minimax_text_encoder_source("q4"),
+            MINIMAX_TIERED_TEXT_ENCODER
+        );
+        assert_eq!(
+            minimax_text_encoder_source("q8"),
+            MINIMAX_TIERED_TEXT_ENCODER
+        );
+        assert_eq!(
+            minimax_text_encoder_source("bf16"),
+            MINIMAX_UPSTREAM_TEXT_ENCODER,
+            "the rehost publishes no bf16 text encoder; the manifest's bf16 co-requisite row is \
+             the upstream repository"
+        );
+    }
+
+    /// The output unwrapper refuses the two shapes an image or audio provider would return, under
+    /// this arm's OWN name — so a misrouted still could never be recorded as a joint A/V clip.
+    #[test]
+    fn the_minimax_output_unwrapper_refuses_image_and_audio_shaped_output() {
+        let frame = Image {
+            width: 2,
+            height: 1,
+            pixels: vec![0, 0, 0, 255, 255, 255],
+        };
+        assert_eq!(
+            diagnostic_video_frames(
+                GenerationOutput::Images(vec![frame.clone()]),
+                MINIMAX_VIDEO_LABEL
+            )
+            .unwrap_err(),
+            "MLX MiniMax-H3 render returned images, not a video clip"
+        );
+        assert_eq!(
+            diagnostic_video_frames(
+                GenerationOutput::Video {
+                    frames: Vec::new(),
+                    fps: 24,
+                    audio: None,
+                },
+                MINIMAX_VIDEO_LABEL
+            )
+            .unwrap_err(),
+            "MLX MiniMax-H3 render returned no frames"
+        );
+        // And the LTX arm's own refusals are unchanged by the label becoming a parameter.
+        assert_eq!(
+            diagnostic_video_frames(GenerationOutput::Images(vec![frame]), LTX_VIDEO_LABEL)
+                .unwrap_err(),
+            "MLX LTX-2.3 render returned images, not a video clip"
+        );
+    }
+
+    /// The determinism envelope must be falsifiable in both directions: an identical clip passes,
+    /// and the broad bias the arm's negative mutation applies breaches all three metrics.
+    #[test]
+    fn the_determinism_envelope_admits_an_identical_clip_and_breaches_on_the_mutation() {
+        let clip = vec![
+            Image {
+                width: 2,
+                height: 1,
+                pixels: vec![10, 20, 30, 200, 210, 220],
+            },
+            Image {
+                width: 2,
+                height: 1,
+                pixels: vec![40, 50, 60, 70, 80, 90],
+            },
+        ];
+        let (maximum, mean, rms) = video_max_mean_rms_abs(&clip, &clip).unwrap();
+        assert_eq!((maximum, mean, rms), (0.0, 0.0, 0.0));
+        assert!(minimax_quality_passes(maximum, mean, rms));
+
+        let mutated = clip.iter().map(qwen_negative_mutation).collect::<Vec<_>>();
+        let (maximum, mean, rms) = video_max_mean_rms_abs(&mutated, &clip).unwrap();
+        assert!(maximum > MINIMAX_MAX_THRESHOLD);
+        assert!(mean > MINIMAX_MEAN_THRESHOLD);
+        assert!(rms > MINIMAX_RMS_THRESHOLD);
+        assert!(!minimax_quality_passes(maximum, mean, rms));
+
+        // The thresholds are this provider's own literals, pinned in the 0-255 unit an operator
+        // reads them in. They are spelled as MiniMax-named literals rather than aliased onto
+        // another lane's constants, so a receipt embedding them cannot be traced to a constant
+        // asserting a different provider's provenance.
+        let per_255 = |threshold: f64| (threshold * 255.0).round() as u64;
+        assert_eq!(
+            (
+                per_255(MINIMAX_MAX_THRESHOLD),
+                per_255(MINIMAX_MEAN_THRESHOLD),
+                per_255(MINIMAX_RMS_THRESHOLD),
+            ),
+            (3, 1, 2)
+        );
     }
 }

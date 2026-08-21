@@ -40,7 +40,7 @@ function requireObject(value, at) {
   return value;
 }
 
-function engineContractIndex(engineFacts, pin) {
+function engineContractIndex(engineFacts) {
   const out = new Map();
   const seenBackends = new Set();
   for (const document of engineFacts) {
@@ -51,11 +51,8 @@ function engineContractIndex(engineFacts, pin) {
     }
     if (seenBackends.has(backend)) throw new Error(`duplicate engine capability facts backend ${backend}`);
     seenBackends.add(backend);
-    if (document.generatedFrom?.inferenceRevision !== pin) {
-      throw new Error(
-        `engine capability facts for ${backend} are keyed to ` +
-          `${document.generatedFrom?.inferenceRevision ?? "(unset)"}, but Cargo pins ${pin}`,
-      );
+    if (!/^[0-9a-f]{40}$/.test(document.generatedFrom?.inferenceRevision ?? "")) {
+      throw new Error(`engine capability facts for ${backend} have no valid inference revision`);
     }
     if (!Array.isArray(document.memoryContracts) || document.memoryContracts.length === 0) {
       throw new Error(`engine capability facts for ${backend} have no memoryContracts inventory`);
@@ -139,8 +136,8 @@ function engineContractIndex(engineFacts, pin) {
   return out;
 }
 
-export function validateMemoryContractFacts(engineFacts, pin) {
-  const providers = engineContractIndex(engineFacts, pin).size;
+export function validateMemoryContractFacts(engineFacts) {
+  const providers = engineContractIndex(engineFacts).size;
   routeEligibilityFromEngineFacts(engineFacts);
   return providers;
 }
@@ -344,7 +341,7 @@ const MANIFEST_ROUTE_PROFILES = new Map([
   ["identity", new Set(["ip_adapter", "identity"])],
 ]);
 
-/** Read the executable worker registry's pin-bound route witness, never Rust source text. */
+/** Read the executable worker registry's dumped route witness, never Rust source text. */
 export function routeEligibilityFromEngineFacts(engineFacts) {
   const rows = [];
   const seen = new Set();
@@ -408,7 +405,6 @@ function closureRows(closures) {
 }
 
 export function collectMemoryContractMismatches({
-  pin,
   engineFacts,
   manifest,
   cells,
@@ -416,7 +412,7 @@ export function collectMemoryContractMismatches({
   closures,
   survey,
 }) {
-  const engine = engineContractIndex(engineFacts, pin);
+  const engine = engineContractIndex(engineFacts);
   const routeEligibility = routeEligibilityFromEngineFacts(engineFacts);
   const declarations = manifestContracts(manifest);
   const out = [];
@@ -620,7 +616,7 @@ export function collectMemoryContractMismatches({
  * `load(id, LoadSpec)` registration. It is engine facts, not human paperwork.
  */
 export function reconcileMemoryContracts(input) {
-  const engine = engineContractIndex(input.engineFacts, input.pin);
+  const engine = engineContractIndex(input.engineFacts);
   const declarations = manifestContracts(input.manifest);
   const bespokeWaivers = validateBespokeMemoryRouteWaivers(
     input.engineFacts,

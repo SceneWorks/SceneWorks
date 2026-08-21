@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
@@ -1709,6 +1710,409 @@ export const RUNG4_APPLICABILITIES = Object.freeze([
 ]);
 export const RUNG4_IMPLEMENTATIONS = Object.freeze(["shared-primitive", "provider-local", "none"]);
 export const RUNG4_REQUEST_PEAKS = Object.freeze(["moves", "does-not-move", "unmeasured"]);
+export const RUNG4_CONTRACT_SUPPORT = Object.freeze([
+  "implemented",
+  "missing",
+  "structurally-not-applicable",
+]);
+
+/** A git sha, abbreviated no shorter than 9 hex characters. See `contractRevision` below. */
+export const RUNG4_CONTRACT_REVISION_PATTERN = /^[0-9a-f]{9,40}$/;
+
+/**
+ * The published matrix cell's `state` vocabulary, restated once for the out-of-matrix records
+ * (sc-17153). An out-of-matrix family cannot hold a cell, but it CAN and MUST carry the cell's two
+ * distinct claims — `state` (the rung WORKS: a code claim) and `memoryCharacterization` (the rung's
+ * PEAKS are known: an evidence claim) — because collapsing them is exactly the SC-16060 failure the
+ * cell vocabulary exists to prevent. Consumers classify `state` through `isImplemented()`, never by
+ * string comparison; `parseOutOfMatrixRung4Families` enforces both claims below.
+ */
+export const OUT_OF_MATRIX_CELL_STATES = Object.freeze([
+  "Implemented/unverified",
+  "Runtime verified",
+  "Verified",
+  "Missing",
+  "Structurally N/A",
+]);
+
+/**
+ * The prerequisite claim this survey may not carry again (sc-18664).
+ *
+ * Rung 4's only shared prerequisite is `LoadShape::DeferredMaterialization`
+ * (`BOUNDED_TRANSFORMER_RESIDENCY_REQUIRES`, inference
+ * `crates/contracts/gen-core/src/memory_strategy.rs:310-313` at the pinned f17c82544). SC-15998
+ * removed the rung-1 edge the
+ * survey's notes asserted, because it had encoded one provider's coupled loader shape as universal
+ * arithmetic.
+ *
+ * Scoped to `notes` deliberately, and the scope is the whole point. A PROVIDER may still append its
+ * own `BoundedTransformerResidency -> StagedResidency` edge through `additional_prerequisites`, and
+ * mlx-gen-anima and mlx-gen-chroma do — so the same sentence is TRUE inside those families' entries
+ * and false as a blanket note. A document-wide ban would have forced a rewrite of a correct
+ * provider-specific verdict, which is exactly what sc-18664 was told not to do.
+ */
+export const STALE_RUNG1_PREREQUISITE_PATTERNS = Object.freeze([
+  /rung 4 requires rung 1/i,
+  /requires rung 1 engaged in the same request/i,
+]);
+
+/**
+ * The excision that lets the ban scan the file the ban is written in.
+ *
+ * The pattern literals above necessarily contain the banned text, so a self-scan would always fire.
+ * This names the declaration and removes it first. It fails CLOSED on purpose: rename or reshape
+ * that constant and this stops matching, the literals stay in the scanned text, and the guard
+ * throws rather than going quietly green.
+ */
+const STALE_RUNG1_PATTERN_DECLARATION =
+  /export const STALE_RUNG1_PREREQUISITE_PATTERNS = Object\.freeze\(\[[\s\S]*?\]\);/;
+
+/**
+ * The generator's OWN prose, held to the same ban as the survey's notes (sc-18664).
+ *
+ * One rule, two halves. `assertRung4NotesRecordTheContractPrerequisite` bans the removed rung-1
+ * prerequisite claim from the survey's `notes`; the identical sentence also sat in this file's
+ * `stagedResidencyIsAvailable` docstring — the more authoritative of the two sites, because it is
+ * where a reader of the gate itself lands. Banning a sentence in the data file while leaving it in
+ * the code that reads the data file is the "one half of a pair moved" defect this epic keeps
+ * finding, so both halves run off the SAME `STALE_RUNG1_PREREQUISITE_PATTERNS` constant and a
+ * pattern added for either covers the other for free.
+ *
+ * Doc comments WRAP, and that is not a detail: the removed claim was invisible to a line-oriented
+ * grep of this very file from the day it was written (cb1593ac, sc-15969) until a human read it,
+ * because `engaged in the same` and `request` sat on different lines. The source is therefore
+ * flattened across comment continuations before matching, which is the only reason this guard sees
+ * what a grep could not.
+ *
+ * Scoped to this file and deliberately NOT to `generate-memory-matrix.test.mjs`, which feeds the
+ * banned sentence in as mutation INPUT — that is what proves the notes guard bites, and banning it
+ * there would delete the evidence.
+ */
+export function assertGeneratorSourceDoesNotRestateTheRemovedEdge(source) {
+  const scanned = source
+    .replace(STALE_RUNG1_PATTERN_DECLARATION, "")
+    .replaceAll(/\n[ \t]*\*[ \t]?/g, " ");
+  for (const pattern of STALE_RUNG1_PREREQUISITE_PATTERNS) {
+    if (pattern.test(scanned)) {
+      throw new Error(
+        `scripts/generate-memory-matrix.mjs restates the rung-1 prerequisite SC-15998 removed (${pattern}). BOUNDED_TRANSFORMER_RESIDENCY_REQUIRES is LoadShape::DeferredMaterialization and nothing else; the generator's rung-1 gate is a proxy for the edge individual providers append through additional_prerequisites, not the shared contract rule (sc-18664)`,
+      );
+    }
+  }
+}
+
+const GENERATOR_SOURCE_PATH = fileURLToPath(import.meta.url);
+let generatorSourceCache = null;
+const generatorSourceText = () =>
+  (generatorSourceCache ??= readFileSync(GENERATOR_SOURCE_PATH, "utf8"));
+
+/**
+ * The notes' half of the correction: the stale claim is gone AND the real one is stated.
+ *
+ * Both directions, because an absence check alone passes on notes that say nothing at all — the
+ * quiet outcome that would let the next reader re-derive the removed edge from the silence.
+ */
+export function assertRung4NotesRecordTheContractPrerequisite(notes) {
+  const body = (notes ?? []).join("\n");
+  for (const pattern of STALE_RUNG1_PREREQUISITE_PATTERNS) {
+    if (pattern.test(body)) {
+      throw new Error(
+        `rung-4 survey notes restate the rung-1 prerequisite SC-15998 removed (${pattern}). Rung 4 requires LoadShape::DeferredMaterialization and nothing else; a provider's own additional_prerequisites edge belongs in that family's entry, not in the shared notes (sc-18664)`,
+      );
+    }
+  }
+  for (const required of ["LoadShape::DeferredMaterialization", "SC-15998"]) {
+    if (!body.includes(required)) {
+      throw new Error(
+        `rung-4 survey notes must name ${required}: the correction is a positive statement of rung 4's sole shared prerequisite, not just the absence of the old one (sc-18664)`,
+      );
+    }
+  }
+}
+
+/**
+ * The family verdict as a FUNCTION of the per-stack verdicts, so it cannot be asserted independently.
+ *
+ * This is the survey's own `structuralApplicability` vocabulary restated as arithmetic: `full` is one
+ * uniform stack that a single BlockPlan bounds with only embedders and heads outside it; `partial` is
+ * a trunk that decomposes into two or more separately-indexed stacks needing a plan each, or that
+ * carries a remainder which cannot be windowed at all; `none` is no windowable stack anywhere.
+ *
+ * The restatement is exact for 38 of the 40 verdicts `families` already carries, and NOT for the
+ * other two — say so rather than claim it is simply the vocabulary. Qwen-Image (`families.15511`)
+ * records `full` on both backends while holding two `blockStacks`, because the second is
+ * control-route-only (`entries: ["qwen_image_control"]`) and is not resident on the routes the
+ * verdict covers. This function has no notion of route scoping and derives `partial` there.
+ *
+ * Route scoping is deliberately NOT added, and the reason is that no record needs it to reach the
+ * right answer. MiniMax-H3 has its own route-conditional stack — `text_encoder.vision_tower`, the
+ * `fl2va` keyframe path only — and is `partial` under either rule, because its two conv stacks and
+ * its several separately-indexed denoise stacks each force `partial` on their own. Adding a route
+ * axis to serve zero consumers would be speculation; the exception is recorded here and pinned by
+ * the test that computes Qwen-Image's derivation and asserts it disagrees with the record.
+ */
+export function deriveOutOfMatrixApplicability(stacks) {
+  const windowable = stacks.filter((stack) => stack.structuralApplicability !== "none");
+  if (!windowable.length) return "none";
+  const remainder = stacks.length - windowable.length;
+  return windowable.length === 1 && remainder === 0 && windowable[0].structuralApplicability === "full"
+    ? "full"
+    : "partial";
+}
+
+/**
+ * Validate the surveyed families the MATRIX cannot carry a verdict for (sc-18664).
+ *
+ * `families` is fenced to the image catalog in both directions — the generator builds from
+ * `manifest.models.filter(type === "image")`, and `assertRung4SurveyCoversEveryFamily` rejects a
+ * survey key the catalog does not advertise — so a video family placed there fails generation rather
+ * than producing a row. MiniMax-H3 is the first family to hit that: it is `"type": "video"`, and
+ * `familyGroup` throws on `minimax_h3`, so it has no group key either.
+ *
+ * These records are therefore validated here and never published. The guard that keeps them from
+ * becoming a museum is the catalog check: the day `familyGroup` learns one of the named entries, this
+ * throws and the record has to move into `families`, where the coverage fence can see it.
+ */
+export function parseOutOfMatrixRung4Families(parsed, { familyGroups } = {}) {
+  const records = new Map();
+  const families = parsed.families ?? {};
+  for (const [group, family] of Object.entries(parsed.outOfMatrixFamilies ?? {})) {
+    const where = `rung-4 survey out-of-matrix ${family.name ?? group}`;
+    if (Object.hasOwn(families, group)) {
+      throw new Error(
+        `${where}: SC-${group} is also a \`families\` key — one family gets one verdict, in one place`,
+      );
+    }
+    if (!family.catalogEntries?.length) {
+      throw new Error(`${where}: must name the catalog entries it is a survey OF`);
+    }
+    if (familyGroups) {
+      for (const id of family.catalogEntries) {
+        let owner = null;
+        try {
+          owner = familyGroups(id);
+        } catch {
+          owner = null;
+        }
+        if (owner !== null) {
+          throw new Error(
+            `${where}: familyGroup now resolves ${id} to family SC-${owner}, so the matrix carries this lane — move the record into \`families\` where the coverage fence can see it (sc-18664)`,
+          );
+        }
+      }
+    }
+    for (const [backend, verdict] of Object.entries(family.backends ?? {})) {
+      const at = `${where} (${backend})`;
+      if (!RUNG4_APPLICABILITIES.includes(verdict.structuralApplicability)) {
+        throw new Error(
+          `${at}: unknown structuralApplicability ${JSON.stringify(verdict.structuralApplicability)}`,
+        );
+      }
+      if (!RUNG4_IMPLEMENTATIONS.includes(verdict.implementation)) {
+        throw new Error(`${at}: unknown implementation ${JSON.stringify(verdict.implementation)}`);
+      }
+      if (!RUNG4_REQUEST_PEAKS.includes(verdict.requestPeak?.finding)) {
+        throw new Error(
+          `${at}: unknown requestPeak finding ${JSON.stringify(verdict.requestPeak?.finding)}`,
+        );
+      }
+      if (!verdict.evidence?.length) {
+        throw new Error(`${at}: a verdict derived from provider code must cite at least one source`);
+      }
+      // ...and must say which tree those citations resolve in. This is the one thing an
+      // out-of-matrix record needs that a `families` verdict does not: `families` is surveyed
+      // against the crates the Cargo pin already carries, so `generatedFrom.inferenceRevision`
+      // dates every path in it. These records are surveyed at a revision of their own —
+      // MiniMax-H3's MLX paths resolve at e09f46aaf and its Candle ones at 79f02e6d0, two DIFFERENT
+      // trees, and neither is the pin. What the field asserts has moved since it was introduced: at
+      // the pinned f17c82544 both H3 crates exist and both anchors are ANCESTORS of it, so the
+      // field now reads "last surveyed here, not re-surveyed since" rather than "the pinned tree
+      // has no such crate yet". Without it the record silently mixes revisions and reads as if the
+      // matrix's own pin dated it (sc-18664; meaning restated sc-18650 pre-merge review).
+      if (!RUNG4_CONTRACT_REVISION_PATTERN.test(verdict.contractRevision ?? "")) {
+        throw new Error(
+          `${at}: contractRevision must name the inference revision this record's evidence paths resolve at, as a git sha of at least 9 hex characters — got ${JSON.stringify(verdict.contractRevision)}. An out-of-matrix record is surveyed from crates the matrix's own pinned revision need not contain, so without it the record mixes two trees (sc-18664)`,
+        );
+      }
+      const stacks = verdict.stacks ?? [];
+      if (!stacks.length) {
+        throw new Error(
+          `${at}: the family verdict is derived from per-stack verdicts, so the stacks have to be there`,
+        );
+      }
+      const seen = new Set();
+      for (const stack of stacks) {
+        const stackAt = `${at}: stacks[${JSON.stringify(stack.id)}]`;
+        if (!stack.id || seen.has(stack.id)) {
+          throw new Error(`${stackAt}: every stack needs its own id, and ids must not repeat`);
+        }
+        seen.add(stack.id);
+        if (!RUNG4_APPLICABILITIES.includes(stack.structuralApplicability)) {
+          throw new Error(
+            `${stackAt}: unknown structuralApplicability ${JSON.stringify(stack.structuralApplicability)}`,
+          );
+        }
+        if (!stack.reason) {
+          throw new Error(`${stackAt}: a per-stack verdict without a stated reason is an assertion`);
+        }
+        if (stack.windowable !== (stack.structuralApplicability !== "none")) {
+          throw new Error(
+            `${stackAt}: windowable ${JSON.stringify(stack.windowable)} contradicts structuralApplicability ${JSON.stringify(stack.structuralApplicability)}`,
+          );
+        }
+        if (stack.structuralApplicability === "none" && !stack.structural?.length) {
+          throw new Error(
+            `${stackAt}: a stack the rung cannot bound is a Structurally N/A claim, which the epic accepts only with static provider evidence — none is cited`,
+          );
+        }
+      }
+      const derived = deriveOutOfMatrixApplicability(stacks);
+      if (derived !== verdict.structuralApplicability) {
+        throw new Error(
+          `${at}: records ${verdict.structuralApplicability} but its stacks derive ${derived} — the family verdict follows from the stacks, it is not a separate claim`,
+        );
+      }
+      // AC2's second half: a `partial` family has to say WHICH stacks are the no, or the verdict
+      // reads as a shrug. Exact set equality in both directions, so a stale name cannot survive a
+      // stack being reclassified.
+      const unwindowable = stacks
+        .filter((stack) => stack.structuralApplicability === "none")
+        .map((stack) => stack.id)
+        .sort();
+      const declared = [...(verdict.nonWindowableStacks ?? [])].sort();
+      if (JSON.stringify(declared) !== JSON.stringify(unwindowable)) {
+        throw new Error(
+          `${at}: nonWindowableStacks is ${JSON.stringify(declared)} but the stacks the rung cannot bound are ${JSON.stringify(unwindowable)}`,
+        );
+      }
+      if (!RUNG4_CONTRACT_SUPPORT.includes(verdict.contractSupport)) {
+        throw new Error(
+          `${at}: unknown contractSupport ${JSON.stringify(verdict.contractSupport)} — it mirrors gen_core::MemoryStrategySupport for this provider`,
+        );
+      }
+      // The survey and the provider contract have to agree, in BOTH directions. A survey that says
+      // the rung applies while the contract declares the architecture lacks what it optimizes is a
+      // contradiction; a survey that says it applies while the contract merely has not built it is
+      // the ordinary case, and needs the reason on the record so the gap is not read as a defect.
+      if (verdict.contractSupport === "structurally-not-applicable" && derived !== "none") {
+        throw new Error(
+          `${at}: the contract declares rung 4 StructurallyNotApplicable while this survey names a windowable stack — one of the two is wrong`,
+        );
+      }
+      if (verdict.contractSupport === "implemented" && derived === "none") {
+        throw new Error(
+          `${at}: the contract declares rung 4 Implemented while this survey finds no windowable stack — one of the two is wrong`,
+        );
+      }
+      if (verdict.contractSupport !== "implemented") {
+        if (verdict.implementation !== "none") {
+          throw new Error(
+            `${at}: claims implementation ${JSON.stringify(verdict.implementation)} while the contract does not declare rung 4 Implemented`,
+          );
+        }
+        if (derived !== "none" && !(verdict.contractReason && verdict.contractSource)) {
+          throw new Error(
+            `${at}: rung 4 applies to a stack but the contract does not implement it — record contractSource and contractReason, or the gap reads as an unexplained hole`,
+          );
+        }
+      }
+      // sc-17153 — the record carries the SAME two distinct claims a published matrix cell does,
+      // in the cell vocabulary, so the day this family gains a lane the move into `families` is a
+      // relocation rather than a re-derivation. Both claims validated on every generation:
+      //
+      //   `state`                  — the CODE claim. Classified through the shared
+      //                              `isImplemented()` predicate, never by string comparison, and
+      //                              required to AGREE with `contractSupport` through that
+      //                              predicate: an `Implemented/unverified` record whose contract
+      //                              does not implement the rung (or the reverse) is a
+      //                              contradiction, not a nuance.
+      //   `memoryCharacterization` — the PEAKS claim. `status`, `coveredPixelBound` and (on a
+      //                              temporal record) `coveredFrameBound` are DERIVED from
+      //                              `measuredGeometries` by the shared
+      //                              `memoryCharacterization()` helper, exactly as the family
+      //                              verdict is derived from its stacks above — asserting them
+      //                              independently is how a record drifts. A characterization on a
+      //                              non-implemented state is refused, mirroring the published
+      //                              cell rule (`memoryCharacterization is … on … measured
+      //                              geometries` in `validateMatrix`).
+      if (!OUT_OF_MATRIX_CELL_STATES.includes(verdict.state)) {
+        throw new Error(
+          `${at}: unknown state ${JSON.stringify(verdict.state)} — an out-of-matrix record carries the matrix cell's own state vocabulary (sc-17153)`,
+        );
+      }
+      if (isImplemented(verdict.state) !== (verdict.contractSupport === "implemented")) {
+        throw new Error(
+          `${at}: state ${JSON.stringify(verdict.state)} disagrees with contractSupport ${JSON.stringify(verdict.contractSupport)} under isImplemented() — the two claims describe one contract`,
+        );
+      }
+      const characterization = verdict.memoryCharacterization;
+      if (
+        !characterization ||
+        typeof characterization.reason !== "string" ||
+        characterization.reason.length === 0
+      ) {
+        throw new Error(
+          `${at}: memoryCharacterization with a non-empty reason is required — the record must say what is measured and what the terminal campaign still owes (sc-17153)`,
+        );
+      }
+      // sc-18663. The comparison is on JSON, and the derived side is `sortedUnique`, so ORDER and
+      // duplicates are part of the claim. Say that here rather than let the derivation message below
+      // report two arrays that read as identical — that diagnostic sent a reader looking for a
+      // status bug when the record merely listed its geometries out of order.
+      const measuredGeometries = characterization.measuredGeometries ?? [];
+      if (
+        !Array.isArray(measuredGeometries) ||
+        JSON.stringify(measuredGeometries) !== JSON.stringify(sortedUnique(measuredGeometries))
+      ) {
+        throw new Error(
+          `${at}: measuredGeometries ${JSON.stringify(measuredGeometries)} must be an array that is sorted and duplicate-free — the derivation compares it against sortedUnique(...), so ordering and repeats are part of the claim (sc-18663)`,
+        );
+      }
+      // sc-18663. `memoryCharacterization()` emits a FOURTH key, `coveredFrameBound`, as soon as the
+      // form is temporal — any `WxHxfF` geometry. Projecting only the three image-shaped keys made
+      // the comparison unsatisfiable for every multi-frame record: the derived object always carried
+      // a key the declared one could not, so a video family could not record temporal coverage at
+      // all, which is exactly what epic 17137's terminal campaign has to record.
+      //
+      // The temporal form is INFERRED from the geometries rather than read from a record field, and
+      // that is the whole point of the check: a `declaresTemporalCurve`-style field on the record
+      // would be a SECOND independent claim — settable to `false` to relax the grading — in the one
+      // place whose job is to make the characterization a function of `measuredGeometries` alone. A
+      // published cell can read the flag from the manifest because the manifest's curve is not the
+      // cell's own assertion; an out-of-matrix record has no such external declaration to read.
+      // (Consequence, stated rather than left implicit: a record measured ONLY at single-frame
+      // geometries is graded against two coefficients even for a video family. Measurements can only
+      // ADD the temporal axis, so a real video capture — which always carries frames — is graded
+      // against three.)
+      const derivedCharacterization = memoryCharacterization(measuredGeometries);
+      const declaredCharacterization = {
+        status: characterization.status,
+        measuredGeometries: characterization.measuredGeometries,
+        coveredPixelBound: characterization.coveredPixelBound,
+        // Present on both sides or neither: an omitted bound leaves the key out and mismatches the
+        // derived `null`, and a bound smuggled onto a record whose geometries carry no frame axis
+        // adds a key the derived object does not have. Both are the same defect — a bound that does
+        // not follow from the geometries — and both fail below.
+        ...(Object.hasOwn(derivedCharacterization, "coveredFrameBound") ||
+        Object.hasOwn(characterization, "coveredFrameBound")
+          ? { coveredFrameBound: characterization.coveredFrameBound }
+          : {}),
+      };
+      if (JSON.stringify(declaredCharacterization) !== JSON.stringify(derivedCharacterization)) {
+        throw new Error(
+          `${at}: memoryCharacterization ${JSON.stringify(declaredCharacterization)} does not derive from its measuredGeometries (${JSON.stringify(derivedCharacterization)}) — status, coveredPixelBound and coveredFrameBound follow from the geometries, they are not separate claims`,
+        );
+      }
+      if (characterization.status !== "unmeasured" && !isImplemented(verdict.state)) {
+        throw new Error(
+          `${at}: memoryCharacterization is ${characterization.status} while the state is not implemented — a rung that does not work cannot have characterized peaks`,
+        );
+      }
+      records.set(`${group}:${backend}`, verdict);
+    }
+  }
+  return records;
+}
 
 /**
  * Parse and validate the SC-15969 rung-4 applicability survey.
@@ -1726,12 +2130,20 @@ export const RUNG4_REQUEST_PEAKS = Object.freeze(["moves", "does-not-move", "unm
  *   a non-empty legacy `implementedEntries` or exact `implementationScopes` claim (or the reverse)
  *   is a contradiction, and every named entry has to belong to the family that claims it.
  */
-export function parseRung4Survey(body, { familyGroups } = {}) {
+export function parseRung4Survey(body, { familyGroups, generatorSource } = {}) {
   const parsed = JSON.parse(body);
   const families = parsed.families;
   if (!families || typeof families !== "object") {
     throw new Error("rung-4 survey: missing `families`");
   }
+  // sc-18664. All three run on every generation, which is what gives them reach: `--check` in CI and
+  // the pre-push hook go through here, so a stale prerequisite note, the same claim restated in the
+  // generator's own prose, or an unvalidated out-of-matrix record fails the same way a bad family
+  // verdict does. The source scan sits HERE, next to the notes scan it shares a pattern set with,
+  // so the two halves of the one ban cannot be wired into different code paths.
+  assertRung4NotesRecordTheContractPrerequisite(parsed.notes);
+  assertGeneratorSourceDoesNotRestateTheRemovedEdge(generatorSource ?? generatorSourceText());
+  parseOutOfMatrixRung4Families(parsed, { familyGroups });
   const survey = new Map();
   const unroutedBackends = new Map();
   const modalityRelationships = new Map();
@@ -2010,6 +2422,14 @@ export function parseRung4Survey(body, { familyGroups } = {}) {
   // verdicts from one parse and topology declarations from another.
   survey.unroutedBackends = unroutedBackends;
   survey.modalityRelationships = modalityRelationships;
+  // sc-18663: ONE computation of the out-of-matrix catalog entries, attached to the parse that
+  // validated the records they come from. Two consumers read it — `buildMatrix` subtracts these
+  // entries from the coordinate universe, and `assertCalibrationPlanTargetsResolvedCoordinates`
+  // exempts plan rows that target them — and a second, independently spelled set is exactly how an
+  // exemption would outlive the subtraction it is the complement of.
+  survey.outOfMatrixCatalogEntries = new Set(
+    Object.values(parsed.outOfMatrixFamilies ?? {}).flatMap((family) => family.catalogEntries ?? []),
+  );
   return survey;
 }
 
@@ -2237,11 +2657,25 @@ export function catalogFamilyBackends(manifestModels, routedBackends) {
 }
 
 /**
- * Whether this entry advertises rung 1 on this backend. Rung 4 requires rung 1 engaged in the same
- * request (`gen_core::memory_strategy`'s `BOUNDED_TRANSFORMER_RESIDENCY_REQUIRES`), so the rung-4 arm
- * below reads the prerequisite from the SAME predicate the rung-1 arm uses. Restating it would let
- * the two drift, and the drift is silent: a family that gained rung-1 capability would keep
- * reporting rung 4 as unreachable.
+ * Whether this entry advertises rung 1 on this backend.
+ *
+ * This is the RUNG-1 arm's own predicate, and after sc-19542 that is the only place it is applied
+ * unconditionally. The rung-4 arm used to gate every family on it as well; `rung4ContractAdmits`
+ * replaced that, and this function now reaches rung 4 only through the `rung` evaluator in
+ * `RUNG4_PREREQUISITE_EVALUATORS`, for the families whose own provider record declares that edge.
+ *
+ * Availability, not engagement: it answers whether the provider implements rung 1 on this lane. That
+ * is the right question for the edge it now serves, because gen-core's `validate_selection` accepts
+ * a `Rung { .. EngagedInSameRequest }` prerequisite when `MemoryProviderContract::engages` holds,
+ * and for an edge the realization itself appended, `engages` reduces to that rung being declared
+ * `Implemented` (inference `crates/contracts/gen-core/src/memory_strategy.rs:1346-1362` at the
+ * pinned rev `f17c82544`: `required_by_realization` is true by construction, so the conjunction is
+ * the `matches!(self.support(rung), Some(Implemented))` term).
+ *
+ * This is the reduction of ONE of `validate_selection`'s two accepting arms, not of the whole
+ * prerequisite check. The second arm is `StructurallyNotApplicable`, and it lives in the `rung`
+ * evaluator below rather than here, because it is a fact about the provider's declaration and not
+ * about what this lane makes available.
  */
 export function stagedResidencyIsAvailable({
   backend,
@@ -2277,6 +2711,313 @@ export function stagedResidencyIsAvailable({
     : declaredModel.candle?.supportsSequentialOffload === true ||
         declaredModel.candle?.sequentialPeakGb !== undefined ||
         declaredModel.candle?.turboFit !== undefined;
+}
+
+/**
+ * gen-core's `BOUNDED_TRANSFORMER_RESIDENCY_REQUIRES`, mirrored (sc-19542).
+ *
+ * `&[MemoryStrategyPrerequisite::LoadShape(LoadShape::DeferredMaterialization)]` at the pinned rev
+ * `f17c82544` — inference `crates/contracts/gen-core/src/memory_strategy.rs:310-313`, the identifier
+ * on line 312. Exactly one edge, shared by every provider, and no rung edge at all. Everything else
+ * a provider demands of rung 4 it appends itself, which is what
+ * `config/rung4-contract-prerequisites.json` records per (family, backend).
+ *
+ * This constant is the gate's own predicate, and the guards derive from it rather than restating it:
+ * `assertRung4CalibrationsDeclareTheRequiredLoadShape` reads the required shape out of this array
+ * instead of carrying its own copy of the string, so teaching rung 4 a second shared edge moves the
+ * guard with the gate.
+ */
+export const SHARED_RUNG4_PREREQUISITES = Object.freeze([
+  Object.freeze({ kind: "load-shape", shape: "deferred_materialization" }),
+]);
+
+/**
+ * One evaluator per prerequisite kind, mirroring gen-core's `validate_selection` arms.
+ *
+ * Dispatch is by `kind` with no default arm — an unrecognised kind throws, because a prerequisite
+ * the matrix does not know how to evaluate must not be silently satisfied. That is the failure
+ * direction sc-19542 exists to remove.
+ */
+const RUNG4_PREREQUISITE_EVALUATORS = Object.freeze({
+  /**
+   * gen-core: `if self.load_shape == required { continue }`.
+   *
+   * `load_shape` is a LOAD-time property of the generator instance (`spec.load_shape`), not a
+   * property of a catalog coordinate, so no cell can be demoted on it here: a rung-4 matrix cell is
+   * a claim about the loads that satisfy this edge, and the catalog carries no per-cell load shape
+   * to test. It is NOT thereby unchecked. Where the catalog does carry a load shape — on a declared
+   * rung-4 calibration binding — `assertRung4CalibrationsDeclareTheRequiredLoadShape` grades it
+   * against this same edge and refuses generation on a mismatch.
+   */
+  "load-shape": () => true,
+  /**
+   * gen-core's `EngagedInSameRequest` arm has TWO ways to be satisfied, and this mirrors both —
+   * inference `crates/contracts/gen-core/src/memory_strategy.rs:1862-1873` at the pinned
+   * `f17c82544`.
+   *
+   * 1. `if self.engages(selection.strategy, rung) { continue }`. For an edge the realization itself
+   *    appended, `engages`'s `required_by_realization` term is true by construction, so the
+   *    conjunction reduces to that rung being declared `Implemented` on this lane — which is what
+   *    `stagedResidencyIsAvailable` answers.
+   * 2. `if matches!(self.support(rung), Some(StructurallyNotApplicable { .. })) { continue }` — the
+   *    edge is satisfied VACUOUSLY, because the provider asserts its architecture has no such
+   *    component to shed. gen-core's own comment says so.
+   *
+   * Arm 2 was missing, and this gate exists to follow the contract's actual rule rather than a
+   * reduction of half of it. It is fail-closed and currently unreachable — `mlx-gen-sensenova` is
+   * the only provider declaring `StagedResidency` structurally N/A at the pinned revision, and it
+   * appends no rung edge for the arm to satisfy — but the first provider that does both would be
+   * under-admitted without it.
+   *
+   * `record.stagedResidencySupport` is `null` wherever the extractor could not read the declaration
+   * unambiguously, and `null` falls through to arm 1. That asymmetry is deliberate: arm 2 ADMITS, so
+   * only a positive reading of the provider's own declaration may fire it.
+   */
+  rung: (prerequisite, context, record) => {
+    if (
+      prerequisite.rung !== "staged_residency" ||
+      prerequisite.scope !== "engaged_in_same_request"
+    ) {
+      throw new Error(
+        `rung-4 prerequisite ${JSON.stringify(prerequisite)} names a rung/scope this gate has no ` +
+          "evaluator for — teach it one rather than admitting the cell (sc-19542)",
+      );
+    }
+    if (record.stagedResidencySupport === "structurally_not_applicable") return true;
+    return stagedResidencyIsAvailable(context);
+  },
+});
+
+/** The prerequisite kinds a record may carry, derived from the evaluators that can answer them. */
+export const RUNG4_PREREQUISITE_KINDS = Object.freeze(Object.keys(RUNG4_PREREQUISITE_EVALUATORS));
+
+/**
+ * What a record may say a provider declares for the rung its edges name.
+ *
+ * gen-core's `MemoryStrategySupport` has three variants; `null` is this gate's fourth answer, for a
+ * declaration the extractor could not read unambiguously. Only `structurally_not_applicable` changes
+ * an admission, and only in the ADMITTING direction, which is why the unknown case is spelled at all
+ * rather than defaulted.
+ */
+export const RUNG4_DECLARED_SUPPORTS = Object.freeze([
+  "implemented",
+  "missing",
+  "structurally_not_applicable",
+  null,
+]);
+
+/**
+ * Whether rung 4's DECLARED prerequisite graph admits this cell (sc-19542).
+ *
+ * This is the fix. The arm used to ask `stagedResidencyIsAvailable` of every family, which is a
+ * rung-1 availability proxy applied where the contract never asked for one — measurably inert on
+ * the catalog as it stood, and wrong the moment a provider's prerequisites change. It now walks the
+ * same graph `MemoryProviderContract::validate_selection` walks: the shared edges above, then the
+ * edges THIS provider appended through `additional_prerequisites`, each answered by its own
+ * evaluator.
+ *
+ * `record.additionalPrerequisites` is derived from the pinned revision by
+ * `scripts/rung4-contract-prerequisites.mjs`, and 21 of the catalog's 40 (family, backend) pairs
+ * carry the rung-1 edge while 19 do not — so which families this consults the rung-1 predicate for
+ * is now a property of the providers rather than a blanket rule.
+ *
+ * WHAT THAT 21/19 IS AND IS NOT (measured, sc-19542 review f6)
+ *
+ * 21/19 is a fact about the RECORD SET, not about this catalog. Instrumenting this arm over a full
+ * generation run measures the difference it actually makes:
+ *
+ *   * 426 evaluations reach `rung4ContractAdmits`, spanning 17 of the 40 (family, backend) pairs.
+ *     The other 23 pairs are never evaluated at all: the `&&` chains at both call sites short-
+ *     circuit on `structuralApplicability` and on `rung4Implementation` first, so a pair whose
+ *     rung-4 verdict is `none`, or which has no implementation parameters, never asks the contract.
+ *   * Of those 17 reached pairs, exactly 2 carry NO rung-1 edge and are therefore the only lanes
+ *     whose answer this fix can change: `15510:mlx` (Z-Image) and `15527:candle` (PuLID). The other
+ *     17 no-edge pairs are in the 23 that never arrive.
+ *   * `stagedResidencyIsAvailable` returned `true` at every one of the 426 evaluations, so the
+ *     edge-carrying pairs are admitted on the same term the old blanket proxy admitted them on.
+ *   * Old and new therefore agree on 40/40 probed keys, which is why the generated artifact is
+ *     BYTE-IDENTICAL across this change.
+ *
+ * So "19 lanes no longer consult the rung-1 proxy" is true of the record set and reaches 2 lanes in
+ * practice. The fix is still the right one — it replaces a proxy that happens to agree today with
+ * the graph the contract actually walks, and the divergence it prevents is the first time a
+ * provider's prerequisites change — but it is a correctness change with a byte-identical artifact,
+ * not a change in what this catalog admits. Stated here because a reader who takes 21/19 as the
+ * blast radius will over-read every one of those numbers.
+ *
+ * An edge flagged `conditional` — appended by a `then_some` on a runtime condition, or inside a
+ * `#[cfg]`-gated item that is not in every production build — is evaluated as PRESENT. "This
+ * provider may demand rung 1" is the fail-closed reading for an admission gate: a conditional
+ * prerequisite dropped is a cell admitted that some builds refuse.
+ */
+export function rung4ContractAdmits(record, context) {
+  if (!record) {
+    throw new Error(
+      "rung-4 admission asked for a (family, backend) with no contract-prerequisite record — the " +
+        "coverage fence in parseRung4ContractPrerequisites should have made this unreachable (sc-19542)",
+    );
+  }
+  return [...SHARED_RUNG4_PREREQUISITES, ...record.additionalPrerequisites].every((prerequisite) => {
+    const evaluate = RUNG4_PREREQUISITE_EVALUATORS[prerequisite.kind];
+    if (!evaluate) {
+      throw new Error(
+        `rung-4 prerequisite kind ${JSON.stringify(prerequisite.kind)} has no evaluator (sc-19542)`,
+      );
+    }
+    return evaluate(prerequisite, context, record);
+  });
+}
+
+/**
+ * Parse and validate the per-(family, backend) rung-4 prerequisite records (sc-19542).
+ *
+ * Two things are checked here, and each is a way the record could be WRONG rather than merely absent:
+ *
+ * - **Keyed to the live pin.** The edges are a fact about one inference revision. A record keyed to
+ *   an older pin would report a graph nobody re-derived, so it is a hard error and never a fallback.
+ * - **Every edge is one this gate can evaluate.** An edge whose kind has no evaluator, or that cites
+ *   no provider file, throws rather than being skipped over by `every()`.
+ *
+ * Coverage is the third, and it lives in `assertRung4PrerequisiteRecordsCoverEveryFamily` so it runs
+ * beside — and after — the survey's own coverage fence. Both answer to the same catalog, and a
+ * family that is missing from BOTH should be reported as an unsurveyed family rather than as an
+ * unrecorded one.
+ */
+export function parseRung4ContractPrerequisites(body, { pin }) {
+  const parsed = JSON.parse(body);
+  if (parsed.inferenceRevision !== pin) {
+    throw new Error(
+      `config/rung4-contract-prerequisites.json is keyed to ` +
+        `${parsed.inferenceRevision?.slice(0, 9) ?? "(unset)"} but Cargo pins ${pin.slice(0, 9)}. ` +
+        "Re-run: node scripts/rung4-contract-prerequisites.mjs --repo <inference> --write",
+    );
+  }
+  const records = new Map();
+  for (const [group, family] of Object.entries(parsed.families ?? {})) {
+    for (const [backend, record] of Object.entries(family.backends ?? {})) {
+      const at = `rung-4 contract prerequisites ${family.name ?? group} (${backend})`;
+      if (!record.crate) {
+        throw new Error(`${at}: must name the inference crate the record was derived from`);
+      }
+      const edges = record.additionalPrerequisites;
+      if (!Array.isArray(edges)) {
+        throw new Error(
+          `${at}: additionalPrerequisites must be an array — an absent field would read as "no ` +
+            'edges", which is the fail-open answer',
+        );
+      }
+      for (const edge of edges) {
+        if (!RUNG4_PREREQUISITE_KINDS.includes(edge.kind)) {
+          throw new Error(
+            `${at}: prerequisite kind ${JSON.stringify(edge.kind)} has no evaluator in this gate`,
+          );
+        }
+        if (!edge.source) {
+          throw new Error(`${at}: every edge must cite the provider file it was derived from`);
+        }
+        // An absent `conditional` would read as "unconditional", which is a claim about the
+        // provider rather than the absence of one.
+        if (typeof edge.conditional !== "boolean") {
+          throw new Error(
+            `${at}: every edge must say whether the construction that appends it is conditional`,
+          );
+        }
+      }
+      if (!RUNG4_DECLARED_SUPPORTS.includes(record.stagedResidencySupport ?? null)) {
+        throw new Error(
+          `${at}: stagedResidencySupport ${JSON.stringify(record.stagedResidencySupport)} is not a ` +
+            `gen-core MemoryStrategySupport this gate knows (${RUNG4_DECLARED_SUPPORTS.join(", ")})`,
+        );
+      }
+      records.set(`${group}:${backend}`, {
+        crate: record.crate,
+        additionalPrerequisites: edges,
+        stagedResidencySupport: record.stagedResidencySupport ?? null,
+      });
+    }
+  }
+  return records;
+}
+
+/**
+ * Coverage of the prerequisite records, both ways — the same shape as the survey's fence.
+ *
+ * Catalog -> records is what keeps the gate honest: a family with no record reaches
+ * `rung4ContractAdmits` with nothing to admit from. Records -> catalog keeps the FILE honest: a
+ * record for a lane the catalog no longer advertises would sit there being maintained and reviewed
+ * while deciding nothing.
+ */
+export function assertRung4PrerequisiteRecordsCoverEveryFamily(records, models) {
+  // Scoped to the IMAGE half of the universe, which is the half the derivation script
+  // (scripts/rung4-contract-prerequisites.mjs) walks: sc-19542 derived the per-provider edge
+  // graphs for the 20 image families, and sc-18815 widened the matrix universe to video entries
+  // afterwards. A video lane therefore has no record BY CONSTRUCTION and falls back to the
+  // pre-sc-19542 direct predicate at the admission arms (see the record-or-fallback call sites),
+  // which is byte-identical to what main shipped for those lanes. Deriving the video providers'
+  // graphs widens this fence with them.
+  const advertised = new Set(
+    models
+      .filter((model) => model.modality === "image")
+      .flatMap((model) => model.backends.map((backend) => `${familyGroup(model.id)}:${backend}`)),
+  );
+  for (const key of advertised) {
+    if (!records.has(key)) {
+      const [group, backend] = key.split(":");
+      throw new Error(
+        `family SC-${group} has no ${backend} rung-4 contract-prerequisite record, so the rung-4 arm ` +
+          "would have no declared graph to admit its cells from (sc-19542)",
+      );
+    }
+  }
+  for (const key of records.keys()) {
+    if (!advertised.has(key)) {
+      const [group, backend] = key.split(":");
+      throw new Error(
+        `rung-4 contract prerequisites: family SC-${group} carries a ${backend} record, but the ` +
+          "catalog advertises no such entry — the record reaches no cell (sc-19542)",
+      );
+    }
+  }
+}
+
+/**
+ * The shared `LoadShape` edge, graded where the catalog can actually see a load shape (sc-19542).
+ *
+ * `rung4ContractAdmits` cannot demote a cell on that edge, because a coordinate has no load shape.
+ * A declared CALIBRATION BINDING does: `loadShape` is a field on every binding, and today's rung-4
+ * bindings carry `deferred_materialization` while their rungs 0-3 siblings carry
+ * `eager_materialization` — the contract prerequisite showing up in the evidence. A rung-4 binding
+ * claiming a shape the edge forbids describes a measurement gen-core would have refused to run, so
+ * it fails generation.
+ *
+ * The required shape is READ OUT OF `SHARED_RUNG4_PREREQUISITES` rather than restated, so this
+ * guard cannot drift from the gate it grades: change the shared edge and this demands the new shape
+ * on the next run, with nothing to update by hand.
+ */
+export function assertRung4CalibrationsDeclareTheRequiredLoadShape(models) {
+  const required = SHARED_RUNG4_PREREQUISITES.filter(
+    (prerequisite) => prerequisite.kind === "load-shape",
+  ).map((prerequisite) => prerequisite.shape);
+  if (!required.length) {
+    throw new Error(
+      "rung 4 declares no shared load-shape prerequisite, so this guard grades nothing — remove it " +
+        "with the edge rather than leaving it green (sc-19542)",
+    );
+  }
+  for (const model of models) {
+    for (const backend of ["mlx", "candle"]) {
+      for (const binding of model[backend]?.calibrations ?? []) {
+        if (binding.rung !== "bounded_transformer_residency") continue;
+        if (!required.includes(binding.loadShape)) {
+          throw new Error(
+            `${model.id}:${backend}: a bounded_transformer_residency calibration binding declares ` +
+              `loadShape ${JSON.stringify(binding.loadShape)}, but rung 4's shared prerequisite ` +
+              `requires ${required.join(" or ")} (sc-19542)`,
+          );
+        }
+      }
+    }
+  }
 }
 
 function staticCandleOverlayIsAvailable({ model, route, overlay, manifestById }) {
@@ -2382,6 +3123,7 @@ export function strategyStatus({
   mode,
   overlay,
   rung4Survey,
+  rung4ContractPrerequisites,
   manifestById,
   inferenceClosureDigests,
 }) {
@@ -2420,7 +3162,13 @@ export function strategyStatus({
     rung !== "bounded_transformer_residency" ||
     (["full", "partial"].includes(staticRung4Verdict?.structuralApplicability) &&
       staticRung4Implementation !== null &&
-      stagedResidencyIsAvailable({
+      // The image families' declared prerequisite graph (sc-19542) where a record exists; the
+      // pre-sc-19542 direct predicate for the video lanes the derivation script does not yet walk
+      // (sc-18815 sync reconciliation — the coverage fence documents the split).
+      ((key, context) =>
+        rung4ContractPrerequisites.has(key)
+          ? rung4ContractAdmits(rung4ContractPrerequisites.get(key), context)
+          : stagedResidencyIsAvailable(context))(`${familyGroup(model.id)}:${backend}`, {
         backend,
         model,
         route,
@@ -2716,8 +3464,9 @@ export function strategyStatus({
       return { state: "Missing", source: null, parameters: {} };
     }
     // Implementation is per ENTRY and per MODE — inference may route a catalog entry's modes to
-    // different descriptors than the one carrying the contract — and the rung is unreachable without
-    // its declared rung-1 prerequisite however good the architecture is.
+    // different descriptors than the one carrying the contract — and the rung is unreachable unless
+    // this provider's own declared prerequisite graph admits the cell, however good the architecture
+    // is.
     const implementationParameters = rung4Implementation(
       verdict,
       model.id,
@@ -2727,7 +3476,13 @@ export function strategyStatus({
     );
     const implementedHere =
       implementationParameters !== null &&
-      stagedResidencyIsAvailable({
+      // The image families' declared prerequisite graph (sc-19542) where a record exists; the
+      // pre-sc-19542 direct predicate for the video lanes the derivation script does not yet walk
+      // (sc-18815 sync reconciliation — the coverage fence documents the split).
+      ((key, context) =>
+        rung4ContractPrerequisites.has(key)
+          ? rung4ContractAdmits(rung4ContractPrerequisites.get(key), context)
+          : stagedResidencyIsAvailable(context))(`${familyGroup(model.id)}:${backend}`, {
         backend,
         model,
         route,
@@ -2776,6 +3531,7 @@ function validateMatrix(
   expectedIds,
   backendTierOverrides,
   rung4Survey,
+  rung4ContractPrerequisites,
   cellInventoryExpectations,
   calibrationPlan,
   catalogFamilyBackendPairs,
@@ -2823,7 +3579,9 @@ function validateMatrix(
     }
   }
   assertCellInventoryMatchesCatalog(matrix.cells, cellInventoryExpectations);
-  assertCalibrationPlanTargetsResolvedCoordinates(calibrationPlan, matrix.cells);
+  assertCalibrationPlanTargetsResolvedCoordinates(calibrationPlan, matrix.cells, {
+    outOfMatrixEntries: rung4Survey.outOfMatrixCatalogEntries,
+  });
   assertTwinCoverage(matrix.models);
   assertVideoOwnership(matrix.models);
   assertUnroutedEntriesAreDeclared(matrix.models);
@@ -2835,6 +3593,7 @@ function validateMatrix(
   assertRung4SurveyCoversEveryFamily(rung4Survey, matrix.models, {
     catalogFamilyBackends: catalogFamilyBackendPairs,
   });
+  assertRung4PrerequisiteRecordsCoverEveryFamily(rung4ContractPrerequisites, matrix.models);
   for (const model of matrix.models) {
     for (const map of ["owningFamilyStories", "owningModelStories", "axes"]) {
       const owned = Object.keys(model[map]).sort();
@@ -3033,10 +3792,33 @@ export function plannedCellIds(calibrationPlan, cells) {
  * So this is not a slim guard. It is the check that should always have existed: a plan entry naming a
  * coordinate the catalog cannot express is a typo, a stale target, or a vocabulary drift, and all
  * three are defects. It throws rather than warns because the failure mode it replaces was silence.
+ *
+ * ## The one exemption, and why it is not a hole (sc-18663)
+ *
+ * `buildMatrix` SUBTRACTS the survey's declared out-of-matrix catalog entries from the coordinate
+ * universe, so those entries resolve to no cell BY CONSTRUCTION. Requiring a plan row for one of
+ * them to match a coordinate is therefore a category error, not a missing-coordinate report: such a
+ * family is validated by its `outOfMatrixFamilies` record — every stack, both claims, on every
+ * generation — instead of by a published cell, and epic 17137's terminal campaign has to be able to
+ * plan captures against MiniMax-H3 before the matrix can carry a verdict for it.
+ *
+ * The exemption reads the SAME set the universe subtraction reads (`survey.outOfMatrixCatalogEntries`,
+ * computed once in `parseRung4Survey`), so the two cannot drift into exempting rows the matrix does
+ * carry. It is keyed on `target.modelId`, the same field the subtraction is keyed on, so it is the
+ * exact complement of that subtraction and nothing wider. An entry naming a family that is in
+ * NEITHER the matrix nor the survey's out-of-matrix set still fails closed, and the day `familyGroup`
+ * learns one of the named entries `parseOutOfMatrixRung4Families` throws and forces the family into
+ * the matrix — at which point its plan rows are held to the coordinate requirement again.
  */
-export function assertCalibrationPlanTargetsResolvedCoordinates(calibrationPlan, cells) {
+export function assertCalibrationPlanTargetsResolvedCoordinates(
+  calibrationPlan,
+  cells,
+  { outOfMatrixEntries = new Set() } = {},
+) {
   const unmatched = calibrationPlan.providers.filter(
-    (entry) => !cells.some((cell) => planEntryTargetsCoordinate(entry, cell)),
+    (entry) =>
+      !outOfMatrixEntries.has(entry.target.modelId) &&
+      !cells.some((cell) => planEntryTargetsCoordinate(entry, cell)),
   );
   if (!unmatched.length) return;
   const detail = unmatched
@@ -3337,6 +4119,10 @@ export const SOURCE_PATHS = Object.freeze({
   calibrationPlan: "config/memory-calibration-plan.json",
   inferenceClosures: "config/inference-provider-closures.json",
   rung4Survey: "config/rung4-applicability-survey.json",
+  // sc-19542. In SOURCE_PATHS because it DECIDES cell state: the rung-4 arm admits from these
+  // records. A source that changes a cell and is outside the fingerprint is a provenance hole, and
+  // the source-tree revision is the thing that would have to notice a record being edited.
+  rung4ContractPrerequisites: "config/rung4-contract-prerequisites.json",
   engineCapabilitiesMlx: "config/engine-capabilities/capabilities.mlx.json",
   engineCapabilitiesCandle: "config/engine-capabilities/capabilities.candle.json",
   cargo: "Cargo.toml",
@@ -3405,6 +4191,12 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
   );
   const closureDigestsByProvider = Object.fromEntries(inferenceClosureDigests);
   const rung4Survey = parseRung4Survey(bodies.rung4Survey, { familyGroups: familyGroup });
+  // sc-19542: the rung-4 arm's declared prerequisite graph, per (family, backend). Coverage is
+  // fenced against the survey's own key set, so the two cannot drift apart.
+  const rung4ContractPrerequisites = parseRung4ContractPrerequisites(
+    bodies.rung4ContractPrerequisites,
+    { pin: inferencePin(cargoBody) },
+  );
   const manifest = JSON.parse(stripJsoncComments(manifestBody));
   // Comments and formatting are not part of any of these sources' contracts. Hash each source's
   // SEMANTIC body — parsed value for JSON/JSONC, inert whole-line comments removed for Rust and
@@ -3423,7 +4215,22 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
   // does not carry cannot even report `Missing`, which is how the video lane read as complete while
   // covering one modality. Adding a modality here is deliberate and gated: it needs route resolution
   // (`resolveRoutes`), a family group, and a rung-4 survey verdict or a declared pending owner.
-  const entries = manifest.models.filter((model) => MATRIX_MODALITIES.has(model.type));
+  //
+  // MINUS the survey's declared OUT-OF-MATRIX entries (sc-18664 × sc-18815, reconciled by the
+  // sc-17137 main sync). Those records name catalog entries the matrix cannot yet carry a verdict
+  // for — MiniMax-H3 is the live case: `familyGroup` has no arm for it, no video-route resolver row
+  // exists, and its providers are absent at the pinned inference revision, so admitting it here
+  // fails generation at `resolveRoute` rather than producing a row. The records are NOT unvalidated
+  // escape hatches: `parseOutOfMatrixRung4Families` (run inside `parseRung4Survey` above) validates
+  // every one on every generation and throws the day `familyGroup` learns one of the named entries,
+  // which is what forces the family INTO this universe when the epic promotes it.
+  // sc-18663: read from the parse above rather than re-derived from a second `JSON.parse` of the
+  // same body. The calibration-plan exemption reads the same set, and two spellings of it would let
+  // an exemption survive a subtraction being narrowed (or the reverse).
+  const outOfMatrixEntries = rung4Survey.outOfMatrixCatalogEntries;
+  const entries = manifest.models.filter(
+    (model) => MATRIX_MODALITIES.has(model.type) && !outOfMatrixEntries.has(model.id),
+  );
   const images = entries.filter((model) => model.type === "image");
   const manifestById = new Map(entries.map((model) => [model.id, model]));
   const expectedIds = parseExpectedImageIds(enginesBody);
@@ -3454,6 +4261,8 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
   // an entry that declares no control lane, and scoping that to `images` would let a video entry
   // acquire one and orphan its measurements silently — the sc-16069 failure in a new modality.
   assertDeclaredControlLanes(entries, bodies.imageRouting);
+  // sc-19542: rung 4's shared LoadShape edge, graded where the catalog can see a load shape.
+  assertRung4CalibrationsDeclareTheRequiredLoadShape(images);
 
   const models = entries
     .map((model) => {
@@ -3559,6 +4368,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
                 mode,
                 overlay,
                 rung4Survey,
+                rung4ContractPrerequisites,
                 manifestById,
                 inferenceClosureDigests,
               });
@@ -3788,37 +4598,56 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
   // Report-only side channel: the enumeration is deliberately absent from the checked-in document, so
   // `report-memory-contract-reconciliation.mjs` collects it here instead of reassembling the inputs.
   onReconciliation?.(memoryContractReconciliation);
-  const calibrationRuns = calibrationBundle.records.map((record) => {
-    const cell = cells.find(
-      (candidate) =>
-        candidate.modelId === record.target.modelId &&
-        candidate.resolvedRoute === record.target.provider &&
-        candidate.backend === record.backend &&
-        candidate.tier === record.target.tier &&
-        candidate.mode === record.target.mode &&
-        candidate.overlay === matrixOverlayFor(record.target.overlay) &&
-        candidate.rung === record.strategy.rung,
-    );
-    if (!cell) throw new Error(`${record.id}: calibration record does not map to a matrix cell`);
-    const modality = manifestById.get(record.target.modelId)?.type ?? null;
-    return {
-      cellId: cell.id,
-      binding: calibrationBinding(record, cell, {
-        exactPlanEntries: exactPlanEntriesForRecord(calibrationPlan, record),
-        modality,
-      }),
-      semantics: cell.evidence.currentEnvironmentVerification.some(
-        (evidence) => evidence.source === `docs/generated/memory-calibration-evidence.json#${record.id}`,
-      )
-        ? "current"
-        : evidenceSemantics(record, {
-            sceneWorks: sceneWorksRevision,
-            inference: pin,
-            inferenceClosureDigests: closureDigestsByProvider,
-          }),
-      record,
-    };
-  });
+  // sc-18663: the SAME category error as the calibration-plan guard, one step later. An out-of-matrix
+  // family's catalog entries are subtracted from the universe above, so its receipts can never find a
+  // cell — and demanding one turned the campaign's first MiniMax-H3 record into a generation failure.
+  // Those numbers are carried by the family's `outOfMatrixFamilies.memoryCharacterization`, which is
+  // DERIVED from its `measuredGeometries` and validated on every generation, so nothing goes
+  // unrecorded by being unbound here.
+  //
+  // Keyed on the SAME set the subtraction uses (`survey.outOfMatrixCatalogEntries`) and on the
+  // record's own `target.modelId`, so the skip is the exact complement of the subtraction and cannot
+  // outlive it: the day `familyGroup` learns one of those entries the survey record is refused, the
+  // family joins the universe, and its records bind here like any other. A record naming a family in
+  // NEITHER set still throws below — this narrows the requirement, it does not remove it.
+  //
+  // One consequence, stated rather than left to be discovered: `summary.calibrationRuns` counts the
+  // BUNDLE, so once an out-of-matrix receipt exists it exceeds `matrix.calibrationRuns.length` by
+  // exactly the skipped rows. That is the honest pair — how many receipts exist, and how many bound
+  // to a published coordinate — not a discrepancy.
+  const calibrationRuns = calibrationBundle.records
+    .filter((record) => !outOfMatrixEntries.has(record.target.modelId))
+    .map((record) => {
+      const cell = cells.find(
+        (candidate) =>
+          candidate.modelId === record.target.modelId &&
+          candidate.resolvedRoute === record.target.provider &&
+          candidate.backend === record.backend &&
+          candidate.tier === record.target.tier &&
+          candidate.mode === record.target.mode &&
+          candidate.overlay === matrixOverlayFor(record.target.overlay) &&
+          candidate.rung === record.strategy.rung,
+      );
+      if (!cell) throw new Error(`${record.id}: calibration record does not map to a matrix cell`);
+      const modality = manifestById.get(record.target.modelId)?.type ?? null;
+      return {
+        cellId: cell.id,
+        binding: calibrationBinding(record, cell, {
+          exactPlanEntries: exactPlanEntriesForRecord(calibrationPlan, record),
+          modality,
+        }),
+        semantics: cell.evidence.currentEnvironmentVerification.some(
+          (evidence) => evidence.source === `docs/generated/memory-calibration-evidence.json#${record.id}`,
+        )
+          ? "current"
+          : evidenceSemantics(record, {
+              sceneWorks: sceneWorksRevision,
+              inference: pin,
+              inferenceClosureDigests: closureDigestsByProvider,
+            }),
+        record,
+      };
+    });
 
   // Replaced after validation with the PUBLISHED cells only (sc-18099). Built over the full set here
   // so the document shape below is unchanged and `validateMatrix` still sees the full inventory.
@@ -4138,6 +4967,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
     expectedIds,
     backendTierOverrides,
     rung4Survey,
+    rung4ContractPrerequisites,
     cellInventoryExpectations,
     calibrationPlan,
     catalogFamilyBackends(manifest.models, routedBackends),

@@ -475,7 +475,7 @@ Each also honours an optional repository-secret override (`SCENEWORKS_QWEN_IMAGE
 `SCENEWORKS_Z_IMAGE_ROOT`, …), used only when it canonicalizes to a path ending in that lane's exact
 suffix.
 
-### Adapter environment — one family per provider arm
+### Adapter environment — seven families, one per provider arm
 
 The derivation rule: **each provider arm reads `SCENEWORKS_<ARTIFACT>_{REPOSITORY,REVISION,ROOT}`**,
 where `<ARTIFACT>` names the artifact family the arm loads, not the provider id verbatim
@@ -523,7 +523,7 @@ SCENEWORKS_FLUX2_REPOSITORY=SceneWorks/flux2-dev-mlx         # fixed; validated 
 SCENEWORKS_FLUX2_REVISION=<exact artifact revision>
 SCENEWORKS_FLUX2_ROOT=/abs/path/.../snapshots/<rev>/<tier>   # q4 | q8 — tier DERIVED from the plan target
 
-# memory-mlx-adapter — ltx_2_3   (sc-18808; the MLX video arm. FOUR vars, not three)
+# memory-mlx-adapter — ltx_2_3   (sc-18808; the only VIDEO arm. FOUR vars, not three)
 SCENEWORKS_LTX_REPOSITORY=SceneWorks/ltx-2.3-mlx             # fixed; validated against LTX_REPOSITORY
 SCENEWORKS_LTX_REVISION=<exact artifact revision>
 SCENEWORKS_LTX_ROOT=/abs/path/.../snapshots/<rev>/<tier>     # bf16 | q4 | q8, derived from the plan target
@@ -665,23 +665,21 @@ node scripts/memory-calibration-harness.mjs run \
   --provider-command '["/abs/path/to/target/release/memory-<backend>-adapter"]' \
   --sceneworks-repo /abs/path/to/SceneWorks \
   --inference-repo /abs/path/to/inference \
-  --resume docs/generated/memory-calibration-evidence.json \
+  --raw-log-dir /abs/path/OUTSIDE/the/repo/raw-receipts \
+  --source-path-prefix docs/calibration/<story-or-campaign> \
   --output /abs/path/OUTSIDE/the/repo/<lane>-evidence.json
 ```
 
-🔴 **On an MLX physical-source arm only, add the raw-log pair.** These two flags are the
-physical-source-capture path and they are MLX-only, so they are NOT in the invocation above:
-
-```bash
-  --raw-log-dir /abs/path/OUTSIDE/the/repo/raw-receipts \
-  --source-path-prefix docs/calibration/<story-or-campaign> \
-```
-
-The harness refuses any case where `--raw-log-dir` is set and the provider returned no
-`sourceCapture`, and accepts only `sourceCapture.kind === "physical_mlx"`. Only
-`crates/sceneworks-memory-adapter/src/bin/mlx.rs` emits that key; `bin/candle.rs` emits none, so on
-a candle lane the sweep dies *inside the per-case loop* — after the first row's cold model load —
-rather than at argument parsing. The two are also validated as a pair, so supply both or neither.
+> **No `--resume` here, and RUN `plan` FIRST.** This recipe used to pass
+> `--resume docs/generated/memory-calibration-evidence.json`, which silently no-ops the most common
+> reason to be reading this runbook. `--resume` suppresses cases that were already ATTEMPTED, judged
+> on repository identity with the closure digest deliberately stripped from both sides — so a record
+> staled by an inference pin bump still counts as attempted, and `run --resume` captures nothing
+> while exiting 0. Measured on sc-19721: `plan --resume` returned 0 of the 7 fixtures the bump had
+> just demoted; without it, all 7 resolved, for 19 cases. Both CI lanes omit `--resume` from `run`.
+> Always `plan` both ways before holding an exclusive GPU window — the diff between the two fixture
+> lists IS your re-capture set. See
+> [memory-calibration-harness.md](memory-calibration-harness.md) for the mechanism.
 
 Then schema-check the raw bundle before doing anything else:
 
@@ -702,7 +700,12 @@ Flag notes, all from `memory-calibration-harness.mjs:1186-1233`:
   sweep can be resumed by pointing `--resume` at the partial output and re-running. Only schema-valid
   `complete` records suppress their executed passing cases; a gated or candidate record suppresses a
   repeated *attempt* only when its logical case, harness version, repository receipts and hardware
-  probe all match.
+  probe all match. **That is its ONLY correct use: resuming an interrupted sweep of the same
+  revision.** Suppression is blind to the closure digest in both directions
+  (`operationallyAttemptedLogicalIds`), by design — it decides whether to re-run a multi-hour
+  capture, not whether the evidence is current. So it must never be used to re-capture evidence a
+  pin bump staled: those records still read as attempted. For a re-capture, omit it on `run` and
+  pass it on `ingest`, where it means the merge BASE instead.
 
 ### 6b. Through the guarded dispatch
 

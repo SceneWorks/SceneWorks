@@ -33,7 +33,8 @@ use sceneworks_core::image_request::{
     default_count as image_default_count, default_resolution as image_default_resolution,
 };
 use sceneworks_core::jobs_store::{
-    candle_supported, mac_capabilities, mac_rust_supported, model_mac_support, CreateJob,
+    candle_supported, mac_capabilities, mac_rust_supported, model_candle_support,
+    model_mac_support, video_job_type_for_mode, video_request_is_claimable_by_any_lane, CreateJob,
     DuplicateJob, JobsStore, JobsStoreError, MacCapabilities, ProgressUpdate, RegisterWorker,
     RetryJob, RouteDecision, StaleSweep, UnsupportedReason, WorkerHeartbeat, JOB_STATUSES,
 };
@@ -62,7 +63,9 @@ use sceneworks_core::training_store::{
     TrainingDatasetSummary, TrainingDatasetUpdateInput,
 };
 use sceneworks_core::video_request::{
-    default_resolution, duration_limit_error, fps_limit_error, resolve_duration, resolve_fps,
+    classify_reference_set, default_resolution, duration_limit_error, fps_limit_error,
+    reference_limit_error, requested_steps, resolve_duration, resolve_fps, steps_limit_error,
+    ReferenceSetVerdict,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -4829,6 +4832,45 @@ fn validate_character_test_job(payload: &CharacterTestRequest) -> Result<(), Api
     Ok(())
 }
 
+/// Every `mode` a `POST /api/v1/video/jobs` request may name — the enqueue allow-list, and a
+/// SEPARATE reachability gate from the catalog: a mode absent HERE 400s with "Unsupported video
+/// mode" no matter what the model's manifest `capabilities` declare, what `VIDEO_UI_MODES` offers,
+/// or what the worker can render.
+///
+/// It is a named `const` rather than the inline array literal it was so a test can enumerate the
+/// REAL list. A guard that retypes the modes asserts against its own copy and stays green while
+/// this list drifts — the false-green shape that let GH #2074 ship. `every_declared_video_capability_is_submittable`
+/// (tests/jobs.rs) reads this constant and the shipped manifest, so a new family's capability that
+/// is not admitted here is RED at the source.
+///
+/// ⚠️ Adding a family means checking SIX surfaces, not one (sc-17159): manifest `capabilities`,
+/// [`sceneworks_core::jobs_store::routing`]'s `VIDEO_UI_MODES`, `video_mode_is_mlx_eligible` +
+/// `VIDEO_MODEL_CAPS`, the candle claim gate, THIS list plus the per-mode required-asset `match`
+/// below it, and the worker's dispatch arm.
+pub(crate) const VIDEO_JOB_MODES: &[&str] = &[
+    "image_to_video",
+    "text_to_video",
+    "first_last_frame",
+    "extend_clip",
+    "video_bridge",
+    "replace_person",
+    // Bernini editing / reference-driven video modes (sc-4703).
+    "video_to_video",
+    "reference_to_video",
+    "reference_video_to_video",
+    // Bernini multi-source-video modes (sc-5425): mv2v (multiple source clips)
+    // and ads2v (source video + reference video + reference images).
+    "multi_video_to_video",
+    "ads2v",
+    // SCAIL-2 standalone character animation (sc-5448 / sc-5449, epic 5439): reference
+    // character image + driving video → animated clip. It was wired end-to-end — catalog
+    // `capabilities`, `VIDEO_UI_MODES`, `video_mode_is_mlx_eligible`, the candle claim gate,
+    // the worker's `generate_scail2` — and offered in the Video Studio, but never added
+    // HERE, so every submission 400'd on "Unsupported video mode" and the mode was
+    // unreachable from the moment it shipped (GH #2074).
+    "animate_character",
+];
+
 fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
     if payload.project_id.is_empty() {
         return Err(ApiError::bad_request("projectId is required"));
@@ -4846,31 +4888,7 @@ fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
             sceneworks_core::lora_family::MAX_JOB_LORAS
         )));
     }
-    if ![
-        "image_to_video",
-        "text_to_video",
-        "first_last_frame",
-        "extend_clip",
-        "video_bridge",
-        "replace_person",
-        // Bernini editing / reference-driven video modes (sc-4703).
-        "video_to_video",
-        "reference_to_video",
-        "reference_video_to_video",
-        // Bernini multi-source-video modes (sc-5425): mv2v (multiple source clips)
-        // and ads2v (source video + reference video + reference images).
-        "multi_video_to_video",
-        "ads2v",
-        // SCAIL-2 standalone character animation (sc-5448 / sc-5449, epic 5439): reference
-        // character image + driving video → animated clip. It was wired end-to-end — catalog
-        // `capabilities`, `VIDEO_UI_MODES`, `video_mode_is_mlx_eligible`, the candle claim gate,
-        // the worker's `generate_scail2` — and offered in the Video Studio, but never added
-        // HERE, so every submission 400'd on "Unsupported video mode" and the mode was
-        // unreachable from the moment it shipped (GH #2074).
-        "animate_character",
-    ]
-    .contains(&payload.mode.as_str())
-    {
+    if !VIDEO_JOB_MODES.contains(&payload.mode.as_str()) {
         return Err(ApiError::bad_request("Unsupported video mode"));
     }
     if payload
@@ -4901,6 +4919,29 @@ fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
             "sourceClipAssetIds must contain at most {MAX_VIDEO_SOURCE_CLIP_ASSET_IDS} ids"
         )));
     }
+    // The audio references (sc-17160), rejected blank-first and bounded exactly like the two
+    // id lists above — same order, same wording — because "consistent with the existing lists"
+    // is the contract a caller reads off one list and applies to the next.
+    if payload
+        .reference_audio_asset_ids
+        .iter()
+        .any(|id| id.trim().is_empty())
+    {
+        return Err(ApiError::bad_request(
+            "referenceAudioAssetIds must not contain blank ids",
+        ));
+    }
+    if payload.reference_audio_asset_ids.len() > MAX_VIDEO_REFERENCE_AUDIO_ASSET_IDS {
+        return Err(ApiError::bad_request(format!(
+            "referenceAudioAssetIds must contain at most {MAX_VIDEO_REFERENCE_AUDIO_ASSET_IDS} ids"
+        )));
+    }
+    // There is deliberately NO combined blanket here, only the three per-list ones above. 12 is
+    // MiniMax-H3's number, not a product-wide truth: today's caps admit 8 images AND 8 clips on
+    // one request, so a blanket 12 would refuse a 16-file shape this route accepts right now —
+    // narrowing every existing video model, which is precisely what the cap change must not do.
+    // The combined budget is a per-model fact and lives with the model, as
+    // `limits.maxCombinedReferenceAssets` (see `create_video_job`).
     // Only a *named* duration is bounded here, for the same reason as fps below: an omitted one is
     // resolved from the model's declared `defaults.duration` in `create_video_job`. This blanket
     // stays a payload-sanity check; the model's own `limits.hardMaxDuration` is enforced there
@@ -4966,9 +5007,47 @@ fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
         "video_to_video" if payload.source_clip_asset_id.is_none() => Err(ApiError::bad_request(
             "Video to Video requires a source clip.",
         )),
-        "reference_to_video" if payload.reference_asset_ids.is_empty() => Err(
-            ApiError::bad_request("Reference to Video requires at least one reference image."),
-        ),
+        // `reference_to_video` requires at least one VISUAL reference — an image or a video clip.
+        // Audio references are admitted alongside them and never instead of them.
+        //
+        // Two corrections in one line. sc-17159 widened this from `reference_asset_ids.is_empty()`
+        // because Bernini, the only r2v model at the time, takes images alone, so "at least one
+        // reference image" and "at least one reference" were the same sentence — true for the
+        // clips MiniMax-H3 Ref2VA added, and WRONG for the audio it added at the same time.
+        //
+        // sc-19574 settled it against the reference implementation rather than by argument.
+        // diffusers `MiniMaxH3` (upstream PR #14355, `0.40.0.dev0 @ 7564fb01`) states the rule on
+        // `MiniMaxH3AudioReference` — "never on its own — an audio reference has to be paired with
+        // at least one image or video reference. It never reaches the conditioner and is encoded by
+        // the audio VAE alone" — and ENFORCES it in `before_encoder.py`:
+        //
+        //     if set(kinds) == {"audio"}:
+        //         raise ValueError("An audio reference has to be paired with at least one image or
+        //                           video reference and cannot be used on its own.")
+        //
+        // So the engine was right and this layer was wrong: an audio-only set leaves the visual
+        // conditioner with nothing to read, and the render it would produce is unconditioned. The
+        // worker refuses it too (sc-19508, `minimax_h3_validate_partition`); refusing it HERE is
+        // what makes the user find out at submission instead of after a queued job fails.
+        //
+        // The rule itself is `sceneworks_core::video_request::classify_reference_set`, which the
+        // MCP tool and the worker call too — one predicate, three layers, so they cannot drift back
+        // into disagreement. Only the WORDING is this layer's. It does NOT loosen Bernini: its own
+        // conditioning assembly (`resolve_bernini_conditioning`, both lanes) still refuses an r2v
+        // with no `referenceAssetIds`, naming bernini — the model-specific half of the requirement
+        // belongs with the model, exactly like `limits.maxReferenceAssets`.
+        "reference_to_video"
+            if classify_reference_set(
+                payload.reference_asset_ids.len(),
+                payload.source_clip_asset_ids.len(),
+                payload.reference_audio_asset_ids.len(),
+            ) != ReferenceSetVerdict::Conditionable =>
+        {
+            Err(ApiError::bad_request(
+                "Reference to Video requires at least one reference image or video clip. Audio \
+                 references condition the soundtrack and cannot be the only reference.",
+            ))
+        }
         "reference_video_to_video" if payload.source_clip_asset_id.is_none() => Err(
             ApiError::bad_request("Reference + Video requires a source clip."),
         ),
@@ -5237,8 +5316,32 @@ const MAX_IMAGE_DIMENSION: u32 = 4096;
 /// Upper bound for video width/height — a lower backstop than images, matching
 /// the cap enforced when validating a video job request.
 const MAX_VIDEO_DIMENSION: u32 = 1920;
-const MAX_VIDEO_REFERENCE_ASSET_IDS: usize = 8;
+// ---------------------------------------------------------------------------
+// Reference-media payload-sanity blankets (sc-17160).
+//
+// These three are the OUTER bound — "no video model in the product accepts more than
+// this" — and play exactly the role the `1..=30` duration and `1..=60` fps blankets do
+// a few lines up in `validate_video_job`: they run BEFORE the model is known (a recipe
+// preset can still replace it — sc-12300), so they cannot be the per-model answer.
+//
+// The BINDING per-model cap is `sceneworks_core::video_request::reference_limit_error`,
+// enforced in `create_video_job` against the resolved manifest entry, and mirrored in the
+// worker's `video_preflight`. Its defaults are 8 images / 8 clips / 0 audio / no combined
+// ceiling, so raising the image blanket from 8 to 9 here does NOT hand a 9th reference to
+// any already-shipped model — bernini and every other family still refuse it, one layer
+// down, on `limits.maxReferenceAssets`.
+//
+// The COMBINED cap has no blanket at all, only a per-model declaration, for the same reason
+// in the opposite direction: see the note where the per-list checks end.
+// ---------------------------------------------------------------------------
+
+/// 9 — MiniMax-H3 Ref2VA's image-reference ceiling, the largest of any shipped video model
+/// (every other family stops at [`sceneworks_core::video_request::DEFAULT_MAX_REFERENCE_ASSETS`]).
+const MAX_VIDEO_REFERENCE_ASSET_IDS: usize = 9;
 const MAX_VIDEO_SOURCE_CLIP_ASSET_IDS: usize = 8;
+/// 3 — Ref2VA's audio-reference ceiling. No model declares more; models that declare
+/// nothing take none at all (`DEFAULT_MAX_REFERENCE_AUDIO_ASSETS` is 0).
+const MAX_VIDEO_REFERENCE_AUDIO_ASSET_IDS: usize = 3;
 
 fn validate_dimension(value: u32, field: &'static str, max: u32) -> Result<(), ApiError> {
     if !(256..=max).contains(&value) {

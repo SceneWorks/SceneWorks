@@ -56,7 +56,7 @@ while read -r _local_ref local_sha _remote_ref remote_sha; do
   # it; it adds no gate and demands no measurement. `platform-review-contracts.test.mjs` derives the
   # coverage from SOURCE_PATHS so the next added source cannot go missing the same way.
   if printf '%s\n' "$changed" | grep -Eq \
-    '^(config/manifests/builtin\.models\.jsonc|config/(memory-calibration-plan|tier-integrity)\.jsonc?|config/(inference-provider-closures|rung4-applicability-survey)\.json|config/engine-capabilities/capabilities\.(mlx|candle)\.json|scripts/(generate-memory-matrix|generate-candle-admission-inventory|check-tier-integrity|memory-calibration-harness)\.mjs|scripts/lib/(source-revision|jsonc|memory-contract-reconciliation|manifest-memory-declarations)\.mjs|docs/generated/(memory-matrix\.json|memory-calibration-evidence\.json|video-memory-curves\.json|candle-admission-inventory\.(json|md)|candle-admission-(baseline|decisions)\.json))$'; then
+    '^(config/manifests/builtin\.models\.jsonc|config/(memory-calibration-plan|tier-integrity)\.jsonc?|config/(inference-provider-closures|rung4-applicability-survey|rung4-contract-prerequisites)\.json|config/engine-capabilities/capabilities\.(mlx|candle)\.json|scripts/(generate-memory-matrix|generate-candle-admission-inventory|check-tier-integrity|memory-calibration-harness)\.mjs|scripts/lib/(source-revision|jsonc|memory-contract-reconciliation|manifest-memory-declarations)\.mjs|docs/generated/(memory-matrix\.json|memory-calibration-evidence\.json|video-memory-curves\.json|candle-admission-inventory\.(json|md)|candle-admission-(baseline|decisions)\.json))$'; then
     derived_docs_changed=1
   fi
 done

@@ -471,7 +471,7 @@ impl KreaRuntimeEvidenceContext {
 /// below, both load-bearing:
 ///
 /// 1. Every multi-megabyte `.safetensors` the testkit writes is converted to a SPARSE file right
-///    after its tier is written (`crate::tests::sparsify_fixture_weights_tail`, the shared
+///    after its tier is written (`crate::test_fixture_disk::sparsify_written_safetensors`, the shared
 ///    sc-20606 home of this discipline): `fsutil sparse setflag` +
 ///    `setrange` over the never-written tail past the safetensors header deallocates it while the
 ///    logical size — and every byte the header actually stores — stays exactly as written. This is
@@ -494,32 +494,16 @@ fn krea_test_artifact_root(tier: &str) -> std::path::PathBuf {
         root: std::path::PathBuf,
     }
 
-    const FIXTURE_PREFIX: &str = "sceneworks-krea-memfix-";
+    /// Distinctive enough that the sweep can match nothing else under the shared temp root.
+    const FIXTURE_FAMILY: &str = "sceneworks-krea-memfix-";
 
     static FIXTURE: std::sync::OnceLock<Fixture> = std::sync::OnceLock::new();
     let fixture = FIXTURE.get_or_init(|| {
-        let temp_root = std::env::temp_dir();
-        if let Ok(entries) = std::fs::read_dir(&temp_root) {
-            let stale_before =
-                std::time::SystemTime::now() - std::time::Duration::from_secs(24 * 60 * 60);
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                let Some(name) = name.to_str() else { continue };
-                if !name.starts_with(FIXTURE_PREFIX) {
-                    continue;
-                }
-                let is_stale = entry
-                    .metadata()
-                    .and_then(|metadata| metadata.modified())
-                    .map(|modified| modified < stale_before)
-                    .unwrap_or(false);
-                if is_stale {
-                    let _ = std::fs::remove_dir_all(entry.path());
-                }
-            }
-        }
+        crate::test_fixture_disk::sweep_stale_fixtures(FIXTURE_FAMILY);
         let temp = tempfile::Builder::new()
-            .prefix(FIXTURE_PREFIX)
+            .prefix(&crate::test_fixture_disk::process_keyed_prefix(
+                FIXTURE_FAMILY,
+            ))
             .tempdir()
             .expect("Krea memory-contract fixture root");
         let root = temp.path().to_path_buf();
@@ -534,7 +518,7 @@ fn krea_test_artifact_root(tier: &str) -> std::path::PathBuf {
             .expect("write sparse Krea encoder fixture");
             // Per tier, not once at the end: the transient full allocation (doc comment above) is
             // then bounded by ONE tier's encoder file rather than all three.
-            crate::tests::sparsify_fixture_weights_tail(&tier_root.join("text_encoder"));
+            crate::test_fixture_disk::sparsify_written_safetensors(&tier_root.join("text_encoder"));
             if let Some(bits) = bits {
                 let transformer = tier_root.join("transformer");
                 std::fs::create_dir_all(&transformer).expect("Krea transformer fixture dir");
@@ -5763,7 +5747,7 @@ mod tests {
         for tier in ["q4", "q8"] {
             for component in ["transformer", "transformer_2", "text_encoder", "vae"] {
                 let path = root.join(tier).join(component).join("model.safetensors");
-                crate::tests::set_sparse_len(&path, 5_000_000_000);
+                crate::test_fixture_disk::create_sparse_weights(&path, 5_000_000_000);
             }
         }
 

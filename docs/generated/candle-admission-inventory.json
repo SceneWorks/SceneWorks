@@ -3,23 +3,23 @@
   "generatedBy": "scripts/generate-candle-admission-inventory.mjs",
   "story": "sc-19049",
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:a9f4340e2ca0ec7853311046774b98d858386736997b47e1b91eaec21114a346",
+    "sceneWorksRevision": "source-tree:2e389736e27827e584b80687532b8ca3f25ab6ba3a83796bf159c59211d8bf06",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "3636705de6bb1c191290da0e03891a1b8b66c07cf6a3d950cc7d8b496623fdb2"
+        "sha256": "0c49ac7397a5e3553555f0c59037f421dcb7f20fd1b68a18e9cbf2f30d40368c"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
-        "sha256": "6567129d5cf9c089a6124669efbfde93c4032701b235b01bb9c9f727e42933cb"
+        "sha256": "fe927562117d616d1d6be27841d56d984ba735a928f85f8d17213829ffa8e256"
       },
       "routingCandle": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
-        "sha256": "d54eaeb777184d0f0610177bfa00c8d9b2ea7a95eddfeb6353d2b1e6d91ff49d"
+        "sha256": "0867b5c59ffc50ccd387fda81de9deec44e8ae4ad99ee97c741fb96f3efd6d58"
       },
       "routingMlx": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
-        "sha256": "45c1cff1dbd1effd7fbb33d0018f8fe40fb777a7d0db6a35ead6201e5b5551a0"
+        "sha256": "57da581fc14e58dabba089b18b58c49264bbbe295e74903574c8858352ad2d51"
       },
       "engines": {
         "path": "crates/sceneworks-worker/src/engines.rs",
@@ -35,7 +35,7 @@
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "c3bfc293c1183733281fb20e58fec79963ebde79bc9561bb9a63f55c833825df"
+        "sha256": "1906687f1cd2d1165c23bce65ac72a830c392484369d76b22c19f857f6dc5291"
       },
       "candleMemoryStrategy": {
         "path": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
@@ -95,7 +95,7 @@
       },
       "imageFluxIpAdapter": {
         "path": "crates/sceneworks-worker/src/image_jobs/flux_ipadapter.rs",
-        "sha256": "9e88b6663c39dd2c7a4f5ab198ca8af5687db9a2f1cf4aa8b3e0ed86c54eb4dc"
+        "sha256": "12463ab2c987bcb1c670ad843350cbafd1c754a0325a19014709c9eba6904c5d"
       },
       "imageKolorsControl": {
         "path": "crates/sceneworks-worker/src/image_jobs/kolors_control.rs",
@@ -3726,6 +3726,7 @@
       "chatterbox_tts",
       "chatterbox_ve",
       "kokoro_82m",
+      "minimax_h3",
       "moss_sfx_v2",
       "moss_tts_realtime",
       "moss_ttsd_v05",

@@ -30,6 +30,19 @@ const ALLOWED: &[(&str, usize, &str)] = &[
         "production: VACE replace-frames + work dir for a real render",
     ),
     (
+        "src/video_jobs/minimax_h3.rs",
+        1,
+        "production: the Ref2VA reference-clip work dir (extracted frames + the clip's own \
+         soundtrack) for a real render, removed by the arm on EVERY exit including the refusals",
+    ),
+    (
+        "src/video_jobs/reference_audio.rs",
+        1,
+        "production: the per-reference work dir the standalone audio references are normalized \
+         into (sc-18650), removed by the resolver on EVERY exit including the refusals — the same \
+         shape as the reference-clip work dir above",
+    ),
+    (
         "src/snapshot_install.rs",
         1,
         "deliberate: `whisper_smoke_hub_cache`'s default root is a revision-keyed cache that is \
@@ -61,13 +74,14 @@ const ALLOWED: &[(&str, usize, &str)] = &[
          a human opens after a real-weight probe run; a guard would delete it first",
     ),
     (
-        "src/vram_gate.rs",
+        "src/test_fixture_disk.rs",
         1,
-        "deliberate (sc-19053): the shared Krea fixture lives in a `static`, and statics never run \
-         `Drop` — its tempfile guard can never delete it, so every test process leaks one dir by \
-         construction. Fixture init therefore sweeps prior runs' stale `sceneworks-krea-memfix-*` \
-         leftovers; the shared temp ROOT is the sweep's subject, and the fixture itself still \
-         hangs off a tempfile guard.",
+        "deliberate: `sweep_stale_fixtures` collects leftovers of the ONE fixture whose guard \
+         cannot run — a `TempDir` parked in a `static`, which never sees `Drop`, so that fixture \
+         leaks a directory per test process by construction. The directories it collects are by \
+         definition ones no `TempDir` owns any more, so there is no guard to ask where they are. \
+         Prefix-scoped, PID-attributed and age-cutoff'd so a concurrent run's fixture can never \
+         match; see `is_stale_fixture` and its tests.",
     ),
 ];
 

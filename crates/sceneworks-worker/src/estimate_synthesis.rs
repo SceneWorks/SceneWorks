@@ -995,27 +995,76 @@ where
     base.saturating_add(auxiliary)
 }
 
-/// The floor's per-rung WEIGHTS term for a load described by a provider contract (sc-18096) —
-/// [`compose_resident_floor_bytes`] over the contract's own declarations. The contract supplies the
-/// component bytes; the law lives one function up.
+/// The floor's per-rung WEIGHTS term for a load described by a provider contract (sc-18096).
+/// Contracts without an evicting transformer sub-stack use [`compose_resident_floor_bytes`]
+/// unchanged; an adopting contract applies the same law while preserving its load-exact
+/// precompute instant.
+/// Bytes the provider declares it drops from inside `asset_facts.transformer_bytes` before the
+/// declaring phase reaches steady state. Auxiliary components are deliberately excluded: they are
+/// not part of the transformer's load-exact term and therefore cannot reduce it.
+pub(crate) fn intra_transformer_evicted_bytes(contract: &MemoryProviderContract) -> u64 {
+    contract
+        .asset_facts
+        .transformer_bytes
+        .saturating_sub(contract.steady_state_transformer_bytes())
+}
+
 pub(crate) fn floor_weights_bytes(
     contract: &MemoryProviderContract,
     engaged: &[MemoryStrategy],
 ) -> u64 {
     let facts = contract.asset_facts;
-    compose_resident_floor_bytes(
-        &ResidentWeights {
-            conditioning_bytes: facts.conditioning_bytes,
-            heavy_bytes: facts.base_bytes.saturating_sub(facts.conditioning_bytes),
-            transformer_bytes: facts.transformer_bytes,
-        },
-        engaged,
-        contract
-            .resident_components()
-            .iter()
-            .filter(|component| component.kind.is_auxiliary())
-            .map(|component| (component.resident_bytes, component.bounded_by)),
-    )
+    let intra_transformer_evicted = intra_transformer_evicted_bytes(contract);
+    if intra_transformer_evicted == 0 {
+        return compose_resident_floor_bytes(
+            &ResidentWeights {
+                conditioning_bytes: facts.conditioning_bytes,
+                heavy_bytes: facts.base_bytes.saturating_sub(facts.conditioning_bytes),
+                transformer_bytes: facts.transformer_bytes,
+            },
+            engaged,
+            contract
+                .resident_components()
+                .iter()
+                .filter(|component| component.kind.is_auxiliary())
+                .map(|component| (component.resident_bytes, component.bounded_by)),
+        );
+    }
+    let conditioning = facts.conditioning_bytes;
+    let staged = engaged.contains(&MemoryStrategy::StagedResidency);
+    // The load-exact non-conditioning working set: the transformer still includes any sub-stack
+    // that will be evicted only after its precompute instant.
+    let heavy_load_exact = facts.base_bytes.saturating_sub(conditioning);
+    let bounded_transformer = engaged.contains(&MemoryStrategy::BoundedTransformerResidency);
+    // The reductions are exclusive. Staged residency may remove only the declared steady-state
+    // transformer drop, clamped at the load-exact transformer; rung 4 windows that whole
+    // transformer and must not subtract the same sub-stack a second time.
+    let heavy = if staged && !bounded_transformer {
+        heavy_load_exact
+            .saturating_sub(intra_transformer_evicted)
+            .max(facts.transformer_bytes)
+    } else if bounded_transformer {
+        heavy_load_exact.saturating_sub(facts.transformer_bytes)
+    } else {
+        heavy_load_exact
+    };
+    let base = if staged {
+        conditioning.max(heavy)
+    } else {
+        conditioning.saturating_add(heavy)
+    };
+    let auxiliary = contract
+        .resident_components()
+        .iter()
+        .filter(|component| component.kind.is_auxiliary())
+        .filter(|component| match component.bounded_by {
+            Some(bounding) => !engaged.contains(&bounding),
+            None => true,
+        })
+        .fold(0_u64, |total, component| {
+            total.saturating_add(component.resident_bytes)
+        });
+    base.saturating_add(auxiliary)
 }
 
 /// The smallest declared value for every numeric knob the engaged composition requires — the most

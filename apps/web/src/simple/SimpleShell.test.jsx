@@ -174,6 +174,72 @@ describe("SimpleShell", () => {
     expect(container.querySelector(".su-nav-footer .su-switch")).toBeTruthy();
   });
 
+  // sc-17162 — `ui.description` had exactly ONE reader in the app: the advanced Models screen's
+  // card. Simple's only route there is "Manage", which switches the SHELL out from under the user,
+  // so a Simple user identified every model by NAME ALONE. That is a reachability gap, not a
+  // styling one: for MiniMax-H3 the string is the withheld-component disclosure, and a disclosure
+  // that renders only on a screen the reduced shell hands off to is not discharged for that shell's
+  // users.
+  //
+  // Driven through the REAL shell across all THREE studios, because the wiring is per-studio (three
+  // separate call sites of `ModelDescription`) and a test that only covered Video — where
+  // MiniMax-H3 lives — would have left Image and Audio silently unwired. Asserted against the
+  // fixture's own string rather than a literal, so it is the model's declared copy that is proven
+  // to reach the DOM.
+  it("renders the selected model's description in every Simple studio (sc-17162)", async () => {
+    // Eligibility is load-bearing here, not decoration: each studio picks its model out of the
+    // catalog on its own terms, and a fixture that fails that filter selects NOTHING, so the studio
+    // renders no model field and the assertion reads `undefined` for a reason that has nothing to
+    // do with the wiring under test. Both legs failed exactly that way in draft — Video needs video
+    // `capabilities`, and Audio resolves per MODE through `audioModelServesMode`, whose default
+    // "music" mode requires a declared `audio.editModes`. That is the argument for driving all
+    // three studios rather than extrapolating from whichever one happened to be green.
+    const described = (type, description, extra) => ({
+      ...IMAGE_MODEL,
+      id: `${type}_described`,
+      type,
+      ui: { ...IMAGE_MODEL.ui, description },
+      ...extra,
+    });
+    const image = described("image", "Image model. Declares what it does and does not do.", {
+      capabilities: ["text_to_image"],
+    });
+    const video = described("video", "Video model. Not the hosted product; 2K is unreachable.", {
+      capabilities: ["text_to_video", "image_to_video"],
+    });
+    const audio = described("audio", "Audio model. Mono only, and no voice cloning.", {
+      capabilities: ["text_to_audio"],
+      audio: { editModes: ["generate"], sampleRates: [44100] },
+    });
+    const context = baseContext({
+      imageModels: [image],
+      videoModels: [video],
+      audioModels: [audio],
+      models: [image, video, audio],
+    });
+
+    await renderShell(root, context);
+    expect(container.querySelector(".su-model-desc")?.textContent).toBe(image.ui.description);
+
+    await click(navButton(container, "Video"));
+    expect(container.querySelector(".su-topbar-title strong").textContent).toBe("Video Studio");
+    expect(container.querySelector(".su-model-desc")?.textContent).toBe(video.ui.description);
+
+    await click(navButton(container, "Audio"));
+    expect(container.querySelector(".su-topbar-title strong").textContent).toBe("Audio Studio");
+    expect(container.querySelector(".su-model-desc")?.textContent).toBe(audio.ui.description);
+  });
+
+  it("renders nothing where a model declares no description (sc-17162)", async () => {
+    // Rendering nothing is always correct — a model that declares no description owes none — and
+    // this is the anti-vacuity guard for the assertion above: without it, a `ModelDescription` that
+    // emitted an empty <p> for every model would still satisfy a querySelector-is-truthy check.
+    // `IMAGE_MODEL` declares `ui` but no `description`, which is the common catalog shape.
+    expect(IMAGE_MODEL.ui.description).toBeUndefined();
+    await renderShell(root, baseContext());
+    expect(container.querySelector(".su-model-desc")).toBeNull();
+  });
+
   it("navigates between screens from the sidebar", async () => {
     await renderShell(root, baseContext());
     await click(navButton(container, "Queue"));
