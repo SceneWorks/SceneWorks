@@ -422,6 +422,123 @@ async fn raw_batch_detail_injects_authoritative_sdxl_components_for_the_worker()
     assert_eq!(claimed["job"]["id"], job["id"]);
 }
 
+/// The OpenPose co-requisite belongs to Model Manager install/repair authority, not the generic
+/// image worker payload. A normal no-pose SDXL request must carry only the provider's unconditional
+/// hard components (three on Candle; none for the self-contained MLX package), and retry/duplicate
+/// must preserve that projection at their shared canonicalization boundary.
+#[tokio::test]
+async fn ordinary_sdxl_txt2img_never_forwards_the_soft_openpose_component() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let manifest_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
+    std::fs::write(
+        manifest_dir.join("builtin.models.jsonc"),
+        include_str!("../../../../config/manifests/builtin.models.jsonc"),
+    )
+    .expect("shipped model manifest writes");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let (status, original) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": "project-1",
+            "mode": "text_to_image",
+            "prompt": "mist over hills",
+            "model": "realvisxl",
+            "count": 1,
+            "advanced": { "steps": 20 }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "txt2img enqueues: {original}");
+    let job_id = original["id"].as_str().expect("job id");
+    let mut boundary_jobs = vec![("create", original.clone())];
+    for operation in ["retry", "duplicate"] {
+        let (status, replay) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/{operation}"),
+            json!({ "payloadChanges": { "advanced": { "steps": 21 } } }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{operation}: {replay}");
+        boundary_jobs.push((operation, replay));
+    }
+
+    for (boundary, job) in boundary_jobs {
+        assert!(
+            job["payload"]["advanced"].get("poses").is_none(),
+            "{boundary}: the ordinary request must remain a no-pose job"
+        );
+        let co_requisites: Vec<&Value> = job["payload"]["modelManifestEntry"]["downloads"]
+            .as_array()
+            .expect("authoritative downloads array")
+            .iter()
+            .filter(|download| download["coRequisite"] == json!(true))
+            .collect();
+        let component_ids: std::collections::BTreeSet<&str> = co_requisites
+            .iter()
+            .filter_map(|download| download["componentId"].as_str())
+            .collect();
+        assert!(
+            !component_ids.contains("controlnet_openpose"),
+            "{boundary}: a no-pose job must not forward the soft OpenPose component: {component_ids:?}"
+        );
+        let hard_sdxl_components = std::collections::BTreeSet::from([
+            "tokenizer_clip_l",
+            "tokenizer_clip_bigg",
+            "vae_fp16_fix",
+        ]);
+        assert_eq!(
+            component_ids, hard_sdxl_components,
+            "{boundary}: the authoritative payload carries only the exact hard SDXL metadata rows"
+        );
+        for download in &co_requisites {
+            let platforms = download["platforms"]
+                .as_array()
+                .expect("hard SDXL co-requisites declare their platforms")
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(
+                platforms,
+                std::collections::BTreeSet::from(["windows", "linux"]),
+                "{boundary}: carried hard SDXL metadata is Candle-only: {download}"
+            );
+        }
+        #[cfg(target_os = "macos")]
+        let target_platform = "macos";
+        #[cfg(target_os = "windows")]
+        let target_platform = "windows";
+        #[cfg(target_os = "linux")]
+        let target_platform = "linux";
+        let applicable_component_ids = co_requisites
+            .iter()
+            .filter(|download| {
+                download["platforms"].as_array().is_some_and(|platforms| {
+                    platforms
+                        .iter()
+                        .any(|platform| platform.as_str() == Some(target_platform))
+                })
+            })
+            .filter_map(|download| download["componentId"].as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        #[cfg(target_os = "macos")]
+        assert!(
+            applicable_component_ids.is_empty(),
+            "{boundary}: carried Candle metadata is inapplicable to self-contained MLX SDXL: \
+             {applicable_component_ids:?}"
+        );
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(
+            applicable_component_ids, hard_sdxl_components,
+            "{boundary}: Candle receives exactly its three descriptor-required components"
+        );
+    }
+}
+
 #[tokio::test]
 async fn raw_batch_detail_overwrites_untrusted_client_manifest_metadata() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
@@ -1192,6 +1309,43 @@ async fn retry_and_duplicate_reauthorize_merged_control_weights_before_create() 
         }
     }
 
+    // The one shipped SDXL OpenPose tuple is accepted at every alternate create boundary, while
+    // caller-forged authorization/revision fields are removed and never persisted.
+    for operation in ["retry", "duplicate"] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/{operation}"),
+            json!({
+                "payloadChanges": {
+                    "advanced": {
+                        "controlWeights": {
+                            "repo": "xinsir/controlnet-openpose-sdxl-1.0",
+                            "filename": "diffusion_pytorch_model.safetensors",
+                            "revision": "0123456789abcdef0123456789abcdef01234567",
+                            "_catalogAuthorized": true
+                        }
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{operation}: {body}");
+        let weights = body["payload"]["advanced"]["controlWeights"]
+            .as_object()
+            .expect("canonical controlWeights");
+        assert_eq!(
+            weights.get("repo").and_then(Value::as_str),
+            Some("xinsir/controlnet-openpose-sdxl-1.0")
+        );
+        assert_eq!(
+            weights.get("filename").and_then(Value::as_str),
+            Some("diffusion_pytorch_model.safetensors")
+        );
+        assert!(!weights.contains_key("revision"));
+        assert!(!weights.contains_key("_catalogAuthorized"));
+    }
+
     // Legitimate operations retain their existing success semantics after the merged payload is
     // canonicalized; rejected injections above must not have persisted hidden jobs.
     for operation in ["retry", "duplicate"] {
@@ -1212,8 +1366,8 @@ async fn retry_and_duplicate_reauthorize_merged_control_weights_before_create() 
     let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
     assert_eq!(
         jobs.as_array().expect("jobs array").len(),
-        3,
-        "only the original and two clean operations may persist"
+        5,
+        "only the original, two shipped-control operations, and two clean operations may persist"
     );
 }
 
