@@ -792,7 +792,7 @@ fn write_pulid_safetensors_fixture(path: &std::path::Path) -> Result<(), String>
     )
     .map_err(|error| format!("create {}: {error}", path.display()))?;
     let mut header = br#"{"weight":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}"#.to_vec();
-    while !header.len().is_multiple_of(8) {
+    while header.len() % 8 != 0 {
         header.push(b' ');
     }
     let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
