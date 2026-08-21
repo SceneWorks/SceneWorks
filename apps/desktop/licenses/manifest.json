@@ -1018,13 +1018,14 @@
     {
       "id": "controlnet-tile-sdxl",
       "models": [
+        "controlnet_openpose_sdxl",
         "controlnet_tile_sdxl"
       ],
-      "name": "ControlNet Tile SDXL",
+      "name": "xinsir SDXL ControlNet utilities",
       "publisher": "xinsir",
       "license": "Apache-2.0",
-      "homepage": "https://huggingface.co/xinsir/controlnet-tile-sdxl-1.0",
-      "usage": "Tile ControlNet for SDXL-architecture upscaling (utility model). Downloaded on first use from the upstream repository; NOT re-hosted by SceneWorks.",
+      "homepage": "https://huggingface.co/xinsir",
+      "usage": "OpenPose ControlNet for SDXL-family pose-guided generation and Tile ControlNet for SDXL-architecture upscaling (shared utility models). Installed explicitly through Model Manager from pinned upstream repositories and NOT re-hosted by SceneWorks; the catalog-backed OpenPose and Tile routes resolve only installed snapshots during their jobs.",
       "documents": [
         {
           "label": "Apache License 2.0",

@@ -20944,6 +20944,47 @@
       }
     },
     {
+      // Generic SDXL OpenPose ControlNet (sc-20747): the optional conditioning network shared by
+      // the exact five SDXL-family pose-control models on both MLX and Candle. It is a standalone
+      // utility, like the Tile ControlNet below, because one immutable snapshot serves every base;
+      // duplicating it as a hard co-requisite would add ~2.5 GB to ordinary non-pose installs.
+      //
+      // Model Manager owns the only download path. `image_jobs/sdxl_control.rs` resolves this exact
+      // pinned snapshot synchronously with `resolve_hf_component_file`; a render with no install
+      // refuses actionably and never creates an app-private cache or reaches the network.
+      // Apache-2.0, ungated; the single safetensors file is consumed directly by both providers.
+      "id": "controlnet_openpose_sdxl",
+      "autoDownload": false,
+      "name": "SDXL OpenPose ControlNet",
+      "family": "controlnet-openpose",
+      "type": "utility",
+      "adapter": "controlnet-openpose",
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "xinsir/controlnet-openpose-sdxl-1.0",
+          "revision": "23f966cd5cfdd3f7729c903e243d87152162d2b7",
+          "files": ["diffusion_pytorch_model.safetensors"],
+          "estimatedSizeBytes": 2500000000
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/xinsir/controlnet-openpose-sdxl-1.0"
+      },
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "ui": {
+        "label": "SDXL OpenPose ControlNet",
+        "description": "Optional OpenPose ControlNet weights used by pose-guided SDXL, RealVisXL, and Illustrious generation on Mac, Windows, and Linux. Install once in Model Manager; the generic SDXL pose-control route uses the immutable local snapshot and never downloads weights. Apache-2.0, commercial-use OK, ungated.",
+        "recommendedFor": []
+      }
+    },
+    {
       // SDXL tile ControlNet — the auxiliary weights the Image Editor Detail enhancer needs
       // (`JobType::ImageDetail`, sc-2437/sc-2438). The native worker (`image_jobs/detail.rs`) resolves it
       // by REPO STRING (`TILE_CONTROLNET_REPO = "xinsir/controlnet-tile-sdxl-1.0"`, overridable via

@@ -2,8 +2,9 @@
 //!
 //! A job payload is not an authority to choose an arbitrary Hugging Face
 //! repository. Shipped strict-control artifacts are admitted by the exact
-//! engine/repository/file tuple below and are always fetched at the pinned
-//! revision. User and project overlays use the separate registered-overlay
+//! engine/repository/file tuple below and are always resolved at the pinned
+//! revision. Install flows may fetch those immutable bytes; render paths are
+//! cache-only. User and project overlays use the separate registered-overlay
 //! catalog path in the Rust API.
 
 /// One immutable strict-control weight artifact shipped by SceneWorks.

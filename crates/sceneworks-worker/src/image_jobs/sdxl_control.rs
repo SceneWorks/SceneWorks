@@ -374,43 +374,19 @@ fn sdxl_control_repo_file(request: &ImageRequest) -> WorkerResult<(String, Strin
     Ok((repo, file, revision))
 }
 
-async fn ensure_sdxl_control_weights(
-    api: &ApiClient,
+/// Resolve the immutable ControlNet artifact installed through Model Manager. This helper has only
+/// [`Settings`] and is synchronous by design: a render job can inspect the HF cache, but it cannot
+/// construct a download client or create an app-private fallback destination.
+fn require_sdxl_control_weights(
     settings: &Settings,
-    job: &JobSnapshot,
     request: &ImageRequest,
 ) -> WorkerResult<PathBuf> {
     let (repo, file, revision) = sdxl_control_repo_file(request)?;
-    if let Some(snapshot) =
-        crate::model_jobs::huggingface_pinned_snapshot_dir(&settings.data_dir, &repo, &revision)
-    {
-        let path = snapshot.join(&file);
-        if path.is_file() {
-            return Ok(path);
-        }
-    }
-    let client = crate::downloads::streaming_download_client();
-    let context = crate::downloads::DownloadContext {
-        api,
-        client: &client,
-        settings,
-        job_id: &job.id,
-        cancel_message: "SDXL pose-control generation canceled while fetching control weights.",
-        fresh_download: false,
-    };
-    let destination = settings
-        .data_dir
-        .join("cache")
-        .join("controlnet-sdxl")
-        .join(&file);
-    crate::downloads::ensure_hf_cached_file(
-        &context,
-        &repo,
-        &revision,
-        &file,
-        &destination,
-    )
-    .await
+    crate::downloads::resolve_hf_component_file(settings, &repo, &revision, &file).ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "SDXL pose-control weights are not installed. Install \"SDXL OpenPose ControlNet\" in Model Manager when using the shipped default, or install the selected control overlay, then retry (required {repo}@{revision}/{file})"
+        ))
+    })
 }
 
 fn sdxl_control_spec(
@@ -575,7 +551,7 @@ async fn generate_sdxl_control_stream(
             request.model
         ))
     })?;
-    let control_weights = ensure_sdxl_control_weights(api, settings, job, request).await?;
+    let control_weights = require_sdxl_control_weights(settings, request)?;
     let (quant, quant_bits) = resolve_quant(request, Some(&weights_dir));
     let adapters = resolve_adapters(request, settings)?;
     let adapter_count = adapters.len();
@@ -731,6 +707,32 @@ mod sdxl_control_tests {
         ImageRequest::from_payload(value.as_object().expect("payload"))
     }
 
+    fn isolate_hf_cache() -> crate::test_env::EnvVars {
+        crate::test_env::EnvVars::set(&[
+            ("HF_HUB_CACHE", ""),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+            ("HF_HOME", ""),
+        ])
+    }
+
+    fn offline_settings_at(data_dir: &Path) -> Settings {
+        Settings {
+            data_dir: data_dir.to_path_buf(),
+            ..crate::test_env::offline_settings()
+        }
+    }
+
+    fn stage_control_snapshot(data_dir: &Path, revision: &str) -> PathBuf {
+        let snapshot = crate::huggingface_repo_cache_path(data_dir, SDXL_CONTROL_REPO)
+            .expect("repo cache path")
+            .join("snapshots")
+            .join(revision);
+        std::fs::create_dir_all(&snapshot).expect("create snapshot");
+        let weights = snapshot.join(SDXL_CONTROL_FILE);
+        std::fs::write(&weights, b"installed control weights").expect("stage weights");
+        weights
+    }
+
     #[test]
     fn exact_five_model_family_and_material_candidate_are_pinned() {
         assert_eq!(
@@ -788,6 +790,97 @@ mod sdxl_control_tests {
         assert!(matches!(spec.control, Some(WeightsSource::File(_))));
         assert!(spec.extra_controls.is_empty(), "public route is singular-control only");
         assert_eq!(spec.quantize, Some(Quant::Q8));
+    }
+
+    #[test]
+    fn manifest_declares_exactly_the_shipped_sdxl_control_authority() {
+        let artifact = sceneworks_core::control_weights::shipped_control_weight(
+            SDXL_CONTROL_ENGINE_ID,
+            SDXL_CONTROL_REPO,
+            SDXL_CONTROL_FILE,
+        )
+        .expect("shipped SDXL control authority");
+        let pin = crate::manifest_pins::builtin_model_pin("controlnet_openpose_sdxl");
+        assert_eq!(pin.repo, artifact.repo);
+        assert_eq!(pin.revision, artifact.revision);
+        assert_eq!(pin.files, [artifact.file]);
+    }
+
+    #[test]
+    fn installed_control_component_resolves_from_the_exact_pinned_snapshot() {
+        let _env = isolate_hf_cache();
+        let root = tempfile::tempdir().expect("data dir");
+        let artifact = sceneworks_core::control_weights::shipped_control_weight(
+            SDXL_CONTROL_ENGINE_ID,
+            SDXL_CONTROL_REPO,
+            SDXL_CONTROL_FILE,
+        )
+        .expect("shipped SDXL control authority");
+        let installed = stage_control_snapshot(root.path(), artifact.revision);
+        let resolved = require_sdxl_control_weights(
+            &offline_settings_at(root.path()),
+            &request(json!({ "model": "sdxl", "advanced": { "poses": [{}] } })),
+        )
+        .expect("installed component resolves without network");
+        assert_eq!(resolved, installed);
+    }
+
+    #[test]
+    fn missing_control_component_is_an_actionable_model_manager_refusal() {
+        let _env = isolate_hf_cache();
+        let root = tempfile::tempdir().expect("data dir");
+        let error = require_sdxl_control_weights(
+            &offline_settings_at(root.path()),
+            &request(json!({ "model": "sdxl", "advanced": { "poses": [{}] } })),
+        )
+        .expect_err("missing component must refuse before provider load");
+        let message = error.to_string();
+        assert!(message.contains("Model Manager"), "{message}");
+        assert!(message.contains(SDXL_CONTROL_REPO), "{message}");
+        assert!(message.contains(SDXL_CONTROL_FILE), "{message}");
+        assert!(message.contains(
+            sceneworks_core::control_weights::default_control_revision(SDXL_CONTROL_ENGINE_ID)
+                .expect("shipped revision")
+        ));
+    }
+
+    #[test]
+    fn control_component_is_cache_only_with_no_legacy_or_mutable_fallback() {
+        let _env = isolate_hf_cache();
+        let root = tempfile::tempdir().expect("data dir");
+        let repo_cache = crate::huggingface_repo_cache_path(root.path(), SDXL_CONTROL_REPO)
+            .expect("repo cache path");
+
+        // Neither a mutable `refs/main` snapshot nor the unpublished route's former private-cache
+        // destination is an installed immutable component. Both must remain invisible.
+        let stale = stage_control_snapshot(root.path(), "mutable-main");
+        std::fs::create_dir_all(repo_cache.join("refs")).expect("refs dir");
+        std::fs::write(repo_cache.join("refs/main"), "mutable-main").expect("refs main");
+        let legacy = root
+            .path()
+            .join("cache")
+            .join("controlnet-sdxl")
+            .join(SDXL_CONTROL_FILE);
+        std::fs::create_dir_all(legacy.parent().expect("legacy parent")).expect("legacy dir");
+        std::fs::write(&legacy, b"legacy job cache").expect("legacy weights");
+        assert!(stale.is_file() && legacy.is_file());
+
+        let error = require_sdxl_control_weights(
+            &offline_settings_at(root.path()),
+            &request(json!({ "model": "sdxl", "advanced": { "poses": [{}] } })),
+        )
+        .expect_err("only the exact Model Manager snapshot may satisfy the render");
+        assert!(error.to_string().contains("Model Manager"), "{error}");
+    }
+
+    #[test]
+    fn render_weight_resolver_has_no_network_or_job_context_capability() {
+        // This type assertion locks the cache-only seam: reintroducing an async resolver or giving
+        // it API/job/download context fails to compile. The repository-wide job-time download guard
+        // separately scans the reachable body and rejects any network-capable call site.
+        let resolver: fn(&Settings, &ImageRequest) -> WorkerResult<PathBuf> =
+            require_sdxl_control_weights;
+        let _ = resolver;
     }
 
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
