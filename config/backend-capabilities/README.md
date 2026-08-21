@@ -42,9 +42,11 @@ with `preservedCandleOnly: true` rather than normalized away.
 for the original 47 residual MLX-only cells, with the direct approval preserved in Shortcut activity
 19457; four product-decision records for the 13 Eros cells withdrawn from Candle by SC-18902; four
 epic-17137 sequencing records approved 2026-08-16 for the 10 `minimax_h3` cells the sc-19721 pin bump
-made visible; and four more approved 2026-08-20 for the 8 `minimax_h3_ref` cells sc-18650's Ref2VA
-activation made visible. `summary.exceptionCount` in `matrix.json` is the live count; this paragraph
-records provenance, not population.
+made visible; and four more approved 2026-08-20 for the 9 `minimax_h3_ref` cells sc-18650's Ref2VA
+activation made visible — 8 of those on the Ref2VA activation itself, and a ninth,
+`conditioningShape/referenceVideo`, approved separately later the same day once PR #2460's
+`referenceVideo => videoClip` fix exposed it (`mlxOnlyCellCount` 80 -> 81). `summary.exceptionCount`
+in `matrix.json` is the live count; this paragraph records provenance, not population.
 Schema v2 keeps the capability-axis `category` separate from `decisionType`. Exceptions must
 classify the decision as `technical_blocker`, `licensing_blocker`, `hardware_floor`,
 `sequencing_choice`, or `product_decision`; provide non-empty evidence; name an approver and authority
