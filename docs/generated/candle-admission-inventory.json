@@ -3,7 +3,7 @@
   "generatedBy": "scripts/generate-candle-admission-inventory.mjs",
   "story": "sc-19049",
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:7bb02c5ec272b977bff25621e8f7de89188ccd76a795da2d105c6a2d7cb15b76",
+    "sceneWorksRevision": "source-tree:b638b59ad9c9e2cbb463bc209d8f9fa548f6d3db9f7c990d476bfbfbda4e33e6",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -59,11 +59,11 @@
       },
       "videoMemoryCurves": {
         "path": "crates/sceneworks-core/src/video_memory_curves.rs",
-        "sha256": "fee44ba64f2cf0ca9819f4d1d9f1025a38f567c88f92f4da3c58290997ecfa7f"
+        "sha256": "1f27e51386f4de6031ea6d453cc59be5977d984dea8bea8ddc16801f5f4eda48"
       },
       "videoMemoryCurvesData": {
         "path": "docs/generated/video-memory-curves.json",
-        "sha256": "bf550cbc938aaa4a9ab5d721eafe8102d86e74e94cc076e5813bd7ef0faf44f8"
+        "sha256": "c36aa75c98d5bb5e1f813bcf44fa704b326a94f0af41c85e9dea8291d026b2af"
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",

@@ -10,6 +10,21 @@
 //! This module deliberately has no `gen-core` dependency. Both MLX and candle can consume the same
 //! wire format by translating their own backend, rung, load-shape, and decode-regime types at the
 //! edge.
+//!
+//! # Schema v3 — one container, two lanes (epic 19048)
+//!
+//! v2 carried `sourceFit` ONCE, at bundle level, so the container could name exactly one fit
+//! report and therefore hold exactly one lane's provenance: promoting a candle curve would have had
+//! to overwrite the MLX curve's fit attribution or drop it. R1 ("one mechanism, two bases") and R4
+//! ("lane-tagged coefficients, readers fail closed on a foreign lane") both require the two to
+//! coexist, so v3 moves fit provenance ONTO THE CURVE. Each curve names the temporal-form fit
+//! report its coefficients were promoted from, the producer replaces one lane at a time while
+//! preserving the others, and a curve whose provenance is absent or malformed invalidates the whole
+//! bundle rather than being admitted unattributed.
+//!
+//! `generatedBy` stays at bundle level: it names the producer SCRIPT, and both lanes are promoted
+//! by `scripts/fit-ltx-temporal-form.mjs` (which is backend-neutral in its plumbing — see
+//! `docs/calibration-runbook.md` §12g).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
@@ -20,7 +35,7 @@ use sha2::{Digest, Sha256};
 
 use crate::memory_calibration::{MeasurementLane, StrategyRung};
 
-pub const VIDEO_MEMORY_CURVE_SCHEMA_VERSION: u32 = 2;
+pub const VIDEO_MEMORY_CURVE_SCHEMA_VERSION: u32 = 3;
 pub const PACKAGED_VIDEO_MEMORY_CURVES: &str =
     include_str!("../../../docs/generated/video-memory-curves.json");
 /// Every immutable evidence source compiled alongside the promoted curve bundle. The loader treats
@@ -34,7 +49,11 @@ const PACKAGED_VIDEO_MEMORY_CURVE_SOURCES: &[(&str, &str)] = &[(
 const HISTORICAL_VIDEO_MEMORY_CURVE_FIT_PATH: &str =
     "docs/generated/ltx-temporal-form-fit-sc-18810.json";
 const PACKAGED_VIDEO_MEMORY_CURVE_GENERATOR: &str = "scripts/fit-ltx-temporal-form.mjs";
-const VIDEO_MEMORY_CURVE_FIT_PREFIX: &str = "docs/generated/ltx-temporal-form-fit-sc-";
+const VIDEO_MEMORY_CURVE_FIT_PREFIX: &str = "docs/generated/";
+/// The fit-report FAMILY, not one report: `docs/generated/<family>-temporal-form-fit-sc-<story>.json`.
+/// v2 pinned the `ltx-` spelling, which made an LTX MLX report the only expressible provenance in a
+/// container that now has to attribute a Wan candle curve too.
+const VIDEO_MEMORY_CURVE_FIT_INFIX: &str = "-temporal-form-fit-sc-";
 const VIDEO_MEMORY_CURVE_FIT_SUFFIX: &str = ".json";
 
 const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
@@ -44,7 +63,6 @@ const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 pub struct VideoMemoryCurveBundle {
     pub schema_version: u32,
     pub generated_by: String,
-    pub source_fit: String,
     pub source_catalog: Vec<VideoCurveSourceCatalogEntry>,
     pub curves: Vec<VideoMemoryCurve>,
 }
@@ -73,6 +91,10 @@ pub struct VideoMemoryCurve {
     pub calibration_abi: u32,
     pub calibration_fingerprint: String,
     pub decode_pass: VideoCurveDecodePass,
+    /// The temporal-form fit report THIS curve was promoted from (schema v3). Per-curve because the
+    /// container holds one curve set per measurement lane and each lane is fitted from its own
+    /// campaign; a missing or non-canonical value invalidates the whole bundle.
+    pub source_fit: String,
     pub measured_geometry_hull: Vec<VideoCurveHullPoint>,
     pub phases: VideoPhaseCurves,
     pub evidence: VideoCurveEvidenceSummary,
@@ -203,14 +225,28 @@ impl VideoMemoryCurveBundle {
     /// Evaluate the unique curve matching the complete query. Any ambiguity or mismatch fails
     /// closed to `None`; callers must keep their pre-existing floor candidate.
     pub fn evaluate(&self, query: VideoCurveQuery<'_>) -> Option<VideoCurveEvaluation<'_>> {
+        self.evaluate_against(
+            packaged_source_handshakes().ok()?,
+            packaged_model_families().ok()?,
+            query,
+        )
+    }
+
+    /// The evaluation proper, against an explicitly supplied evidence catalog. Separating this from
+    /// the `include_str!` lookup is what makes a multi-lane bundle testable before both lanes'
+    /// evidence files are compiled into this crate: production still routes through [`Self::evaluate`],
+    /// which can only ever supply the packaged catalog.
+    fn evaluate_against(
+        &self,
+        sources: &BTreeMap<String, PackagedSourceHandshake>,
+        model_families: &BTreeMap<String, String>,
+        query: VideoCurveQuery<'_>,
+    ) -> Option<VideoCurveEvaluation<'_>> {
         if self.schema_version != VIDEO_MEMORY_CURVE_SCHEMA_VERSION
             || self.generated_by != PACKAGED_VIDEO_MEMORY_CURVE_GENERATOR
-            || !is_canonical_video_memory_curve_fit_path(&self.source_fit)
         {
             return None;
         }
-        let sources = packaged_source_handshakes().ok()?;
-        let model_families = packaged_model_families().ok()?;
         validate_video_memory_curve_bundle_ref(self, sources, model_families).ok()?;
         let mut matches = self.curves.iter().filter(|curve| {
             curve.model_id == query.model_id
@@ -320,18 +356,30 @@ fn validate_video_memory_curve_bundle_ref(
     if bundle.curves.is_empty() {
         return Err("video-memory curve bundle is empty".to_owned());
     }
-    if bundle.generated_by != PACKAGED_VIDEO_MEMORY_CURVE_GENERATOR
-        || !is_canonical_video_memory_curve_fit_path(&bundle.source_fit)
-    {
+    if bundle.generated_by != PACKAGED_VIDEO_MEMORY_CURVE_GENERATOR {
         return Err("video-memory curve bundle provenance is incomplete".to_owned());
     }
     validate_source_catalog(bundle, sources)?;
     let mut ids = BTreeSet::new();
     let mut selectors = BTreeSet::new();
     let mut referenced_records = BTreeSet::new();
+    // One lane is promoted from ONE campaign, so every curve in a lane must name the same fit
+    // report. The producer replaces a lane wholesale and cannot emit a mixture, but that is a
+    // property of the producer; enforcing it here makes it a property of the ARTIFACT, so a
+    // hand-edited or half-merged bundle that blends two campaigns into one lane fails closed.
+    let mut lane_fit: BTreeMap<&str, &str> = BTreeMap::new();
     for curve in &bundle.curves {
         if !curve_is_valid(curve) {
             return Err(format!("video-memory curve {:?} is invalid", curve.id));
+        }
+        // Schema v3: fit provenance is the CURVE's, not the bundle's. An unattributed or
+        // non-canonical report path fails the whole bundle closed rather than admitting
+        // coefficients nothing can trace back to a capture campaign.
+        if !is_canonical_video_memory_curve_fit_path(&curve.source_fit) {
+            return Err(format!(
+                "video-memory curve {:?} names {:?}, which is not a canonical temporal-form fit report",
+                curve.id, curve.source_fit
+            ));
         }
         validate_curve_evidence(curve, sources, model_families)?;
         if !ids.insert(curve.id.clone()) {
@@ -370,6 +418,24 @@ fn validate_video_memory_curve_bundle_ref(
             }
         }
     }
+    for curve in &bundle.curves {
+        match lane_fit.entry(curve.backend.as_key()) {
+            std::collections::btree_map::Entry::Vacant(slot) => {
+                slot.insert(curve.source_fit.as_str());
+            }
+            std::collections::btree_map::Entry::Occupied(slot) => {
+                if *slot.get() != curve.source_fit.as_str() {
+                    return Err(format!(
+                        "video-memory lane {:?} mixes fit reports {:?} and {:?}; one lane is \
+                         promoted from one campaign",
+                        curve.backend.as_key(),
+                        slot.get(),
+                        curve.source_fit
+                    ));
+                }
+            }
+        }
+    }
     let expected_records = sources
         .iter()
         .flat_map(|(path, source)| {
@@ -390,10 +456,36 @@ fn validate_video_memory_curve_bundle_ref(
     Ok(())
 }
 
+/// `docs/generated/<family>-temporal-form-fit-sc-<story>.json`, and nothing else.
+///
+/// Generalized from v2's single hardcoded `ltx-` spelling to the FAMILY of temporal-form fit
+/// reports, so a Wan candle campaign can attribute its curve without the constraint being dropped.
+/// Still refused: a traversal or absolute path, a nested directory (the family may not contain
+/// `/`), an uppercase or underscored spelling, an empty family, a missing or non-numeric story, and
+/// any trailing suffix after the story number.
 fn is_canonical_video_memory_curve_fit_path(path: &str) -> bool {
-    path.strip_prefix(VIDEO_MEMORY_CURVE_FIT_PREFIX)
-        .and_then(|story| story.strip_suffix(VIDEO_MEMORY_CURVE_FIT_SUFFIX))
-        .is_some_and(|story| !story.is_empty() && story.bytes().all(|byte| byte.is_ascii_digit()))
+    let Some(rest) = path.strip_prefix(VIDEO_MEMORY_CURVE_FIT_PREFIX) else {
+        return false;
+    };
+    // `rsplit_once` so a family that itself contains the infix still binds the story to the LAST
+    // occurrence, which is the one the suffix follows.
+    let Some((family, story)) = rest
+        .strip_suffix(VIDEO_MEMORY_CURVE_FIT_SUFFIX)
+        .and_then(|stem| stem.rsplit_once(VIDEO_MEMORY_CURVE_FIT_INFIX))
+    else {
+        return false;
+    };
+    if story.is_empty() || !story.bytes().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+    // A lowercase kebab family: non-empty segments of `[a-z0-9]` joined by single hyphens.
+    !family.is_empty()
+        && family.split('-').all(|segment| {
+            !segment.is_empty()
+                && segment
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        })
 }
 
 #[derive(Debug)]
@@ -855,7 +947,16 @@ mod tests {
     fn packaged_curve_is_strict_and_evaluates_all_three_phases() {
         let bundle = load_video_memory_curves(PACKAGED_VIDEO_MEMORY_CURVES)
             .unwrap_or_else(|error| panic!("packaged curve bundle parses: {error}"));
-        assert_eq!(bundle.curves.len(), 1);
+        // Lane-scoped, not bundle-scoped: the container is multi-lane since v3, so a candle
+        // promotion must not red this MLX assertion (epic 19048).
+        assert_eq!(
+            bundle
+                .curves
+                .iter()
+                .filter(|curve| curve.backend == VideoCurveBackend::Mlx)
+                .count(),
+            1
+        );
         let evaluation = bundle
             .evaluate(packaged_query())
             .expect("q8 LTX curve matches");
@@ -869,18 +970,36 @@ mod tests {
     }
 
     #[test]
-    fn fit_provenance_accepts_canonical_story_reports_only() {
+    fn fit_provenance_accepts_the_canonical_report_family_only() {
         assert!(is_canonical_video_memory_curve_fit_path(
             HISTORICAL_VIDEO_MEMORY_CURVE_FIT_PATH
         ));
         assert!(is_canonical_video_memory_curve_fit_path(
             "docs/generated/ltx-temporal-form-fit-sc-18946.json"
         ));
+        // v3 generalized the v2 `ltx-` pin to the report FAMILY, so the candle Wan campaign can
+        // attribute its own curve instead of borrowing LTX's report name.
+        assert!(is_canonical_video_memory_curve_fit_path(
+            "docs/generated/wan-temporal-form-fit-sc-19057.json"
+        ));
+        assert!(is_canonical_video_memory_curve_fit_path(
+            "docs/generated/wan2-2-ti2v-5b-temporal-form-fit-sc-19057.json"
+        ));
         for path in [
             "docs/generated/ltx-temporal-form-fit.json",
             "docs/generated/ltx-temporal-form-fit-sc-.json",
             "docs/generated/ltx-temporal-form-fit-sc-18946-extra.json",
             "../docs/generated/ltx-temporal-form-fit-sc-18946.json",
+            // Generalizing the family may not open the path itself up.
+            "docs/generated/nested/wan-temporal-form-fit-sc-19057.json",
+            "docs/generated/-temporal-form-fit-sc-19057.json",
+            "docs/generated/temporal-form-fit-sc-19057.json",
+            "docs/generated/wan--temporal-form-fit-sc-19057.json",
+            "docs/generated/WAN-temporal-form-fit-sc-19057.json",
+            "docs/generated/wan_2_2-temporal-form-fit-sc-19057.json",
+            "docs/generated/wan-temporal-form-fit-19057.json",
+            "docs/generated/wan-temporal-form-fit-sc-19057.json.bak",
+            "/docs/generated/wan-temporal-form-fit-sc-19057.json",
         ] {
             assert!(
                 !is_canonical_video_memory_curve_fit_path(path),
@@ -1049,7 +1168,6 @@ mod tests {
         let bundle = VideoMemoryCurveBundle {
             schema_version: VIDEO_MEMORY_CURVE_SCHEMA_VERSION,
             generated_by: PACKAGED_VIDEO_MEMORY_CURVE_GENERATOR.to_owned(),
-            source_fit: HISTORICAL_VIDEO_MEMORY_CURVE_FIT_PATH.to_owned(),
             source_catalog: sources
                 .iter()
                 .map(|(path, source)| VideoCurveSourceCatalogEntry {
@@ -1092,6 +1210,308 @@ mod tests {
         assert!(
             validate_video_memory_curve_bundle(wrong_subset, &sources, families).is_err(),
             "dropping one exact source record invalidates the whole multi-curve bundle"
+        );
+    }
+
+    const CANDLE_FIT: &str = "docs/generated/wan-temporal-form-fit-sc-19057.json";
+    const CANDLE_CLOSURE: &str = "b4a29108bbbbcccc0123456789abcdef0123456789abcdef0123456789abcdef";
+    const CANDLE_FINGERPRINT: &str = "sc-19057-wan-2-2-ti2v-5b-candle-t2v-staged-capture-v1";
+    const CANDLE_SOURCE_PATH: &str = "docs/generated/wan-candle-video-sc-19057.json";
+
+    /// One MLX curve and one candle curve, each bound to its own evidence source and its own fit
+    /// report, in a single bundle. Returns `(sources, bundle)`; the candle records are the packaged
+    /// MLX records relabelled onto the `candle:wan2_2_ti2v_5b` identity with scaled coefficients, so
+    /// a lane that read the wrong curve would read a visibly different number.
+    fn two_lane_bundle() -> (
+        BTreeMap<String, PackagedSourceHandshake>,
+        VideoMemoryCurveBundle,
+        String,
+    ) {
+        let mlx_source =
+            compute_packaged_source_handshake(PACKAGED_VIDEO_MEMORY_CURVE_SOURCES[0].1)
+                .expect("packaged source parses");
+        let candle_records = mlx_source
+            .records
+            .iter()
+            .enumerate()
+            .map(|(index, record)| {
+                let mut record = record.clone();
+                record["id"] = serde_json::json!(format!("imc-{:020x}", 0xca_11e0_usize + index));
+                record["backend"] = serde_json::json!("candle");
+                record["target"]["modelId"] = serde_json::json!("wan_2_2");
+                record["target"]["provider"] = serde_json::json!("wan2_2_ti2v_5b");
+                record["repositories"]["inference"]["closureDigest"] =
+                    serde_json::json!(CANDLE_CLOSURE);
+                record["calibrationFingerprint"] = serde_json::json!(CANDLE_FINGERPRINT);
+                record
+            })
+            .collect::<Vec<_>>();
+        let candle_raw = format!(
+            "{}\n",
+            serde_json::to_string_pretty(&serde_json::json!({ "records": candle_records }))
+                .expect("synthetic candle source serializes")
+        );
+        let sources = source_handshakes([
+            (
+                PACKAGED_VIDEO_MEMORY_CURVE_SOURCES[0].0,
+                PACKAGED_VIDEO_MEMORY_CURVE_SOURCES[0].1,
+            ),
+            (CANDLE_SOURCE_PATH, candle_raw.as_str()),
+        ])
+        .expect("the two-lane source catalog validates");
+        let families = packaged_model_families().expect("model-family catalog");
+        let mlx = packaged_video_memory_curves().unwrap().curves[0].clone();
+        let mut candle = mlx.clone();
+        candle.model_id = "wan_2_2".to_owned();
+        candle.model_family = "wan-video".to_owned();
+        candle.provider = "wan2_2_ti2v_5b".to_owned();
+        candle.backend = VideoCurveBackend::Candle;
+        candle.closure_digest = CANDLE_CLOSURE.to_owned();
+        candle.calibration_fingerprint = CANDLE_FINGERPRINT.to_owned();
+        candle.source_fit = CANDLE_FIT.to_owned();
+        candle.id = format!(
+            "wan_2_2:wan-video:wan2_2_ti2v_5b:candle:{}:{}:{:?}",
+            candle.tier, candle.mode, candle.rung
+        );
+        candle.phases.denoise.per_mpx_frame_gb *= 2.0;
+        candle.evidence.sources = expected_curve_evidence_sources(&candle, &sources, families);
+        candle.evidence.records = candle
+            .evidence
+            .sources
+            .iter()
+            .map(|source| source.record_ids.len() as u32)
+            .sum();
+        candle.evidence.fit_points = 7;
+        candle.evidence.held_out_points = candle.evidence.records.saturating_sub(7);
+        let mut curves = vec![mlx, candle];
+        curves.sort_by(|left, right| left.id.cmp(&right.id));
+        let bundle = VideoMemoryCurveBundle {
+            schema_version: VIDEO_MEMORY_CURVE_SCHEMA_VERSION,
+            generated_by: PACKAGED_VIDEO_MEMORY_CURVE_GENERATOR.to_owned(),
+            source_catalog: sources
+                .iter()
+                .map(|(path, source)| VideoCurveSourceCatalogEntry {
+                    path: path.clone(),
+                    sha256: source.evidence_sha256.clone(),
+                })
+                .collect(),
+            curves,
+        };
+        (sources, bundle, candle_raw)
+    }
+
+    /// Epic 19048 R1/R4: one container, two bases. Before v3 the bundle could name exactly one fit
+    /// report, so these two curves could not have coexisted with their provenance intact.
+    #[test]
+    fn both_lanes_coexist_and_neither_can_read_the_others_coefficients() {
+        let (sources, bundle, _candle_raw) = two_lane_bundle();
+        let families = packaged_model_families().expect("model-family catalog");
+        let bundle = validate_video_memory_curve_bundle(bundle, &sources, families)
+            .expect("a two-lane bundle validates against both lanes' compiled evidence");
+        assert_eq!(bundle.curves.len(), 2);
+        assert_eq!(
+            bundle
+                .curves
+                .iter()
+                .map(|curve| curve.source_fit.as_str())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            2,
+            "each lane carries its OWN fit provenance, which v2's single bundle-level sourceFit \
+             made impossible"
+        );
+
+        let candle = bundle
+            .curves
+            .iter()
+            .find(|curve| curve.backend == VideoCurveBackend::Candle)
+            .expect("the candle lane survives beside the MLX one");
+        let candle_query = VideoCurveQuery {
+            model_id: &candle.model_id,
+            model_family: &candle.model_family,
+            provider: &candle.provider,
+            backend: VideoCurveBackend::Candle,
+            tier: &candle.tier,
+            mode: &candle.mode,
+            rung: candle.rung,
+            load_shape: candle.load_shape,
+            closure_digest: &candle.closure_digest,
+            calibration_abi: crate::memory_calibration::MEMORY_CALIBRATION_ABI,
+            calibration_fingerprint: &candle.calibration_fingerprint,
+            decode_pass: candle.decode_pass,
+            geometry: packaged_query().geometry,
+        };
+
+        let evaluate = |query| bundle.evaluate_against(&sources, families, query);
+        let mlx_evaluation = evaluate(packaged_query()).expect("the MLX lane still reads");
+        let candle_evaluation = evaluate(candle_query)
+            .expect("the candle lane reads its own curve out of the shared container");
+        assert_ne!(mlx_evaluation.curve_id, candle_evaluation.curve_id);
+        assert!(
+            candle_evaluation.phases.denoise > mlx_evaluation.phases.denoise,
+            "each lane evaluates ITS OWN coefficients, not the other's"
+        );
+
+        // R4's fail-closed rule, now that a foreign curve is actually present to be mistaken for a
+        // match: flipping only the lane must still find nothing.
+        let mut foreign = packaged_query();
+        foreign.backend = VideoCurveBackend::Candle;
+        assert!(
+            evaluate(foreign).is_none(),
+            "an MLX identity may not be answered from the candle lane"
+        );
+        let mut foreign = candle_query;
+        foreign.backend = VideoCurveBackend::Mlx;
+        assert!(
+            evaluate(foreign).is_none(),
+            "a candle identity may not be answered from the MLX lane"
+        );
+    }
+
+    /// F5: the one-lane-one-report invariant is ENFORCED, not merely produced.
+    ///
+    /// The mix has to be a LEGITIMATE second curve in the same lane — a distinct complete selector
+    /// with its own exact evidence subset — or the duplicate-selector check fires first and the
+    /// test proves nothing about provenance.
+    #[test]
+    fn a_lane_may_not_mix_two_fit_reports() {
+        const CANDLE_FIT: &str = "docs/generated/wan-temporal-form-fit-sc-19057.json";
+        let (base_sources, base, candle_raw) = two_lane_bundle();
+        let families = packaged_model_families().expect("model-family catalog");
+        let candle = base
+            .curves
+            .iter()
+            .find(|curve| curve.backend == VideoCurveBackend::Candle)
+            .expect("the fixture has a candle curve")
+            .clone();
+
+        // A second candle CELL: same lane, different tier, its own evidence file.
+        let q4_records = base_sources
+            .get(CANDLE_SOURCE_PATH)
+            .expect("the candle source is in the fixture catalog")
+            .records
+            .iter()
+            .enumerate()
+            .map(|(index, record)| {
+                let mut record = record.clone();
+                record["id"] = serde_json::json!(format!("imc-{:020x}", 0xc4_0000_usize + index));
+                record["target"]["tier"] = serde_json::json!("q4");
+                record
+            })
+            .collect::<Vec<_>>();
+        let q4_raw = format!(
+            "{}\n",
+            serde_json::to_string_pretty(&serde_json::json!({ "records": q4_records }))
+                .expect("synthetic q4 candle source serializes")
+        );
+        let sources = source_handshakes([
+            (
+                PACKAGED_VIDEO_MEMORY_CURVE_SOURCES[0].0,
+                PACKAGED_VIDEO_MEMORY_CURVE_SOURCES[0].1,
+            ),
+            (CANDLE_SOURCE_PATH, candle_raw.as_str()),
+            (
+                "docs/generated/wan-candle-video-sc-19999.json",
+                q4_raw.as_str(),
+            ),
+        ])
+        .expect("the three-source catalog validates");
+
+        let mut q4 = candle.clone();
+        q4.id = format!("{}:q4", q4.id);
+        q4.tier = "q4".to_owned();
+        q4.evidence.sources = expected_curve_evidence_sources(&q4, &sources, families);
+        q4.evidence.records = q4
+            .evidence
+            .sources
+            .iter()
+            .map(|source| source.record_ids.len() as u32)
+            .sum();
+        q4.evidence.fit_points = 7;
+        q4.evidence.held_out_points = q4.evidence.records.saturating_sub(7);
+
+        let rebuild = |q4_fit: &str| {
+            let mut q4 = q4.clone();
+            q4.source_fit = q4_fit.to_owned();
+            let mut curves = base.curves.clone();
+            curves.push(q4);
+            curves.sort_by(|left, right| left.id.cmp(&right.id));
+            VideoMemoryCurveBundle {
+                schema_version: VIDEO_MEMORY_CURVE_SCHEMA_VERSION,
+                generated_by: PACKAGED_VIDEO_MEMORY_CURVE_GENERATOR.to_owned(),
+                source_catalog: sources
+                    .iter()
+                    .map(|(path, source)| VideoCurveSourceCatalogEntry {
+                        path: path.clone(),
+                        sha256: source.evidence_sha256.clone(),
+                    })
+                    .collect(),
+                curves,
+            }
+        };
+
+        // Same report across the lane: valid.
+        validate_video_memory_curve_bundle(rebuild(CANDLE_FIT), &sources, families)
+            .expect("two cells of one lane from ONE campaign are valid");
+
+        // Different report inside the same lane: refused.
+        let error = validate_video_memory_curve_bundle(
+            rebuild("docs/generated/wan-temporal-form-fit-sc-19999.json"),
+            &sources,
+            families,
+        )
+        .expect_err("a lane blending two campaigns must fail closed");
+        // Pin the WHOLE operator-facing sentence, not just a fragment. An operator greps this
+        // string; a substring assertion cannot see whitespace rot inside it (a stray run of spaces
+        // where a line continuation belongs is invisible to fmt and clippy alike).
+        assert_eq!(
+            error,
+            "video-memory lane \"candle\" mixes fit reports \
+             \"docs/generated/wan-temporal-form-fit-sc-19057.json\" and \
+             \"docs/generated/wan-temporal-form-fit-sc-19999.json\"; one lane is promoted from one \
+             campaign"
+        );
+    }
+
+    #[test]
+    fn a_curve_without_canonical_fit_provenance_invalidates_the_bundle() {
+        let (sources, bundle, _candle_raw) = two_lane_bundle();
+        let families = packaged_model_families().expect("model-family catalog");
+        for spelling in [
+            "",
+            "docs/generated/wan-temporal-form-fit.json",
+            "../docs/generated/wan-temporal-form-fit-sc-19057.json",
+            "docs/generated/wan-temporal-form-fit-sc-19057.json.bak",
+        ] {
+            let mut mutated = bundle.clone();
+            mutated
+                .curves
+                .iter_mut()
+                .find(|curve| curve.backend == VideoCurveBackend::Candle)
+                .unwrap()
+                .source_fit = spelling.to_owned();
+            assert!(
+                validate_video_memory_curve_bundle(mutated.clone(), &sources, families).is_err(),
+                "{spelling:?} must not be admitted as fit provenance"
+            );
+            assert!(
+                mutated
+                    .evaluate_against(&sources, families, packaged_query())
+                    .is_none(),
+                "one curve's unattributed coefficients fail the WHOLE bundle closed, including the \
+                 other lane's lookup"
+            );
+        }
+
+        // Provenance is a REQUIRED field, so an omitted one cannot even parse.
+        let mut value: Value = serde_json::to_value(&bundle).expect("bundle serializes");
+        value["curves"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("sourceFit");
+        assert!(
+            serde_json::from_value::<VideoMemoryCurveBundle>(value).is_err(),
+            "a curve with no fit provenance must not deserialize"
         );
     }
 

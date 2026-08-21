@@ -6,7 +6,7 @@ use gen_core::{
     MemoryLifecycleCapabilities, MemoryParameterRanges, MemoryPhase, MemoryStrategyCapability,
     MemoryStrategySupport, MemoryWindowMaterialization, Precision, Quant, VaeTiling, WeightsSource,
 };
-use sceneworks_core::video_memory_curves::VideoCurveHullPoint;
+use sceneworks_core::video_memory_curves::{VideoCurveHullPoint, VideoMemoryCurve};
 use sceneworks_core::video_request::{
     single_pass_decode_frame_cap, vae_full_res_channels, video_admission, VideoAdmission,
     VideoAdmissionGeometry, VideoDecodePass, VideoGeometryRole,
@@ -457,9 +457,42 @@ fn fixture_curve_bundle() -> VideoMemoryCurveBundle {
     let bundle = sceneworks_core::video_memory_curves::packaged_video_memory_curves()
         .expect("packaged video curve")
         .clone();
-    assert_eq!(bundle.curves.len(), 1);
-    assert_eq!(bundle.curves[0].closure_digest, FITTED_CURVE_CLOSURE);
+    // The container is multi-lane since schema v3 (epic 19048), so this fixture asserts the
+    // sc-18810 LTX curve is present and UNIQUE rather than asserting the bundle holds nothing
+    // else. The bundle is deliberately NOT narrowed to that one curve: `evaluate` revalidates the
+    // whole container against the compiled evidence catalog, and dropping another lane's curve
+    // would orphan that lane's source records and fail every lookup closed.
+    assert_eq!(
+        bundle
+            .curves
+            .iter()
+            .filter(|curve| curve.model_id == FITTED_CURVE_MODEL_ID)
+            .count(),
+        1
+    );
+    assert_eq!(fixture_curve(&bundle).closure_digest, FITTED_CURVE_CLOSURE);
     bundle
+}
+
+const FITTED_CURVE_MODEL_ID: &str = "ltx_2_3";
+
+/// The sc-18810 LTX curve inside the packaged multi-lane bundle. Selected by identity, never by
+/// position: a promoted candle lane sorts into the same `curves` vec and would otherwise silently
+/// become `curves[0]` for every mutation below.
+fn fixture_curve(bundle: &VideoMemoryCurveBundle) -> &VideoMemoryCurve {
+    bundle
+        .curves
+        .iter()
+        .find(|curve| curve.model_id == FITTED_CURVE_MODEL_ID)
+        .expect("the packaged bundle carries the sc-18810 LTX curve")
+}
+
+fn fixture_curve_mut(bundle: &mut VideoMemoryCurveBundle) -> &mut VideoMemoryCurve {
+    bundle
+        .curves
+        .iter_mut()
+        .find(|curve| curve.model_id == FITTED_CURVE_MODEL_ID)
+        .expect("the packaged bundle carries the sc-18810 LTX curve")
 }
 
 fn select_once_with_curves(
@@ -866,7 +899,7 @@ fn a_curve_cannot_be_relabelled_to_manufacture_bounded_decode_parameters() {
     );
     let generator = fixture_generator(Some(contract));
     let mut curves = fixture_curve_bundle();
-    curves.curves[0].rung = StrategyRung::BoundedDecode;
+    fixture_curve_mut(&mut curves).rung = StrategyRung::BoundedDecode;
     let mut request = inputs(121, budget(40.0), 0);
     request.expected_closure_digest = FITTED_CURVE_CLOSURE;
 
@@ -1738,7 +1771,10 @@ fn mutating_the_ratified_cross_coefficient_changes_selector_outcome() {
     );
 
     let mut mutated = original.clone();
-    mutated.curves[0].phases.decode.per_mpx_frame_gb = 0.0;
+    fixture_curve_mut(&mut mutated)
+        .phases
+        .decode
+        .per_mpx_frame_gb = 0.0;
     let mutated_verdict = select_once_with_curves(&contract, &mutated, budget(host_gb), geometry);
     assert!(
         matches!(
@@ -1769,7 +1805,10 @@ fn mutating_a_phase_residual_changes_the_admission_decision() {
     );
 
     let mut mutated = original.clone();
-    mutated.curves[0].phases.decode.max_residual_gb += 12.0;
+    fixture_curve_mut(&mut mutated)
+        .phases
+        .decode
+        .max_residual_gb += 12.0;
     let mutated_verdict = select_once_with_curves(&contract, &mutated, budget(host_gb), request);
     assert!(
         matches!(mutated_verdict, VideoRungSelection::Reject { .. }),
@@ -1945,15 +1984,15 @@ fn every_identity_or_envelope_mismatch_falls_back_to_the_unchanged_floor() {
     let inside = geometry(145, VideoGeometryRole::Requested);
 
     let mut curves = fixture_curve_bundle();
-    curves.curves[0].backend = VideoCurveBackend::Candle;
+    fixture_curve_mut(&mut curves).backend = VideoCurveBackend::Candle;
     assert_curve_mismatch_falls_back("foreign lane", &contract, &curves, inside);
 
     let mut curves = fixture_curve_bundle();
-    curves.curves[0].closure_digest = "0".repeat(64);
+    fixture_curve_mut(&mut curves).closure_digest = "0".repeat(64);
     assert_curve_mismatch_falls_back("stale closure", &contract, &curves, inside);
 
     let mut curves = fixture_curve_bundle();
-    curves.curves[0].calibration_abi += 1;
+    fixture_curve_mut(&mut curves).calibration_abi += 1;
     assert_curve_mismatch_falls_back("foreign calibration ABI", &contract, &curves, inside);
 
     let curves = fixture_curve_bundle();
@@ -1987,23 +2026,23 @@ fn every_identity_or_envelope_mismatch_falls_back_to_the_unchanged_floor() {
     );
 
     let mut curves = fixture_curve_bundle();
-    curves.curves[0].calibration_fingerprint = "stale-fixture".to_owned();
+    fixture_curve_mut(&mut curves).calibration_fingerprint = "stale-fixture".to_owned();
     assert_curve_mismatch_falls_back("stale fingerprint", &contract, &curves, inside);
 
     let mut curves = fixture_curve_bundle();
-    curves.curves[0].tier = "bf16".to_owned();
+    fixture_curve_mut(&mut curves).tier = "bf16".to_owned();
     assert_curve_mismatch_falls_back("unsupported tier", &contract, &curves, inside);
 
     let mut curves = fixture_curve_bundle();
-    curves.curves[0].model_id = "ltx_2_3_eros".to_owned();
+    fixture_curve_mut(&mut curves).model_id = "ltx_2_3_eros".to_owned();
     assert_curve_mismatch_falls_back("unsupported model", &contract, &curves, inside);
 
     let mut curves = fixture_curve_bundle();
-    curves.curves[0].model_family = "ltx-custom".to_owned();
+    fixture_curve_mut(&mut curves).model_family = "ltx-custom".to_owned();
     assert_curve_mismatch_falls_back("unsupported family", &contract, &curves, inside);
 
     let mut curves = fixture_curve_bundle();
-    curves.curves[0].mode = "image_to_video".to_owned();
+    fixture_curve_mut(&mut curves).mode = "image_to_video".to_owned();
     assert_curve_mismatch_falls_back("unsupported mode", &contract, &curves, inside);
 
     let curves = fixture_curve_bundle();
@@ -2042,7 +2081,7 @@ fn the_single_pass_cap_geometry_can_bind_the_graded_set() {
     // Structural wiring fixture only: the committed campaign did NOT measure 1280x704 f297. Extend
     // the test copy's convex hull to that cap so this test can prove core passes the cap's exact
     // geometry/regime into the fitted selector without claiming production evidence for it.
-    curves.curves[0].measured_geometry_hull = vec![
+    fixture_curve_mut(&mut curves).measured_geometry_hull = vec![
         VideoCurveHullPoint {
             pixels: 393_216,
             voxels: 393_216 * 121,
@@ -2112,7 +2151,7 @@ fn same_rung_cap_binding_carries_cap_peak_but_actual_request_geometry() {
     let mut curves = fixture_curve_bundle();
     // Structural fixture only: extend the copy to the 297-frame cap. Production remains bounded by
     // the generated campaign hull and makes no claim at this geometry.
-    curves.curves[0].measured_geometry_hull = vec![
+    fixture_curve_mut(&mut curves).measured_geometry_hull = vec![
         VideoCurveHullPoint {
             pixels: 393_216,
             voxels: 393_216 * 121,

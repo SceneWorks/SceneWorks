@@ -1,7 +1,6 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "generatedBy": "scripts/fit-ltx-temporal-form.mjs",
-  "sourceFit": "docs/generated/ltx-temporal-form-fit-sc-18810.json",
   "sourceCatalog": [
     {
       "path": "docs/generated/ltx-mlx-geometry-sweep-sc-18810.json",
@@ -24,6 +23,7 @@
       "calibrationAbi": 3,
       "calibrationFingerprint": "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
       "decodePass": "single_pass",
+      "sourceFit": "docs/generated/ltx-temporal-form-fit-sc-18810.json",
       "measuredGeometryHull": [
         {
           "pixels": 393216,
