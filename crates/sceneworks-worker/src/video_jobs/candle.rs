@@ -332,10 +332,7 @@ fn candle_ltx_bundle_tier_across_revisions(root: &Path, tier: CandleLtxTier) -> 
         let dir = candidate.join(tier);
         candle_ltx_tier_complete(&dir).then_some(dir)
     };
-    roots
-        .into_iter()
-        .flatten()
-        .find_map(|candidate| resolve(candidate))
+    roots.into_iter().flatten().find_map(resolve)
 }
 
 /// Resolve the exact packed LTX tier selected by the request. The checkpoint is already packed, so
