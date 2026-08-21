@@ -2725,7 +2725,7 @@
             "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
             "sceneWorksRevision": "0acb1b601d814154bcf137f1f348eadbb0c2c8aa",
             "matrixSourceRevision": "source-tree:df8749b99ee4bed430cc9e88c47f3cba5040d1ddf145f5d4627ee6cd5c610fcd",
-            "inferenceRevision": "014134e3035ad7e4eca5c2ed7bded2375dc3c071", "inferenceClosureDigest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",
+            "inferenceRevision": "75d66db50543ac288deb278853d0f0b432f92c5c", "inferenceClosureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
             "provider": "qwen_image", "tier": "bf16", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/qwen-image-mlx",
@@ -2738,7 +2738,7 @@
             "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
             "sceneWorksRevision": "0acb1b601d814154bcf137f1f348eadbb0c2c8aa",
             "matrixSourceRevision": "source-tree:df8749b99ee4bed430cc9e88c47f3cba5040d1ddf145f5d4627ee6cd5c610fcd",
-            "inferenceRevision": "014134e3035ad7e4eca5c2ed7bded2375dc3c071", "inferenceClosureDigest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",
+            "inferenceRevision": "75d66db50543ac288deb278853d0f0b432f92c5c", "inferenceClosureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
             "provider": "qwen_image", "tier": "bf16", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/qwen-image-mlx",
@@ -2751,7 +2751,7 @@
             "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
             "sceneWorksRevision": "0acb1b601d814154bcf137f1f348eadbb0c2c8aa",
             "matrixSourceRevision": "source-tree:df8749b99ee4bed430cc9e88c47f3cba5040d1ddf145f5d4627ee6cd5c610fcd",
-            "inferenceRevision": "014134e3035ad7e4eca5c2ed7bded2375dc3c071", "inferenceClosureDigest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",
+            "inferenceRevision": "75d66db50543ac288deb278853d0f0b432f92c5c", "inferenceClosureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
             "provider": "qwen_image", "tier": "bf16", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/qwen-image-mlx",
@@ -2764,7 +2764,7 @@
             "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
             "sceneWorksRevision": "0acb1b601d814154bcf137f1f348eadbb0c2c8aa",
             "matrixSourceRevision": "source-tree:df8749b99ee4bed430cc9e88c47f3cba5040d1ddf145f5d4627ee6cd5c610fcd",
-            "inferenceRevision": "014134e3035ad7e4eca5c2ed7bded2375dc3c071", "inferenceClosureDigest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",
+            "inferenceRevision": "75d66db50543ac288deb278853d0f0b432f92c5c", "inferenceClosureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
             "provider": "qwen_image", "tier": "bf16", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/qwen-image-mlx",
@@ -2777,7 +2777,7 @@
             "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
             "sceneWorksRevision": "0acb1b601d814154bcf137f1f348eadbb0c2c8aa",
             "matrixSourceRevision": "source-tree:df8749b99ee4bed430cc9e88c47f3cba5040d1ddf145f5d4627ee6cd5c610fcd",
-            "inferenceRevision": "014134e3035ad7e4eca5c2ed7bded2375dc3c071", "inferenceClosureDigest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",
+            "inferenceRevision": "75d66db50543ac288deb278853d0f0b432f92c5c", "inferenceClosureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
             "provider": "qwen_image", "tier": "bf16", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/qwen-image-mlx",
@@ -2790,7 +2790,7 @@
             "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
             "sceneWorksRevision": "4a649d9c46e8b56b232422cb92550028108b44c9",
             "matrixSourceRevision": "source-tree:e2081fbe647526b7a198efb4047ca89c30ec944e54ef4218d4a339f19b0523ba",
-            "inferenceRevision": "40fa7583a01974617e2a7275052d6d446688c956", "inferenceClosureDigest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",
+            "inferenceRevision": "75d66db50543ac288deb278853d0f0b432f92c5c", "inferenceClosureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
             "provider": "qwen_image", "tier": "q8", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/qwen-image-mlx",
@@ -2803,7 +2803,7 @@
             "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
             "sceneWorksRevision": "4a649d9c46e8b56b232422cb92550028108b44c9",
             "matrixSourceRevision": "source-tree:e2081fbe647526b7a198efb4047ca89c30ec944e54ef4218d4a339f19b0523ba",
-            "inferenceRevision": "40fa7583a01974617e2a7275052d6d446688c956", "inferenceClosureDigest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",
+            "inferenceRevision": "75d66db50543ac288deb278853d0f0b432f92c5c", "inferenceClosureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
             "provider": "qwen_image", "tier": "q8", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/qwen-image-mlx",
@@ -2816,7 +2816,7 @@
             "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
             "sceneWorksRevision": "0acb1b601d814154bcf137f1f348eadbb0c2c8aa",
             "matrixSourceRevision": "source-tree:df8749b99ee4bed430cc9e88c47f3cba5040d1ddf145f5d4627ee6cd5c610fcd",
-            "inferenceRevision": "014134e3035ad7e4eca5c2ed7bded2375dc3c071", "inferenceClosureDigest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",
+            "inferenceRevision": "75d66db50543ac288deb278853d0f0b432f92c5c", "inferenceClosureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
             "provider": "qwen_image", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/qwen-image-mlx",
@@ -2829,7 +2829,7 @@
             "fingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
             "sceneWorksRevision": "0acb1b601d814154bcf137f1f348eadbb0c2c8aa",
             "matrixSourceRevision": "source-tree:df8749b99ee4bed430cc9e88c47f3cba5040d1ddf145f5d4627ee6cd5c610fcd",
-            "inferenceRevision": "014134e3035ad7e4eca5c2ed7bded2375dc3c071", "inferenceClosureDigest": "9930aa538259f7c576c13e3241e872a6486b049fe62b423e5dca3b3fe56f7bae",
+            "inferenceRevision": "75d66db50543ac288deb278853d0f0b432f92c5c", "inferenceClosureDigest": "96849569eab9281dd23dca0910b6a58308e329f5bfb481337723a76ce26067f6",
             "provider": "qwen_image", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/qwen-image-mlx",
@@ -9098,7 +9098,7 @@
             "fingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1",
             "sceneWorksRevision": "b1055ad192369ea0aa0352965755269baa7d8031",
             "matrixSourceRevision": "source-tree:a6665a33ccce0320e6cb811b6a5ab2d8fd6cfc65c3968c9060e7c83d0089db6d",
-            "inferenceRevision": "10831e4ca5b8bf780319a8ee7f21427175075448", "inferenceClosureDigest": "355749219c38b37af5054df047b0f44b65ecd8f822fc258243eee9d09c1d0247",
+            "inferenceRevision": "75d66db50543ac288deb278853d0f0b432f92c5c", "inferenceClosureDigest": "6f6cebb6ba86dd630bc0d3fea9da8960ea0f4acf3bbeba28cb4d3665d3b0d1c6",
             "provider": "flux2_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux2-dev-mlx",
@@ -9111,7 +9111,7 @@
             "fingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1",
             "sceneWorksRevision": "b1055ad192369ea0aa0352965755269baa7d8031",
             "matrixSourceRevision": "source-tree:a6665a33ccce0320e6cb811b6a5ab2d8fd6cfc65c3968c9060e7c83d0089db6d",
-            "inferenceRevision": "10831e4ca5b8bf780319a8ee7f21427175075448", "inferenceClosureDigest": "355749219c38b37af5054df047b0f44b65ecd8f822fc258243eee9d09c1d0247",
+            "inferenceRevision": "75d66db50543ac288deb278853d0f0b432f92c5c", "inferenceClosureDigest": "6f6cebb6ba86dd630bc0d3fea9da8960ea0f4acf3bbeba28cb4d3665d3b0d1c6",
             "provider": "flux2_dev", "tier": "q4", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux2-dev-mlx",
@@ -9124,7 +9124,7 @@
             "fingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1",
             "sceneWorksRevision": "b1055ad192369ea0aa0352965755269baa7d8031",
             "matrixSourceRevision": "source-tree:a6665a33ccce0320e6cb811b6a5ab2d8fd6cfc65c3968c9060e7c83d0089db6d",
-            "inferenceRevision": "10831e4ca5b8bf780319a8ee7f21427175075448", "inferenceClosureDigest": "355749219c38b37af5054df047b0f44b65ecd8f822fc258243eee9d09c1d0247",
+            "inferenceRevision": "75d66db50543ac288deb278853d0f0b432f92c5c", "inferenceClosureDigest": "6f6cebb6ba86dd630bc0d3fea9da8960ea0f4acf3bbeba28cb4d3665d3b0d1c6",
             "provider": "flux2_dev", "tier": "q8", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 768, "height": 768, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux2-dev-mlx",
@@ -9137,7 +9137,7 @@
             "fingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1",
             "sceneWorksRevision": "b1055ad192369ea0aa0352965755269baa7d8031",
             "matrixSourceRevision": "source-tree:a6665a33ccce0320e6cb811b6a5ab2d8fd6cfc65c3968c9060e7c83d0089db6d",
-            "inferenceRevision": "10831e4ca5b8bf780319a8ee7f21427175075448", "inferenceClosureDigest": "355749219c38b37af5054df047b0f44b65ecd8f822fc258243eee9d09c1d0247",
+            "inferenceRevision": "75d66db50543ac288deb278853d0f0b432f92c5c", "inferenceClosureDigest": "6f6cebb6ba86dd630bc0d3fea9da8960ea0f4acf3bbeba28cb4d3665d3b0d1c6",
             "provider": "flux2_dev", "tier": "q8", "mode": "text_to_image", "overlay": "none",
             "geometry": { "width": 1024, "height": 1024, "batch": 1, "frames": 1 },
             "artifactRepository": "SceneWorks/flux2-dev-mlx",
@@ -18436,6 +18436,13 @@
         "recommendedMaxDuration": 10,
         "hardMaxDuration": 15,
         "fps": [24, 25, 30],
+        // The distilled model bakes its sigma waypoints into training, so 8 is not a default the
+        // caller may move — it is the ONLY renderable count (sc-19502). Both backends derive it from
+        // a byte-identical STAGE1_SIGMAS table (9 waypoints) and the shared gen-core floor refuses
+        // anything else, so this is a genuinely lane-agnostic fact rather than a papered-over
+        // difference. Deliberately NOT `hardMinSteps: 8`: a floor says "at least 8" and would admit
+        // steps: 30, which the engine cannot render.
+        "steps": [8],
         // LTX is bucket-trained on 480p/720p derivatives; squares above 640x640
         // fall outside the training distribution and produce black frames. Keep
         // the square option at 640x640 even though normalized_dimensions would
@@ -18581,6 +18588,10 @@
         "recommendedMaxDuration": 10,
         "hardMaxDuration": 15,
         "fps": [24, 25, 30],
+        // Same distilled schedule as base LTX-2.3 — same engine id per backend, same baked
+        // STAGE1_SIGMAS — so the same single legal step count (sc-19502). The 10Eros merge changes
+        // the weights, not the sigma waypoints.
+        "steps": [8],
         // See LTX-2.3 note above: squares above 640x640 are out-of-distribution
         // and render black; same engine, so the same ÷64 requirement and the same
         // 704 (= 64·11) 720p buckets apply (sc-12294).
@@ -19265,6 +19276,17 @@
       "family": "wan-video",
       "type": "video",
       "adapter": "wan_video",
+      // NO `first_last_frame` (sc-19504). It was advertised here and NO lane served it: the MLX
+      // I2V-A14B descriptor declares `conditioning: vec![ConditioningKind::Reference]` with no
+      // `Keyframe` (mlx-gen-wan/src/model.rs, pinned by its own registration test), and the candle
+      // I2V-A14B descriptor is the same single `Reference` — so gen-core's default-deny
+      // `validate_request` makes a keyframe a hard `Unsupported` on BOTH lanes. The 5B (`wan_2_2`)
+      // serves FLF because TI2V is a mask-blend/replace-latent architecture whose pinned-frame set
+      // is just a list of latent indices; the A14B is channel-concat (`in_dim` 36 = noise 16 +
+      // mask 4 + z_video 16) whose mask is hard-pinned to latent frame 0 and whose patch_embedding
+      // was trained on "frame 0 image, rest zeros" — a second pinned frame is out-of-distribution
+      // for the checkpoint, not a flag flip. Upstream ships no Wan2.2 FLF2V variant of this family
+      // either. `extend_clip` / `video_bridge` stay: the candle Wan-VACE lane genuinely serves them.
       "capabilities": ["image_to_video", "extend_clip", "video_bridge"],
       // Per-platform source: macOS downloads the turnkey pre-converted dual-expert MLX snapshot
       // from the SceneWorks HF org (sc-5600, epic 5594); Windows/Linux load the diffusers/GGUF
@@ -19481,6 +19503,7 @@
       "ui": {
         "label": "Wan2.2 14B (I2V)",
         "description": "Wan2.2 A14B image-to-video (high/low-noise mixture-of-experts). Higher fidelity than the 5B model; needs ample VRAM for both experts.",
+        // Tracks `capabilities` — `first_last_frame` withdrawn in sc-19504 (see the note there).
         "recommendedFor": ["image_to_video", "extend_clip", "video_bridge"],
         "durationHint": "Heavier than 5B — keep clips at 5s or less. Generates at 16fps.",
         "promptGuide": {
@@ -20410,6 +20433,1265 @@
             { "label": "Krea Realtime 14B model card", "url": "https://huggingface.co/krea/krea-realtime-video" },
             { "label": "Krea Realtime technical blog post", "url": "https://www.krea.ai/blog/krea-realtime-14b" },
             { "label": "krea-ai/realtime-video inference code", "url": "https://github.com/krea-ai/realtime-video" }
+          ]
+        }
+      }
+    },
+    // MiniMax-H3 / Hailuo 3.0 (epic 17137, sc-17158): a flow-matching DiT that generates video AND
+    // synchronized stereo audio JOINTLY — the render delivers one muxed mp4, the audio is not a
+    // separate pass. Two DiT partitions ship, and they are two manifest entries (sc-17139 AC4):
+    // `minimax_h3` (the `transformer` checkpoint — t2va + fl2va) and `minimax_h3_ref` (the
+    // `transformer_ref` checkpoint — Ref2VA). They share one hosted repo and one shared component
+    // floor; only the primary `files` predicate differs.
+    //
+    // ⚠️ GEOMETRY: the epic's R7 and sc-17158's own TITLE say frames are `4k + 1`. THAT IS WRONG and
+    // measured false (sc-17242 spike, against the official diffusers `MiniMaxH3` on real weights;
+    // correction of record on sc-17158 activity 18824 and epic activity 19108). The lattice is
+    // `17n + 5`, the two are NOT nested, and the 5–15 s clamp leaves exactly FOURTEEN legal frame
+    // counts, 124…345 — see `MINIMAX_H3_LEGAL_FRAME_COUNTS` in
+    // crates/sceneworks-core/src/video_request.rs, which is where the app enforces it.
+    //
+    // ⚠️ COST: this is the most expensive video model in the catalog by a wide margin. Measured
+    // 50-step projections on real weights (sc-17152, sc-17150 activity 19106):
+    //     576x320  @ 124 f (5.1667 s)  →  16.26 s/step  →   813 s   (13.5 min)
+    //     576x320  @ 345 f (14.375 s)  →  51.59 s/step  →  2 579 s  (43 min)
+    //     1344x768 @ 124 f (5.1667 s)  → 147.87 s/step  →  7 394 s  (2.05 HOURS)
+    //     1344x768 @ 345 f (14.375 s)  →  ~8.4 hours of attention alone
+    // The binding constraint is a canvas x duration PRODUCT and no scalar limit can express it, so
+    // `recommendedMaxDuration` stays at the hard bound and the pairing is surfaced in `ui`
+    // (sc-17153 owns the fit gate that can actually reason about it).
+    //
+    // ⚠️ NOT SHIPPED UPSTREAM (do not imply otherwise in copy — sc-17162): `H3-Context-IR` (hosted
+    // prompt refinement, so prompt adherence differs from the Hailuo API), `H3-Regenerate-2K` (so
+    // "up to 2K" is NOT reachable from these weights), and the sparse-attention inference path
+    // (so the open weights run DENSE attention, which is why the cost table above looks like that).
+    //
+    // ⚠️ NO IMAGE LANE. `min_duration = 5.0` is hardcoded upstream, so `T = 1` does not render at
+    // all. The epic's image-lane premise ("T=1 collapses ~31k tokens to ~1k") has no basis;
+    // sc-17240 / sc-17241 / sc-18666 are in Backlog and must not be revived from this entry.
+    {
+      "id": "minimax_h3",
+      "name": "MiniMax-H3",
+      "family": "minimax-h3",
+      "type": "video",
+      "adapter": "minimax_h3",
+      // t2va (text → audio+video) and fl2va (first and/or last frame conditioning, 0/1/2 images).
+      // Ref2VA lives on `minimax_h3_ref`, which is the only partition whose checkpoint conditions
+      // on multi-modal references. Reachability (VIDEO_UI_MODES eligibility, the
+      // `validate_video_job` allow-list, the worker's routing) is sc-17159 — declaration is NOT
+      // reachability (GH #2074), and this entry deliberately claims only what the checkpoint does.
+      "capabilities": ["text_to_video", "image_to_video", "first_last_frame"],
+      // sc-17242 spike, measured against the official diffusers reference: the pipeline's ENTIRE
+      // input surface is 19 params — `prompt`, `image`, `last_image`, `references`, `num_frames`,
+      // `height`, `width`, `num_inference_steps`, `generator`, `latents`, `audio_latents`,
+      // `output_type`, `attention_kwargs` and 6 intermediates. There is **no `guidance_scale` and no
+      // `negative_prompt`**, so both axes are declared false and Video Studio hides the controls
+      // rather than offering knobs the worker would discard. ABSENT would mean TRUE here (the video
+      // block's polarity is the opposite of `audio`'s), which is why silence is not an option.
+      "video": { "supportsGuidance": false, "supportsNegativePrompt": false },
+      // sc-17227 — LICENCE ACKNOWLEDGMENT WITHOUT A CREDENTIAL. `gated` is deliberately ABSENT:
+      // `MiniMaxAI/MiniMax-H3` is a PUBLIC repo, so there is no Hugging Face token to add and no
+      // "Request access" page to visit. Declaring `gated: true` here to get the acknowledgment
+      // checkbox would demand a credential that does not exist. `requiresLicenseAcknowledgment` is
+      // the decoupled half: it raises the in-app acknowledgment gate (sc-7872) and blocks the
+      // download until the user accepts, with no credential UI.
+      //
+      // WHY IT IS REQUIRED AT ALL. The MiniMax H3 Community License is non-transferable (§II) and
+      // defines a "Licensee" as whoever uses the Works (§I.9), so the user is a Licensee in their
+      // own right — SceneWorks' authorization does not stand in for theirs. §V.2 obliges us, before
+      // providing access, to notify each user that the §V / Exhibit A restrictions apply. This is
+      // that notification; `licenseNotice` is its text. It does NOT resolve the §V.4 territorial
+      // question — an acknowledgment cannot make an Excluded-Territory use authorized — which stays
+      // Michael's ship/no-ship call on sc-17227. Restored (sc-17227 review MINOR 5): deleting it
+      // left this file contradicting item 2 of docs/minimax-h3-use-restriction-safeguards.md, which
+      // still says exactly this and is owned by sc-19541.
+      "requiresLicenseAcknowledgment": true,
+      "licenseUrl": "https://huggingface.co/MiniMaxAI/MiniMax-H3",
+      "licenseNotice": "MiniMax-H3's weights, and the video and audio they produce, are governed by the MiniMax H3 Community License Agreement — not by SceneWorks' own AGPL-3.0 licence. That agreement grants a NON-TRANSFERABLE licence (§II) and defines a \"Licensee\" as whoever uses the model (§I.9), so it binds you directly and SceneWorks' authorization from MiniMax does not stand in for yours. Four of its terms decide whether you may use this model at all. (1) APPLICABLE TERRITORY (§I.3, §I.5, §V.4): the agreement's default Applicable Territory is worldwide excluding the European Union, the United Kingdom, the Republic of Korea, and the United States of America. Separately, MiniMax has confirmed in writing that it authorizes SceneWorks to use MiniMax H3 and MiniMax H3 Works, conditioned on SceneWorks' continued compliance with the commitments in its request; which provision of the agreement that confirmation is given under is not stated here. Questions about your own use go to MiniMax at api@minimax.io (§IV.1). (2) ACCEPTABLE USE POLICY (§V.1 and Exhibit A): twenty prohibited uses, of which item 12 requires you to clearly and prominently disclose that content is machine-generated whenever you publish it to a public environment — SceneWorks does not write that disclosure into your files, so making it is yours to do. (3) ADDITIONAL COMMERCIAL TERMS (§IV.1): separate prior written authorization from MiniMax is required if your commercial products and services generate more than 20 million US dollars in yearly revenue. (4) NO IMPROVING OTHER AI MODELS (§V.3): you may not use the Works or any of their Outputs or results to improve any other artificial intelligence model, other than MiniMax H3 or its Model Derivatives. SceneWorks ships a LoRA trainer, dataset captioning and a training studio, so this is the restriction the product's own features are most likely to reach — training a different model on MiniMax-H3 renders is what §V.3 forbids. Read the full text under About → Licenses before downloading.",
+      "downloads": [
+        // Quant matrix (sc-17150, epic 8506 shape): each tier is a SEPARATE user-selectable
+        // artifact tagged with a `variant`; q4 (default) installs when no tier is chosen. Sizes are
+        // the EXACT hosted directory bytes measured post-upload (sc-17150 activity 19106); the six
+        // artifacts plus 1,519 B of repo-root files reconcile to the repo total 240,725,488,299 B
+        // to the byte.
+        //
+        // THE DiT AND THE TEXT ENCODER ARE TIERED; BOTH VAEs ARE NOT. Originally only the DiT was
+        // (sc-17139) — three self-contained tiers would have repeated the 62 GB text encoder and the
+        // 11 GB VAE floor per tier and cost ~250 GB. sc-19120 tiered the text encoder separately, as
+        // a per-tier `coRequisite` (`variant` SCOPES a co-requisite, sc-14980), which buys the
+        // saving without duplicating the VAEs. The text encoder and both VAEs remain
+        // byte-identical between this entry and `minimax_h3_ref`, so the floor downloads ONCE for
+        // both; the VAE rows carry no `variant` and so stay tier-agnostic.
+        //
+        // ⚠️ QUANT BUYS DISK, AND ALSO MEMORY — but not where the process peak is. Measured
+        // (sc-17150 activity 19121): DiT denoise-resident drops 40.43 GB (bf16) → 11.63 GB (q4), a
+        // 28.80 GB reduction. The ~53 GB generate peak was the Qwen3-VL-32B text encoder, which runs
+        // BEFORE the DiT loads and USED TO BE dense in every tier, so it masked the DiT stages and
+        // made the process peak look tier-independent. sc-19120 removed that: the text encoder is
+        // now packed per tier (q4/q8 rows below), so the peak is no longer tier-independent.
+        // ⚠️ The post-sc-19120 generate peak has NOT been re-measured — the numbers above are the
+        // pre-change measurement, and sc-18662 (block streaming) is the remaining half of the gap.
+        //
+        // ⚠️ THE TIER ROWS ARE NO LONGER `macos`-ONLY (sc-20267, epic 17137 PR 3/3). The q4 and q8
+        // DiT primaries and their q4/q8 `text_encoder` co-requisites now carry
+        // `platforms: ["macos", "windows", "linux"]`, because `candle-gen-minimax-h3` gained
+        // `supported_quants: &[Quant::Q4, Quant::Q8]` AND a real pre-quantized tier loader (a tier
+        // resolver plus packed DiT / TE / vision loaders) in the paired inference change. The tier is
+        // therefore selectable on both lanes and reads the SAME packed artifacts — nothing is
+        // re-hosted and no byte counts move. The bf16 rows stay platform-split: see the note on the
+        // bf16 DiT row below and the off-Mac block further down for which route serves which lane.
+        //
+        // ⚠️ THIS IS OBTAINABILITY, NOT ROUTING. `VIDEO_MODEL_CAPS` still carries every candle column
+        // false for both partitions, `crates/sceneworks-worker/src/video_jobs/minimax_h3.rs` is still
+        // `#[cfg(target_os = "macos")]` end to end, and SceneWorks' own inference pin is unchanged by
+        // sc-20267 — so the app it builds does not yet contain the flip these rows anticipate.
+        // Declaration is not reachability (GH #2074).
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/transformer/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 18780109783,
+          "footprint": { "diskSizeBytes": 18780109783, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "variant": "q8",
+          "files": ["q8/transformer/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 35302064357,
+          "footprint": { "diskSizeBytes": 35302064357, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "variant": "bf16",
+          "files": ["bf16/transformer/*"],
+          // ⚠️ DELIBERATELY STILL `macos`-ONLY while the q4/q8 rows above are not (sc-20267). Two
+          // reasons, both about the OFF-MAC bf16 route that already exists further down:
+          //   1. off-Mac bf16 is served by the sc-19558 raw-upstream row (`MiniMaxAI/MiniMax-H3` @
+          //      939557dc, `transformer/*`), so widening this rehost row would put TWO bf16
+          //      `transformer` candidates in scope on Windows/Linux — and `model_download_for_variant`
+          //      returns the FIRST match, which is not a choice anything records; and
+          //   2. the off-Mac route is the BETTER one for candle. The macOS bf16 text-encoder row omits
+          //      shard 13 under a licence taken from the MLX engine's own `TE_SHARDS` / `VISION_SHARD`
+          //      read pattern; the off-Mac row ships all 14 because no shard-13-omission equivalent has
+          //      been established for `candle-gen-minimax-h3` (see that row's note below).
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 66280569250,
+          "footprint": { "diskSizeBytes": 66280569250, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        // --- the shared floor: three tier-agnostic co-requisites, all from MiniMax's OWN upstream
+        // repo at one pinned snapshot. NOT re-hosted (sc-17150 activity 18712 decided against a
+        // rehost): the 14 text-encoder shards are byte-for-byte identical to
+        // Qwen/Qwen3-VL-32B-Instruct (14/14 SHA-256, 66,714,912,872 B both sides, sc-17143), so a
+        // mirror would add nothing but bytes. Sourcing the component from `MiniMaxAI/MiniMax-H3`
+        // rather than from Qwen directly is deliberate: `text_encoder/tokenizer_config.json` is the
+        // ONE file MiniMax changed (it adds the 7 `additional_special_tokens` whose ids the engine
+        // assigns BY LIST ORDER), and taking the whole component from one repo keeps a single
+        // pinned revision covering all three shared components with no tokenizer overlay.
+        //
+        // ⚠️ THAT REASONING HOLDS FOR bf16 ONLY. sc-19120 adds PACKED q4/q8 text encoders, which do
+        // not exist upstream in any form, so those two tiers ARE rehosted in
+        // `SceneWorks/minimax-h3-mlx` beside the DiT tiers. `variant` on a co-requisite SCOPES it
+        // (sc-14980): `resolve_co_requisites_for_tier` picks exactly ONE row per `componentId`, so
+        // each tier subtree must be SELF-CONTAINED. Every tier therefore ships the same nine
+        // non-shard files — the seven tokenizer/preprocessor sidecars are copied VERBATIM from
+        // `MiniMaxAI/MiniMax-H3` at the revision pinned below, so MiniMax's 7
+        // `additional_special_tokens` (assigned BY LIST ORDER) are preserved in every tier. Shard 13
+        // is omitted from the packed tiers too, for the reason spelled out on the bf16 row.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "variant": "q4",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "subdir": "q4/text_encoder",
+          "files": ["q4/text_encoder/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 18722713964
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "variant": "q8",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "subdir": "q8/text_encoder",
+          "files": ["q8/text_encoder/*"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 33723765614
+        },
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "variant": "bf16",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "subdir": "text_encoder",
+          // ⚠️ SHARD 13 IS DELIBERATELY OMITTED — 4,875,990,584 B (7.3 %) saved. The engine reads
+          // decoder layers 0..=49 from shards 1..=12 and the vision tower from shard 14
+          // (`TE_SHARDS` / `VISION_SHARD`); only the trimmable tail — decoder layers 50..=63, the
+          // final norm and `lm_head` — lives in shard 13, and the real-weight forward smoke runs
+          // with it absent (sc-17143, epic activity 19108). Shards are listed individually rather
+          // than globbed because the downloader hard-fails a pattern matching zero remote files, so
+          // an explicit list is the auditable form. The DiT context is `hidden_states[50]`, proven
+          // bit-identical with the tail removed (mutation + physical-removal, sc-17143).
+          "files": [
+            "text_encoder/config.json",
+            "text_encoder/model.safetensors.index.json",
+            "text_encoder/tokenizer.json",
+            "text_encoder/tokenizer_config.json",
+            "text_encoder/vocab.json",
+            "text_encoder/merges.txt",
+            "text_encoder/chat_template.json",
+            "text_encoder/preprocessor_config.json",
+            "text_encoder/video_preprocessor_config.json",
+            "text_encoder/model-00001-of-00014.safetensors",
+            "text_encoder/model-00002-of-00014.safetensors",
+            "text_encoder/model-00003-of-00014.safetensors",
+            "text_encoder/model-00004-of-00014.safetensors",
+            "text_encoder/model-00005-of-00014.safetensors",
+            "text_encoder/model-00006-of-00014.safetensors",
+            "text_encoder/model-00007-of-00014.safetensors",
+            "text_encoder/model-00008-of-00014.safetensors",
+            "text_encoder/model-00009-of-00014.safetensors",
+            "text_encoder/model-00010-of-00014.safetensors",
+            "text_encoder/model-00011-of-00014.safetensors",
+            "text_encoder/model-00012-of-00014.safetensors",
+            "text_encoder/model-00014-of-00014.safetensors"
+          ],
+          "platforms": ["macos"],
+          // 66,726,510,529 B for the whole component, minus the 4,875,990,584 B shard 13.
+          "estimatedSizeBytes": 61850519945
+        },
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "coRequisite": true,
+          "componentId": "video_vae",
+          "subdir": "vae",
+          "files": ["vae/*"],
+          "platforms": ["macos"],
+          // Dense in EVERY tier (the Wan precedent) — no `variant`, because this is a floor no tier
+          // shrinks. Say so here so nobody later "optimizes" a tier expecting it to move. Its
+          // decoder is a 36-layer TRANSFORMER, not a conv stack, which is why decode is unusually
+          // expensive for a VAE.
+          // ⚠️ The published component is **F32, all 703 tensors** — not bf16. Earlier copy in this
+          // repository said "dense bf16", and the correction matters because it changes what a
+          // loader at f32 costs: loading it at f32 is a NO-OP CAST, not a doubling. Measured from
+          // the safetensors headers of `MiniMaxAI/MiniMax-H3@939557dc` (sc-19506).
+          "estimatedSizeBytes": 10415635127
+        },
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "coRequisite": true,
+          "componentId": "audio_vae",
+          "subdir": "audio_vae",
+          "files": ["audio_vae/*"],
+          "platforms": ["macos"],
+          // 32 kHz stereo, 40 Hz token rate. Also dense in every tier, and also **F32** (all 1087
+          // tensors) rather than bf16 — same correction as the video VAE above.
+          "estimatedSizeBytes": 605431611
+        },
+        // --- sc-19558 / sc-19573: the two remaining paths `mlx-gen-minimax-h3::load` OPENS and the
+        // catalog did not declare. Both are tier-agnostic, both come from the same pinned upstream
+        // snapshot as the VAEs, and both are tiny — a `coRequisite` is a PRE-DOWNLOAD WEIGHTS FLOOR,
+        // so an entry that omits a probed path is declaring an install that cannot load. Their names
+        // are pinned against the runtime probe list from BOTH sides: by
+        // `minimax_h3_downloads_cover_every_path_the_loader_probes` in
+        // crates/sceneworks-core/src/builtin_manifests.rs and by
+        // `minimax_h3_macos_download_set_covers_every_probed_shared_file` in the worker, each reading
+        // `mlx_tier_completeness::MINIMAX_H3_*` rather than a second hand-copied list.
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "coRequisite": true,
+          "componentId": "tokenizer",
+          "subdir": "tokenizer",
+          // ⚠️ sc-19558 CORRECTION — THIS ROW DID NOT EXIST, AND ITS ABSENCE MADE THE WHOLE FAMILY
+          // UNLOADABLE ON A FRESH INSTALL. `mlx-gen-minimax-h3::load` probes
+          // `<root>/tokenizer/tokenizer.json` on every load, and
+          // `mlx_tier_completeness::minimax_h3_shared_is_complete` mirrors that probe AS A FILE — but
+          // no macOS row supplied the directory, so a manifest-driven install of ANY tier failed the
+          // gate before it reached the loader. `minimax_h3_macos_download_set_covers_every_probed_
+          // shared_file` binds the two together so a future probe added on one side goes red on the
+          // other.
+          //
+          // No `variant`: the tokenizer is dense and identical in every tier, so it is a floor no
+          // tier shrinks — the `video_vae` / `audio_vae` shape, not the per-tier `text_encoder` one.
+          "files": ["tokenizer/*"],
+          "platforms": ["macos"],
+          // 4 files: tokenizer.json, tokenizer_config.json, vocab.json, merges.txt. Measured
+          // directory bytes at the pinned revision. NOT the same directory as the seven tokenizer
+          // sidecars inside `text_encoder/` — the loader opens this one by its own path.
+          "estimatedSizeBytes": 11492078
+        },
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "coRequisite": true,
+          "componentId": "fl2va_audio_vae_config",
+          "subdir": "FL2VA/audio_vae",
+          // ⚠️ sc-19558 CORRECTION — the second half of the same gap. `load` probes all THREE of
+          // `FL2VA/audio_vae/{config.json,config.yaml,metadata.json}`, and both `decode_audio` and
+          // `load_audio_encoder` parse them for the audio VAE's constructor arguments; the
+          // repackaged root config carries none of them. No macOS row supplied them either.
+          //
+          // ONLY the three documents, NOT `FL2VA/audio_vae/*`. That glob would also pull
+          // `model.safetensors` — 605,429,308 B of audio-VAE weights that are a near-duplicate of
+          // the `audio_vae/` row above, which is where the MLX lane actually reads its weights
+          // (`Weights::from_dir(self.root.join("audio_vae"))`) — plus nine `.py` modules no Rust
+          // engine can execute, doubling the audio VAE for 2,504 B of constructor arguments. The
+          // off-Mac row below DOES glob the directory, because candle's `load_audio_vae` reads the
+          // component from there. Different engines, different read patterns, so different file
+          // lists rather than one copied twice.
+          //
+          // `componentId` IS declared here (sc-19558), unlike the pre-merge sc-19573 row: it pairs
+          // this with the `platforms: ["windows","linux"]` row of the same id below, exactly as the
+          // `text_encoder` / `video_vae` / `audio_vae` rows pair, so `install_state_for` tracks one
+          // component per platform rather than an unnamed by-path fetch on one side only.
+          "files": [
+            "FL2VA/audio_vae/config.json",
+            "FL2VA/audio_vae/config.yaml",
+            "FL2VA/audio_vae/metadata.json"
+          ],
+          "platforms": ["macos"],
+          // 1,973 + 91 + 440, measured at the pinned revision.
+          "estimatedSizeBytes": 2504
+        },
+        // --- sc-19573: THE SIBLING DiT PARTITION. The engine's `load` opens `transformer/config.json`
+        // AND `transformer_ref/config.json` on EVERY load regardless of task, because ref2va is a
+        // first-class task of the one registered engine rather than an optional extra. Shipping the
+        // two partitions as the primaries of two separate entries therefore meant installing either
+        // entry alone produced an install that could not render anything at all — not a reduced
+        // capability, a hard load failure.
+        //
+        // ⚠️ THE COMMENT BELOW `minimax_h3_ref` USED TO SAY a hard co-requisite "would force
+        // +18.78 GB on every q4 text-to-video user". That was reasoning from a premise the engine has
+        // never honoured: those bytes are not an optional Ref2VA extra, they are part of the minimum
+        // loadable set. Declaring them is what makes the advertised install size true.
+        //
+        // Per-tier (`variant` SCOPES a co-requisite, sc-14980) so a q4 user fetches the q4 sibling and
+        // not the 66 GB bf16 one, and so `install_state_for`'s tier-scoped aggregate can report a
+        // complete q4 pair as installed while a bf16 half-pair reads incomplete. Sizes are the exact
+        // hosted directory bytes and are IDENTICAL to `minimax_h3_ref`'s primary rows — same repo,
+        // same revision, same 16 files — so the pair downloads once and a shared cache is not
+        // fetched twice.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "variant": "q4",
+          "coRequisite": true,
+          "files": ["q4/transformer_ref/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 18780109783
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "variant": "q8",
+          "coRequisite": true,
+          "files": ["q8/transformer_ref/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 35302064357
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "variant": "bf16",
+          "coRequisite": true,
+          "files": ["bf16/transformer_ref/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 66280569250
+        },
+
+        // ── THE OFF-MAC (candle) ARTIFACT SET — sc-19558 ────────────────────────────────────────
+        //
+        // WHAT THIS IS. `candle-gen-minimax-h3` reads a RAW UPSTREAM SNAPSHOT: its
+        // `REQUIRED_COMPONENT_DIRS` is `["text_encoder", "transformer", "vae", "audio_vae"]` off one
+        // root (`candle-gen-minimax-h3/src/model.rs`), plus the optional `FL2VA/audio_vae/` config
+        // triple its `load_audio_vae` prefers over the declared defaults. These five rows are that
+        // set, from MiniMax's OWN public repo at the SAME pinned revision the macOS co-requisites
+        // above already use. Nothing is re-hosted and nothing new has to be published.
+        //
+        // Since sc-20267 they are the off-Mac **bf16** route rather than the only off-Mac route: the
+        // q4/q8 DiT and text-encoder rows above now serve Windows/Linux too, and a packed install
+        // substitutes those for the first two rows here while still taking the tier-agnostic
+        // remainder from this block.
+        //
+        // WHY NOT THE OTHER TWO OPTIONS — recorded so they are not re-litigated:
+        //   * A candle-packed REHOST was rejected twice over. It is an outward-facing publish (not
+        //     something this repository can land), and it would have no consumer if it existed:
+        //     the candle provider declares `supported_quants: &[]` and has no tier loader, so a
+        //     packed tier is bytes nothing would select.
+        //   * A candle TIER LOADER over the MLX-packed tiers (the Mochi `.scales`-detect
+        //     precedent) was rejected because it does not solve this problem. The tiers hold only
+        //     `transformer/` and `transformer_ref/` — the text encoder and both VAEs are NOT in
+        //     `SceneWorks/minimax-h3-mlx` at all and would still have to come from upstream — so a
+        //     tier loader would buy one component of five while adding engine work and a
+        //     real-weights validation run. It is also blocked on sc-19517: that repo publishes no
+        //     `q4/transformer_ref` and its `bf16/transformer/` is incomplete.
+        //
+        // ⚠️ sc-20267 CORRECTION — THE SECOND BULLET IS FALSIFIED IN FULL, AND THE FIRST BULLET'S
+        // "no consumer" CLAUSE WITH IT. The rejected reasoning is kept above verbatim because it is
+        // still the record of what was decided in sc-19558 and why; what follows is what falsified
+        // each part of it, so neither the stale premise nor the retracted blocker is reintroduced:
+        //   * "the candle provider declares `supported_quants: &[]` and has no tier loader, so a
+        //     packed tier is bytes nothing would select" — FALSE since the sc-20267 inference change:
+        //     `candle-gen-minimax-h3` now advertises `supported_quants: &[Quant::Q4, Quant::Q8]` and
+        //     ships a real pre-quantized tier loader (a tier resolver plus packed DiT, text-encoder
+        //     and vision loaders). A packed tier IS now selectable off-Mac, which is why the q4/q8
+        //     rows above are no longer `macos`-only. (The REHOST half of that bullet still stands on
+        //     its own: nothing new was published — both lanes read the SAME
+        //     `SceneWorks/minimax-h3-mlx` tiers at the same pinned revision.)
+        //   * "The tiers hold only `transformer/` and `transformer_ref/` — the text encoder and both
+        //     VAEs are NOT in `SceneWorks/minimax-h3-mlx` at all … so a tier loader would buy one
+        //     component of five" — FALSE since sc-19120, which added `q4/text_encoder` and
+        //     `q8/text_encoder` to that very repo. The tier now covers the TWO LARGEST components,
+        //     not one of five: DiT 66.28 GB + text encoder 66.71 GB out of the ~144.6 GB dense
+        //     off-Mac total. The REST of that claim stands — the two VAEs and the tokenizer are
+        //     tier-agnostic, no tier shrinks them, and they still come from upstream, which is
+        //     exactly what the rows below fetch.
+        //   * "blocked on sc-19517: that repo publishes no `q4/transformer_ref` and its
+        //     `bf16/transformer/` is incomplete" — sc-19517 is a RETRACTED PREMISE, not an open
+        //     blocker. `q4/transformer_ref` IS published with an exact hosted byte count
+        //     (18,780,109,783 B) and is declared as the per-tier sibling co-requisite in the sc-19573
+        //     block above. Do not reintroduce it as a dependency of anything.
+        //
+        // ⚠️ WHAT THESE ROWS DO **NOT** DO. They make the weights OBTAINABLE off-Mac. They do not
+        // by themselves make the lane serve a job, and `VIDEO_MODEL_CAPS` still carries every candle
+        // column false for both partitions. TWO preconditions remain, and both are named here so
+        // the next reader does not mistake an artifact for a route:
+        //   1. the candle block's `measured: false` — there is no measured VRAM ceiling for this
+        //      lane (`vramGbByTier` / `minMemoryGb` are deliberately absent below); and
+        //   2. `crates/sceneworks-worker/src/video_jobs/minimax_h3.rs` is `#[cfg(target_os =
+        //      "macos")]` end to end, so there is no candle dispatch arm to route to yet.
+        // `candle_video_routed_models_have_an_installable_off_mac_download`
+        // (crates/sceneworks-core/src/jobs_store/tests/mlx_routing_tests.rs) is the guard for the
+        // weights half: flip a candle column with no row here and it goes red.
+        //
+        // ⚠️ THESE ROWS ARE THE OFF-MAC **bf16** TIER — sc-20267 CORRECTION. They used to say "NO
+        // `variant` ON ANY OF THESE. The candle provider advertises `supported_quants: &[]`, so there
+        // is no tier axis off-Mac and a `variant` would advertise a choice nothing can honour." The
+        // tier axis off-Mac is now real (see the correction above), so the DiT primary and the
+        // `text_encoder` co-requisite below carry an explicit `"variant": "bf16"`. The two VAEs and the
+        // FL2VA config triple stay variant-LESS because they are a floor no tier shrinks — the same
+        // shape as their macOS twins.
+        //
+        // THE TWO SPELLINGS ARE NOT INTERCHANGEABLE, and that is why the labels had to be added rather
+        // than left off (apps/rust-api/src/models.rs):
+        //   * a variant-LESS PRIMARY is the UNTIERED/DEFAULT route, not "applies to every tier":
+        //     `model_download_for_variant` matches `variant` by exact (trimmed, lower-cased) equality,
+        //     so an unlabeled row can never satisfy a tier request, and `model_variant_downloads` keys
+        //     it as the `"default"` pseudo-tier. Once the q4/q8 primaries above became visible off-Mac,
+        //     `model_has_variant_matrix` turned TRUE there — and the Model Manager renders the tier
+        //     panel INSTEAD of the single Download button while `orderedMatrixVariants`
+        //     (apps/web/src/screens/ModelManagerScreen.jsx) drops the `"default"` pseudo-tier from that
+        //     panel. Leaving the primary unlabeled would have made the off-Mac bf16 route
+        //     UNINSTALLABLE through the UI, which is the exact obtainability sc-19558 landed to fix.
+        //     `scail2_14b`'s off-Mac primary is the precedent: it carries `variant: "bf16"` explicitly.
+        //   * a variant-LESS CO-REQUISITE is the opposite — `model_co_requisite_downloads_for_variant`
+        //     returns every unlabeled row for EVERY tier — so an unlabeled `text_encoder` row would
+        //     have added the 66.7 GB dense upstream encoder on top of the packed 18.7 GB q4 one for a
+        //     q4 off-Mac install, and `resolve_co_requisites_for_tier` (which refuses to guess once a
+        //     `componentId` maps to several rows) would have had no row to serve bf16 with at all.
+        // Per OS there is now exactly ONE row per (`componentId`, `variant`), which is the same
+        // pairing invariant the tier-agnostic rows record above.
+        //
+        // Sizes are EXACT `os.stat` totals over the pinned snapshot with symlinks dereferenced,
+        // measured 2026-08-15; they sum to 144,633,607,972 B (134.7 GiB) — the DENSE off-Mac floor,
+        // i.e. what a bf16 install costs. A q4 or q8 install off-Mac now pays the packed DiT + packed
+        // text encoder from `SceneWorks/minimax-h3-mlx` instead of the first two rows here, and still
+        // pays the tier-agnostic VAEs and FL2VA config below.
+        //
+        // ⚠️ THE METHOD MATTERS, because the first pass got one row wrong. A hub snapshot dir holds
+        // repository content as SYMLINKS into `blobs/`; anything else in it is a local dropping.
+        // Only symlinked entries are counted here. A recursive walk that stats every regular file
+        // too swept a `__pycache__/` of 8 `*.cpython-314.pyc` files (43,291 B) into the
+        // `FL2VA/audio_vae` row — see that row below, which carries the correction. The stated total
+        // was 144,633,651,263 B for exactly that reason and is now the symlink-only figure.
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          // `variant` added by sc-20267 — this row is the off-Mac bf16 tier, and it is the ONLY bf16
+          // `transformer` candidate off-Mac (the rehost's bf16 row is deliberately still `macos`-only).
+          // See the block preamble for why an unlabeled primary would have made this route
+          // uninstallable once q4/q8 became visible here.
+          "variant": "bf16",
+          "files": ["transformer/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 66280569250,
+          "footprint": { "diskSizeBytes": 66280569250, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          // `variant` added by sc-20267, for the co-requisite half of the reason in the block
+          // preamble: an unlabeled co-requisite applies to EVERY tier, so leaving this row unscoped
+          // would have stacked the 66.7 GB dense encoder on top of the packed q4/q8 one now that those
+          // rows are visible off-Mac. bf16 is the tier this component IS.
+          "variant": "bf16",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "subdir": "text_encoder",
+          // ⚠️ ALL FOURTEEN SHARDS, unlike the macOS bf16 row above, which omits shard 13. That
+          // omission is licensed by the MLX engine's own `TE_SHARDS` / `VISION_SHARD` read pattern;
+          // no equivalent has been established for `candle-gen-minimax-h3`, so this row fetches the
+          // whole component rather than inheriting a trim it cannot cite. It is also why the rehost's
+          // bf16 DiT row was NOT widened off-Mac: this route is the complete one for candle.
+          "files": ["text_encoder/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 66726510529
+        },
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "coRequisite": true,
+          "componentId": "video_vae",
+          "subdir": "vae",
+          "files": ["vae/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 10415635127
+        },
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "coRequisite": true,
+          "componentId": "audio_vae",
+          "subdir": "audio_vae",
+          "files": ["audio_vae/*"],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 605431611
+        },
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "coRequisite": true,
+          "componentId": "fl2va_audio_vae_config",
+          "subdir": "FL2VA/audio_vae",
+          // The reference's OWN `from_pretrained` inputs — the `config.json` / `config.yaml` /
+          // `metadata.json` triple `load_audio_vae` reads when present. It falls back to declared
+          // defaults when absent, so this is not load-bearing for a render; it is fetched so the
+          // off-Mac lane constructs the audio VAE from the same documents the reference does rather
+          // than from a fallback. macOS has no such row because the MLX audio VAE does not read it.
+          "files": ["FL2VA/audio_vae/*"],
+          "platforms": ["windows", "linux"],
+          // 13 files. NOT 605,504,746 — that figure was a mis-measurement, corrected here: the
+          // measuring walk was recursive and swept up a local `__pycache__/` of 8 `*.pyc` files
+          // (43,291 B) that a Python import of the vendored `dac_*.py` modules had left in the
+          // snapshot dir hours after the download. Those are local droppings, not repository
+          // content — they are regular files, while every real snapshot entry is a symlink into
+          // `blobs/`. See the measurement note above the first row for the method that excludes
+          // them.
+          "estimatedSizeBytes": 605461455
+        }
+      ],
+      // ⚠️ NOT PLATFORM-SCOPED, and off-Mac it is now TIER-DEPENDENT rather than simply wrong.
+      // `paths` has no `platforms` axis and no `variant` axis — it is one value per entry.
+      //
+      // sc-19558 recorded this as "off-Mac it names a repo with no surviving rows", which sc-20267
+      // falsified: the q4/q8 DiT and text-encoder rows now survive `retain_downloads_for_os` on
+      // Windows/Linux, so off-Mac a q4 or q8 install DOES populate `SceneWorks/minimax-h3-mlx` and
+      // this value names the right repo for those two tiers. It is still wrong for the off-Mac bf16
+      // tier, whose weights come from `MiniMaxAI/MiniMax-H3`.
+      //
+      // INERT EITHER WAY TODAY: nothing off-Mac reads it, because the candle columns in
+      // `VIDEO_MODEL_CAPS` are all false and there is no H3 arm in the candle ladder, so no off-Mac
+      // code path resolves this value. Recorded rather than silently left, because the change that
+      // flips a candle column must resolve the per-tier root the way `resolve_minimax_h3_load`
+      // resolves the macOS one — a single scalar here cannot express "the rehost at q4/q8, upstream
+      // at bf16", which is precisely the shape the off-Mac rows now have.
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/minimax-h3-mlx"
+      },
+      // sc-18725. `families` is the LOAD gate, and it is genuinely read on both sides: the API's
+      // `model_lora_families` -> `accepted_model_lora_families` -> `validate_lora_specs_for_model`
+      // rejects a submitted LoRA whose family is not in this set, and the web's `loraMatchesModel`
+      // (presetUtils.js) filters the picker on the same list. Declared explicitly rather than left to
+      // `families_from_value_chain`'s top-level-`family` fallback because `loraCompatibility` is one
+      // of the six NESTED_KEYS `merge_model_manifest_entry` merges key-by-key — an absent block here
+      // makes a user-manifest override replace rather than merge.
+      //
+      // `types` is the DESCRIPTIVE vocabulary; it has exactly one reader today —
+      // `modelSupportsMultiPhase` (imageMultiPhase.js), which keys on the single token
+      // "acceleration". That token is deliberately ABSENT: it opens Image Studio's multi-phase
+      // denoise editor, whose worker gate is `request.model == KREA_RAW_MODEL_ID`, so advertising it
+      // from a video model would be a promise nothing keeps. The turbo adapters still surface
+      // normally — the picker gates on `families`, not on `types`.
+      "loraCompatibility": {
+        "families": ["minimax-h3"],
+        "types": ["style", "motion", "character", "enhance"]
+      },
+      "defaults": {
+        // The shortest rung (124 frames) rather than the middle of the menu, because the cost table
+        // above makes the default canvas a 2-hour render at 5.1667 s and worse at every longer one.
+        // `limits.durations[0]` is NOT what makes this the default — `defaults.duration` is; the two
+        // agreeing here is a deliberate choice, not an ordering dependency.
+        "duration": 5.1667,
+        "fps": 24,
+        // Upstream's own default canvas: 16:9 with the 768 shorter side the model card specifies.
+        // `resolve_canvas_size` produces exactly this for a 16:9 request and it is EXACTLY the
+        // 1,032,192 px area budget, so it is the largest legal bucket rather than a happy medium.
+        "resolution": "1344x768",
+        "steps": 50,
+        "sampler": "default",
+        "scheduler": "default"
+      },
+      "limits": {
+        // ⚠️ The FOURTEEN legal clip lengths, and the reason this is a MENU rather than a range:
+        // frames must land on `17n + 5` and only 124…345 satisfy the checkpoint's own 5–15 s clamp,
+        // so a slider would emit durations the engine refuses. Each value is `frames / 24` to 4 dp
+        // and each rounds back to its own frame count exactly (5.1667 x 24 = 124.0008 → 124).
+        // Derived from MINIMAX_H3_LEGAL_FRAME_COUNTS by
+        // `shipped_minimax_h3_duration_menu_is_exactly_the_fourteen_lattice_rungs`, so the menu and
+        // the lattice cannot drift.
+        "durations": [5.1667, 5.875, 6.5833, 7.2917, 8.0, 8.7083, 9.4167, 10.125, 10.8333, 11.5417, 12.25, 12.9583, 13.6667, 14.375],
+        // 124 / 24. The reference ADVERTISES 5.0 s but has no lattice point there, and a shorter
+        // request is refused rather than lengthened (sc-17152).
+        "hardMinDuration": 5.1667,
+        // 345 / 24. The reference ADVERTISES 15.0 s and CANNOT reach it — the next rung is 362
+        // frames = 15.083 s — so 15 s is REFUSED here rather than silently delivered as 14.375 s,
+        // which is exactly what sc-17147 was doing.
+        "hardMaxDuration": 14.375,
+        // Stays at the hard bound deliberately: the real constraint is canvas x duration and a
+        // scalar cannot express it. The full range is comfortable at 576x320; the SHORTEST clip at
+        // the default canvas is already two hours. Recommending a shorter scalar would falsely
+        // imply long clips are infeasible everywhere (sc-17152).
+        "recommendedMaxDuration": 14.375,
+        // 🔴 THE UNIT IS MODEL EVALUATIONS (NFE), and it is the same unit everywhere: `defaults.steps`
+        // above, `advanced.steps`, this floor, and the `sampling.steps` each turbo adapter declares
+        // in builtin.loras.jsonc. The engine builds the sigma grid as `linspace(1, 0, steps + 1)` —
+        // it appends the terminal 0 ITSELF (`JointSchedule::with_shifts(evaluations + 1, ..)`) — so
+        // `defaults.steps: 50` really is 50 evaluations and nothing in SceneWorks adds or subtracts
+        // one. sc-18726 asked for that call to be made once and tested; it is pinned by
+        // `minimax_h3_turbo_steps_are_model_evaluations_not_grid_points` (sceneworks-core) and by
+        // the arm-level `a_selected_turbo_variant_changes_the_job_that_reaches_the_engine`.
+        //
+        // ⚠️ This comment previously read "N steps drive N-1 model evaluations" and concluded that
+        // `steps: 1` is unrenderable. That describes diffusers' `num_inference_steps`, which is NOT
+        // what this key carries: at 1 NFE the engine builds a legal 2-point grid and renders. So the
+        // floor is a PRODUCT judgement, not an engine limit — a 1-evaluation schedule is a single
+        // Euler jump from pure noise, which is not a fast draft, it is noise. 2 is the smallest
+        // schedule with an intermediate sigma. REFUSED rather than quietly raised, the same
+        // reject-never-clamp posture the duration bounds take (sc-19426, corrected sc-18726).
+        "hardMinSteps": 2,
+        // One cadence. The lattice, the duration window and every measured render are 24 fps.
+        "fps": [24],
+        // `CANVAS_MAX_PIXELS` = 1,032,192 = 768 x 1344, and it is ENFORCED as an AREA budget. It had
+        // been declared and unused, and `Capabilities::max_size` bounds each edge INDEPENDENTLY, so
+        // 1344x1344 previously passed every check at 1.75x the checkpoint's budget (sc-17152). Every
+        // advertised bucket below satisfies the AREA, not merely the per-edge cap.
+        "maxPixels": 1032192,
+        // NO `requiresDimensionsMultipleOf`. `SIZE_MULTIPLE` is 32 (the VAE's 16x spatial stride x
+        // the DiT's width patch 2), which is already core's default floor — the same reason
+        // wan_2_2 and scail2_14b declare nothing. Declaring 32 would be a no-op that reads as a
+        // per-model choice; `dimension_multiple_of` is pinned at 32 for this id by
+        // `shipped_manifest_matches_each_engines_real_geometry`.
+        //
+        // There is NO `aspect_ratio` parameter upstream — the canvas derives from the first
+        // keyframe's ratio, or defaults to 16:9 with no keyframe, and bounds are 1:4 to 4:1. These
+        // buckets are the MEASURED `resolve_canvas_size` outputs (21:9 → 1536x672, 16:9 → 1344x768,
+        // 1:1 → 768x768, 9:16 → 768x1344, 4:3 → 1024x768) plus their transposes, and the 576x320
+        // pair sc-17152 rendered on. The 4:1 edge case resolves to 2016x512, which is past the app's
+        // own 1920 px per-side clamp, so it is deliberately NOT advertised — an advertised bucket
+        // must be a fixed point. A keyframe is STRETCHED onto the canvas, not letterboxed, and the
+        // resolved ratio drifts slightly (a 4:1 request comes back 3.938:1).
+        "resolutions": ["1536x672", "672x1536", "1344x768", "768x1344", "1024x768", "768x1024", "768x768", "576x320", "320x576"],
+        // t2va and fl2va condition on `sourceAssetId` / `lastFrameAssetId`, never on the reference
+        // LISTS — this partition's checkpoint has no reference-conditioning path at all, so all
+        // three are 0 and an engine can never be handed conditioning it would silently ignore
+        // (which is invisible in the output). `minimax_h3_ref` is where 9 / 3 / 3 / 12 lives.
+        "maxReferenceAssets": 0,
+        "maxSourceClipAssets": 0,
+        "maxReferenceAudioAssets": 0,
+        // Default-only. sc-19721's pin bump (`75d66db5`) DID make the descriptor reachable, so the
+        // engines.rs drift guard can now compare a curated menu against MiniMax-H3's real
+        // capabilities — but the provider advertises `samplers: ["default"]` and no scheduler menu
+        // of its own, so there is nothing to curate INTO. This stays `["default"]` because that is
+        // what the engine offers, not because the descriptor is invisible; a curated menu is
+        // additive if the engine ever grows one.
+        "samplers": ["default"],
+        "schedulers": ["default"]
+      },
+      "mlx": {
+        // 64 — the DERIVED floor for the DEFAULT (q4) tier (sc-17153), replacing a 96 that went
+        // stale the day sc-19120 merged. NOT a measured end-to-end ceiling: no per-tier
+        // calibration receipt exists for this family yet (`mlx.calibrations` is absent —
+        // deliberately, because inventing one here would read as evidence), and producing those
+        // receipts, each tier in its own process, belongs to epic 17137's single terminal
+        // measurement campaign. Until that lands, this scalar is the honest derivation OF today's
+        // measurements, not a measurement itself.
+        //
+        // ⚠️ WHY 96 WAS WRONG. It priced the DENSE Qwen3-VL-32B text encoder's 53.07 GB isolation
+        // peak (sc-17150 activity 19121) — a stage the DEFAULT tier no longer runs. sc-19120's
+        // packed q4 conditioning stage measures 14.68 GB end to end (inference
+        // `mlx-gen-minimax-h3/src/memory_strategy.rs` + `tests/te_tier_generate_stages.rs`, read
+        // at the pinned `75d66db5`), so 96 over-gated the default tier by ~38 GB at the derivation
+        // geometry and locked the family off every sub-96 GB Mac for no measured reason.
+        //
+        // THE DERIVATION — max over the shipped q4 pipeline's stages at the LARGEST geometry this
+        // entry admits (the 1,032,192-px canvas at 14.375 s / 345 frames ≈ 104k packed rows;
+        // the writable-elements crossing near 260 frames is a memory cost, not a gate — inference
+        // `cost.rs` module docs):
+        //   * conditioning (packed q4 TE): 14.68 GB measured, geometry-invariant on the video axes;
+        //   * denoise: 11.63 GB q4 DiT resident (post AdaLN-evict, measured) + a compute-dtype
+        //     (bf16, tier-independent) transient that is LINEAR in packed rows — every tensor the
+        //     forward MATERIALIZES is linear in S (the SwiGLU projection is the widest; fused SDPA
+        //     streams the S² scores, `cost.rs`) — pinned by two points: ~1.1 GB at ~3.3k rows
+        //     (12.75 GB stage total, te_tier_generate_stages) and ≤12.6 GB at 37.8k rows (the bf16
+        //     sweep's 52.81 GB peak at 1344x768/124f minus the 40.43 GB bf16 resident; the stage
+        //     never broke the dense-TE mask, sc-17152 / activity 18976). Extrapolated to the
+        //     ~104k-row envelope top: ~35 GB transient ⇒ ~46.5 GB stage peak. THIS STAGE BINDS.
+        //   * decode: 5.77 GB measured at the small anchor; spatially tiled (rung 2, frozen
+        //     256/64 px pair), so growth is latent/output buffers (~4 GB at the top), far under
+        //     the denoise stage. The VAEs are untiered, so this is tier-independent.
+        // Wired ceiling is `recommendedMaxWorkingSetSize` (~75 % of unified memory): 46.5 / 0.75 ≈
+        // 62 ⇒ a 64 GB Mac (~48 GB ceiling) holds the whole admitted surface; a 48 GB Mac
+        // (~36 GB) does not at the envelope top. A blanket scalar cannot say "48 GB runs the
+        // smaller geometries" — that is the REQUEST-scoped fit gate's job, not this floor's.
+        //
+        // NOT priced in, on purpose: sc-18662's streamed rung-4 request (requestPeak 5.80 GB q4 at
+        // 124f/384x224, decode-bound) is measured at an inference revision this app does not pin —
+        // the shipped pipeline holds the whole q4 DiT resident through the denoise. When the pin
+        // moves and the terminal campaign measures per-tier receipts, this scalar and the
+        // rung4-applicability-survey's outOfMatrixFamilies["17137"] characterization get real
+        // numbers together.
+        "minMemoryGb": 64,
+        "repo": "SceneWorks/minimax-h3-mlx",
+        "limits": {
+          "samplers": ["default"],
+          "schedulers": ["default"]
+        }
+      },
+      // sc-17156 — THE CANDLE LANE EXISTS AS CODE AND IS NOT YET REACHABLE AS A PRODUCT.
+      //
+      // `candle-gen-minimax-h3` now ships a real end-to-end t2va + fl2va generator and is registered
+      // in `candle-gen-catalog`. What it does NOT yet have is a measured VRAM ceiling or any
+      // artifact a user could install off-Mac, so this block declares the two things that are
+      // provable today and deliberately omits the two that are not.
+      //
+      // ⚠️ NO `vramGbByTier` AND NO `minMemoryGb`, AND THAT IS THE HONEST STATE, NOT AN OVERSIGHT.
+      // The candle probe (`candle-gen-minimax-h3/tests/vram_probe.rs::minimax_h3_vram_bf16`) is
+      // written and wired into the `candle-minimax-h3` CUDA lane behind the `minimax_h3_vram_probe`
+      // dispatch input, but it has never been executed, for two reasons that are both operator
+      // actions rather than code:
+      //   1. the repository variable `CANDLE_MINIMAX_H3_SNAPSHOT` is UNSET, so the lane fails closed
+      //      at its first step by design; and
+      //   2. the pinned `minimax-h3` row in inference's `release/real-weight-models.toml` carries a
+      //      `download_files` allow-list (~11.6 GB: vae/, audio_vae/, FL2VA/audio_vae/, tokenizer/
+      //      and the text-encoder shard INDEX) that deliberately EXCLUDES `transformer/` and the
+      //      fourteen TE shards. A render needs both, so CI cannot materialize what the probe reads.
+      // Until that number exists, `predicted_peak_gb` returning `None` for this model is CORRECT:
+      // the fit gate stays best-effort rather than admitting a card against a guess. Do NOT
+      // backfill an estimate here — a 66.7 GB conditioner staged before a 66.3 GB DiT is not
+      // something to extrapolate from a sibling, and the weights-floor table on sc-17158 activity
+      // 18683 is a weights floor, not a generate peak.
+      //
+      // `measured: false` is therefore load-bearing rather than decorative: it is the schema's own
+      // way of saying this lane's ceilings are not evidence yet.
+      //
+      // ⚠️ THE DOWNLOADS ARE NO LONGER `macos`-ONLY — sc-19558 added the `platforms:
+      // ["windows", "linux"]` raw-snapshot set above, which is the layout this provider's
+      // `REQUIRED_COMPONENT_DIRS` reads, and sc-20267 then widened the q4/q8 DiT and text-encoder
+      // rows to all three platforms once the provider gained `supported_quants: &[Quant::Q4,
+      // Quant::Q8]` and a packed tier loader. So off-Mac now has a THREE-TIER artifact set, not one.
+      // THE ROUTING COLUMNS DID NOT MOVE WITH EITHER CHANGE. A `candle` block is metadata about a
+      // backend; the routing catalog is the authority on which lane serves a request (GH #2074 —
+      // declaration is not reachability), and `VIDEO_MODEL_CAPS` still carries every candle column
+      // false for both partitions because the two open items above — no measured ceiling, and no
+      // candle dispatch arm in `crates/sceneworks-worker/src/video_jobs/minimax_h3.rs`, which is
+      // `#[cfg(target_os = "macos")]` end to end — are unchanged. Obtaining weights is a precondition
+      // of routing, not routing.
+      //
+      // ⚠️ AND NO `vramGbByTier` EVEN THOUGH THERE ARE NOW TIERS OFF-MAC. A tier axis in the download
+      // set is not a measured ceiling: the probe above still has never run, so the per-tier numbers
+      // this block would need do not exist. sc-20267 deliberately added none — a tier column filled in
+      // from the MLX measurements would be a guess about a different loader.
+      "candle": {
+        // Provable, and structural rather than requested: the provider pins
+        // `OFFLOAD_POLICY = OffloadPolicy::Sequential` and ignores `spec.offload_policy` entirely,
+        // so a caller cannot talk it into resident staging. Pinned by
+        // `the_offload_policy_is_forced_sequential_even_when_resident_is_requested`.
+        "supportsSequentialOffload": true,
+        "measured": false
+      },
+      "ui": {
+        "label": "MiniMax-H3",
+        // sc-17227 — §IV.2 of the MiniMax H3 Community License: "You shall prominently display
+        // 'MiniMax H3' on the user interface of commercial product or service that uses MiniMax H3
+        // or MiniMax H3 Works." The exact string with a SPACE, not the hyphenated repo name, and
+        // rendered as its own line above the description on the model card rather than folded into
+        // prose. §III.3.a separately encourages the "Powered by MiniMax H3" wording, so one line
+        // discharges both.
+        "attribution": "Powered by MiniMax H3",
+        // sc-17162 — THE HONESTY PASS OVER THE WITHHELD UPSTREAM COMPONENTS, in the one place a
+        // user reads before committing to a ~30 GB install (`ModelManagerScreen.jsx` renders this
+        // as the model card body; it is `ui.description`'s ONLY reader). Four claims here are
+        // load-bearing rather than descriptive, and each is checkable:
+        //   1. NOT the hosted product — `H3-Context-IR` and `H3-Regenerate-2K` are unreleased, so
+        //      prompt adherence differs from the Hailuo API and 2K is unreachable. The load-bearing
+        //      enforcement for THAT claim is `CANVAS_MAX_PIXELS` (1,032,192), the AREA budget: a 2K
+        //      frame is >2x it on area alone, so no per-edge value can make 2K reachable and there
+        //      is no 2K path to be coy about. See inference
+        //      `docs/reference/minimax-h3-withheld-upstream-components.md`.
+        //
+        //      ⚠️ DO NOT cite `max_size: 1344` as the 2K argument, which this comment previously
+        //      did. It read as a contradiction against this entry's own `limits.resolutions`, which
+        //      advertises `1536x672` / `672x1536` — 1536 > 1344 on the long edge — so the same PR
+        //      appeared to assert a 1344 per-edge ceiling and a 1536-wide bucket at once. The area
+        //      budget is the argument that actually carries the 2K claim and is not in tension with
+        //      anything, so it is the one stated above.
+        //
+        //      The per-edge cap is a SEPARATE, independently-applied bound, and it currently sits
+        //      BELOW this entry's advertised 21:9 pair. So `1536x672` / `672x1536` are ADVERTISED
+        //      BUT NOT YET RENDERABLE: the area check passes and the edge check refuses.
+        //
+        //      ✅ DISCHARGED BY sc-19721's PIN BUMP. `Cargo.toml` now pins `75d66db5`, which
+        //      carries inference PR #640 (`story/sc-17152-h3-max-size-1536`) — the per-edge ceiling
+        //      is `MAX_CANVAS_EDGE = 2016` on both lanes, comfortably above 1536, so the pinned
+        //      engine accepts the pair and the paragraph above is HISTORY, kept only because it
+        //      explains why the area budget alone never settled the question.
+        //
+        //      The tie is enforced, not asserted in prose: `pinned_engine_geometry.rs` reads the
+        //      PINNED provider's own `capabilities.max_size` and refuses any advertised resolution
+        //      whose long edge exceeds it, so a pin that moved backwards would go red in Rust
+        //      instead of silently re-advertising a canvas the engine refuses. The prompt guide's
+        //      *Sizes* section carries the pair with no caveat, pinned by
+        //      `minimaxH3CatalogCopy.test.jsx`.
+        //
+        //      Do NOT write the new ceiling's VALUE here or in the copy. It is an engine internal
+        //      that dates this comment the moment the resolver moves, and 1536 — the intuitive
+        //      guess, being this pair's own long edge — is WRONG: the resolver emits wider still at
+        //      the 4:1 aspect ceiling, so a 1536 cap would keep refusing a canvas the engine
+        //      produces on its own. #640 carries a guard that reds specifically on that value.
+        //
+        //      This repo now CHECKS all of it. `PinnedAreaCap::NotInThePinnedBundle` is gone with
+        //      sc-19721's pin bump: `pinned_engine_geometry.rs` imports
+        //      `providers::minimax_h3::pipeline` and ties `maxPixels` to the engine's own
+        //      `CANVAS_MAX_PIXELS` and every advertised resolution's long edge to the registered
+        //      descriptor's `max_size`. A manifest that got ahead of the engine, or a pin that
+        //      moved behind the manifest, is red there rather than a job-time reject.
+        //   2. Dense attention, because the sparse-attention inference path is unreleased — which
+        //      is what makes the cost table above look like that. It is NOT what sets the 14.38 s
+        //      ceiling: that comes from the checkpoint's own 5–15 s clamp meeting the `17n + 5`
+        //      lattice, which sparse attention does not touch. Do not conflate the two in copy.
+        //   3. 15 s is REFUSED, not shortened. `limits.hardMaxDuration` is 14.375 and the next
+        //      lattice rung is 15.083 s, so a 15 s request errors — a user who reads "5–15 s" on
+        //      MiniMax's own page and plans around it needs to learn that HERE, not from a failed
+        //      submit two hours into a queue.
+        //   4. No still-image mode — `min_duration = 5.0` is hardcoded upstream, so `T = 1` does
+        //      not render at all.
+        // The `<d>` dialogue markers (the fourth withheld surface) are a PROMPTING detail and live
+        // in the prompt guide, which is the only place a user would copy that syntax from.
+        "description": "MiniMax-H3 (Hailuo 3.0) generates video and synchronized stereo audio together in one pass — the clip arrives with its soundtrack already muxed, not dubbed on afterwards. Text-to-video plus first and/or last frame conditioning; there is no still-image mode, because the checkpoint refuses anything shorter than about five seconds. Clips come in fourteen fixed lengths between 5.17s and 14.38s at 24fps and nothing in between renders — including the 15s MiniMax's own documentation advertises, which is refused outright rather than quietly shortened to 14.38s. This is the open-weights model, not the hosted Hailuo product: the prompt-understanding front end (H3-Context-IR) and the 2K in-context upscaler (H3-Regenerate-2K) are not released, so prompt adherence differs from the API and 2K is not reachable from these weights. Sparse-attention inference is also unreleased, so attention runs dense — the shortest clip at the default 1344x768 canvas is about a two-hour render, while the whole length range stays comfortable at 576x320. There is no guidance scale and no negative prompt — the model has neither axis, so those controls are hidden rather than missing. It RENDERS on macOS only, through the native MLX lane, and needs a large-memory Mac; the weights themselves may be downloadable on other platforms.",
+        "recommendedFor": ["text_to_video", "image_to_video", "first_last_frame"],
+        "durationHint": "Fourteen clip lengths only, 5.17s to 14.38s at 24fps — the frame lattice is 17n+5, so nothing in between renders, and 15s is refused rather than shortened to 14.38s. Cost is driven by CANVAS far more than by length: 5.17s at 576x320 is ~14 minutes and the whole 14.38s range is comfortable there, while 5.17s at the default 1344x768 is already ~2 hours. Pick the small canvas first, then the length.",
+        "promptGuide": {
+          "title": "MiniMax-H3 Prompt Guide",
+          "path": "/prompt-guides/minimax-h3.md",
+          "sources": [
+            { "label": "MiniMax-H3 model card", "url": "https://huggingface.co/MiniMaxAI/MiniMax-H3" },
+            { "label": "Hailuo 3.0 prompting guide", "url": "https://hailuoai.video/" },
+            { "label": "MiniMax platform video generation docs", "url": "https://platform.minimax.io/docs/api-reference/video-generation" }
+          ]
+        }
+      }
+    },
+    // The Ref2VA partition. Same architecture, same geometry, same shared floor — a DIFFERENT
+    // checkpoint (`transformer_ref`), which is the only one that conditions on multi-modal
+    // references. A second ENTRY rather than a co-requisite of the first (sc-17139 AC4), because
+    // `variant` is a closed quant enum with no "which checkpoint" axis and the two are separately
+    // pickable in the Studios. Same shape as the wan_2_2_t2v_14b / wan_2_2_i2v_14b pair.
+    //
+    // ⚠️ AMENDED BY sc-19573. sc-17139 AC4 additionally argued that a hard co-requisite "would force
+    // +18.78 GB on every q4 text-to-video user". That premise was wrong: `mlx-gen-minimax-h3::load`
+    // opens BOTH partitions on every load, so those bytes were always part of the minimum loadable
+    // set and withholding them produced an install that rendered nothing. Each entry now declares
+    // the OTHER partition as a per-tier co-requisite (see the rows in both `downloads` arrays); the
+    // entries stay separate, the bytes stop being optional. `required: "soft"` was the other option
+    // and is wrong here for the reason sc-17139 gave — a soft co-requisite keeps the primary usable,
+    // which is precisely the state that does not exist for this pair.
+    //
+    // The two entries share the primary repo `SceneWorks/minimax-h3-mlx` and differ only in the
+    // per-tier `files` predicate, so a per-tier delete on one reclaims exactly its own subtree.
+    // (Whole-model delete resolves the repo cache path, so removing either entry can strand the
+    // other's bytes — a pre-existing, repo-wide characteristic of the twelve shared-repo groups
+    // already in this catalog, e.g. bernini / bernini_image, not something this pair introduces.)
+    {
+      "id": "minimax_h3_ref",
+      "name": "MiniMax-H3 References",
+      "family": "minimax-h3",
+      "type": "video",
+      "adapter": "minimax_h3",
+      // Ref2VA only: up to 9 images, 3 video clips and 3 audio clips, 12 files in total. It is not
+      // a text-to-video or first/last-frame checkpoint — those are `minimax_h3`.
+      "capabilities": ["reference_to_video"],
+      // sc-17242 spike, measured against the official diffusers reference: the pipeline's ENTIRE
+      // input surface is 19 params — `prompt`, `image`, `last_image`, `references`, `num_frames`,
+      // `height`, `width`, `num_inference_steps`, `generator`, `latents`, `audio_latents`,
+      // `output_type`, `attention_kwargs` and 6 intermediates. There is **no `guidance_scale` and no
+      // `negative_prompt`**, so both axes are declared false and Video Studio hides the controls
+      // rather than offering knobs the worker would discard. ABSENT would mean TRUE here (the video
+      // block's polarity is the opposite of `audio`'s), which is why silence is not an option.
+      "video": { "supportsGuidance": false, "supportsNegativePrompt": false },
+      // sc-17227 — same licence gate as `minimax_h3`, and it must be declared HERE too: the
+      // acknowledgment is keyed per model id, and this is a separate entry the user can install
+      // on its own. See the sibling entry for why `gated` is absent (the HF repo is public, so
+      // there is no credential to demand) and why §V.2 requires the notification.
+      "requiresLicenseAcknowledgment": true,
+      "licenseUrl": "https://huggingface.co/MiniMaxAI/MiniMax-H3",
+      "licenseNotice": "MiniMax-H3's weights, and the video and audio they produce, are governed by the MiniMax H3 Community License Agreement — not by SceneWorks' own AGPL-3.0 licence. That agreement grants a NON-TRANSFERABLE licence (§II) and defines a \"Licensee\" as whoever uses the model (§I.9), so it binds you directly and SceneWorks' authorization from MiniMax does not stand in for yours. Four of its terms decide whether you may use this model at all. (1) APPLICABLE TERRITORY (§I.3, §I.5, §V.4): the agreement's default Applicable Territory is worldwide excluding the European Union, the United Kingdom, the Republic of Korea, and the United States of America. Separately, MiniMax has confirmed in writing that it authorizes SceneWorks to use MiniMax H3 and MiniMax H3 Works, conditioned on SceneWorks' continued compliance with the commitments in its request; which provision of the agreement that confirmation is given under is not stated here. Questions about your own use go to MiniMax at api@minimax.io (§IV.1). (2) ACCEPTABLE USE POLICY (§V.1 and Exhibit A): twenty prohibited uses, of which item 12 requires you to clearly and prominently disclose that content is machine-generated whenever you publish it to a public environment — SceneWorks does not write that disclosure into your files, so making it is yours to do. (3) ADDITIONAL COMMERCIAL TERMS (§IV.1): separate prior written authorization from MiniMax is required if your commercial products and services generate more than 20 million US dollars in yearly revenue. (4) NO IMPROVING OTHER AI MODELS (§V.3): you may not use the Works or any of their Outputs or results to improve any other artificial intelligence model, other than MiniMax H3 or its Model Derivatives. SceneWorks ships a LoRA trainer, dataset captioning and a training studio, so this is the restriction the product's own features are most likely to reach — training a different model on MiniMax-H3 renders is what §V.3 forbids. Read the full text under About → Licenses before downloading.",
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "variant": "q4",
+          "default": true,
+          "files": ["q4/transformer_ref/*"],
+          "platforms": ["macos"],
+          // `transformer_ref` is byte-for-byte the same SIZE as `transformer` at every tier — the
+          // two carry identical `config.json` and the same 638 tensor names, so a name-comparison
+          // check cannot tell them apart; they are different WEIGHTS.
+          "estimatedSizeBytes": 18780109783,
+          "footprint": { "diskSizeBytes": 18780109783, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "variant": "q8",
+          "files": ["q8/transformer_ref/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 35302064357,
+          "footprint": { "diskSizeBytes": 35302064357, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "variant": "bf16",
+          "files": ["bf16/transformer_ref/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 66280569250,
+          "footprint": { "diskSizeBytes": 66280569250, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        // BYTE-IDENTICAL to `minimax_h3`'s co-requisite rows — same repos, same pinned revisions,
+        // same component ids, same file predicates, same `variant` scoping. That identity is what
+        // makes the shared floor download ONCE for both entries instead of twice; a co-requisite is
+        // never removed when one of the models that references it is deleted. The floor is now
+        // TIER-SCOPED rather than a single number: 72.9 GB at bf16, but 29.7 GB at q4 and 44.7 GB at
+        // q8, because sc-19120 made the text encoder a per-tier component (see `minimax_h3`).
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "variant": "q4",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "subdir": "q4/text_encoder",
+          "files": ["q4/text_encoder/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 18722713964
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "variant": "q8",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "subdir": "q8/text_encoder",
+          "files": ["q8/text_encoder/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 33723765614
+        },
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "variant": "bf16",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "subdir": "text_encoder",
+          "files": [
+            "text_encoder/config.json",
+            "text_encoder/model.safetensors.index.json",
+            "text_encoder/tokenizer.json",
+            "text_encoder/tokenizer_config.json",
+            "text_encoder/vocab.json",
+            "text_encoder/merges.txt",
+            "text_encoder/chat_template.json",
+            "text_encoder/preprocessor_config.json",
+            "text_encoder/video_preprocessor_config.json",
+            "text_encoder/model-00001-of-00014.safetensors",
+            "text_encoder/model-00002-of-00014.safetensors",
+            "text_encoder/model-00003-of-00014.safetensors",
+            "text_encoder/model-00004-of-00014.safetensors",
+            "text_encoder/model-00005-of-00014.safetensors",
+            "text_encoder/model-00006-of-00014.safetensors",
+            "text_encoder/model-00007-of-00014.safetensors",
+            "text_encoder/model-00008-of-00014.safetensors",
+            "text_encoder/model-00009-of-00014.safetensors",
+            "text_encoder/model-00010-of-00014.safetensors",
+            "text_encoder/model-00011-of-00014.safetensors",
+            "text_encoder/model-00012-of-00014.safetensors",
+            "text_encoder/model-00014-of-00014.safetensors"
+          ],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 61850519945
+        },
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "coRequisite": true,
+          "componentId": "video_vae",
+          "subdir": "vae",
+          "files": ["vae/*"],
+          "platforms": ["macos"],
+          // Byte-identical to `minimax_h3`'s row — see it for the F32 correction and the
+          // measurement this figure comes from.
+          "estimatedSizeBytes": 10415635127
+        },
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "coRequisite": true,
+          "componentId": "audio_vae",
+          "subdir": "audio_vae",
+          "files": ["audio_vae/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 605431611
+        },
+        // sc-19558 / sc-19573 — see `minimax_h3` for the derivations. These rows are byte-identical
+        // to that entry's, which is what keeps the shared floor a single download for the pair.
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "coRequisite": true,
+          "componentId": "tokenizer",
+          "subdir": "tokenizer",
+          // sc-19558 CORRECTION, identical to `minimax_h3`'s new row — see it for why the absence
+          // of this row made a fresh install of EITHER entry fail `minimax_h3_shared_is_complete`
+          // before the loader was reached. Declared per entry because the download set is per
+          // catalog id: installing only Ref2VA must still bring every shared component the engine
+          // probes.
+          "files": ["tokenizer/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 11492078
+        },
+        {
+          "provider": "huggingface",
+          "repo": "MiniMaxAI/MiniMax-H3",
+          "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+          "coRequisite": true,
+          "componentId": "fl2va_audio_vae_config",
+          "subdir": "FL2VA/audio_vae",
+          // sc-19558 CORRECTION — same three documents, same reason. They matter MORE on this
+          // partition: ref2va is the only route that constructs `MiniMaxH3AudioVaeEncoder`, and
+          // `load_audio_encoder` parses this same triple for its geometry.
+          "files": [
+            "FL2VA/audio_vae/config.json",
+            "FL2VA/audio_vae/config.yaml",
+            "FL2VA/audio_vae/metadata.json"
+          ],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 2504
+        },
+        // sc-19573 — THE SIBLING DiT PARTITION, mirrored. This entry's primary is `transformer_ref/`,
+        // so the base `transformer/` is the half it must additionally pull: the engine opens both on
+        // every load, so a Ref2VA-only install was as unloadable as a text-to-video-only one.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "variant": "q4",
+          "coRequisite": true,
+          "files": ["q4/transformer/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 18780109783
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "variant": "q8",
+          "coRequisite": true,
+          "files": ["q8/transformer/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 35302064357
+        },
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/minimax-h3-mlx",
+          "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+          "variant": "bf16",
+          "coRequisite": true,
+          "files": ["bf16/transformer/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 66280569250
+        }
+        // NO OFF-MAC ROWS HERE, and that is deliberate rather than an omission (sc-19558).
+        // `minimax_h3` gained a `platforms: ["windows", "linux"]` raw-snapshot set because
+        // `candle-gen-minimax-h3` implements t2va + fl2va.
+        //
+        // ⚠️ sc-20267 CORRECTION — THE ORIGINAL REASON IS STALE AND MUST NOT BE RESTATED. It read:
+        // "the candle provider DEFAULT-DENIES `ref2va` at its conditioning allowlist until sc-17157
+        // ports `transformer_ref`, so an off-Mac row here would advertise weights for a mode the only
+        // off-Mac engine refuses." sc-17157 LANDED (inference `32204c935`, "port Ref2VA multi-modal
+        // references to candle") and is an ancestor of the revision this repository pins, so the
+        // pinned candle engine advertises ALL THREE reference conditioning kinds — `Reference`,
+        // `ReferenceVideo` and `ReferenceAudio` — in its descriptor's allowlist. There is no engine
+        // refusal to cite.
+        //
+        // WHAT ACTUALLY KEEPS THE OFF-MAC ROWS ABSENT TODAY, both of which are about this repository
+        // rather than the engine:
+        //   1. every `transformer_ref` row is `macos`-ONLY — this entry's three primaries and the three
+        //      sibling co-requisites on `minimax_h3` alike — and they all live in
+        //      `SceneWorks/minimax-h3-mlx`, while the off-Mac bf16 route reads raw upstream. So
+        //      declaring an off-Mac Ref2VA set means first deciding which route serves `transformer_ref`
+        //      at which tier off-Mac. That platform split is sc-19573's concern; sc-20267 widened only
+        //      the base `transformer` tiers and deliberately left every `transformer_ref` row alone; and
+        //   2. there is still no candle dispatch arm — `crates/sceneworks-worker/src/video_jobs/
+        //      minimax_h3.rs` is `#[cfg(target_os = "macos")]` end to end — and this entry still has no
+        //      measured off-Mac VRAM ceiling of its own.
+        // Add the rows in the same change that resolves those two, not before.
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/minimax-h3-mlx"
+      },
+      // sc-18725 — see `minimax_h3` for what each key is read by. Declared HERE too and identically:
+      // the two partitions are one DiT architecture with one geometry, and the gate is per-model-id,
+      // so omitting it would leave Ref2VA unable to take the very adapter distilled for it
+      // (`minimax_h3_ref2v_turbo_4step`). The values match `minimax_h3` exactly on purpose — family
+      // membership cannot express the fl2v-vs-ref2v pairing, which is a labelling convention today
+      // rather than an enforced constraint (tracked on sc-19563).
+      "loraCompatibility": {
+        "families": ["minimax-h3"],
+        "types": ["style", "motion", "character", "enhance"]
+      },
+      "defaults": {
+        "duration": 5.1667,
+        "fps": 24,
+        "resolution": "1344x768",
+        "steps": 50,
+        "sampler": "default",
+        "scheduler": "default"
+      },
+      "limits": {
+        // Identical geometry to `minimax_h3` — same DiT architecture, same VAE, same lattice. See
+        // that entry for the derivations; the two are asserted equal by
+        // `both_minimax_h3_partitions_declare_one_geometry`.
+        "durations": [5.1667, 5.875, 6.5833, 7.2917, 8.0, 8.7083, 9.4167, 10.125, 10.8333, 11.5417, 12.25, 12.9583, 13.6667, 14.375],
+        "hardMinDuration": 5.1667,
+        "hardMaxDuration": 14.375,
+        "recommendedMaxDuration": 14.375,
+        // Same scheduler, same two-EVALUATION floor as `minimax_h3` — see that entry for the unit
+        // (NFE, not sigma grid points) and for why 2 is a product judgement rather than an engine
+        // limit (sc-19426, corrected sc-18726).
+        "hardMinSteps": 2,
+        "fps": [24],
+        "maxPixels": 1032192,
+        "resolutions": ["1536x672", "672x1536", "1344x768", "768x1344", "1024x768", "768x1024", "768x768", "576x320", "320x576"],
+        // Ref2VA's real caps. The per-list numbers do NOT multiply out to the combined one — 9 + 3
+        // + 3 is 15 files against a 12-file ceiling — which is why `maxCombinedReferenceAssets` is
+        // its own key rather than something derived: it is the only cap that can refuse a request in
+        // which every individual list fits (sc-17160).
+        "maxReferenceAssets": 9,
+        "maxSourceClipAssets": 3,
+        "maxReferenceAudioAssets": 3,
+        "maxCombinedReferenceAssets": 12,
+        "samplers": ["default"],
+        "schedulers": ["default"]
+      },
+      "mlx": {
+        // Same floor, same derivation as `minimax_h3` (sc-17153) — the ref DiT partition is
+        // byte-identical to the base one at every tier, the packed q4 conditioning encoder is
+        // shared, and the geometry envelope is asserted equal by
+        // `both_minimax_h3_partitions_declare_one_geometry`, so the denoise-transient term that
+        // binds at the envelope top is the same. The reference presentation adds vision-tower
+        // work to the CONDITIONING stage only, which sits ~32 GB under the binding denoise stage
+        // even with generous headroom, so it cannot move the max. The old 96 priced the retired
+        // dense-TE stage — see the base entry's derivation comment for the full arithmetic and
+        // for what the terminal measurement campaign still owes both entries.
+        "minMemoryGb": 64,
+        "repo": "SceneWorks/minimax-h3-mlx",
+        "limits": {
+          "samplers": ["default"],
+          "schedulers": ["default"]
+        }
+      },
+      // NO `candle` block HERE — and as of sc-20267 the reason is the SAME KIND as `minimax_h3`'s (a
+      // missing measurement plus a missing dispatch arm), not a different kind.
+      //
+      // ⚠️ sc-20267 CORRECTION — WHAT THIS COMMENT USED TO CLAIM IS FACTUALLY FALSE AGAINST THE PIN.
+      // sc-17156 wrote that the reason was "a REFUSAL IN CODE rather than a missing measurement":
+      // that the candle provider "serves the `transformer` checkpoint only", that `ref2va` is
+      // "DEFAULT-DENIED at the descriptor's conditioning allowlist — `Reference`, `ReferenceVideo` and
+      // `ReferenceAudio` are deliberately absent", and that `Capabilities::validate_request` therefore
+      // turns a reference request into a typed `Unsupported`. sc-17157 landed that port (inference
+      // `32204c935`, "port Ref2VA multi-modal references to candle": the `transformer_ref` partition,
+      // the omni-reference presentation and the audio VAE encoder) and it is an ANCESTOR of the
+      // revision this repository pins — so the pinned candle engine advertises all three reference
+      // conditioning kinds and there is no refusal to point at. The old text is quoted rather than
+      // deleted because it is cited elsewhere as the reason this entry has no candle surface; anyone
+      // who finds that citation should land here and stop.
+      //
+      // THE HONEST CURRENT REASON, and it is exactly two things:
+      //   1. NO MEASURED VRAM CEILING for this entry on the candle lane. It needs its own, not a copy
+      //      of `minimax_h3`'s, because the reference presentation adds an encode stage the base
+      //      partition never runs — and `minimax_h3`'s own candle block still carries `measured: false`
+      //      for a probe that has never been executed, so there is nothing to copy even if copying
+      //      were sound; and
+      //   2. NO CANDLE DISPATCH ARM — `crates/sceneworks-worker/src/video_jobs/minimax_h3.rs` is
+      //      `#[cfg(target_os = "macos")]` end to end for BOTH partitions.
+      // Neither is a statement about what the engine can do; both are about what this repository can
+      // yet prove and route. See also the trailing note in `downloads` above for why this entry
+      // declares no off-Mac rows.
+      "ui": {
+        "label": "MiniMax-H3 References",
+        // §IV.2 attribution, same as `minimax_h3` — see that entry for the citation (sc-17227).
+        "attribution": "Powered by MiniMax H3",
+        // sc-17162 — the same honesty pass as `minimax_h3`, carried in full rather than by
+        // reference. The two entries are separate model cards and a user can install THIS one
+        // without ever reading that one's, so "see the other entry" would leave the withheld
+        // components undisclosed on the surface where the decision is actually made.
+        "description": "The reference-conditioned half of MiniMax-H3: give it up to 9 images, 3 video clips and 3 audio clips (12 files in total) and it renders a new clip — with synchronized stereo audio — that carries those subjects, motions and voices. It uses a second checkpoint from the same family, so installing it adds the reference DiT alongside whatever text-to-video tiers you already have; the text encoder and both VAEs are shared and download only once. Same open-weights caveats as MiniMax-H3, and they are not small: the hosted prompt-understanding front end (H3-Context-IR) and the 2K in-context upscaler (H3-Regenerate-2K) are unreleased, so prompt adherence differs from the Hailuo API and 2K is not reachable from these weights; sparse-attention inference is unreleased too, so attention runs dense and the shortest clip at the default 1344x768 canvas is about a two-hour render. There is no guidance scale and no negative prompt. Clips come in the same fourteen fixed lengths between 5.17s and 14.38s — 15s is refused rather than shortened — and there is no still-image mode.",
+        "recommendedFor": ["reference_to_video"],
+        "durationHint": "Same fourteen clip lengths as MiniMax-H3, 5.17s to 14.38s at 24fps — nothing in between renders and 15s is refused rather than shortened to 14.38s — and the same canvas-dominated cost, so start at 576x320.",
+        "promptGuide": {
+          "title": "MiniMax-H3 Prompt Guide",
+          "path": "/prompt-guides/minimax-h3.md",
+          "sources": [
+            { "label": "MiniMax-H3 model card", "url": "https://huggingface.co/MiniMaxAI/MiniMax-H3" },
+            { "label": "Hailuo 3.0 prompting guide", "url": "https://hailuoai.video/" },
+            { "label": "MiniMax platform video generation docs", "url": "https://platform.minimax.io/docs/api-reference/video-generation" }
           ]
         }
       }

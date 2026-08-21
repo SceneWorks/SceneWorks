@@ -1,7 +1,7 @@
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { PresetManagerScreen } from "./PresetManagerScreen.jsx";
+import { PresetManagerScreen, defaultValueErrors } from "./PresetManagerScreen.jsx";
 import { withAppContext, field, changeField } from "../main.testSupport.jsx";
 import { appConfirm } from "../appConfirm.jsx";
 
@@ -559,5 +559,56 @@ describe("PresetManagerScreen", () => {
       expect(field(container, "Name").value).toBe("In-progress name");
       expect(pill()).toContain("Unsaved changes");
     });
+  });
+});
+
+// sc-19502 — a preset stores DEFAULTS, so an out-of-menu value here is not one bad job, it is every
+// job the preset ever drives. LTX-2.3 is distilled and renders at exactly 8 steps; before this the
+// only Steps guard was a generic 1..200 range, so `steps: 30` saved cleanly and then 400'd at
+// enqueue forever after.
+describe("defaultValueErrors — the step menu (sc-19502)", () => {
+  const videoForm = (steps) => ({
+    count: "",
+    steps,
+    guidanceScale: "",
+    resolution: "",
+    duration: "",
+    fps: "",
+  });
+  const distilled = { steps: [8] };
+
+  it("refuses a step count off the model's exact menu, on both sides", () => {
+    // OVER the menu is the case a floor-shaped constraint would have admitted.
+    const over = defaultValueErrors(videoForm("30"), true, distilled);
+    expect(over).toHaveLength(1);
+    expect(over[0]).toMatch(/Steps 30/);
+    expect(over[0]).toMatch(/isn't one this model supports/);
+
+    // UNDER the menu too, so it is not secretly a ceiling.
+    expect(defaultValueErrors(videoForm("4"), true, distilled)).toHaveLength(1);
+  });
+
+  it("admits the advertised count and an unset one", () => {
+    expect(defaultValueErrors(videoForm("8"), true, distilled)).toEqual([]);
+    // Unset means "the engine picks" — refusing it would make a distilled model unusable in a
+    // preset unless the author knew its magic number.
+    expect(defaultValueErrors(videoForm(""), true, distilled)).toEqual([]);
+  });
+
+  it("leaves a model with no declared menu unconstrained", () => {
+    // The overwhelmingly common case: no `limits.steps`, so only the generic sanity range applies.
+    expect(defaultValueErrors(videoForm("30"), true, {})).toEqual([]);
+    expect(defaultValueErrors(videoForm("30"), true, undefined)).toEqual([]);
+    // …and the sanity range still bites, so widening the menu check did not delete it.
+    expect(defaultValueErrors(videoForm("500"), true, {})).toHaveLength(1);
+    expect(defaultValueErrors(videoForm("0"), true, {})).toHaveLength(1);
+  });
+
+  it("applies to image presets too — the menu is not a video-only axis", () => {
+    // The step menu check sits OUTSIDE the `isVideo` block, unlike duration/fps. A distilled image
+    // model would need the same refusal, and gating it on video would silently exempt one.
+    const image = defaultValueErrors(videoForm("30"), false, distilled);
+    expect(image).toHaveLength(1);
+    expect(image[0]).toMatch(/Steps 30/);
   });
 });

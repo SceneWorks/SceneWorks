@@ -7,6 +7,8 @@ import { buildSimpleVideoRequest } from "./simpleJobs.js";
 import { describeResolution, resolutionSummary } from "./aspect.js";
 import { preferredDuration, preferredVideoResolution } from "./modelDefaults.js";
 import { useSimpleRefine } from "./useSimpleRefine.js";
+import { formatDurationSeconds } from "../videoModelLimits.js";
+import { ModelAttribution } from "../components/ModelAttribution.jsx";
 import { useSimpleUi } from "./SimpleUiContext.js";
 import { useStudioState } from "./useStudioState.js";
 import { useSimpleLoras } from "./useSimpleLoras.js";
@@ -14,6 +16,7 @@ import { SimpleLoraField, promptWithKeyword } from "./SimpleLoraField.jsx";
 import { SimpleLoraSheet } from "./SimpleLoraSheet.jsx";
 import {
   Chips,
+  ModelDescription,
   RefinePanel,
   ReferenceTile,
   SheetSelect,
@@ -302,6 +305,16 @@ export function SimpleVideoStudio() {
             }))}
             value={selectedModel?.name ?? selectedModel?.id ?? "No video model installed"}
           />
+          {/* Licence-required attribution (sc-17227 §IV.2, sc-17161). Simple is an alternative
+              shell, not a subset view, so a licence obligation discharged only in Advanced would
+              be undischarged for every Simple user. */}
+          <ModelAttribution model={selectedModel} />
+          {/* sc-17162 — the model's own `ui.description`, which until now rendered ONLY on the
+              advanced Models screen. For MiniMax-H3 that string is the withheld-component
+              disclosure (not the hosted Hailuo product, 2K unreachable, dense attention ⇒ a ~2
+              hour render at full canvas), so a Simple user picked the model on its name alone.
+              Below the attribution, which is a licence obligation and outranks it. */}
+          <ModelDescription model={selectedModel} />
           <SheetSelect
             kind="grid"
             label="Resolution"
@@ -315,12 +328,26 @@ export function SimpleVideoStudio() {
             value={resolutionText}
           />
         </div>
+        {/* Labels are rounded to 2dp; the VALUE stays the model's exact declared number, which
+            the enqueue gate matches against `limits.durations`. MiniMax-H3's rungs are frame
+            counts over 24 and render raw as "5.1667s" / "10.8333s" on a chip. */}
         <Chips
           label="Duration"
           onChange={setDuration}
-          options={durations.map((value) => ({ value, label: `${value}s` }))}
+          options={durations.map((value) => ({ value, label: `${formatDurationSeconds(value)}s` }))}
           value={duration}
         />
+        {/* sc-17162 — `ui.durationHint` had exactly ONE reader (`VideoStudio.jsx` helper copy), so
+            every Simple user got the duration chips with none of the copy explaining them. Simple is
+            an alternative shell, not a subset view: the same argument that put the licence
+            attribution here applies to a caveat a user needs BEFORE they pick a length. MiniMax-H3's
+            hint is where "15s is refused rather than shortened" and the canvas-dominated cost story
+            are told, and a Simple user who never opens Advanced would otherwise meet the refusal as
+            a failed submit. `Chips` exposes no hint slot, so this is a sibling paragraph rather than
+            a prop. Read off the selected model, so every model with a hint gets one. */}
+        {selectedModel?.ui?.durationHint ? (
+          <p className="su-duration-hint">{selectedModel.ui.durationHint}</p>
+        ) : null}
         <SimpleLoraField
           atLimit={lora.atLimit}
           availableLoras={lora.availableLoras}

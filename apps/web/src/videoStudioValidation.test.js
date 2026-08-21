@@ -87,6 +87,15 @@ describe("videoGenerateValidation", () => {
     );
   });
 
+  it("surfaces an execution-tier refusal passed by the active backend lane", () => {
+    const message = "Install or repair the accepted tier in Model Manager.";
+    const summary = summarize(
+      videoGenerateValidation({ ...whole, executionTierBlockMessage: message }),
+    );
+    expect(summary.ready).toBe(false);
+    expect(summary.surfaced.map((entry) => entry.message)).toContain(message);
+  });
+
   it("surfaces preset and selected-LoRA problems", () => {
     const summary = summarize(
       videoGenerateValidation({ ...whole, presetMissing: ["a"], presetIncompatible: ["b"], loraIncompatible: ["c"] }),

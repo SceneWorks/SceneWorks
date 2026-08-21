@@ -162,16 +162,21 @@ test("the committed evidence grades the real catalog clean", async () => {
 // it moves whenever the catalog gains or loses a repo@revision key, together with a re-record.
 // 96 -> 97 on sc-20747: the exact five SDXL backbones gained the one pinned, shared
 // `xinsir/controlnet-openpose-sdxl-1.0` component used by SDXL ControlNet jobs.
-test("all 97 real download keys are pinned to immutable lowercase commit SHAs", async () => {
+//
+// 97 -> 100 on the sc-17137 main sync: the MiniMax-H3 pair (sc-17158/sc-19558/sc-20267) contributes
+// three keys — the `SceneWorks/minimax-h3-mlx` tier re-host, the upstream `MiniMaxAI/MiniMax-H3`
+// shared-component co-requisite, and the raw off-Mac snapshot row — which landed on the epic
+// branch while the Xinsir authority landed on the feature; the union therefore has 100 keys.
+test("all 100 real download keys are pinned to immutable lowercase commit SHAs", async () => {
   const { claims, evidence } = await realInputs();
   const immutableRevision = /^[0-9a-f]{40}$/u;
   const keys = new Set(claims.map((claim) => claimKey(claim.repo, claim.revision)));
 
-  assert.equal(keys.size, 97, "update the 97/97 disclosure when the real key census changes");
+  assert.equal(keys.size, 100, "update the 100/100 disclosure when the real key census changes");
   assert.equal(
     evidence.repos.length,
-    97,
-    "the evidence census must stay aligned with the 97/97 disclosure",
+    100,
+    "the evidence census must stay aligned with the 100/100 disclosure",
   );
   for (const claim of claims) {
     assert.match(

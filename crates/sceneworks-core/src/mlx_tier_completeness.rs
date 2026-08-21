@@ -1,5 +1,5 @@
 //! Per-family tier-completeness predicates for the MLX turnkeys that ship NO `model_index.json`
-//! (Anima / Boogu / SANA / SCAIL-2 / Wan / SenseNova-U1).
+//! (Anima / Boogu / SANA / SCAIL-2 / Wan / SenseNova-U1 / MiniMax-H3).
 //!
 //! These families lay their weights out in a bespoke tree rather than a diffusers `model_index.json`
 //! pipeline, so the generic `<tier>/*` presence checks — the worker's `tier_components_present`
@@ -204,21 +204,15 @@ fn sensenova_tokenizer_resolvable(dir: &Path) -> bool {
     })
 }
 
-/// Whether the SenseNova backbone under `dir` is fully on disk: either the packed single-file
-/// `model.safetensors` (every q4/q8 tier, and the `*-fast-mlx` bf16, which the packer emits pre-merged
-/// as one file) or a sharded `model.safetensors.index.json` with EVERY shard its `weight_map` names
-/// (the base/infographic bf16 tiers ship 8 shards / ~35 GB).
+/// Whether EVERY shard the safetensors index `index_file` in `dir` names is on disk, resolved against
+/// `dir` itself (the same rule `verify_model_snapshot.py` applies to an `expected_files` index).
 ///
 /// The shard set is read from the index rather than settling for "some `.safetensors` is here": the
-/// engine's `Weights::from_dir` merges whatever shards it finds WITHOUT consulting the index, then
-/// fails much later on missing tensor keys — so a download interrupted after 1 of 8 shards would
-/// otherwise read complete. A malformed / unreadable index is treated as incomplete.
-fn sensenova_backbone_present(dir: &Path) -> bool {
-    if dir.join("model.safetensors").is_file() {
-        return true;
-    }
-    let index = dir.join("model.safetensors.index.json");
-    let Ok(contents) = std::fs::read_to_string(&index) else {
+/// MLX loaders merge whatever shards they find WITHOUT consulting the index, then fail much later on
+/// missing tensor keys — so a download interrupted after 1 of N shards would otherwise read complete.
+/// An index naming no shards, or a malformed / unreadable one, is treated as incomplete.
+fn index_shards_present(dir: &Path, index_file: &str) -> bool {
+    let Ok(contents) = std::fs::read_to_string(dir.join(index_file)) else {
         return false;
     };
     let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&contents) else {
@@ -232,6 +226,15 @@ fn sensenova_backbone_present(dir: &Path) -> bool {
         .filter_map(serde_json::Value::as_str)
         .peekable();
     shards.peek().is_some() && shards.all(|shard| dir.join(shard).is_file())
+}
+
+/// Whether the SenseNova backbone under `dir` is fully on disk: either the packed single-file
+/// `model.safetensors` (every q4/q8 tier, and the `*-fast-mlx` bf16, which the packer emits pre-merged
+/// as one file) or a sharded `model.safetensors.index.json` with EVERY shard its `weight_map` names
+/// (the base/infographic bf16 tiers ship 8 shards / ~35 GB), per [`index_shards_present`].
+fn sensenova_backbone_present(dir: &Path) -> bool {
+    dir.join("model.safetensors").is_file()
+        || index_shards_present(dir, "model.safetensors.index.json")
 }
 
 /// Whether a SenseNova-U1 tier `dir` is COMPLETE and loadable. The `SceneWorks/sensenova-u1-8b*-mlx`
@@ -309,6 +312,243 @@ pub fn sensenova_tier_predicate(model_id: &str) -> Option<fn(&Path) -> bool> {
     } else {
         sensenova_tier_complete
     })
+}
+
+/// The DiT partition directory each MiniMax-H3 catalog entry owns inside a `SceneWorks/minimax-h3-mlx`
+/// tier (sc-19078). `minimax_h3` (t2va + fl2va) is the base `transformer/` checkpoint; `minimax_h3_ref`
+/// (Ref2VA) is `transformer_ref/`. The names mirror `DIT_COMPONENT` / `REFERENCE_DIT_PARTITION` in
+/// inference's `mlx-gen-minimax-h3::model`, which is what the loader actually opens.
+///
+/// The two partitions are the ONLY things a tier of that repo holds: the Qwen3-VL-32B text encoder,
+/// both VAEs and the tokenizer are dense in every tier and ship as shared co-requisites from upstream
+/// `MiniMaxAI/MiniMax-H3`, so they are deliberately NOT part of this predicate — the catalog gates them
+/// separately as co-requisites (`install_state_for`), which is what keeps a q4 install from demanding
+/// the bf16 tier's floor.
+pub const MINIMAX_H3_PARTITIONS: [(&str, &str); 2] = [
+    ("minimax_h3", "transformer"),
+    ("minimax_h3_ref", "transformer_ref"),
+];
+
+/// The sharded-weight index inference's `mlx-gen-minimax-h3::convert` writes into every MiniMax-H3 DiT
+/// partition. It is the file that makes a 14-shard partition checkable at all: without it the predicate
+/// would need fourteen hand-maintained shard names per partition and would silently stop covering a
+/// re-shard.
+const MINIMAX_H3_DIT_INDEX: &str = "diffusion_pytorch_model.safetensors.index.json";
+
+/// Whether ONE MiniMax-H3 DiT `partition` (`transformer` / `transformer_ref`) under tier dir `dir` is
+/// COMPLETE and loadable. `SceneWorks/minimax-h3-mlx` ships no `model_index.json` at either the tier
+/// root or inside a partition, so rust-api's coarse `<tier>/<partition>/*` glob is satisfied by a
+/// SINGLE landed file: a download interrupted after one of fourteen shards read `installed` and then
+/// died at load. A partition is complete when its `config.json` is present (the engine's config parse
+/// errors without it) and every shard its [`MINIMAX_H3_DIT_INDEX`] names is on disk.
+fn minimax_h3_partition_complete(dir: &Path, partition: &str) -> bool {
+    let partition = dir.join(partition);
+    partition.join("config.json").is_file()
+        && index_shards_present(&partition, MINIMAX_H3_DIT_INDEX)
+}
+
+/// Whether a `minimax_h3` (t2va + fl2va) tier `dir` is complete — its `transformer/` partition.
+pub fn minimax_h3_tier_complete(dir: &Path) -> bool {
+    minimax_h3_partition_complete(dir, MINIMAX_H3_PARTITIONS[0].1)
+}
+
+/// Whether a `minimax_h3_ref` (Ref2VA) tier `dir` is complete — its `transformer_ref/` partition.
+///
+/// Deliberately independent of [`minimax_h3_tier_complete`]: the two partitions are separate catalog
+/// entries with disjoint `files` predicates, so a user who installed only the reference checkpoint has
+/// a complete `minimax_h3_ref` tier and NO `transformer/` at all. Requiring both would report that
+/// working install as torn and prompt an endless repair.
+pub fn minimax_h3_ref_tier_complete(dir: &Path) -> bool {
+    minimax_h3_partition_complete(dir, MINIMAX_H3_PARTITIONS[1].1)
+}
+
+/// The per-tier completeness predicate for a MiniMax-H3 `model_id`, or `None` for an id outside
+/// [`MINIMAX_H3_PARTITIONS`]. Dispatched on the id rather than the shared `minimax-h3` family because
+/// the two entries own DIFFERENT partition dirs of the same repo — a family-only predicate could not
+/// tell them apart and would have to demand both, which is exactly the false-torn case above.
+pub fn minimax_h3_tier_predicate(model_id: &str) -> Option<fn(&Path) -> bool> {
+    match model_id {
+        id if id == MINIMAX_H3_PARTITIONS[0].0 => Some(minimax_h3_tier_complete),
+        id if id == MINIMAX_H3_PARTITIONS[1].0 => Some(minimax_h3_ref_tier_complete),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// sc-19573 — the SHARED (non-DiT) half of what `mlx-gen-minimax-h3::load` opens.
+//
+// Everything below is ONE list, and that is the point. Before sc-19573 the probe list existed twice:
+// once as a hard-coded array inside the worker's `minimax_h3_shared_is_complete`, and once
+// implicitly as whatever rows happened to be in the catalog entry's `downloads`. The two disagreed —
+// `tokenizer/` and the `FL2VA/audio_vae/` constructor documents were probed and never declared — so
+// the manifest described an install that could not load. A manifest guard written against a SECOND
+// hand-copied list would have reproduced exactly that failure mode, which is why the guard, the
+// runtime completeness predicate and the resolver all read these constants and nothing else.
+//
+// The engine itself lives in the pinned `inference` workspace and cannot be imported here, so this
+// is a mirror rather than a derivation. What makes it a HONEST mirror is that it is the ONLY mirror:
+// the check that stands in front of the loader ([`minimax_h3_shared_is_complete`]) and the check that
+// stands in front of the download ([`crate::builtin_manifests`]' guard) cannot disagree with each
+// other, so a wrong entry here goes red in one place and is fixed in one place.
+//
+// ⚠️ PARTLY BOUND TO THE ENGINE SINCE sc-19721's PIN BUMP — and the unbound half is named.
+//
+// This crate cannot depend on an inference crate, so the tie lives in the worker:
+// `sceneworks-worker::pinned_engine_geometry::minimax_h3_component_names_are_the_pinned_engines_own`
+// asserts [`MINIMAX_H3_PARTITIONS`] and [`MINIMAX_H3_TEXT_ENCODER_DIR`] against
+// `mlx-gen-minimax-h3::model`'s own `DIT_COMPONENT` / `REFERENCE_DIT_PARTITION` /
+// `TEXT_ENCODER_COMPONENT`. A rename upstream now reds there instead of at load time on a user's
+// machine. Before the bump none of that was possible: at `014134e3` the crate was not in the tree
+// and there was no symbol to import.
+//
+// STILL A TRANSCRIPTION: [`MINIMAX_H3_SHARED_PROBED_FILES`],
+// [`MINIMAX_H3_TEXT_ENCODER_PROBED_FILES`] and [`MINIMAX_H3_AUDIO_VAE_CONFIG_FILES`]. The engine's
+// probe list is a private array literal inside `model::load`, not an exported constant, so there is
+// nothing to import — binding it needs either an upstream export or a real `load` of a fixture
+// missing each path in turn (which needs weights). That remainder stays recorded on sc-18650,
+// because a comment in this file is not something a pin-bump session is guaranteed to open.
+//
+// The file-level probes are ALSO the half most exposed to the pin moving under them, which is why
+// naming them here matters: sc-19558 replaced the directory probes with file probes precisely
+// because an interrupted download leaves a present-but-empty directory, and the engine's own list
+// is what decides which file proves a component landed.
+// ---------------------------------------------------------------------------
+
+/// The shared component FILES a MiniMax-H3 load opens under the snapshot it is handed as
+/// `spec.weights` — the upstream `MiniMaxAI/MiniMax-H3` root.
+///
+/// 🔴 FILES, NOT DIRECTORIES (sc-19558, replacing sc-19573's `["tokenizer", "vae", "audio_vae"]`).
+/// An interrupted co-requisite download leaves the component directory present and EMPTY, so an
+/// `is_dir()` floor certifies a broken install as complete and the failure moves past the only point
+/// that can name it — into the engine, which probes these exact paths. The file list is a strict
+/// refinement: every install a directory probe admitted correctly, a file probe still admits.
+///
+/// The one file per component is the one the engine opens FIRST, so a missing shard cannot be
+/// mistaken for a missing component; the shard-level checks belong to the tier predicates
+/// ([`minimax_h3_tier_complete`]) and to the engine's own index walk.
+///
+/// The text encoder is deliberately NOT here: sc-19120 made it the one shared component whose ROOT
+/// depends on the tier (packed under `<tier>/text_encoder` in the rehost at q4/q8, dense under the
+/// upstream root at bf16), so it is resolved by [`minimax_h3_text_encoder_dir`] and probed through
+/// [`MINIMAX_H3_TEXT_ENCODER_PROBED_FILES`]. The two DiT partitions are not here either — they are
+/// [`MINIMAX_H3_PARTITIONS`], under the TIER root.
+pub const MINIMAX_H3_SHARED_PROBED_FILES: [&str; 3] = [
+    "tokenizer/tokenizer.json",
+    "vae/config.json",
+    "audio_vae/config.json",
+];
+
+/// The directory holding the audio VAE's CONSTRUCTOR DOCUMENTS, relative to the same snapshot root.
+///
+/// Separate from `audio_vae/` (which carries the weights) because the repackaged root config carries
+/// none of the audio VAE's constructor arguments — the engine reads them from here.
+pub const MINIMAX_H3_AUDIO_VAE_CONFIG_DIR: &str = "FL2VA/audio_vae";
+
+/// The three files the engine reads out of [`MINIMAX_H3_AUDIO_VAE_CONFIG_DIR`].
+///
+/// Named individually rather than globbed as `FL2VA/audio_vae/*`: the real directory also holds a
+/// 605 MB `model.safetensors` that is a byte-for-byte duplicate of the `audio_vae/` component
+/// already downloaded, plus nine `.py` files no Rust engine can execute. A glob would double the
+/// audio VAE's bytes for three documents totalling 2,504 B.
+pub const MINIMAX_H3_AUDIO_VAE_CONFIG_FILES: [&str; 3] =
+    ["config.json", "config.yaml", "metadata.json"];
+
+/// The component directory name the Qwen3-VL-32B text encoder is read from, under whichever root
+/// [`minimax_h3_text_encoder_dir`] selects.
+pub const MINIMAX_H3_TEXT_ENCODER_DIR: &str = "text_encoder";
+
+/// The files that identify a LOADABLE text encoder inside the dir [`minimax_h3_text_encoder_dir`]
+/// resolved — checked as files for the same sc-19558 reason the shared components are.
+///
+/// Both, not just `config.json`: `resolve_text_encoder_dir` → `map_shards` reads the config for the
+/// architecture and the index for the shard set, so a directory holding only the config is the
+/// sc-19517 shape (an interrupted publish) and half-loads at the provider rather than here.
+///
+/// Verified present on every root this resolver can select, at the pinned revisions the manifest
+/// declares: `SceneWorks/minimax-h3-mlx@137ce668` `q4/text_encoder` (187,240 B index) and
+/// `q8/text_encoder`, and `MiniMaxAI/MiniMax-H3@939557dc` `text_encoder` — which is also why the
+/// manifest's bf16 row lists `text_encoder/model.safetensors.index.json` explicitly. So this is a
+/// strict tightening, not a new way for a correct install to be refused.
+pub const MINIMAX_H3_TEXT_ENCODER_PROBED_FILES: [&str; 2] =
+    ["config.json", "model.safetensors.index.json"];
+
+/// Where a MiniMax-H3 load reads its text encoder from, for `tier` (sc-19120).
+///
+/// * `q4` / `q8` → `<tier_root>/<tier>/text_encoder`, the PACKED encoder in
+///   `SceneWorks/minimax-h3-mlx`. It does not exist upstream in any form.
+/// * anything else (`bf16`) → `<base_root>/text_encoder`, the dense upstream component.
+///
+/// This function is the reason sc-19573 exists at all in the worker: the pre-sc-19573 completeness
+/// check probed `<base_root>/text_encoder` UNCONDITIONALLY, and a q4 or q8 install never has that
+/// path — its co-requisite row is `variant`-scoped to bf16 and is never fetched. So every packed-tier
+/// install was refused before it reached the engine, with an error blaming the shared floor for a
+/// file that tier is correct not to have.
+pub fn minimax_h3_text_encoder_dir(
+    tier_root: &Path,
+    base_root: &Path,
+    tier: &str,
+) -> std::path::PathBuf {
+    match tier {
+        "q4" | "q8" => tier_root.join(tier).join(MINIMAX_H3_TEXT_ENCODER_DIR),
+        _ => base_root.join(MINIMAX_H3_TEXT_ENCODER_DIR),
+    }
+}
+
+/// Every path the SHARED floor of a MiniMax-H3 load probes, in declaration order: the three
+/// [`MINIMAX_H3_SHARED_PROBED_FILES`] and the three [`MINIMAX_H3_AUDIO_VAE_CONFIG_FILES`] under
+/// `base_root`, then the two [`MINIMAX_H3_TEXT_ENCODER_PROBED_FILES`] under whatever root
+/// [`minimax_h3_text_encoder_dir`] resolved.
+///
+/// Every one of these is a `coRequisite` download from a repo the tiers do not come from, so a user
+/// can genuinely have a complete `q4/` and no shared floor at all.
+///
+/// Roots are joined rather than formatted, so passing two EMPTY roots yields the snapshot-relative
+/// spelling a manifest `files` pattern is written in — which is how the download-coverage guard in
+/// [`crate::builtin_manifests`] reads the same list instead of hand-copying it.
+pub fn minimax_h3_shared_probe_paths(
+    base_root: &Path,
+    text_encoder_dir: &Path,
+) -> Vec<std::path::PathBuf> {
+    MINIMAX_H3_SHARED_PROBED_FILES
+        .iter()
+        .map(|file| base_root.join(file))
+        .chain(
+            MINIMAX_H3_AUDIO_VAE_CONFIG_FILES
+                .iter()
+                .map(|file| base_root.join(MINIMAX_H3_AUDIO_VAE_CONFIG_DIR).join(file)),
+        )
+        .chain(
+            MINIMAX_H3_TEXT_ENCODER_PROBED_FILES
+                .iter()
+                .map(|file| text_encoder_dir.join(file)),
+        )
+        .collect()
+}
+
+/// The probes from [`minimax_h3_shared_probe_paths`] that are NOT on disk, in the same order.
+///
+/// Exposed rather than folded into [`minimax_h3_shared_is_complete`] so a refusal can NAME what is
+/// absent. Restating the whole expected list — which is what the pre-sc-19558 message did — reads
+/// identically whether one path is missing or all eight, and sends a user to re-download components
+/// they already have.
+pub fn minimax_h3_missing_shared_probes(
+    base_root: &Path,
+    text_encoder_dir: &Path,
+) -> Vec<std::path::PathBuf> {
+    minimax_h3_shared_probe_paths(base_root, text_encoder_dir)
+        .into_iter()
+        .filter(|probe| !probe.is_file())
+        .collect()
+}
+
+/// Whether the SHARED components a MiniMax-H3 load probes are all on disk.
+///
+/// FILES throughout, never `is_dir()` (sc-19558). The audio-VAE case makes the reason concrete: the
+/// `FL2VA/audio_vae/` directory exists as soon as any one of its thirteen entries lands, and the
+/// three the engine actually opens are the three smallest — but the same is true of every other
+/// component, because an interrupted download creates the directory before it fills it.
+pub fn minimax_h3_shared_is_complete(base_root: &Path, text_encoder_dir: &Path) -> bool {
+    minimax_h3_missing_shared_probes(base_root, text_encoder_dir).is_empty()
 }
 
 #[cfg(test)]
@@ -812,6 +1052,389 @@ mod tests {
         assert!(sensenova_tier_predicate("sana_1600m").is_none());
     }
 
+    /// Write ONE MiniMax-H3 DiT partition under tier dir `dir`: `config.json` plus a shard index naming
+    /// `shards`, of which only `present` actually land. The real repo ships 14 shards per partition; the
+    /// fixture keeps the COUNT small and the index-vs-disk relationship exact, which is what the
+    /// predicate reads.
+    fn seed_minimax_partition(dir: &Path, partition: &str, shards: &[&str], present: &[&str]) {
+        let partition = dir.join(partition);
+        let weight_map = shards
+            .iter()
+            .enumerate()
+            .map(|(index, shard)| {
+                (
+                    format!("blocks.{index}.attn.to_q.weight"),
+                    serde_json::Value::String((*shard).to_owned()),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+        fs::create_dir_all(&partition).unwrap();
+        fs::write(
+            partition.join(MINIMAX_H3_DIT_INDEX),
+            serde_json::json!({ "weight_map": weight_map }).to_string(),
+        )
+        .unwrap();
+        touch(&partition.join("config.json"));
+        for shard in present {
+            touch(&partition.join(shard));
+        }
+    }
+
+    const MINIMAX_SHARDS: [&str; 3] = [
+        "diffusion_pytorch_model-00001-of-00003.safetensors",
+        "diffusion_pytorch_model-00002-of-00003.safetensors",
+        "diffusion_pytorch_model-00003-of-00003.safetensors",
+    ];
+
+    /// Write a COMPLETE `minimax_h3` tier (the base `transformer/` partition only).
+    fn seed_minimax_h3(dir: &Path) {
+        seed_minimax_partition(dir, "transformer", &MINIMAX_SHARDS, &MINIMAX_SHARDS);
+    }
+
+    /// Write a COMPLETE `minimax_h3_ref` tier (the `transformer_ref/` partition only).
+    fn seed_minimax_h3_ref(dir: &Path) {
+        seed_minimax_partition(dir, "transformer_ref", &MINIMAX_SHARDS, &MINIMAX_SHARDS);
+    }
+
+    #[test]
+    fn minimax_h3_complete_true_each_file_load_bearing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("q4");
+        seed_minimax_h3(&dir);
+        assert!(
+            minimax_h3_tier_complete(&dir),
+            "fully-seeded transformer partition is complete"
+        );
+
+        // Mutation check, applied to EACH file on its own: the config, the index, and every one of the
+        // shards it names must independently flip the verdict. A tier that clears the coarse
+        // `q4/transformer/*` glob on a single landed file is exactly the "installed but unloadable"
+        // shape this predicate exists to catch.
+        let mut files = vec!["config.json".to_owned(), MINIMAX_H3_DIT_INDEX.to_owned()];
+        files.extend(MINIMAX_SHARDS.iter().map(|shard| (*shard).to_owned()));
+        for file in files {
+            let torn = tmp.path().join("torn");
+            seed_minimax_h3(&torn);
+            fs::remove_file(torn.join("transformer").join(&file)).unwrap();
+            assert!(
+                !minimax_h3_tier_complete(&torn),
+                "removing transformer/{file} must read incomplete"
+            );
+            fs::remove_dir_all(&torn).ok();
+        }
+    }
+
+    #[test]
+    fn minimax_h3_ref_complete_true_each_file_load_bearing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("q4");
+        seed_minimax_h3_ref(&dir);
+        assert!(minimax_h3_ref_tier_complete(&dir));
+
+        let mut files = vec!["config.json".to_owned(), MINIMAX_H3_DIT_INDEX.to_owned()];
+        files.extend(MINIMAX_SHARDS.iter().map(|shard| (*shard).to_owned()));
+        for file in files {
+            let torn = tmp.path().join("torn");
+            seed_minimax_h3_ref(&torn);
+            fs::remove_file(torn.join("transformer_ref").join(&file)).unwrap();
+            assert!(
+                !minimax_h3_ref_tier_complete(&torn),
+                "removing transformer_ref/{file} must read incomplete"
+            );
+            fs::remove_dir_all(&torn).ok();
+        }
+    }
+
+    #[test]
+    fn minimax_h3_partitions_are_judged_independently_of_each_other() {
+        // The two catalog entries own DISJOINT partition dirs of ONE repo, so each tier verdict must
+        // read only its own partition. A user who installed just the reference checkpoint has no
+        // `transformer/` at all; demanding both would report that working install as torn forever.
+        let tmp = tempfile::tempdir().unwrap();
+        let base_only = tmp.path().join("base-only");
+        seed_minimax_h3(&base_only);
+        assert!(minimax_h3_tier_complete(&base_only));
+        assert!(!minimax_h3_ref_tier_complete(&base_only));
+
+        let ref_only = tmp.path().join("ref-only");
+        seed_minimax_h3_ref(&ref_only);
+        assert!(minimax_h3_ref_tier_complete(&ref_only));
+        assert!(!minimax_h3_tier_complete(&ref_only));
+
+        // Both installed side by side in one tier — the shipped shape once a user owns both entries.
+        let both = tmp.path().join("both");
+        seed_minimax_h3(&both);
+        seed_minimax_h3_ref(&both);
+        assert!(minimax_h3_tier_complete(&both));
+        assert!(minimax_h3_ref_tier_complete(&both));
+    }
+
+    #[test]
+    fn minimax_h3_partition_needs_every_shard_the_index_names() {
+        // 2 of 3 shards landed: the coarse glob is satisfied, the index is not.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("bf16");
+        seed_minimax_partition(&dir, "transformer", &MINIMAX_SHARDS, &MINIMAX_SHARDS[..2]);
+        assert!(!minimax_h3_tier_complete(&dir));
+
+        // Mutation check: landing the last shard flips it, so the assertion above discriminates on the
+        // MISSING shard rather than on some unrelated absence.
+        touch(&dir.join("transformer").join(MINIMAX_SHARDS[2]));
+        assert!(minimax_h3_tier_complete(&dir));
+    }
+
+    #[test]
+    fn minimax_h3_ignores_appledouble_shard_sidecars_and_empty_indexes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("q8");
+        seed_minimax_partition(&dir, "transformer", &MINIMAX_SHARDS, &MINIMAX_SHARDS[..2]);
+        // A hidden `._` sidecar has a different name than the shard the index maps to, so an exact-path
+        // check rejects it (SceneWorks#1333).
+        touch(
+            &dir.join("transformer")
+                .join(format!("._{}", MINIMAX_SHARDS[2])),
+        );
+        assert!(!minimax_h3_tier_complete(&dir));
+
+        // An index whose `weight_map` names NOTHING is incomplete rather than vacuously complete: a
+        // truncated/placeholder index must never certify a partition with no weights at all.
+        let empty = tmp.path().join("empty-index");
+        seed_minimax_partition(&empty, "transformer", &[], &[]);
+        assert!(!minimax_h3_tier_complete(&empty));
+    }
+
+    #[test]
+    fn minimax_h3_predicate_dispatch_is_keyed_on_the_entry_id() {
+        // Behavioural probe (fn pointers don't compare reliably): a tier holding ONLY the base
+        // partition separates the two predicates the dispatcher can return.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("q4");
+        seed_minimax_h3(&dir);
+
+        let base = minimax_h3_tier_predicate("minimax_h3").expect("base id has a predicate");
+        assert!(base(&dir), "minimax_h3 must take the transformer predicate");
+        let reference =
+            minimax_h3_tier_predicate("minimax_h3_ref").expect("reference id has a predicate");
+        assert!(
+            !reference(&dir),
+            "minimax_h3_ref must take the transformer_ref predicate"
+        );
+
+        // Ids outside the pair get no predicate, so a future MiniMax entry with a different on-disk
+        // shape is left alone rather than mis-tightened. `minimax_h3_ref` is a PREFIX extension of
+        // `minimax_h3`, so a prefix match here would silently mis-dispatch — assert exact keying.
+        assert!(minimax_h3_tier_predicate("minimax_h3_2k").is_none());
+        assert!(minimax_h3_tier_predicate("minimax_h3_refiner").is_none());
+        assert!(minimax_h3_tier_predicate("wan_2_2").is_none());
+    }
+
+    /// Write the COMPLETE shared floor under `base_root` — every path
+    /// [`minimax_h3_shared_is_complete`] probes there, and nothing else. The text encoder is NOT
+    /// seeded: it lives at the root the CALLER resolved, which may not be under `base_root` at all.
+    fn seed_minimax_shared(base_root: &Path) {
+        for file in MINIMAX_H3_SHARED_PROBED_FILES {
+            touch(&base_root.join(file));
+        }
+        for file in MINIMAX_H3_AUDIO_VAE_CONFIG_FILES {
+            touch(&base_root.join(MINIMAX_H3_AUDIO_VAE_CONFIG_DIR).join(file));
+        }
+    }
+
+    /// Write a complete text encoder into `dir` — both probed files.
+    fn seed_minimax_text_encoder(dir: &Path) {
+        for file in MINIMAX_H3_TEXT_ENCODER_PROBED_FILES {
+            touch(&dir.join(file));
+        }
+    }
+
+    #[test]
+    fn minimax_h3_shared_floor_needs_every_probed_path_and_each_is_load_bearing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("base");
+        let text_encoder = base.join(MINIMAX_H3_TEXT_ENCODER_DIR);
+        seed_minimax_shared(&base);
+        seed_minimax_text_encoder(&text_encoder);
+        assert!(
+            minimax_h3_shared_is_complete(&base, &text_encoder),
+            "a fully-seeded shared floor is complete"
+        );
+        assert!(
+            minimax_h3_missing_shared_probes(&base, &text_encoder).is_empty(),
+            "the enumerator and the predicate must agree on a complete floor"
+        );
+
+        // Mutation check, applied to EACH probed path on its own — the set passing together proves
+        // nothing about whether any individual member is read. Driven off the enumerator's own
+        // output so a probe added to the list cannot escape the sweep, and asserted on the
+        // ENUMERATOR as well as the predicate: a refusal that named the wrong path would be as
+        // useless as one that named none.
+        let every_probe = minimax_h3_shared_probe_paths(&base, &text_encoder);
+        assert_eq!(
+            every_probe.len(),
+            MINIMAX_H3_SHARED_PROBED_FILES.len()
+                + MINIMAX_H3_AUDIO_VAE_CONFIG_FILES.len()
+                + MINIMAX_H3_TEXT_ENCODER_PROBED_FILES.len(),
+            "the enumerator must emit every declared probe and nothing else"
+        );
+        // …and an ABSOLUTE floor as well. The equality above is self-consistent — deleting a probe
+        // from a constant shrinks both sides and the sweep silently narrows — which a mutation run
+        // caught: dropping `tokenizer/tokenizer.json` left this test green and was only reported by
+        // the manifest-coverage guard. Eight is the shipped count (3 shared + 3 FL2VA + 2 encoder).
+        assert!(
+            every_probe.len() >= 8,
+            "the probe list collapsed to {} entries — a vacuous sweep proves nothing",
+            every_probe.len()
+        );
+        for probe in &every_probe {
+            let relative = probe
+                .strip_prefix(&base)
+                .expect("every probe is under `base`");
+            let torn = tmp.path().join("torn");
+            seed_minimax_shared(&torn);
+            let torn_te = torn.join(MINIMAX_H3_TEXT_ENCODER_DIR);
+            seed_minimax_text_encoder(&torn_te);
+            let torn_probe = torn.join(relative);
+            fs::remove_file(&torn_probe).unwrap();
+            assert!(
+                !minimax_h3_shared_is_complete(&torn, &torn_te),
+                "removing {} must read incomplete",
+                relative.display()
+            );
+            assert_eq!(
+                minimax_h3_missing_shared_probes(&torn, &torn_te),
+                vec![torn_probe],
+                "the enumerator must name exactly the path that was removed"
+            );
+            fs::remove_dir_all(&torn).ok();
+        }
+
+        // 🔴 sc-19558 — THE DEFECT A DIRECTORY PROBE CANNOT SEE. An interrupted co-requisite
+        // download leaves each component directory present and EMPTY. Under the sc-19573 `is_dir()`
+        // floor this whole root read COMPLETE and the failure moved into the engine; under the file
+        // floor every component is named.
+        let empty_dirs = tmp.path().join("empty-dirs");
+        for probe in &every_probe {
+            let relative = probe
+                .strip_prefix(&base)
+                .expect("every probe is under `base`");
+            fs::create_dir_all(
+                empty_dirs
+                    .join(relative)
+                    .parent()
+                    .expect("probe has a parent"),
+            )
+            .unwrap();
+        }
+        let empty_te = empty_dirs.join(MINIMAX_H3_TEXT_ENCODER_DIR);
+        assert!(
+            !minimax_h3_shared_is_complete(&empty_dirs, &empty_te),
+            "present-but-empty component directories are a torn install, not a complete one"
+        );
+        assert_eq!(
+            minimax_h3_missing_shared_probes(&empty_dirs, &empty_te).len(),
+            every_probe.len(),
+            "every probe must be reported missing, not just the first"
+        );
+
+        // The text encoder is checked at the root the CALLER resolved rather than under `base_root`.
+        let no_te = tmp.path().join("no-te");
+        seed_minimax_shared(&no_te);
+        assert!(!minimax_h3_shared_is_complete(
+            &no_te,
+            &no_te.join(MINIMAX_H3_TEXT_ENCODER_DIR)
+        ));
+
+        // The audio-VAE documents are files, not a directory: a `FL2VA/audio_vae/` that exists but
+        // holds only the 605 MB weight duplicate is NOT the constructor documents the engine opens.
+        let weights_only = tmp.path().join("weights-only");
+        seed_minimax_shared(&weights_only);
+        let weights_te = weights_only.join(MINIMAX_H3_TEXT_ENCODER_DIR);
+        seed_minimax_text_encoder(&weights_te);
+        for file in MINIMAX_H3_AUDIO_VAE_CONFIG_FILES {
+            fs::remove_file(
+                weights_only
+                    .join(MINIMAX_H3_AUDIO_VAE_CONFIG_DIR)
+                    .join(file),
+            )
+            .unwrap();
+        }
+        touch(
+            &weights_only
+                .join(MINIMAX_H3_AUDIO_VAE_CONFIG_DIR)
+                .join("model.safetensors"),
+        );
+        assert!(
+            !minimax_h3_shared_is_complete(&weights_only, &weights_te),
+            "a present FL2VA/audio_vae/ dir with no constructor documents must read incomplete"
+        );
+    }
+
+    #[test]
+    fn minimax_h3_text_encoder_root_is_tier_dependent() {
+        // sc-19120 + sc-19573: the PACKED q4/q8 encoders live beside the DiT tiers in the rehost and
+        // do not exist upstream at all, so a q4 install legitimately has NO `text_encoder/` under the
+        // upstream snapshot. Resolving both tiers to the same root is what refused every packed-tier
+        // install before sc-19573.
+        let tier_root = Path::new("/tiers");
+        let base_root = Path::new("/base");
+        assert_eq!(
+            minimax_h3_text_encoder_dir(tier_root, base_root, "q4"),
+            Path::new("/tiers/q4/text_encoder")
+        );
+        assert_eq!(
+            minimax_h3_text_encoder_dir(tier_root, base_root, "q8"),
+            Path::new("/tiers/q8/text_encoder")
+        );
+        assert_eq!(
+            minimax_h3_text_encoder_dir(tier_root, base_root, "bf16"),
+            Path::new("/base/text_encoder")
+        );
+    }
+
+    /// A q4 install has NO `text_encoder/` under the upstream snapshot and MUST still read complete.
+    /// This is the exact shape sc-19573 fixed; it is asserted against the shipped tier names rather
+    /// than a synthetic one so a future tier rename cannot leave it vacuously green.
+    #[test]
+    fn minimax_h3_packed_tier_install_is_complete_without_an_upstream_text_encoder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().join("MiniMaxAI--MiniMax-H3");
+        let tiers = tmp.path().join("SceneWorks--minimax-h3-mlx");
+        seed_minimax_shared(&base);
+        for tier in ["q4", "q8"] {
+            seed_minimax_text_encoder(&tiers.join(tier).join(MINIMAX_H3_TEXT_ENCODER_DIR));
+            let resolved = minimax_h3_text_encoder_dir(&tiers, &base, tier);
+            assert!(
+                minimax_h3_shared_is_complete(&base, &resolved),
+                "the {tier} packed text encoder must satisfy the shared floor"
+            );
+        }
+        // A packed encoder that is present but TORN — `config.json` landed, the shard index did not
+        // — is the sc-19517 shape and must NOT satisfy the floor (sc-19558). Asserted per tier, and
+        // restored afterwards, so the two directions are proved on the same fixture.
+        for tier in ["q4", "q8"] {
+            let packed = tiers.join(tier).join(MINIMAX_H3_TEXT_ENCODER_DIR);
+            let index = packed.join("model.safetensors.index.json");
+            fs::remove_file(&index).unwrap();
+            let resolved = minimax_h3_text_encoder_dir(&tiers, &base, tier);
+            assert_eq!(
+                minimax_h3_missing_shared_probes(&base, &resolved),
+                vec![index.clone()],
+                "a {tier} packed encoder missing its shard index must be named, not admitted"
+            );
+            touch(&index);
+        }
+        // bf16 still reads the upstream component, and is genuinely incomplete without it.
+        assert!(!minimax_h3_shared_is_complete(
+            &base,
+            &minimax_h3_text_encoder_dir(&tiers, &base, "bf16")
+        ));
+        seed_minimax_text_encoder(&base.join(MINIMAX_H3_TEXT_ENCODER_DIR));
+        assert!(minimax_h3_shared_is_complete(
+            &base,
+            &minimax_h3_text_encoder_dir(&tiers, &base, "bf16")
+        ));
+    }
+
     #[test]
     fn missing_tier_dir_is_incomplete_for_every_family() {
         // A tier subdir that does not exist at all (never converted / never downloaded) is incomplete,
@@ -823,5 +1446,7 @@ mod tests {
         assert!(!sana_tier_complete(&absent));
         assert!(!wan_tier_complete(&absent));
         assert!(!sensenova_tier_complete(&absent));
+        assert!(!minimax_h3_tier_complete(&absent));
+        assert!(!minimax_h3_ref_tier_complete(&absent));
     }
 }

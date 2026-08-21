@@ -113,6 +113,11 @@ fn video_jobs_remains_split_into_real_engine_modules() {
             "pub(super) async fn generate_mochi(",
         ),
         (
+            "minimax_h3",
+            include_str!("minimax_h3.rs"),
+            "pub(super) async fn generate_minimax_h3(",
+        ),
+        (
             "svd",
             include_str!("svd.rs"),
             "pub(super) async fn generate_svd(",
@@ -137,6 +142,7 @@ fn video_jobs_remains_split_into_real_engine_modules() {
         "krea_realtime",
         "ltx",
         "mochi",
+        "minimax_h3",
         "svd",
         "vace",
     ] {
@@ -988,14 +994,11 @@ fn comfyui_wan_a14b_gate_rejects_32gb_and_admits_large_card() {
     let root = root_guard.path();
     let high = root.join("high.safetensors");
     let low = root.join("low.safetensors");
-    std::fs::File::create(&high)
-        .unwrap()
-        .set_len(20 * 1024 * 1024 * 1024)
-        .unwrap();
-    std::fs::File::create(&low)
-        .unwrap()
-        .set_len(20 * 1024 * 1024 * 1024)
-        .unwrap();
+    // 2 x 20 GiB. Sparse, or this one test allocates 40 GiB of NTFS (see
+    // `crate::test_fixture_disk`); the gate reads the length, not the bytes.
+    for path in [&high, &low] {
+        crate::test_fixture_disk::create_sparse_weights(path, 20 * 1024 * 1024 * 1024);
+    }
     let make_paths =
         || ComfyuiWanPaths::test_fixture(high.clone(), low.clone(), None, None, root.to_path_buf());
     assert!(
@@ -1128,6 +1131,336 @@ fn video_preflight_refuses_a_clip_past_the_models_declared_hard_max_duration() {
     ));
 }
 
+/// sc-17160: the worker's backstop refuses reference media past what the model declares, BEFORE
+/// any weights load — pinned at the seam `run_video_generate_job` actually calls.
+///
+/// Kills the same mutation the two gates above do: deleting the `reference_limit_error` call from
+/// `video_preflight`. Every `sceneworks_core::video_request` test stays green through that — the
+/// function is still correct, it is simply no longer CALLED.
+///
+/// The audio arm is the one that matters most. An engine handed conditioning it does not consume
+/// renders UNCONDITIONED, and an unconditioned render is not an error — it is a plausible-looking
+/// clip that ignored the reference (the epic-1788 class). The API gate covers what it enqueues; a
+/// job replayed from a pre-sc-17160 row, or produced by any future non-HTTP path, reaches the
+/// engine through here.
+#[test]
+fn video_preflight_refuses_reference_media_past_what_the_model_declares() {
+    // An already-shipped model declares none of the four keys, so it keeps 8 / 8 / 0 — and a
+    // single audio reference is refused rather than silently dropped.
+    let legacy_audio = request(json!({
+        "projectId": "p", "model": "bernini", "mode": "reference_to_video", "prompt": "p",
+        "referenceAssetIds": ["ref-1"],
+        "referenceAudioAssetIds": ["voice-1"],
+        "modelManifestEntry": { "limits": {} }
+    }));
+    let Err(WorkerError::InvalidPayload(message)) = video_preflight(&legacy_audio) else {
+        panic!("a model declaring no audio-reference capability must refuse one");
+    };
+    assert!(message.contains("bernini"), "names the model: {message}");
+    assert!(
+        message.contains("takes no audio references"),
+        "says the model takes none: {message}"
+    );
+
+    // The same model still admits its historical 8 images + 8 clips: the cap change moved nothing
+    // for it, which is the regression this half exists to hold.
+    let legacy_at_cap = request(json!({
+        "projectId": "p", "model": "bernini", "mode": "reference_to_video", "prompt": "p",
+        "referenceAssetIds": ["a", "b", "c", "d", "e", "f", "g", "h"],
+        "sourceClipAssetIds": ["1", "2", "3", "4", "5", "6", "7", "8"],
+        "modelManifestEntry": { "limits": {} }
+    }));
+    assert!(
+        video_preflight(&legacy_at_cap).is_ok(),
+        "8 images + 8 clips is exactly what bernini accepted before this story"
+    );
+
+    // A model that DECLARES the Ref2VA surface: 9 + 2 + 1 = 12 admits, 9 + 3 + 3 = 15 does not.
+    let ref2va_limits = json!({
+        "limits": {
+            "maxReferenceAssets": 9,
+            "maxSourceClipAssets": 3,
+            "maxReferenceAudioAssets": 3,
+            "maxCombinedReferenceAssets": 12
+        }
+    });
+    let admitted = request(json!({
+        "projectId": "p", "model": "ref2va_probe", "mode": "reference_to_video", "prompt": "p",
+        "referenceAssetIds": ["a", "b", "c", "d", "e", "f", "g", "h", "i"],
+        "sourceClipAssetIds": ["1", "2"],
+        "referenceAudioAssetIds": ["voice-1"],
+        "modelManifestEntry": ref2va_limits
+    }));
+    assert!(
+        video_preflight(&admitted).is_ok(),
+        "9 + 2 + 1 is exactly the declared 12-file budget"
+    );
+
+    let over_budget = request(json!({
+        "projectId": "p", "model": "ref2va_probe", "mode": "reference_to_video", "prompt": "p",
+        "referenceAssetIds": ["a", "b", "c", "d", "e", "f", "g", "h", "i"],
+        "sourceClipAssetIds": ["1", "2", "3"],
+        "referenceAudioAssetIds": ["v1", "v2", "v3"],
+        "modelManifestEntry": ref2va_limits
+    }));
+    let Err(WorkerError::InvalidPayload(message)) = video_preflight(&over_budget) else {
+        panic!("15 files against a declared 12 must be refused before the load");
+    };
+    assert!(message.contains("12"), "states the cap: {message}");
+    assert!(message.contains("15"), "states what was asked: {message}");
+
+    // A job carrying no manifest entry at all (the stub lane, an uncatalogued id) keeps the
+    // defaults rather than becoming unconstrained — the audio list is new surface, so "no
+    // declaration" must mean "not supported", not "anything goes".
+    let no_entry = request(json!({
+        "projectId": "p", "model": "stub-model", "mode": "text_to_video", "prompt": "p",
+        "referenceAudioAssetIds": ["voice-1"]
+    }));
+    assert!(
+        video_preflight(&no_entry).is_err(),
+        "an undeclared model must not silently accept audio references"
+    );
+}
+
+/// sc-17160: the audio references resolve through the PROJECT-RELATIVE asset path, not a bare
+/// filename — the trap this story was explicitly warned about.
+///
+/// An asset id is not a path. It resolves through `ProjectStore::get_asset` to a project-relative
+/// `file.path` recorded in the sidecar, which `safe_project_path` then joins under the project
+/// root. This drives the whole chain on a real store with a real WAV on disk, and asserts the
+/// decoded samples come back — a resolver that returned the right count of empty tracks would
+/// pass a shape-only assertion.
+///
+/// The negative arms are the ones that pin the guard: an id that does not exist, and a project
+/// path that is not the asset's own, must both fail loudly rather than resolve to something.
+///
+/// # The fixture rate is 24 kHz on purpose (sc-18650)
+///
+/// It used to be 32 000, which made the `sample_rate` assertion below a false green: it wrote a
+/// constant to disk and read the same constant back, so it was equally satisfied by a resolver
+/// that resampled and by one that did nothing — which is what the resolver actually did, leaving
+/// `referenceAudioAssetIds` with ZERO reachable success paths, because
+/// `Ref2VaReferences::check_audio` rejects every rate but 32 000 and no shipped SceneWorks producer
+/// emits it (every `audio.sampleRates` in `builtin.models.jsonc` is 22050 / 24000 / 48000).
+///
+/// 24 000 is one of those real producer rates, and the ratio to the engine's 32 000 is exactly 4:3,
+/// so the resampled length is a checkable number rather than "some other number": a passthrough
+/// reds on the rate, and a relabel-the-header cheat reds on the length.
+#[tokio::test]
+async fn resolve_reference_audio_conditioning_resolves_project_relative_asset_paths() {
+    let data_dir = tempfile::tempdir().expect("temp dir creates");
+    let mut settings = Settings::from_env();
+    settings.data_dir = data_dir.path().to_path_buf();
+    let api = ApiClient::new(&settings);
+    let job = reference_audio_job_snapshot();
+    let store = ProjectStore::new(settings.data_dir.clone(), "worker");
+    let project = store.create_project("sc17160").expect("project creates");
+    let project_path = PathBuf::from(&project.path);
+
+    // Two distinct clips, so an implementation that resolved one id and cloned it — or reordered
+    // the list — is caught: the sample counts differ. Long enough (0.25 s / 0.5 s) that a real
+    // resampler has a filter window to work in; a handful of samples is not a signal.
+    //
+    // Registered through `persist_generated_asset`, the same entry point the Audio Studio lane
+    // writes its clips with — which today is the ONLY door an audio asset comes through, since
+    // `import_asset` accepts image and video uploads only.
+    const SOURCE_RATE: u32 = 24_000;
+    // The engine-boundary rate, read off the resolver's own constant rather than retyped.
+    use super::reference_audio::REFERENCE_AUDIO_SAMPLE_RATE;
+    let mut asset_ids = Vec::new();
+    for (asset_id, name, samples) in [
+        ("asset_voice", "voice.wav", 6_000usize),
+        ("asset_music", "music.wav", 12_000usize),
+    ] {
+        let media_rel = format!("assets/audio/{name}");
+        let media_path = project_path.join(&media_rel);
+        std::fs::create_dir_all(media_path.parent().expect("audio dir"))
+            .expect("audio dir creates");
+        write_wav_pcm16(
+            &AudioTrack {
+                // A DC level rather than silence: ffmpeg's resampler is free to trim leading and
+                // trailing silence-shaped padding, and a constant signal makes the output length a
+                // property of the rate conversion rather than of the content.
+                samples: vec![0.25; samples],
+                sample_rate: SOURCE_RATE,
+                channels: 1,
+            },
+            &media_path,
+        )
+        .expect("wav writes");
+        store
+            .persist_generated_asset(
+                &project.id,
+                "job-sc17160",
+                "genset-sc17160",
+                &json!({
+                    "type": "audio",
+                    "assetId": asset_id,
+                    "mediaPath": media_rel,
+                    "mimeType": "audio/wav",
+                    "displayName": name,
+                    "createdAt": "2026-08-11T00:00:00Z",
+                }),
+            )
+            .expect("audio asset persists");
+        asset_ids.push(asset_id.to_owned());
+    }
+
+    // The recorded media path is PROJECT-RELATIVE — the fact the resolver has to honor. Asserted
+    // here so this test fails on the store's contract changing rather than silently starting to
+    // prove something weaker.
+    let recorded = store
+        .get_asset(&project.id, &asset_ids[0])
+        .expect("asset reads");
+    let rel = recorded["file"]["path"].as_str().expect("media path");
+    assert!(
+        !rel.starts_with('/') && !PathBuf::from(rel).is_absolute(),
+        "the sidecar records a project-relative path, not an absolute one: {rel}"
+    );
+
+    let request = request(json!({
+        "projectId": project.id,
+        "model": "ref2va_probe",
+        "mode": "reference_to_video",
+        "prompt": "p",
+        "referenceAudioAssetIds": asset_ids
+    }));
+
+    // --- Arms that never reach ffmpeg, so they run on every host ------------------------------
+
+    // An empty request resolves to no conditioning and touches no disk — the shape every
+    // already-shipped video model takes through this call.
+    let bare = noop_request(&project.id);
+    assert!(
+        resolve_reference_audio_conditioning(&api, &settings, &job, &bare, &project_path)
+            .await
+            .expect("no references resolves cleanly")
+            .is_empty()
+    );
+
+    // An unknown id fails loudly rather than resolving to nothing.
+    let missing = request_with_audio(&project.id, &["not-an-asset"]);
+    assert!(matches!(
+        resolve_reference_audio_conditioning(&api, &settings, &job, &missing, &project_path).await,
+        Err(WorkerError::InvalidPayload(_))
+    ));
+
+    // ...and so does a real id resolved against a DIFFERENT project root: the project-relative
+    // path only means anything under the project it came from, and `safe_project_path` is what
+    // keeps a sidecar path from reaching outside it (sc-4278 / F-MLXW-14).
+    let elsewhere = tempfile::tempdir().expect("temp dir creates");
+    assert!(matches!(
+        resolve_reference_audio_conditioning(&api, &settings, &job, &request, elsewhere.path())
+            .await,
+        Err(WorkerError::InvalidPayload(_))
+    ));
+
+    // --- The success arm, which is a real ffmpeg transcode -------------------------------------
+
+    if !ffmpeg_reachable() {
+        eprintln!(
+            "skipping the resample half of \
+             resolve_reference_audio_conditioning_resolves_project_relative_asset_paths: \
+             ffmpeg not found"
+        );
+        return;
+    }
+
+    let conditioning =
+        resolve_reference_audio_conditioning(&api, &settings, &job, &request, &project_path)
+            .await
+            .expect("both references resolve");
+    assert_eq!(conditioning.len(), 2);
+    let lengths: Vec<usize> = conditioning
+        .iter()
+        .map(|item| match item {
+            gen_core::Conditioning::ReferenceAudio { audio, strength } => {
+                assert_eq!(*strength, None, "no per-reference strength knob exists yet");
+                // THE contract. The asset on disk is 24 kHz; the engine hard-errors on anything
+                // but this, and ships no resampler to fix it. Passing the header's rate through
+                // is what made this capability unreachable (sc-18650).
+                assert_eq!(
+                    audio.sample_rate, REFERENCE_AUDIO_SAMPLE_RATE,
+                    "the reference must reach the engine at its audio VAE's rate, not the \
+                     asset's {SOURCE_RATE} Hz"
+                );
+                assert_eq!(audio.channels, 1, "the source layout is left alone");
+                audio.samples.len()
+            }
+            other => panic!("expected ReferenceAudio, got {other:?}"),
+        })
+        .collect();
+
+    // A resampler that only rewrote the header would return the SOURCE counts (6 000 / 12 000).
+    // The 4:3 rate ratio means a real conversion returns 8 000 / 16 000, give or take the filter's
+    // own edge handling.
+    for (index, (&measured, source)) in lengths.iter().zip([6_000usize, 12_000]).enumerate() {
+        let expected = source * REFERENCE_AUDIO_SAMPLE_RATE as usize / SOURCE_RATE as usize;
+        let drift = measured.abs_diff(expected);
+        assert!(
+            drift <= 128,
+            "reference {index}: {source} samples @ {SOURCE_RATE} Hz must resample to about \
+             {expected} @ {REFERENCE_AUDIO_SAMPLE_RATE} Hz, got {measured} (drift {drift})"
+        );
+    }
+    assert!(
+        lengths[0] < lengths[1],
+        "each id decodes to ITS OWN clip, in submission order: {lengths:?}"
+    );
+}
+
+/// A [`JobSnapshot`] for the reference-audio resolver tests. The resolver spawns ffmpeg through the
+/// shared runner, which uses the id only to name the scratch directory and to address the
+/// heartbeat/cancel polls — neither of which needs a real job row, because the poll interval never
+/// elapses inside a sub-second transcode.
+fn reference_audio_job_snapshot() -> JobSnapshot {
+    serde_json::from_value(json!({
+        "id": "job-sc17160",
+        "type": "video_generate",
+        "status": "running",
+        "projectId": null,
+        "projectName": null,
+        "payload": { "model": "ref2va_probe" },
+        "result": {},
+        "requestedGpu": "auto",
+        "assignedGpu": null,
+        "workerId": "test-worker",
+        "progress": 0.0,
+        "stage": "queued",
+        "message": "queued",
+        "error": null,
+        "etaSeconds": null,
+        "elapsedSeconds": null,
+        "attempts": 1,
+        "sourceJobId": null,
+        "duplicateOfJobId": null,
+        "cancelRequested": false,
+        "createdAt": "2026-08-11T00:00:00Z",
+        "updatedAt": "2026-08-11T00:00:00Z",
+        "startedAt": null,
+        "completedAt": null,
+        "canceledAt": null,
+        "lastHeartbeatAt": null
+    }))
+    .expect("the reference-audio job snapshot deserializes")
+}
+
+/// A [`VideoRequest`] carrying only a project id — the shape every video job that predates
+/// sc-17160 has.
+fn noop_request(project_id: &str) -> VideoRequest {
+    request(json!({
+        "projectId": project_id, "model": "bernini", "mode": "text_to_video", "prompt": "p"
+    }))
+}
+
+/// A [`VideoRequest`] carrying the given audio reference ids.
+fn request_with_audio(project_id: &str, ids: &[&str]) -> VideoRequest {
+    request(json!({
+        "projectId": project_id, "model": "ref2va_probe", "mode": "reference_to_video",
+        "prompt": "p", "referenceAudioAssetIds": ids
+    }))
+}
+
 /// sc-12347: the same backstop on the fps axis — refuses a rate the model does not advertise,
 /// and admits a payload that names no rate at all.
 ///
@@ -1215,6 +1548,180 @@ fn video_preflight_refuses_an_fps_the_model_does_not_advertise() {
     let no_entry = request(json!({
         "projectId": "p", "model": "stub-model", "mode": "text_to_video", "prompt": "p",
         "duration": 5, "fps": 60
+    }));
+    assert!(
+        video_preflight(&no_entry).is_ok(),
+        "no menu declared => no menu"
+    );
+}
+
+/// sc-19426: the same backstop on the SAMPLING axis — refuses a step count under the model's
+/// declared `limits.hardMinSteps`, and admits a payload that names no step count at all.
+///
+/// Kills the same class of mutation: deleting the `steps_limit_error` call from `video_preflight`
+/// leaves every core test green, because the core function is still correct — just not CALLED.
+///
+/// Ungated for the same reason as the two above: no other gate on any lane looks at steps, so this
+/// is the whole backstop rather than a nicety.
+#[test]
+fn video_preflight_refuses_a_step_count_under_the_models_declared_floor() {
+    let h3_entry = json!({
+        "limits": {
+            "durations": [5.1667], "hardMinDuration": 5.1667, "hardMaxDuration": 14.375,
+            "hardMinSteps": 2, "fps": [24]
+        },
+        "defaults": { "duration": 5.1667, "fps": 24, "steps": 50 }
+    });
+
+    // The story's shape: a request the other three gates ALL admit — 5.1667s is exactly the
+    // duration floor, 24 fps is the model's one advertised cadence, no references — that still
+    // hands the scheduler a one-point sigma grid it cannot build a single evaluation from.
+    let one_step = request(json!({
+        "projectId": "p", "model": "minimax_h3", "mode": "text_to_video", "prompt": "p",
+        "duration": 5.1667, "fps": 24, "advanced": { "steps": 1 },
+        "modelManifestEntry": h3_entry
+    }));
+    assert_eq!(
+        duration_limit_error(
+            &one_step.model,
+            one_step.duration,
+            &one_step.model_manifest_entry
+        ),
+        None,
+        "the duration bounds ADMIT this request — it is exactly the shortest legal clip"
+    );
+    assert_eq!(
+        fps_limit_error(
+            &one_step.model,
+            one_step.fps,
+            &one_step.model_manifest_entry
+        ),
+        None,
+        "…and 24 is the only rate it advertises"
+    );
+    let Err(WorkerError::InvalidPayload(message)) = video_preflight(&one_step) else {
+        panic!("1 step on a model with a 2-step floor must be refused before the load");
+    };
+    assert!(message.contains("minimax_h3"), "names the model: {message}");
+    assert!(
+        message.contains("at least 2 sampling steps"),
+        "states the floor: {message}"
+    );
+    assert!(
+        message.contains("asks for 1."),
+        "states what was asked: {message}"
+    );
+
+    // The model's own shipped default admits — 50 steps must still run, or the gate has bricked
+    // the model it was added for.
+    let default_steps = request(json!({
+        "projectId": "p", "model": "minimax_h3", "mode": "text_to_video", "prompt": "p",
+        "duration": 5.1667, "fps": 24, "advanced": { "steps": 50 },
+        "modelManifestEntry": h3_entry
+    }));
+    assert!(video_preflight(&default_steps).is_ok(), "50 is the default");
+
+    // A payload naming NO steps must be ADMITTED. `advanced` is a verbatim passthrough map with no
+    // blanket step count, so an omitted `steps` means "the engine picks" — inventing one here would
+    // refuse ordinary jobs, which is the regression the fps gate above nearly shipped.
+    let no_steps = request(json!({
+        "projectId": "p", "model": "minimax_h3", "mode": "text_to_video", "prompt": "p",
+        "duration": 5.1667, "fps": 24, "modelManifestEntry": h3_entry
+    }));
+    assert!(
+        video_preflight(&no_steps).is_ok(),
+        "a steps-less payload must not be refused by the floor"
+    );
+
+    // A job carrying no manifest entry is UNCONSTRAINED — never block without a declared floor.
+    let no_entry = request(json!({
+        "projectId": "p", "model": "stub-model", "mode": "text_to_video", "prompt": "p",
+        "advanced": { "steps": 1 }
+    }));
+    assert!(
+        video_preflight(&no_entry).is_ok(),
+        "no floor declared => no floor"
+    );
+}
+
+/// sc-19502: the same backstop for the EXACT-value menu — refuses a step count off the model's
+/// declared `limits.steps` on BOTH sides, and admits a payload that names no step count at all.
+///
+/// The worker gate is what makes the constraint hold for a job that did NOT come through the HTTP
+/// route — a replayed pre-sc-19502 row, or any future non-HTTP producer. It matters more here than
+/// for the floor: this is the last gate before the engine, and on the mlx lane the engine used to
+/// accept anything and silently render its baked schedule, so a job that slipped past enqueue had
+/// nothing downstream to catch it.
+///
+/// Kills the same mutation class: deleting the `steps_limit_error` call from `video_preflight`
+/// leaves every core test green, because the core function is still correct — just not CALLED.
+#[test]
+fn video_preflight_refuses_a_step_count_off_the_models_declared_menu() {
+    // The shipped LTX-2.3 shape: one legal count, and it is the model's own default.
+    let ltx_entry = json!({
+        "limits": { "steps": [8], "fps": [24, 25, 30], "hardMaxDuration": 15 },
+        "defaults": { "duration": 6, "fps": 25, "steps": 8 }
+    });
+
+    // OVER the menu — the case a floor-shaped key would have admitted, and the case the story
+    // names: it used to reach the engine and then 400 late on candle / render silently on mlx.
+    let thirty = request(json!({
+        "projectId": "p", "model": "ltx_2_3", "mode": "text_to_video", "prompt": "p",
+        "duration": 6.0, "fps": 24, "advanced": { "steps": 30 },
+        "modelManifestEntry": ltx_entry
+    }));
+    assert_eq!(
+        fps_limit_error(&thirty.model, thirty.fps, &thirty.model_manifest_entry),
+        None,
+        "the other gates ADMIT this request — only the step menu refuses it"
+    );
+    let Err(WorkerError::InvalidPayload(message)) = video_preflight(&thirty) else {
+        panic!("30 steps on a model with an exact 8-step menu must be refused before the load");
+    };
+    assert!(message.contains("ltx_2_3"), "names the model: {message}");
+    assert!(
+        message.contains("fixed 8-step schedule"),
+        "states the legal value: {message}"
+    );
+    assert!(
+        message.contains("asks for 30 steps"),
+        "states what was asked: {message}"
+    );
+
+    // UNDER the menu is refused too, so the menu is not secretly a ceiling.
+    let four = request(json!({
+        "projectId": "p", "model": "ltx_2_3", "mode": "text_to_video", "prompt": "p",
+        "duration": 6.0, "fps": 24, "advanced": { "steps": 4 },
+        "modelManifestEntry": ltx_entry
+    }));
+    assert!(
+        matches!(video_preflight(&four), Err(WorkerError::InvalidPayload(_))),
+        "4 is off the menu as well"
+    );
+
+    // The model's own shipped default admits, or the gate has bricked the model it was added for.
+    let on_menu = request(json!({
+        "projectId": "p", "model": "ltx_2_3", "mode": "text_to_video", "prompt": "p",
+        "duration": 6.0, "fps": 24, "advanced": { "steps": 8 },
+        "modelManifestEntry": ltx_entry
+    }));
+    assert!(video_preflight(&on_menu).is_ok(), "8 is the menu");
+
+    // A payload naming NO steps must be ADMITTED — an omitted `steps` means "run the baked
+    // schedule", which is the ordinary path for every distilled model.
+    let no_steps = request(json!({
+        "projectId": "p", "model": "ltx_2_3", "mode": "text_to_video", "prompt": "p",
+        "duration": 6.0, "fps": 24, "modelManifestEntry": ltx_entry
+    }));
+    assert!(
+        video_preflight(&no_steps).is_ok(),
+        "a steps-less payload must not be refused by the menu"
+    );
+
+    // A job carrying no manifest entry is UNCONSTRAINED — never block without a declared menu.
+    let no_entry = request(json!({
+        "projectId": "p", "model": "stub-model", "mode": "text_to_video", "prompt": "p",
+        "advanced": { "steps": 30 }
     }));
     assert!(
         video_preflight(&no_entry).is_ok(),
@@ -1683,7 +2190,11 @@ fn record_frame_count_records_the_encoded_clip_not_the_request() {
 
     // A clip whose length matches NEITHER prediction — the shape sc-12318's stub probe produces
     // (asked for 151, returned 1). The record must follow the frames that exist.
-    let odd = EncodedClip { frames: 7, fps: 25 };
+    let odd = EncodedClip {
+        frames: 7,
+        fps: 25,
+        has_audio: false,
+    };
     let stamped = odd.record_frame_count(bernini_raw_settings(&bernini));
     assert_eq!(
         stamped["frameCount"],
@@ -1704,12 +2215,18 @@ fn record_frame_count_records_the_encoded_clip_not_the_request() {
     let clip = EncodedClip {
         frames: rendered,
         fps: 25,
+        has_audio: false,
     };
     let stamped = clip.record_frame_count(bernini_raw_settings(&bernini));
     assert_eq!(stamped["frameCount"], json!(149));
 
     // An already-stamped record is corrected, not duplicated (the stamp is the ONE writer).
-    let restamped = EncodedClip { frames: 5, fps: 25 }.record_frame_count(stamped);
+    let restamped = EncodedClip {
+        frames: 5,
+        fps: 25,
+        has_audio: false,
+    }
+    .record_frame_count(stamped);
     assert_eq!(restamped["frameCount"], json!(5));
 
     // A non-object carries no keys to correct and passes through rather than being wrapped.
@@ -1763,6 +2280,55 @@ fn encoded_clip_measures_the_file_not_the_request() {
     assert_eq!(clip.duration_seconds(), 2.0);
 }
 
+/// sc-19577: the asset records whether the mp4 got a SOUNDTRACK, measured off what was muxed.
+///
+/// The condition asserted here is the same one `encode_inner` branches on — `decoded.audio` — so
+/// the record and the mux cannot disagree. Both outcomes are driven from the SAME model id
+/// (`minimax_h3`), which is the point: a per-family lookup would badge the silent clip below, and
+/// asserting only the `true` case would pass against exactly that hardcode.
+#[test]
+fn asset_fact_records_the_soundtrack_that_was_actually_muxed() {
+    let frame = || RgbFrame {
+        width: 2,
+        height: 2,
+        pixels: vec![0; 12],
+    };
+    let decoded = |audio: Option<AudioTrack>| DecodedVideo {
+        frames: vec![frame(), frame()],
+        fps: 24,
+        audio,
+        adapter_apply_reports: Vec::new(),
+    };
+    let track = AudioTrack {
+        samples: vec![0.0; 64],
+        sample_rate: 32_000,
+        channels: 2,
+    };
+
+    let with_audio = EncodedClip::measure(&decoded(Some(track)));
+    let silent = EncodedClip::measure(&decoded(None));
+    assert!(with_audio.has_audio);
+    assert!(
+        !silent.has_audio,
+        "a joint audio+video model that returned no audio must not claim a soundtrack"
+    );
+
+    // …and it reaches the asset fact, which is what `build_video_sidecar_parts` reads.
+    let request = request(json!({
+        "projectId": "p", "model": "minimax_h3", "mode": "text_to_video",
+        "prompt": "a lighthouse keeper hums",
+    }));
+    let plan = VideoPlan::new(&request, Path::new("/tmp/project"));
+    let fact = |clip| video_asset_fact(&plan, 7, "mlx_minimax_h3", json!({}), None, clip);
+    assert_eq!(fact(with_audio)["hasAudio"], json!(true));
+    assert_eq!(
+        fact(silent)["hasAudio"],
+        json!(false),
+        "the key is emitted for a silent render too — absent means `recorded before sc-19577`, \
+         which is a different fact from `measured, and silent`"
+    );
+}
+
 /// The candle-lane half of [`no_raw_settings_builder_records_its_own_frame_count`] (sc-12371).
 /// Same invariant, different `#[cfg]`: these builders were the other half of the live bug —
 /// `candle_bernini` / `candle_scail2`(`_replace`) and `candle_wan_comfyui` (under an
@@ -1812,8 +2378,12 @@ fn no_candle_raw_settings_builder_records_its_own_frame_count() {
         );
     }
     // And the stamp still writes the clip's real length on this lane.
-    let stamped = EncodedClip { frames: 7, fps: 25 }
-        .record_frame_count(bernini_raw_settings(&req("bernini")));
+    let stamped = EncodedClip {
+        frames: 7,
+        fps: 25,
+        has_audio: false,
+    }
+    .record_frame_count(bernini_raw_settings(&req("bernini")));
     assert_eq!(stamped["frameCount"], json!(7));
 }
 
@@ -1864,9 +2434,9 @@ fn mochi_root_real_sized(tag: &str) -> tempfile::TempDir {
         ("text_encoder/model.safetensors", MOCHI_Q4_TE_BYTES),
         ("vae/model.safetensors", MOCHI_Q4_VAE_BYTES),
     ] {
-        let path = root.join(relative);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::File::create(&path).unwrap().set_len(len).unwrap();
+        // ~20.1 GB per call, and 17 tests call this. Sparse, or a parallel run of them fills the
+        // disk outright (see `crate::test_fixture_disk`).
+        crate::test_fixture_disk::create_sparse_weights(&root.join(relative), len);
     }
     std::fs::create_dir_all(root.join("tokenizer")).unwrap();
     std::fs::write(
@@ -2457,6 +3027,12 @@ struct ArmProbe {
     spec: std::sync::Arc<std::sync::Mutex<Option<LoadSpec>>>,
     /// Provider-owned adapter outcomes returned after generation.
     adapter_reports: std::sync::Arc<std::sync::Mutex<Vec<gen_core::AdapterApplyReport>>>,
+    /// The soundtrack the stub engine returns alongside its frames. `None` (the default) is the
+    /// silent-video engines — Wan, Mochi, Krea. `Some` is the joint audio+video families, where the
+    /// question the probe exists to answer is whether the ARM carries the engine's track through to
+    /// `DecodedVideo::audio` or silently drops it (epic 17137 / sc-19508): a video that lost its
+    /// soundtrack still plays, so nothing else in the pipeline notices.
+    audio: Option<gen_core::AudioTrack>,
 }
 
 #[cfg(any(
@@ -2473,6 +3049,7 @@ impl ArmProbe {
         let seen_spec = std::sync::Arc::clone(&self.spec);
         let seen_request = std::sync::Arc::clone(&self.request);
         let adapter_reports = std::sync::Arc::clone(&self.adapter_reports);
+        let audio = self.audio.clone();
         move |engine_id, spec| {
             *seen_spec.lock().unwrap() = Some(spec.clone());
             Ok(Box::new(ProbeGenerator {
@@ -2491,6 +3068,7 @@ impl ArmProbe {
                 },
                 request: seen_request,
                 adapter_reports,
+                audio,
             }))
         }
     }
@@ -2531,6 +3109,8 @@ struct ProbeGenerator {
     descriptor: gen_core::ModelDescriptor,
     request: std::sync::Arc<std::sync::Mutex<Option<GenerationRequest>>>,
     adapter_reports: std::sync::Arc<std::sync::Mutex<Vec<gen_core::AdapterApplyReport>>>,
+    /// The soundtrack this stub emits with its frames — see [`ArmProbe::audio`].
+    audio: Option<gen_core::AudioTrack>,
 }
 
 #[cfg(any(
@@ -2565,7 +3145,7 @@ impl Generator for ProbeGenerator {
                 pixels: vec![0u8; 12],
             }],
             fps: req.fps.unwrap_or(30),
-            audio: None,
+            audio: self.audio.clone(),
         })
     }
 }
@@ -2899,9 +3479,8 @@ fn mochi_hf_cache_shared_only(tag: &str) -> tempfile::TempDir {
         ("text_encoder/model.safetensors", MOCHI_Q4_TE_BYTES),
         ("vae/model.safetensors", MOCHI_Q4_VAE_BYTES),
     ] {
-        let path = snapshot.join(relative);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::File::create(&path).unwrap().set_len(len).unwrap();
+        // ~10.4 GB of encoder + VAE; sparse (see `crate::test_fixture_disk`).
+        crate::test_fixture_disk::create_sparse_weights(&snapshot.join(relative), len);
     }
     std::fs::create_dir_all(snapshot.join("tokenizer")).unwrap();
     std::fs::create_dir_all(repo_dir.join("refs")).unwrap();
@@ -3150,9 +3729,8 @@ fn mochi_root_shared_only(tag: &str) -> tempfile::TempDir {
         ("text_encoder/model.safetensors", MOCHI_Q4_TE_BYTES),
         ("vae/model.safetensors", MOCHI_Q4_VAE_BYTES),
     ] {
-        let path = root.join(relative);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::File::create(&path).unwrap().set_len(len).unwrap();
+        // ~10.4 GB per call, and 7 tests call this; sparse (see `crate::test_fixture_disk`).
+        crate::test_fixture_disk::create_sparse_weights(&root.join(relative), len);
     }
     std::fs::create_dir_all(root.join("tokenizer")).unwrap();
     root_guard
@@ -6161,6 +6739,7 @@ fn asset_fact_records_fit_and_multi_source_ids() {
     let clip = EncodedClip {
         frames: 81,
         fps: 16,
+        has_audio: false,
     };
     let fact = video_asset_fact(&plan, 5, "mlx_bernini", json!({}), None, clip);
     assert_eq!(fact["referenceClipAssetId"], json!("clip_ref"));
@@ -6191,6 +6770,7 @@ fn asset_fact_embeds_replacement_status_when_present() {
     let clip = EncodedClip {
         frames: 81,
         fps: 16,
+        has_audio: false,
     };
     let fact = video_asset_fact(&plan, 7, "mlx_wan_vace", json!({}), Some(status), clip);
     assert_eq!(fact["replacementStatus"]["replacementActive"], json!(true));
@@ -7319,9 +7899,12 @@ fn scail2_multi_reference_conditioning_is_ordered_paired_and_bounded() {
         let pairs: Vec<_> = (0..count)
             .map(|index| (image(index as u8), image(index as u8 + 32)))
             .collect();
-        let conditioning =
-            scail2_animate_conditioning(pairs, driving.clone(), driving_mask.clone())
-                .expect("1–6 reference/mask pairs must be valid");
+        let conditioning = super::scail2::scail2_animate_conditioning(
+            pairs,
+            driving.clone(),
+            driving_mask.clone(),
+        )
+        .expect("1–6 reference/mask pairs must be valid");
         assert_eq!(conditioning.len(), count * 2 + 1);
         for index in 0..count {
             match &conditioning[index * 2] {
@@ -7355,14 +7938,15 @@ fn scail2_multi_reference_conditioning_is_ordered_paired_and_bounded() {
         );
     }
 
-    let empty = scail2_animate_conditioning(vec![], driving.clone(), driving_mask.clone())
-        .expect_err("a missing reference/mask pair must fail before engine dispatch")
-        .to_string();
+    let empty =
+        super::scail2::scail2_animate_conditioning(vec![], driving.clone(), driving_mask.clone())
+            .expect_err("a missing reference/mask pair must fail before engine dispatch")
+            .to_string();
     assert!(
         empty.contains("at least one reference character"),
         "got: {empty}"
     );
-    let seven = scail2_animate_conditioning(
+    let seven = super::scail2::scail2_animate_conditioning(
         (0..7)
             .map(|index| (image(index), image(index + 32)))
             .collect(),
@@ -7392,11 +7976,15 @@ fn scail2_multi_reference_segmentation_stops_between_references_on_cancel() {
     };
     let cancel = CancelFlag::new();
     let mut seen = Vec::new();
-    let result = segment_scail2_references(vec![image(1), image(2)], &cancel, |reference, _| {
-        seen.push(reference.pixels[0]);
-        cancel.cancel();
-        Ok(image(reference.pixels[0] + 32))
-    });
+    let result = super::scail2::segment_scail2_references(
+        vec![image(1), image(2)],
+        &cancel,
+        |reference, _| {
+            seen.push(reference.pixels[0]);
+            cancel.cancel();
+            Ok(image(reference.pixels[0] + 32))
+        },
+    );
     assert!(
         matches!(result, Err(WorkerError::Canceled(_))),
         "got: {result:?}"
@@ -10379,6 +10967,32 @@ fn video_load_spec_threads_text_encoder_dir() {
         matches!(video_load_spec(&with_te).text_encoder, Some(WeightsSource::Dir(ref p)) if *p == gemma),
         "text_encoder_dir rides LoadSpec::text_encoder as a Dir source"
     );
+    assert!(
+        video_load_spec(&with_te).components.is_empty(),
+        "`text_encoder_dir` is the LoadSpec::text_encoder field — it must NOT also land in the \
+         components map, which is where MiniMax-H3's packed per-tier encoder goes (sc-19120)"
+    );
+
+    // sc-19120 / sc-19506: MiniMax-H3's packed per-tier text encoder is a COMPONENT, not the
+    // `text_encoder` field. `mlx-gen-minimax-h3::resolve_text_encoder_dir` reads
+    // `spec.components["text_encoder"]` and falls back to `<weights>/text_encoder` when it is
+    // absent, so an unstaged packed encoder is a silent dense load rather than an error.
+    let packed_te = PathBuf::from("/models/minimax-h3-mlx/q4/text_encoder");
+    let with_component_te = VideoGenInput {
+        engine_id: "minimax_h3",
+        model_dir: PathBuf::from("/models/minimax-h3"),
+        text_encoder_component_dir: Some(packed_te.clone()),
+        ..VideoGenInput::default()
+    };
+    let spec = video_load_spec(&with_component_te);
+    assert!(
+        spec.text_encoder.is_none(),
+        "the packed encoder must not leak onto LoadSpec::text_encoder — that field is LTX's seam"
+    );
+    assert!(
+        matches!(spec.components.get("text_encoder"), Some(WeightsSource::Dir(p)) if *p == packed_te),
+        "text_encoder_component_dir rides LoadSpec::components[\"text_encoder\"]"
+    );
 
     // sc-13664: a resolved amoral-enhancer dir is staged as the `uncensored_enhancer` component so
     // the MLX LTX provider loads it on demand (the provider's `$LTX_UNCENSORED_GEMMA_DIR` / HF-cache
@@ -11850,6 +12464,584 @@ async fn encode_stub_to_mp4_with_audio_and_poster() {
     assert!(!media_path.with_extension("audio.wav").exists());
 }
 
+/// **The AV mux policy at the container (sc-19425).** The mux step bounds the file at the PICTURE's
+/// length and never lets the soundtrack decide it.
+///
+/// `-shortest` is the thing this must not be. When the soundtrack is even marginally shorter it wins
+/// and pays for winning in discarded video frames — measured at 5 of MiniMax-H3's 14 legal frame
+/// counts, up to 3 frames lost for a 10 µs deficit, with the container still advertising the audio's
+/// duration. See [`audio_mux_args`] for the full table.
+///
+/// Pure arg-shape, so it runs on every host including those with no ffmpeg; the behaviour it stands
+/// for is measured by `the_audio_mux_keeps_every_frame_at_every_minimax_h3_duration` below.
+#[test]
+fn the_audio_mux_bounds_the_clip_at_the_picture_not_the_soundtrack() {
+    let args = audio_mux_args(
+        Path::new("/tmp/e.mp4"),
+        Path::new("/tmp/a.wav"),
+        Path::new("/tmp/m.mp4"),
+        124,
+        24,
+    );
+    assert!(
+        !args.iter().any(|a| a == "-shortest"),
+        "`-shortest` lets the soundtrack shorten the picture: {args:?}"
+    );
+    let t = args
+        .iter()
+        .position(|a| a == "-t")
+        .expect("the mux must bound the output explicitly");
+    // 124 / 24 = 5.1666666…, rounded to the microsecond. Asserted as the literal string because the
+    // value ffmpeg is handed is what decides whether the last frame survives; restating it as
+    // `format!("{:.6}", 124.0 / 24.0)` would only repeat the implementation.
+    assert_eq!(args[t + 1], "5.166667");
+    assert!(args.iter().any(|a| a == "-map_metadata"), "sc-15956 tag");
+
+    // INPUT IDENTITY (sc-19549, same gap as the SeedVR2 sibling below). `-map_metadata 0` names its
+    // input by INDEX, so "the sc-15956 tag comes from the VIDEO, never from the WAV" holds only
+    // while the encoded picture is the FIRST `-i`. Swapping the two leaves the assertion above
+    // green — `-map_metadata 0` is still present — while the tag is taken off the WAV instead, and
+    // the unmapped default stream selection changes under it. Pinned here because this half runs on
+    // every host and the measured half skips wherever ffmpeg is absent.
+    let inputs: Vec<&str> = args
+        .iter()
+        .enumerate()
+        .filter(|(index, arg)| arg.as_str() == "-i" && index + 1 < args.len())
+        .map(|(index, _)| args[index + 1].as_str())
+        .collect();
+    assert_eq!(
+        inputs,
+        ["/tmp/e.mp4", "/tmp/a.wav"],
+        "input 0 must be the encoded picture and input 1 the soundtrack: {args:?}"
+    );
+
+    // Every legal MiniMax-H3 duration bounds at its own frame count. The NINE inexact rungs are
+    // where that has content: at those the soundtrack's own grid length
+    // (`round(frames / 24 · 40) · 800 / 32000`) is ±8.33 ms away, so a bound taken off the audio
+    // would land measurably elsewhere. Counted, so this loop cannot quietly become the five
+    // exactly-aligned rungs where every candidate policy agrees.
+    let mut inexact = 0;
+    for &frames in &sceneworks_core::video_request::MINIMAX_H3_LEGAL_FRAME_COUNTS {
+        let args = audio_mux_args(
+            Path::new("e"),
+            Path::new("a"),
+            Path::new("m"),
+            frames as usize,
+            sceneworks_core::video_request::MINIMAX_H3_FPS,
+        );
+        let bound: f64 = args[args.iter().position(|a| a == "-t").unwrap() + 1]
+            .parse()
+            .expect("a decimal seconds bound");
+        let picture = f64::from(frames) / f64::from(sceneworks_core::video_request::MINIMAX_H3_FPS);
+        assert!(
+            (bound - picture).abs() < 1e-6,
+            "{frames}: bounded at {bound} s, picture is {picture} s"
+        );
+        // ...and the bound cannot cut the final frame, whose pts is a whole interval earlier.
+        assert!(
+            bound > f64::from(frames - 1) / 24.0,
+            "{frames}: the bound must sit past the last frame's presentation time"
+        );
+        // What a soundtrack-derived bound would have been: the audio latent grid's own length.
+        let soundtrack = (f64::from(frames) / 24.0 * 40.0).round() * 800.0 / 32_000.0;
+        if (soundtrack - picture).abs() > 1e-9 {
+            inexact += 1;
+            assert!(
+                (bound - soundtrack).abs() > 8.0e-3,
+                "{frames}: the bound {bound} s is the soundtrack's {soundtrack} s, not the \
+                 picture's {picture} s"
+            );
+        }
+    }
+    assert_eq!(
+        inexact, 9,
+        "nine of the fourteen rungs must actually distinguish the two candidate bounds"
+    );
+
+    // Degenerate fps mirrors `encode_inner`'s own `.max(1)` clamp rather than dividing by zero.
+    let zero = audio_mux_args(Path::new("e"), Path::new("a"), Path::new("m"), 9, 0);
+    assert_eq!(
+        zero[zero.iter().position(|a| a == "-t").unwrap() + 1],
+        "9.000000"
+    );
+}
+
+/// The measured half of the guard above: run the real two-step encode at **all fourteen** MiniMax-H3
+/// legal frame counts with a soundtrack fitted to the picture, and decode the resulting mp4 back.
+/// Every frame must survive.
+///
+/// Two axes, and they fail independently. **Completeness:** every frame the engine produced is in
+/// the file. **Truthfulness (AC2):** the container advertises the duration of the picture it holds
+/// — see [`assert_duration_matches_picture`]. Under `-shortest` both go red, at 124, 175, 226, 277
+/// and 328: the five counts whose fitted track rounds a third of a sample SHORT. Sampling only
+/// 141/192/243/294/345 (the exactly-aligned five) would pass for either policy, which is why the
+/// loop is the whole lattice.
+///
+/// 64x64 keeps fourteen encodes cheap; the policy is about timestamps, not pixels. Skips when no
+/// ffmpeg is reachable, like the sibling encode tests.
+#[tokio::test]
+async fn the_audio_mux_keeps_every_frame_at_every_minimax_h3_duration() {
+    if !ffmpeg_reachable() {
+        eprintln!(
+            "skipping the_audio_mux_keeps_every_frame_at_every_minimax_h3_duration: no ffmpeg"
+        );
+        return;
+    }
+    let fps = sceneworks_core::video_request::MINIMAX_H3_FPS;
+    let dir_guard = tempfile::Builder::new()
+        .prefix("sw_mux_av_")
+        .tempdir()
+        .expect("temp dir");
+    let mut checked = 0;
+    for &frames in &sceneworks_core::video_request::MINIMAX_H3_LEGAL_FRAME_COUNTS {
+        let count = frames as usize;
+        // MiniMax-H3's delivered soundtrack: 32 kHz stereo, `round(frames / fps · 32000)` samples
+        // per channel — the engine's `fit_audio_to_video` target, NOT the audio grid's
+        // `round(frames / fps · 40) · 800`.
+        let per_channel = (f64::from(frames) / f64::from(fps) * 32_000.0).round() as usize;
+        let decoded = DecodedVideo {
+            frames: (0..count)
+                .map(|i| RgbFrame {
+                    width: 64,
+                    height: 64,
+                    pixels: vec![(i % 251) as u8; 64 * 64 * 3],
+                })
+                .collect(),
+            fps,
+            audio: Some(AudioTrack {
+                samples: vec![0.05; per_channel * 2],
+                sample_rate: 32_000,
+                channels: 2,
+            }),
+            adapter_apply_reports: Vec::new(),
+        };
+        let media_path = dir_guard.path().join(format!("clip_{frames}.mp4"));
+        encode_media(&media_path, decoded, None, None)
+            .await
+            .expect("encode + mux");
+        let held = probe_frame_count(&media_path).expect("a decodable frame count");
+        // The container must advertise the duration it ACTUALLY holds. Measured against the frame
+        // count the file carries rather than the count we asked for, because that is what
+        // "truthful" means and it is what gives this assertion reach independent of the count
+        // check below. MEASURED: reverting to `-shortest` leaves the container still advertising
+        // the nominal 5.170 s at 124 while the file holds 122 frames (5.083 s) — so the same bound
+        // written against `count` is GREEN under that mutation at all fourteen rungs and guards
+        // nothing. This form is red at all five trimming counts.
+        assert_duration_matches_picture(&media_path, held, fps);
+        assert_eq!(
+            held, count,
+            "{frames} frames: the muxed mp4 must hold every frame the engine produced"
+        );
+        checked += 1;
+    }
+    assert_eq!(checked, 14, "all fourteen lattice rungs must be exercised");
+
+    // The other direction, which is what `-shortest` was there for and why "just delete the flag"
+    // is not the fix: a soundtrack twice the picture's length must not extend the container.
+    // Unbounded, this same command produces a 10.33 s file around 5.17 s of picture.
+    let frames = 124usize;
+    let decoded = DecodedVideo {
+        frames: (0..frames)
+            .map(|i| RgbFrame {
+                width: 64,
+                height: 64,
+                pixels: vec![(i % 251) as u8; 64 * 64 * 3],
+            })
+            .collect(),
+        fps,
+        audio: Some(AudioTrack {
+            samples: vec![
+                0.05;
+                2 * (frames as f64 / f64::from(fps) * 32_000.0).round() as usize * 2
+            ],
+            sample_rate: 32_000,
+            channels: 2,
+        }),
+        adapter_apply_reports: Vec::new(),
+    };
+    let media_path = dir_guard.path().join("long_audio.mp4");
+    encode_media(&media_path, decoded, None, None)
+        .await
+        .expect("encode + mux");
+    // The same bound as the loop, not a loose `< 6.0`: 0.83 s of slop around a 5.1667 s picture
+    // would have passed a container advertising anything from the picture's length to sixteen
+    // extra frames of it. Unbounded, this command produces 10.33 s here.
+    let held = probe_frame_count(&media_path).expect("a decodable frame count");
+    assert_duration_matches_picture(&media_path, held, fps);
+    assert_eq!(held, frames);
+}
+
+/// The container's advertised duration must be the duration of the picture it actually holds
+/// (sc-19425 AC2) — a player reading `mvhd` and a decoder counting frames must agree.
+///
+/// The tolerance is 20 ms, which sits between two measured quantities. Below it: ffmpeg prints
+/// `Duration:` to centiseconds, so the read itself carries ±5 ms, and across all fourteen lattice
+/// rungs the residual is exactly that ±5 ms and never more. Above it: one frame at 24 fps is
+/// 41.7 ms, so 20 ms is under HALF a frame interval and a container off by even a single frame
+/// cannot pass (measured: 45 ms at the one-frame rungs, 87–123 ms at the two- and three-frame ones).
+fn assert_duration_matches_picture(path: &Path, held_frames: usize, fps: u32) {
+    let advertised = probe_duration_seconds(path).expect("a container duration");
+    let picture = held_frames as f64 / f64::from(fps.max(1));
+    assert!(
+        (advertised - picture).abs() < 0.02,
+        "the container advertises {advertised} s for the {held_frames} frames it holds \
+         ({picture} s of picture)"
+    );
+}
+
+/// The container's own advertised `Duration:` — the number a player shows, read off the same
+/// ffmpeg probe.
+fn probe_duration_seconds(path: &Path) -> Option<f64> {
+    let stderr = probe_stderr(path)?;
+    let rest = stderr.split("Duration: ").nth(1)?;
+    let hms = rest.split(',').next()?;
+    let mut parts = hms.split(':');
+    let h: f64 = parts.next()?.trim().parse().ok()?;
+    let m: f64 = parts.next()?.parse().ok()?;
+    let s: f64 = parts.next()?.parse().ok()?;
+    Some(h * 3600.0 + m * 60.0 + s)
+}
+
+/// Decode `path` and return the frame count ffmpeg counts, the same `-f null -` probe
+/// `media_jobs::probe_source_frame_count` uses (no `ffprobe`: the desktop bundle ships none).
+fn probe_frame_count(path: &Path) -> Option<usize> {
+    let stderr = probe_stderr(path)?;
+    stderr
+        .rsplit("frame=")
+        .next()
+        .and_then(|tail| tail.split_whitespace().next())
+        .and_then(|n| n.parse().ok())
+}
+
+/// One decoding `-f null -` pass over `path`, returning ffmpeg's stderr. Shared by the two probes
+/// above so they read the same run's report rather than two.
+///
+/// The pass DECODES rather than stream-copying, and that is load-bearing rather than incidental.
+/// MEASURED on ffmpeg 6.1.1-3ubuntu5 (what `apt-get install ffmpeg` puts on `ubuntu-latest`, the
+/// runner this lane's `checks` job uses): under `-c copy` that build emits no `frame=` token at
+/// all — its stats line is `size=N/A time=00:00:01.87 bitrate=N/A speed=1.28e+03x` — so
+/// [`probe_frame_count`] parsed `None` and both measured mux tests died on their `expect`. Decoding
+/// restores the counter (`frame=   48`) there. ffmpeg 9.0.1 prints `frame=` either way, which is
+/// why this went unnoticed against the bundled 7.1 the sibling doc comments were measured on; the
+/// decoding form is the one that agrees across both.
+///
+/// Decoding also makes the count VFR-honest rather than a container claim — MEASURED on 6.1.1, the
+/// variable-rate fixture below reports `frame=   32` real frames.
+fn probe_stderr(path: &Path) -> Option<String> {
+    let program = std::env::var("SCENEWORKS_FFMPEG")
+        .ok()
+        .filter(|p| !p.trim().is_empty())
+        .unwrap_or_else(|| "ffmpeg".to_owned());
+    let out = std::process::Command::new(program)
+        .args([
+            "-hide_banner",
+            "-nostdin",
+            "-i",
+            &path.display().to_string(),
+            "-map",
+            "0:v:0",
+            "-f",
+            "null",
+            "-",
+        ])
+        .output()
+        .ok()?;
+    Some(String::from_utf8_lossy(&out.stderr).into_owned())
+}
+
+/// **The SeedVR2 upscale mux obeys the same AV policy as the generation mux (sc-19549).** sc-19425
+/// removed `-shortest` from the generation mux and left this one behind, on a SHIPPED path where the
+/// soundtrack being handed authority over the picture is the user's own source audio and the picture
+/// it truncates is the user's own upscaled footage.
+///
+/// Pure arg-shape, so it runs on every host including those with no ffmpeg; the behaviour it stands
+/// for is measured by
+/// [`the_seedvr2_upscale_mux_keeps_every_frame_for_short_long_vfr_and_absent_source_audio`].
+#[test]
+fn the_seedvr2_upscale_mux_bounds_the_clip_at_the_picture_not_the_source_audio() {
+    let args = seedvr2_audio_mux_args(
+        Path::new("/tmp/upscaled.mp4"),
+        Path::new("/tmp/source.mp4"),
+        Path::new("/tmp/mux.mp4"),
+        48,
+        24,
+    );
+    assert!(
+        !args.iter().any(|a| a == "-shortest"),
+        "`-shortest` lets the user's own soundtrack shorten their own picture: {args:?}"
+    );
+    let t = args
+        .iter()
+        .position(|a| a == "-t")
+        .expect("the upscale mux must bound the output explicitly");
+    // 48 / 24 = 2 s exactly. Asserted as the literal string because the value ffmpeg is handed is
+    // what decides whether the tail frames survive.
+    assert_eq!(args[t + 1], "2.000000");
+    // …and it must be an OUTPUT option. `-t` written after the output path is a different (and
+    // inert) command; the bound has to sit before the file it bounds.
+    assert!(
+        t + 1 < args.len() - 1,
+        "the bound must precede the output path: {args:?}"
+    );
+
+    // ONE policy, not two spellings of it: the bound this path emits is byte-identical to the one
+    // the generation mux emits for the same picture. The inexact rungs are the ones with content —
+    // at 124/24 the two would diverge in the sixth decimal if either recomputed it its own way.
+    for (frames, fps) in [(48usize, 24u32), (124, 24), (345, 24), (151, 30), (9, 0)] {
+        let upscale =
+            seedvr2_audio_mux_args(Path::new("u"), Path::new("s"), Path::new("o"), frames, fps);
+        let generation =
+            audio_mux_args(Path::new("e"), Path::new("a"), Path::new("m"), frames, fps);
+        let upscale_bound = &upscale[upscale.iter().position(|a| a == "-t").unwrap() + 1];
+        let generation_bound = &generation[generation.iter().position(|a| a == "-t").unwrap() + 1];
+        assert_eq!(
+            upscale_bound, generation_bound,
+            "{frames}@{fps}: the two mux paths must bound at the same number"
+        );
+    }
+
+    // Degenerate fps mirrors `encode_inner`'s own `.max(1)` clamp rather than dividing by zero.
+    let zero = seedvr2_audio_mux_args(Path::new("u"), Path::new("s"), Path::new("o"), 9, 0);
+    assert_eq!(
+        zero[zero.iter().position(|a| a == "-t").unwrap() + 1],
+        "9.000000"
+    );
+
+    // INPUT IDENTITY, which every other claim here rests on and which nothing else here pins.
+    // `-map 0:v:0`, `-map 1:a:0?` and `-map_metadata 0` all name inputs by INDEX, so the bound
+    // being "read off the picture" is true only while the picture is the FIRST `-i` and the user's
+    // source is the SECOND. Swapping the two leaves every assertion above and below GREEN — the
+    // flag multiset is byte-identical — while ffmpeg maps the SOURCE's video, the PICTURE's audio,
+    // and takes the sc-15956 workflow tag off the user's own container. MEASURED with the bundled
+    // ffmpeg 7.1 on the exact fixture the sibling measured test builds: the swapped vector yields
+    // **50 frames at an advertised 2.08 s** where the correct one yields 48 at 2.00 s. Only a
+    // decoded frame count sees that, and that half skips wherever ffmpeg is absent — so input order
+    // is pinned HERE too, on the half that runs everywhere.
+    let inputs: Vec<&str> = args
+        .iter()
+        .enumerate()
+        .filter(|(index, arg)| arg.as_str() == "-i" && index + 1 < args.len())
+        .map(|(index, _)| args[index + 1].as_str())
+        .collect();
+    assert_eq!(
+        inputs,
+        ["/tmp/upscaled.mp4", "/tmp/source.mp4"],
+        "input 0 must be the upscaled picture and input 1 the user's source clip: {args:?}"
+    );
+
+    // The rest of the vector this story must not disturb: audio stays OPTIONAL (a silent source is
+    // not an error), the picture stays a straight copy, and the sc-15956 workflow tag keeps coming
+    // from input 0 rather than from the user's source container.
+    assert!(
+        args.windows(2)
+            .any(|w| w == ["-map".to_owned(), "1:a:0?".to_owned()]),
+        "source audio must stay optional: {args:?}"
+    );
+    assert!(
+        args.windows(2)
+            .any(|w| w == ["-c:v".to_owned(), "copy".to_owned()]),
+        "the upscaled picture must not be re-encoded: {args:?}"
+    );
+    assert!(
+        args.windows(2)
+            .any(|w| w == ["-map_metadata".to_owned(), "0".to_owned()]),
+        "sc-15956 tag must come from the upscaled video, not the source: {args:?}"
+    );
+    assert!(
+        args.windows(2)
+            .any(|w| w == ["-movflags".to_owned(), "+faststart".to_owned()]),
+        "faststart must survive the mux: {args:?}"
+    );
+}
+
+/// The measured half of the guard above: run the REAL mux command over a real 48-frame picture and
+/// four real source clips, and decode the results back. Every frame must survive, and the container
+/// must advertise the duration it actually holds.
+///
+/// **Why 48 frames at 24 fps.** The defect has to be EXPRESSIBLE at the count chosen. MEASURED with
+/// the bundled ffmpeg 7.1 on this exact vector: a 2.000000 s picture against 1.99 s of source audio
+/// keeps all 48 frames even under `-shortest` — AAC pads out to a whole 1024-sample frame, so a
+/// deficit under ~21 ms is invisible and a probe built on one is inert while reporting green. At
+/// 1.5 s of audio the same command keeps **33 of 48** and advertises 1.51 s for the 1.375 s of
+/// picture it holds. The margin is what makes the defect reach the file, not the frame count on its
+/// own.
+///
+/// **Two axes, and they fail independently.** *Completeness* — every upscaled frame is in the file —
+/// is what `-shortest` breaks (short-audio case). *Truthfulness* — the container advertises the
+/// picture it holds — is what dropping the flag outright breaks (long-audio case: MEASURED 4.01 s of
+/// container around 2.00 s of picture, with all 48 frames present, so the count check alone is GREEN
+/// there). Neither assertion subsumes the other and both are needed.
+///
+/// 64x64 keeps four mux passes cheap; the policy is about timestamps, not pixels. Skips when no
+/// ffmpeg is reachable, like the sibling encode tests.
+#[tokio::test]
+async fn the_seedvr2_upscale_mux_keeps_every_frame_for_short_long_vfr_and_absent_source_audio() {
+    if !ffmpeg_reachable() {
+        eprintln!(
+            "skipping the_seedvr2_upscale_mux_keeps_every_frame_for_short_long_vfr_and_absent_source_audio: no ffmpeg"
+        );
+        return;
+    }
+    let fps = 24u32;
+    let frames = 48usize;
+    let dir_guard = tempfile::Builder::new()
+        .prefix("sw_seedvr2_mux_")
+        .tempdir()
+        .expect("temp dir");
+    let dir = dir_guard.path();
+
+    // Stand-in for what `encode_seedvr2_stream` writes: exactly `frames` pictures on a constant
+    // `-r fps` timebase, which is what that step produces by construction from the numbered PNG
+    // sequence — the property the bound is read off.
+    let upscaled = dir.join("upscaled.mp4");
+    run_ffmpeg(
+        [
+            "ffmpeg",
+            "-nostdin",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=64x64:rate=24",
+            "-frames:v",
+            "48",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-r",
+            "24",
+        ]
+        .iter()
+        .map(|a| (*a).to_owned())
+        .chain(std::iter::once(upscaled.display().to_string()))
+        .collect(),
+        None,
+    )
+    .await
+    .expect("build the upscaled picture fixture");
+    assert_eq!(
+        probe_frame_count(&upscaled),
+        Some(frames),
+        "the picture fixture must itself hold every frame before anything is muxed onto it"
+    );
+
+    /// Build a source clip: `audio_secs` of a sine (or no audio track at all), over a video stream
+    /// that is either 24 fps CFR or genuinely variable.
+    async fn write_source_clip(path: &Path, audio_secs: Option<f64>, variable: bool) {
+        let mut args: Vec<String> = vec![
+            "ffmpeg",
+            "-nostdin",
+            "-y",
+            "-f",
+            "lavfi",
+            "-t",
+            "3.0",
+            "-i",
+            "testsrc=size=64x64:rate=24",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        if let Some(secs) = audio_secs {
+            args.extend(
+                ["-f", "lavfi", "-t"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .chain(std::iter::once(format!("{secs}")))
+                    .chain(
+                        [
+                            "-i",
+                            "sine=frequency=440:sample_rate=48000",
+                            "-map",
+                            "0:v",
+                            "-map",
+                            "1:a",
+                        ]
+                        .into_iter()
+                        .map(str::to_owned),
+                    ),
+            );
+        }
+        if variable {
+            // Keep an irregular subset of the source frames at their original presentation times.
+            args.extend(
+                [
+                    "-vf",
+                    "select='not(mod(n,3))+gt(mod(n,17),13)',setpts=PTS-STARTPTS",
+                    "-fps_mode",
+                    "vfr",
+                ]
+                .into_iter()
+                .map(str::to_owned),
+            );
+        }
+        args.extend(
+            ["-c:v", "libx264", "-pix_fmt", "yuv420p"]
+                .into_iter()
+                .map(str::to_owned),
+        );
+        if audio_secs.is_some() {
+            args.extend(["-c:a", "aac"].into_iter().map(str::to_owned));
+        }
+        args.push(path.display().to_string());
+        run_ffmpeg(args, None)
+            .await
+            .expect("build the source clip fixture");
+    }
+
+    // (label, audio seconds, variable frame rate). `None` audio is the `-map 1:a:0?` optionality
+    // this story must not break while bounding the file.
+    let cases: [(&str, Option<f64>, bool); 4] = [
+        ("audio_shorter", Some(1.5), false),
+        ("audio_longer", Some(4.0), false),
+        ("audio_shorter_vfr", Some(1.5), true),
+        ("audio_absent", None, false),
+    ];
+    let mut checked = 0;
+    for (label, audio_secs, variable) in cases {
+        let source = dir.join(format!("source_{label}.mp4"));
+        write_source_clip(&source, audio_secs, variable).await;
+        if variable {
+            // The VFR fixture must genuinely disagree with the picture's timebase, or the case is
+            // decoration. MEASURED: 32 frames advertised over 2.88 s — ~11 fps average against a
+            // 24 tbr declaration — so a bound taken off input 1 in any form would land elsewhere.
+            let source_frames = probe_frame_count(&source).expect("a decodable source frame count");
+            let source_seconds = probe_duration_seconds(&source).expect("a source duration");
+            assert!(
+                (source_seconds - source_frames as f64 / f64::from(fps)).abs() > 0.5,
+                "{label}: the source must not be 24 fps CFR ({source_frames} frames over \
+                 {source_seconds} s)"
+            );
+            assert_ne!(
+                source_frames, frames,
+                "{label}: the source must not happen to hold the picture's frame count"
+            );
+        }
+
+        let out = dir.join(format!("mux_{label}.mp4"));
+        run_ffmpeg(
+            seedvr2_audio_mux_args(&upscaled, &source, &out, frames, fps),
+            None,
+        )
+        .await
+        .expect("the source-audio passthrough mux");
+
+        let held = probe_frame_count(&out).expect("a decodable frame count");
+        // Measured against what the file ACTUALLY holds rather than what we asked for, which is
+        // what gives this assertion reach independent of the count check below: under `-shortest`
+        // the short-audio case advertises 1.51 s for 33 frames (1.375 s), so the same assertion
+        // written against `frames` would be green on the damaged file.
+        assert_duration_matches_picture(&out, held, fps);
+        assert_eq!(
+            held, frames,
+            "{label}: the muxed mp4 must hold every upscaled frame"
+        );
+        checked += 1;
+    }
+    assert_eq!(checked, 4, "all four source shapes must be exercised");
+}
+
 #[tokio::test]
 async fn encode_media_rejects_malformed_raw_frame_before_starting_ffmpeg() {
     let dir_guard = tempfile::Builder::new()
@@ -11877,19 +13069,60 @@ async fn encode_media_rejects_malformed_raw_frame_before_starting_ffmpeg() {
     assert!(!media_path.exists());
 }
 
-fn ffmpeg_reachable() -> bool {
-    if let Ok(path) = std::env::var("SCENEWORKS_FFMPEG") {
-        if !path.trim().is_empty() && Path::new(&path).exists() {
-            return true;
-        }
-    }
-    std::process::Command::new("ffmpeg")
-        .arg("-version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+/// Is a real ffmpeg reachable — `SCENEWORKS_FFMPEG`, or `ffmpeg` on PATH?
+///
+/// **The soft skip is for developer hosts and must never stay soft on a lane that means to run
+/// these tests (sc-19549).** A measured test that returns early prints one line and reports `ok` in
+/// 0.03 s, which is indistinguishable from a real green at a glance — so a CI lane with no ffmpeg
+/// silently guards nothing while looking exactly like a lane that guards everything. The convention
+/// was inherited from sc-19425, whose `the_audio_mux_keeps_every_frame_at_every_minimax_h3_duration`
+/// carried a doc comment asserting "CI with ffmpeg runs it for real" that nothing enforced: MEASURED
+/// at the time of this change, no file under `.github/workflows/` installed ffmpeg or set
+/// `SCENEWORKS_FFMPEG`, and the bundled binary is gitignored (`.gitignore`, `apps/desktop/ffmpeg/`),
+/// so whether any of these tests ever ran rested entirely on the runner image.
+///
+/// The arg-shape halves do not substitute for the measured ones. MEASURED with the bundled ffmpeg
+/// 7.1 on the fixture the sibling tests build: swapping the two `-i` inputs produces **50 frames at
+/// an advertised 2.08 s** instead of 48 at 2.00 s, and every arg-shape assertion stays green across
+/// that swap because the flag multiset is identical. Only a decoded frame count sees it.
+///
+/// So a lane that declares a real ffmpeg sets `SCENEWORKS_REQUIRE_FFMPEG=1` (`.github/workflows/
+/// check.yml`, the `checks` job, which installs ffmpeg immediately before `npm run rust:check` —
+/// the job whose `cargo test` covers `sceneworks-worker` as a workspace default member). With it
+/// set, "no ffmpeg" is a FAILURE rather than a skip, so the install step being dropped, the binary
+/// being renamed, or the variable going missing turns the lane red instead of quiet. Hosts that
+/// never set it — a developer's laptop with no ffmpeg — skip exactly as before.
+pub(crate) fn ffmpeg_reachable() -> bool {
+    let reachable = if std::env::var("SCENEWORKS_FFMPEG")
+        .ok()
+        .is_some_and(|path| !path.trim().is_empty() && Path::new(&path).exists())
+    {
+        true
+    } else {
+        std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    };
+
+    assert!(
+        reachable || !ffmpeg_is_required(),
+        "SCENEWORKS_REQUIRE_FFMPEG is set, so this lane declares a real ffmpeg, but neither \
+         SCENEWORKS_FFMPEG nor `ffmpeg` on PATH resolves to one. The measured AV-mux tests would \
+         otherwise have skipped and reported `ok` (sc-19549)."
+    );
+    reachable
+}
+
+/// Does this lane promise a real ffmpeg? Set (to anything but empty or `0`) by the CI lanes that
+/// install one, which is what turns [`ffmpeg_reachable`]'s skip into a failure.
+pub(crate) fn ffmpeg_is_required() -> bool {
+    std::env::var("SCENEWORKS_REQUIRE_FFMPEG")
+        .ok()
+        .is_some_and(|flag| !matches!(flag.trim(), "" | "0"))
 }
 
 /// F-118: video upscale accepts only 2x and 4x. Any other factor is rejected with a clear error
@@ -13340,4 +14573,2927 @@ async fn no_person_track_string_reaches_a_published_clip_or_its_poster() {
     );
     assert_no_person_track_strings(&upscaled, "the upscaled clip");
     assert_no_person_track_strings(&upscaled.with_extension("poster.jpg"), "its poster");
+}
+
+// ---------------------------------------------------------------------------
+// MiniMax-H3 / Hailuo 3.0 (epic 17137 / sc-19508) — the MLX dispatch arm.
+//
+// Everything below drives the REAL arm (`generate_minimax_h3_using` is what `generate_minimax_h3`
+// delegates to, one line, no logic) or the REAL predicates the arm and the router share. Nothing
+// here re-implements a loader or a route: the recurring failure in this class is a smoke that
+// replicates the engine plumbing and goes green over a broken registration.
+// ---------------------------------------------------------------------------
+
+/// A MiniMax-H3 payload for `model`, with whatever extra keys the test needs.
+#[cfg(target_os = "macos")]
+fn minimax_h3_request(model: &str, extra: Value) -> VideoRequest {
+    let mut payload = json!({
+        "projectId": "p",
+        "model": model,
+        "mode": if model == "minimax_h3_ref" { "reference_to_video" } else { "text_to_video" },
+        "prompt": "a lighthouse keeper hums",
+    });
+    let object = payload.as_object_mut().expect("object payload");
+    for (key, value) in extra.as_object().cloned().unwrap_or_default() {
+        object.insert(key, value);
+    }
+    request(payload)
+}
+
+/// Write ONE MiniMax-H3 DiT partition under tier dir `dir`: the `config.json` the engine parses plus
+/// a shard index naming `shards`, all of which land.
+///
+/// Deliberately the same shape `sceneworks_core::mlx_tier_completeness` reads — `config.json` plus
+/// every shard the index names — because that predicate is what the resolver under test calls. A
+/// fixture that merely created the directory would satisfy a `<tier>/<partition>/*` glob and prove
+/// nothing about the completeness rule sc-19078 established.
+#[cfg(target_os = "macos")]
+fn seed_minimax_h3_partition(dir: &Path, partition: &str) {
+    let partition = dir.join(partition);
+    std::fs::create_dir_all(&partition).expect("partition dir");
+    let shards = [
+        "diffusion_pytorch_model-00001-of-00002.safetensors",
+        "diffusion_pytorch_model-00002-of-00002.safetensors",
+    ];
+    let weight_map = shards
+        .iter()
+        .enumerate()
+        .map(|(index, shard)| {
+            (
+                format!("blocks.{index}.attn.to_q.weight"),
+                Value::String((*shard).to_owned()),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    std::fs::write(
+        partition.join("diffusion_pytorch_model.safetensors.index.json"),
+        json!({ "weight_map": weight_map }).to_string(),
+    )
+    .expect("shard index");
+    std::fs::write(partition.join("config.json"), "{}").expect("dit config");
+    for shard in shards {
+        std::fs::write(partition.join(shard), b"weights").expect("shard");
+    }
+}
+
+/// A tier root carrying `tiers`, each with the `partitions` named. Returns the guard so the caller
+/// controls the lifetime (a dropped `TempDir` deletes the fixture mid-test).
+#[cfg(target_os = "macos")]
+fn minimax_h3_tier_root(prefix: &str, tiers: &[&str], partitions: &[&str]) -> tempfile::TempDir {
+    let guard = tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir()
+        .expect("temp dir");
+    for tier in tiers {
+        for partition in partitions {
+            seed_minimax_h3_partition(&guard.path().join(tier), partition);
+        }
+        // The PACKED per-tier text encoder (sc-19120). It exists in the rehost for q4 and q8 ONLY —
+        // bf16 reads the dense upstream component instead — so seeding it for every tier would hide
+        // the tier-dependent resolution `minimax_h3_text_encoder_dir` performs.
+        //
+        // BOTH probed files, off the shared constant (sc-19558): the floor checks `config.json` AND
+        // `model.safetensors.index.json`, and a fixture writing only the first would leave every
+        // packed-tier test asserting against a refusal instead of a resolve.
+        if matches!(*tier, "q4" | "q8") {
+            let text_encoder = guard
+                .path()
+                .join(tier)
+                .join(sceneworks_core::mlx_tier_completeness::MINIMAX_H3_TEXT_ENCODER_DIR);
+            std::fs::create_dir_all(&text_encoder).expect("packed text encoder dir");
+            for file in sceneworks_core::mlx_tier_completeness::MINIMAX_H3_TEXT_ENCODER_PROBED_FILES
+            {
+                std::fs::write(text_encoder.join(file), "{}").expect("te probe");
+            }
+        }
+    }
+    guard
+}
+
+/// A shared/base snapshot root carrying every component `mlx-gen-minimax-h3::load` probes under
+/// `spec.weights` — the upstream repo's half of the install, which is a DIFFERENT download from the
+/// tiers.
+///
+/// It writes the probed **FILES**, and derives which ones from
+/// `mlx_tier_completeness::minimax_h3_shared_probe_paths` rather than restating a directory list.
+/// sc-19558 moved the completeness gate from `is_dir()` to `is_file()` precisely because an
+/// interrupted co-requisite download leaves the directory behind — the `FL2VA/audio_vae/` case makes
+/// it concrete, since that directory exists as soon as any one of its thirteen entries lands — so a
+/// directory-only fixture described an install the resolver now refuses, and a hand-copied file list
+/// here would drift from the gate the same way the catalog drifted from the loader.
+///
+/// The DENSE upstream text encoder is seeded too. It is present only at bf16 in a real install, but
+/// harmless here: a q4 resolve reads the tier root instead and never looks at this path.
+#[cfg(target_os = "macos")]
+fn minimax_h3_base_root(prefix: &str) -> tempfile::TempDir {
+    let guard = tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir()
+        .expect("temp dir");
+    for probe in minimax_h3_base_root_probes(guard.path()) {
+        std::fs::create_dir_all(probe.parent().expect("a probe is a nested path"))
+            .expect("component dir");
+        std::fs::write(&probe, "{}").expect("probed file");
+    }
+    guard
+}
+
+/// Every path `minimax_h3_base_root` writes: the shared floor plus the DENSE upstream text encoder,
+/// which is where `minimax_h3_text_encoder_dir` sends a bf16 resolve.
+#[cfg(target_os = "macos")]
+fn minimax_h3_base_root_probes(root: &Path) -> Vec<std::path::PathBuf> {
+    sceneworks_core::mlx_tier_completeness::minimax_h3_shared_probe_paths(
+        root,
+        &root.join(sceneworks_core::mlx_tier_completeness::MINIMAX_H3_TEXT_ENCODER_DIR),
+    )
+}
+
+/// A `JobSnapshot` for a MiniMax-H3 video job.
+#[cfg(target_os = "macos")]
+fn minimax_h3_job_snapshot() -> JobSnapshot {
+    serde_json::from_value(json!({
+        "id": "job-minimax-h3-1",
+        "type": "video_generate",
+        "status": "running",
+        "projectId": null,
+        "projectName": null,
+        "payload": { "model": "minimax_h3" },
+        "result": {},
+        "requestedGpu": "auto",
+        "assignedGpu": null,
+        "workerId": "test-worker",
+        "progress": 0.0,
+        "stage": "queued",
+        "message": "queued",
+        "error": null,
+        "etaSeconds": null,
+        "elapsedSeconds": null,
+        "attempts": 1,
+        "sourceJobId": null,
+        "duplicateOfJobId": null,
+        "cancelRequested": false,
+        "createdAt": "2026-08-14T00:00:00Z",
+        "updatedAt": "2026-08-14T00:00:00Z",
+        "startedAt": null,
+        "completedAt": null,
+        "canceledAt": null,
+        "lastHeartbeatAt": null
+    }))
+    .expect("the minimax-h3 job snapshot deserializes")
+}
+
+/// The `data_dir` [`drive_minimax_h3_arm`] runs under. Named rather than inlined because the LoRA
+/// confinement (`normalize_app_managed_lora_path`) admits only paths UNDER the data dir, so a test
+/// that stages an adapter for the arm has to stage it here — anywhere else and the arm rejects the
+/// file for the confinement reason rather than exercising the recipe (sc-18726).
+#[cfg(target_os = "macos")]
+fn minimax_h3_data_dir(tier_root: &Path) -> PathBuf {
+    tier_root.join("arm-data-dir")
+}
+
+/// Drive the REAL `generate_minimax_h3_using` against `probe`, with both roots pointed at fixtures.
+///
+/// Every network field is unroutable (`offline_settings`) and `HF_HUB_CACHE` is pinned at an empty
+/// dir, so reaching the hub would fail loudly instead of depending on a dev box's real cache — the
+/// sc-12380 trap. The two `*_DIR` overrides are the supported operator seams the resolver reads
+/// first, which is what lets this run with no snapshot layout at all.
+#[cfg(target_os = "macos")]
+fn drive_minimax_h3_arm(
+    tier_root: &Path,
+    base_root: &Path,
+    probe: &ArmProbe,
+    request: &VideoRequest,
+) -> WorkerResult<(DecodedVideo, Value)> {
+    // The t2va/fl2va arms resolve no media, so the project root is never read and a placeholder is
+    // honest. The Ref2VA arms DO read it — they take `drive_minimax_h3_arm_in_project`.
+    let project_path = tier_root.join("unused-project");
+    drive_minimax_h3_arm_in_project(tier_root, base_root, probe, request, &project_path)
+}
+
+/// [`drive_minimax_h3_arm`] with the project root supplied — the Ref2VA form.
+///
+/// A reference asset id resolves through `ProjectStore::get_asset` to a PROJECT-RELATIVE
+/// `file.path`, which `safe_project_path` joins under this root. So an arm carrying references only
+/// reaches the engine when the root is the staged project's own
+/// ([`stage_minimax_h3_reference_project`]).
+#[cfg(target_os = "macos")]
+fn drive_minimax_h3_arm_in_project(
+    tier_root: &Path,
+    base_root: &Path,
+    probe: &ArmProbe,
+    request: &VideoRequest,
+    project_path: &Path,
+) -> WorkerResult<(DecodedVideo, Value)> {
+    drive_minimax_h3_arm_in_project_with_env(
+        tier_root,
+        base_root,
+        probe,
+        request,
+        project_path,
+        &[],
+    )
+}
+
+/// [`drive_minimax_h3_arm_in_project`] with extra env vars pinned in the SAME
+/// [`crate::test_env::temp_env_vars`] scope. The env lock is NOT reentrant, so a test that needs
+/// e.g. [`crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV`] (the sc-17153 fit-gate coupling tripwire) must
+/// thread it through here rather than wrapping the harness in a second `temp_env_var`, which would
+/// self-deadlock.
+#[cfg(target_os = "macos")]
+fn drive_minimax_h3_arm_in_project_with_env(
+    tier_root: &Path,
+    base_root: &Path,
+    probe: &ArmProbe,
+    request: &VideoRequest,
+    project_path: &Path,
+    extra_env: &[(&str, &str)],
+) -> WorkerResult<(DecodedVideo, Value)> {
+    let settings = Settings {
+        data_dir: minimax_h3_data_dir(tier_root),
+        ..offline_settings()
+    };
+    let job = minimax_h3_job_snapshot();
+    let loader = probe.loader();
+    let hf_cache = tier_root.join("unused-hf-cache");
+    let project_path = project_path.to_path_buf();
+    let mut env: Vec<(&str, &str)> = vec![
+        ("HF_HUB_CACHE", hf_cache.to_str().expect("utf-8 hub")),
+        (
+            crate::video_jobs::minimax_h3::MINIMAX_H3_TIER_DIR_ENV,
+            tier_root.to_str().expect("utf-8 tier root"),
+        ),
+        (
+            crate::video_jobs::minimax_h3::MINIMAX_H3_BASE_DIR_ENV,
+            base_root.to_str().expect("utf-8 base root"),
+        ),
+    ];
+    env.extend_from_slice(extra_env);
+    crate::test_env::temp_env_vars(&env, || {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime builds")
+            .block_on(crate::video_jobs::minimax_h3::generate_minimax_h3_using(
+                &ApiClient::new(&settings),
+                &settings,
+                &job,
+                request,
+                &project_path,
+                "minimax_h3",
+                "mlx",
+                loader,
+            ))
+    })
+}
+
+/// sc-17159 → sc-19508 (epic 17137) — a MiniMax-H3 job NEVER degrades to a procedural fake clip.
+///
+/// Without a fail-loud gate the Stub path calls `generate_stub_video` and returns a synthesized clip
+/// AT THE REQUESTED GEOMETRY — indistinguishable from a real render until watched. That is the
+/// silent degradation sc-4176 added `ensure_video_engine_weights` to prevent.
+///
+/// **What sc-19508 changed.** sc-17159 filled the slot with an unconditional refusal carrying a
+/// hard-coded "not in the pinned inference revision" string, because there was no dispatch arm to
+/// fall through to. There is one now, so the refusal is DERIVED: the arm asks the registry whether
+/// the engine is linked.
+///
+/// **What sc-19721 changed.** The pin moved and the engine IS linked, so layer (1) of
+/// `ensure_minimax_h3_renderable` no longer fires — exactly the substitution the pre-bump version of
+/// this test demanded in its own premise assertion. The property under test is unchanged and is the
+/// whole point of the design: with the engine present but the weights unprovisioned, the ladder must
+/// STILL fall to `Stub` and the fail-loud gate must STILL refuse. It is layer (3) that refuses now,
+/// and its error is the resolver's own — `InvalidPayload`, naming the missing snapshot — rather than
+/// the `Engine` variant layer (1) produced. Asserting the variant AND the reason is what makes that
+/// substitution visible instead of silent.
+///
+/// The refusal is asserted by ITS OWN reason, not by `is_err()`: a bare error check would go inert
+/// the moment the request were rejected for some unrelated cause (sc-19488).
+#[cfg(target_os = "macos")]
+#[test]
+fn minimax_h3_never_degrades_to_a_fake_video() {
+    let data_dir_guard = tempfile::Builder::new()
+        .prefix("minimax_h3_route_")
+        .tempdir()
+        .expect("temp dir");
+    let settings = Settings {
+        data_dir: data_dir_guard.path().to_path_buf(),
+        ..Settings::from_env()
+    };
+    // sc-19721: HERMETIC, and newly load-bearing. Before the pin bump the refusal short-circuited on
+    // "engine not registered" and never touched the filesystem, so no env var could reach it. Now
+    // the resolver runs, and `SCENEWORKS_MLX_MINIMAX_H3_*_DIR` / `HF_HUB_CACHE` are written by other
+    // tests in this SAME process — a concurrent writer pointing them at a staged tier would make
+    // `resolve_minimax_h3_load` succeed here, route the request to `VideoRoute::MiniMaxH3`, and fail
+    // this test for a reason that has nothing to do with it (observed, not theorised). Pinning them
+    // takes the crate-wide env lock, which is the only thing that makes the read atomic.
+    let _env = crate::test_env::EnvVars::set(&[
+        (crate::video_jobs::minimax_h3::MINIMAX_H3_TIER_DIR_ENV, ""),
+        (crate::video_jobs::minimax_h3::MINIMAX_H3_BASE_DIR_ENV, ""),
+        (
+            "HF_HUB_CACHE",
+            data_dir_guard
+                .path()
+                .join("no-such-hub")
+                .to_str()
+                .expect("utf-8 hub path"),
+        ),
+    ]);
+    // The premise this whole test rests on, asserted rather than assumed: the engine IS in the
+    // linked bundle, so the refusal below is the weights-unprovisioned one and not the
+    // engine-absent one. If a future pin drops the provider, this fires FIRST and says so, instead
+    // of the assertions below passing for the WRONG reason — an engine-absent refusal would satisfy
+    // "it refused" while proving nothing about the unprovisioned-install path.
+    assert!(
+        crate::video_jobs::minimax_h3::minimax_h3_engine_is_registered(),
+        "the linked inference bundle no longer registers minimax_h3 — the pin moved backwards off \
+         the sc-17137 inference feature head. This guard would then be re-testing layer (1), which \
+         is not the property it is here for."
+    );
+
+    // Every declared mode of BOTH partitions, so no shape slips past on a route the ladder happens
+    // to match for another reason.
+    for (model, mode) in [
+        ("minimax_h3", "text_to_video"),
+        ("minimax_h3", "image_to_video"),
+        ("minimax_h3", "first_last_frame"),
+        ("minimax_h3_ref", "reference_to_video"),
+    ] {
+        let req = request(json!({
+            "projectId": "p", "model": model, "mode": mode, "prompt": "a lighthouse keeper hums",
+            // A real Ref2VA payload, so the reference partition is exercised with the shape it
+            // actually receives rather than an empty one that would be refused for a second reason.
+            "referenceAssetIds": if model == "minimax_h3_ref" { json!(["asset-1"]) } else { json!([]) },
+        }));
+        assert_eq!(
+            resolve_video_route(&req, &settings),
+            VideoRoute::Stub,
+            "{model}/{mode}: with no engine in the linked bundle the ladder must fall through to \
+             Stub, where the fail-loud gate runs"
+        );
+        let err = ensure_video_engine_weights(&req, &settings)
+            .expect_err("a MiniMax-H3 job MUST fail loudly, never render a fake video");
+        let WorkerError::InvalidPayload(message) = err else {
+            panic!(
+                "{model}/{mode}: expected the resolver's WorkerError::InvalidPayload. A \
+                 WorkerError::Engine here would mean layer (1) fired — the engine went missing \
+                 from the bundle — which is a different failure this test is not about."
+            );
+        };
+        assert!(
+            message.contains(model),
+            "{model}/{mode}: the error must name the model: {message}"
+        );
+        assert!(
+            message.contains("is not downloaded"),
+            "{model}/{mode}: the error must name the real cause — the weights are unprovisioned, \
+             which is the refusal that survives the pin bump: {message}"
+        );
+        assert!(
+            message.contains("Model Manager"),
+            "{model}/{mode}: the error must tell the user how to fix it, so the failure cannot be \
+             mistaken for a finished job: {message}"
+        );
+        assert!(
+            !message.contains("not in the pinned inference revision"),
+            "{model}/{mode}: layer (1)'s pre-bump string must be GONE — the engine is linked now, \
+             and leaving that reason reachable would be a lie about why the job failed: {message}"
+        );
+    }
+
+    // The arm is keyed on the MiniMax-H3 family alone: a model that legitimately falls through to
+    // the stub (a test/unknown id with no engine family) is untouched, so this refusal did not
+    // become a blanket "every stub job errors".
+    let unknown = request(json!({
+        "projectId": "p", "model": "totally_unknown_model", "mode": "text_to_video", "prompt": "p"
+    }));
+    assert_eq!(resolve_video_route(&unknown, &settings), VideoRoute::Stub);
+    assert!(
+        ensure_video_engine_weights(&unknown, &settings).is_ok(),
+        "a non-engine model id keeps the stub as its intended path"
+    );
+}
+
+/// The `VideoRoute::MiniMaxH3` tail arm is REACHED once the engine is ready (sc-19508).
+///
+/// Without this the arm would be untestable dead code until sc-18650 lands: `minimax_h3_available`
+/// requires the engine to be REGISTERED, which is false at the pinned revision, so every MiniMax job
+/// falls to `Stub` and deleting the arm entirely would be green in every other test. Declaration is
+/// not reachability — this drives the real ladder with the readiness the pin bump will supply.
+///
+/// The `false` half is equally load-bearing: it pins today's behavior (Stub, where the fail-loud
+/// gate runs) so the arm cannot be made unconditionally live by mistake.
+#[cfg(target_os = "macos")]
+#[test]
+fn minimax_h3_reaches_its_own_route_arm_once_the_engine_is_ready() {
+    let data_dir_guard = tempfile::Builder::new()
+        .prefix("minimax_h3_route_arm_")
+        .tempdir()
+        .expect("temp dir");
+    let settings = Settings {
+        data_dir: data_dir_guard.path().to_path_buf(),
+        ..offline_settings()
+    };
+    for (model, mode, extra) in [
+        ("minimax_h3", "text_to_video", json!({})),
+        (
+            "minimax_h3",
+            "image_to_video",
+            json!({ "sourceAssetId": "a" }),
+        ),
+        (
+            "minimax_h3",
+            "first_last_frame",
+            json!({ "sourceAssetId": "a", "lastFrameAssetId": "b" }),
+        ),
+        (
+            "minimax_h3_ref",
+            "reference_to_video",
+            json!({ "referenceAssetIds": ["r1"] }),
+        ),
+    ] {
+        let mut payload = json!({
+            "projectId": "p", "model": model, "mode": mode, "prompt": "a lighthouse keeper hums",
+        });
+        let object = payload.as_object_mut().expect("object payload");
+        for (key, value) in extra.as_object().cloned().unwrap_or_default() {
+            object.insert(key, value);
+        }
+        let req = request(payload);
+        assert_eq!(
+            resolve_video_route_with(&req, &settings, true),
+            VideoRoute::MiniMaxH3("minimax_h3"),
+            "{model}/{mode}: a ready MiniMax-H3 engine must reach its OWN arm — and carry the one \
+             registry id both partitions load, not a per-partition id the registry has never heard of"
+        );
+        assert_eq!(
+            resolve_video_route_with(&req, &settings, false),
+            VideoRoute::Stub,
+            "{model}/{mode}: with the engine absent the ladder must still fall to Stub, where the \
+             fail-loud gate refuses instead of returning a procedural clip"
+        );
+    }
+
+    // The tail arm must not have widened the ladder: a model served by an earlier arm keeps its
+    // route regardless of MiniMax readiness, so routing for every pre-existing model is unchanged.
+    let mochi = request(json!({
+        "projectId": "p", "model": "mochi_1", "mode": "text_to_video", "prompt": "p"
+    }));
+    assert_eq!(
+        resolve_video_route_with(&mochi, &settings, true),
+        resolve_video_route_with(&mochi, &settings, false),
+        "MiniMax readiness must not change any other model's route"
+    );
+}
+
+/// The engine-presence check reads the REGISTRY, not a pinned revision string (sc-19508).
+///
+/// This is the substitution sc-17159's guard asked for, and the property that makes the whole arm
+/// writable before sc-18650: the engine is reached through `media().load(id, spec)` — a runtime
+/// lookup keyed on a string — so nothing needs the provider importable at compile time. What it
+/// needs is the id PRESENT in the registry.
+///
+/// Both halves are load-bearing, and sc-19721's pin bump FLIPPED which one is which. The engine is
+/// now in the linked bundle, so `minimax_h3` resolves; the discriminating negative is an id the
+/// registry genuinely does not carry. A check stubbed to answer "present" to everything fails the
+/// negative half, and one stubbed to answer "absent" — which would make every MiniMax job refuse
+/// forever while looking exactly like the pre-bump world — fails the positive half. That second
+/// failure mode is the one this test exists for now: before the bump it was the passing state.
+#[cfg(target_os = "macos")]
+#[test]
+fn minimax_h3_engine_presence_is_read_from_the_registry() {
+    assert!(
+        crate::inference_runtime::media_descriptor("minimax_h3").is_some(),
+        "minimax_h3 IS registered at the pinned inference revision (sc-19721 moved the pin onto \
+         the sc-17137 inference feature head, which is where mlx-gen-catalog first re-exports it)"
+    );
+    assert!(
+        crate::inference_runtime::media_descriptor("wan2_2_t2v_14b").is_some(),
+        "the probe must resolve a long-registered video engine too, or the assertion above says \
+         nothing about MiniMax specifically"
+    );
+    assert!(
+        crate::inference_runtime::media_descriptor("minimax_h4").is_none(),
+        "the probe must discriminate: an id the bundle does not carry has to resolve to None, or \
+         `is_some()` above would pass against a registry that answers Some to everything"
+    );
+    assert!(
+        crate::video_jobs::minimax_h3::minimax_h3_engine_is_registered(),
+        "the helper must agree with the registry read it claims to perform"
+    );
+}
+
+/// BOTH catalog entries resolve to the SAME engine id, and nothing else does.
+///
+/// The story description asked for `minimax_h3` → "the base transformer provider" and
+/// `minimax_h3_ref` → "the transformer_ref provider". **There is no second provider.**
+/// `mlx-gen-minimax-h3` registers one `MODEL_ID = "minimax_h3"`; the two catalog entries own two DiT
+/// partition DIRECTORIES of it, and the engine picks between them from the conditioning. A second
+/// engine id would have produced an unknown-model load error at run time — green in every
+/// compile-time check.
+#[cfg(target_os = "macos")]
+#[test]
+fn minimax_h3_engine_id_is_one_id_for_both_partitions() {
+    use crate::video_jobs::minimax_h3::minimax_h3_engine_id;
+    assert_eq!(minimax_h3_engine_id("minimax_h3"), Some("minimax_h3"));
+    assert_eq!(minimax_h3_engine_id("minimax_h3_ref"), Some("minimax_h3"));
+    for outside in ["mochi_1", "wan_2_2", "krea_realtime_14b", "minimax_h4"] {
+        assert_eq!(
+            minimax_h3_engine_id(outside),
+            None,
+            "{outside} is outside the family — a broader match would steal it from its own arm"
+        );
+    }
+}
+
+/// The conditioning SHAPE must agree with the catalog entry's DiT partition (sc-19508).
+///
+/// This is the "would FAIL if the wrong partition were resolved" acceptance criterion, against the
+/// mechanism that exists. `transformer/` and `transformer_ref/` ship the same `config.json` and the
+/// same 638 tensor names — only the values differ — so a request that lands on the wrong one RUNS
+/// and returns plausible video. There is no error to catch downstream; the shape check is the only
+/// thing between a catalog id and a silently-wrong 18.78 GB checkpoint.
+///
+/// Every refusal is asserted on its own wording, never `is_err()`.
+#[cfg(target_os = "macos")]
+#[test]
+fn minimax_h3_refuses_a_shape_that_would_load_the_other_partition() {
+    use crate::video_jobs::minimax_h3::minimax_h3_validate_partition;
+
+    // The shapes that are CORRECT for their entry — the discriminating half. Without these the
+    // whole test would pass against a validator hard-wired to refuse everything.
+    for (model, extra) in [
+        ("minimax_h3", json!({})),
+        ("minimax_h3", json!({ "sourceAssetId": "a" })),
+        (
+            "minimax_h3",
+            json!({ "sourceAssetId": "a", "lastFrameAssetId": "b" }),
+        ),
+        ("minimax_h3", json!({ "lastFrameAssetId": "b" })),
+        ("minimax_h3_ref", json!({ "referenceAssetIds": ["r1"] })),
+        (
+            "minimax_h3_ref",
+            json!({ "referenceAssetIds": ["r1"], "referenceAudioAssetIds": ["a1"] }),
+        ),
+    ] {
+        let req = minimax_h3_request(model, extra);
+        assert!(
+            minimax_h3_validate_partition(&req).is_ok(),
+            "{model}: this shape belongs to the entry it was submitted against and must be admitted"
+        );
+    }
+
+    // A reference on the BASE entry would resolve ref2va and denoise on `transformer_ref/`.
+    let wrong_partition = minimax_h3_request("minimax_h3", json!({ "referenceAssetIds": ["r1"] }));
+    let message = minimax_h3_validate_partition(&wrong_partition)
+        .expect_err("a reference on the base entry must be refused")
+        .to_string();
+    assert!(
+        message.contains("minimax_h3_ref"),
+        "the refusal must name the entry that DOES serve references: {message}"
+    );
+
+    // A keyframe on the REFERENCE entry would resolve fl2va and denoise on `transformer/`.
+    let wrong_way = minimax_h3_request("minimax_h3_ref", json!({ "sourceAssetId": "a" }));
+    let message = minimax_h3_validate_partition(&wrong_way)
+        .expect_err("a keyframe-only payload on the reference entry must be refused")
+        .to_string();
+    assert!(
+        message.contains("at least one reference"),
+        "the refusal must say what the reference entry actually needs: {message}"
+    );
+
+    // Both at once is a hard error upstream too (`MiniMaxH3Task::resolve`); refused here so the
+    // user gets a SceneWorks-worded reason before a 53 GB text encoder is mapped.
+    let both = minimax_h3_request(
+        "minimax_h3_ref",
+        json!({ "sourceAssetId": "a", "referenceAssetIds": ["r1"] }),
+    );
+    let message = minimax_h3_validate_partition(&both)
+        .expect_err("keyframes AND references are two different tasks")
+        .to_string();
+    assert!(
+        message.contains("both keyframes and references"),
+        "the refusal must name the collision: {message}"
+    );
+
+    // Audio-only leaves the visual stream unconditioned — upstream's `before_encoder.py` raises on
+    // `set(kinds) == {"audio"}` because an audio reference never reaches the reference conditioner.
+    // Refused here first, before any load. sc-19574 lifted the RULE into
+    // `sceneworks_core::video_request::classify_reference_set`, which the API and the MCP tool read
+    // too, so this asserts the worker's end of a decision the three now share rather than the only
+    // layer that held it.
+    let audio_only = minimax_h3_request(
+        "minimax_h3_ref",
+        json!({ "referenceAudioAssetIds": ["a1"] }),
+    );
+    let message = minimax_h3_validate_partition(&audio_only)
+        .expect_err("an audio-only reference set must be refused")
+        .to_string();
+    assert!(
+        message.contains("audio-only"),
+        "the refusal must name the shape: {message}"
+    );
+    // WHICH refusal: a reference-free request hits a DIFFERENT arm with a different reason, and an
+    // `is_err()`-shaped assertion could not tell them apart. Both are `InvalidPayload`, so the
+    // message is the only discriminator.
+    let none_at_all = minimax_h3_request("minimax_h3_ref", json!({}));
+    let message = minimax_h3_validate_partition(&none_at_all)
+        .expect_err("a reference-free r2v request must be refused")
+        .to_string();
+    assert!(
+        message.contains("requires at least one reference") && !message.contains("audio-only"),
+        "an empty reference set must report the empty-set reason, not the audio one: {message}"
+    );
+    // …and an image alongside the same audio is accepted, so the audio list is a companion rather
+    // than a disqualifier. Without this leg the assertion above would pass for a guard that
+    // refused every request carrying audio at all.
+    let image_and_audio = minimax_h3_request(
+        "minimax_h3_ref",
+        json!({ "referenceAssetIds": ["r1"], "referenceAudioAssetIds": ["a1"] }),
+    );
+    minimax_h3_validate_partition(&image_and_audio)
+        .expect("an image + audio reference set is the shape Ref2VA serves");
+
+    // 🔴 THIS LEG WAS AN `expect_err` UNTIL sc-18650. It pinned a blanket "video references are not
+    // renderable in this build" refusal that outlived both of its premises: sc-19721's pin bump made
+    // `Conditioning::ReferenceVideo` and the engine's advertisement of it real, and this story built
+    // the SceneWorks half — `resolve_minimax_h3_clip_conditioning` decodes a clip into frames, the
+    // rate they carry, and the clip's own soundtrack. The capability is what is pinned now.
+    //
+    // The shape gate must stay SILENT about clips: everything a clip can get wrong is knowable only
+    // from the asset, so it is refused by the decode (which still runs before any weight is read),
+    // not guessed at here. See `minimax_h3_reference_clip_shape_refusals`.
+    let clips = minimax_h3_request(
+        "minimax_h3_ref",
+        json!({ "referenceAssetIds": ["r1"], "sourceClipAssetIds": ["c1"] }),
+    );
+    minimax_h3_validate_partition(&clips)
+        .expect("image + clip is a renderable Ref2VA set since sc-18650");
+    // …and a CLIP-ONLY set too: `classify_reference_set` counts a clip as a visual reference, so a
+    // clip alone conditions the visual stream and is not the audio-only shape.
+    let clips_only = minimax_h3_request("minimax_h3_ref", json!({ "sourceClipAssetIds": ["c1"] }));
+    minimax_h3_validate_partition(&clips_only).expect("a clip alone conditions the visual stream");
+    // The clip lists still belong to the REFERENCE partition. The base entry has no reference
+    // conditioning at all, and a clip must not be the one reference kind that sneaks past that.
+    let base_with_clip = minimax_h3_request("minimax_h3", json!({ "sourceClipAssetIds": ["c1"] }));
+    let message = minimax_h3_validate_partition(&base_with_clip)
+        .expect_err("the base checkpoint has no reference conditioning")
+        .to_string();
+    assert!(
+        message.contains("minimax_h3_ref"),
+        "the refusal must point at the entry that does load the reference partition: {message}"
+    );
+    // A clip alongside a keyframe is STILL refused: fl2va and ref2va are different checkpoints and
+    // the engine refuses `(keyframes, references)` outright.
+    let clip_and_keyframe = minimax_h3_request(
+        "minimax_h3_ref",
+        json!({ "sourceAssetId": "k1", "sourceClipAssetIds": ["c1"] }),
+    );
+    let message = minimax_h3_validate_partition(&clip_and_keyframe)
+        .expect_err("keyframes and references are different tasks")
+        .to_string();
+    assert!(
+        message.contains("keyframes and references"),
+        "the refusal must name the two-task collision: {message}"
+    );
+}
+
+/// The shape refusals a reference clip still earns — and why each one is genuinely unrenderable
+/// rather than merely unbuilt (sc-18650).
+///
+/// Both are the ENGINE's own rules, moved to the first layer that can see the evidence. The frame
+/// floor otherwise fires inside `encode_prompt_ref2va` with the 66.7 GB conditioner already mapped;
+/// the aspect bound otherwise fires inside `Ref2VaReferences::new` after every clip in the request
+/// has been decoded. Neither is a new gate.
+#[cfg(target_os = "macos")]
+#[test]
+fn minimax_h3_reference_clip_shape_refusals() {
+    use crate::video_jobs::minimax_h3::{
+        minimax_h3_validate_reference_clip, MINIMAX_H3_MIN_REFERENCE_CLIP_FRAMES,
+    };
+    let frame = |width: u32, height: u32| Image {
+        width,
+        height,
+        pixels: vec![0; (width * height * 3) as usize],
+    };
+    let clip = |width: u32, height: u32, count: usize| vec![frame(width, height); count];
+
+    // The floor is DERIVED: 24 fps sampled at 2 fps merges in groups of 2, so the second sampled
+    // frame sits at index 12 and the clip must reach it. A literal here would not notice a rate
+    // change; re-deriving it is the point.
+    assert_eq!(
+        MINIMAX_H3_MIN_REFERENCE_CLIP_FRAMES, 13,
+        "round((2 - 1) * 24 / 2) + 1 = 13 frames, 0.5417 s"
+    );
+
+    minimax_h3_validate_reference_clip("minimax_h3_ref", "c1", &clip(1280, 720, 13))
+        .expect("exactly the floor is renderable — the bound is inclusive");
+
+    let message = minimax_h3_validate_reference_clip("minimax_h3_ref", "c1", &clip(1280, 720, 12))
+        .expect_err("one frame under the floor cannot fill a merged conditioner group")
+        .to_string();
+    assert!(
+        message.contains("12 frames") && message.contains("13 frames"),
+        "the refusal must state what was supplied and what is needed: {message}"
+    );
+    assert!(
+        message.contains("No output was produced"),
+        "a pre-render refusal must say nothing was rendered: {message}"
+    );
+
+    let message = minimax_h3_validate_reference_clip("minimax_h3_ref", "c1", &[])
+        .expect_err("an undecodable clip has nothing to condition on")
+        .to_string();
+    assert!(
+        message.contains("no decodable frames"),
+        "an empty decode must report itself as such, not as a short clip: {message}"
+    );
+
+    // 1:4 to 4:1, either way up. `4.0` exactly is inside; past it the engine's canvas resolver has
+    // no size to give.
+    minimax_h3_validate_reference_clip("minimax_h3_ref", "c1", &clip(2048, 512, 24))
+        .expect("4:1 is the widest the model reads a reference at");
+    minimax_h3_validate_reference_clip("minimax_h3_ref", "c1", &clip(512, 2048, 24))
+        .expect("1:4 is the tallest");
+    for (w, h) in [(2049u32, 512u32), (512, 2049)] {
+        let message = minimax_h3_validate_reference_clip("minimax_h3_ref", "c1", &clip(w, h, 24))
+            .expect_err("outside 1:4..4:1 there is no canvas")
+            .to_string();
+        assert!(
+            message.contains("1:4 to 4:1") && message.contains(&format!("{w}x{h}")),
+            "the refusal must name the bound and the shape: {message}"
+        );
+    }
+}
+
+/// The extraction chain, which is where "a reference does not bind the canvas" is either honored or
+/// silently broken (sc-18650).
+///
+/// Everything asserted here is invisible in a rendered clip: a padded reference still renders, an
+/// upscaled one still renders, a reference resampled to the request's fps still renders. The filter
+/// string is the only place these decisions exist.
+#[cfg(target_os = "macos")]
+#[test]
+fn minimax_h3_reference_clip_filter_never_pads_or_upscales() {
+    use crate::video_jobs::minimax_h3::{
+        minimax_h3_reference_clip_filter, MINIMAX_H3_CANVAS_MAX_PIXELS,
+        MINIMAX_H3_CANVAS_SHORT_EDGE, MINIMAX_H3_REFERENCE_CLIP_FPS,
+    };
+    let filter = minimax_h3_reference_clip_filter(
+        MINIMAX_H3_REFERENCE_CLIP_FPS,
+        MINIMAX_H3_CANVAS_SHORT_EDGE,
+        MINIMAX_H3_CANVAS_MAX_PIXELS,
+    );
+
+    assert_eq!(
+        MINIMAX_H3_REFERENCE_CLIP_FPS, 24,
+        "the engine resamples every reference onto its own 24 fps"
+    );
+    assert!(
+        filter.starts_with("fps=24,"),
+        "the clip is put ON the engine's own rate here, so the `fps` the conditioning declares is \
+         the rate the frames actually carry: {filter}"
+    );
+    assert!(
+        !filter.contains("pad="),
+        "a reference does NOT bind the generated canvas, so letterbox bars added here would be \
+         conditioned on as picture — this is exactly where the Wan-VACE / LTX clip readers differ, \
+         and copying their recipe is the easy mistake: {filter}"
+    );
+    assert!(
+        !filter.contains("force_original_aspect_ratio"),
+        "`decrease` caps the LONG edge, which would hand the engine a clip below its own canvas \
+         for it to upscale back: {filter}"
+    );
+    assert!(
+        filter.contains("min(iw,768)") && filter.contains("min(ih,768)"),
+        "the SHORT edge is capped at the engine's canvas short edge and never scaled up: {filter}"
+    );
+
+    // The mirrored budget is the engine's own, read out of the pinned bundle rather than trusted as
+    // a literal — the same tie `pinned_engine_geometry` makes for the manifest's `maxPixels`.
+    assert_eq!(
+        MINIMAX_H3_CANVAS_MAX_PIXELS,
+        runtime_macos::providers::minimax_h3::pipeline::CANVAS_MAX_PIXELS,
+        "the extraction's area bound must be the canvas budget the pinned engine actually enforces"
+    );
+
+    // The SHORT edge alone does not bound the picture. Past `max_pixels / short_edge²` = 1.75:1 the
+    // area is the binding term, and a cinemascope clip decoded on the short-edge rule alone
+    // materializes well above the canvas the engine then refits it to.
+    assert!(
+        filter.contains("sqrt(1032192*ih/iw)") && filter.contains("sqrt(1032192*iw/ih)"),
+        "the area budget must be in the scale expression on BOTH orientations: {filter}"
+    );
+
+    // The same arithmetic the filter string spells, so the two cannot drift: for a landscape source
+    // the constrained axis is the height, `min(ih, short_edge, sqrt(max_pixels * ih / iw))`, and the
+    // width follows the preserved aspect ratio on the `-1` axis. Truncated, because ffmpeg's scale
+    // expressions evaluate to integers.
+    let budget = u64::from(MINIMAX_H3_CANVAS_MAX_PIXELS);
+    let decoded = |iw: f64, ih: f64| -> (u64, u64) {
+        let short = f64::from(MINIMAX_H3_CANVAS_SHORT_EDGE);
+        let area = f64::from(MINIMAX_H3_CANVAS_MAX_PIXELS);
+        if iw >= ih {
+            let h = ih.min(short).min((area * ih / iw).sqrt()).floor();
+            ((h * iw / ih).floor() as u64, h as u64)
+        } else {
+            let w = iw.min(short).min((area * iw / ih).sqrt()).floor();
+            (w as u64, (w * ih / iw).floor() as u64)
+        }
+    };
+
+    // 2.39:1 — a scope master. The short-edge rule alone gives 1836x768 = 1_410_048 px, 37% over
+    // the engine's budget; with the area term the decode lands inside it.
+    let (w, h) = decoded(2560.0, 1072.0);
+    assert!(
+        w * h <= budget,
+        "a 2.39:1 source must decode inside the engine's canvas budget, got {w}x{h} = {} px",
+        w * h
+    );
+    assert!(
+        h < u64::from(MINIMAX_H3_CANVAS_SHORT_EDGE),
+        "past 1.75:1 the AREA is the binding bound, not the short edge: {h}"
+    );
+
+    // 16:9 is already over budget at a 768 short edge (768 x 1365), so the area term binds there
+    // too — this is the common case, not an exotic one.
+    let (w, h) = decoded(1920.0, 1080.0);
+    assert!(
+        w * h <= budget && h < u64::from(MINIMAX_H3_CANVAS_SHORT_EDGE),
+        "16:9 must also land inside the budget: {w}x{h}"
+    );
+
+    // At or below 1.75:1 the short edge still binds, and nothing is scaled UP.
+    assert_eq!(
+        decoded(1344.0, 768.0),
+        (1344, 768),
+        "exactly the budget at exactly the short edge must pass through untouched"
+    );
+    assert_eq!(
+        decoded(320.0, 240.0),
+        (320, 240),
+        "a source below the canvas is NEVER upscaled here — the engine's own resolver does that"
+    );
+
+    // Portrait is the same rule the other way up.
+    let (w, h) = decoded(1072.0, 2560.0);
+    assert!(
+        w * h <= budget && w < u64::from(MINIMAX_H3_CANVAS_SHORT_EDGE),
+        "the portrait branch must carry the identical bound: {w}x{h}"
+    );
+}
+
+/// A blank `sourceClipAssetIds` entry is refused rather than turned into a path component.
+///
+/// Deliberately a DIRECT call: `string_list` drops blank entries at parse
+/// (`parses_mv2v_and_ads2v_multi_source_fields`), so no HTTP payload can reach this refusal and no
+/// payload-level test can exercise it. It guards the producers that never touch that parser — a
+/// replayed job row, a hand-built `VideoRequest` — where an empty id resolves to the project
+/// directory rather than to a clip.
+#[cfg(target_os = "macos")]
+#[test]
+fn minimax_h3_blank_clip_asset_id_is_refused() {
+    use crate::video_jobs::minimax_h3::minimax_h3_clip_asset_id;
+
+    assert_eq!(
+        minimax_h3_clip_asset_id("minimax_h3_ref", "  clip-a  ").expect("a real id passes"),
+        "clip-a",
+        "the id is trimmed on the way through, so a padded id is not a distinct asset"
+    );
+
+    for blank in ["", "   ", "\t\n"] {
+        let message = minimax_h3_clip_asset_id("minimax_h3_ref", blank)
+            .expect_err("a blank id names no asset")
+            .to_string();
+        assert!(
+            message.contains("sourceClipAssetIds") && message.contains("blank"),
+            "the refusal must name the field and the fault: {message}"
+        );
+        assert!(
+            message.starts_with("minimax_h3_ref:"),
+            "every refusal in this arm leads with the model id: {message}"
+        );
+    }
+}
+
+/// Whether a clip carries a soundtrack is read off the extraction's own stderr — INPUT streams only.
+#[cfg(target_os = "macos")]
+#[test]
+fn minimax_h3_clip_audio_detection_reads_the_input_section() {
+    use crate::video_jobs::minimax_h3::minimax_h3_clip_input_has_audio;
+    let with_audio = "Input #0, mov,mp4,m4a, from 'clip.mp4':\n  \
+        Stream #0:0[0x1](und): Video: h264 (High), yuv420p, 1920x1080, 30 fps\n  \
+        Stream #0:1[0x2](und): Audio: aac (LC), 48000 Hz, stereo, fltp, 128 kb/s\n\
+        Output #0, image2, to 'ref_%05d.png':\n  Stream #0:0: Video: png, rgb24\n";
+    assert!(minimax_h3_clip_input_has_audio(with_audio));
+
+    let silent = "Input #0, mov,mp4,m4a, from 'clip.mp4':\n  \
+        Stream #0:0[0x1](und): Video: h264 (High), yuv420p, 1920x1080, 30 fps\n\
+        Output #0, image2, to 'ref_%05d.png':\n  Stream #0:0: Video: png, rgb24\n";
+    assert!(
+        !minimax_h3_clip_input_has_audio(silent),
+        "a silent source must condition on motion alone rather than send ffmpeg after a stream \
+         that is not there"
+    );
+
+    // The OUTPUT section is not evidence about the source. Today nothing writes audio out of this
+    // chain, so a whole-buffer parser would pass — and would start lying the moment one did.
+    let audio_only_in_output = "Input #0, mov,mp4,m4a, from 'clip.mp4':\n  \
+        Stream #0:0[0x1](und): Video: h264 (High), yuv420p, 1920x1080, 30 fps\n\
+        Output #0, wav, to 'out.wav':\n  Stream #0:0: Audio: pcm_s16le, 32000 Hz, stereo\n";
+    assert!(
+        !minimax_h3_clip_input_has_audio(audio_only_in_output),
+        "an OUTPUT audio stream says nothing about whether the SOURCE carried one"
+    );
+}
+
+/// Frame order survives the extraction — the one property of a motion reference that is completely
+/// invisible in the rendered output when it is wrong (sc-18650).
+///
+/// The zero-padded `%05d` pattern is what makes the lexical `paths.sort()` the numeric one. Written
+/// against a real on-disk sequence rather than a mocked one because the collision the padding
+/// prevents (`ref_10.png` before `ref_2.png`) only exists in the filesystem.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn minimax_h3_reference_clip_frames_keep_source_order() {
+    // A held `tempfile` guard, never a hand-built path under the shared temp root: the name is
+    // unique per CALL (a pid is not — a run landing on a recycled pid inherits leftovers) and the
+    // cleanup rides on `Drop`, so it survives the panic of a failing assertion below. This is the
+    // shape `no_test_fixture_builds_a_path_under_the_shared_temp_root` enforces (sc-17707).
+    let guard = tempfile::Builder::new()
+        .prefix("sw_mm_h3_ref_order_")
+        .tempdir()
+        .expect("fixture dir");
+    let dir = guard.path().to_path_buf();
+    // Twelve frames, so the numbering crosses the 9 -> 10 boundary an unpadded pattern reorders.
+    for index in 0..12u8 {
+        let image = image::RgbImage::from_pixel(2, 2, image::Rgb([index, index, index]));
+        image
+            .save_with_format(
+                dir.join(format!("ref_{index:05}.png")),
+                image::ImageFormat::Png,
+            )
+            .expect("fixture frame");
+    }
+    let frames = crate::video_jobs::minimax_h3::minimax_h3_load_reference_frames(dir.clone())
+        .await
+        .expect("frames load");
+    assert_eq!(
+        frames.iter().map(|f| f.pixels[0]).collect::<Vec<_>>(),
+        (0..12u8).collect::<Vec<_>>(),
+        "the decoded frames must be in clip order — a shuffled motion reference still renders a \
+         plausible clip, so nothing downstream would notice"
+    );
+}
+
+/// Keyframes anchor the FIRST and LAST frame, and references keep the caller's order (sc-19508).
+///
+/// Both are invisible in the output when wrong. A keyframe at any index other than `0` or
+/// `-1`/`frames-1` is a hard engine reject; a reference list in the wrong order changes the
+/// `<Picture i>` labels and the shared rotary clock, so the render silently differs.
+///
+/// The last anchor is `-1` and NOT `frames - 1` on purpose: `-1` is independent of the frame count
+/// this arm computed, so a disagreement between our lattice coercion and the engine's can never turn
+/// a last-frame anchor into a rejected mid-clip one.
+#[cfg(target_os = "macos")]
+#[test]
+fn minimax_h3_conditioning_anchors_and_reference_order() {
+    use crate::video_jobs::minimax_h3::minimax_h3_conditioning;
+    let image = |tag: u8| Image {
+        width: 2,
+        height: 2,
+        pixels: vec![tag; 12],
+    };
+    let anchors = |c: &[Conditioning]| -> Vec<i32> {
+        c.iter()
+            .filter_map(|c| match c {
+                Conditioning::Keyframe { frame_idx, .. } => Some(*frame_idx),
+                _ => None,
+            })
+            .collect()
+    };
+
+    assert!(
+        minimax_h3_conditioning(None, None, Vec::new(), Vec::new(), Vec::new()).is_empty(),
+        "t2va conditions on nothing"
+    );
+    assert_eq!(
+        anchors(&minimax_h3_conditioning(
+            Some(image(1)),
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new()
+        )),
+        vec![0],
+        "a first frame alone anchors index 0"
+    );
+    assert_eq!(
+        anchors(&minimax_h3_conditioning(
+            None,
+            Some(image(2)),
+            Vec::new(),
+            Vec::new(),
+            Vec::new()
+        )),
+        vec![-1],
+        "a last frame alone anchors -1, the count-independent end slot"
+    );
+    let both = minimax_h3_conditioning(
+        Some(image(1)),
+        Some(image(2)),
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    );
+    assert_eq!(
+        anchors(&both),
+        vec![0, -1],
+        "first_last_frame is TWO anchors, one at each end — the same list at the same index would \
+         be refused as two keyframes on one end"
+    );
+    // The images must land on the anchors they were given for, not merely be present.
+    let Conditioning::Keyframe { image: first, .. } = &both[0] else {
+        panic!("the first conditioning entry is a keyframe");
+    };
+    assert_eq!(
+        first.pixels[0], 1,
+        "the FIRST-frame asset must be the one anchored at index 0"
+    );
+
+    // Reference order: images, then video clips, then audio — the order the engine's own
+    // `request_references` walks the variants in, and the only one the three separate payload lists
+    // can express. Tagged pixels/samples make a re-ordering visible; a length check alone would
+    // pass against a shuffled list.
+    let track = |tag: f32| gen_core::AudioTrack {
+        samples: vec![tag],
+        sample_rate: 32_000,
+        channels: 2,
+        stems: Vec::new(),
+    };
+    let audio = |tag: f32| Conditioning::ReferenceAudio {
+        audio: track(tag),
+        strength: None,
+    };
+    let clip = |tag: u8, sound: Option<f32>| Conditioning::ReferenceVideo {
+        frames: vec![image(tag)],
+        fps: 24.0,
+        audio: sound.map(track),
+    };
+    let refs = minimax_h3_conditioning(
+        None,
+        None,
+        vec![image(7), image(8), image(9)],
+        vec![clip(20, None), clip(21, Some(0.75))],
+        vec![audio(0.25), audio(0.5)],
+    );
+    let order: Vec<String> = refs
+        .iter()
+        .map(|c| match c {
+            Conditioning::Reference { image, .. } => format!("i{}", image.pixels[0]),
+            Conditioning::ReferenceVideo { frames, .. } => format!("v{}", frames[0].pixels[0]),
+            Conditioning::ReferenceAudio { audio, .. } => format!("a{}", audio.samples[0]),
+            other => format!("unexpected:{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        order,
+        vec!["i7", "i8", "i9", "v20", "v21", "a0.25", "a0.5"],
+        "reference order is semantic — images, then clips, then audio, each in submission order"
+    );
+    // A video reference's OWN soundtrack rides the `ReferenceVideo` variant and must NOT be split
+    // out into a standalone `ReferenceAudio`: that would be a different request (its own rotary
+    // slot, and one of the three standalone audio-reference cap slots a clip's own soundtrack does
+    // not consume). The split would be invisible in `order` above, which sees only the variant.
+    let Conditioning::ReferenceVideo { audio: carried, .. } = &refs[4] else {
+        panic!("the second clip is a video reference");
+    };
+    assert_eq!(
+        carried.as_ref().map(|a| a.samples[0]),
+        Some(0.75),
+        "a clip's soundtrack stays ON the clip"
+    );
+    assert_eq!(
+        refs.iter()
+            .filter(|c| matches!(c, Conditioning::ReferenceAudio { .. }))
+            .count(),
+        2,
+        "the clip's soundtrack must not have become a third standalone audio reference"
+    );
+}
+
+/// The recorded task follows the CONDITIONING, which is what the engine derives the partition from.
+#[cfg(target_os = "macos")]
+#[test]
+fn minimax_h3_task_is_derived_from_the_conditioning() {
+    use crate::video_jobs::minimax_h3::{minimax_h3_conditioning, minimax_h3_task};
+    let image = Image {
+        width: 2,
+        height: 2,
+        pixels: vec![0; 12],
+    };
+    assert_eq!(
+        minimax_h3_task(&minimax_h3_conditioning(
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new()
+        )),
+        "t2va"
+    );
+    assert_eq!(
+        minimax_h3_task(&minimax_h3_conditioning(
+            Some(image.clone()),
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new()
+        )),
+        "fl2va"
+    );
+    assert_eq!(
+        minimax_h3_task(&minimax_h3_conditioning(
+            None,
+            None,
+            vec![image.clone()],
+            Vec::new(),
+            Vec::new()
+        )),
+        "ref2va",
+        "a reference set denoises on transformer_ref/ — the asset record is the only place a \
+         wrong-partition render is visible after the fact"
+    );
+    // A CLIP-ONLY reference set is the same partition, and `minimax_h3_task` had no
+    // `ReferenceVideo` arm while the variant could not be built (sc-18650). Without this leg the
+    // record would read `t2va` for a render that denoised on `transformer_ref/` — a wrong-partition
+    // claim in the one field whose job is to say which checkpoint ran.
+    assert_eq!(
+        minimax_h3_task(&minimax_h3_conditioning(
+            None,
+            None,
+            Vec::new(),
+            vec![Conditioning::ReferenceVideo {
+                frames: vec![image],
+                fps: 24.0,
+                audio: None,
+            }],
+            Vec::new()
+        )),
+        "ref2va",
+        "a clip-only reference set is still ref2va"
+    );
+}
+
+/// A tier is loadable only with BOTH DiT partitions, and the error names the missing half.
+///
+/// `mlx_tier_completeness`'s two predicates are independent BY DESIGN so the Model Manager can
+/// report each catalog entry honestly. The ENGINE's `load` probes `transformer/config.json` AND
+/// `transformer_ref/config.json` on every load regardless of task, so a one-partition install
+/// reports "installed" in the UI and cannot render. This resolver is where that gap is closed.
+#[cfg(target_os = "macos")]
+#[test]
+fn minimax_h3_tier_resolution_requires_both_dit_partitions() {
+    use crate::video_jobs::minimax_h3::{
+        resolve_minimax_h3_load, MINIMAX_H3_BASE_DIR_ENV, MINIMAX_H3_TIER_DIR_ENV,
+    };
+    let base = minimax_h3_base_root("minimax_h3_base_");
+    let req = minimax_h3_request("minimax_h3", json!({}));
+    let settings = Settings {
+        data_dir: base.path().join("unused-data-dir"),
+        ..offline_settings()
+    };
+
+    let resolve = |tier_root: &Path| {
+        crate::test_env::temp_env_vars(
+            &[
+                (
+                    MINIMAX_H3_TIER_DIR_ENV,
+                    tier_root.to_str().expect("utf-8 tier root"),
+                ),
+                (
+                    MINIMAX_H3_BASE_DIR_ENV,
+                    base.path().to_str().expect("utf-8 base root"),
+                ),
+            ],
+            || resolve_minimax_h3_load(&settings, &req),
+        )
+    };
+
+    // Both partitions ⇒ resolves, and points at the BASE partition dir (the provider swings to its
+    // `transformer_ref` sibling for a ref2va render).
+    let complete = minimax_h3_tier_root("mm_both_", &["q4"], &["transformer", "transformer_ref"]);
+    let load = resolve(complete.path()).expect("a complete q4 tier resolves");
+    assert_eq!(load.tier, "q4");
+    assert_eq!(load.quant, Some(Quant::Q4));
+    assert_eq!(load.dit_dir, complete.path().join("q4").join("transformer"));
+    assert_eq!(
+        load.root,
+        base.path(),
+        "spec.weights is the UPSTREAM root — the shared components live there, not in the tier repo"
+    );
+
+    // Base partition only — the `minimax_h3` download without `minimax_h3_ref`.
+    let base_only = minimax_h3_tier_root("mm_base_", &["q4"], &["transformer"]);
+    let message = resolve(base_only.path())
+        .expect_err("one partition is not a loadable tier")
+        .to_string();
+    assert!(
+        message.contains("only one of the two MiniMax-H3 DiT partitions"),
+        "the error must say which half is missing rather than 'not downloaded': {message}"
+    );
+
+    // Reference partition only — the mirror case, so the message is not accidentally one-sided.
+    let ref_only = minimax_h3_tier_root("mm_ref_", &["q4"], &["transformer_ref"]);
+    let message = resolve(ref_only.path())
+        .expect_err("one partition is not a loadable tier")
+        .to_string();
+    assert!(
+        message.contains("only one of the two MiniMax-H3 DiT partitions"),
+        "the reference-only install must get the same actionable error: {message}"
+    );
+
+    // Nothing installed at all is a DIFFERENT message — "download the tier", not "you have half".
+    let empty = tempfile::Builder::new()
+        .prefix("mm_empty_")
+        .tempdir()
+        .expect("temp dir");
+    let message = resolve(empty.path())
+        .expect_err("an empty tier root does not resolve")
+        .to_string();
+    assert!(
+        message.contains("no complete MiniMax-H3 tier found"),
+        "an empty install must not be reported as a torn one: {message}"
+    );
+}
+
+/// sc-19558 — **a shared probe that is missing is refused BY NAME**, one probe at a time, with the
+/// probe's DIRECTORY left in place.
+///
+/// 🔴 THE DIRECTORY STAYS. That is the whole defect: an interrupted co-requisite download leaves
+/// `vae/` (or `tokenizer/`, or the packed `q4/text_encoder/`) present and empty, so the sc-19573
+/// `is_dir()` floor read the install COMPLETE and the failure moved into the engine, past the only
+/// layer that could name it. Every mutation below is `remove_file`, and the parent directory is
+/// asserted to survive, so a regression to a directory probe cannot pass this test.
+///
+/// Deleting all of them at once would prove the SET is gated, not each member: a gate that checked
+/// only `vae/config.json` would pass that and still admit a snapshot with no tokenizer. The control
+/// resolve after each restore is equally load-bearing — without it a resolver that refused
+/// unconditionally would sweep clean.
+///
+/// Driven off `minimax_h3_shared_probe_paths` at the root the TIER resolves to (sc-19573), so the
+/// two probes that live under `<tier>/q4/text_encoder` are swept as well as the six under the
+/// upstream snapshot. A list restated here would drift from the gate the same way the catalog
+/// drifted from the loader.
+#[cfg(target_os = "macos")]
+#[test]
+fn minimax_h3_resolution_names_each_missing_shared_probe() {
+    use crate::video_jobs::minimax_h3::{
+        resolve_minimax_h3_load, MINIMAX_H3_BASE_DIR_ENV, MINIMAX_H3_TIER_DIR_ENV,
+    };
+    let base = minimax_h3_base_root("mm_probe_base_");
+    let req = minimax_h3_request("minimax_h3", json!({}));
+    let settings = Settings {
+        data_dir: base.path().join("unused-data-dir"),
+        ..offline_settings()
+    };
+    let tier = minimax_h3_tier_root(
+        "mm_probe_tier_",
+        &["q4"],
+        &["transformer", "transformer_ref"],
+    );
+    let resolve = || {
+        crate::test_env::temp_env_vars(
+            &[
+                (
+                    MINIMAX_H3_TIER_DIR_ENV,
+                    tier.path().to_str().expect("utf-8 tier root"),
+                ),
+                (
+                    MINIMAX_H3_BASE_DIR_ENV,
+                    base.path().to_str().expect("utf-8 base root"),
+                ),
+            ],
+            || resolve_minimax_h3_load(&settings, &req),
+        )
+    };
+
+    resolve().expect("the control: a complete base root and a complete q4 tier resolve");
+
+    // `q4` is what an unqualified request resolves to, so this is the install the sweep describes.
+    let probes = sceneworks_core::mlx_tier_completeness::minimax_h3_shared_probe_paths(
+        base.path(),
+        &sceneworks_core::mlx_tier_completeness::minimax_h3_text_encoder_dir(
+            tier.path(),
+            base.path(),
+            "q4",
+        ),
+    );
+    assert!(
+        probes.len() >= 8,
+        "the probe list collapsed to {} entries — a vacuous sweep proves nothing",
+        probes.len()
+    );
+    // The packed text encoder must really be in the sweep, not merely assumed to be: it is the one
+    // probe that lives outside the upstream snapshot.
+    assert!(
+        probes
+            .iter()
+            .any(|probe| probe.starts_with(tier.path().join("q4"))),
+        "the q4 packed text encoder must be part of the shared floor: {probes:?}"
+    );
+
+    for probe in &probes {
+        let parent = probe.parent().expect("a probe is a nested path").to_owned();
+        let saved = std::fs::read(probe).expect("the fixture wrote every probed file");
+        std::fs::remove_file(probe).expect("remove one probe");
+        assert!(
+            parent.is_dir(),
+            "the mutation must leave {} behind — a directory probe would still pass",
+            parent.display()
+        );
+        let message = resolve()
+            .expect_err("a missing shared probe must be refused before the engine loads")
+            .to_string();
+        assert!(
+            message.contains(&probe.display().to_string()),
+            "the refusal must name `{}` rather than restating the whole list: {message}",
+            probe.display()
+        );
+        std::fs::write(probe, saved).expect("restore the probe");
+        resolve()
+            .unwrap_or_else(|e| panic!("restoring `{}` must resolve again: {e}", probe.display()));
+    }
+}
+
+/// sc-19120 / sc-19506 — a q4/q8 tier's PACKED text encoder is STAGED, and the dense upstream one
+/// is the fallback rather than the default.
+///
+/// This closes a silent half-landing. sc-19120 published packed q4/q8 text encoders beside the DiT
+/// tiers and declared them in the manifest as per-tier `coRequisite` rows, so the bytes downloaded —
+/// but nothing put the directory on the `LoadSpec`, and `mlx-gen-minimax-h3::resolve_text_encoder_dir`
+/// falls back to `<spec.weights>/text_encoder`, the UPSTREAM DENSE bf16 Qwen3-VL-32B. A q4 render
+/// therefore still loaded the 53.07 GB dense conditioner: the largest component in the family, at
+/// full width, on the tier a user picked precisely because bf16 does not fit.
+///
+/// Three cases: a tier WITH a packed TE stages it, a tier WITHOUT one is REFUSED by name, and a
+/// TORN one — the directory present but the shard index missing, which is what an interrupted
+/// download leaves behind and what sc-19517 found on the hosted `bf16/transformer/` — is refused by
+/// name too, rather than staged for the provider to fail on.
+///
+/// ⚠️ CASES 1 AND 3 CHANGED SHAPE WHEN sc-19558 MET sc-19573, and the change is deliberate. sc-19506
+/// made a q4 tier with no usable packed encoder FALL BACK to `<weights>/text_encoder`. sc-19573 made
+/// the encoder's ROOT tier-dependent, and under that resolution a q4 install has no upstream
+/// `text_encoder/` to fall back TO — the co-requisite row is `variant: "bf16"`-scoped. So the
+/// fallback would have been to a path that is absent by design, producing a hard error inside the
+/// engine on `text_encoder/config.json`; and where it did resolve, it would put a q4 render on the
+/// 53 GB dense conditioner, which is the sc-19506 defect wearing a different hat. Refusing by name
+/// is the only outcome that is both loadable-or-actionable.
+#[cfg(target_os = "macos")]
+#[test]
+fn minimax_h3_resolution_stages_the_packed_text_encoder_when_the_tier_ships_one() {
+    use crate::video_jobs::minimax_h3::{
+        resolve_minimax_h3_load, MINIMAX_H3_BASE_DIR_ENV, MINIMAX_H3_TIER_DIR_ENV,
+    };
+    let base = minimax_h3_base_root("mm_te_base_");
+    let req = minimax_h3_request("minimax_h3", json!({}));
+    let settings = Settings {
+        data_dir: base.path().join("unused-data-dir"),
+        ..offline_settings()
+    };
+    let resolve = |tier_root: &Path| {
+        crate::test_env::temp_env_vars(
+            &[
+                (
+                    MINIMAX_H3_TIER_DIR_ENV,
+                    tier_root.to_str().expect("utf-8 tier root"),
+                ),
+                (
+                    MINIMAX_H3_BASE_DIR_ENV,
+                    base.path().to_str().expect("utf-8 base root"),
+                ),
+            ],
+            || resolve_minimax_h3_load(&settings, &req),
+        )
+    };
+
+    // The shipped shape: `config.json` + the shard index the rehost publishes for the component.
+    let packed = minimax_h3_tier_root(
+        "mm_te_packed_",
+        &["q4"],
+        &["transformer", "transformer_ref"],
+    );
+    let te = packed
+        .path()
+        .join("q4")
+        .join(sceneworks_core::mlx_tier_completeness::MINIMAX_H3_TEXT_ENCODER_DIR);
+    let load = resolve(packed.path()).expect("a complete q4 tier resolves");
+    assert_eq!(
+        load.text_encoder_dir,
+        Some(te.clone()),
+        "a q4 tier that ships a packed text encoder must stage it — an unstaged one means the q4 \
+         render loads the 53 GB dense conditioner and the tier buys nothing on it"
+    );
+
+    // TORN: the directory exists, the index does not. Named, not silently swapped for a fallback.
+    std::fs::remove_file(te.join("model.safetensors.index.json")).expect("remove te index");
+    assert!(te.is_dir(), "the mutation must leave the directory behind");
+    let message = resolve(packed.path())
+        .expect_err("an interrupted packed-text-encoder download must not resolve")
+        .to_string();
+    assert!(
+        message.contains(
+            &te.join("model.safetensors.index.json")
+                .display()
+                .to_string()
+        ),
+        "the refusal must name the missing shard index: {message}"
+    );
+
+    // ABSENT ENTIRELY — a pre-sc-19120 install. Same refusal, naming the config this time.
+    std::fs::remove_dir_all(&te).expect("drop the packed text encoder");
+    let message = resolve(packed.path())
+        .expect_err("a q4 tier with no packed text encoder must not resolve")
+        .to_string();
+    assert!(
+        message.contains(&te.join("config.json").display().to_string()),
+        "the refusal must name the packed encoder the q4 tier is supposed to ship: {message}"
+    );
+}
+
+/// The shared components are a SEPARATE download from the tiers, and their absence says so.
+#[cfg(target_os = "macos")]
+#[test]
+fn minimax_h3_resolution_names_the_missing_shared_components() {
+    use crate::video_jobs::minimax_h3::{
+        resolve_minimax_h3_load, MINIMAX_H3_BASE_DIR_ENV, MINIMAX_H3_TIER_DIR_ENV,
+    };
+    let tiers = minimax_h3_tier_root("mm_shared_", &["q4"], &["transformer", "transformer_ref"]);
+    // A base root holding every shared component DIRECTORY and not one of the files inside them —
+    // the shape an interrupted co-requisite download leaves behind, and the shape the sc-19573
+    // `is_dir()` floor certified as complete (sc-19558). `FL2VA/audio_vae/` is the case the
+    // assertion below names, because its constructor documents live ONLY in the FL2VA sources.
+    let base = tempfile::Builder::new()
+        .prefix("mm_torn_base_")
+        .tempdir()
+        .expect("temp dir");
+    for probe in minimax_h3_base_root_probes(base.path()) {
+        std::fs::create_dir_all(probe.parent().expect("a probe is a nested path"))
+            .expect("component dir");
+    }
+    let req = minimax_h3_request("minimax_h3", json!({}));
+    let settings = Settings {
+        data_dir: base.path().join("unused-data-dir"),
+        ..offline_settings()
+    };
+    let message = crate::test_env::temp_env_vars(
+        &[
+            (
+                MINIMAX_H3_TIER_DIR_ENV,
+                tiers.path().to_str().expect("utf-8"),
+            ),
+            (
+                MINIMAX_H3_BASE_DIR_ENV,
+                base.path().to_str().expect("utf-8"),
+            ),
+        ],
+        || resolve_minimax_h3_load(&settings, &req),
+    )
+    .expect_err("a torn shared install must not resolve")
+    .to_string();
+    assert!(
+        message.contains("FL2VA/audio_vae"),
+        "the error must name the component that is actually missing, since the tiers and the \
+         shared components are separate downloads: {message}"
+    );
+}
+
+/// sc-19573 — a PACKED-tier install has no upstream `text_encoder/`, and must still resolve.
+///
+/// sc-19120 made the Qwen3-VL-32B encoder a per-tier artifact: q4 and q8 read a packed copy hosted
+/// beside the DiT tiers, and their catalog rows are `variant`-scoped, so a q4 install never fetches
+/// the dense upstream component. The shared-completeness check probed `<base_root>/text_encoder`
+/// unconditionally, which meant EVERY q4 and q8 install was refused before it reached the engine,
+/// blaming the shared floor for a path that tier is correct not to have.
+///
+/// Asserted in both directions on purpose. A test that only proved q4 resolves would also pass if the
+/// text encoder had simply stopped being checked at all — so the bf16 half below proves the probe is
+/// still live, and the third block proves the packed encoder is load-bearing for q4 specifically.
+#[cfg(target_os = "macos")]
+#[test]
+fn minimax_h3_resolves_the_text_encoder_at_the_root_its_tier_actually_ships_it_in() {
+    use crate::video_jobs::minimax_h3::{
+        resolve_minimax_h3_load, MINIMAX_H3_BASE_DIR_ENV, MINIMAX_H3_TIER_DIR_ENV,
+    };
+    let tiers = minimax_h3_tier_root(
+        "mm_te_",
+        &["q4", "bf16"],
+        &["transformer", "transformer_ref"],
+    );
+    let base = minimax_h3_base_root("mm_te_base_");
+    let settings = Settings {
+        data_dir: base.path().join("unused-data-dir"),
+        ..offline_settings()
+    };
+    // `mlxQuantize: 0` is the bf16 (dense) request — `resolve_mlx_dense_quant` maps <= 0 to `None`,
+    // which is what puts bf16 first in the tier order. Absent would mean q4.
+    let resolve = |tier_root: &Path, base_root: &Path, quantize: i64| {
+        let req = minimax_h3_request(
+            "minimax_h3",
+            json!({ "advanced": { "mlxQuantize": quantize } }),
+        );
+        crate::test_env::temp_env_vars(
+            &[
+                (
+                    MINIMAX_H3_TIER_DIR_ENV,
+                    tier_root.to_str().expect("utf-8 tier root"),
+                ),
+                (
+                    MINIMAX_H3_BASE_DIR_ENV,
+                    base_root.to_str().expect("utf-8 base root"),
+                ),
+            ],
+            || resolve_minimax_h3_load(&settings, &req),
+        )
+    };
+
+    // q4 with the upstream text encoder DELETED — the exact on-disk shape a q4 install produces.
+    let q4_base = tempfile::Builder::new()
+        .prefix("mm_te_q4_base_")
+        .tempdir()
+        .expect("temp dir");
+    copy_dir_recursive(base.path(), q4_base.path());
+    std::fs::remove_dir_all(
+        q4_base
+            .path()
+            .join(sceneworks_core::mlx_tier_completeness::MINIMAX_H3_TEXT_ENCODER_DIR),
+    )
+    .expect("drop the upstream text encoder");
+    let load = resolve(tiers.path(), q4_base.path(), 4)
+        .expect("a q4 install with only the packed text encoder must resolve");
+    assert_eq!(load.tier, "q4");
+    assert_eq!(
+        load.text_encoder_dir,
+        Some(tiers.path().join("q4").join("text_encoder")),
+        "the packed encoder must be STAGED, not merely downloaded — without this the 18.7 GB \
+         sc-19120 added is fetched and never opened"
+    );
+
+    // 🔴 REACHABILITY, not merely declaration (sc-19573 review). Asserting the SceneWorks-side
+    // struct field alone proves nothing about the engine: `mlx-gen-minimax-h3` resolves its text
+    // encoder ONLY from `spec.components["text_encoder"]` (`resolve_text_encoder_dir`), and
+    // `spec.text_encoder` — the LTX external-Gemma field — has ZERO references anywhere in that
+    // crate. Staged on the wrong field, a q4 job would fall through to `<weights>/text_encoder`,
+    // which a packed-tier install correctly does not have, and hard-error INSIDE the engine on the
+    // missing `text_encoder/config.json`. So assert the field the engine reads, on the built spec.
+    let spec = video_load_spec(&VideoGenInput {
+        engine_id: "minimax_h3",
+        model_dir: q4_base.path().to_path_buf(),
+        dit_component_dir: Some(load.dit_dir.clone()),
+        text_encoder_component_dir: load.text_encoder_dir.clone(),
+        ..VideoGenInput::default()
+    });
+    assert!(
+        matches!(
+            spec.components.get("text_encoder"),
+            Some(WeightsSource::Dir(dir)) if *dir == tiers.path().join("q4").join("text_encoder")
+        ),
+        "the packed encoder must land in components[\"text_encoder\"] — the only seam \
+         mlx-gen-minimax-h3 reads: {:?}",
+        spec.components
+    );
+    assert!(
+        spec.text_encoder.is_none(),
+        "LoadSpec::text_encoder is the LTX seam and is never read by this engine; staging there \
+         moves the failure from before the engine to inside it: {:?}",
+        spec.text_encoder
+    );
+
+    // bf16 reads the dense upstream component and passes nothing on the spec: `None` is what leaves
+    // the provider on its own `<root>/text_encoder`, which is exactly where that component is.
+    let load = resolve(tiers.path(), base.path(), 0)
+        .expect("a bf16 install with the upstream text encoder resolves");
+    assert_eq!(load.tier, "bf16");
+    assert_eq!(load.text_encoder_dir, None);
+
+    // …and bf16 is genuinely REFUSED without it, so the probe is not merely skipped for that tier.
+    let message = resolve(tiers.path(), q4_base.path(), 0)
+        .expect_err("bf16 without the upstream text encoder must not resolve")
+        .to_string();
+    assert!(
+        message.contains("text encoder"),
+        "the bf16 refusal must name the text encoder: {message}"
+    );
+
+    // The packed encoder is load-bearing for q4 in the same way — remove it and q4 stops resolving.
+    let torn_tiers =
+        minimax_h3_tier_root("mm_te_torn_", &["q4"], &["transformer", "transformer_ref"]);
+    std::fs::remove_dir_all(torn_tiers.path().join("q4").join("text_encoder"))
+        .expect("drop the packed encoder");
+    let message = resolve(torn_tiers.path(), q4_base.path(), 4)
+        .expect_err("q4 without the packed text encoder must not resolve")
+        .to_string();
+    assert!(
+        message.contains("text encoder") && message.contains("q4"),
+        "the q4 refusal must name the tier's own encoder rather than the upstream one: {message}"
+    );
+}
+
+/// Copy `from` into `to` recursively — a fixture helper, not a general-purpose utility.
+#[cfg(target_os = "macos")]
+fn copy_dir_recursive(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).expect("destination dir");
+    for entry in std::fs::read_dir(from).expect("readable source dir") {
+        let entry = entry.expect("readable entry");
+        let target = to.join(entry.file_name());
+        if entry.file_type().expect("file type").is_dir() {
+            copy_dir_recursive(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).expect("copy file");
+        }
+    }
+}
+
+/// **The caller-side pin.** Drives the REAL arm end to end and asserts on what reached the engine.
+///
+/// Four things are checked here because each is invisible in the output when wrong:
+///
+/// * the `17n + 5` frame count (the Wan `4k + 1` stride would hand the engine an off-lattice count
+///   it hard-rejects — the two lattices are NOT nested);
+/// * the tier's DiT staged as the `"transformer"` COMPONENT while `spec.weights` names the upstream
+///   root (swap them and the loader either cannot find `text_encoder/` or loads the unquantized
+///   upstream DiT — a full-precision render on a machine sized for q4);
+/// * the quant marker, which the provider ASSERTS against the staged tier rather than applying;
+/// * the absence of `guidance` / `negative_prompt`, which this guidance-distilled checkpoint rejects.
+#[cfg(target_os = "macos")]
+#[test]
+fn generate_minimax_h3_using_hands_the_engine_the_lattice_count_and_the_staged_tier() {
+    let tiers = minimax_h3_tier_root("mm_arm_", &["q4"], &["transformer", "transformer_ref"]);
+    let base = minimax_h3_base_root("mm_arm_base_");
+    let probe = ArmProbe::default();
+    // 6.0 s at MiniMax-H3's one cadence is 144 raw frames, which is OFF the `17n + 5` lattice — so
+    // the coercion has to actually MOVE it (to 158) and this cannot pass against an arm that
+    // forwards the raw count. Stated explicitly rather than leaning on the resolved default: a
+    // payload with no `modelManifestEntry` gets a generic duration, which would make what this
+    // asserts depend on a default it is not testing.
+    // The payload deliberately CARRIES a negative prompt and a guidance scale. Both assertions
+    // below say the arm must not forward them; against an empty payload they would be asserting a
+    // default and would stay green if someone wired either field through.
+    let request = minimax_h3_request(
+        "minimax_h3",
+        json!({
+            "duration": 6.0,
+            "fps": 24,
+            "negativePrompt": "blurry, watermark",
+            "advanced": { "guidanceScale": 7.5 },
+        }),
+    );
+
+    let (_decoded, raw_settings) =
+        drive_minimax_h3_arm(tiers.path(), base.path(), &probe, &request)
+            .expect("a t2va job with a complete q4 tier and shared components runs");
+
+    assert_eq!(
+        request.raw_frame_count(),
+        144,
+        "the fixture must hand the arm an OFF-lattice count, or the coercion is a no-op here"
+    );
+    assert_eq!(
+        probe.engine_frames(),
+        158,
+        "the ARM must snap onto the `17n + 5` lattice (17 x 9 + 5 = 158), the first legal count at \
+         or above 144"
+    );
+    assert_eq!(
+        (probe.engine_frames() - 5) % 17,
+        0,
+        "and it must be a genuine lattice point, not a hard-coded number that happens to match"
+    );
+    assert_ne!(
+        probe.engine_frames(),
+        wan_frame_count(request.raw_frame_count()),
+        "the probe must discriminate: routing this arm through the Wan 4k+1 stride is the exact \
+         bug the epic's retracted '4k+1' claim would have produced, and the engine never refits"
+    );
+
+    let spec = probe.spec.lock().unwrap().clone().expect("a load ran");
+    // `WeightsSource` is not `PartialEq`, so unwrap each to the directory it names.
+    let source_dir = |source: Option<&WeightsSource>| match source {
+        Some(WeightsSource::Dir(dir)) => Some(dir.clone()),
+        _ => None,
+    };
+    assert_eq!(
+        source_dir(Some(&spec.weights)),
+        Some(base.path().to_path_buf()),
+        "spec.weights must be the UPSTREAM root — every shared component is probed under it"
+    );
+    assert_eq!(
+        source_dir(spec.components.get("transformer")),
+        Some(tiers.path().join("q4").join("transformer")),
+        "the tiered DiT must ride the components map: it lives in a different repo from the \
+         shared components, and `weights` can only name one root"
+    );
+    // 🔴 The packed per-tier text encoder (sc-19120), on the seam the ENGINE reads — asserted here,
+    // on the spec the arm actually built, rather than on the SceneWorks-side struct field.
+    // `mlx-gen-minimax-h3::resolve_text_encoder_dir` matches ONLY
+    // `spec.components.get("text_encoder")`; `spec.text_encoder` has zero references in that entire
+    // crate. Staged there instead, a q4 load falls through to `<weights>/text_encoder` — which this
+    // fixture's packed-tier base root does not have — and hard-errors inside the engine.
+    assert_eq!(
+        source_dir(spec.components.get("text_encoder")),
+        Some(tiers.path().join("q4").join("text_encoder")),
+        "the packed q4 text encoder must ride components[\"text_encoder\"], the only seam the \
+         engine resolves it from"
+    );
+    assert!(
+        spec.text_encoder.is_none(),
+        "`LoadSpec::text_encoder` is LTX's external-Gemma seam and is never read by this engine: \
+         {:?}",
+        spec.text_encoder
+    );
+    assert_eq!(
+        spec.quantize,
+        Some(Quant::Q4),
+        "the arm must carry the resolved tier's quant onto the LoadSpec — the provider asserts it \
+         against the tier's own marker rather than quantizing at load"
+    );
+
+    let engine_request = probe
+        .request
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the arm reached the engine");
+    assert_eq!(
+        engine_request.fps,
+        Some(24),
+        "MiniMax-H3 has ONE cadence; the engine errors on anything else"
+    );
+    assert!(
+        !request.negative_prompt.trim().is_empty(),
+        "the fixture must SUPPLY a negative prompt, or the assertion below tests a default"
+    );
+    assert!(
+        engine_request.negative_prompt.is_none(),
+        "guidance-distilled: the checkpoint has no unconditional branch and REJECTS a negative \
+         prompt — the manifest declares the axis false and the worker must not forward it"
+    );
+    assert!(
+        request.advanced.contains_key("guidanceScale"),
+        "same: the fixture must supply a guidance scale for the next assertion to discriminate"
+    );
+    assert!(
+        engine_request.guidance.is_none(),
+        "there is no guidance axis on this checkpoint — a forwarded scale would be rejected by \
+         `validate_request`, and the Video Studio hides the control"
+    );
+    assert!(
+        engine_request.conditioning.is_empty(),
+        "a t2va payload conditions on nothing"
+    );
+
+    assert_eq!(
+        raw_settings["minimaxH3Tier"],
+        json!("q4"),
+        "the asset must record the tier that actually LOADED"
+    );
+    assert_eq!(
+        raw_settings["minimaxH3Task"],
+        json!("t2va"),
+        "and the task that actually DENOISED — the only durable evidence of WHICH of the two \
+         structurally-identical DiT partitions ran"
+    );
+    assert_eq!(raw_settings["realModelInference"], json!(true));
+}
+
+/// sc-17153 — the fit-gate COUPLING tripwire: the MiniMax-H3 load path runs through the generic
+/// pre-load admission gate, and that gate reads the PER-TIER bytes the load actually stages.
+///
+/// The mirror of the Wan lane's `wan_candle_blocks_drive_the_video_fit_gate_and_reject` /
+/// `mochi_preflight_rejects_the_5s_default_on_a_64gb_mac` pattern, for the seam H3 actually has:
+/// this family adds NO per-family gate code — `mlx_fit_gate::apply_residency_policy` is generic and
+/// runs on the generator cache's cold-load path (`generator_cache.rs`), pricing the staged
+/// `components["transformer"]` / `components["text_encoder"]` dirs because they resolve OUTSIDE
+/// `spec.weights` (`spec_component_bytes`, sc-15154). That coupling is exactly what `minMemoryGb`'s
+/// honesty rests on (the blanket floor gates visibility; THIS gate is the per-tier admission), and
+/// nothing pinned it for H3: delete the `apply_residency_policy` call on the cold-load path, or
+/// stage the tier inside `spec.weights` where the component scan skips it, and every other H3 test
+/// stays green while a 66 GB bf16 load sails onto a 16 GB Mac and MLX SIGKILLs the worker.
+///
+/// Both halves run at the SAME emulated 16 GB budget, so what splits them is ONLY the staged
+/// tier's on-disk bytes — which is the coupling claim:
+///  * a q4 DiT at its real hosted size (18.78 GB — the manifest's exact `estimatedSizeBytes`,
+///    sparse on disk) must be REFUSED with the gate's actionable message, BEFORE the loader runs
+///    (18.78 GB staged weights alone exceed the 16 − 2 GB reserve ceiling, so not even the
+///    sc-12179 weights-floor admission can rescue it);
+///  * the same arm, same budget, with a small tier is ADMITTED and reaches the engine — proving
+///    the refusal above is byte-driven, not a blanket family reject.
+#[cfg(target_os = "macos")]
+#[test]
+fn minimax_h3_load_path_is_coupled_to_the_per_tier_admission_bytes() {
+    // The q4 base-partition bytes the manifest hosts (`config/manifests/builtin.models.jsonc`,
+    // `files: ["q4/transformer/*"]`). The gate prices the STAGED partition — `transformer_ref` is
+    // resolved by the engine as a sibling and is deliberately not staged, so it is not inflated.
+    const MINIMAX_H3_Q4_DIT_BYTES: u64 = 18_780_109_783;
+
+    let tiers = minimax_h3_tier_root(
+        "mm_fitgate_big_",
+        &["q4"],
+        &["transformer", "transformer_ref"],
+    );
+    let partition = tiers.path().join("q4").join("transformer");
+    let shards: Vec<std::path::PathBuf> = std::fs::read_dir(&partition)
+        .expect("fixture partition")
+        .filter_map(|entry| Some(entry.ok()?.path()))
+        .filter(|path| path.extension().is_some_and(|ext| ext == "safetensors"))
+        .collect();
+    assert!(
+        !shards.is_empty(),
+        "the fixture partition must carry shards to inflate"
+    );
+    let per_shard = MINIMAX_H3_Q4_DIT_BYTES / shards.len() as u64;
+    let remainder = MINIMAX_H3_Q4_DIT_BYTES % shards.len() as u64;
+    for (index, shard) in shards.iter().enumerate() {
+        let len = per_shard + u64::from(index == 0) * remainder;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(shard)
+            .expect("open shard")
+            .set_len(len)
+            .expect("sparse-inflate shard to the hosted size");
+    }
+    let base = minimax_h3_base_root("mm_fitgate_base_");
+    let probe = ArmProbe::default();
+    let request = minimax_h3_request("minimax_h3", json!({}));
+    let project = tiers.path().join("unused-project");
+    let message = match drive_minimax_h3_arm_in_project_with_env(
+        tiers.path(),
+        base.path(),
+        &probe,
+        &request,
+        &project,
+        &[(crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, "16")],
+    ) {
+        Ok(_) => panic!(
+            "an 18.78 GB staged q4 DiT cannot fit a 16 GB Mac even one component at a time — \
+             admitting it is the wired-overcommit SIGKILL the pre-load gate exists to prevent"
+        ),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        message.contains("minimax_h3"),
+        "the refusal names the model: {message}"
+    );
+    assert!(
+        message.contains("unified memory"),
+        "the refusal is the fit gate's actionable message, not a loader error: {message}"
+    );
+    assert!(
+        !probe.loaded(),
+        "the gate must refuse BEFORE `inference_runtime::load` allocates — a post-load refusal \
+         cannot exist, because MLX's default error handler is exit(-1)"
+    );
+
+    // The admit half: same budget, small tier ⇒ the decision flips on the tier bytes alone and the
+    // arm reaches the engine. Without this, the reject half would stay green against a gate that
+    // blanket-refuses the family.
+    let small_tiers = minimax_h3_tier_root(
+        "mm_fitgate_small_",
+        &["q4"],
+        &["transformer", "transformer_ref"],
+    );
+    let small_base = minimax_h3_base_root("mm_fitgate_small_base_");
+    let small_probe = ArmProbe::default();
+    let small_project = small_tiers.path().join("unused-project");
+    drive_minimax_h3_arm_in_project_with_env(
+        small_tiers.path(),
+        small_base.path(),
+        &small_probe,
+        &request,
+        &small_project,
+        &[(crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV, "16")],
+    )
+    .expect("a tier whose staged bytes fit the same 16 GB budget must be admitted");
+    assert!(
+        small_probe.loaded(),
+        "the admitted load must actually reach the loader — the pair proves the gate is coupled \
+         to the per-tier bytes, not to the family id"
+    );
+}
+
+/// sc-19120 / sc-19506 — the ARM puts the packed text encoder on the `LoadSpec`, and leaves the key
+/// ABSENT when the tier has none.
+///
+/// `minimax_h3_resolution_stages_the_packed_text_encoder_when_the_tier_ships_one` pins the
+/// RESOLVER, and `video_load_spec_threads_text_encoder_dir` pins the `VideoGenInput` → `LoadSpec`
+/// mapping. Neither covers the ONE line between them — `text_encoder_component_dir: load.text_encoder_dir` in
+/// `generate_minimax_h3_using` — and dropping that line was measured to leave both of those tests
+/// green while every q4 render silently went back to the 53 GB dense conditioner. This is the seam
+/// test that makes it red.
+///
+/// Both directions, because only the positive one is a claim about the fix and only the negative one
+/// keeps the fallback honest: an absent key is what sends the provider to `<weights>/text_encoder`,
+/// which is CORRECT for the dense bf16 tier.
+///
+/// The negative case is BF16, not "a q4 tier with the packed component deleted" (which is what it
+/// was before sc-19558 met sc-19573). Under the tier-aware root resolution a q4 install has no
+/// upstream `text_encoder/` to fall back TO — the co-requisite row is `variant: "bf16"`-scoped — so
+/// that shape is now REFUSED by the shared floor rather than resolved onto a fallback, and
+/// `minimax_h3_resolution_stages_the_packed_text_encoder_when_the_tier_ships_one` is what pins the
+/// refusal. bf16 is the tier where an absent key is genuinely correct, so it is the one that keeps
+/// this direction non-vacuous.
+#[cfg(target_os = "macos")]
+#[test]
+fn generate_minimax_h3_using_stages_the_packed_text_encoder_onto_the_load_spec() {
+    let source_dir = |source: Option<&WeightsSource>| match source {
+        Some(WeightsSource::Dir(dir)) => Some(dir.clone()),
+        _ => None,
+    };
+    let base = minimax_h3_base_root("mm_te_arm_base_");
+    let request = minimax_h3_request("minimax_h3", json!({}));
+
+    // bf16 ships no packed text encoder — the key must be absent so the provider falls back to the
+    // dense upstream copy under `spec.weights`. `mlxQuantize: 0` is what selects the dense tier
+    // (`resolve_mlx_dense_quant` maps <= 0 to `None`); absent would mean q4.
+    let bare = minimax_h3_tier_root(
+        "mm_te_arm_bare_",
+        &["bf16"],
+        &["transformer", "transformer_ref"],
+    );
+    let dense_request =
+        minimax_h3_request("minimax_h3", json!({ "advanced": { "mlxQuantize": 0 } }));
+    let probe = ArmProbe::default();
+    drive_minimax_h3_arm(bare.path(), base.path(), &probe, &dense_request)
+        .expect("a t2va job with a complete bf16 tier and shared components runs");
+    let spec = probe.spec.lock().unwrap().clone().expect("a load ran");
+    assert!(
+        !spec.components.contains_key("text_encoder"),
+        "a tier with no packed text encoder must leave the key ABSENT — that absence is what \
+         selects the provider's `<weights>/text_encoder` fallback"
+    );
+
+    // A q4 tier, whose packed component `minimax_h3_tier_root` seeds with the shipped shape:
+    // `config.json` + the shard index. Both are load-bearing — the shared floor probes each.
+    let packed = minimax_h3_tier_root(
+        "mm_te_arm_packed_",
+        &["q4"],
+        &["transformer", "transformer_ref"],
+    );
+    let te = packed
+        .path()
+        .join("q4")
+        .join(sceneworks_core::mlx_tier_completeness::MINIMAX_H3_TEXT_ENCODER_DIR);
+    // A SECOND base root, not a reuse of the first: the shared video funnel caches the loaded
+    // generator, and a second drive against the same `spec.weights` is served from that cache
+    // without calling the loader at all — which would leave `probe.spec` empty and the assertion
+    // below reading a load that never happened.
+    let base = minimax_h3_base_root("mm_te_arm_base2_");
+    let probe = ArmProbe::default();
+    drive_minimax_h3_arm(packed.path(), base.path(), &probe, &request)
+        .expect("a t2va job with a complete q4 tier and shared components runs");
+    let spec = probe.spec.lock().unwrap().clone().expect("a load ran");
+    assert_eq!(
+        source_dir(spec.components.get("text_encoder")),
+        Some(te),
+        "the packed per-tier text encoder must ride `LoadSpec::components[\"text_encoder\"]` — that \
+         is the key `mlx-gen-minimax-h3::resolve_text_encoder_dir` reads, and without it a q4 \
+         render loads the dense 53 GB conditioner and the tier buys nothing on it"
+    );
+    assert_eq!(
+        source_dir(Some(&spec.weights)),
+        Some(base.path().to_path_buf()),
+        "and it must NOT displace `spec.weights`, which stays the upstream root carrying the VAEs, \
+         the tokenizer and the dense text encoder the fallback needs"
+    );
+}
+
+/// The engine's synchronized soundtrack reaches the asset instead of being dropped (sc-19508).
+///
+/// MiniMax-H3 emits video AND stereo audio in ONE pass. A clip that lost its soundtrack still plays,
+/// so nothing downstream notices — which is why this is pinned at the arm rather than assumed from
+/// the funnel's shape. `DecodedVideo::audio` already carries `GenerationOutput::Video { audio }`
+/// generically (LTX-2.3 built it); this asserts the MiniMax arm actually inherits that path rather
+/// than needing bespoke plumbing, and would fail if the arm ever stopped going through the shared
+/// funnel.
+#[cfg(target_os = "macos")]
+#[test]
+fn generate_minimax_h3_using_carries_the_engine_soundtrack_to_the_asset() {
+    let tiers = minimax_h3_tier_root("mm_av_", &["q4"], &["transformer", "transformer_ref"]);
+    let base = minimax_h3_base_root("mm_av_base_");
+    let probe = ArmProbe {
+        // The family's declared output: 32 kHz interleaved stereo.
+        audio: Some(gen_core::AudioTrack {
+            samples: vec![0.25, -0.25, 0.5, -0.5],
+            sample_rate: 32_000,
+            channels: 2,
+            stems: Vec::new(),
+        }),
+        ..ArmProbe::default()
+    };
+    let request = minimax_h3_request("minimax_h3", json!({}));
+
+    let (decoded, _raw) = drive_minimax_h3_arm(tiers.path(), base.path(), &probe, &request)
+        .expect("the arm runs against the probe");
+
+    let track = decoded
+        .audio
+        .expect("the joint audio+video family's soundtrack must reach the asset, not be dropped");
+    assert_eq!(track.sample_rate, 32_000);
+    assert_eq!(track.channels, 2);
+    assert_eq!(
+        track.samples,
+        vec![0.25, -0.25, 0.5, -0.5],
+        "the samples must arrive unmodified — a re-synthesized or truncated track would still \
+         play, so only comparing the payload catches it"
+    );
+
+    // The discriminating half: the same arm over a SILENT engine must yield no track, so this test
+    // cannot pass against a `DecodedVideo` that fabricates one.
+    //
+    // It runs against FRESH fixture roots on purpose. The funnel loads through
+    // `generator_cache::with_cached_generator_using`, keyed on the engine id AND the `LoadSpec` — so
+    // a second run over the same roots would be a cache HIT, silently reuse the loud generator
+    // above, and "prove" the opposite of what it claims while still passing. Different roots means a
+    // different spec, which means the silent loader actually runs.
+    let silent_tiers =
+        minimax_h3_tier_root("mm_silent_", &["q4"], &["transformer", "transformer_ref"]);
+    let silent_base = minimax_h3_base_root("mm_silent_base_");
+    let silent = ArmProbe::default();
+    let (decoded, _raw) =
+        drive_minimax_h3_arm(silent_tiers.path(), silent_base.path(), &silent, &request)
+            .expect("the arm runs against a silent probe too");
+    assert!(
+        silent.loaded(),
+        "the silent probe's loader must actually have run — a cache hit here would reuse the \
+         generator above and invert what this half proves"
+    );
+    assert!(
+        decoded.audio.is_none(),
+        "an engine that returned no audio must not gain one in the arm"
+    );
+}
+
+/// The arm refuses a wrong-partition shape BEFORE it loads anything (sc-19508).
+///
+/// `probe.loaded()` is what makes this a pre-load assertion rather than just an error check: it is
+/// only ever set from inside the loader. A validator moved after the load would leave every message
+/// assertion above green while the 53 GB text encoder was already mapped.
+#[cfg(target_os = "macos")]
+#[test]
+fn generate_minimax_h3_using_refuses_a_wrong_partition_shape_before_loading() {
+    let tiers = minimax_h3_tier_root("mm_shape_", &["q4"], &["transformer", "transformer_ref"]);
+    let base = minimax_h3_base_root("mm_shape_base_");
+    let probe = ArmProbe::default();
+    // A reference on the BASE entry: the engine would resolve ref2va and denoise on the reference
+    // partition, returning plausible video from the wrong checkpoint.
+    let request = minimax_h3_request("minimax_h3", json!({ "referenceAssetIds": ["r1"] }));
+
+    let message = drive_minimax_h3_arm(tiers.path(), base.path(), &probe, &request)
+        .err()
+        .expect("a reference on the base entry must be refused")
+        .to_string();
+    assert!(
+        message.contains("minimax_h3_ref"),
+        "the refusal must point at the entry that serves references: {message}"
+    );
+    assert!(
+        !probe.loaded(),
+        "the shape check must run BEFORE the load — a wrong-partition job must never pay for a \
+         53 GB text encoder, let alone render from the wrong DiT"
+    );
+}
+
+/// sc-19558: every file `mlx-gen-minimax-h3::load` probes under the UPSTREAM root is supplied by a
+/// macOS download row of the catalog entry that needs it.
+///
+/// The defect this closes was a MISSING DOWNLOAD ROW, not a wrong one: `tokenizer/` and the three
+/// `FL2VA/audio_vae/` constructor documents were probed by the loader and by
+/// `minimax_h3_shared_is_complete`, and supplied by nothing — so a manifest-driven install of ANY
+/// tier failed the completeness gate before it reached the loader, on both catalog entries.
+///
+/// Deliberately NOT `#[cfg(target_os = "macos")]`. The probe list is a fact about the manifest and
+/// the engine's own loop, and it is on the Linux lane that a macOS-only row is easiest to delete by
+/// accident. `mlx_tier_completeness` is an unfenced core module for the same reason.
+///
+/// Overlaps `minimax_h3_downloads_cover_every_path_the_loader_probes` (sceneworks-core) without
+/// duplicating it, and both are kept: core's asks the TIER-SCOPED question over every tier and both
+/// entries, including the DiT partitions; this one asks the PLATFORM-SCOPED question — that the
+/// `platforms: ["macos"]` rows against the upstream repo, and not the candle rows that happen to
+/// name the same paths, are what supply the MLX lane's shared floor.
+///
+/// Mutation checks (each verified RED by construction of the assertion): delete either new row from
+/// either entry; narrow `"tokenizer/*"` to `"tokenizer/tokenizer_config.json"`; drop
+/// `"FL2VA/audio_vae/config.yaml"` from the three-document list.
+#[test]
+fn minimax_h3_macos_download_set_covers_every_probed_shared_file() {
+    use sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS;
+    use sceneworks_core::jsonc::strip_jsonc_comments;
+
+    // The upstream snapshot `spec.weights` resolves to. Spelled here rather than imported because
+    // `MINIMAX_H3_BASE_REPO` is macOS-fenced and this test is not; the two are tied together below.
+    const UPSTREAM_REPO: &str = "MiniMaxAI/MiniMax-H3";
+    #[cfg(target_os = "macos")]
+    assert_eq!(UPSTREAM_REPO, super::minimax_h3::MINIMAX_H3_BASE_REPO);
+
+    let raw = BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| *contents)
+        .expect("builtin.models.jsonc present");
+    let manifest: Value =
+        serde_json::from_str(&strip_jsonc_comments(raw)).expect("builtin models parses as JSON");
+
+    // Every probe of a BF16 install, snapshot-relative. bf16 is the tier whose text encoder comes
+    // from the upstream repo (`minimax_h3_text_encoder_dir` sends q4/q8 to the rehost instead), so
+    // it is the tier that makes this the complete upstream set — and the upstream `text_encoder`
+    // row IS `variant: "bf16"`-scoped, so it must be declared somewhere.
+    //
+    // Both roots EMPTY so the enumerator yields the relative spelling a `files` pattern is written
+    // in. Read from `mlx_tier_completeness` rather than restated: a second hand-copied list here
+    // would drift from the gate exactly the way the catalog drifted from the loader.
+    let empty = Path::new("");
+    let probes: Vec<String> =
+        sceneworks_core::mlx_tier_completeness::minimax_h3_shared_probe_paths(
+            empty,
+            &sceneworks_core::mlx_tier_completeness::minimax_h3_text_encoder_dir(
+                empty, empty, "bf16",
+            ),
+        )
+        .iter()
+        // `to_string_lossy` yields NATIVE separators, so this is `FL2VA\audio_vae\config.json` on
+        // Windows while the declared patterns are Hugging Face download globs, which are always
+        // `/`. Comparing them raw passes on macOS/Linux and fails only on the Windows candle lane.
+        .map(|probe| probe.to_string_lossy().replace('\\', "/"))
+        .collect();
+    assert!(
+        probes.len() >= 8,
+        "the probe list collapsed to {} entries — a vacuous sweep proves nothing",
+        probes.len()
+    );
+
+    for entry_id in ["minimax_h3", "minimax_h3_ref"] {
+        let model = manifest["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .find(|model| model["id"].as_str() == Some(entry_id))
+            .unwrap_or_else(|| panic!("{entry_id} present in the builtin catalog"));
+
+        // macOS rows against the upstream repo only. The tier rows live in the SceneWorks rehost
+        // and the off-Mac rows serve candle, neither of which supplies `spec.weights` on this lane.
+        let patterns: Vec<&str> = model["downloads"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{entry_id} declares downloads"))
+            .iter()
+            .filter(|row| row["repo"].as_str() == Some(UPSTREAM_REPO))
+            .filter(|row| {
+                row["platforms"]
+                    .as_array()
+                    .is_some_and(|p| p.iter().any(|v| v.as_str() == Some("macos")))
+            })
+            .flat_map(|row| row["files"].as_array().into_iter().flatten())
+            .filter_map(|f| f.as_str())
+            .collect();
+        assert!(
+            !patterns.is_empty(),
+            "{entry_id} declares no macOS {UPSTREAM_REPO} rows at all"
+        );
+
+        for probe in &probes {
+            let covered = patterns
+                .iter()
+                .any(|pattern| match pattern.strip_suffix('*') {
+                    // `tokenizer/*` covers `tokenizer/tokenizer.json`. The retained trailing `/` is
+                    // what stops `vae/*` from claiming `audio_vae/config.json`.
+                    Some(prefix) => probe.starts_with(prefix),
+                    None => *pattern == probe.as_str(),
+                });
+            assert!(
+                covered,
+                "{entry_id}: `mlx-gen-minimax-h3::load` probes `{probe}` under the {UPSTREAM_REPO} \
+                 snapshot, but no macOS download row supplies it. A probe with no row is not a slow \
+                 download — it is an install that fails the completeness gate before the loader \
+                 runs. Declared patterns: {patterns:?}"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MiniMax-H3 turbo recipe — the DRIVABLE CHAIN (epic 17137, sc-18726 / sc-18727).
+//
+// The failure these guard against is not "the control does not render". It is the one this epic has
+// shipped three times: a control that exists, a payload field that carries its value, and a worker
+// that never reads it. So every test below drives the REAL arm and asserts on what reached the
+// ENGINE — the step count, the video shift, and the adapter file itself — rather than on any
+// intermediate state.
+//
+// Every asserted value is NON-DEFAULT on purpose. The model's `defaults.steps` is 50 and the
+// engine's own `VIDEO_SIGMA_SHIFT` is 12.0, so an arm that forwarded nothing could not pass.
+// ---------------------------------------------------------------------------
+
+/// Stage a turbo adapter file under the arm's data dir and return the payload `loras` entry naming
+/// it — the shape `serialize_job_lora` produces for a catalog-backed selection (`id` + `path` +
+/// `weight`).
+///
+/// The `id` is what the recipe resolves from, and it is a REAL catalog id: the resolver reads the
+/// embedded builtin manifest, so a made-up id resolves to no recipe and every assertion below would
+/// silently be asserting the base regime.
+#[cfg(target_os = "macos")]
+fn minimax_h3_turbo_lora(tier_root: &Path, lora_id: &str) -> Value {
+    let dir = minimax_h3_data_dir(tier_root).join("loras");
+    std::fs::create_dir_all(&dir).expect("lora dir");
+    let file = dir.join(format!("{lora_id}.safetensors"));
+    write_lora_fixture(&file, None);
+    json!({ "id": lora_id, "path": file.to_string_lossy(), "weight": 1.0 })
+}
+
+/// Stage a real image reference for the Ref2VA arms: a project in the arm's own `ProjectStore`, a
+/// decodable PNG under it, and the indexed asset record `load_reference_image` resolves.
+///
+/// Returns `(project_id, project_path, asset_id)`. Both are needed by the caller: the id goes in the
+/// request (`minimax_h3_request`'s default `projectId` is a placeholder no store has heard of) and
+/// the path goes to [`drive_minimax_h3_arm_in_project`].
+///
+/// Registered through `persist_generated_asset` — the same door the image lane writes its own
+/// outputs with — rather than by hand-writing a sidecar, so this proves the resolution against the
+/// asset shape references actually have.
+#[cfg(target_os = "macos")]
+fn stage_minimax_h3_reference_project(data_dir: &Path) -> (String, PathBuf, String) {
+    let store = ProjectStore::new(data_dir.to_path_buf(), "worker");
+    let project = store
+        .create_project("sc18726_ref")
+        .expect("project creates");
+    let project_path = PathBuf::from(&project.path);
+    let asset_id = "mm_h3_ref_1";
+    let media_rel = "assets/images/reference.png";
+    let media_path = project_path.join(media_rel);
+    std::fs::create_dir_all(media_path.parent().expect("image dir")).expect("image dir creates");
+    // A real decodable PNG, not a touched file: `load_reference_image` runs `decode_image_any` and
+    // an empty file would fail there — which would leave this arm stopping one frame later than the
+    // fallback it replaces rather than reaching the engine.
+    image::RgbImage::from_pixel(64, 64, image::Rgb([32u8, 96, 200]))
+        .save(&media_path)
+        .expect("reference png writes");
+    store
+        .persist_generated_asset(
+            &project.id,
+            "job-sc18726",
+            "genset-sc18726",
+            &json!({
+                "type": "image",
+                "assetId": asset_id,
+                "mediaPath": media_rel,
+                "mimeType": "image/png",
+                "width": 64,
+                "height": 64,
+                "displayName": "reference.png",
+                "createdAt": "2026-08-15T00:00:00Z",
+            }),
+        )
+        .expect("reference asset persists");
+    (project.id, project_path, asset_id.to_owned())
+}
+
+/// Stage a real VIDEO reference clip for the Ref2VA arms (sc-18650) — an encoded mp4 under the
+/// project plus the indexed asset record `ltx::resolve_clip_media_path` resolves.
+///
+/// `luma(i) = 10 + i * step` fills frame `i`, so the decoded frames carry their own index as a
+/// signal that survives an H.264 round trip. Frame ORDER is the property this exists to make
+/// checkable: a shuffled motion reference still renders a plausible clip, so nothing downstream
+/// notices.
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+async fn stage_minimax_h3_clip_asset(
+    store: &ProjectStore,
+    project_id: &str,
+    project_path: &Path,
+    asset_id: &str,
+    width: u32,
+    height: u32,
+    count: usize,
+    step: u8,
+    with_audio: bool,
+) {
+    let fps = sceneworks_core::video_request::MINIMAX_H3_FPS;
+    let media_rel = format!("assets/videos/{asset_id}.mp4");
+    let media_path = project_path.join(&media_rel);
+    std::fs::create_dir_all(media_path.parent().expect("video dir")).expect("video dir creates");
+    let decoded = DecodedVideo {
+        frames: (0..count)
+            .map(|index| {
+                let luma = 10u8.saturating_add((index as u8).wrapping_mul(step));
+                RgbFrame {
+                    width,
+                    height,
+                    pixels: vec![luma; (width * height * 3) as usize],
+                }
+            })
+            .collect(),
+        fps,
+        audio: with_audio.then(|| AudioTrack {
+            samples: vec![0.05; (count * 32_000 / fps as usize) * 2],
+            sample_rate: 32_000,
+            channels: 2,
+        }),
+        adapter_apply_reports: Vec::new(),
+    };
+    encode_media(&media_path, decoded, None, None)
+        .await
+        .expect("the fixture clip encodes");
+    store
+        .persist_generated_asset(
+            project_id,
+            "job-sc18650",
+            "genset-sc18650",
+            &json!({
+                "type": "video",
+                "assetId": asset_id,
+                "mediaPath": media_rel,
+                "mimeType": "video/mp4",
+                "width": width,
+                "height": height,
+                "fps": fps,
+                "displayName": format!("{asset_id}.mp4"),
+                "createdAt": "2026-08-19T00:00:00Z",
+            }),
+        )
+        .expect("clip asset persists");
+}
+
+/// 🔴 **THE CHAIN, clip half (sc-18650).** A `sourceClipAssetIds` entry reaches the engine as
+/// `Conditioning::ReferenceVideo` carrying the frames, the rate they actually carry, and the clip's
+/// own soundtrack — through the REAL arm, against a real ffmpeg, from a real project asset.
+///
+/// This is the test the blanket "video references are not renderable in this build" refusal stood
+/// in place of. Every assertion below is a decision that is INVISIBLE in a rendered clip:
+///
+/// * a padded reference renders (and conditions on letterbox bars as picture);
+/// * a reference put on the REQUEST's canvas renders (and silently makes references bind geometry,
+///   which is the one thing `ref2va` is defined by not doing);
+/// * a reference declaring the request's fps renders (25% fast, per the engine's own note);
+/// * a shuffled reference renders;
+/// * a soundtrack split into a standalone `ReferenceAudio` renders (as a different request, on a
+///   different rotary slot, consuming one of the three audio cap slots);
+/// * an untruncated reference renders (conditioned against picture it is 40% longer than).
+///
+/// Skips when no ffmpeg is reachable, like the sibling encode tests.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_reference_clip_reaches_the_engine_as_reference_video_conditioning() {
+    if !ffmpeg_reachable() {
+        eprintln!(
+            "skipping a_reference_clip_reaches_the_engine_as_reference_video_conditioning: no \
+             ffmpeg"
+        );
+        return;
+    }
+    let tiers = minimax_h3_tier_root("mm_clip_", &["q4"], &["transformer", "transformer_ref"]);
+    let base = minimax_h3_base_root("mm_clip_base_");
+    let data_dir = minimax_h3_data_dir(tiers.path());
+    let store = ProjectStore::new(data_dir.clone(), "worker");
+    let project = store
+        .create_project("sc18650_clips")
+        .expect("project creates");
+    let project_path = PathBuf::from(&project.path);
+    let fixtures = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("fixture runtime builds");
+    // A 1600x900 clip WITH a soundtrack: 900 is over the engine's 768 canvas short edge, so this
+    // one carries the geometry claim. 24 frames, comfortably over the 13-frame conditioner floor
+    // and well under any render's frame count, so it is never truncated.
+    fixtures.block_on(stage_minimax_h3_clip_asset(
+        &store,
+        &project.id,
+        &project_path,
+        "mm_h3_clip_wide",
+        1600,
+        900,
+        24,
+        9,
+        true,
+    ));
+    // A tiny clip LONGER than the render, with a soundtrack that is longer with it: this one
+    // carries both truncation claims — the picture cut to the render's frame count, and the
+    // soundtrack cut to the span of the picture that survived. 160x90 keeps 200 frames cheap.
+    fixtures.block_on(stage_minimax_h3_clip_asset(
+        &store,
+        &project.id,
+        &project_path,
+        "mm_h3_clip_long",
+        160,
+        90,
+        200,
+        3,
+        true,
+    ));
+    // A SILENT clip: motion alone. Also the third reference, which is the per-modality cap.
+    fixtures.block_on(stage_minimax_h3_clip_asset(
+        &store,
+        &project.id,
+        &project_path,
+        "mm_h3_clip_silent",
+        160,
+        90,
+        24,
+        3,
+        false,
+    ));
+
+    let request = minimax_h3_request(
+        "minimax_h3_ref",
+        json!({
+            "projectId": project.id,
+            "duration": 5.2,
+            "fps": 24,
+            "sourceClipAssetIds": [
+                "mm_h3_clip_wide", "mm_h3_clip_long", "mm_h3_clip_silent",
+            ],
+        }),
+    );
+    let expected_frames = sceneworks_core::video_request::video_frame_count(
+        &request.model,
+        request.raw_frame_count(),
+    );
+    let probe = ArmProbe::default();
+    let (_decoded, raw) =
+        drive_minimax_h3_arm_in_project(tiers.path(), base.path(), &probe, &request, &project_path)
+            .expect("a clip-bearing Ref2VA job runs");
+    let engine = probe
+        .request
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the arm reached the engine");
+
+    let clips: Vec<(&Vec<gen_core::Image>, f32, Option<&gen_core::AudioTrack>)> = engine
+        .conditioning
+        .iter()
+        .filter_map(|item| match item {
+            gen_core::Conditioning::ReferenceVideo { frames, fps, audio } => {
+                Some((frames, *fps, audio.as_ref()))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        clips.len(),
+        3,
+        "all three clips must reach the engine, in submission order: {:?}",
+        engine
+            .conditioning
+            .iter()
+            .map(|c| c.kind())
+            .collect::<Vec<_>>()
+    );
+
+    // --- clip 1: geometry, rate, order, soundtrack --------------------------------------------
+    let (wide_frames, wide_fps, wide_audio) = &clips[0];
+    assert_eq!(
+        *wide_fps, 24.0,
+        "the declared rate must be the rate the frames CARRY — the decode put them on the engine's \
+         own 24 fps, so this is measured data and not a default"
+    );
+    assert_eq!(
+        wide_frames.len(),
+        24,
+        "a clip shorter than the render keeps every frame"
+    );
+    // 1600x900 is 16:9, and 16:9 laid on a 768 short edge is 1365x768 — already 32% ABOVE the
+    // engine's 768·1344 canvas budget. So the AREA is the binding bound here, not the short edge:
+    // `min(900, 768, sqrt(1032192 · 900 / 1600)) = 762`. This is the common case, not an exotic
+    // one, which is why the short-edge-only rule this replaced materialized nearly every landscape
+    // reference above the canvas the engine then refits it to. NOT the request's canvas either, and
+    // NOT padded to it: a reference does not bind the generated geometry.
+    let expected_height = (1_032_192.0f64 * 900.0 / 1600.0).sqrt().min(768.0);
+    assert!(
+        f64::from(wide_frames[0].height) <= expected_height
+            && expected_height - f64::from(wide_frames[0].height) <= 1.0,
+        "the short edge must land on the engine's own area-constrained value ~{expected_height:.0}, \
+         got {}",
+        wide_frames[0].height
+    );
+    assert!(
+        u64::from(wide_frames[0].width) * u64::from(wide_frames[0].height) <= 1_032_192,
+        "a decoded reference must land inside the engine's canvas area budget — {}x{} is {} px",
+        wide_frames[0].width,
+        wide_frames[0].height,
+        u64::from(wide_frames[0].width) * u64::from(wide_frames[0].height)
+    );
+    let expected_width = (1600.0 * f64::from(wide_frames[0].height) / 900.0f64).round() as u32;
+    assert!(
+        wide_frames[0].width.abs_diff(expected_width) <= 1,
+        "the aspect ratio must survive the extraction untouched — {}x{} against an expected \
+         ~{expected_width}x{expected_height:.0}. A `pad=` recipe would have produced the request's \
+         canvas with bars, which renders and conditions on the bars",
+        wide_frames[0].width,
+        wide_frames[0].height
+    );
+    assert!(
+        wide_frames
+            .iter()
+            .all(|frame| frame.width == wide_frames[0].width
+                && frame.height == wide_frames[0].height),
+        "every frame of one clip shares one size"
+    );
+    // Frame ORDER. `luma(i) = 10 + 9i` over 24 frames spans 10..217 in steps of 9, so an H.264
+    // round trip cannot reorder two frames without inverting the ramp. Asserted as a strict
+    // increase with a tolerance well inside one step.
+    let ramp: Vec<i32> = wide_frames
+        .iter()
+        .map(|frame| i32::from(frame.pixels[frame.pixels.len() / 2]))
+        .collect();
+    for pair in ramp.windows(2) {
+        assert!(
+            pair[1] - pair[0] > 4,
+            "the frames must arrive in clip order — a shuffled motion reference still renders a \
+             plausible clip, so nothing downstream would notice: {ramp:?}"
+        );
+    }
+    let carried = wide_audio.expect("a clip with a soundtrack conditions on it");
+    assert_eq!(
+        carried.sample_rate, 32_000,
+        "the engine ships NO resampler and refuses anything but its audio VAE's rate at its own \
+         boundary, so the caller has to land on it exactly"
+    );
+    assert_eq!(carried.channels, 2);
+    assert!(
+        !carried.samples.is_empty(),
+        "an empty waveform is refused by `Ref2VaReferences::new`"
+    );
+    // Cut to the span of the picture that was actually kept, not left at the source's length: the
+    // engine encodes the whole track. 24 frames at 24 fps is 1 s; allow a frame of slop either way.
+    let seconds = carried.samples.len() as f64 / 2.0 / 32_000.0;
+    assert!(
+        (seconds - 1.0).abs() < 0.1,
+        "the soundtrack must be bounded by the picture it accompanies, got {seconds:.3} s against \
+         1.000 s of frames"
+    );
+
+    // --- clip 2: truncation, of the picture AND of the soundtrack with it ----------------------
+    let (long_frames, long_fps, long_audio) = &clips[1];
+    assert_eq!(*long_fps, 24.0);
+    assert!(
+        expected_frames < 200,
+        "the fixture must actually be longer than the render, or the truncation is unproved"
+    );
+    assert_eq!(
+        long_frames.len(),
+        expected_frames as usize,
+        "a clip longer than the render is cut to the render's own frame count — the engine \
+         truncates there too, and decoding the rest only to throw it away is the cheap half of the \
+         mistake"
+    );
+    // The soundtrack has to be cut WITH the picture. The engine encodes the whole track, so an
+    // untruncated one would condition 8.33 s of audio against 5.875 s of frames — and would pass
+    // any assertion written only against the frame count.
+    let long_carried = long_audio.expect("this fixture carries a soundtrack");
+    let long_seconds = long_carried.samples.len() as f64 / 2.0 / 32_000.0;
+    let picture_seconds = f64::from(expected_frames) / 24.0;
+    assert!(
+        (long_seconds - picture_seconds).abs() < 0.1,
+        "the soundtrack must be bounded by the picture that survived truncation — got \
+         {long_seconds:.3} s against {picture_seconds:.3} s of frames (the source holds 8.333 s)"
+    );
+
+    // --- clip 3: motion alone ------------------------------------------------------------------
+    let (_silent_frames, _silent_fps, silent_audio) = &clips[2];
+    assert!(
+        silent_audio.is_none(),
+        "a silent source conditions on motion alone rather than on an invented waveform"
+    );
+
+    // The record has to say what happened: whether a clip's own soundtrack was conditioned on is
+    // decided from the source file, so it appears nowhere in the payload and nowhere in the output.
+    assert_eq!(raw["minimaxH3Task"], json!("ref2va"));
+    assert_eq!(raw["minimaxH3ReferenceClips"], json!(3));
+    assert_eq!(
+        raw["minimaxH3ReferenceClipSoundtracks"],
+        json!(2),
+        "one of the three fixtures is silent — a constant here would pass against all of them"
+    );
+
+    // --- and the refusal that has to land BEFORE the weights ----------------------------------
+    // A clip too short to fill one merged conditioner group is refused by the engine too, but only
+    // from inside `encode_prompt_ref2va` — with the 66.7 GB conditioner already mapped. The probe's
+    // loader is the discriminator: an `is_err()` assertion alone would pass for a refusal that
+    // still paid for the load.
+    fixtures.block_on(stage_minimax_h3_clip_asset(
+        &store,
+        &project.id,
+        &project_path,
+        "mm_h3_clip_short",
+        160,
+        90,
+        6,
+        20,
+        false,
+    ));
+    let short = minimax_h3_request(
+        "minimax_h3_ref",
+        json!({
+            "projectId": project.id,
+            "duration": 5.2,
+            "fps": 24,
+            "sourceClipAssetIds": ["mm_h3_clip_short"],
+        }),
+    );
+    let short_probe = ArmProbe::default();
+    let message = match drive_minimax_h3_arm_in_project(
+        tiers.path(),
+        base.path(),
+        &short_probe,
+        &short,
+        &project_path,
+    ) {
+        Ok(_) => panic!("a clip under the conditioner floor cannot be conditioned on"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        message.contains("13 frames") && message.contains("No output was produced"),
+        "the refusal must name the floor and say nothing was rendered: {message}"
+    );
+    assert!(
+        short_probe.spec.lock().unwrap().is_none(),
+        "the refusal must land BEFORE the engine is loaded — the defect is knowable from the asset \
+         alone, and the alternative is paying for a 66.7 GB conditioner to be told so"
+    );
+}
+
+/// 🔴 **THE CHAIN.** A selected turbo variant reaches the engine as its own `(steps, video shift)`
+/// AND as a loaded adapter, and the base regime is byte-identical to what shipped before.
+///
+/// Both halves are required and neither is sufficient:
+///
+/// * **the recipe without the adapter** renders the BASE checkpoint on a 4-step schedule, which
+///   sc-18729 measured as visibly undercooked (motion 1.117 against the LoRA's 5.612) — a fast
+///   render of the wrong thing;
+/// * **the adapter without the recipe** is what sc-18725 actually shipped: a 692M-parameter residual
+///   stacked onto a 50-step render, slower than the base and off-distribution.
+///
+/// The `off` arm is the control. Without it, an arm that unconditionally forced `(4, 6.0)` would
+/// pass the `on` arm and destroy every non-turbo MiniMax-H3 render.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_selected_turbo_variant_changes_the_job_that_reaches_the_engine() {
+    let tiers = minimax_h3_tier_root("mm_turbo_", &["q4"], &["transformer", "transformer_ref"]);
+    let base = minimax_h3_base_root("mm_turbo_base_");
+
+    // --- turbo OFF: the base regime, unchanged ------------------------------------------------
+    let off_probe = ArmProbe::default();
+    let off = minimax_h3_request("minimax_h3", json!({}));
+    let (_decoded, off_raw) = drive_minimax_h3_arm(tiers.path(), base.path(), &off_probe, &off)
+        .expect("a plain t2va job runs");
+    let off_request = off_probe
+        .request
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the arm reached the engine");
+    assert_eq!(
+        (off_request.steps, off_request.scheduler_shift),
+        (None, None),
+        "with no accelerator the arm must pass NOTHING, so the engine's own 50 steps / shift 12.0 \
+         stand exactly as they did before sc-18726"
+    );
+    let off_spec = off_probe.spec.lock().unwrap().clone().expect("a load ran");
+    assert!(
+        off_spec.adapters.is_empty(),
+        "a job with no LoRAs must load none"
+    );
+    assert_eq!(off_raw["minimaxH3Turbo"], json!("off"));
+    assert_eq!(off_raw["effectiveSteps"], Value::Null);
+    assert_eq!(off_raw["effectiveSchedulerShift"], Value::Null);
+
+    // --- turbo ON: the 768p variant's OWN recipe ----------------------------------------------
+    let on_probe = ArmProbe::default();
+    let lora = minimax_h3_turbo_lora(tiers.path(), "minimax_h3_turbo_4step_768p");
+    let lora_path = lora["path"].as_str().expect("a staged path").to_owned();
+    let on = minimax_h3_request("minimax_h3", json!({ "loras": [lora] }));
+    let (_decoded, on_raw) = drive_minimax_h3_arm(tiers.path(), base.path(), &on_probe, &on)
+        .expect("a t2va job carrying the turbo adapter runs");
+    let on_request = on_probe
+        .request
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the arm reached the engine");
+    assert_eq!(
+        on_request.steps,
+        Some(4),
+        "the variant's own NFE must reach the engine — 4, not the model's default 50, and not the \
+         5 a SceneWorks-side +1 would produce (the engine appends the terminal sigma itself)"
+    );
+    assert_eq!(
+        on_request.scheduler_shift,
+        Some(6.0),
+        "the variant's own VIDEO shift must reach the engine — 6.0, the one published variant that \
+         differs from the base 12.0, so this cannot pass against a hardcoded default"
+    );
+    let on_spec = on_probe.spec.lock().unwrap().clone().expect("a load ran");
+    assert_eq!(
+        on_spec
+            .adapters
+            .iter()
+            .map(|adapter| adapter.path.clone())
+            .collect::<Vec<_>>(),
+        vec![std::fs::canonicalize(&lora_path).expect("the staged adapter canonicalizes")],
+        "the adapter itself must reach the LOAD — before sc-18726 the arm passed `Vec::new()` and \
+         every selected MiniMax-H3 LoRA was silently dropped here"
+    );
+    assert_eq!(
+        on_raw["minimaxH3Turbo"],
+        json!("minimax_h3_turbo_4step_768p")
+    );
+    assert_eq!(on_raw["effectiveSteps"], json!(4));
+    assert_eq!(on_raw["effectiveSchedulerShift"], json!(6.0));
+    assert_eq!(
+        on_raw["effectiveAudioSchedulerShift"],
+        json!(3.0),
+        "the asset records the WHOLE schedule — the audio shift the engine is fixed at, not just \
+         the video half the request can move"
+    );
+}
+
+/// Each published variant carries its OWN recipe to the engine — the property a single constant, a
+/// format sniff, or a `role: accelerator` boolean could not have.
+///
+/// The four files disagree pairwise: the two 4-step fl2v ones share an NFE and differ on shift, the
+/// 8-step one shares the shift with `4step_v01` and differs on NFE. Any implementation that
+/// collapses the set to one recipe fails at least one arm.
+#[cfg(target_os = "macos")]
+#[test]
+fn every_turbo_variant_drives_its_own_recipe_to_the_engine() {
+    let tiers = minimax_h3_tier_root("mm_variants_", &["q4"], &["transformer", "transformer_ref"]);
+    let base = minimax_h3_base_root("mm_variants_base_");
+    // The ref2v arm is driven at the ENGINE SEAM like the other three, not through the pure sampling
+    // function: the ref2v adapter is the one variant paired with the OTHER DiT partition, so the
+    // partition it is unique to is exactly the one a function-level assertion would leave unproved.
+    // That takes a real reference on disk, because `resolve_minimax_h3_conditioning` decodes one
+    // before the arm ever builds a `GenerationRequest`.
+    let (project_id, project_path, reference_id) =
+        stage_minimax_h3_reference_project(&minimax_h3_data_dir(tiers.path()));
+    for (model, lora_id, steps, shift) in [
+        ("minimax_h3", "minimax_h3_turbo_4step_768p", 4u32, 6.0f32),
+        ("minimax_h3", "minimax_h3_turbo_8step", 8, 12.0),
+        ("minimax_h3", "minimax_h3_turbo_4step_v01", 4, 12.0),
+        ("minimax_h3_ref", "minimax_h3_ref2v_turbo_4step", 4, 12.0),
+    ] {
+        let lora = minimax_h3_turbo_lora(tiers.path(), lora_id);
+        // The reference partition needs a reference, or the SHAPE validator refuses before the
+        // recipe is ever consulted.
+        let extra = if model == "minimax_h3_ref" {
+            json!({
+                "loras": [lora],
+                "projectId": project_id,
+                "referenceAssetIds": [reference_id],
+            })
+        } else {
+            json!({ "loras": [lora] })
+        };
+        let request = minimax_h3_request(model, extra);
+        let probe = ArmProbe::default();
+        drive_minimax_h3_arm_in_project(tiers.path(), base.path(), &probe, &request, &project_path)
+            .unwrap_or_else(|error| panic!("{lora_id} renders: {error}"));
+        let engine = probe
+            .request
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the arm reached the engine");
+        assert_eq!(
+            (engine.steps, engine.scheduler_shift),
+            (Some(steps), Some(shift)),
+            "{lora_id} must drive its OWN (steps, video shift) to the engine"
+        );
+        // The ref2v arm additionally has to have gone through the REFERENCE path to get here, or
+        // the partition this variant is distilled for is still unproved at the seam. The
+        // conditioning the arm built is what discriminates.
+        if model == "minimax_h3_ref" {
+            assert!(
+                engine
+                    .conditioning
+                    .iter()
+                    .any(|item| matches!(item, gen_core::Conditioning::Reference { .. })),
+                "the ref2v arm must reach the engine carrying its reference, not as a bare t2va \
+                 request that happened to resolve the same recipe: {:?}",
+                engine.conditioning
+            );
+        }
+    }
+}
+
+/// An explicit `advanced.steps` beats the variant's own count; the trained SHIFT does not yield.
+///
+/// Upstream lists the 8-step adapter as "8 / 4", so a caller who knows the checkpoint may run it
+/// shorter — honouring the knob rather than seizing it, exactly as `scail2_sampling` does. The shift
+/// is the opposite call and is asserted here so the asymmetry is a decision rather than an accident:
+/// a distilled checkpoint sampled at a shift it was not distilled for is the off-distribution render
+/// the recipe exists to prevent, so `advanced.schedulerShift` loses to the variant.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_explicit_step_override_wins_over_the_variants_count_but_the_shift_does_not() {
+    let tiers = minimax_h3_tier_root("mm_override_", &["q4"], &["transformer", "transformer_ref"]);
+    let base = minimax_h3_base_root("mm_override_base_");
+    let probe = ArmProbe::default();
+    let lora = minimax_h3_turbo_lora(tiers.path(), "minimax_h3_turbo_8step");
+    // 6 is neither the variant's 8, nor the model default 50, nor the other variants' 4 — so no
+    // value elsewhere in the system can produce this number by accident. 9.0 is likewise not the
+    // variant's/engine's 12.0 nor the 768p variant's 6.0.
+    let request = minimax_h3_request(
+        "minimax_h3",
+        json!({ "loras": [lora], "advanced": { "steps": 6, "schedulerShift": 9.0 } }),
+    );
+
+    drive_minimax_h3_arm(tiers.path(), base.path(), &probe, &request).expect("the job runs");
+    let engine = probe
+        .request
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the arm reached the engine");
+    assert_eq!(
+        engine.steps,
+        Some(6),
+        "an explicit step count must win over the variant's own"
+    );
+    assert_eq!(
+        engine.scheduler_shift,
+        Some(12.0),
+        "the variant's TRAINED shift must win over an explicit one — 9.0 must not reach the engine"
+    );
+}
+
+/// Two accelerators asking for different schedules are refused BEFORE anything loads.
+///
+/// A render has one schedule; silently picking the first would run a job at numbers the user can see
+/// they did not choose. `probe.loaded()` makes this a pre-load assertion — the refusal must not cost
+/// a 53 GB text-encoder load.
+#[cfg(target_os = "macos")]
+#[test]
+fn two_conflicting_turbo_variants_are_refused_before_the_load() {
+    let tiers = minimax_h3_tier_root("mm_conflict_", &["q4"], &["transformer", "transformer_ref"]);
+    let base = minimax_h3_base_root("mm_conflict_base_");
+    let probe = ArmProbe::default();
+    let request = minimax_h3_request(
+        "minimax_h3",
+        json!({
+            "loras": [
+                minimax_h3_turbo_lora(tiers.path(), "minimax_h3_turbo_4step_768p"),
+                minimax_h3_turbo_lora(tiers.path(), "minimax_h3_turbo_8step"),
+            ]
+        }),
+    );
+
+    let message = drive_minimax_h3_arm(tiers.path(), base.path(), &probe, &request)
+        .err()
+        .expect("two different schedules cannot both govern one render")
+        .to_string();
+    assert!(
+        message.contains("MiniMax-H3 Turbo (4-step, 768p)")
+            && message.contains("MiniMax-H3 Turbo (8-step)"),
+        "the refusal names both adapters: {message}"
+    );
+    assert!(
+        !probe.loaded(),
+        "a contradictory selection must be refused before the load"
+    );
+}
+
+/// A plain (non-accelerator) MiniMax-H3 LoRA loads its weights and leaves the schedule alone.
+///
+/// The complement of the chain test: it proves the adapter plumbing is genuinely general rather than
+/// a turbo-only special case, and that the recipe keys on the catalog id rather than on "any LoRA is
+/// present".
+#[cfg(target_os = "macos")]
+#[test]
+fn a_plain_minimax_h3_lora_loads_without_changing_the_schedule() {
+    let tiers = minimax_h3_tier_root("mm_plain_", &["q4"], &["transformer", "transformer_ref"]);
+    let base = minimax_h3_base_root("mm_plain_base_");
+    let probe = ArmProbe::default();
+    let lora = minimax_h3_turbo_lora(tiers.path(), "some_user_style_lora");
+    let request = minimax_h3_request("minimax_h3", json!({ "loras": [lora] }));
+
+    let (_decoded, raw) = drive_minimax_h3_arm(tiers.path(), base.path(), &probe, &request)
+        .expect("a job carrying a plain LoRA runs");
+    let engine = probe
+        .request
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the arm reached the engine");
+    assert_eq!(
+        (engine.steps, engine.scheduler_shift),
+        (None, None),
+        "a LoRA with no declared recipe must not move the schedule"
+    );
+    let spec = probe.spec.lock().unwrap().clone().expect("a load ran");
+    assert_eq!(
+        spec.adapters.len(),
+        1,
+        "…and must still be LOADED — the plumbing is general, not turbo-only"
+    );
+    assert_eq!(raw["minimaxH3Turbo"], json!("off"));
 }

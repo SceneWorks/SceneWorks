@@ -3023,7 +3023,7 @@ fn person_replace_job(payload: Value) -> JobSnapshot {
 }
 
 #[test]
-fn scail2_candle_separates_source_ready_tiers_from_the_pinned_descriptor_gate() {
+fn scail2_candle_separates_source_ready_tiers_from_product_acceptance() {
     // Standalone character animation: scail2_14b + animate_character + a reference + a driving clip.
     // The reference can be referenceAssetIds, a bare referenceAssetId, or the i2v sourceAssetId.
     for reference in [
@@ -3094,8 +3094,8 @@ fn scail2_candle_separates_source_ready_tiers_from_the_pinned_descriptor_gate() 
         "loras": [{ "name": "scail2-dpo" }]
     }))));
 
-    // The resolver can consume exact packaged q4/q8 directories, but these are source-readiness
-    // proofs only until the current runtime capability artifact is regenerated from the final pin.
+    // The resolver can consume exact packaged q4/q8 directories and the repaired runtime facts
+    // advertise both tiers, but these remain source/engine proofs until terminal product acceptance.
     for (bits, mode_payload) in [
         (
             4,
@@ -3122,6 +3122,19 @@ fn scail2_candle_separates_source_ready_tiers_from_the_pinned_descriptor_gate() 
             scail2_candle_source_tier_eligible(&payload),
             "q{bits} must retain its exact source package: {payload:?}"
         );
+        let mode = if payload.contains_key("mode") {
+            "animate_character"
+        } else {
+            "replace_person"
+        };
+        assert!(
+            crate::jobs_store::routing::matrix::candle_video_descriptor_supports_quant(
+                "scail2_14b",
+                mode,
+                if bits == 4 { "q4" } else { "q8" },
+            ),
+            "the authoritative repaired Candle facts must retain q{bits}: {payload:?}"
+        );
         let production_eligible = if payload.contains_key("mode") {
             scail2_animate_candle_eligible("scail2_14b", &payload)
         } else {
@@ -3129,7 +3142,7 @@ fn scail2_candle_separates_source_ready_tiers_from_the_pinned_descriptor_gate() 
         };
         assert!(
             !production_eligible,
-            "q{bits} must remain closed until the pinned descriptor advertises it: {payload:?}"
+            "q{bits} must remain closed until terminal product acceptance: {payload:?}"
         );
     }
 }

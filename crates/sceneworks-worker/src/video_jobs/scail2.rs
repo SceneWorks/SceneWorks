@@ -15,6 +15,11 @@ use super::{
     vace::{load_source_video_frames, replacement_status_value, resolve_character_references},
     wan::local_mlx_dir,
 };
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+use sceneworks_core::video_request::MAX_SCAIL2_REFERENCE_CHARACTERS;
 
 // ---------------------------------------------------------------------------
 // Real MLX SCAIL-2 generation (macOS, via mlx-gen-scail2, epic 5439 / sc-5448): end-to-end character
@@ -257,6 +262,85 @@ pub(super) fn scail2_engine_video_mode(mode: &str) -> &'static str {
     }
 }
 
+/// Segment every SCAIL-2 character separately, keeping the caller's order and checking the
+/// heartbeat-owned cancellation flag between references. A single all-images SAM3 invocation
+/// would blur reference association and could continue through five expensive encodes after a
+/// cancellation; the engine instead receives a strict image/mask pair for each character.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn segment_scail2_references<F>(
+    references: Vec<Image>,
+    cancel: &gen_core::CancelFlag,
+    mut segment_one: F,
+) -> WorkerResult<Vec<(Image, Image)>>
+where
+    F: FnMut(&Image, &gen_core::CancelFlag) -> WorkerResult<Image>,
+{
+    if references.is_empty() {
+        return Err(WorkerError::InvalidPayload(
+            "SCAIL-2 Animate Character requires at least one reference character image.".to_owned(),
+        ));
+    }
+    if references.len() > MAX_SCAIL2_REFERENCE_CHARACTERS {
+        return Err(WorkerError::InvalidPayload(format!(
+            "SCAIL-2 Animate Character supports at most {MAX_SCAIL2_REFERENCE_CHARACTERS} reference characters."
+        )));
+    }
+
+    let mut pairs = Vec::with_capacity(references.len());
+    for reference in references {
+        crate::person_segment_sam3_common::check_segment_canceled(Some(cancel))?;
+        let mask = segment_one(&reference, cancel)?;
+        crate::person_segment_sam3_common::check_segment_canceled(Some(cancel))?;
+        pairs.push((reference, mask));
+    }
+    Ok(pairs)
+}
+
+/// Build the strict SCAIL-2 conditioned-input grammar: ordered `Reference`, `Mask` pairs for
+/// every character, followed by the driving `ControlClip`. In particular, do not use the generic
+/// image-only `MultiReference` carrier: it cannot associate each identity image with the color mask
+/// SCAIL-2 must encode alongside it.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn scail2_animate_conditioning(
+    reference_pairs: Vec<(Image, Image)>,
+    driving: Vec<Image>,
+    driving_mask: Vec<Image>,
+) -> WorkerResult<Vec<Conditioning>> {
+    if reference_pairs.is_empty() {
+        return Err(WorkerError::InvalidPayload(
+            "SCAIL-2 Animate Character requires at least one reference character image.".to_owned(),
+        ));
+    }
+    if reference_pairs.len() > MAX_SCAIL2_REFERENCE_CHARACTERS {
+        return Err(WorkerError::InvalidPayload(format!(
+            "SCAIL-2 Animate Character supports at most {MAX_SCAIL2_REFERENCE_CHARACTERS} reference characters."
+        )));
+    }
+
+    let mut conditioning = Vec::with_capacity(reference_pairs.len() * 2 + 1);
+    for (reference, mask) in reference_pairs {
+        conditioning.push(Conditioning::Reference {
+            image: reference,
+            strength: None,
+        });
+        conditioning.push(Conditioning::Mask { image: mask });
+    }
+    conditioning.push(Conditioning::ControlClip {
+        frames: driving,
+        mask: driving_mask,
+        masking_strength: 1.0,
+        start_frame: 0,
+        mode: ReplacementMode::default(),
+    });
+    Ok(conditioning)
+}
+
 /// Resolve a SCAIL-2 request into the engine conditioning: load the reference character image and the
 /// driving clip, segment both with native SAM3 (every person → a palette color), paint the color-coded
 /// masks (animation background convention), and assemble strict ordered `Reference`, `Mask` pairs
@@ -340,7 +424,7 @@ pub(super) async fn resolve_scail2_conditioning(
         settings,
         &job.id,
         move |flag| {
-            super::segment_scail2_references(references, &flag, |reference, flag| {
+            segment_scail2_references(references, &flag, |reference, flag| {
                 let masks = crate::person_segment_sam3::segment_all_persons_in_memory(
                     &rm,
                     &rt,

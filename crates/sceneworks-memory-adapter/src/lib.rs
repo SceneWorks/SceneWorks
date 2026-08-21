@@ -9,7 +9,7 @@ use std::io::{self, Read};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const INFERENCE_PIN: &str = "c3bfb064843f517abfe65660be57456214982770";
+pub const INFERENCE_PIN: &str = "4013049764172ee7dc707101c7da8c83c1483f2d";
 pub const QWEN_REPOSITORY: &str = "SceneWorks/qwen-image-mlx";
 pub const FLUX2_REPOSITORY: &str = "SceneWorks/flux2-dev-mlx";
 pub const KREA_REPOSITORY: &str = "SceneWorks/krea-2-turbo-mlx";
@@ -19,6 +19,18 @@ pub const Z_IMAGE_REPOSITORY: &str = "SceneWorks/z-image-turbo-mlx";
 /// hard load-time requirement of the pinned provider, not a fallback, so a capture resolves TWO
 /// roots under this one repository: the numeric tier and `gemma`.
 pub const LTX_REPOSITORY: &str = "SceneWorks/ltx-2.3-mlx";
+/// The `mlx:minimax_h3` TIERED artifact (sc-18663). Unlike every repository above it, this rehost
+/// is **not sufficient on its own**: `mlx_gen_minimax_h3::model::load` probes `vae/`, `audio_vae/`,
+/// `tokenizer/` and `FL2VA/audio_vae/` under the spec's own weights root, and this rehost publishes
+/// none of them — it carries only the per-tier `transformer/`, `transformer_ref/` and (for q4/q8)
+/// `text_encoder/`. A capture therefore resolves TWO artifact triples, this one and
+/// [`MINIMAX_UPSTREAM_REPOSITORY`], and the record's loadability fingerprint names both.
+pub const MINIMAX_REPOSITORY: &str = "SceneWorks/minimax-h3-mlx";
+/// The upstream `minimax_h3` snapshot the shared partitions come from. It is a DIFFERENT repository
+/// id from [`MINIMAX_REPOSITORY`] with no tier sub-directory, so it is validated through
+/// [`validate_huggingface_revision_root`] rather than being forced through the rehost's
+/// variant-suffixed validator.
+pub const MINIMAX_UPSTREAM_REPOSITORY: &str = "MiniMaxAI/MiniMax-H3";
 pub const COMPARISON_OUTPUT_BIAS_PARAMETER: &str = "comparisonOutputBias";
 /// Persisted-JSON spellings of `gen_core::LoadShape`. Every emitted fragment must state the
 /// materialization shape its run actually used; the harness rejects a fragment that omits it, and
@@ -414,21 +426,58 @@ pub fn validate_huggingface_snapshot_root(
     variant: &str,
     expected_repository: &str,
 ) -> Result<(), String> {
+    validate_snapshot_suffix(
+        canonical_root,
+        repository,
+        revision,
+        Some(variant),
+        expected_repository,
+    )
+}
+
+/// The variant-free twin of [`validate_huggingface_snapshot_root`]: the canonical root must be the
+/// snapshot directory ITSELF, `.../models--<owner>--<name>/snapshots/<revision>`.
+///
+/// Added for `mlx:minimax_h3` (sc-18663), whose shared partitions live directly under an upstream
+/// snapshot that has no tier sub-directory. Forcing that root through the variant validator would
+/// mean inventing a variant component the publisher does not have, so the suffix that is actually
+/// checked is the one the artifact actually carries.
+pub fn validate_huggingface_revision_root(
+    canonical_root: &Path,
+    repository: &str,
+    revision: &str,
+    expected_repository: &str,
+) -> Result<(), String> {
+    validate_snapshot_suffix(
+        canonical_root,
+        repository,
+        revision,
+        None,
+        expected_repository,
+    )
+}
+
+fn validate_snapshot_suffix(
+    canonical_root: &Path,
+    repository: &str,
+    revision: &str,
+    variant: Option<&str>,
+    expected_repository: &str,
+) -> Result<(), String> {
     validate_artifact_identity(repository, revision, expected_repository)?;
     let repository_component = format!("models--{}", expected_repository.replace('/', "--"));
-    let expected = [
-        repository_component.as_str(),
-        "snapshots",
-        revision,
-        variant,
-    ];
+    let mut expected = vec![repository_component.as_str(), "snapshots", revision];
+    expected.extend(variant);
     let components = canonical_root
         .components()
         .filter_map(|component| component.as_os_str().to_str())
         .collect::<Vec<_>>();
     if !components.ends_with(&expected) {
+        let suffix = variant
+            .map(|variant| format!("/{variant}"))
+            .unwrap_or_default();
         return Err(format!(
-            "artifact root must end with /{repository_component}/snapshots/{revision}/{variant}"
+            "artifact root must end with /{repository_component}/snapshots/{revision}{suffix}"
         ));
     }
     Ok(())
@@ -983,6 +1032,80 @@ mod tests {
             revision,
             "q8",
             SDXL_REPOSITORY
+        )
+        .is_err());
+    }
+
+    /// The `mlx:minimax_h3` capture resolves TWO artifact triples, and the two are validated by
+    /// DIFFERENT shapes: the rehost carries a tier sub-directory, the upstream snapshot does not.
+    /// Each validator must refuse the other's root, or a capture could stage the shared partitions
+    /// out of the tier tree (or the DiT out of the upstream tree) and still pass identity.
+    #[test]
+    fn minimax_identity_separates_the_tiered_rehost_from_the_upstream_snapshot() {
+        let rehost_revision = "137ce668c55a20bc0935fd1cf2a3de8448abb7f4";
+        let upstream_revision = "939557dc319dd91227e30195a763f272ba7f8765";
+        let tier_root = Path::new(
+            "/cache/models--SceneWorks--minimax-h3-mlx/snapshots/137ce668c55a20bc0935fd1cf2a3de8448abb7f4/q4",
+        );
+        let upstream_root = Path::new(
+            "/cache/models--MiniMaxAI--MiniMax-H3/snapshots/939557dc319dd91227e30195a763f272ba7f8765",
+        );
+
+        assert!(validate_huggingface_snapshot_root(
+            tier_root,
+            MINIMAX_REPOSITORY,
+            rehost_revision,
+            "q4",
+            MINIMAX_REPOSITORY
+        )
+        .is_ok());
+        assert!(validate_huggingface_revision_root(
+            upstream_root,
+            MINIMAX_UPSTREAM_REPOSITORY,
+            upstream_revision,
+            MINIMAX_UPSTREAM_REPOSITORY
+        )
+        .is_ok());
+
+        // The upstream snapshot is not a tier root, and the tier root is not a snapshot root.
+        assert!(validate_huggingface_revision_root(
+            tier_root,
+            MINIMAX_REPOSITORY,
+            rehost_revision,
+            MINIMAX_REPOSITORY
+        )
+        .is_err());
+        assert!(validate_huggingface_snapshot_root(
+            upstream_root,
+            MINIMAX_UPSTREAM_REPOSITORY,
+            upstream_revision,
+            "bf16",
+            MINIMAX_UPSTREAM_REPOSITORY
+        )
+        .is_err());
+
+        // Neither repository may stand in for the other, and the tier component is exact.
+        assert!(validate_huggingface_revision_root(
+            upstream_root,
+            MINIMAX_REPOSITORY,
+            upstream_revision,
+            MINIMAX_REPOSITORY
+        )
+        .is_err());
+        assert!(validate_huggingface_snapshot_root(
+            tier_root,
+            MINIMAX_REPOSITORY,
+            rehost_revision,
+            "q8",
+            MINIMAX_REPOSITORY
+        )
+        .is_err());
+        // A component-staging path is one level too deep for either validator.
+        assert!(validate_huggingface_revision_root(
+            &upstream_root.join("text_encoder"),
+            MINIMAX_UPSTREAM_REPOSITORY,
+            upstream_revision,
+            MINIMAX_UPSTREAM_REPOSITORY
         )
         .is_err());
     }

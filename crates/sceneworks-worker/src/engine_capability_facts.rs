@@ -615,6 +615,8 @@ fn conditioning_label(kind: gen_core::ConditioningKind) -> &'static str {
         gen_core::ConditioningKind::ControlClip => "control_clip",
         gen_core::ConditioningKind::VideoSync => "video_sync",
         gen_core::ConditioningKind::ConversationHistory => "conversation_history",
+        // sc-17149's third video conditioning mechanism, spelled the way gen-core's own
+        // request-vocabulary serializes it (`conditioning.reference_video.fps`).
         gen_core::ConditioningKind::ReferenceVideo => "reference_video",
     }
 }

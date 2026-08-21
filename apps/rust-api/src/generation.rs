@@ -742,12 +742,10 @@ pub(crate) async fn create_video_job(
     ApiJson(payload): ApiJson<VideoJobRequest>,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
     validate_video_job(&payload)?;
-    let job_type = match payload.mode.as_str() {
-        "extend_clip" => JobType::VideoExtend,
-        "video_bridge" => JobType::VideoBridge,
-        "replace_person" => JobType::PersonReplace,
-        _ => JobType::VideoGenerate,
-    };
+    // The mode → job-type mapping lives in core (sc-19570) because the UI-gating probes must build
+    // the SAME pair this route enqueues before asking the claim predicates about it. Two copies
+    // would let the oracle answer about a job type that is never created.
+    let job_type = video_job_type_for_mode(payload.mode.as_str());
     let requested_gpu = payload.requested_gpu.clone();
     let project_id = Some(payload.project_id.clone());
     let project_name = payload.project_name.clone();
@@ -831,6 +829,46 @@ pub(crate) async fn create_video_job(
             job_payload.insert("duration".to_owned(), contract_number(duration));
         }
     }
+    // The model's declared `limits.hardMinSteps` AND `limits.steps`, enforced at enqueue (sc-19426,
+    // sc-19502 — one call, because `steps_limit_error` owns both). A FOURTH axis: the
+    // three gates around it bound how long the clip is and how much conditioning media it carries,
+    // never how it is SAMPLED — so a MiniMax-H3 request at exactly its 5.1667s floor and its one
+    // advertised 24 fps, with no references at all, clears every one of them carrying
+    // `advanced.steps = 1` — a single Euler jump from pure noise, which is not a fast draft. Until
+    // this key existed the constraint could only be written as a manifest comment, and a comment
+    // enforces nothing.
+    //
+    // The unit is MODEL EVALUATIONS everywhere on this seam — `advanced.steps`, `defaults.steps`,
+    // `limits.hardMinSteps`, `limits.steps`, and each turbo adapter's declared `sampling.steps`. The
+    // MiniMax-H3 engine appends its own terminal sigma grid point (`evaluations + 1`), so no ±1 is
+    // applied on this side of the boundary (sc-18726). A gate that read grid points while the worker
+    // passed evaluations would be off by one on every model in the family.
+    //
+    // Rejected, never clamped, for the duration cap's reason: raising the step count for the caller
+    // doubles the compute they asked for with no error and no signal.
+    //
+    // sc-19502 widened this from a floor to also cover an EXACT menu, and the same call site serves
+    // both. LTX-2.3 is distilled — 8 baked sigma waypoints, no other renderable count — so an
+    // `advanced.steps = 30` request used to 400 late from the candle engine and, on mlx, be accepted
+    // and silently rendered at 8 anyway. Both lanes now refuse it, and this gate refuses it here
+    // first, before the job is dispatched.
+    //
+    // Same placement rationale as the three gates above — keyed off the post-preset `model_id` and
+    // the resolved entry, with the count read off `job_payload` so the gate judges the value
+    // actually enqueued. Unlike duration and fps there is no write-back and no resolved default:
+    // `advanced` is a verbatim passthrough map, so an omitted `steps` means the engine picks, which
+    // is not a value this gate may invent (see `requested_steps`).
+    if let Some(entry) = model_manifest_entry.as_object() {
+        if let Some(steps) = job_payload
+            .get("advanced")
+            .and_then(Value::as_object)
+            .and_then(requested_steps)
+        {
+            if let Some(message) = steps_limit_error(&model_id, steps, entry) {
+                return Err(ApiError::bad_request(message));
+            }
+        }
+    }
     // The model's declared `defaults.fps` + `limits.fps`, the other half of `frames = duration ×
     // fps` (sc-12347). The cap above closes the *duration* axis only: a legally-5s mochi_1 request
     // (cap 5 ✓) at 60 fps is 301 frames — double the shipped default's 151 — and `301 % 6 == 1`
@@ -848,6 +886,33 @@ pub(crate) async fn create_video_job(
     // resolved entry (reading either from the DTO is sc-12300). The RESOLVED rate is written back so
     // the enqueued payload records what was actually rendered — the worker re-resolves identically
     // from the same entry, but a recipe replay reads this row.
+    // The model's declared reference-media caps (sc-17160) — `limits.maxReferenceAssets` /
+    // `maxSourceClipAssets` / `maxReferenceAudioAssets` / `maxCombinedReferenceAssets`. This is the
+    // BINDING half of the caps; `validate_video_job`'s three constants are only the payload-sanity
+    // outer bound, for the same reason `1..=30` is for duration — that gate runs before the model is
+    // known, and a recipe preset can still replace it (sc-12300).
+    //
+    // It is what makes raising the image blanket 8 -> 9 for MiniMax-H3 safe for every OTHER video
+    // model: `reference_caps` defaults to 8 images / 8 clips / 0 audio / no combined ceiling, so a
+    // family that declares nothing behaves byte-for-byte as it did before this key had a reader — a
+    // 9th reference to bernini is still refused, just here instead of one layer up. A per-family cap
+    // rather than a global bump, which is what the "raising a shared constant affects every video
+    // model" warning on the story asks for.
+    //
+    // Same placement rationale as the duration and fps caps above: keyed off the post-preset
+    // `model_id` and the resolved entry. The counts come off the DTO, not `job_payload`, because no
+    // preset patches the id lists — they are the caller's media, verbatim.
+    if let Some(entry) = model_manifest_entry.as_object() {
+        if let Some(message) = reference_limit_error(
+            &model_id,
+            payload.reference_asset_ids.len(),
+            payload.source_clip_asset_ids.len(),
+            payload.reference_audio_asset_ids.len(),
+            entry,
+        ) {
+            return Err(ApiError::bad_request(message));
+        }
+    }
     if let Some(entry) = model_manifest_entry.as_object() {
         let fps = resolve_fps(job_payload.get("fps"), entry);
         if let Some(message) = fps_limit_error(&model_id, fps, entry) {
@@ -884,8 +949,55 @@ pub(crate) async fn create_video_job(
         Some(&catalogs),
     )
     .await?;
+    // **THE NO-LANE GATE (sc-19504).** Last, on the payload actually about to be enqueued, so it
+    // judges the post-preset model + the resolved geometry rather than the DTO (sc-12300) — and
+    // after the LoRA validation, because a rejected adapter is a better error than "no backend".
+    //
+    // Every gate above this one asks "is this request well-formed?". This one asks the different
+    // question that GH #2074, sc-15328 and sc-19504 all turned on: **will anything ever run it?**
+    // A video job no lane claims is not rejected and not failed — it sits `queued` /
+    // "Waiting for an available worker." forever, next to an idle worker, with no error and no
+    // terminal state. `wan_2_2_i2v_14b` + `first_last_frame` was exactly that: admitted by the
+    // `VIDEO_JOB_MODES` allow-list, advertised by the manifest, offered as a Video Studio tab
+    // off-Mac, and claimable by neither the MLX engine (the I2V-A14B descriptor declares
+    // `conditioning: [Reference]` — no `Keyframe`) nor the candle i2v gate (which requires
+    // `mode == "image_to_video"`). Withdrawing the capability stops the TAB; only this stops the
+    // HANG, because `VIDEO_JOB_MODES` is global and an MCP / raw-REST / recipe-replay caller can
+    // still name any admitted mode against any model.
+    //
+    // Derived from the real claim predicates `worker_supports_job` consults, never a restated list,
+    // so a routing change moves this gate with it — see
+    // `video_request_is_claimable_by_any_lane`, which also documents why this is neither a
+    // capability gate nor a platform gate.
+    if !video_request_is_claimable_by_any_lane(&job_type, &job_payload) {
+        let mode = job_payload
+            .get("mode")
+            .and_then(Value::as_str)
+            .unwrap_or(payload.mode.as_str());
+        return Err(ApiError::bad_request(format!(
+            "{model_id} cannot render the \"{mode}\" mode — no backend implements it, so this job \
+             would wait for a worker that will never claim it. Choose a mode this model lists in \
+             its capabilities, or a model that supports this one."
+        )));
+    }
+    // **THE PLATFORM HALF OF THE SAME DEFECT IS NOT DECIDED HERE (sc-19570).** The gate above is
+    // platform-independent and stays that way, so it admits a request some OTHER host's lane would
+    // claim — `ltx_2_3` + `image_to_video`, `wan_2_2` + `first_last_frame` and the rest of the
+    // measured MLX-only set. Off-Mac nothing can claim those, and the job used to hang forever.
+    //
+    // sc-19570 first refused them right here with a `400`, which made `POST /api/v1/video/jobs`
+    // answer differently on Windows than on macOS for byte-identical bodies. That was ruled out:
+    // **an HTTP contract is not platform-dependent.** The status code, response shape and error
+    // envelope are the same on every host; what a given machine can actually RENDER is an execution
+    // outcome, and it is reported as one.
+    //
+    // So the platform verdict moved into the job lifecycle —
+    // `JobsStore::fail_platform_unreachable_jobs`, run below and again on every claim — and the job
+    // reaches a terminal `failed` with a `platform_unreachable:` reason instead of sitting queued.
+    // Nothing about the two gates' ORDER or wording is coupled: this one still 400s a mode no lane
+    // serves anywhere, on every platform alike.
     let job = create_generation_job(
-        state,
+        state.clone(),
         job_type,
         project_id,
         project_name,
@@ -893,6 +1005,12 @@ pub(crate) async fn create_video_job(
         requested_gpu,
     )
     .await?;
+    // Terminate an unreachable job NOW rather than leaving it for the claim-time sweep. The sweep
+    // runs when a worker polls, and the deployments that most need this answer are exactly the ones
+    // where no worker ever will (an API-only container, a Windows host whose GPU worker is not
+    // installed). Waiting for a poll would reintroduce the hang this story exists to remove, so the
+    // response the caller already holds carries the terminal state.
+    let job = fail_job_if_platform_unreachable(&state, job).await?;
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
 
@@ -915,6 +1033,35 @@ pub(crate) fn ensure_video_model_available_on_platform(
         )));
     }
     Ok(())
+}
+
+/// Run the sc-19570 platform-reachability sweep and return `job` as it now stands: unchanged on a
+/// Mac and for any pair this host's lane serves, terminal `failed` when nothing here can ever claim
+/// it.
+///
+/// The status code does NOT depend on the verdict — the caller returns `201` either way, on every
+/// platform. Only the snapshot's `status` / `error` differ, which is what an execution outcome is.
+///
+/// It calls the same store method the claim path calls rather than duplicating the decision, so the
+/// two entry points can never disagree about which pairs are unreachable.
+async fn fail_job_if_platform_unreachable(
+    state: &AppState,
+    job: JobSnapshot,
+) -> Result<JobSnapshot, ApiError> {
+    let host_os = state.settings.host_os.clone();
+    let failed = store_call(state.clone(), move |store, _timeout| {
+        store.fail_platform_unreachable_jobs(&host_os)
+    })
+    .await?;
+    let mut result = job;
+    for failed_job in failed {
+        crate::jobs::emit_platform_unreachable(&failed_job);
+        publish(state, "job.updated", &failed_job);
+        if failed_job.id == result.id {
+            result = failed_job;
+        }
+    }
+    Ok(result)
 }
 
 /// `POST /api/v1/audio/jobs` — the SceneWorks Audio Studio job path (epic 13400 / sc-13404), the
@@ -995,16 +1142,30 @@ pub(crate) async fn create_audio_job(
 /// A resolved `duration` in the payload's `ContractNumber` (= `serde_json::Number`) shape: an
 /// integral value stays integral.
 ///
+/// `pub(crate)` only so `a_fractional_resolved_duration_keeps_the_manifests_own_decimal` can assert
+/// the encoding directly rather than through a whole enqueue round-trip.
+///
 /// The wire has always carried `"duration": 5`, not `5.0` — `ContractNumber` preserves whatever the
 /// caller sent, and every shipped `defaults.duration` is a whole number. Writing an `f32` straight
 /// in flattens that (`Value::from(5.0_f32)` is `5.0`), a gratuitous contract change that the
 /// payload-normalization tests correctly catch.
-fn contract_number(value: f32) -> Value {
+pub(crate) fn contract_number(value: f32) -> Value {
     if value.fract() == 0.0 {
-        Value::from(value as i64)
-    } else {
-        Value::from(value)
+        return Value::from(value as i64);
     }
+    // A FRACTIONAL default must round-trip to the decimal the manifest declared, not to the f32's
+    // binary expansion (sc-17159). `Value::from(f32)` widens to `f64`, so MiniMax-H3's
+    // `defaults.duration: 5.1667` was enqueued as `5.1666998863220215` — numerically harmless
+    // (`VideoRequest` reads it back as the same f32 and lands on frame 124) but not EQUAL to any of
+    // the fourteen values in that model's `limits.durations`, which is the menu the duration
+    // dropdown preselects against and the set a recipe replay is compared to. Every video model
+    // before this family had a whole-number default, so the fractional branch had never carried a
+    // shipped value.
+    //
+    // `f32::to_string` emits the shortest decimal that reproduces the f32 exactly ("5.1667"), so
+    // parsing that back yields the manifest's own number. The fallback keeps the historical shape
+    // for any value whose text somehow does not re-parse.
+    serde_json::from_str(&value.to_string()).unwrap_or_else(|_| Value::from(value))
 }
 
 /// The typed route that owns `job_type`, or `None` for every job type the generic

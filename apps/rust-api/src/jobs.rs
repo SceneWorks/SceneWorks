@@ -97,7 +97,7 @@ pub(crate) async fn create_job(
             payload.job_type.as_str()
         )));
     }
-    validate_raw_job_payload(&state, &payload.job_type, &payload.payload)?;
+    validate_raw_job_payload(&state, &payload.job_type, &payload.payload).await?;
     canonicalize_image_model_payload(&state, &payload.job_type, &mut payload.payload).await?;
     crate::model_sources::ensure_runtime_model_sources(
         &state,
@@ -132,6 +132,7 @@ pub(crate) async fn claim_job(
     let enforce_unsupported = state.settings.mlx_enforce_unsupported;
     let candle_required = state.settings.candle_required;
     let candle_enforce = state.settings.candle_enforce_unsupported;
+    let host_os = state.settings.host_os.clone();
     let (stale_sweep, claim_result) = store_call(state.clone(), move |store, timeout| {
         let stale_sweep = store.mark_stale_workers_interrupted(timeout)?;
         let claim_result = (|| {
@@ -149,6 +150,15 @@ pub(crate) async fn claim_job(
             let candle_stranded = store.fail_stranded_candle_jobs(candle_required, timeout)?;
             let candle_unsupported =
                 store.fail_unsupported_candle_jobs(candle_required, candle_enforce)?;
+            // Platform reachability (sc-19570): fail any queued video job whose mode no lane on
+            // THIS host can ever claim. Unlike the four sweeps above it takes no flag and no grace
+            // window — the gap is structural, not transient, and every one of those four declines
+            // to touch this job (the stranded sweeps bail the moment a live worker of their own
+            // kind exists; both unsupported sweeps default to warn), which is why it hung.
+            // `POST /api/v1/video/jobs` runs the same sweep inline so the hang closes even where no
+            // worker ever polls; this arm covers the raw `POST /api/v1/jobs`, retry and duplicate
+            // paths that never pass through that route.
+            let platform_unreachable = store.fail_platform_unreachable_jobs(&host_os)?;
             let (job, decision) = store.claim_next_job_routed(&payload.worker_id, mlx_required)?;
             Ok::<_, JobsStoreError>((
                 job,
@@ -157,14 +167,22 @@ pub(crate) async fn claim_job(
                 unsupported,
                 candle_stranded,
                 candle_unsupported,
+                platform_unreachable,
             ))
         })();
         Ok((stale_sweep, claim_result))
     })
     .await?;
     handle_stale_sweep(&state, &stale_sweep);
-    let (response, decision, stranded, unsupported, candle_stranded, candle_unsupported) =
-        claim_result?;
+    let (
+        response,
+        decision,
+        stranded,
+        unsupported,
+        candle_stranded,
+        candle_unsupported,
+        platform_unreachable,
+    ) = claim_result?;
     for job in &stranded {
         emit_mlx_unavailable(job);
         publish(&state, "job.updated", job);
@@ -179,6 +197,10 @@ pub(crate) async fn claim_job(
     }
     for (job, reason) in &candle_unsupported {
         emit_candle_unsupported(job, reason, "enforce");
+        publish(&state, "job.updated", job);
+    }
+    for job in &platform_unreachable {
+        emit_platform_unreachable(job);
         publish(&state, "job.updated", job);
     }
     if let Some(decision) = &decision {
@@ -210,6 +232,7 @@ pub(crate) async fn claim_job(
         || !unsupported.is_empty()
         || !candle_stranded.is_empty()
         || !candle_unsupported.is_empty()
+        || !platform_unreachable.is_empty()
     {
         // claim_job already ran mark_stale_workers_interrupted above (its own
         // transaction), so refresh the queue WITHOUT sweeping a second time
@@ -303,6 +326,33 @@ fn emit_candle_unavailable(job: &JobSnapshot) {
             "jobId": job.id,
             "jobType": job.job_type.as_str(),
             "model": model,
+            "reason": job.error,
+        }),
+    );
+}
+
+/// Emit the `platform_unreachable` terminal-routing event (sc-19570) — the System → Logs surface
+/// for a video job whose mode has no lane on this host at all.
+///
+/// A SEPARATE event from `mlx_unavailable` / `candle_unavailable` on purpose, not a fifth `mode` on
+/// one of them: those two say a worker of the right kind failed to check in, which is transient and
+/// operational ("confirm the worker is running"). This one says no such worker can exist here, and
+/// the only remedy is a different model or a different mode. Collapsing them would send an operator
+/// looking for a process that is not missing.
+///
+/// `pub(crate)` because the video enqueue route emits it too — `POST /api/v1/video/jobs` runs the
+/// same sweep inline so the terminal state does not wait on a worker poll.
+pub(crate) fn emit_platform_unreachable(job: &JobSnapshot) {
+    let model = job.payload.get("model").and_then(Value::as_str);
+    let mode = job.payload.get("mode").and_then(Value::as_str);
+    sceneworks_core::observability::emit_event(
+        tracing::Level::INFO,
+        json!({
+            "event": "platform_unreachable",
+            "jobId": job.id,
+            "jobType": job.job_type.as_str(),
+            "model": model,
+            "mode": mode,
             "reason": job.error,
         }),
     );
@@ -594,7 +644,7 @@ async fn validate_and_canonicalize_merged_generation_payload(
     if generation_job_model_is_path_backed(&job_type) {
         validate_payload_model(&merged)?;
     } else {
-        validate_raw_job_payload(state, &job_type, &merged)?;
+        validate_raw_job_payload(state, &job_type, &merged).await?;
     }
     let canonical_model_entry =
         canonicalize_image_model_payload(state, &job_type, &mut merged).await?;
@@ -932,7 +982,10 @@ fn dense_image_detail_error() -> ApiError {
 /// consume `modelId`, and `model_convert.outputDir` selects its final install location. Other raw
 /// job payloads may contain descriptive model metadata, but are deliberately absent unless that
 /// field selects a filesystem path.
-fn validate_raw_job_payload(
+///
+/// `async` since sc-17227: the licence-acknowledgment check on the fetching job types awaits the
+/// catalog. Both call sites (`create_job`, and the retry/duplicate path) must `.await` it.
+async fn validate_raw_job_payload(
     state: &AppState,
     job_type: &JobType,
     payload: &JsonObject,
@@ -948,6 +1001,49 @@ fn validate_raw_job_payload(
         JobType::ModelDownload | JobType::ModelImport | JobType::ModelConvert
     ) {
         validate_payload_model_id(payload)?;
+    }
+    // Licence-acknowledgment gate for the FETCHING job types (sc-17227), keyed on the payload's
+    // `repo`/`sourceUrl` rather than on a model id.
+    //
+    // This route enqueues `job_type` + payload VERBATIM: `run_model_download_job` reads `repo` /
+    // `files` / `revision` straight out of the payload with no catalog lookup anywhere in between,
+    // and `validate_payload_model_id` above only FORMAT-checks `modelId` — which the payload need
+    // not carry at all. So a `model_download` posted here fetched `MiniMaxAI/MiniMax-H3` and was
+    // answered 201 while the typed `POST /api/v1/models/:id/download` answered 403 for the same
+    // bytes. Rejecting the whole job type instead would break retry/duplicate, which re-validate a
+    // stored `model_download` payload through this same function; the repo-keyed check lets an
+    // already-authorized download retry (the typed route stamps `licenseAcknowledged` onto the job)
+    // while still refusing a fresh unacknowledged one.
+    //
+    // The LoRA download/import types are in the list because they take the same `repo` + `files`
+    // shape through `run_lora_download_job` and would otherwise be the identical bypass wearing a
+    // different `job_type`. `/loras/import` applies the SAME predicate on its own typed route
+    // (`queue_lora_import_job`) — it fetches whatever repo the caller names and never consults the
+    // LoRA catalog for it, so what the catalog happens to declare has no bearing on what that route
+    // can reach. `/loras/:id/download` now applies the SAME predicate on its own typed route too
+    // (`create_lora_download_job`, `apps/rust-api/src/loras.rs`). The reasoning previously recorded
+    // here for exempting it — that it resolves the repo FROM the catalog entry named by the path id
+    // and 404s an unknown id, so "a caller cannot point it at a repo" — answered a different
+    // question, and sc-17227 overturned it: who CHOOSES the repo is not who is bound by its licence.
+    // A catalog LoRA whose `source.repo` names a repo a `requiresLicenseAcknowledgment` model
+    // declares was fetched there with no acknowledgment, while the identical `lora_download` job
+    // posted to THIS route was answered 403 — the asymmetry, not the reachability, was the defect.
+    //
+    // `model_convert` is here because it is a fetching job type too, and less obviously so: it
+    // names no `repo`, but `resolve_convert_plan`'s LTX arm hands the payload's `baseRepo` to
+    // `ensure_ltx_upscaler_cached` → `ensure_hf_files_cached`, and `upscalerFile` is a GLOB — so
+    // `"**"` downloads the entire named repo. Adding the job type alone would have been inert;
+    // `ensure_job_payload_license_acknowledged` reads `baseRepo`/`sourceRepo` as well as `repo`
+    // (`LICENSE_GATED_REPO_PAYLOAD_KEYS`), which is what makes this line bite.
+    if matches!(
+        job_type,
+        JobType::ModelDownload
+            | JobType::ModelImport
+            | JobType::ModelConvert
+            | JobType::LoraDownload
+            | JobType::LoraImport
+    ) {
+        crate::models::ensure_job_payload_license_acknowledged(state, payload).await?;
     }
     if matches!(job_type, JobType::ModelConvert) {
         let output_dir = payload

@@ -7,7 +7,7 @@ import { buildSimpleAudioRequest } from "./simpleJobs.js";
 import { SimpleAudioDeck, SimpleTakeCard, takeGridColumns } from "./simpleAudioParts.jsx";
 import { useSimpleUi } from "./SimpleUiContext.js";
 import { useStudioState } from "./useStudioState.js";
-import { Chips, SheetSelect, StudioRunStatus, jobIsRunning, newestLocalJob } from "./studioParts.jsx";
+import { Chips, ModelDescription, SheetSelect, StudioRunStatus, jobIsRunning, newestLocalJob } from "./studioParts.jsx";
 
 // Simple Audio Studio (design handoff → Audio Studio redesign, epic 14361 / sc-14365).
 //
@@ -196,6 +196,9 @@ export function SimpleAudioStudio() {
           }))}
           value={selectedModel?.name ?? selectedModel?.id ?? "No audio model installed"}
         />
+        {/* sc-17162 — see the note in `studioParts.jsx`. `ui.description` had one reader in the
+            whole app (the advanced Models card), so Simple identified a model by NAME ALONE. */}
+        <ModelDescription model={selectedModel} />
         {mode === "speech" && voices.length ? (
           <SheetSelect
             label="Voice"
