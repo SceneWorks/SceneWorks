@@ -422,6 +422,86 @@ async fn raw_batch_detail_injects_authoritative_sdxl_components_for_the_worker()
     assert_eq!(claimed["job"]["id"], job["id"]);
 }
 
+/// The OpenPose co-requisite belongs to Model Manager install/repair authority, not the generic
+/// image worker payload. A normal no-pose SDXL request must carry only the provider's unconditional
+/// hard components (three on Candle; none for the self-contained MLX package), and retry/duplicate
+/// must preserve that projection at their shared canonicalization boundary.
+#[tokio::test]
+async fn ordinary_sdxl_txt2img_never_forwards_the_soft_openpose_component() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let manifest_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&manifest_dir).expect("manifest dir creates");
+    std::fs::write(
+        manifest_dir.join("builtin.models.jsonc"),
+        include_str!("../../../../config/manifests/builtin.models.jsonc"),
+    )
+    .expect("shipped model manifest writes");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let (status, original) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": "project-1",
+            "mode": "text_to_image",
+            "prompt": "mist over hills",
+            "model": "realvisxl",
+            "count": 1,
+            "advanced": { "steps": 20 }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "txt2img enqueues: {original}");
+    let job_id = original["id"].as_str().expect("job id");
+    let mut boundary_jobs = vec![("create", original.clone())];
+    for operation in ["retry", "duplicate"] {
+        let (status, replay) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/{operation}"),
+            json!({ "payloadChanges": { "advanced": { "steps": 21 } } }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{operation}: {replay}");
+        boundary_jobs.push((operation, replay));
+    }
+
+    for (boundary, job) in boundary_jobs {
+        assert!(
+            job["payload"]["advanced"].get("poses").is_none(),
+            "{boundary}: the ordinary request must remain a no-pose job"
+        );
+        let component_ids: std::collections::BTreeSet<&str> = job["payload"]["modelManifestEntry"]
+            ["downloads"]
+            .as_array()
+            .expect("authoritative downloads array")
+            .iter()
+            .filter(|download| download["coRequisite"] == json!(true))
+            .filter_map(|download| download["componentId"].as_str())
+            .collect();
+        assert!(
+            !component_ids.contains("controlnet_openpose"),
+            "{boundary}: a no-pose job must not forward the soft OpenPose component: {component_ids:?}"
+        );
+        #[cfg(target_os = "macos")]
+        assert!(
+            component_ids.is_empty(),
+            "{boundary}: self-contained MLX SDXL needs no generic co-requisite: {component_ids:?}"
+        );
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(
+            component_ids,
+            std::collections::BTreeSet::from([
+                "tokenizer_clip_l",
+                "tokenizer_clip_bigg",
+                "vae_fp16_fix",
+            ]),
+            "{boundary}: Candle receives exactly its three descriptor-required components"
+        );
+    }
+}
+
 #[tokio::test]
 async fn raw_batch_detail_overwrites_untrusted_client_manifest_metadata() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");

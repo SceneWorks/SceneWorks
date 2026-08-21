@@ -795,8 +795,9 @@ pub(crate) async fn canonicalize_image_model_payload(
     };
     validate_model_id(&model_id)?;
 
-    let model_manifest_entry =
-        crate::models::resolve_model_manifest_entry(state, &model_id).await?;
+    let model_manifest_entry = project_image_manifest_for_worker(
+        crate::models::resolve_model_manifest_entry(state, &model_id).await?,
+    );
     if matches!(job_type, JobType::ImageDetail)
         && !model_manifest_entry
             .as_object()
@@ -818,6 +819,29 @@ pub(crate) async fn canonicalize_image_model_payload(
         canonicalize_image_detail_dense_tier(payload)?;
     }
     Ok(Some(model_manifest_entry))
+}
+
+/// Project catalog-only, request-scoped components out of the generic image worker payload.
+///
+/// The shared SDXL OpenPose checkpoint is a soft install companion so Model Manager can provision
+/// and repair it alongside each supported backbone. It is not a descriptor-required component and
+/// must never be staged by ordinary txt2img, edit, or Batch Detail jobs. The dedicated
+/// `sdxl_control` pose route owns its strict authority tuple and resolves that exact component
+/// synchronously from the pinned cache before load, so forwarding this catalog row to unrelated
+/// jobs only broadens their worker-visible artifact set without helping the pose route.
+///
+/// Keep every other soft component: selected decoders and other request-specific features resolve
+/// their own authored component ids from this worker-private entry.
+fn project_image_manifest_for_worker(mut entry: Value) -> Value {
+    if let Some(downloads) = entry.get_mut("downloads").and_then(Value::as_array_mut) {
+        downloads.retain(|download| {
+            !(download.get("coRequisite").and_then(Value::as_bool) == Some(true)
+                && download.get("required").and_then(Value::as_str) == Some("soft")
+                && download.get("componentId").and_then(Value::as_str)
+                    == Some("controlnet_openpose"))
+        });
+    }
+    entry
 }
 
 #[cfg(not(target_os = "macos"))]
