@@ -57,6 +57,7 @@ pub(crate) const CANDLE_VIDEO_LORA_MODELS: &[&str] = &[
 pub(crate) enum CandleImageLane {
     ImportedFamily,
     InstantId,
+    SdxlControl,
     SdxlEdit,
     Flux2Edit,
     QwenEdit,
@@ -114,6 +115,14 @@ const CANDLE_IMAGE_ROUTES: &[CandleImageRoute] = &[
         lane: CandleImageLane::InstantId,
         models: ModelMatch::Any(&["instantid_realvisxl"]),
         shape: instantid_candle_eligible,
+    },
+    CandleImageRoute {
+        // Generic SDXL OpenPose ControlNet. This must precede the edit and IP-Adapter lanes so a
+        // pose-bearing conflict is claimed by the control handler and rejected rather than losing
+        // the pose in another conditioned route.
+        lane: CandleImageLane::SdxlControl,
+        models: ModelMatch::Family(is_sdxl_control_model),
+        shape: sdxl_control_candle_candidate,
     },
     CandleImageRoute {
         lane: CandleImageLane::SdxlEdit,
@@ -294,7 +303,8 @@ pub(crate) fn candle_pose_route_models() -> Vec<&'static str> {
         .filter(|route| {
             matches!(
                 route.lane,
-                CandleImageLane::QwenControl
+                CandleImageLane::SdxlControl
+                    | CandleImageLane::QwenControl
                     | CandleImageLane::KolorsControl
                     | CandleImageLane::ZImageControl
                     | CandleImageLane::Flux1Control
@@ -302,9 +312,10 @@ pub(crate) fn candle_pose_route_models() -> Vec<&'static str> {
                     | CandleImageLane::KreaControl
             )
         })
-        .flat_map(|route| match route.models {
-            ModelMatch::Any(models) => models.iter().copied(),
-            ModelMatch::Family(_) => [].iter().copied(),
+        .flat_map(|route| match (route.lane, &route.models) {
+            (CandleImageLane::SdxlControl, _) => SDXL_CONTROL_MODELS.iter().copied(),
+            (_, ModelMatch::Any(models)) => models.iter().copied(),
+            (_, ModelMatch::Family(_)) => [].iter().copied(),
         })
         .collect()
 }
@@ -1003,6 +1014,50 @@ pub(crate) fn is_sdxl_family_candle_model(model: &str) -> bool {
     )
 }
 
+/// The exact SDXL-family ids that share the generic OpenPose ControlNet provider. This is
+/// deliberately wider than [`is_sdxl_family_candle_model`] by one distilled checkpoint:
+/// RealVisXL Lightning supports the new pose-only control provider recipe, while the pre-existing
+/// edit/IP-Adapter family remains unchanged and continues to exclude it.
+pub(crate) const SDXL_CONTROL_MODELS: &[&str] = &[
+    "sdxl",
+    "realvisxl",
+    "realvisxl_lightning",
+    "illustrious_xl_v1",
+    "illustrious_xl_v2",
+];
+
+pub(crate) fn is_sdxl_control_model(model: &str) -> bool {
+    SDXL_CONTROL_MODELS.contains(&model)
+}
+
+/// A material SDXL control carrier. The worker owns the full conflict/count/type validation; this
+/// scheduler predicate intentionally claims malformed/non-empty pose carriers and explicit material
+/// control intent too, before edit or IP-Adapter, so no other conditioned route can silently discard
+/// them. Missing/null/empty poses remain ordinary generation only when no other control field is set.
+pub(crate) fn sdxl_control_candle_candidate(payload: &Map<String, Value>) -> bool {
+    let Some(advanced) = payload.get("advanced").and_then(Value::as_object) else {
+        return false;
+    };
+    let poses_are_material = match advanced.get("poses") {
+        None | Some(Value::Null) => false,
+        Some(Value::Array(poses)) if poses.is_empty() => false,
+        Some(_) => true,
+    };
+    let named_control_is_material = match advanced.get("controlMode") {
+        None | Some(Value::Null) => false,
+        Some(Value::String(mode)) => !mode.trim().is_empty(),
+        Some(_) => true,
+    };
+    poses_are_material
+        || named_control_is_material
+        || advanced
+            .get("controlImage")
+            .is_some_and(|value| !value.is_null())
+        || advanced
+            .get("controlWeights")
+            .is_some_and(|value| !value.is_null())
+}
+
 /// SDXL img2img / inpaint / outpaint candle-routing conditions (sc-5487, epic 5480). The candle
 /// `SdxlEdit` provider serves `edit_image` mode with a `sourceAssetId` on the sdxl family: img2img (no
 /// mask), inpaint (+ `maskAssetId`), and outpaint (`fit_mode == "outpaint"`) all route to the one lane.
@@ -1592,9 +1647,14 @@ pub(crate) fn krea_control_candle_eligible(payload: &Map<String, Value>) -> bool
 }
 
 /// Candle-routed image models that HAVE a candle strict-control lane (sc-5489; flux2_dev sc-7736; base
-/// z_image + flux_dev sc-8379 / sc-8412). A `advanced.poses` job on any OTHER candle-routed model has no
-/// pose path on candle (plain-SDXL pose ships via InstantID, `instantid_realvisxl`, not `sdxl`).
+/// z_image + flux_dev sc-8379 / sc-8412, plus the generic five-model SDXL OpenPose lane).
+/// An `advanced.poses` job on any OTHER candle-routed model has no pose path on candle.
 pub(crate) const CANDLE_POSE_MODELS: &[&str] = &[
+    "sdxl",
+    "realvisxl",
+    "realvisxl_lightning",
+    "illustrious_xl_v1",
+    "illustrious_xl_v2",
     "qwen_image",
     "kolors",
     "z_image_turbo",

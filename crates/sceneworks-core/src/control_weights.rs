@@ -22,6 +22,12 @@ pub struct ShippedControlWeight {
 /// matching never broadens to a repository- or organization-wide trust rule.
 pub const SHIPPED_CONTROL_WEIGHTS: &[ShippedControlWeight] = &[
     ShippedControlWeight {
+        engine_id: "sdxl",
+        repo: "xinsir/controlnet-openpose-sdxl-1.0",
+        file: "diffusion_pytorch_model.safetensors",
+        revision: "23f966cd5cfdd3f7729c903e243d87152162d2b7",
+    },
+    ShippedControlWeight {
         engine_id: "flux1_dev_control",
         repo: "Shakker-Labs/FLUX.1-dev-ControlNet-Union-Pro-2.0",
         file: "diffusion_pytorch_model.safetensors",
@@ -129,6 +135,18 @@ mod tests {
 
     #[test]
     fn allow_list_is_exact_and_revisions_are_pinned() {
+        assert!(shipped_control_weight(
+            "sdxl",
+            "xinsir/controlnet-openpose-sdxl-1.0",
+            "diffusion_pytorch_model.safetensors"
+        )
+        .is_some());
+        assert!(shipped_control_weight(
+            "sdxl",
+            "xinsir/controlnet-openpose-sdxl-1.0",
+            "other.safetensors"
+        )
+        .is_none());
         assert!(shipped_control_weight(
             "flux2_dev_control",
             "alibaba-pai/FLUX.2-dev-Fun-Controlnet-Union",

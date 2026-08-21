@@ -116,6 +116,7 @@ fn candle_image_dispatch_reports_named_lane_and_preserves_precedence() {
         candle_image_route_lanes(),
         vec![
             CandleImageLane::InstantId,
+            CandleImageLane::SdxlControl,
             CandleImageLane::SdxlEdit,
             CandleImageLane::Flux2Edit,
             CandleImageLane::Flux2Edit,
@@ -268,6 +269,27 @@ fn candle_image_dispatch_reports_named_lane_and_preserves_precedence() {
         cases.push((edit(model), CandleImageLane::SdxlEdit));
         cases.push((reference(model), CandleImageLane::SdxlIpAdapter));
     }
+    for model in [
+        "sdxl",
+        "realvisxl",
+        "realvisxl_lightning",
+        "illustrious_xl_v1",
+        "illustrious_xl_v2",
+    ] {
+        cases.push((pose(model), CandleImageLane::SdxlControl));
+    }
+    for advanced in [
+        json!({ "controlMode": "pose" }),
+        json!({ "controlMode": "canny" }),
+        json!({ "controlMode": false }),
+        json!({ "controlImage": "asset" }),
+        json!({ "controlWeights": {} }),
+    ] {
+        cases.push((
+            json!({ "model": "sdxl", "advanced": advanced }),
+            CandleImageLane::SdxlControl,
+        ));
+    }
 
     for (payload, expected) in cases {
         assert_eq!(
@@ -279,6 +301,31 @@ fn candle_image_dispatch_reports_named_lane_and_preserves_precedence() {
     // Real same-model overlaps pin the exact first-match precedence. Each tuple names the
     // predicates simultaneously satisfied and the route that must win.
     let overlaps = [
+        (
+            json!({
+                "model": "sdxl",
+                "mode": "edit_image",
+                "sourceAssetId": "source_1",
+                "advanced": { "poses": [{}] }
+            }),
+            CandleImageLane::SdxlControl,
+            &[
+                sdxl_control_candle_candidate as fn(&Map<String, Value>) -> bool,
+                sdxl_edit_candle_eligible,
+            ][..],
+        ),
+        (
+            json!({
+                "model": "realvisxl",
+                "referenceAssetId": "reference_1",
+                "advanced": { "poses": [{}] }
+            }),
+            CandleImageLane::SdxlControl,
+            &[
+                sdxl_control_candle_candidate as fn(&Map<String, Value>) -> bool,
+                sdxl_ipadapter_candle_eligible,
+            ][..],
+        ),
         (
             json!({
                 "model": "z_image_turbo",
@@ -2037,11 +2084,8 @@ fn candle_worker_claims_txt2img_but_refuses_unsupported_shapes() {
         ),
         "candle worker should claim z_image_turbo strict-pose (sc-5489)"
     );
-    // sc-5968: plain `sdxl` + poses has NO candle pose lane (SDXL pose ships via InstantID), and
-    // no native fallback can serve it off-Mac — so the candle worker CLAIMS it (to reject
-    // with a typed error in the handler) rather than allowing a generic claimant to silently render
-    // an unconditioned T2I image. `worker_supports_job` is therefore TRUE here (candle owns it to fail
-    // it loudly); the handler's `candle_unsupported_pose_reject` guard does the rejecting.
+    // sc-20747: plain `sdxl` + poses is the generic OpenPose ControlNet lane. The worker claims it
+    // for native generation on Candle; InstantID remains isolated on its own model id.
     assert!(worker_supports_job(
         &candle,
         &image_generate_job(json!({
@@ -2218,11 +2262,9 @@ fn torch_worker_claims_everything_the_candle_worker_defers() {
             "sourceAssetId": "asset_1"
         }))
     ));
-    // sc-5968: the synthetic generic descriptor DECLINES the unsupported-pose shape the candle
-    // worker owns-to-reject (sdxl + poses), preventing silent unconditioned T2I; candle takes it and
-    // rejects. On Mac the same shape is MLX-served, so the `mlx` worker still claims it (asserted
-    // in the cross-descriptor unsupported-pose test).
-    assert!(!worker_supports_job(
+    // sc-20747: SDXL pose is now a native control lane. The synthetic legacy worker may still match
+    // its broad declaration; production native-worker precedence selects Candle/MLX.
+    assert!(worker_supports_job(
         &torch,
         &image_generate_job(json!({
             "model": "sdxl",
@@ -2231,13 +2273,11 @@ fn torch_worker_claims_everything_the_candle_worker_defers() {
     ));
 }
 
-/// sc-5968: unsupported-pose routing across descriptors — candle OWNS it (to reject), the synthetic
-/// generic descriptor DECLINES it (no silent T2I), and the Mac `mlx` worker SERVES it (no regression,
-/// `sdxl_mlx_eligible` is unconditional). Plus: the wired candle pose families are unaffected, and
-/// `image_job_is_candle_eligible` still reports sdxl+poses as NOT candle-*served* (it's owned only
-/// to reject — the distinction the worker's dispatch guard keys on).
+/// sc-20747: SDXL pose is a real named native route on both schedulers rather than the historical
+/// owned-to-reject shape. The synthetic legacy descriptor remains broad, while native precedence
+/// selects Candle/MLX in production.
 #[test]
-fn unsupported_pose_is_owned_by_candle_declined_by_torch_served_by_mlx() {
+fn sdxl_pose_is_served_by_candle_and_mlx_without_the_old_reject_shape() {
     let candle = gpu_worker(CANDLE_CAPS);
     let torch = gpu_worker(TORCH_CAPS);
     let mlx: WorkerSnapshot = serde_json::from_value(json!({
@@ -2253,18 +2293,17 @@ fn unsupported_pose_is_owned_by_candle_declined_by_torch_served_by_mlx() {
     let sdxl_pose =
         image_generate_job(json!({ "model": "sdxl", "advanced": { "poses": [{ "id": "p" }] } }));
 
-    assert!(image_request_candle_pose_reject(
+    assert!(!image_request_candle_pose_reject(
         "sdxl",
         &object(json!({ "advanced": { "poses": [{ "id": "p" }] } }))
     ));
-    assert!(worker_supports_job(&candle, &sdxl_pose), "candle owns it");
+    assert!(worker_supports_job(&candle, &sdxl_pose), "candle serves it");
     assert!(
-        !worker_supports_job(&torch, &sdxl_pose),
-        "torch declines it"
+        worker_supports_job(&torch, &sdxl_pose),
+        "legacy worker remains broad"
     );
     assert!(worker_supports_job(&mlx, &sdxl_pose), "mlx still serves it");
-    // It is NOT candle-*served* (only owned-to-reject); the worker's dispatch guard rejects it.
-    assert!(!image_job_is_candle_eligible(&sdxl_pose));
+    assert!(image_job_is_candle_eligible(&sdxl_pose));
 
     // A wired candle pose family is NOT a reject shape, and edit_image is never a reject shape.
     assert!(!image_request_candle_pose_reject(
@@ -3880,12 +3919,8 @@ fn qwen_control_pose_jobs_route_to_candle() {
     assert!(!qwen_control_candle_eligible(&object(json!({
         "model": "qwen_image", "mode": "edit_image", "advanced": { "poses": [{}] }
     }))));
-    // Plain `sdxl` + poses is NOT candle-*served* (no plain-SDXL pose lane — SDXL pose ships via
-    // InstantID): the qwen branch is specific and the txt2img gate's has_poses check rejects it, so
-    // `image_job_is_candle_eligible` is false. (It is, however, candle-*owned-to-reject* at the
-    // worker layer per sc-5968 — see `unsupported_pose_is_owned_by_candle_*`; that claim lives in
-    // `worker_supports_job`, not here. z_image_turbo + poses IS a candle lane — `zimage_control_*`.)
-    assert!(!image_job_is_candle_eligible(&image_generate_job(json!({
+    // Plain `sdxl` + poses is the separate generic SDXL ControlNet lane.
+    assert!(image_job_is_candle_eligible(&image_generate_job(json!({
         "model": "sdxl", "advanced": { "poses": [{}] }
     }))));
 }

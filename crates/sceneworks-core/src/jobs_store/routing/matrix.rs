@@ -1253,6 +1253,10 @@ fn bespoke_image_lane_support(
                         | ("conditioning", "reference")
                 )
         }
+        // Staged until the final accepted inference pin and descriptor dump. The route is wired,
+        // but the checked-in semantic matrix/exceptions deliberately remain pin-keyed to the
+        // current provider facts and must not be advanced from source inference alone.
+        CandleImageLane::SdxlControl => false,
         CandleImageLane::QwenEdit => {
             matches!(
                 model,

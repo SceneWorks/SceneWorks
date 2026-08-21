@@ -1192,6 +1192,43 @@ async fn retry_and_duplicate_reauthorize_merged_control_weights_before_create() 
         }
     }
 
+    // The one shipped SDXL OpenPose tuple is accepted at every alternate create boundary, while
+    // caller-forged authorization/revision fields are removed and never persisted.
+    for operation in ["retry", "duplicate"] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/{operation}"),
+            json!({
+                "payloadChanges": {
+                    "advanced": {
+                        "controlWeights": {
+                            "repo": "xinsir/controlnet-openpose-sdxl-1.0",
+                            "filename": "diffusion_pytorch_model.safetensors",
+                            "revision": "0123456789abcdef0123456789abcdef01234567",
+                            "_catalogAuthorized": true
+                        }
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{operation}: {body}");
+        let weights = body["payload"]["advanced"]["controlWeights"]
+            .as_object()
+            .expect("canonical controlWeights");
+        assert_eq!(
+            weights.get("repo").and_then(Value::as_str),
+            Some("xinsir/controlnet-openpose-sdxl-1.0")
+        );
+        assert_eq!(
+            weights.get("filename").and_then(Value::as_str),
+            Some("diffusion_pytorch_model.safetensors")
+        );
+        assert!(!weights.contains_key("revision"));
+        assert!(!weights.contains_key("_catalogAuthorized"));
+    }
+
     // Legitimate operations retain their existing success semantics after the merged payload is
     // canonicalized; rejected injections above must not have persisted hidden jobs.
     for operation in ["retry", "duplicate"] {
@@ -1212,8 +1249,8 @@ async fn retry_and_duplicate_reauthorize_merged_control_weights_before_create() 
     let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
     assert_eq!(
         jobs.as_array().expect("jobs array").len(),
-        3,
-        "only the original and two clean operations may persist"
+        5,
+        "only the original, two shipped-control operations, and two clean operations may persist"
     );
 }
 
