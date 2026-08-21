@@ -5,9 +5,9 @@
     "modelCount": 94,
     "importedFamilyCount": 3,
     "cellCount": 918,
-    "mlxOnlyCellCount": 81,
+    "mlxOnlyCellCount": 75,
     "candleOnlyCellCount": 47,
-    "exceptionCount": 19
+    "exceptionCount": 18
   },
   "sources": {
     "apiContractEntry": "9a2ea9bcc03c8dc48bd4f67d818d497d2d76baacf260de401c5c4fcf572b4f4b",
@@ -16,15 +16,15 @@
     "apiValidation": "b9f21500465791d78015f258623acbf946333746147c65ffd477605c0c9ce43e",
     "baseWeightImports": "4566b74afa2b721ecf3ab0af55ce0d95287c5e34d92932269a4db2cd413fe182",
     "descriptorAudioFacts": "c7aca3d3aae52a2d0ed44493e1e915903ee7e1615172e5c057bde48531281e90",
-    "descriptorCandleFacts": "98c9e8a4f669dab820612694eae5ff2bd2310a098adf243705e71cdc39f924ac",
-    "descriptorCandleRuntime": "0109a8cf029d837bb68ac9435b2073e4b2fda58a18cd0dc35689cfd2444ec987",
+    "descriptorCandleFacts": "e2b4448d0ee00cd84af113ee3367bc36b1d615f131779c0d53ce934bc47c7b90",
+    "descriptorCandleRuntime": "24888b0ebde298d11eb0961a86e3d701b1a242e5684717652964b8e9625a8d4e",
     "descriptorMlxFacts": "b1974290fab8d35fa5b3e455b7cf156e01644bcb0852e2eef25a79fe0b1feaa0",
     "descriptorMlxRuntime": "9f0330602a75cf386cedea98b87b757ef98dd9b18c0d31a70e75ef1f268baaef",
-    "descriptorPreviewFacts": "b6114761b5921fbd3d75c9eb66a74cfd6f712d6411f86c66544c1c93d3e630d2",
-    "exceptionRegister": "f18f64eacbe1884afd097c182d78115fbd4354516277209311975b384a57f903",
+    "descriptorPreviewFacts": "2e63c9948b01672335b15e1a77c300c6ecbbc6c94d419e1157614a569f03d8be",
+    "exceptionRegister": "cfb1370284c87c61b61a44d55ef645a8bde6c0cb3484969397ea4adb87039e54",
     "manifest": "0a57d2d41fb39292faea9551a1d99fad2a9634b69f305ba37ecd53d642460c45",
     "modelImportDefaults": "958ce5647f0ab3bb489cb1338974f511bd852fc577051d48cb5e9b5ec4512ab4",
-    "routerCandle": "91886e25e35484ac7d1409170bb843dc7f02baff77a1bdb2ab5cfef5566333a4",
+    "routerCandle": "aee669a7fd7ef02dc1356663fcae0c921096d82f4d30b90a542fe5d5b6b3067d",
     "routerCatalog": "45320eabae56ae2f85805504d0e6b6def75a283f29d2a7e277d64acd59a11040",
     "routerGaps": "885a73b08cd2d598d656adb15d69a2ea0a78faa0437fc3ba0e25d5f5245efcb2",
     "routerMlx": "d9bc69db199a5efe378db62d558ab134a0ee1c82da8561dbb1d0d641bd0f57cb",
@@ -1813,12 +1813,7 @@
         {
           "capability": "control",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "epic-8588",
-            "url": "https://app.shortcut.com/trefry/epic/8588",
-            "authority": "epic-8588"
-          }
+          "candle": true
         },
         {
           "capability": "mask",
@@ -1932,12 +1927,7 @@
         {
           "capability": "control",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "epic-8588",
-            "url": "https://app.shortcut.com/trefry/epic/8588",
-            "authority": "epic-8588"
-          }
+          "candle": true
         },
         {
           "capability": "mask",
@@ -4373,12 +4363,7 @@
         {
           "capability": "control",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "epic-8588",
-            "url": "https://app.shortcut.com/trefry/epic/8588",
-            "authority": "epic-8588"
-          }
+          "candle": true
         },
         {
           "capability": "mask",
@@ -4464,12 +4449,7 @@
         {
           "capability": "control",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "epic-8588",
-            "url": "https://app.shortcut.com/trefry/epic/8588",
-            "authority": "epic-8588"
-          }
+          "candle": true
         },
         {
           "capability": "mask",
@@ -4816,12 +4796,7 @@
         {
           "capability": "multiReference",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "epic-8588",
-            "url": "https://app.shortcut.com/trefry/epic/8588",
-            "authority": "epic-8588"
-          }
+          "candle": true
         },
         {
           "capability": "reference",
@@ -5122,12 +5097,7 @@
         {
           "capability": "control",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "epic-8588",
-            "url": "https://app.shortcut.com/trefry/epic/8588",
-            "authority": "epic-8588"
-          }
+          "candle": true
         },
         {
           "capability": "mask",
@@ -7562,25 +7532,6 @@
         "models/krea_realtime_14b/precisionTier/bf16",
         "models/krea_realtime_14b/precisionTier/q4",
         "models/krea_realtime_14b/precisionTier/q8"
-      ]
-    },
-    {
-      "id": "epic-8588-conditioning-sequencing",
-      "category": "conditioning",
-      "decisionType": "sequencing_choice",
-      "evidence": "Michael Trefry directly approved carrying these exact six MLX-only conditioning cells under epic-8588 on 2026-08-14; the canonical owner-approval record is Shortcut activity 19457: https://app.shortcut.com/trefry/story/18481/parity-closure-reconcile-specialist-epics-stale-records-ui-gating-and-final-crossbackend-acceptance#activity-19457",
-      "approver": "Michael Trefry",
-      "authority": "epic-8588",
-      "approvedDate": "2026-08-14",
-      "userFacingBehavior": "Unsupported Candle conditioning controls are hidden or disabled with an explanation, and direct unsupported requests fail closed rather than degrading silently.",
-      "revisitCondition": "Revisit when epic-8588 ships the named Candle conditioning work and the generated matrix, routing tests, and required runtime evidence prove each corresponding Candle cell.",
-      "cells": [
-        "models/illustrious_xl_v1/conditioningShape/control",
-        "models/illustrious_xl_v2/conditioningShape/control",
-        "models/realvisxl/conditioningShape/control",
-        "models/realvisxl_lightning/conditioningShape/control",
-        "models/scail2_14b/conditioningShape/multiReference",
-        "models/sdxl/conditioningShape/control"
       ]
     },
     {

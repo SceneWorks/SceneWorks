@@ -369,6 +369,18 @@ struct PreviewRoot {
 
 /// Build the complete, deterministic matrix without loading model weights.
 pub fn backend_capability_matrix() -> Result<BackendCapabilityMatrix, String> {
+    backend_capability_matrix_from_runtime_sources(MLX_RUNTIME_FACTS, CANDLE_RUNTIME_FACTS)
+}
+
+/// Build the matrix from the same production derivation with supplied native runtime snapshots.
+///
+/// The public generator always uses the checked-in artifacts. Keeping the derivation injectable
+/// lets the focused tests prove a one-cell native-fact regression changes the resulting matrix,
+/// instead of restating a mirror of its expected cells.
+fn backend_capability_matrix_from_runtime_sources(
+    mlx_runtime_source: &str,
+    candle_runtime_source: &str,
+) -> Result<BackendCapabilityMatrix, String> {
     let manifest: ManifestRoot = serde_json::from_str(&strip_jsonc_comments(MANIFEST))
         .map_err(|error| format!("parse builtin.models.jsonc: {error}"))?;
     let preview: PreviewRoot = serde_json::from_str(&strip_jsonc_comments(PREVIEW))
@@ -381,8 +393,8 @@ pub fn backend_capability_matrix() -> Result<BackendCapabilityMatrix, String> {
             exceptions.schema_version
         ));
     }
-    let mlx_facts = runtime_facts(MLX_RUNTIME_FACTS, "mlx")?;
-    let candle_facts = runtime_facts(CANDLE_RUNTIME_FACTS, "candle")?;
+    let mlx_facts = runtime_facts(mlx_runtime_source, "mlx")?;
+    let candle_facts = runtime_facts(candle_runtime_source, "candle")?;
     validate_runtime_pair(&mlx_facts, &candle_facts)?;
     validate_exceptions(&exceptions)?;
 
@@ -418,7 +430,7 @@ pub fn backend_capability_matrix() -> Result<BackendCapabilityMatrix, String> {
         schema_version: 4,
         generated_by: GENERATOR.to_owned(),
         summary,
-        sources: source_digests(),
+        sources: source_digests_for_runtime_sources(mlx_runtime_source, candle_runtime_source),
         models,
         imported_families,
         gpu_job_types,
@@ -3261,7 +3273,15 @@ fn validate_obligations(
     }
 }
 
+#[cfg(test)]
 fn source_digests() -> BTreeMap<String, String> {
+    source_digests_for_runtime_sources(MLX_RUNTIME_FACTS, CANDLE_RUNTIME_FACTS)
+}
+
+fn source_digests_for_runtime_sources(
+    mlx_runtime_source: &str,
+    candle_runtime_source: &str,
+) -> BTreeMap<String, String> {
     [
         ("manifest", MANIFEST),
         ("routerCatalog", ROUTING_CATALOG),
@@ -3303,8 +3323,8 @@ fn source_digests() -> BTreeMap<String, String> {
         ("descriptorMlxFacts", MLX_DESCRIPTOR_FACTS),
         ("descriptorCandleFacts", CANDLE_DESCRIPTOR_FACTS),
         ("descriptorAudioFacts", AUDIO_DESCRIPTOR_FACTS),
-        ("descriptorMlxRuntime", MLX_RUNTIME_FACTS),
-        ("descriptorCandleRuntime", CANDLE_RUNTIME_FACTS),
+        ("descriptorMlxRuntime", mlx_runtime_source),
+        ("descriptorCandleRuntime", candle_runtime_source),
         ("descriptorPreviewFacts", PREVIEW),
         ("webImageRequest", WEB_IMAGE_REQUEST),
         ("webImageAdvanced", WEB_IMAGE_ADVANCED),
@@ -3537,6 +3557,132 @@ mod tests {
                 "{mutation} capability semantics must fail closed"
             );
         }
+    }
+
+    #[test]
+    fn sc19059_resolved_candle_conditioning_is_not_left_in_the_residual_register() {
+        let baseline = backend_capability_matrix().expect("production matrix derives");
+        let resolved = [
+            ("illustrious_xl_v1", "control"),
+            ("illustrious_xl_v2", "control"),
+            ("realvisxl", "control"),
+            ("realvisxl_lightning", "control"),
+            ("scail2_14b", "multiReference"),
+            ("sdxl", "control"),
+        ];
+        for (model, shape) in resolved {
+            let cell = baseline
+                .models
+                .iter()
+                .find(|row| row.id == model)
+                .and_then(|row| {
+                    row.conditioning_shape
+                        .iter()
+                        .find(|cell| cell.capability == shape)
+                })
+                .unwrap_or_else(|| panic!("production derivation emits {model}/{shape}"));
+            assert_eq!(
+                (cell.mlx, cell.candle),
+                (Some(true), Some(true)),
+                "{model}/{shape} is backed by both native engine facts"
+            );
+            assert!(cell.parity_obligation.is_none());
+        }
+        assert!(
+            !baseline
+                .exceptions
+                .iter()
+                .any(|record| record.id == "epic-8588-conditioning-sequencing"),
+            "the resolved epic-8588 record must be removed rather than retained empty"
+        );
+
+        // Mutate the actual Candle runtime snapshot and feed it through the production derivation;
+        // this is deliberately not a copied matrix fixture. Removing a native fact must restore
+        // precisely its MLX-only parity obligation and make the checked-in matrix mismatch.
+        let mut missing_candle_control: Value = serde_json::from_str(CANDLE_RUNTIME_FACTS).unwrap();
+        let generators = missing_candle_control["snapshot"]["generator_capabilities"]
+            .as_array_mut()
+            .expect("Candle snapshot has generator capabilities");
+        let sdxl = generators
+            .iter_mut()
+            .find(|entry| entry["id"] == "sdxl")
+            .expect("Candle snapshot has the SDXL provider");
+        sdxl["conditioning"] = Value::Array(Vec::new());
+        let mutated = backend_capability_matrix_from_runtime_sources(
+            MLX_RUNTIME_FACTS,
+            &serde_json::to_string(&missing_candle_control).unwrap(),
+        )
+        .expect("mutated production facts still derive a matrix");
+        for model in [
+            "illustrious_xl_v1",
+            "illustrious_xl_v2",
+            "realvisxl",
+            "realvisxl_lightning",
+            "sdxl",
+        ] {
+            let cell = mutated
+                .models
+                .iter()
+                .find(|row| row.id == model)
+                .and_then(|row| {
+                    row.conditioning_shape
+                        .iter()
+                        .find(|cell| cell.capability == "control")
+                })
+                .unwrap_or_else(|| panic!("mutated derivation emits {model}/control"));
+            assert_eq!((cell.mlx, cell.candle), (Some(true), Some(false)));
+            assert_eq!(
+                cell.parity_obligation
+                    .as_ref()
+                    .map(|obligation| obligation.work_item.as_str()),
+                Some("epic-8588")
+            );
+        }
+        let checked_in: BackendCapabilityMatrix = serde_json::from_str(CHECKED_IN).unwrap();
+        assert!(
+            checked_in_matrix_matches_live(checked_in, mutated).is_err(),
+            "removing Candle SDXL control must break the checked-in matrix/residual relationship"
+        );
+
+        let mut missing_scail_multi_reference: Value =
+            serde_json::from_str(CANDLE_RUNTIME_FACTS).unwrap();
+        let scail = missing_scail_multi_reference["snapshot"]["generator_capabilities"]
+            .as_array_mut()
+            .expect("Candle snapshot has generator capabilities")
+            .iter_mut()
+            .find(|entry| entry["id"] == "scail2_14b")
+            .expect("Candle snapshot has the SCAIL-2 provider");
+        scail["conditioning"] = Value::Array(vec![
+            Value::String("reference".to_owned()),
+            Value::String("mask".to_owned()),
+            Value::String("controlClip".to_owned()),
+        ]);
+        let mutated_scail = backend_capability_matrix_from_runtime_sources(
+            MLX_RUNTIME_FACTS,
+            &serde_json::to_string(&missing_scail_multi_reference).unwrap(),
+        )
+        .expect("mutated SCAIL-2 facts still derive a matrix");
+        let scail_cell = mutated_scail
+            .models
+            .iter()
+            .find(|row| row.id == "scail2_14b")
+            .and_then(|row| {
+                row.conditioning_shape
+                    .iter()
+                    .find(|cell| cell.capability == "multiReference")
+            })
+            .expect("mutated derivation emits scail2_14b/multiReference");
+        assert_eq!(
+            (scail_cell.mlx, scail_cell.candle),
+            (Some(true), Some(false))
+        );
+        assert_eq!(
+            scail_cell
+                .parity_obligation
+                .as_ref()
+                .map(|obligation| obligation.work_item.as_str()),
+            Some("epic-8588")
+        );
     }
 
     #[test]
@@ -4852,10 +4998,6 @@ mod tests {
             (
                 "epic-8433-krea-realtime-precision-sequencing",
                 ("epic-8433", "precision", 3usize),
-            ),
-            (
-                "epic-8588-conditioning-sequencing",
-                ("epic-8588", "conditioning", 6usize),
             ),
             (
                 "epic-7434-cfg-pp-guidance-sequencing",

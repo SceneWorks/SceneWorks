@@ -1080,14 +1080,30 @@ pub(crate) fn scail2_candle_source_tier_eligible(payload: &Map<String, Value>) -
     !has_adapters || tier == "bf16"
 }
 
+/// Product admission for a source-ready SCAIL-2 tier.
+///
+/// The repaired pinned descriptor now truthfully advertises the q4/q8 provider surface, but those
+/// two product precision cells remain deliberately sequenced behind the epic-20738 terminal
+/// acceptance campaign. Descriptor truth alone must therefore not promote an explicit packed-tier
+/// request. Dense bf16 remains the established Candle baseline; the source resolver and terminal
+/// harness can continue proving the exact q4/q8 packages without exposing them as product routes.
+fn scail2_candle_product_tier_eligible(
+    model: &str,
+    mode: &str,
+    payload: &Map<String, Value>,
+) -> bool {
+    scail2_candle_effective_tier(payload) == Some("bf16")
+        && super::matrix::candle_video_descriptor_supports_quant(model, mode, "bf16")
+}
+
 /// Candle SCAIL-2 `animate_character` eligibility (sc-6837, epic 6563). SCAIL-2 is a DISTINCT candle
 /// engine (NOT Wan-VACE), so it has its own gate rather than membership in [`CANDLE_VIDEO_VACE_MODELS`]:
 /// the `scail2_14b` model + the `animate_character` mode + a reference character image
 /// (`referenceAssetId` / `referenceAssetIds` / `sourceAssetId`) + a driving clip (`sourceClipAssetId`).
 /// The exact q4/q8 hosted artifacts and dense bf16 tier are source-ready; unsupported or malformed
-/// precision requests fail closed. Production also consults the pinned Candle descriptor, so q4/q8
-/// remain unclaimed until their runtime fact row is promoted. Packed tiers refuse adapters, while a
-/// dense adapter request is preserved and resolved to bf16 by the worker. Mirrors the MLX
+/// precision requests fail closed. Production additionally keeps q4/q8 sequenced behind terminal
+/// acceptance even when the pinned descriptor advertises them. Packed tiers refuse adapters, while
+/// a dense adapter request is preserved and resolved to bf16 by the worker. Mirrors the MLX
 /// `video_mode_is_mlx_eligible(scail2_14b, animate_character)` shape, expressed as a candle-claim
 /// gate. Factored out so the routing tests can probe it (parity with [`video_request_candle_eligible`]).
 pub(crate) fn scail2_animate_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
@@ -1107,11 +1123,7 @@ pub(crate) fn scail2_animate_candle_eligible(model: &str, payload: &Map<String, 
         return false;
     }
     scail2_candle_source_tier_eligible(payload)
-        && super::matrix::candle_video_descriptor_supports_quant(
-            model,
-            "animate_character",
-            scail2_candle_effective_tier(payload).expect("source eligibility chose a tier"),
-        )
+        && scail2_candle_product_tier_eligible(model, "animate_character", payload)
 }
 
 /// Candle SCAIL-2 `replace_person` eligibility (sc-6837, epic 6563). The `scail2_14b` model behind a
@@ -1131,11 +1143,7 @@ pub(crate) fn scail2_replace_candle_eligible(model: &str, payload: &Map<String, 
         return false;
     }
     scail2_candle_source_tier_eligible(payload)
-        && super::matrix::candle_video_descriptor_supports_quant(
-            model,
-            "replace_person",
-            scail2_candle_effective_tier(payload).expect("source eligibility chose a tier"),
-        )
+        && scail2_candle_product_tier_eligible(model, "replace_person", payload)
 }
 
 /// Candle Bernini VIDEO eligibility (sc-10997, epic 6562). Bernini is a DISTINCT candle engine (the

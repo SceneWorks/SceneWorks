@@ -1,7 +1,7 @@
 {
   "schemaVersion": 8,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:e2b564361810d3d38203af75a35238a7a3e6eafa66e142e01fcb4c279558b5d2",
+    "sceneWorksRevision": "source-tree:fd68f27e5f49eadb8e1b02683f7c20d70dd7be4818649d9ca1fb350053d8ebb7",
     "inferenceRevision": "4013049764172ee7dc707101c7da8c83c1483f2d",
     "sources": {
       "manifest": {
@@ -14,7 +14,7 @@
       },
       "routingCandle": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
-        "sha256": "de1f8ff7034cbf1c2c441e42aa6bf9c775d3b22b40b771c797e69fc2ddac0e5a"
+        "sha256": "c5261a367a4904654c680ca65bf1d68d1c3b418d0d28527241359002458982c3"
       },
       "routingMlx": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
@@ -98,7 +98,7 @@
       },
       "engineCapabilitiesCandle": {
         "path": "config/engine-capabilities/capabilities.candle.json",
-        "sha256": "e3c8a0a59ce6ea34c6e0845bc3f7c90b2dd8a2b8c382b7543a0415a5ebbc66da"
+        "sha256": "7b03e32d060d8ecc1fa2915d71d6737379801bcd2cf6e701f7ee571d30dc8ea6"
       },
       "cargo": {
         "path": "Cargo.toml",
