@@ -3743,6 +3743,19 @@ fn downtier_candidate_tiers(
 /// packed transformer's resolved tier so the sidecar tells the truth. The event/`warn!` still fire so
 /// the fallback is surfaced either way.
 #[cfg(target_os = "macos")]
+fn resolved_tier_warning_message(
+    engine: &str,
+    model_id: &str,
+    requested_label: &str,
+    actual_label: &str,
+) -> String {
+    format!(
+        "{engine}: quant tier for {model_id} resolved from {requested_label} to {actual_label}; \
+         recording the tier that actually ran"
+    )
+}
+
+#[cfg(target_os = "macos")]
 fn reconcile_resolved_tier_quant(
     requested: (Option<Quant>, Option<i64>),
     weights_dir: &Path,
@@ -3764,8 +3777,8 @@ fn reconcile_resolved_tier_quant(
     let requested_label = requested.1.map_or("bf16".to_owned(), |b| format!("q{b}"));
     let actual_label = actual_bits.map_or("bf16".to_owned(), |b| format!("q{b}"));
     tracing::warn!(
-        "{engine}: requested quant tier {requested_label} for {model_id} is not downloaded; \
-         fell back to {actual_label} — recording the tier that actually ran"
+        "{}",
+        resolved_tier_warning_message(engine, model_id, &requested_label, &actual_label)
     );
     emit_event(
         "quant_tier_downgraded",
@@ -14136,6 +14149,21 @@ mod quant_tier_reconcile_tests {
             ),
             (Some(Quant::Q8), Some(8)),
         );
+    }
+
+    /// Admission may deliberately resolve an installed lower tier when the requested tier does not
+    /// fit. The warning must describe the observed resolution without falsely claiming that the
+    /// requested tier was absent from disk.
+    #[test]
+    fn resolved_tier_warning_does_not_invent_a_missing_download() {
+        let warning =
+            resolved_tier_warning_message("mlx", "qwen_image", "bf16", "q8");
+
+        assert_eq!(
+            warning,
+            "mlx: quant tier for qwen_image resolved from bf16 to q8; recording the tier that actually ran"
+        );
+        assert!(!warning.contains("not downloaded"));
     }
 
     #[test]
