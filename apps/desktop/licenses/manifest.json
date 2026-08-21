@@ -1020,6 +1020,13 @@
       "models": [
         "controlnet_tile_sdxl"
       ],
+      "appliesToModels": [
+        "sdxl",
+        "realvisxl",
+        "realvisxl_lightning",
+        "illustrious_xl_v1",
+        "illustrious_xl_v2"
+      ],
       "name": "xinsir SDXL ControlNet utilities",
       "publisher": "xinsir",
       "license": "Apache-2.0",
