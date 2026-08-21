@@ -1,7 +1,7 @@
 {
   "schemaVersion": 8,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:6421d59813cf51dd1e059139969341c8762e979f9814bc4c2bc2eb96d72361b6",
+    "sceneWorksRevision": "source-tree:b37eb41503b566f2c8a704d4dfae5e000aa3ce49b1dc6136c4a28a4f27503b60",
     "inferenceRevision": "4013049764172ee7dc707101c7da8c83c1483f2d",
     "sources": {
       "manifest": {
@@ -26,7 +26,7 @@
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "a795d1de40e78ae06fcbc53ffce3fdc083461ae67c391cd86ff385963cf7f0f7"
+        "sha256": "04a29d348ffbedea379feac9ec08eb650adb4d94accc6e4d869b3d7766fc99bc"
       },
       "videoRouteWan": {
         "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",
@@ -58,7 +58,7 @@
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "980be92d36e7654db0369fb2435b9a620f8625ea45cb4c1bfa5ce93969f7000b"
+        "sha256": "d785f8feb5aec6937708cb7583703b7f2cf7f58ddd050ed34efbfce19b7204c3"
       },
       "estimateSynthesis": {
         "path": "crates/sceneworks-worker/src/estimate_synthesis.rs",
