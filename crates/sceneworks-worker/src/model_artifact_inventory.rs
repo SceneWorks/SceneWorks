@@ -76,6 +76,7 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
             "crates/sceneworks-worker/src/image_jobs/qwen_control.rs",
             "crates/sceneworks-worker/src/image_jobs/qwen_edit_candle.rs",
             "crates/sceneworks-worker/src/image_jobs/sdxl.rs",
+            "crates/sceneworks-worker/src/image_jobs/sdxl_control.rs",
             "crates/sceneworks-worker/src/image_jobs/sdxl_edit_candle.rs",
             "crates/sceneworks-worker/src/image_jobs/sdxl_imported.rs",
             "crates/sceneworks-worker/src/image_jobs/sdxl_ipadapter.rs",
