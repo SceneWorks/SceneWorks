@@ -3,9 +3,9 @@ use super::prelude::*;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use super::{
     ltx::{
-        ltx_quant_bits, ltx_wants_q8, resolve_ltx_adapters, resolve_ltx_conditioning,
-        resolve_ltx_replace_conditioning, resolve_video_clip_conditioning,
-        LTX_BUNDLE_PRE_BF16_REVISION, LTX_BUNDLE_REPO, LTX_BUNDLE_REVISION,
+        resolve_ltx_adapters, resolve_ltx_conditioning, resolve_ltx_replace_conditioning,
+        resolve_video_clip_conditioning, LTX_BUNDLE_PRE_BF16_REVISION, LTX_BUNDLE_REPO,
+        LTX_BUNDLE_REVISION,
     },
     mochi::{
         ensure_mochi_bf16_present, ensure_mochi_q8_present, mochi_precheck_dir, mochi_tier_quant,
@@ -285,6 +285,58 @@ fn candle_ltx_tier_complete(dir: &Path) -> bool {
     dir.join("transformer.safetensors").is_file() && dir.join("quantize_config.json").is_file()
 }
 
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CandleLtxTier {
+    Q4,
+    Q8,
+}
+
+/// Parse the Candle LTX tier without conflating an absent override with a present malformed one.
+/// Only an absent value gets the q4 default; every explicit value must parse exactly to 4 or 8.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_ltx_requested_tier(request: &VideoRequest) -> Option<CandleLtxTier> {
+    let Some(value) = request.advanced.get("mlxQuantize") else {
+        return Some(CandleLtxTier::Q4);
+    };
+    let bits = value
+        .as_i64()
+        .or_else(|| value.as_str()?.trim().parse::<i64>().ok())?;
+    match bits {
+        4 => Some(CandleLtxTier::Q4),
+        8 => Some(CandleLtxTier::Q8),
+        _ => None,
+    }
+}
+
+/// Find an exact packed tier in only the current immutable bundle revision or its approved parent.
+/// A flat legacy root remains supported, while arbitrary sibling snapshots remain excluded.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_ltx_bundle_tier_across_revisions(root: &Path, tier: CandleLtxTier) -> Option<PathBuf> {
+    let tier = match tier {
+        CandleLtxTier::Q4 => "q4",
+        CandleLtxTier::Q8 => "q8",
+    };
+    let roots = root
+        .parent()
+        .filter(|parent| parent.file_name().and_then(|name| name.to_str()) == Some("snapshots"))
+        .map(|snapshots| {
+            [
+                snapshots.join(LTX_BUNDLE_REVISION),
+                snapshots.join(LTX_BUNDLE_PRE_BF16_REVISION),
+            ]
+        });
+    let resolve = |candidate: PathBuf| {
+        let dir = candidate.join(tier);
+        candle_ltx_tier_complete(&dir).then_some(dir)
+    };
+    roots
+        .into_iter()
+        .flatten()
+        .find_map(|candidate| resolve(candidate))
+        .or_else(|| resolve(root.to_path_buf()))
+}
+
 /// Resolve the exact packed LTX tier selected by the request. The checkpoint is already packed, so
 /// the returned load quant is deliberately `None`: `LoadSpec::quantize` means on-the-fly
 /// quantization to the Candle LTX provider and must never be set for these tiers. Base LTX supports
@@ -300,33 +352,12 @@ pub(super) fn candle_ltx_tier_subdir(
     if engine_id != "ltx_2_3_distilled" || model != "ltx_2_3" {
         return None;
     }
-    let tier = match ltx_quant_bits(request) {
-        None | Some(4) => "q4",
-        Some(8) => "q8",
-        _ => return None,
-    };
+    let tier = candle_ltx_requested_tier(request)?;
     // Keep the Candle resolver aligned with the immutable bundle compatibility policy: an existing
     // q4 install may still live at the proven parent while an on-demand q8 fetch lands at the
     // current revision. Do not scan arbitrary cache siblings, which would let an unpinned checkpoint
     // satisfy an explicit tier request.
-    let roots = root
-        .parent()
-        .filter(|parent| parent.file_name().and_then(|name| name.to_str()) == Some("snapshots"))
-        .map(|snapshots| {
-            [
-                snapshots.join(LTX_BUNDLE_REVISION),
-                snapshots.join(LTX_BUNDLE_PRE_BF16_REVISION),
-            ]
-        });
-    let resolve = |candidate: PathBuf| {
-        let dir = candidate.join(tier);
-        candle_ltx_tier_complete(&dir).then_some((dir, None))
-    };
-    roots
-        .into_iter()
-        .flatten()
-        .find_map(|candidate| resolve(candidate))
-        .or_else(|| resolve(root.to_path_buf()))
+    candle_ltx_bundle_tier_across_revisions(root, tier).map(|dir| (dir, None))
 }
 
 /// Fetch the base LTX packed `q8/` tier on demand for the off-Mac Candle provider. A q8 request
@@ -339,13 +370,13 @@ pub(super) async fn ensure_candle_ltx_q8_present(
     job: &JobSnapshot,
     request: &VideoRequest,
 ) -> WorkerResult<()> {
-    if request.model != "ltx_2_3" || !ltx_wants_q8(request) {
+    if request.model != "ltx_2_3" || candle_ltx_requested_tier(request) != Some(CandleLtxTier::Q8) {
         return Ok(());
     }
     let Some(root) = huggingface_snapshot_dir(&settings.data_dir, LTX_BUNDLE_REPO) else {
         return Ok(());
     };
-    if candle_ltx_tier_complete(&root.join("q8")) {
+    if candle_ltx_bundle_tier_across_revisions(&root, CandleLtxTier::Q8).is_some() {
         return Ok(());
     }
     crate::model_jobs::ensure_hf_files_cached(

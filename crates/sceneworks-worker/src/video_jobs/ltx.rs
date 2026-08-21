@@ -105,11 +105,8 @@ pub(super) fn ltx_gemma_dir_is_complete(dir: &Path) -> bool {
 }
 
 /// Parse `advanced.mlxQuantize` (int or numeric string) → the requested bit width, if present.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-pub(super) fn ltx_quant_bits(request: &VideoRequest) -> Option<i64> {
+#[cfg(target_os = "macos")]
+fn ltx_quant_bits(request: &VideoRequest) -> Option<i64> {
     request
         .advanced
         .get("mlxQuantize")
@@ -118,10 +115,7 @@ pub(super) fn ltx_quant_bits(request: &VideoRequest) -> Option<i64> {
 
 /// Whether the request opts into the higher-quality Q8 LTX checkpoint (`advanced.mlxQuantize: 8`,
 /// accepted as int or string). The default is Q4 (sc-5608).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(target_os = "macos")]
 pub(super) fn ltx_wants_q8(request: &VideoRequest) -> bool {
     ltx_quant_bits(request)
         .map(|bits| bits >= 8)

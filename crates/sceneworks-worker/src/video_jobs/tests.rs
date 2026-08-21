@@ -11912,10 +11912,20 @@ mod candle_video_label_tests {
             Some(q4.clone()),
             "the no-override default remains q4"
         );
-        for invalid_tier in [0, 5, 7, 9] {
+        for invalid_tier in [
+            json!(0),
+            json!(5),
+            json!(7),
+            json!(9),
+            json!("bf16"),
+            json!("8.0"),
+            Value::Null,
+            json!(8.0),
+            json!({ "bits": 8 }),
+        ] {
             let invalid = request(json!({
                 "projectId": "p", "model": "ltx_2_3",
-                "advanced": { "mlxQuantize": invalid_tier }
+                "advanced": { "mlxQuantize": invalid_tier.clone() }
             }));
             assert!(
                 candle_ltx_tier_subdir(temp.path(), "ltx_2_3_distilled", "ltx_2_3", &invalid)
@@ -11976,20 +11986,21 @@ mod candle_video_label_tests {
         }
 
         let hub = tempfile::tempdir().expect("hub");
-        let snapshot = hub
-            .path()
-            .join(format!(
-                "models--{}",
-                sceneworks_core::hf_home::safe_repo_dir_name(LTX_BUNDLE_REPO).expect("repo slug")
-            ))
-            .join("snapshots")
-            .join(LTX_BUNDLE_REVISION);
-        for tier in ["q4", "q8"] {
+        let repo_cache = hub.path().join(format!(
+            "models--{}",
+            sceneworks_core::hf_home::safe_repo_dir_name(LTX_BUNDLE_REPO).expect("repo slug")
+        ));
+        let snapshots = repo_cache.join("snapshots");
+        let current = snapshots.join(LTX_BUNDLE_REVISION);
+        let prior = snapshots.join(LTX_BUNDLE_PRE_BF16_REVISION);
+        for (snapshot, tier) in [(&current, "q4"), (&prior, "q8")] {
             let dir = snapshot.join(tier);
             std::fs::create_dir_all(&dir).expect("tier dir");
             std::fs::write(dir.join("transformer.safetensors"), "x").expect("transformer");
             std::fs::write(dir.join("quantize_config.json"), "{}").expect("quant marker");
         }
+        std::fs::create_dir_all(repo_cache.join("refs")).expect("refs");
+        std::fs::write(repo_cache.join("refs/main"), LTX_BUNDLE_REVISION).expect("refs/main");
         let data = tempfile::tempdir().expect("data");
         let settings = Settings {
             data_dir: data.path().to_path_buf(),
@@ -12019,10 +12030,10 @@ mod candle_video_label_tests {
         );
         assert!(
             cached.is_ok(),
-            "a complete q8 tier must skip the network: {cached:?}"
+            "q8 cached only in the approved parent revision must skip the offline network: {cached:?}"
         );
 
-        std::fs::remove_file(snapshot.join("q8/quantize_config.json")).expect("tear q8");
+        std::fs::remove_file(prior.join("q8/quantize_config.json")).expect("tear q8");
         let missing = temp_env_vars(
             &[
                 ("HF_HUB_CACHE", hub.path().to_str().expect("utf-8 hub")),
