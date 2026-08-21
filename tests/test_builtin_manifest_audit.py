@@ -262,6 +262,7 @@ def _assert_mage_candle_ladder(model: dict, model_id: str) -> None:
         for key, value in model["candle"].items()
         if key != "memoryStrategyContract"
     } == {
+        "measurementLane": "candle",
         "minMemoryGb": 17,
         "vramGbByTier": {"q4": 14.67, "q8": 16.95, "bf16": 20.41},
         "vramMeasuredPixels": 1024 * 1024,
@@ -984,6 +985,7 @@ def test_scail2_candle_admission_matches_the_validated_shared_package_evidence()
     # that a reader can check against the authority. The authority is
     # `estimate_synthesis::graded_scalar_gb` (margin: `ladder_margin_policy::CANDLE_ESTIMATE_MARGIN`).
     assert candle == {
+        "measurementLane": "candle",
         "minMemoryGb": 109,
         "vramGbByTier": {"bf16": 102.115},
         "vramMeasuredPixels": 832 * 480,
