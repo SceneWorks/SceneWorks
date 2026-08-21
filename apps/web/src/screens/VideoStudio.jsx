@@ -784,13 +784,30 @@ export function VideoStudio() {
     reseedOnModelChange: true,
   });
   const availableTierKey = availableTiers.join(",");
-  // Apply a recorded tier only after its target model is active and only when that exact tier is
-  // selectable on the active backend. This also re-validates if the platform capability response
-  // changes the active backend after mount. Invalid requests stay in `recipeTierRequest`, which is
-  // what keeps the refusal explicit instead of silently omitting mlxQuantize and running a default.
+  const recipeTierTargetModel = recipeTierRequest
+    ? videoModels.find((item) => item.id === recipeTierRequest.modelId)
+    : null;
+  const recipeTierTargetAvailable = Boolean(
+    recipeTierRequest && macVideoModels.some((item) => item.id === recipeTierRequest.modelId),
+  );
+  // Re-activate a replay target after a transient capability/catalog refresh when it can still
+  // serve the current mode, then apply its exact tier. A user mode change that the target cannot
+  // serve deliberately keeps the automatic fallback model active; the global replay guard below
+  // still refuses submission until the user explicitly starts a new generation.
   useEffect(() => {
     if (
       recipeTierRequest &&
+      selectedModel?.id !== recipeTierRequest.modelId &&
+      recipeTierTargetAvailable &&
+      recipeTierTargetModel &&
+      videoModelServesMode(recipeTierTargetModel, mode, macCapabilities)
+    ) {
+      setModel(recipeTierRequest.modelId);
+      return;
+    }
+    if (
+      recipeTierRequest &&
+      recipeTierTargetAvailable &&
       recipeTierRequest.modelId === selectedModel?.id &&
       availableTiers.includes(recipeTierRequest.tier)
     ) {
@@ -798,7 +815,15 @@ export function VideoStudio() {
     }
     // The stable key represents exact tier availability; the array identity changes with renders.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [recipeTierRequest, selectedModel?.id, activeBackend, availableTierKey]);
+  }, [
+    recipeTierRequest,
+    recipeTierTargetModel,
+    recipeTierTargetAvailable,
+    selectedModel?.id,
+    mode,
+    activeBackend,
+    availableTierKey,
+  ]);
   const handleExecutionTierChange = useCallback(
     (nextTier) => {
       setRecipeTierRequest(null);
@@ -809,8 +834,14 @@ export function VideoStudio() {
   const replayTierTargetsActiveModel = Boolean(
     recipeTierRequest && recipeTierRequest.modelId === selectedModel?.id,
   );
-  const replayTierBlockMessage = replayTierTargetsActiveModel
-    ? !availableTiers.includes(recipeTierRequest.tier)
+  const replayTierTargetName =
+    recipeTierTargetModel?.name ?? recipeTierRequest?.modelName ?? recipeTierRequest?.modelId;
+  const replayTierBlockMessage = recipeTierRequest
+    ? !recipeTierTargetAvailable
+      ? `This recipe requires ${replayTierTargetName} at ${tierLabel(recipeTierRequest.tier)}, but that model is not available on the current backend. Generation stays blocked while the recipe replay is active.`
+      : !replayTierTargetsActiveModel
+        ? `This recipe requires ${replayTierTargetName} at ${tierLabel(recipeTierRequest.tier)}, but ${selectedModel?.name ?? model} is active for the current mode. Generation stays blocked while the recipe replay is active.`
+      : !availableTiers.includes(recipeTierRequest.tier)
       ? unavailableRecipeTierMessage(
           selectedModel,
           activeBackend,
@@ -828,6 +859,24 @@ export function VideoStudio() {
     recipeTierRequest.tier !== "bf16" &&
     !SCAIL2_CANDLE_PRODUCT_TIERS.includes(recipeTierRequest.tier) &&
     availableTiers.includes("bf16");
+  const canStartNewGenerationFromReplay = Boolean(
+    replayTierBlockMessage &&
+      macVideoModels.some((item) => item.id === selectedModel?.id) &&
+      !baseExecutionTierBlockMessage &&
+      (!nativeTierLane || availableTiers.includes(quantTier)),
+  );
+  const startNewGenerationLabel = canStartNewBf16FromReplay
+    ? "Use bf16 for a new generation"
+    : `Start new generation with ${selectedModel?.name ?? model}${
+        nativeTierLane ? ` ${tierLabel(quantTier)}` : ""
+      }`;
+  const handleStartNewGenerationFromReplay = useCallback(() => {
+    setRecipeModelNotice("");
+    setRecipeTierRequest(null);
+    if (nativeTierLane && availableTiers.includes(quantTier)) {
+      handleTierChange(quantTier);
+    }
+  }, [nativeTierLane, availableTiers, quantTier, handleTierChange]);
   const showTorchQuantization = activeBackend !== "mlx" && !nativeTierLane && supportsQuantization;
   const selectedTierQuantize =
     nativeTierLane && availableTiers.includes(quantTier) ? tierQuantize(quantTier) : null;
@@ -1146,8 +1195,11 @@ export function VideoStudio() {
     // then serialize no mlxQuantize and silently run bf16.
     const recipeTier = quantizeTier(rawSettings.mlxQuantize);
     if (recipeTier) {
+      const recipeTierModelId = recipe.model && recipeModelAvailable ? recipe.model : model;
       setRecipeTierRequest({
-        modelId: recipe.model && recipeModelAvailable ? recipe.model : model,
+        modelId: recipeTierModelId,
+        modelName:
+          videoModels.find((item) => item.id === recipeTierModelId)?.name ?? recipeTierModelId,
         tier: recipeTier,
       });
     } else {
@@ -2789,13 +2841,13 @@ export function VideoStudio() {
               row, from the same summary that gates the button (sc-10650). Project, prompt
               and inputs are silent requirements: their empty fields show it. */}
           <ValidationSummary issues={videoValidity.surfaced} label="Generate errors" />
-          {canStartNewBf16FromReplay ? (
+          {canStartNewGenerationFromReplay ? (
             <button
               className="secondary-action"
-              onClick={() => handleExecutionTierChange("bf16")}
+              onClick={handleStartNewGenerationFromReplay}
               type="button"
             >
-              Use bf16 for a new generation
+              {startNewGenerationLabel}
             </button>
           ) : null}
 

@@ -1715,6 +1715,125 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
     expect(createVideoJob.mock.calls[0][0].advanced).toMatchObject({ mlxQuantize: 8 });
   });
 
+  it("keeps replay blocked when capability refresh removes its model and reapplies it on return", async () => {
+    const bernini = tieredVideoModel(["q4", "q8"]);
+    const fallback = {
+      ...tieredVideoModel(["q4"]),
+      id: "fallback_video",
+      name: "Fallback Video",
+    };
+    const createVideoJob = vi.fn();
+    const studioLaunch = tierReplay("bernini", 8, "refresh-removes-bernini-q8");
+    const contextFor = (videoModels) =>
+      baseContext({
+        videoModels,
+        createVideoJob,
+        macCapabilities: MAC_CAPS,
+        studioLaunch,
+      });
+    await render(contextFor([bernini, fallback]));
+    expect(tierPicker().value).toBe("q8");
+
+    // The capability response and a native form submit can land in the same turn. The stale target
+    // is no longer available even before the automatic model-snap effect writes the fallback.
+    flushSync(() => {
+      root.render(
+        <AppContext.Provider value={contextFor([fallback])}>
+          <VideoStudio />
+        </AppContext.Provider>,
+      );
+    });
+    container
+      .querySelector("form")
+      .dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+    expect(createVideoJob).not.toHaveBeenCalled();
+    await act(async () => {});
+    expect(container.querySelector(".settings-field-model select").value).toBe("fallback_video");
+    expect(tierPicker().value).toBe("q4");
+    expect(container.textContent).toContain("requires Bernini at Q8");
+    expect(container.textContent).toContain("not available on the current backend");
+    expect(buttonWithText(container, "Render clip").disabled).toBe(true);
+    await act(async () => {
+      container
+        .querySelector("form")
+        .dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+    });
+    expect(createVideoJob).not.toHaveBeenCalled();
+
+    // No retirement occurred. When the authoritative catalog returns, the exact target and tier
+    // return too; replay does not silently become a new Fallback Video Q4 generation.
+    await render(contextFor([bernini, fallback]));
+    expect(container.querySelector(".settings-field-model select").value).toBe("bernini");
+    expect(tierPicker().value).toBe("q8");
+    expect(buttonWithText(container, "Render clip").disabled).toBe(false);
+    await click(buttonWithText(container, "Render clip"));
+    expect(createVideoJob.mock.calls[0][0]).toMatchObject({
+      model: "bernini",
+      advanced: { mlxQuantize: 8 },
+    });
+  });
+
+  it("blocks a mode fallback until an explicit action starts a new exact-tier generation", async () => {
+    const bernini = tieredVideoModel(["q4", "q8"]);
+    const imageVideo = {
+      ...tieredVideoModel(["q4"]),
+      id: "image_video",
+      name: "Image Video",
+      capabilities: ["image_to_video"],
+      macSupport: {
+        supported: true,
+        features: { videoModes: { image_to_video: true } },
+      },
+    };
+    const source = {
+      id: "source_image",
+      type: "image",
+      projectId: "project_1",
+      displayName: "Source Image",
+    };
+    const createVideoJob = vi.fn();
+    const replay = tierReplay("bernini", 8, "mode-fallback-bernini-q8");
+    replay.recipe.normalizedSettings = { sourceAssetId: source.id };
+    const context = baseContext({
+      videoModels: [bernini, imageVideo],
+      assets: [source],
+      createVideoJob,
+      macCapabilities: MAC_CAPS,
+      studioLaunch: replay,
+    });
+    await render(context);
+
+    await click(buttonWithText(container.querySelector(".mode-control"), "Image → Video"));
+    expect(container.querySelector(".settings-field-model select").value).toBe("image_video");
+    expect(tierPicker().value).toBe("q4");
+    expect(container.textContent).toContain("requires Bernini at Q8");
+    expect(container.textContent).toContain("Image Video is active for the current mode");
+    const renderButton = buttonWithText(container, "Render clip");
+    expect(renderButton.disabled).toBe(true);
+    await act(async () => {
+      container
+        .querySelector("form")
+        .dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+    });
+    expect(createVideoJob).not.toHaveBeenCalled();
+
+    const startNew = buttonWithText(
+      container,
+      "Start new generation with Image Video Q4 (smallest)",
+    );
+    expect(startNew).toBeTruthy();
+    await click(startNew);
+    expect(container.textContent).not.toContain("requires Bernini at Q8");
+    expect(renderButton.disabled).toBe(false);
+    await click(renderButton);
+    expect(createVideoJob.mock.calls[0][0]).toMatchObject({
+      mode: "image_to_video",
+      model: "image_video",
+      sourceAssetId: "source_image",
+      advanced: { mlxQuantize: 4 },
+    });
+  });
+
   it("retires a rejected replay through the Replace Person engine selector", async () => {
     const scail = {
       ...scailTierModel(["q4", "q8", "bf16"]),
