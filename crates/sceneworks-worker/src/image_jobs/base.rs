@@ -1953,6 +1953,55 @@ fn resolve_candle_flux1_packed_weights_dir(
     }
 }
 
+/// Whether completed-image telemetry must replay the Candle-only FLUX.1 exact-tier resolver.
+///
+/// The metrics consumer is shared by MLX and Candle builds, but the direct packed FLUX.1 route is
+/// not: macOS must keep using its ordinary MLX resolver and default-tier semantics. Keeping that
+/// distinction in a pure cfg-sensitive predicate makes the build boundary testable without making
+/// [`resolve_candle_flux1_packed_weights_dir`] (or any Candle production route) available on macOS.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn completed_image_metrics_use_candle_flux1_exact_resolution(model: &str) -> bool {
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let exact = matches!(model, "flux_schnell" | "flux_dev");
+    #[cfg(target_os = "macos")]
+    let exact = {
+        let _ = model;
+        false
+    };
+    exact
+}
+
+/// Re-resolve the tier used by a completed image for telemetry only. The Candle-only FLUX.1 lane
+/// replays its exact q4/q8 resolver; macOS and all other families replay the ordinary resolver that
+/// selected their production weights. The cfg around the Candle call is intentional: a shared
+/// metrics helper must never make the off-Mac Candle route part of a macOS build.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn resolve_completed_image_metrics_tier_dir(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> Option<PathBuf> {
+    let _use_candle_exact =
+        completed_image_metrics_use_candle_flux1_exact_resolution(&request.model);
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    if _use_candle_exact {
+        return resolve_candle_flux1_packed_weights_dir(request, settings)
+            .ok()
+            .flatten();
+    }
+    #[cfg(target_os = "macos")]
+    debug_assert!(
+        !_use_candle_exact,
+        "macOS metrics must not select the Candle-only FLUX.1 resolver"
+    );
+    resolve_weights_dir(request, settings).ok().flatten()
+}
+
 #[cfg(target_os = "macos")]
 pub(super) fn resolved_mlx_artifact_tier(
     weights_dir: &Path,
@@ -5738,6 +5787,25 @@ mod metrics_settings_tests {
 
     fn request(value: serde_json::Value) -> ImageRequest {
         ImageRequest::from_payload(value.as_object().unwrap())
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn completed_metrics_replay_exact_flux1_tiers_only_on_the_candle_build() {
+        let candle_build = cfg!(all(not(target_os = "macos"), feature = "backend-candle"));
+        for model in ["flux_schnell", "flux_dev"] {
+            assert_eq!(
+                completed_image_metrics_use_candle_flux1_exact_resolution(model),
+                candle_build,
+                "{model} must use Candle's q4-default exact resolver only on the Candle build"
+            );
+        }
+        assert!(!completed_image_metrics_use_candle_flux1_exact_resolution(
+            "qwen_image"
+        ));
     }
 
     #[test]
@@ -11596,13 +11664,7 @@ async fn consume_gen_events_with_disclosure(
     // `.ok().flatten()` because a metrics block must never fail a completed generation: an unresolvable
     // dir yields `None`, which conservatively reports the request-derived q4/q8/bf16 label exactly as
     // it did before this parameter existed.
-    let tier_dir = if matches!(plan.request.model.as_str(), "flux_schnell" | "flux_dev") {
-        resolve_candle_flux1_packed_weights_dir(&plan.request, settings)
-            .ok()
-            .flatten()
-    } else {
-        resolve_weights_dir(&plan.request, settings).ok().flatten()
-    };
+    let tier_dir = resolve_completed_image_metrics_tier_dir(&plan.request, settings);
     let mut metrics = build_image_metrics(
         &plan.request,
         effective_steps,
