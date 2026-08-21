@@ -548,7 +548,7 @@ const COMPILE_CHAIN_STEPS = [
   "Check the candle sidecar builds (rust-api, backend-candle)",
   "Check and test the candle memory adapter (lib + memory-candle-adapter)",
   "Clippy (candle worker)",
-  "Verify capabilities.candle.json is a real dump, not a restamp",
+  "Verify capabilities.candle.json content against a fresh dump",
 ];
 
 // The ORDERED view of the job's steps. `stepBody()` above finds one step by name; this keeps
@@ -3185,7 +3185,7 @@ function mlxJobSteps(workflow, job) {
 }
 
 // The jobs that carry fatal guards, scanned as ONE set. Both, not just `nax-worker`: main
-// moved "Verify capabilities.mlx.json is a real dump, not a restamp" onto the hosted
+// moved "Verify capabilities.mlx.json content against a fresh dump" onto the hosted
 // `macos-checks` job, because it is a weights-free registry walk that has no business on the
 // scarce M5/NAX pool. The guard was not weakened — it still ends every branch in `exit 1` —
 // it changed jobs, and the `laneExits` assertion below (which counts the WHOLE FILE) is what
@@ -3205,28 +3205,28 @@ function mlxGuardSteps(workflow) {
 // "Validate ..." steps share both the `INFERENCE_PIN` condition and its message.
 const MLX_FATAL_GUARDS = [
   {
-    step: "Verify capabilities.mlx.json is a real dump, not a restamp",
-    detects: "the checked-in MLX facts file is a restamp, not a fresh dump at this pin",
+    step: "Verify capabilities.mlx.json content against a fresh dump",
+    detects: "the checked-in MLX facts file differs in capability content from a fresh dump at this pin",
     branch: [
-      'if ! diff -u config/engine-capabilities/capabilities.mlx.json "$scratch/capabilities.mlx.json"; then',
+      'if ! node scripts/compare-engine-capability-facts.mjs config/engine-capabilities/capabilities.mlx.json "$scratch/capabilities.mlx.json"; then',
     ],
-    diagnostic: /^echo "::error::config\/engine-capabilities\/capabilities\.mlx\.json does not match a fresh"/,
+    diagnostic: /^echo "::error::config\/engine-capabilities\/capabilities\.mlx\.json differs in capability"/,
   },
   {
-    step: "Verify capabilities.mlx.json is a real dump, not a restamp",
+    step: "Verify capabilities.mlx.json content against a fresh dump",
     detects:
-      "the checked-in RUNTIME facts file is a restamp rather than inference's fresh snapshot",
+      "the checked-in RUNTIME facts file differs in capability content from inference's fresh snapshot",
     branch: [
-      'if ! diff -u config/engine-capabilities/runtime/capabilities.mlx.json "$scratch/runtime/capabilities.mlx.json"; then',
+      'if ! node scripts/compare-engine-capability-facts.mjs config/engine-capabilities/runtime/capabilities.mlx.json "$scratch/runtime/capabilities.mlx.json"; then',
     ],
     diagnostic:
       /^echo "::error::config\/engine-capabilities\/runtime\/capabilities\.mlx\.json does not"/,
   },
   {
-    step: "Verify capabilities.mlx.json is a real dump, not a restamp",
-    detects: "the checked-in AUDIO facts file is a restamp — the one dump BOTH lanes write",
+    step: "Verify capabilities.mlx.json content against a fresh dump",
+    detects: "the checked-in AUDIO facts file differs in capability content — the one dump BOTH lanes write",
     branch: [
-      'if ! diff -u config/engine-capabilities/audio/capabilities.candle.json "$scratch/audio/capabilities.candle.json"; then',
+      'if ! node scripts/compare-engine-capability-facts.mjs config/engine-capabilities/audio/capabilities.candle.json "$scratch/audio/capabilities.candle.json"; then',
     ],
     diagnostic:
       /^echo "::error::config\/engine-capabilities\/audio\/capabilities\.candle\.json does not"/,
@@ -3365,7 +3365,7 @@ const MLX_FATAL_GUARDS = [
 // the contract is the exact expression, not its presence. `null` means the step is
 // unconditional and must stay that way.
 //
-// The restamp check reads `if: ${{ always() }}` since main moved it to `macos-checks`, and
+// The content-verify step reads `if: ${{ always() }}` since main moved it to `macos-checks`, and
 // that is MORE reachable than unconditional, not less: `always()` on a step's `if:` makes it
 // run even when an earlier step in the job already failed. It does not swallow this step's own
 // failures — only `continue-on-error` and `|| true` do that, and both remain banned below. The
@@ -3373,7 +3373,7 @@ const MLX_FATAL_GUARDS = [
 // backed tests fail closed, and `always()` lets the producer and its paired upload still run so
 // the fresh facts can be committed, instead of deadlocking the bootstrap.
 const MLX_GUARD_STEP_REACHABILITY = {
-  "Verify capabilities.mlx.json is a real dump, not a restamp": "if: ${{ always() }}",
+  "Verify capabilities.mlx.json content against a fresh dump": "if: ${{ always() }}",
   "Validate Qwen provisioning mode": "if: ${{ github.event_name == 'workflow_dispatch' }}",
   "Validate Z-Image provisioning mode": "if: ${{ github.event_name == 'workflow_dispatch' }}",
   "Validate memory-strategy calibration identities":
@@ -3585,16 +3585,16 @@ test("MLX-lane guard steps stay reachable and cannot be degraded into warnings",
     }
   }
 
-  // The restamp check is the one guard step that runs several commands and a `trap`, and it
+  // The content-verify step is the one guard step that runs several commands and a `trap`, and it
   // opts into strictness explicitly. `pipefail` and `-u` are NOT GitHub's defaults (the
   // default shell is `bash -e {0}`), so this is a real declaration, not a restatement of
   // one: without it a failing `cargo run` inside a pipeline, or an unset `$scratch`, reaches
-  // the `diff` and the guard compares against nothing.
+  // the comparison and the guard compares against nothing.
   assert.ok(
     byName
-      .get("Verify capabilities.mlx.json is a real dump, not a restamp")
+      .get("Verify capabilities.mlx.json content against a fresh dump")
       .statements.includes("set -euo pipefail"),
-    `${MLX_LANE}: the restamp check must keep \`set -euo pipefail\``,
+    `${MLX_LANE}: the content-verify step must keep \`set -euo pipefail\``,
   );
 });
 

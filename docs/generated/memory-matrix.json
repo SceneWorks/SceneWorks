@@ -1,7 +1,7 @@
 {
   "schemaVersion": 8,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:01c33c3c8acf9a53e53f9f207bfd0066bd6676738340f4f8ca99195155ff5ce2",
+    "sceneWorksRevision": "source-tree:0bcf35badc1b6d57e03334fcb6ce9795eb0e48ce32439283e4e200f260af7183",
     "inferenceRevision": "4013049764172ee7dc707101c7da8c83c1483f2d",
     "sources": {
       "manifest": {
@@ -94,7 +94,7 @@
       },
       "engineCapabilitiesMlx": {
         "path": "config/engine-capabilities/capabilities.mlx.json",
-        "sha256": "2c63683b20e5ff70631ea3cded3c58ad5bd6d57377def55bfbe5ef3d008a8174"
+        "sha256": "f4a00074ecb91f68e9fb335e9c4377422d2c87dc213228519afce1748ae00cee"
       },
       "engineCapabilitiesCandle": {
         "path": "config/engine-capabilities/capabilities.candle.json",
