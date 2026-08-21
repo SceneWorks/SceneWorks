@@ -435,10 +435,7 @@ fn sdxl_control_spec(
 /// other typed and named sources are overlays held by the same provider load. The gate's
 /// `ConditioningFootprint::from_paths` containment pass then makes a component nested under the base
 /// (or a path repeated in two slots) count exactly once.
-#[cfg(any(
-    test,
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn sdxl_control_admission_paths(spec: &LoadSpec) -> WorkerResult<(&Path, Vec<&Path>)> {
     let base = match &spec.weights {
         WeightsSource::Dir(path) => path.as_path(),
@@ -793,6 +790,7 @@ mod sdxl_control_tests {
         assert_eq!(spec.quantize, Some(Quant::Q8));
     }
 
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     #[test]
     fn finalized_admission_counts_adapter_component_and_selected_te_once() {
         let root = tempfile::tempdir().expect("tempdir");
