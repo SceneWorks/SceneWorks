@@ -310,7 +310,9 @@ fn candle_ltx_requested_tier(request: &VideoRequest) -> Option<CandleLtxTier> {
 }
 
 /// Find an exact packed tier in only the current immutable bundle revision or its approved parent.
-/// A flat legacy root remains supported, while arbitrary sibling snapshots remain excluded.
+/// The selected root is used only to locate the cache's `snapshots/` directory: it is never itself
+/// admitted, because `huggingface_snapshot_dir` may select a mutable `refs/main` target or an
+/// arbitrary complete sibling by file count.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn candle_ltx_bundle_tier_across_revisions(root: &Path, tier: CandleLtxTier) -> Option<PathBuf> {
     let tier = match tier {
@@ -334,7 +336,6 @@ fn candle_ltx_bundle_tier_across_revisions(root: &Path, tier: CandleLtxTier) -> 
         .into_iter()
         .flatten()
         .find_map(|candidate| resolve(candidate))
-        .or_else(|| resolve(root.to_path_buf()))
 }
 
 /// Resolve the exact packed LTX tier selected by the request. The checkpoint is already packed, so
@@ -1175,7 +1176,8 @@ pub(super) async fn generate_candle_video_using(
     let ltx_tier = candle_ltx_tier_subdir(&snapshot_dir, engine_id, &request.model, request);
     if is_ltx && ltx_tier.is_none() {
         return Err(WorkerError::InvalidPayload(format!(
-            "{} requires a complete Candle LTX q4 or q8 packed tier matching advanced.mlxQuantize",
+            "{} requires a complete Candle LTX q4 or q8 packed tier matching advanced.mlxQuantize \
+             from an approved immutable bundle revision; repair this model in Model Manager",
             request.model
         )));
     }

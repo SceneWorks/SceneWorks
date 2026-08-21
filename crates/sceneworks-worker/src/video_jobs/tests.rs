@@ -12147,8 +12147,10 @@ mod candle_video_label_tests {
     #[test]
     fn candle_ltx_source_resolver_prepares_exact_tiers_without_promoting_q8() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let q4 = temp.path().join("q4");
-        let q8 = temp.path().join("q8");
+        let snapshots = temp.path().join("snapshots");
+        let current = snapshots.join(LTX_BUNDLE_REVISION);
+        let q4 = current.join("q4");
+        let q8 = current.join("q8");
         std::fs::create_dir_all(&q4).expect("q4");
         std::fs::create_dir_all(&q8).expect("q8");
         std::fs::write(q4.join("transformer.safetensors"), "x").expect("transformer");
@@ -12165,7 +12167,7 @@ mod candle_video_label_tests {
         let default_request = request(json!({ "projectId": "p", "model": "ltx_2_3" }));
 
         let (resolved, quant) =
-            candle_ltx_tier_subdir(temp.path(), "ltx_2_3_distilled", "ltx_2_3", &q4_request)
+            candle_ltx_tier_subdir(&current, "ltx_2_3_distilled", "ltx_2_3", &q4_request)
                 .expect("base LTX q4 tier");
         assert_eq!(resolved, q4);
         assert_eq!(
@@ -12191,7 +12193,7 @@ mod candle_video_label_tests {
         // This directly exercises reusable source plumbing below the product router. The core route
         // remains the authority that withholds q8 until terminal evidence advances its capability.
         let (resolved_q8, q8_quant) =
-            candle_ltx_tier_subdir(temp.path(), "ltx_2_3_distilled", "ltx_2_3", &q8_request)
+            candle_ltx_tier_subdir(&current, "ltx_2_3_distilled", "ltx_2_3", &q8_request)
                 .expect("base LTX q8 tier");
         assert_eq!(resolved_q8, q8, "an explicit q8 request must select q8");
         assert!(
@@ -12199,13 +12201,8 @@ mod candle_video_label_tests {
             "the pre-packed q8 tier must not request a second load-time quantization"
         );
         assert_eq!(
-            candle_ltx_tier_subdir(
-                temp.path(),
-                "ltx_2_3_distilled",
-                "ltx_2_3",
-                &default_request,
-            )
-            .map(|(dir, _)| dir),
+            candle_ltx_tier_subdir(&current, "ltx_2_3_distilled", "ltx_2_3", &default_request,)
+                .map(|(dir, _)| dir),
             Some(q4.clone()),
             "the no-override default remains q4"
         );
@@ -12225,31 +12222,26 @@ mod candle_video_label_tests {
                 "advanced": { "mlxQuantize": invalid_tier.clone() }
             }));
             assert!(
-                candle_ltx_tier_subdir(temp.path(), "ltx_2_3_distilled", "ltx_2_3", &invalid)
+                candle_ltx_tier_subdir(&current, "ltx_2_3_distilled", "ltx_2_3", &invalid)
                     .is_none(),
                 "unsupported LTX Candle tier {invalid_tier} must fail closed"
             );
         }
         assert!(
-            candle_ltx_tier_subdir(
-                temp.path(),
-                "ltx_2_3_distilled",
-                "ltx_2_3_eros",
-                &q4_request,
-            )
-            .is_none(),
+            candle_ltx_tier_subdir(&current, "ltx_2_3_distilled", "ltx_2_3_eros", &q4_request,)
+                .is_none(),
             "Eros stays on its dense standalone checkpoint"
         );
 
         std::fs::remove_file(q8.join("quantize_config.json")).expect("tear q8 tier");
         assert!(
-            candle_ltx_tier_subdir(temp.path(), "ltx_2_3_distilled", "ltx_2_3", &q8_request,)
+            candle_ltx_tier_subdir(&current, "ltx_2_3_distilled", "ltx_2_3", &q8_request,)
                 .is_none(),
             "an explicit q8 request must never silently select q4"
         );
         std::fs::remove_file(q4.join("quantize_config.json")).expect("tear tier");
         assert!(
-            candle_ltx_tier_subdir(temp.path(), "ltx_2_3_distilled", "ltx_2_3", &q4_request,)
+            candle_ltx_tier_subdir(&current, "ltx_2_3_distilled", "ltx_2_3", &q4_request,)
                 .is_none(),
             "a partial q4 tier is never selected"
         );
@@ -12270,6 +12262,25 @@ mod candle_video_label_tests {
             Some(current.join("q8")),
             "an on-demand q8 tier in the current revision must beat q4 in the selected prior revision"
         );
+
+        let unapproved = tempfile::tempdir().expect("unapproved cache");
+        let unapproved_snapshots = unapproved.path().join("snapshots");
+        let arbitrary = unapproved_snapshots.join("arbitrary-revision");
+        for tier in ["q4", "q8"] {
+            let tier_dir = arbitrary.join(tier);
+            std::fs::create_dir_all(&tier_dir).expect("arbitrary tier dir");
+            std::fs::write(tier_dir.join("transformer.safetensors"), "x")
+                .expect("arbitrary transformer");
+            std::fs::write(tier_dir.join("quantize_config.json"), "{}")
+                .expect("arbitrary quant marker");
+        }
+        for request in [&q4_request, &q8_request, &default_request] {
+            assert!(
+                candle_ltx_tier_subdir(&arbitrary, "ltx_2_3_distilled", "ltx_2_3", request,)
+                    .is_none(),
+                "a complete tier selected from an unapproved revision must not satisfy Candle LTX"
+            );
+        }
     }
 
     #[test]
@@ -12331,6 +12342,14 @@ mod candle_video_label_tests {
         );
 
         std::fs::remove_file(prior.join("q8/quantize_config.json")).expect("tear q8");
+        let arbitrary = snapshots.join("arbitrary-complete-revision").join("q8");
+        std::fs::create_dir_all(&arbitrary).expect("arbitrary q8");
+        std::fs::write(arbitrary.join("transformer.safetensors"), "x")
+            .expect("arbitrary transformer");
+        std::fs::write(arbitrary.join("quantize_config.json"), "{}")
+            .expect("arbitrary quant marker");
+        std::fs::write(repo_cache.join("refs/main"), "arbitrary-complete-revision")
+            .expect("mutable refs/main");
         let missing = temp_env_vars(
             &[
                 ("HF_HUB_CACHE", hub.path().to_str().expect("utf-8 hub")),
@@ -12341,7 +12360,27 @@ mod candle_video_label_tests {
         );
         assert!(
             missing.is_err(),
-            "an incomplete q8 tier must attempt its q8/* on-demand fetch instead of loading q4"
+            "an arbitrary refs/main q8 must not suppress the fixed-revision q8/* fetch or load q4"
+        );
+
+        let current_q8 = current.join("q8");
+        std::fs::create_dir_all(&current_q8).expect("current q8");
+        std::fs::write(current_q8.join("transformer.safetensors"), "x")
+            .expect("current transformer");
+        std::fs::write(current_q8.join("quantize_config.json"), "{}")
+            .expect("current quant marker");
+        let current_cached = temp_env_vars(
+            &[
+                ("HF_HUB_CACHE", hub.path().to_str().expect("utf-8 hub")),
+                ("HUGGINGFACE_HUB_CACHE", ""),
+                ("HF_HOME", ""),
+            ],
+            || block_on(ensure_candle_ltx_q8_present(&api, &settings, &job, &q8)),
+        );
+        assert!(
+            current_cached.is_ok(),
+            "q8 in the approved current revision must be accepted even when refs/main is arbitrary: \
+             {current_cached:?}"
         );
     }
 
