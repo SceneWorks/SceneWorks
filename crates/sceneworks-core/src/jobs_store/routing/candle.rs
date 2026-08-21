@@ -365,6 +365,8 @@ pub(crate) enum CandleImageRefusal {
     ConditioningCarrier,
     /// A user LoRA on a family that advertises no inference adapter slot.
     UserLora,
+    /// A quant tier plus adapter on a family where both are admitted only independently.
+    QuantLoraCombination,
     /// `advanced.poses` — strict-pose ControlNet.
     Poses,
     /// `advanced.phases` — a multi-phase schedule.
@@ -384,6 +386,7 @@ impl CandleImageRefusal {
             Self::EditMode => "mode edit_image",
             Self::ConditioningCarrier => "a populated conditioning carrier",
             Self::UserLora => "a user LoRA on an adapter-less family",
+            Self::QuantLoraCombination => "an unproven quant tier plus adapter combination",
             Self::Poses => "advanced.poses",
             Self::Phases => "advanced.phases",
             Self::QuantTier => "advanced.mlxQuantize",
@@ -414,6 +417,10 @@ const CANDLE_IMAGE_CHECKS: &[(CandleImageRefusal, CandleImageCheck)] = &[
         candle_refuses_conditioning_carrier,
     ),
     (CandleImageRefusal::UserLora, candle_refuses_user_lora),
+    (
+        CandleImageRefusal::QuantLoraCombination,
+        candle_refuses_quant_lora_combination,
+    ),
     (CandleImageRefusal::Poses, candle_refuses_poses),
     (CandleImageRefusal::Phases, candle_refuses_phases),
     (CandleImageRefusal::QuantTier, candle_refuses_quant_tier),
@@ -507,9 +514,40 @@ pub(crate) fn candle_family_serves_quant(model: &str) -> bool {
     CANDLE_QUANT_LORA_MODELS.contains(&model) || CANDLE_QUANT_MODELS.contains(&model)
 }
 
+/// Whether the family admits adapters composed with a selected/loaded Q4 or Q8 tier.
+pub(crate) fn candle_family_serves_quant_lora(model: &str) -> bool {
+    CANDLE_QUANT_LORA_MODELS.contains(&model)
+}
+
 /// LoRAs: not in the candle lane unless the audited family row advertises adapters.
 fn candle_refuses_user_lora(model: &str, payload: &Map<String, Value>) -> bool {
     !candle_family_serves_lora(model) && has_nonempty_array(payload, "loras")
+}
+
+/// Some families admit quant and adapters independently without proving their composition.
+fn candle_refuses_quant_lora_combination(model: &str, payload: &Map<String, Value>) -> bool {
+    candle_quant_lora_combination_is_unsupported(
+        candle_family_serves_quant(model),
+        candle_family_serves_lora(model),
+        candle_family_serves_quant_lora(model),
+        payload,
+    )
+}
+
+/// Pure decision seam for the deliberate standalone-quant + standalone-adapter catalog shape.
+/// Keeping this independent of a currently promoted model lets the staged Chroma catalog remain
+/// fail-closed while the composition rule stays directly testable.
+pub(crate) fn candle_quant_lora_combination_is_unsupported(
+    serves_quant: bool,
+    serves_lora: bool,
+    serves_quant_lora: bool,
+    payload: &Map<String, Value>,
+) -> bool {
+    serves_quant
+        && serves_lora
+        && !serves_quant_lora
+        && candle_request_wants_quant(payload)
+        && has_nonempty_array(payload, "loras")
 }
 
 /// Strict-pose ControlNet (`advanced.poses`, object-shaped entries) is refused by this base lane.
@@ -530,10 +568,16 @@ fn candle_refuses_phases(_model: &str, payload: &Map<String, Value>) -> bool {
 /// (sc-5099). Lens (sc-5126), SD3.5 (sc-7880), Krea (sc-9607/sc-9983), the Ideogram/Boogu packed
 /// families (sc-9607), Qwen-Image (sc-11020), and Z-Image advertise Q4/Q8, so their quant requests
 /// stay on candle. For the packed families the `mlxQuantize` value is a turnkey tier-SELECT (which
-/// pre-quantized q4/q8 subdir to load), a no-op on the loader rather than a runtime quantize — but
-/// the gate is the same: quant-capable → stay.
+/// pre-quantized q4/q8 subdir to load), a no-op on the loader rather than a runtime quantize. Once
+/// Chroma's staged catalog promotion lands, it has exactly those two published packed directories,
+/// so a non-q4/q8 value remains refused instead of reaching the downstream directory resolver.
 fn candle_refuses_quant_tier(model: &str, payload: &Map<String, Value>) -> bool {
-    !candle_family_serves_quant(model) && candle_request_wants_quant(payload)
+    let Some(bits) = candle_requested_quant_bits(payload) else {
+        return false;
+    };
+    !candle_family_serves_quant(model)
+        || (matches!(model, "chroma1_base" | "chroma1_flash" | "chroma1_hd")
+            && !matches!(bits, 4 | 8))
 }
 
 /// The first [`CANDLE_IMAGE_CHECKS`] entry that refuses this request, short-circuiting exactly like
