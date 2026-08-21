@@ -1143,6 +1143,7 @@ export function buildReport(
   driverStates = new Map(),
   sourceSessions = [],
   story = "sc-18810",
+  terminalProvenance = null,
 ) {
   const orderedPoints = points
     .slice()
@@ -1208,11 +1209,14 @@ export function buildReport(
     generatedBy: "scripts/fit-ltx-temporal-form.mjs",
     capturedRecords: orderedPoints.length,
     tiers,
-    // Which driver session produced which record, and under which SceneWorks revision. The evidence
-    // BUNDLE's own `sourceSessions` is `[]` for this lane (as it is for sc-18808): the harness only
-    // populates it on its capture path, and these records were ingested without it. This block is
-    // the provenance that does exist, derived from the committed logs rather than typed.
+    // Which driver session produced which record, and under which SceneWorks revision. Driver-log
+    // mode derives these entries from the committed logs. Direct record-terminal mode keeps this
+    // empty rather than inventing a session; its distinct authority is persisted immediately below.
     sourceSessions,
+    // The terminal authority is separate from `sourceSessions`: a direct harness capture has no
+    // driver-log session to invent, while an older driver campaign must name the exact logs whose
+    // BEGIN/OK/FAIL records were parsed. CLI-produced reports always persist one of these modes.
+    ...(terminalProvenance ? { terminalProvenance } : {}),
     ...(plan ? { coverage: coverageOf(plan, orderedPoints, driverStates) } : {}),
     noiseFloors,
     selectorFits,
@@ -1804,6 +1808,15 @@ async function main() {
     driverStates,
     sessionsFrom(logs, points, fixtureByName),
     story,
+    recordTerminals
+      ? {
+          mode: "record_terminals",
+          authority: "runtime_complete_records_from_clean_repositories",
+        }
+      : {
+          mode: "driver_logs",
+          logs: logs.map((log) => log.path),
+        },
   );
   const serialised = `${JSON.stringify(report, null, 2)}\n`;
   // The container is multi-lane. Promoting THIS campaign replaces only its own measurement lane;

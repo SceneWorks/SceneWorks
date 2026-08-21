@@ -1805,7 +1805,11 @@ wired into `npm run check` so it stays schema-valid:
    There is no `--driver-log` for this lane (the runbook's §12d invocation writes none), so
    `--record-terminals` explicitly derives terminal counts from `runtime_complete` records stamped
    with two clean repositories. The two provenance modes are mutually exclusive; omitting both is
-   refused rather than silently treating captured rows as terminal.
+   refused rather than silently treating captured rows as terminal. The fit report persists
+   `terminalProvenance.mode = "record_terminals"` with its clean-record authority and leaves
+   `sourceSessions` empty. A driver-log campaign instead persists `mode = "driver_logs"`, the exact
+   repository-relative log paths, and the sessions derived from those logs. Thus an auditor can
+   distinguish the two authorities without pretending direct records came from a driver session.
 
    Then add `docs/generated/wan-candle-video-sc-19057.json` to
    `PACKAGED_VIDEO_MEMORY_CURVE_SOURCES` in `crates/sceneworks-core/src/video_memory_curves.rs`.

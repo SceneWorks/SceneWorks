@@ -33,14 +33,29 @@ npm run generate:candle-admission
 At the frozen head the derived route inventory contains 63 Candle routes: 55 image and 8 video.
 The generated artifact is the exhaustive route-level record; its important unresolved classes are:
 
-- 15 image route records and the served Bernini video record are `unreached`.
-- The image records reduce to 11 distinct provider engines without a Candle provider contract:
-  `anima_aesthetic`, `anima_base`, `anima_turbo`, `bernini`, `boogu_image_edit`, `chroma1_base`,
-  `chroma1_flash`, `chroma1_hd`, `sana_1600m`, `sana_sprint_1600m`, and `sdxl`.
-- Six reached image routes also declare no provider contract. Consequently, the proven implication is
-  "unreached implies no contract", not an if-and-only-if relation.
-- Seven video records reach a route-local fit gate. Bernini is served by the Candle engine but has no
+- The shared selector is unreached for **38** routes: **30 image + 8 video**. This count is distinct
+  from `summary.byMechanism.unreached = 16`; the latter means no admission mechanism at all, while a
+  legacy scalar, conditioning, or flat-video gate may still leave the shared selector unreached.
+- The 30 image routes split exactly into four disjoint classes:
+  - 15 have no admission mechanism: `anima_aesthetic`, `anima_base`, `anima_turbo`,
+    `bernini_image`, `boogu_image_edit`, `chroma1_base`, `chroma1_flash`, `chroma1_hd`,
+    `illustrious_xl_v1`, `illustrious_xl_v2`, `realvisxl`, `realvisxl_lightning`, `sana_1600m`,
+    `sana_sprint_1600m`, and `sdxl`;
+  - 13 reach only the legacy scalar gate: `boogu_image`, `boogu_image_turbo`, `ideogram_4`,
+    `ideogram_4_turbo`, `sd3_5_large`, `sd3_5_large_turbo`, `sd3_5_medium`, and the six
+    `sensenova_u1_8b*` manifest routes;
+  - `kolors` reaches conditioning plus the legacy scalar gate; and
+  - `instantid_realvisxl` reaches conditioning only.
+- The 8 video routes are the seven route-local flat-fit users (`ltx_2_3`, `mochi_1`, `scail2_14b`,
+  `svd`, `wan_2_2`, `wan_2_2_i2v_14b`, and `wan_2_2_t2v_14b`) plus served Bernini, which has no
   Candle manifest block, fit symbol, or pre-load admission gate.
+- All 38 records declare no Candle provider contract, but contract absence is not a reason to bypass
+  the selector. Pinned inference already supplies `MemoryProviderContract::compatibility_default`:
+  an honest resident-only contract with every optimized rung `Missing`, no calibration identity,
+  and no fabricated evidence. A route can therefore enter the selector with that compatibility
+  view and its existing sourced scalar/floor as the base estimate. The owner decision is narrower:
+  when selection returns `Unverified`, preserve the current legacy fallback or disable/refuse the
+  route. SC-19059 must not silently choose between those product behaviors.
 
 The memory matrix now fingerprints every named production input SC-19059 inherited:
 
@@ -72,7 +87,10 @@ provenance. This closes the former `memory-matrix-source-paths-under-cover-candl
 - A synthetic Candle curve with a deliberately non-live closure can prove the producer, packaging,
   Docker copy, lane coexistence, and generated-artifact gates. It cannot prove runtime binding or a
   decision movement. Only a real curve with the live closure may move the route from floor to fitted
-  curve.
+  curve. The sanitized command transcript, red-gate/clear ledger, transient hashes, and byte-identical
+  cleanup proof are retained in
+  `docs/calibration/sc-19059/synthetic-candle-promotion-rehearsal.md` and its adjacent checksum
+  manifest; neither file contains synthetic measurements.
 
 ## Source-level divergence inventory
 
@@ -109,14 +127,14 @@ product decision under the label of refactoring.
 
 | ID | Residual | Current effect / terminal requirement |
 | --- | --- | --- |
-| C1 | Provider-contract absence | The unreached image class cannot enter the shared selector without Candle providers publishing contracts. Fabricating manifest evidence is forbidden. Resolve upstream or owner-approve the blocked class; do not claim every route reaches the selector. |
+| C1 | Selector reach and compatibility contracts | 38 routes (30 image + 8 video) do not reach the shared selector. Provider-contract absence does not make them intrinsically unselectable: pinned inference's `MemoryProviderContract::compatibility_default` is a resident-only, no-calibration, no-fabrication path. The unresolved owner choice is what the application does with its expected `Unverified` result: keep the existing sourced legacy fallback, or disable/refuse that route. |
 | C2 | Bernini Candle video | A real served route has no Candle block, fit symbol, or pre-load gate. It remains entirely ungated. |
 | C3 | Bare `measured` boolean | The manifest cannot distinguish a fitted curve, a single measured point, and a declared floor. No evidence-class producer exists to adopt. |
 | C4 | No packaged Candle video curve before capture | The bundle contains one MLX curve and zero Candle curves. The real SC-19057 campaign must add, validate, and bind the first Candle curve; synthetic evidence must not be retained. |
 | C5 | Linked Candle sequential capability | The CPU lane cannot resolve the actual `engine_supports_sequential` answers because the Candle provider bundle needs CUDA to link. The baseline therefore records both capability inputs. Resolve in the privileged Candle lane. |
 | C6 | `bounded_by` on Candle | The composition law and tests exist, but no current Candle provider declares a non-`None` `bounded_by`; this is unexercised future-contract behavior, not production Candle coverage. |
 | C7 | Decision artifact blind spots | Video and Krea-runtime rows are `not_evaluated`. Their admission evidence lives in focused tests and reviewed ledgers until the generator has a non-fabricated evaluable context. Do not infer stability from byte-identical JSON. |
-| C8 | SC-20573 bespoke-route exclusions | The pinned-geometry guard explicitly leaves `instantid_realvisxl` and `pulid_flux_dev` in `KNOWN_UNSWEPT_GATE_BEARING_MODELS` because neither has a `MODEL_TABLE` row. Both are gate-bearing, so SC-20573's literal "every model" bar is not fully measured. The macOS census is also a six-SenseNova floor rather than exact set equality. |
+| C8 | SC-20573 bespoke-route dispatch | The current exclusion is inaccurate. `instantid_realvisxl` has no inference memory-calibration contract or envelope, so it is not calibration-scoped and must leave the scoped census rather than be described as an unswept gate-bearing model. `pulid_flux_dev` is calibration-scoped and CPU-probeable at pin despite having no `MODEL_TABLE` row. On MLX, `runtime_macos::providers::pulid` exposes provider id `pulid_flux`; `mlx-gen-pulid` registers both `MemoryRegistration` and `MemoryBehaviorRegistration`, with public `weights_free_contract` and `registered_fixture`. On Candle, `runtime_cuda::providers::pulid::memory_strategy` exposes the same provider id and public `provider_contract`/`safety_check`; its crate test fixture constructs minimal safetensors for the FLUX base, PuLID, EVA, and three face networks, so the contract probe needs no CUDA device or real weights. SC-20573 should dispatch `pulid_flux_dev` through these backend-specific provider fixtures before the `MODEL_TABLE` lookup, remove InstantID from the calibration census, and then tighten exact-set equality. That dispatch repair is not implemented by SC-19059. |
 
 ## Decision-diff ledger from SC-19049 to the frozen head
 
@@ -177,7 +195,8 @@ the full ledger must be rerun at the final head.
 
 ## Remaining terminal gates
 
-- Owner disposition for D1-D5 and C1-C3; the inventory is currently non-empty.
+- Owner disposition for D1-D5 and the C1 `Unverified` fallback-versus-disable choice, plus C2-C3;
+  the inventory is currently non-empty.
 - Real SC-19057 Candle capture and promotion, with no synthetic curve or fabricated closure retained.
 - CUDA-linked sequential-capability resolution and Candle acceptance.
 - Final-head macOS MLX and Windows Candle workflow URLs with terminal required CI.

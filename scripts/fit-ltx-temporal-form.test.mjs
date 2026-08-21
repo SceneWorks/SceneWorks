@@ -819,6 +819,10 @@ test("multi-dataset CLI output stays current when source order is reversed", () 
     assert.equal(JSON.parse(readFileSync(curvePath, "utf8")).curves.length, 3);
     const generatedReport = JSON.parse(readFileSync(reportPath, "utf8"));
     assert.equal(generatedReport.story, "sc-18946");
+    assert.deepEqual(generatedReport.terminalProvenance, {
+      mode: "driver_logs",
+      logs: [path.relative(ROOT, logPath)],
+    });
     assert.ok(generatedReport.coefficientTransfer);
     assert.ok(generatedReport.phaseFlip);
     assert.deepEqual(
@@ -833,6 +837,78 @@ test("multi-dataset CLI output stays current when source order is reversed", () 
       12,
       "four replicate geometries in each of three selectors stay twelve same-cell groups",
     );
+  } finally {
+    rmSync(output, { recursive: true, force: true });
+  }
+});
+
+test("the spawned CLI accepts exactly one terminal provenance mode and rejects both or neither", () => {
+  const target = path.join(ROOT, "target");
+  mkdirSync(target, { recursive: true });
+  const output = mkdtempSync(path.join(target, "sceneworks-terminal-provenance-"));
+  try {
+    const dataset = structuredClone(DATASET);
+    for (const record of dataset.records) {
+      record.status = "runtime_complete";
+      record.repositories.sceneWorks.dirty = false;
+      record.repositories.inference.dirty = false;
+    }
+    const fixtures = new Set(dataset.records.map((record) => record.fixture));
+    const plan = {
+      ...structuredClone(PLAN),
+      providers: PLAN.providers.filter((provider) => fixtures.has(provider.fixture)),
+    };
+    const datasetPath = path.join(output, "records.json");
+    const planPath = path.join(output, "plan.json");
+    writeFileSync(datasetPath, `${JSON.stringify(dataset, null, 2)}\n`);
+    writeFileSync(planPath, `${JSON.stringify(plan, null, 2)}\n`);
+
+    const run = (...modeArgs) => {
+      const suffix = modeArgs.includes("--record-terminals") ? "records" : "logs";
+      const selectedPlan = modeArgs.includes("--record-terminals")
+        ? planPath
+        : path.join(ROOT, "docs/calibration/sc-18810/ltx-mlx-geometry-sweep.json");
+      return spawnSync(process.execPath, [
+        path.join(ROOT, "scripts/fit-ltx-temporal-form.mjs"),
+        "--story", "sc-18946",
+        "--dataset", datasetPath,
+        "--plan", selectedPlan,
+        "--write", path.join(output, `${suffix}-fit.json`),
+        "--curve-write", path.join(output, `${suffix}-curves.json`),
+        ...modeArgs,
+      ], { cwd: ROOT, encoding: "utf8" });
+    };
+
+    const recordMode = run("--record-terminals");
+    assert.equal(recordMode.status, 0, recordMode.stderr);
+    const recordReport = JSON.parse(readFileSync(path.join(output, "records-fit.json"), "utf8"));
+    assert.deepEqual(recordReport.terminalProvenance, {
+      mode: "record_terminals",
+      authority: "runtime_complete_records_from_clean_repositories",
+    });
+    assert.deepEqual(
+      recordReport.sourceSessions,
+      [],
+      "record-terminal provenance must not fabricate a driver-log session",
+    );
+
+    const driverMode = run("--driver-log", path.join(ROOT, LOG_PATHS[0]),
+      "--driver-log", path.join(ROOT, LOG_PATHS[1]));
+    assert.equal(driverMode.status, 0, driverMode.stderr);
+    const driverReport = JSON.parse(readFileSync(path.join(output, "logs-fit.json"), "utf8"));
+    assert.deepEqual(driverReport.terminalProvenance, {
+      mode: "driver_logs",
+      logs: LOG_PATHS,
+    });
+    assert.ok(driverReport.sourceSessions.length > 0);
+
+    const both = run("--record-terminals", "--driver-log", path.join(ROOT, LOG_PATHS[0]));
+    assert.notEqual(both.status, 0);
+    assert.match(both.stderr, /mutually exclusive provenance modes/);
+
+    const neither = run();
+    assert.notEqual(neither.status, 0);
+    assert.match(neither.stderr, /fit needs terminal provenance/);
   } finally {
     rmSync(output, { recursive: true, force: true });
   }

@@ -34,6 +34,13 @@
       ]
     }
   ],
+  "terminalProvenance": {
+    "mode": "driver_logs",
+    "logs": [
+      "docs/calibration/sc-18810/precrash-q8-run.log",
+      "docs/calibration/sc-18810/sweep-run.log"
+    ]
+  },
   "coverage": {
     "plannedEntries": 44,
     "capturedFixtures": 8,
