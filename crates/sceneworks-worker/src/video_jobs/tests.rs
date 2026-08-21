@@ -7851,8 +7851,8 @@ fn wan_tier_ti2v_5b_single_expert_completeness() {
     assert_eq!(wan_tier_subdir(root, &req), Some(dir));
 }
 
-/// Write the six files that make a SCAIL-2 tier subdir COMPLETE ([`scail2_tier_is_complete`]), so
-/// [`scail2_tier_subdir`] treats it as present.
+/// Write the six files plus the tier-matching config marker that make a SCAIL-2 tier subdir COMPLETE
+/// ([`scail2_tier_is_complete`]), so [`scail2_tier_subdir`] treats it as present.
 #[cfg(target_os = "macos")]
 fn write_complete_scail2_tier(root: &Path, tier: &str) {
     let dir = root.join(tier);
@@ -7860,6 +7860,17 @@ fn write_complete_scail2_tier(root: &Path, tier: &str) {
     for file in sceneworks_core::mlx_tier_completeness::SCAIL2_TIER_FILES {
         std::fs::write(dir.join(file), b"x").unwrap();
     }
+    let config = match tier {
+        "bf16" => json!({}),
+        "q4" => json!({ "quantization": { "bits": 4, "group_size": 64 } }),
+        "q8" => json!({ "quantization": { "bits": 8, "group_size": 64 } }),
+        _ => panic!("unsupported SCAIL-2 test tier {tier}"),
+    };
+    std::fs::write(
+        dir.join("config.json"),
+        serde_json::to_vec(&config).unwrap(),
+    )
+    .unwrap();
 }
 
 /// `mlxQuantize` selects the preferred SCAIL-2 tier, then falls back to the always-smaller present
