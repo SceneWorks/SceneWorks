@@ -430,6 +430,86 @@ fn sdxl_control_spec(
     spec
 }
 
+/// Resolve every weight path carried by the finalized SDXL ControlNet load. The base is returned
+/// separately because the Candle conditioning gate reports base/overlay bytes independently; all
+/// other typed and named sources are overlays held by the same provider load. The gate's
+/// `ConditioningFootprint::from_paths` containment pass then makes a component nested under the base
+/// (or a path repeated in two slots) count exactly once.
+#[cfg(any(
+    test,
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn sdxl_control_admission_paths(spec: &LoadSpec) -> WorkerResult<(&Path, Vec<&Path>)> {
+    let base = match &spec.weights {
+        WeightsSource::Dir(path) => path.as_path(),
+        WeightsSource::File(_) => {
+            return Err(WorkerError::Engine(
+                "SDXL pose-control admission requires a directory base".to_owned(),
+            ));
+        }
+    };
+    let mut overlays = Vec::new();
+    if let Some(control) = &spec.control {
+        overlays.push(crate::conditioning_fit::weights_source_path(control));
+    }
+    overlays.extend(
+        spec.extra_controls
+            .iter()
+            .map(crate::conditioning_fit::weights_source_path),
+    );
+    if let Some(ip_adapter) = &spec.ip_adapter {
+        overlays.push(crate::conditioning_fit::weights_source_path(ip_adapter));
+    }
+    overlays.extend(spec.adapters.iter().map(|adapter| adapter.path.as_path()));
+    if let Some(pid) = &spec.pid {
+        overlays.push(crate::conditioning_fit::weights_source_path(&pid.checkpoint));
+        overlays.push(crate::conditioning_fit::weights_source_path(&pid.gemma));
+    }
+    if let Some(identity) = &spec.identity {
+        overlays.extend(
+            [
+                identity.encoder.as_ref(),
+                identity.eva.as_ref(),
+                identity.face_dir.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            .map(crate::conditioning_fit::weights_source_path),
+        );
+    }
+    if let Some(text_encoder) = &spec.text_encoder {
+        overlays.push(crate::conditioning_fit::weights_source_path(text_encoder));
+    }
+    overlays.extend(
+        spec.components
+            .values()
+            .map(crate::conditioning_fit::weights_source_path),
+    );
+    Ok((base, overlays))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn apply_sdxl_control_mlx_residency(spec: LoadSpec) -> WorkerResult<LoadSpec> {
+    crate::mlx_fit_gate::apply_residency_policy(spec, SDXL_CONTROL_ENGINE_ID)
+}
+
+#[cfg(any(
+    test,
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn sdxl_control_flash_attn(request: &ImageRequest) -> bool {
+    request
+        .advanced
+        .get("flashAttn")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn apply_sdxl_control_flash_attn(enabled: bool) {
+    runtime_cuda::providers::sdxl::set_flash_attn(enabled);
+}
+
 #[allow(clippy::too_many_arguments)]
 fn sdxl_control_generate_one(
     generator: &dyn Generator,
@@ -550,29 +630,44 @@ async fn generate_sdxl_control_stream(
     spec = attach_manifest_text_encoder(spec, SDXL_CONTROL_ENGINE_ID, request, settings)?;
     spec = spec.with_resolved_route(request.model.clone());
 
-    // Every Candle conditioning route is admitted before its uncached provider load. MLX uses the
-    // same handler but its platform request policy remains unchanged; no terminal memory evidence is
-    // fabricated for this new composition.
+    // This bespoke route bypasses the generator cache, so apply the same provider-derived MLX
+    // residency/fit contract here on the final spec before its uncached load.
+    #[cfg(target_os = "macos")]
+    let spec = apply_sdxl_control_mlx_residency(spec)?;
+
+    // Every Candle conditioning route is admitted before its uncached provider load. Derive the
+    // footprint from the FINAL spec, after request adapters, required named components, and any
+    // selected text encoder have been attached. `from_paths` deduplicates nested/repeated paths.
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    admit_conditioning_paths(
-        settings,
-        &request.model,
-        "SDXL OpenPose ControlNet",
-        &weights_dir,
-        &[&control_weights],
-    )
-    .await?;
+    {
+        let (base, overlays) = sdxl_control_admission_paths(&spec)?;
+        admit_conditioning_paths(
+            settings,
+            &request.model,
+            "SDXL OpenPose ControlNet",
+            base,
+            &overlays,
+        )
+        .await?;
+    }
 
     let prompt = request.prompt.clone();
     let (width, height) = (request.width, request.height);
     let seed = resolve_seed(request, 0);
     let stickwidth = crate::openpose_skeleton::body_stickwidth(width, height);
     let total = poses.len();
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    let flash_attn = sdxl_control_flash_attn(request);
     let (cancel, rx, blocking) = start_gen_stream(
         job.id.clone(),
         SDXL_CONTROL_ENGINE_ID,
         adapter_count,
         move || {
+            // The registered txt2img route applies this process-global setting before load, but this
+            // bespoke ControlNet route bypasses that seam. Set it for every job (including `false`)
+            // immediately before load so a previous job's value can never leak into this pipeline.
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+            apply_sdxl_control_flash_attn(flash_attn);
             crate::inference_runtime::load(SDXL_CONTROL_ENGINE_ID, &spec).map_err(|error| {
                 WorkerError::Engine(format!("SDXL pose-control load failed: {error}"))
             })
@@ -696,6 +791,129 @@ mod sdxl_control_tests {
         assert!(matches!(spec.control, Some(WeightsSource::File(_))));
         assert!(spec.extra_controls.is_empty(), "public route is singular-control only");
         assert_eq!(spec.quantize, Some(Quant::Q8));
+    }
+
+    #[test]
+    fn finalized_admission_counts_adapter_component_and_selected_te_once() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let base = root.path().join("base");
+        let nested = base.join("vae");
+        std::fs::create_dir_all(&nested).expect("base dirs");
+        std::fs::write(base.join("model.safetensors"), vec![0_u8; 11]).expect("base");
+        std::fs::write(nested.join("model.safetensors"), vec![0_u8; 13]).expect("nested");
+        let write = |name: &str, bytes: usize| {
+            let path = root.path().join(name);
+            std::fs::write(&path, vec![0_u8; bytes]).expect("overlay");
+            path
+        };
+        let control = write("control.safetensors", 17);
+        let adapter = write("adapter.safetensors", 19);
+        let component = write("component.safetensors", 23);
+        let text_encoder = write("text-encoder.safetensors", 29);
+
+        let spec = sdxl_control_spec(
+            base,
+            control.clone(),
+            Some(Quant::Q8),
+            vec![AdapterSpec::new(adapter, 1.0, AdapterKind::Lora)],
+        )
+        // The nested component is already covered by the recursively scanned base.
+        .with_component("nested_vae", WeightsSource::Dir(nested))
+        .with_component("external_component", WeightsSource::File(component))
+        // A repeated source in another named slot must not be priced twice.
+        .with_component("repeated_control", WeightsSource::File(control))
+        .with_text_encoder(WeightsSource::File(text_encoder));
+        let (base, overlays) = sdxl_control_admission_paths(&spec).expect("admission paths");
+        let footprint = crate::conditioning_fit::ConditioningFootprint::from_paths(
+            "sdxl",
+            "SDXL OpenPose ControlNet",
+            base,
+            &overlays,
+        );
+        assert_eq!(footprint.base_bytes, 11 + 13);
+        assert_eq!(
+            footprint.overlay_bytes,
+            17 + 19 + 23 + 29,
+            "control + adapter + external component + selected TE, each exactly once"
+        );
+    }
+
+    #[test]
+    fn mlx_fit_gate_refuses_the_complete_control_composition_under_a_small_cap() {
+        use std::fs::OpenOptions;
+
+        const GIB: u64 = 1024 * 1024 * 1024;
+        let root = tempfile::tempdir().expect("tempdir");
+        let sparse = |path: PathBuf, bytes: u64| {
+            let file = OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(&path)
+                .expect("sparse source");
+            file.set_len(bytes).expect("set sparse length");
+            path
+        };
+        let base = root.path().join("base");
+        std::fs::create_dir_all(&base).expect("base dir");
+        sparse(base.join("model.safetensors"), GIB);
+        let control = sparse(root.path().join("control.safetensors"), 2 * GIB / 3);
+        let adapter = sparse(root.path().join("adapter.safetensors"), 2 * GIB / 3);
+        let component = sparse(root.path().join("component.safetensors"), 2 * GIB / 3);
+        let selected_te = sparse(root.path().join("selected-te.safetensors"), GIB / 8);
+
+        let base_composition = sdxl_control_spec(
+            base,
+            control,
+            Some(Quant::Q8),
+            vec![AdapterSpec::new(adapter, 1.0, AdapterKind::Lora)],
+        )
+        .with_component("vae_fp16_fix", WeightsSource::File(component));
+        let complete = base_composition
+            .clone()
+            .with_text_encoder(WeightsSource::File(selected_te));
+
+        crate::test_env::temp_env_var(
+            crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV,
+            "4",
+            || {
+                assert!(
+                    apply_sdxl_control_mlx_residency(LoadSpec::new(WeightsSource::Dir(
+                        root.path().join("base")
+                    )))
+                    .is_ok(),
+                    "the base alone fits the 4 GiB weights floor"
+                );
+                let error = apply_sdxl_control_mlx_residency(complete)
+                    .expect_err("the finalized control composition must be refused before load");
+                assert!(error.to_string().contains("unified memory"), "{error}");
+            },
+        );
+    }
+
+    #[test]
+    fn flash_attention_defaults_on_and_preserves_explicit_false() {
+        let default = request(json!({ "model": "sdxl", "advanced": { "poses": [{}] } }));
+        let enabled = request(json!({
+            "model": "sdxl", "advanced": { "poses": [{}], "flashAttn": true }
+        }));
+        let disabled = request(json!({
+            "model": "sdxl", "advanced": { "poses": [{}], "flashAttn": false }
+        }));
+        assert!(sdxl_control_flash_attn(&default));
+        assert!(sdxl_control_flash_attn(&enabled));
+        assert!(!sdxl_control_flash_attn(&disabled));
+    }
+
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn candle_flash_attention_is_reset_for_true_and_false_jobs() {
+        apply_sdxl_control_flash_attn(true);
+        assert!(runtime_cuda::providers::sdxl::flash_attn_enabled());
+        apply_sdxl_control_flash_attn(false);
+        assert!(!runtime_cuda::providers::sdxl::flash_attn_enabled());
+        // Restore the process default for any later SDXL test.
+        apply_sdxl_control_flash_attn(true);
     }
 
     #[test]

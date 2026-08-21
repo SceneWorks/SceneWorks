@@ -14199,6 +14199,10 @@ fn validate_control_kind_accepts_and_rejects_per_table() {
 /// The generic SDXL provider is deliberately narrower than the Fun-Union engines: it exposes only
 /// the pinned OpenPose checkpoint and must reject canny/depth even though the shared preprocessor can
 /// produce those kinds for other providers.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn sdxl_control_catalog_is_pose_only() {
     let row = strict_control_engine(SDXL_CONTROL_ENGINE_ID).expect("sdxl control row");
@@ -14207,6 +14211,28 @@ fn sdxl_control_catalog_is_pose_only() {
     assert!(validate_control_kind(SDXL_CONTROL_ENGINE_ID, &ControlKind::Pose).is_ok());
     assert!(validate_control_kind(SDXL_CONTROL_ENGINE_ID, &ControlKind::Canny).is_err());
     assert!(validate_control_kind(SDXL_CONTROL_ENGINE_ID, &ControlKind::Depth).is_err());
+}
+
+#[test]
+fn sdxl_control_bespoke_load_applies_fit_and_flash_state_before_allocation() {
+    let source = include_str!("sdxl_control.rs");
+    let finalized = source
+        .find("spec = attach_manifest_text_encoder(")
+        .expect("selected text encoder is attached to the final spec");
+    let mlx_gate = source
+        .find("let spec = apply_sdxl_control_mlx_residency(spec)?;")
+        .expect("the bespoke MLX route applies its residency/fit contract");
+    let candle_gate = source
+        .find("let (base, overlays) = sdxl_control_admission_paths(&spec)?;")
+        .expect("the bespoke Candle route derives admission from the final spec");
+    let flash = source
+        .find("apply_sdxl_control_flash_attn(flash_attn);")
+        .expect("the bespoke Candle route applies per-request flash attention");
+    let load = source
+        .find("crate::inference_runtime::load(SDXL_CONTROL_ENGINE_ID, &spec)")
+        .expect("the provider load remains explicit");
+    assert!(finalized < mlx_gate && finalized < candle_gate);
+    assert!(mlx_gate < load && candle_gate < load && flash < load);
 }
 
 /// `requested_control_kind`: default Pose (no `controlMode` → byte-preserved pose path); parse
