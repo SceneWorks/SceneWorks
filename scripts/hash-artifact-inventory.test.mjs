@@ -49,3 +49,17 @@ test("artifact inventory honors controller cancellation before reading model byt
     /operator interrupt/,
   );
 });
+
+test("artifact inventory can exclude downloader metadata without excluding artifact bytes", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "artifact-inventory-metadata-"));
+  await mkdir(path.join(root, ".cache"));
+  await writeFile(path.join(root, ".cache/transport.json"), "ephemeral");
+  await writeFile(path.join(root, "weights.safetensors"), "weights");
+  const result = await hashArtifactInventory(root, { excludeDirectories: [".cache"] });
+  assert.equal(result.files, 1);
+  assert.equal(result.bytes, 7);
+  await assert.rejects(
+    () => hashArtifactInventory(root, { excludeDirectories: ["../outside"] }),
+    /confined relative directory/,
+  );
+});

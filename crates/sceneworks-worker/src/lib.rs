@@ -350,6 +350,11 @@ mod flux2_composition_audit;
 // in normal compiles. Drives the shipped worker conditioning + `crate::inference_runtime::load("scail2_14b")`.
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod scail2_gpu_smoke;
+// SC-20945's single terminal epic-20738 CUDA entrypoint. Test-only, candle-only, and #[ignore]d:
+// the checked-in controller selects one reviewed profile cell per fresh process and serializes all
+// 19 cells in one workflow job. Ordinary tests compile the source but never touch weights/hardware.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod epic_20738_terminal_cuda_smoke;
 // Real-weight GPU smoke for the candle RealVisXL Lightning lane (sc-7176). Test-only + candle-only;
 // drives `crate::inference_runtime::load("sdxl")` with the forced `lightning` sampler against the distilled checkpoint.
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
