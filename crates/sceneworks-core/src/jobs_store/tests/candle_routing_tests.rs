@@ -1451,19 +1451,38 @@ fn chroma_turnkey_q4_q8_tiers_stay_on_candle_without_adapters_or_conditioning() 
             "{model} must refuse an unpublished q6 tier instead of silently remapping it"
         );
 
-        // Chroma's packed-tier admission is plain txt2img only. Its catalog still lists LoRA
-        // compatibility for other routes, but no Candle evidence proves composing an adapter with
-        // the q4/q8 packed codes; refuse the adapter rather than silently dropping or dense-folding it.
-        assert!(
-            !image_request_candle_eligible(
-                model,
-                &object(json!({
-                    "advanced": { "mlxQuantize": 4 },
-                    "loras": [{ "name": "unverified", "path": "/tmp/unverified.safetensors" }]
-                }))
-            ),
-            "{model} must refuse an unproven packed-tier LoRA composition"
-        );
+        for network_type in ["lora", "lokr"] {
+            assert!(
+                image_request_candle_eligible(
+                    model,
+                    &object(json!({
+                        "prompt": "a red fox",
+                        "loras": [{ "name": "dense-adapter", "networkType": network_type }]
+                    }))
+                ),
+                "{model} dense {network_type} must preserve the existing Candle adapter lane"
+            );
+        }
+
+        // No Candle evidence proves composing either adapter kind with the packed q4/q8 codes.
+        for bits in [4, 8] {
+            for network_type in ["lora", "lokr"] {
+                assert!(
+                    !image_request_candle_eligible(
+                        model,
+                        &object(json!({
+                            "advanced": { "mlxQuantize": bits },
+                            "loras": [{
+                                "name": "unverified",
+                                "networkType": network_type,
+                                "path": "/tmp/unverified.safetensors"
+                            }]
+                        }))
+                    ),
+                    "{model} must refuse an unproven q{bits}+{network_type} composition"
+                );
+            }
+        }
 
         // The native Candle Chroma route is text-to-image only; an image carrier must not be
         // reinterpreted as an unconditioned q4/q8 request.

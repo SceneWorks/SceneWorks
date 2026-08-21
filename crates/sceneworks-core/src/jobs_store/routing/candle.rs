@@ -354,6 +354,8 @@ pub(crate) enum CandleImageRefusal {
     ConditioningCarrier,
     /// A user LoRA on a family that advertises no inference adapter slot.
     UserLora,
+    /// A quant tier plus adapter on a family where both are admitted only independently.
+    QuantLoraCombination,
     /// `advanced.poses` — strict-pose ControlNet.
     Poses,
     /// `advanced.phases` — a multi-phase schedule.
@@ -373,6 +375,7 @@ impl CandleImageRefusal {
             Self::EditMode => "mode edit_image",
             Self::ConditioningCarrier => "a populated conditioning carrier",
             Self::UserLora => "a user LoRA on an adapter-less family",
+            Self::QuantLoraCombination => "an unproven quant tier plus adapter combination",
             Self::Poses => "advanced.poses",
             Self::Phases => "advanced.phases",
             Self::QuantTier => "advanced.mlxQuantize",
@@ -403,6 +406,10 @@ const CANDLE_IMAGE_CHECKS: &[(CandleImageRefusal, CandleImageCheck)] = &[
         candle_refuses_conditioning_carrier,
     ),
     (CandleImageRefusal::UserLora, candle_refuses_user_lora),
+    (
+        CandleImageRefusal::QuantLoraCombination,
+        candle_refuses_quant_lora_combination,
+    ),
     (CandleImageRefusal::Poses, candle_refuses_poses),
     (CandleImageRefusal::Phases, candle_refuses_phases),
     (CandleImageRefusal::QuantTier, candle_refuses_quant_tier),
@@ -496,9 +503,25 @@ pub(crate) fn candle_family_serves_quant(model: &str) -> bool {
     CANDLE_QUANT_LORA_MODELS.contains(&model) || CANDLE_QUANT_MODELS.contains(&model)
 }
 
+/// Whether the family admits adapters composed with a selected/loaded Q4 or Q8 tier.
+pub(crate) fn candle_family_serves_quant_lora(model: &str) -> bool {
+    CANDLE_QUANT_LORA_MODELS.contains(&model)
+}
+
 /// LoRAs: not in the candle lane unless the audited family row advertises adapters.
 fn candle_refuses_user_lora(model: &str, payload: &Map<String, Value>) -> bool {
     !candle_family_serves_lora(model) && has_nonempty_array(payload, "loras")
+}
+
+/// Some families admit quant and adapters independently without proving their composition.
+/// Chroma is the current case: dense LoRA/LoKr remains supported, q4/q8 tier selection is supported,
+/// but an adapter on packed codes must fail closed until the engine advertises and validates it.
+fn candle_refuses_quant_lora_combination(model: &str, payload: &Map<String, Value>) -> bool {
+    candle_family_serves_quant(model)
+        && candle_family_serves_lora(model)
+        && !candle_family_serves_quant_lora(model)
+        && candle_request_wants_quant(payload)
+        && has_nonempty_array(payload, "loras")
 }
 
 /// Strict-pose ControlNet (`advanced.poses`, object-shaped entries) is refused by this base lane.

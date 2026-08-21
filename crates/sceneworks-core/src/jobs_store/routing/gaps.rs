@@ -765,6 +765,22 @@ pub(crate) fn classify_candle_image_gap(payload: &Map<String, Value>) -> Unsuppo
             ),
             Some("epic 5480"),
         ),
+        CandleImageRefusal::QuantLoraCombination => UnsupportedReason::new(
+            Some(model),
+            "quantized Candle tier plus user adapter is not admitted",
+            &format!(
+                "this candle family serves its published q4/q8 tiers and serves LoRA/LoKr on its \
+                 dense path, but the packed-tier adapter composition has not been admitted. The \
+                 request is refused rather than silently dropping the adapter or changing the \
+                 selected tier.{remediation}{also}",
+                remediation = if also.is_empty() {
+                    " Re-submit either the dense adapter request or the packed-tier request alone."
+                } else {
+                    ""
+                }
+            ),
+            Some("sc-20741"),
+        ),
         // The sc-5968 case generalized: a candle family with no strict-pose lane asked for poses —
         // it would otherwise silently render an unconditioned image, so it is a hard gap off-Mac.
         // A family that DOES have a pose lane reaches here only when that specialized lane already

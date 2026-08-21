@@ -469,10 +469,12 @@ pub(crate) struct ModelCaps {
     pub(crate) mlx_routed: bool,
     /// The candle (Windows/CUDA) lane serves this model's base txt2img (was `CANDLE_ROUTED_MODELS`).
     pub(crate) candle_routed: bool,
-    /// Candle accepts Q4/Q8 generation requests (either a packed-tier select or load-time quant) but
-    /// NOT inference LoRA (was `CANDLE_QUANT_MODELS`).
+    /// Candle accepts Q4/Q8 generation requests (either a packed-tier select or load-time quant;
+    /// was `CANDLE_QUANT_MODELS`). This may overlap `candle_lora` when both capabilities work
+    /// independently but their composition has not been admitted.
     pub(crate) candle_quant: bool,
-    /// Candle advertises inference LoRA/LoKr but NOT on-the-fly quant (was `CANDLE_LORA_MODELS`).
+    /// Candle advertises inference LoRA/LoKr (was `CANDLE_LORA_MODELS`). This may overlap
+    /// `candle_quant`; overlap alone does not admit a quantized adapter composition.
     pub(crate) candle_lora: bool,
     /// Candle accepts BOTH Q4/Q8 generation requests AND inference LoRA
     /// (was `CANDLE_QUANT_LORA_MODELS`).
@@ -673,11 +675,12 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // Chroma (epic 3531 / sc-3843 MLX; epic 3692 / sc-5576 candle). The hosted standard-tier
     // snapshots already contain the packed q4/q8 transformer directories and candle-gen-chroma
     // consumes them without a dense staging fallback (sc-20741). `mlxQuantize` is therefore a
-    // tier-select that must reach Candle for all three provider ids. Keep adapter support out of
-    // this row: the packed-tier adapter composition has not been independently admitted.
-    ModelCaps::new("chroma1_hd", true, true, true, false, false),
-    ModelCaps::new("chroma1_base", true, true, true, false, false),
-    ModelCaps::new("chroma1_flash", true, true, true, false, false),
+    // tier-select that must reach Candle for all three provider ids. Preserve the existing dense
+    // LoRA/LoKr lane, but keep `candle_quant_lora` false because adapter-on-packed has not been
+    // independently admitted.
+    ModelCaps::new("chroma1_hd", true, true, true, true, false),
+    ModelCaps::new("chroma1_base", true, true, true, true, false),
+    ModelCaps::new("chroma1_flash", true, true, true, true, false),
     // SenseNova-U1 (epic 3180 / sc-3900 MLX; sc-5576 candle). Pure txt2img on candle.
     //
     // sc-14249 (epic 9083): `candle_quant = true` across the whole family. `candle-gen-sensenova`
@@ -1599,20 +1602,19 @@ derive_model_list! {
 }
 
 derive_model_list! {
-    /// The candle image families that accept Q4/Q8 generation requests but NOT inference LoRA —
-    /// either by selecting a pre-packed tier (including Z-Image) or by honoring load-time quant.
-    /// Derived from [`IMAGE_MODEL_CAPS`]`.candle_quant` (sc-9495). Quant stays on candle; a LoRA is
-    /// refused and remains queued.
-    /// Disjoint from [`CANDLE_QUANT_LORA_MODELS`]; both are consulted by the gate. Subset of
-    /// [`CANDLE_ROUTED_MODELS`].
+    /// The candle image families that accept Q4/Q8 generation requests, either by selecting a
+    /// pre-packed tier (including Z-Image) or by honoring load-time quant. Derived from
+    /// [`IMAGE_MODEL_CAPS`]`.candle_quant` (sc-9495). A row may also appear in
+    /// [`CANDLE_LORA_MODELS`] when both capabilities work independently; only
+    /// [`CANDLE_QUANT_LORA_MODELS`] admits their composition. Subset of [`CANDLE_ROUTED_MODELS`].
     pub(crate) CANDLE_QUANT_MODELS, IMAGE_MODEL_CAPS, candle_quant
 }
 
 derive_model_list! {
-    /// The candle image families that advertise inference LoRA/LoKr but NOT Q4/Q8 generation requests
-    /// (derived from [`IMAGE_MODEL_CAPS`]`.candle_lora`). The mirror of [`CANDLE_QUANT_MODELS`]; both
-    /// plus [`CANDLE_QUANT_LORA_MODELS`] are disjoint and all are consulted by the gate. Subset of
-    /// [`CANDLE_ROUTED_MODELS`].
+    /// The candle image families that advertise inference LoRA/LoKr (derived from
+    /// [`IMAGE_MODEL_CAPS`]`.candle_lora`). A row may also appear in [`CANDLE_QUANT_MODELS`] when
+    /// both capabilities work independently; only [`CANDLE_QUANT_LORA_MODELS`] admits their
+    /// composition. Subset of [`CANDLE_ROUTED_MODELS`].
     pub(crate) CANDLE_LORA_MODELS, IMAGE_MODEL_CAPS, candle_lora
 }
 
@@ -2015,6 +2017,9 @@ mod tests {
         "flux_schnell",
         "flux_dev",
         "flux2_klein_9b_true_v2",
+        "chroma1_hd",
+        "chroma1_base",
+        "chroma1_flash",
         "anima_base",
         "anima_aesthetic",
         "anima_turbo",
@@ -2190,12 +2195,13 @@ mod tests {
                     caps.id
                 );
             }
-            // The three candle-adapter columns are mutually exclusive by construction (quant-only,
-            // lora-only, both) — the gate consults them as three disjoint lists.
-            let adapter_flags = [caps.candle_quant, caps.candle_lora, caps.candle_quant_lora];
+            // A combined-capability row is complete in itself rather than being duplicated into the
+            // two standalone lists. The standalone lists MAY overlap: that precisely encodes a model
+            // (currently Chroma) whose dense adapter and packed-tier paths are independently admitted
+            // while their composition is not.
             assert!(
-                adapter_flags.iter().filter(|flag| **flag).count() <= 1,
-                "{}: candle_quant / candle_lora / candle_quant_lora are mutually exclusive",
+                !caps.candle_quant_lora || !(caps.candle_quant || caps.candle_lora),
+                "{}: candle_quant_lora must not be duplicated into standalone columns",
                 caps.id
             );
         }
