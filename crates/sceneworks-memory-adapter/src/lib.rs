@@ -593,6 +593,29 @@ pub fn validate_huggingface_snapshot_root(
     Ok(())
 }
 
+/// Validate an artifact rooted at the Hugging Face snapshot itself rather than a tier directory.
+/// MiniMax-H3's upstream shared components are published in exactly this variant-free shape.
+pub fn validate_huggingface_revision_root(
+    canonical_root: &Path,
+    repository: &str,
+    revision: &str,
+    expected_repository: &str,
+) -> Result<(), String> {
+    validate_artifact_identity(repository, revision, expected_repository)?;
+    let repository_component = format!("models--{}", expected_repository.replace('/', "--"));
+    let expected = [repository_component.as_str(), "snapshots", revision];
+    let components = canonical_root
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect::<Vec<_>>();
+    if !components.ends_with(&expected) {
+        return Err(format!(
+            "artifact root must end with /{repository_component}/snapshots/{revision}"
+        ));
+    }
+    Ok(())
+}
+
 pub fn not_run_scenarios(blocker: &str) -> Value {
     Value::Array(
         [
@@ -1348,6 +1371,80 @@ mod tests {
             revision,
             "q8",
             SDXL_REPOSITORY
+        )
+        .is_err());
+    }
+
+    /// The `mlx:minimax_h3` capture resolves TWO artifact triples, and the two are validated by
+    /// DIFFERENT shapes: the rehost carries a tier sub-directory, the upstream snapshot does not.
+    /// Each validator must refuse the other's root, or a capture could stage the shared partitions
+    /// out of the tier tree (or the DiT out of the upstream tree) and still pass identity.
+    #[test]
+    fn minimax_identity_separates_the_tiered_rehost_from_the_upstream_snapshot() {
+        let rehost_revision = "137ce668c55a20bc0935fd1cf2a3de8448abb7f4";
+        let upstream_revision = "939557dc319dd91227e30195a763f272ba7f8765";
+        let tier_root = Path::new(
+            "/cache/models--SceneWorks--minimax-h3-mlx/snapshots/137ce668c55a20bc0935fd1cf2a3de8448abb7f4/q4",
+        );
+        let upstream_root = Path::new(
+            "/cache/models--MiniMaxAI--MiniMax-H3/snapshots/939557dc319dd91227e30195a763f272ba7f8765",
+        );
+
+        assert!(validate_huggingface_snapshot_root(
+            tier_root,
+            MINIMAX_REPOSITORY,
+            rehost_revision,
+            "q4",
+            MINIMAX_REPOSITORY
+        )
+        .is_ok());
+        assert!(validate_huggingface_revision_root(
+            upstream_root,
+            MINIMAX_UPSTREAM_REPOSITORY,
+            upstream_revision,
+            MINIMAX_UPSTREAM_REPOSITORY
+        )
+        .is_ok());
+
+        // The upstream snapshot is not a tier root, and the tier root is not a snapshot root.
+        assert!(validate_huggingface_revision_root(
+            tier_root,
+            MINIMAX_REPOSITORY,
+            rehost_revision,
+            MINIMAX_REPOSITORY
+        )
+        .is_err());
+        assert!(validate_huggingface_snapshot_root(
+            upstream_root,
+            MINIMAX_UPSTREAM_REPOSITORY,
+            upstream_revision,
+            "bf16",
+            MINIMAX_UPSTREAM_REPOSITORY
+        )
+        .is_err());
+
+        // Neither repository may stand in for the other, and the tier component is exact.
+        assert!(validate_huggingface_revision_root(
+            upstream_root,
+            MINIMAX_REPOSITORY,
+            upstream_revision,
+            MINIMAX_REPOSITORY
+        )
+        .is_err());
+        assert!(validate_huggingface_snapshot_root(
+            tier_root,
+            MINIMAX_REPOSITORY,
+            rehost_revision,
+            "q8",
+            MINIMAX_REPOSITORY
+        )
+        .is_err());
+        // A component-staging path is one level too deep for either validator.
+        assert!(validate_huggingface_revision_root(
+            &upstream_root.join("text_encoder"),
+            MINIMAX_UPSTREAM_REPOSITORY,
+            upstream_revision,
+            MINIMAX_UPSTREAM_REPOSITORY
         )
         .is_err());
     }

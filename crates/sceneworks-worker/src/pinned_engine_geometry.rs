@@ -43,6 +43,7 @@ use runtime_macos as platform_runtime;
 // `media` feature). candle-gen-bernini / mlx-gen-bernini and the scail2 engines import this same
 // `MAX_AREA_14B` rather than declaring their own, so it is authoritative for the whole 14B family.
 // `SIZE_MULTIPLE_14B` is the same `pub const ... = 16` on both backends.
+use platform_runtime::providers::minimax_h3::pipeline::CANVAS_MAX_PIXELS;
 use platform_runtime::providers::wan::config::{MAX_AREA_14B, MAX_AREA_5B, SIZE_MULTIPLE_14B};
 use serde_json::Value;
 
@@ -61,6 +62,8 @@ const EXPECTED_VIDEO_IDS: &[&str] = &[
     "bernini",
     "scail2_14b",
     "krea_realtime_14b",
+    "minimax_h3",
+    "minimax_h3_ref",
 ];
 
 /// The pinned engine area cap a video model's `limits.maxPixels` must equal. Derived from the
@@ -92,6 +95,7 @@ fn expected_max_pixels(id: &str) -> Option<u64> {
         | "scail2_14b" => Some(MAX_AREA_14B as u64),
         "wan_2_2" => Some(MAX_AREA_5B as u64),
         "ltx_2_3" | "ltx_2_3_eros" | "svd" | "krea_realtime_14b" => None,
+        "minimax_h3" | "minimax_h3_ref" => Some(u64::from(CANVAS_MAX_PIXELS)),
         other => panic!(
             "video model {other:?} is not mapped to a pinned engine area cap — derive its \
              MAX_AREA_* from that model's engine `config.rs` and add it to \
