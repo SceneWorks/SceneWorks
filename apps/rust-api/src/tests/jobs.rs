@@ -6858,6 +6858,27 @@ async fn scail2_animate_character_reaches_the_queue_and_validates_media() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
+fn write_scail2_reference_test_manifest(config_dir: &std::path::Path, multi_reference: bool) {
+    std::fs::create_dir_all(config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        serde_json::to_string_pretty(&json!({
+            "schemaVersion": 1,
+            "models": [{
+                "id": "scail2_14b",
+                "name": "SCAIL-2 14B",
+                "family": "scail2",
+                "type": "video",
+                "capabilities": ["image_to_video"],
+                "ui": { "scail2MultiReference": multi_reference }
+            }]
+        }))
+        .expect("multi-reference manifest serializes"),
+    )
+    .expect("multi-reference manifest writes");
+    write_empty_sibling_manifests(config_dir);
+}
+
 /// The paired SCAIL-2 provider has six source-position slots: the first character plus five
 /// ordered extras. The API owns the public boundary, while the worker keeps the same backstop for
 /// retry/legacy payloads; neither is permitted to silently retain only the first six. The source
@@ -6962,23 +6983,7 @@ async fn scail2_animate_character_preserves_ordered_multi_references_and_rejects
     // the real builtin manifest before inference-main and terminal evidence exist.
     let enabled_temp_dir = tempfile::tempdir().expect("enabled temp dir creates");
     let config_dir = enabled_temp_dir.path().join("config/manifests");
-    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
-    std::fs::write(
-        config_dir.join("builtin.models.jsonc"),
-        r#"{
-            "schemaVersion": 1,
-            "models": [{
-                "id": "scail2_14b",
-                "name": "SCAIL-2 14B",
-                "family": "scail2",
-                "type": "video",
-                "capabilities": ["image_to_video"],
-                "ui": { "scail2MultiReference": true }
-            }]
-        }"#,
-    )
-    .expect("multi-reference manifest writes");
-    write_empty_sibling_manifests(&config_dir);
+    write_scail2_reference_test_manifest(&config_dir, true);
     let enabled_app = create_app(test_settings(&enabled_temp_dir)).expect("enabled app creates");
     request(
         enabled_app.clone(),
@@ -7005,6 +7010,154 @@ async fn scail2_animate_character_preserves_ordered_multi_references_and_rejects
             job["payload"]["referenceAssetIds"],
             json!(references),
             "{count} references must stay ordered for the paired worker contract"
+        );
+    }
+}
+
+/// Retry and duplicate rebuild `modelManifestEntry` from current server state, so the exact merged
+/// reference array must be re-authorized against that rebuilt entry before either operation creates
+/// work. This protects both directions of the descriptor transition: a current-pin replay cannot
+/// bypass the missing flag, while an enabled pin keeps every accepted id in caller order.
+#[tokio::test]
+async fn retry_and_duplicate_strictly_validate_scail2_multi_reference_replay() {
+    let current_temp_dir = tempfile::tempdir().expect("current temp dir creates");
+    let current_app = create_app(test_settings(&current_temp_dir)).expect("current app creates");
+    request(
+        current_app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "SCAIL-2 current descriptor replay" }),
+    )
+    .await;
+    let (status, current_original) = request(
+        current_app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": "project-1",
+            "model": "scail2_14b",
+            "mode": "animate_character",
+            "prompt": "the character dances",
+            "sourceClipAssetId": "clip-driving",
+            "referenceAssetIds": ["character-primary"]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{current_original}");
+    let current_job_id = current_original["id"].as_str().expect("current job id");
+
+    for operation in ["retry", "duplicate"] {
+        let (status, error) = request(
+            current_app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{current_job_id}/{operation}"),
+            json!({
+                "payloadChanges": {
+                    "referenceAssetIds": ["character-primary", "character-secondary"]
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {error}");
+        assert!(
+            error["detail"].as_str().is_some_and(|detail| detail
+                .contains("multi-reference is unavailable until the paired inference descriptor")),
+            "{operation} must enforce the current-pin refusal: {error}"
+        );
+
+        let (status, error) = request(
+            current_app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{current_job_id}/{operation}"),
+            json!({
+                "payloadChanges": {
+                    "referenceAssetIds": ["r0", "r1", "r2", "r3", "r4", "r5", "r6"]
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {error}");
+        assert!(
+            error["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("at most 6 reference characters")),
+            "{operation} must reject seven before descriptor dispatch: {error}"
+        );
+
+        for (malformed, expected) in [
+            (json!("not-an-array"), "must be an array of string ids"),
+            (
+                json!(["character-primary", 7]),
+                "must contain only string ids",
+            ),
+            (
+                json!(["character-primary", "  "]),
+                "must not contain blank ids",
+            ),
+        ] {
+            let (status, error) = request(
+                current_app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{current_job_id}/{operation}"),
+                json!({ "payloadChanges": { "referenceAssetIds": malformed } }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {error}");
+            assert!(
+                error["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains(expected)),
+                "{operation} must reject malformed referenceAssetIds ({expected}): {error}"
+            );
+        }
+    }
+
+    let enabled_temp_dir = tempfile::tempdir().expect("enabled temp dir creates");
+    write_scail2_reference_test_manifest(&enabled_temp_dir.path().join("config/manifests"), true);
+    let enabled_app = create_app(test_settings(&enabled_temp_dir)).expect("enabled app creates");
+    request(
+        enabled_app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "SCAIL-2 enabled descriptor replay" }),
+    )
+    .await;
+    let (status, enabled_original) = request(
+        enabled_app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        json!({
+            "projectId": "project-1",
+            "model": "scail2_14b",
+            "mode": "animate_character",
+            "prompt": "the character dances",
+            "sourceClipAssetId": "clip-driving",
+            "referenceAssetIds": ["character-primary"]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{enabled_original}");
+    let enabled_job_id = enabled_original["id"].as_str().expect("enabled job id");
+    let ordered = json!([
+        "character-4",
+        "character-1",
+        "character-5",
+        "character-0",
+        "character-3",
+        "character-2"
+    ]);
+    for operation in ["retry", "duplicate"] {
+        let (status, replayed) = request(
+            enabled_app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{enabled_job_id}/{operation}"),
+            json!({ "payloadChanges": { "referenceAssetIds": ordered.clone() } }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{operation}: {replayed}");
+        assert_eq!(
+            replayed["payload"]["referenceAssetIds"], ordered,
+            "{operation} must preserve the exact six-reference order"
         );
     }
 }

@@ -4880,11 +4880,6 @@ fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
             "referenceAssetIds must contain at most {MAX_VIDEO_REFERENCE_ASSET_IDS} ids"
         )));
     }
-    validate_scail2_animate_reference_count(
-        &payload.model,
-        &payload.mode,
-        payload.reference_asset_ids.len(),
-    )?;
     if payload
         .source_clip_asset_ids
         .iter()
@@ -5238,14 +5233,53 @@ const MAX_VIDEO_DIMENSION: u32 = 1920;
 const MAX_VIDEO_REFERENCE_ASSET_IDS: usize = 8;
 const MAX_VIDEO_SOURCE_CLIP_ASSET_IDS: usize = 8;
 
-/// SCAIL-2 consumes ordered character reference/mask pairs. The provider's source-position
-/// table has six slots, so accepting a seventh image would either make a later worker fail or
-/// tempt a caller to drop it. Keep the request explicit and fail closed instead.
-pub(crate) fn validate_scail2_animate_reference_count(
-    model: &str,
-    mode: &str,
-    reference_count: usize,
+/// Validate the exact reference array every video creation boundary will persist. The typed submit
+/// route and retry/duplicate all call this after preset/patch merging and current manifest
+/// resolution, so replay cannot drift into the worker parser's deliberately tolerant behavior
+/// (which drops blank/non-string list entries for legacy reads).
+///
+/// This helper is validation-only: it never trims, filters, sorts, or truncates, preserving every
+/// accepted id byte-for-byte and in caller order. SCAIL-2 additionally consumes strict ordered
+/// Reference/Mask pairs, has six source positions, and may expose multiple characters only once the
+/// current server-owned entry says the paired inference descriptor is installed.
+pub(crate) fn validate_video_reference_asset_ids_payload(
+    payload: &JsonObject,
+    model_manifest_entry: &Value,
 ) -> Result<(), ApiError> {
+    let reference_asset_ids = match payload.get("referenceAssetIds") {
+        None => &[][..],
+        Some(Value::Array(values)) => values.as_slice(),
+        Some(_) => {
+            return Err(ApiError::bad_request(
+                "referenceAssetIds must be an array of string ids",
+            ));
+        }
+    };
+    for value in reference_asset_ids {
+        let id = value.as_str().ok_or_else(|| {
+            ApiError::bad_request("referenceAssetIds must contain only string ids")
+        })?;
+        if id.trim().is_empty() {
+            return Err(ApiError::bad_request(
+                "referenceAssetIds must not contain blank ids",
+            ));
+        }
+    }
+    if reference_asset_ids.len() > MAX_VIDEO_REFERENCE_ASSET_IDS {
+        return Err(ApiError::bad_request(format!(
+            "referenceAssetIds must contain at most {MAX_VIDEO_REFERENCE_ASSET_IDS} ids"
+        )));
+    }
+
+    let model = payload
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let mode = payload
+        .get("mode")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let reference_count = reference_asset_ids.len();
     if model == "scail2_14b"
         && mode == "animate_character"
         && reference_count > sceneworks_core::video_request::MAX_SCAIL2_REFERENCE_CHARACTERS
@@ -5255,20 +5289,6 @@ pub(crate) fn validate_scail2_animate_reference_count(
             sceneworks_core::video_request::MAX_SCAIL2_REFERENCE_CHARACTERS
         )));
     }
-    Ok(())
-}
-
-/// A multi-reference request is valid only once the resolved, server-owned model entry says the
-/// pinned inference descriptor accepts its strict Reference/Mask pairs. This is separate from the
-/// six-character boundary: source readiness alone must not make an older inference pin appear to
-/// support a public capability.
-pub(crate) fn validate_scail2_animate_reference_capability(
-    model: &str,
-    mode: &str,
-    reference_count: usize,
-    model_manifest_entry: &Value,
-) -> Result<(), ApiError> {
-    validate_scail2_animate_reference_count(model, mode, reference_count)?;
     if model == "scail2_14b"
         && mode == "animate_character"
         && reference_count > 1
