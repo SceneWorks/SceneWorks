@@ -34,12 +34,21 @@
 //! reads back as the zeros it already was.
 //!
 //! [`set_sparse_valid_safetensor`] is a third fixture builder that lives here because it shares the
-//! `set_len`-tail shape, but it does NOT carry the NTFS discipline: it writes a real safetensors
-//! header between the `File::create` and the `set_len`, so it can neither pre-flag the way
-//! [`create_sparse_weights`] does nor be reached by the post-pass above. Its callers today are all
-//! macOS-only (`mlx_fit_gate`'s source-bound audit), where a `set_len` tail is a hole for free. A
-//! Windows caller would pay the fixture's full logical size, so give it the pre-flag treatment
-//! before adding one.
+//! `set_len`-tail shape, but it does NOT carry the NTFS discipline. That is a scope line, not a
+//! structural one — nothing about its layout resists either route above. It is un-hardened for one
+//! reason only: every caller today is macOS-only (`mlx_fit_gate`'s source-bound audit), where a
+//! `set_len` tail is a hole for free, so flagging it would be a behaviour change with no caller to
+//! fix.
+//!
+//! A Windows caller WOULD pay the fixture's full logical size — these are multi-gigabyte fixtures —
+//! so give it the discipline before adding one. Both routes work on its layout:
+//!
+//! * pre-flag the still-empty file and then write the header. The header write costs one cluster
+//!   and obstructs nothing; the `set_len` that follows still extends without allocating.
+//! * or run [`sparsify_written_safetensors`] over the finished directory. The 8-byte length prefix
+//!   plus header JSON this writes is exactly the written prefix that pass preserves — the header is
+//!   what makes a file legible to it, which is why a headerless [`create_sparse_weights`] file is
+//!   the shape it cannot reason about.
 
 // The fixture sites that call these live behind `backend-candle` / `target_os` gates, so which
 // helper is live depends on the target and feature set — same reason as `test_env`.
