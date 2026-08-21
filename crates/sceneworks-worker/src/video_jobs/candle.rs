@@ -543,8 +543,16 @@ pub(super) fn mochi_vram_preflight(
     gpu_id: &str,
     budget: Option<crate::vram_gate::VramBudget>,
 ) -> WorkerResult<MochiVramPreflight> {
+    let quant = mochi_tier_quant(tier_dir);
+    let tier_key = match quant {
+        Some(Quant::Q4) => "q4",
+        Some(Quant::Q8) => "q8",
+        Some(Quant::Nvfp4) => "nvfp4",
+        None => "bf16",
+    };
     match crate::vram_gate::mochi_fit_error(
         model_label,
+        tier_key,
         crate::mlx_fit_gate::mochi_resident_bytes(tier_dir),
         frames,
         width,
@@ -553,9 +561,7 @@ pub(super) fn mochi_vram_preflight(
         budget,
     ) {
         Some(error) => Err(error),
-        None => Ok(MochiVramPreflight {
-            quant: mochi_tier_quant(tier_dir),
-        }),
+        None => Ok(MochiVramPreflight { quant }),
     }
 }
 

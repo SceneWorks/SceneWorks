@@ -14,8 +14,9 @@
 //! submit synthesized candidates ([`CandidateBasis::EstimateFittedCurve`] /
 //! [`CandidateBasis::EstimateFloor`]) for implemented-but-unmeasured rungs. They are graded at
 //! their peak widened by the backend's ESTIMATE margin, every structural exclusion still applies,
-//! and any eligible measured candidate at the same rung supersedes them — the normative
-//! precedence is measured-current > stale-measured > estimate.
+//! and any eligible measured candidate at the same rung supersedes them. Source-backed
+//! compatibility candidates sit below measured evidence but above synthesized estimates, so the
+//! normative precedence is measured-current > stale-measured > compatibility > estimate.
 
 use std::collections::BTreeSet;
 
@@ -256,7 +257,8 @@ pub struct RequestScope<'a> {
 /// the binding-phase constraint
 /// ([`crate::ladder_margin_policy::ESTIMATE_ADMISSION_REQUIRES_MEASURED_BINDING_PHASE`]) governs
 /// only candidates extrapolated from a measured cell, and because admission telemetry must name
-/// which basis carried a selection.
+/// which basis carried a selection. Compatibility bases carry existing source truth without
+/// claiming calibration or applying the estimate margin a second time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CandidateBasis {
     /// Backed by a measured calibration record.
@@ -268,11 +270,38 @@ pub enum CandidateBasis {
     /// extrapolation basis, so the binding-phase constraint does not apply (see the scope
     /// sentence on the constraint's doc).
     EstimateFloor,
+    /// A compatibility scalar that the legacy lane has already normalized to its established
+    /// admission ceiling. It is neither a calibration measurement nor an estimate to widen again;
+    /// the selector consumes the exact typed ceiling so migration cannot double-apply the lane's
+    /// reserve or uncertainty padding.
+    LegacyScalar,
+    /// A source-backed structural lower bound, such as the exact on-disk weights a load must hold.
+    /// This is deliberately not `Measured` (there is no calibration record) and not
+    /// `EstimateFloor` (widening a lower bound would manufacture refusals the source truth does not
+    /// support).
+    StructuralFloor,
+    /// A lane-tagged legacy video ceiling whose route-local gate has already applied every
+    /// historically shipped normalization. Migration submits that exact ceiling without another
+    /// estimate margin so user-visible availability remains unchanged.
+    LegacyVideo,
 }
 
 impl CandidateBasis {
-    pub const fn is_estimate(self) -> bool {
+    /// Whether gen-core's necessarily-unverified compatibility evidence is an accepted shape for
+    /// this basis. Only a real measured candidate must satisfy the full measured-evidence contract.
+    pub const fn accepts_unverified(self) -> bool {
+        !matches!(self, Self::Measured)
+    }
+
+    /// Whether the selector must apply the backend estimate margin to this basis.
+    pub const fn applies_estimate_margin(self) -> bool {
         matches!(self, Self::EstimateFittedCurve | Self::EstimateFloor)
+    }
+
+    /// Compatibility name retained for consumers whose telemetry scope distinguishes fitted/floor
+    /// estimates from measured evidence. No-margin compatibility bases are intentionally false.
+    pub const fn is_estimate(self) -> bool {
+        self.applies_estimate_margin()
     }
 
     /// Stable label for tracing/telemetry.
@@ -281,6 +310,9 @@ impl CandidateBasis {
             Self::Measured => "measured",
             Self::EstimateFittedCurve => "fitted_curve",
             Self::EstimateFloor => "floor",
+            Self::LegacyScalar => "legacy_scalar",
+            Self::StructuralFloor => "structural_floor",
+            Self::LegacyVideo => "legacy_video",
         }
     }
 }
@@ -298,8 +330,9 @@ pub struct Candidate<'a> {
     /// there without an inference change and a pin bump. The comparison itself is unaffected and is
     /// applied to every lane identically.
     pub closure_digest: &'a str,
-    /// Whether the peak is a measurement or a synthesized estimate (sc-18096). Like
-    /// `closure_digest`, this lives on `Candidate` because `MemoryEvidence` is pinned gen-core.
+    /// Whether the peak is a measurement, synthesized estimate, or source-backed compatibility
+    /// ceiling. Like `closure_digest`, this lives on `Candidate` because `MemoryEvidence` is
+    /// pinned gen-core.
     pub basis: CandidateBasis,
 }
 
@@ -314,21 +347,25 @@ pub(crate) fn peak_bytes_to_gb(peak_bytes: u64) -> f64 {
 
 /// How a non-excluded candidate passed [`candidate_exclusion`] (sc-18095/sc-18096): with evidence
 /// measured under the request's live compile closure, with stale-closure measured evidence that
-/// stays eligible behind the widened stale-measured margin, or as a synthesized estimate behind
-/// the wider estimate margin.
+/// stays eligible behind the widened stale-measured margin, as source-backed compatibility truth
+/// without widening, or as a synthesized estimate behind the wider estimate margin.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CandidateCurrency {
     Current,
     StaleClosure,
     Estimate,
+    /// Source-backed/unverified compatibility evidence whose numeric ceiling is already complete.
+    /// Unlike `Estimate`, it is intentionally not widened.
+    UnverifiedNoMargin,
 }
 
 impl CandidateCurrency {
-    /// Normative precedence (sc-18096): measured-current > stale-measured > estimate.
+    /// Normative precedence: measured-current > stale-measured > compatibility > estimate.
     const fn precedence(self) -> u8 {
         match self {
-            Self::Current => 2,
-            Self::StaleClosure => 1,
+            Self::Current => 3,
+            Self::StaleClosure => 2,
+            Self::UnverifiedNoMargin => 1,
             Self::Estimate => 0,
         }
     }
@@ -487,7 +524,7 @@ fn candidate_exclusion(
     if contract.validate_selection(&candidate.selection).is_err() {
         return Err(MemoryEvidenceVerdict::Invalid);
     }
-    if candidate.basis.is_estimate() {
+    if candidate.basis.accepts_unverified() {
         // sc-18096: worker-side eligibility wrap for estimate-scoped candidates. gen-core's
         // `optimized_eligibility` (pinned inference revision) hard-requires `Verified` conformance
         // and a `Passed` parity result for every optimized rung, which no synthesized estimate can
@@ -499,8 +536,13 @@ fn candidate_exclusion(
         // conformance gate necessarily yields for a synthesized record; the calibration-identity
         // checks it short-circuits do not apply to a candidate with no calibration record behind
         // it.
+        let currency = if candidate.basis.applies_estimate_margin() {
+            CandidateCurrency::Estimate
+        } else {
+            CandidateCurrency::UnverifiedNoMargin
+        };
         return match candidate.evidence.optimized_eligibility(contract) {
-            Ok(()) | Err(MemoryEvidenceVerdict::Unverified) => Ok(CandidateCurrency::Estimate),
+            Ok(()) | Err(MemoryEvidenceVerdict::Unverified) => Ok(currency),
             Err(reason) => Err(reason),
         };
     }
@@ -615,6 +657,9 @@ pub fn select_strategy(
                             candidate.evidence.predicted_peak_bytes,
                             estimate_margin,
                         ),
+                        CandidateCurrency::UnverifiedNoMargin => {
+                            candidate.evidence.predicted_peak_bytes
+                        }
                     };
                     if currency == CandidateCurrency::StaleClosure {
                         // sc-18095: record the admission and the widened peak so a later OOM under
@@ -646,6 +691,16 @@ pub fn select_strategy(
                             "estimate-backed memory-strategy candidate admitted with widened margin"
                         );
                     }
+                    if currency == CandidateCurrency::UnverifiedNoMargin {
+                        tracing::info!(
+                            route = request.resolved_route,
+                            backend = request.backend,
+                            ?strategy,
+                            basis = candidate.basis.as_key(),
+                            peak_bytes = admitted_peak_bytes,
+                            "source-backed compatibility candidate admitted without an estimate margin"
+                        );
+                    }
                     eligible.push((candidate, currency, admitted_peak_bytes));
                 }
             }
@@ -655,10 +710,11 @@ pub fn select_strategy(
         // re-measurement.
         //
         // sc-18096: any eligible MEASURED candidate at this rung — current or stale — supersedes
-        // every estimate at the rung. An estimate exists to cover a rung nobody measured; where a
-        // measurement exists it is authoritative in both directions, including "this rung's
-        // measured peak does not fit", which a synthesized guess must not overrule on a
-        // fatal-OOM lane.
+        // every unmeasured candidate at the rung. Estimates exist to cover rungs nobody measured,
+        // while compatibility candidates preserve existing source truth without claiming a
+        // measurement. Where a measurement exists it is authoritative in both directions,
+        // including "this rung's measured peak does not fit", which unmeasured evidence must not
+        // overrule on a fatal-OOM lane.
         let eligible = {
             let superseded_by_current = |candidate: &Candidate<'_>| {
                 eligible.iter().any(|(current, currency, _)| {
@@ -666,14 +722,18 @@ pub fn select_strategy(
                         && current.evidence.key == candidate.evidence.key
                 })
             };
-            let rung_has_measured = eligible
-                .iter()
-                .any(|(_, currency, _)| *currency != CandidateCurrency::Estimate);
+            let rung_has_measured = eligible.iter().any(|(_, currency, _)| {
+                matches!(
+                    currency,
+                    CandidateCurrency::Current | CandidateCurrency::StaleClosure
+                )
+            });
             eligible
                 .iter()
                 .filter(|(candidate, currency, _)| match currency {
                     CandidateCurrency::Current => true,
                     CandidateCurrency::StaleClosure => !superseded_by_current(candidate),
+                    CandidateCurrency::UnverifiedNoMargin => !rung_has_measured,
                     CandidateCurrency::Estimate => !rung_has_measured,
                 })
                 .copied()
@@ -703,8 +763,9 @@ pub fn select_strategy(
                     left_peak
                         .cmp(right_peak)
                         // The normative precedence breaks peak ties between distinct keys too
-                        // (current > stale > estimate); on an all-current set this arm is always
-                        // `Equal`, so pre-sc-18095 selection is byte-for-byte unchanged.
+                        // (current > stale > compatibility > estimate); on an all-current set this
+                        // arm is always `Equal`, so pre-sc-18095 selection is byte-for-byte
+                        // unchanged.
                         .then_with(|| left_currency.precedence().cmp(&right_currency.precedence()))
                         .then_with(|| parameter_preference(left).cmp(&parameter_preference(right)))
                 },
@@ -2844,6 +2905,96 @@ mod tests {
             needed_gb > 8.0,
             "the reported requirement must carry the widening: {needed_gb}"
         );
+    }
+
+    /// SC-19055 compatibility bases carry an already-normalized source ceiling. The exact raw
+    /// boundary must select; changing this basis to an estimate basis (or applying a second reserve)
+    /// makes the test reject and catches either decision-changing mutation.
+    #[test]
+    fn compatibility_basis_applies_neither_estimate_margin_nor_second_reserve() {
+        let provider = staged_only_provider();
+        let mut record = estimate_evidence(MemoryStrategy::StagedResidency, &provider);
+        record.predicted_peak_bytes = 12 * 1024 * 1024 * 1024;
+        let candidate = Candidate {
+            selection: MemorySelection {
+                strategy: MemoryStrategy::StagedResidency,
+                parameters: Default::default(),
+                tier: tier(),
+            },
+            evidence: &record,
+            closure_digest: "",
+            basis: CandidateBasis::LegacyScalar,
+        };
+        let result = select_strategy(
+            request(),
+            &provider,
+            Some(Budget {
+                available_gb: 12.0,
+                reclaimable_gb: 0.0,
+                total_gb: 12.0,
+                reserved_headroom_gb: 0.0,
+            }),
+            &[candidate],
+        );
+        assert!(
+            matches!(
+                result,
+                Selection::Selected {
+                    needed_gb: 12.0,
+                    ..
+                }
+            ),
+            "the already-reserved source ceiling must fit at its exact boundary: {result:?}"
+        );
+        let tight = select_strategy(
+            request(),
+            &provider,
+            Some(Budget {
+                available_gb: 11.999,
+                reclaimable_gb: 0.0,
+                total_gb: 12.0,
+                reserved_headroom_gb: 0.0,
+            }),
+            &[candidate],
+        );
+        assert!(matches!(tight, Selection::Reject { .. }), "{tight:?}");
+    }
+
+    /// Lack of a live budget remains Unverified while a real insufficient budget is a typed Reject.
+    /// The compatibility bridge must never collapse these into one fail-open or fail-closed state.
+    #[test]
+    fn compatibility_basis_separates_unverified_from_reject() {
+        let provider = staged_only_provider();
+        let mut record = estimate_evidence(MemoryStrategy::StagedResidency, &provider);
+        record.predicted_peak_bytes = 12 * 1024 * 1024 * 1024;
+        let candidate = Candidate {
+            selection: MemorySelection {
+                strategy: MemoryStrategy::StagedResidency,
+                parameters: Default::default(),
+                tier: tier(),
+            },
+            evidence: &record,
+            closure_digest: "",
+            basis: CandidateBasis::StructuralFloor,
+        };
+        assert!(matches!(
+            select_strategy(request(), &provider, None, &[candidate]),
+            Selection::Unverified { .. }
+        ));
+        assert!(matches!(
+            select_strategy(
+                request(),
+                &provider,
+                Some(Budget {
+                    available_gb: 11.0,
+                    reclaimable_gb: 0.0,
+                    total_gb: 12.0,
+                    reserved_headroom_gb: 0.0,
+                }),
+                &[candidate],
+            ),
+            Selection::Reject { .. }
+        ));
     }
 
     /// sc-20571 — production numbers from the bernini over-admission: a `basis=floor` (uncalibrated)

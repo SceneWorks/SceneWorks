@@ -288,6 +288,14 @@ fn candle_base_floor_gb(paths: &[&Path], resident_overlay_bytes: u64) -> Option<
     (bytes > 0).then(|| bytes as f64 / BYTES_PER_GIB + crate::vram_gate::HEADROOM_GB)
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(super) struct BaseFloorSelectorScope<'a> {
+    pub(super) route: &'a str,
+    pub(super) tier_key: &'a str,
+    pub(super) mode_key: &'a str,
+    pub(super) geometry: gen_core::MemoryGeometry,
+}
+
 /// Gate an uncataloged base on its on-disk weights plus any independently resident overlay bytes.
 /// This is intentionally a floor: it can reject only when that load-time surface alone cannot fit.
 pub(super) async fn admit_candle_base_floor_with_resident_overlay(
@@ -296,6 +304,25 @@ pub(super) async fn admit_candle_base_floor_with_resident_overlay(
     settings: &Settings,
     paths: &[&Path],
     resident_overlay_bytes: u64,
+) -> WorkerResult<()> {
+    admit_candle_base_floor_with_resident_overlay_inner(
+        model,
+        lane,
+        settings,
+        paths,
+        resident_overlay_bytes,
+        None,
+    )
+    .await
+}
+
+async fn admit_candle_base_floor_with_resident_overlay_inner(
+    model: &str,
+    lane: &'static str,
+    settings: &Settings,
+    paths: &[&Path],
+    resident_overlay_bytes: u64,
+    selector_scope: Option<BaseFloorSelectorScope<'_>>,
 ) -> WorkerResult<()> {
     let needed = candle_base_floor_gb(paths, resident_overlay_bytes);
     let Some(floor_gb) = needed else {
@@ -314,7 +341,26 @@ pub(super) async fn admit_candle_base_floor_with_resident_overlay(
     let (plan, budget) = gate_with_evict_reclaim(
         &settings.gpu_id,
         raw_budget,
-        |budget| crate::vram_gate::load_plan(needed, None, budget, false),
+        |budget| {
+            let Some(scope) = selector_scope else {
+                return crate::vram_gate::load_plan(needed, None, budget, false);
+            };
+            match crate::candle_memory_strategy::select_compatibility_resident(
+                scope.route,
+                scope.tier_key,
+                scope.mode_key,
+                scope.geometry,
+                budget,
+                needed,
+                crate::memory_strategy::CandidateBasis::StructuralFloor,
+            ) {
+                crate::memory_strategy::Selection::Selected { .. } => LoadPlan::Resident,
+                crate::memory_strategy::Selection::Reject { .. } => LoadPlan::Reject,
+                crate::memory_strategy::Selection::Unverified { .. } => {
+                    crate::vram_gate::load_plan(needed, None, budget, false)
+                }
+            }
+        },
         |raw, reclaimed| raw != reclaimed,
     )
     .await?;
@@ -341,6 +387,28 @@ pub(super) async fn admit_candle_base_floor_with_resident_overlay(
             false,
         )),
     }
+}
+
+/// Bernini still-image has no calibrated Candle contract, but its resolved tier and adapter paths
+/// produce an exact structural lower bound. Bind that floor to the compatibility selector while
+/// retaining the established floor-only admission result and error wording.
+pub(super) async fn admit_candle_base_floor_with_resident_overlay_via_selector(
+    model: &str,
+    lane: &'static str,
+    settings: &Settings,
+    paths: &[&Path],
+    resident_overlay_bytes: u64,
+    selector_scope: BaseFloorSelectorScope<'_>,
+) -> WorkerResult<()> {
+    admit_candle_base_floor_with_resident_overlay_inner(
+        model,
+        lane,
+        settings,
+        paths,
+        resident_overlay_bytes,
+        Some(selector_scope),
+    )
+    .await
 }
 
 /// Gate an imported/ComfyUI base whose user-owned paths have no stable catalog row.

@@ -228,6 +228,30 @@ export const ADMISSION_MECHANISMS = Object.freeze([
       "The shared selector reached through the sc-18456 catch-all arm, scoped by the provider's manifest `candle.memoryStrategyContract`.",
   },
   {
+    id: "shared_selector_legacy_scalar_compatibility",
+    source: "candleMemoryStrategy",
+    definitionSymbols: Object.freeze(["select_compatibility_resident"]),
+    callPattern: "(?<!fn\\s)\\bselect_compatibility_resident\\s*\\(",
+    summary:
+      "Resident-only shared-selector compatibility candidate carrying an existing Candle scalar ceiling without a second reserve or estimate widening.",
+  },
+  {
+    id: "shared_selector_structural_floor_compatibility",
+    source: "candleMemoryStrategy",
+    definitionSymbols: Object.freeze(["select_compatibility_resident"]),
+    callPattern: "(?<!fn\\s)\\bselect_compatibility_resident\\s*\\(",
+    summary:
+      "Resident-only shared-selector compatibility candidate carrying a source-backed structural lower bound with no calibration claim or estimate widening.",
+  },
+  {
+    id: "shared_selector_legacy_video_compatibility",
+    source: "videoAdmission",
+    definitionSymbols: Object.freeze(["select_legacy_video_resident"]),
+    callPattern: "(?<!fn\\s)\\bselect_legacy_video_resident\\s*\\(",
+    summary:
+      "Typed Candle-lane resident compatibility candidate carrying one flat video's already-normalized legacy ceiling without widening it again.",
+  },
+  {
     id: "krea_turbo_fit",
     source: "vramGate",
     definitionSymbols: Object.freeze([
@@ -551,6 +575,90 @@ export function parseRequestScopeDispatch(source) {
     .map(([constant, value]) => ({ constant, value }));
 
   return { named, catchAll, overrideOnly, constants };
+}
+
+/** Parse one source-owned exact `&[&str]` compatibility-route set. */
+export function parseCompatibilityRoutes(source, constant) {
+  const escaped = constant.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = source.match(
+    new RegExp(`(?:pub\\(crate\\)\\s+)?const\\s+${escaped}\\s*:\\s*&\\[&str\\]\\s*=\\s*&\\[([\\s\\S]*?)\\];`),
+  );
+  if (!match) throw new Error(`could not locate ${constant} source-owned route set`);
+  const routes = [...match[1].matchAll(/"([^"]+)"/g)].map((entry) => entry[1]);
+  if (routes.length === 0 || new Set(routes).size !== routes.length) {
+    throw new Error(`${constant} must be a non-empty unique route set`);
+  }
+  return new Set(routes);
+}
+
+/** Extract a Rust function body with balanced braces; throws instead of treating missing code as wiring. */
+function rustFunctionBody(source, symbol) {
+  const signature = new RegExp(`(?:pub\\(crate\\)\\s+)?fn\\s+${symbol}\\s*\\(`).exec(source);
+  if (!signature) throw new Error(`could not locate production function ${symbol}`);
+  const open = source.indexOf("{", signature.index);
+  if (open === -1) throw new Error(`${symbol}: no function body`);
+  let depth = 0;
+  for (let index = open; index < source.length; index += 1) {
+    if (source[index] === "{") depth += 1;
+    if (source[index] === "}") depth -= 1;
+    if (depth === 0) return source.slice(open + 1, index);
+  }
+  throw new Error(`${symbol}: unterminated function body`);
+}
+
+/** Load-bearing wiring guards for the compatibility migration, driven from production source. */
+export function validateCompatibilityWiring(bodies) {
+  const compatibilityBody = rustFunctionBody(
+    bodies.candleMemoryStrategy,
+    "select_compatibility_resident",
+  );
+  if (!compatibilityBody.includes("reserved_headroom_gb: 0.0")) {
+    throw new Error("compatibility selector must normalize its already-reserved ceiling with zero reserve");
+  }
+  for (const basis of ["LegacyScalar", "StructuralFloor", "LegacyVideo"]) {
+    if (!compatibilityBody.includes(`CandidateBasis::${basis}`)) {
+      throw new Error(`compatibility selector no longer accepts ${basis}`);
+    }
+  }
+  const imageBody = productionBody(bodies.imageRouting);
+  if (
+    !imageBody.includes("is_legacy_scalar_compatibility_route") ||
+    !imageBody.includes("CandidateBasis::LegacyScalar") ||
+    !imageBody.includes("select_compatibility_resident")
+  ) {
+    throw new Error("legacy scalar image routes are not wired to their typed compatibility candidate");
+  }
+  for (const [source, symbol] of [
+    [bodies.conditioningFit, "decide_via_compatibility_selector"],
+    [bodies.imageBaseAdmission, "admit_candle_base_floor_with_resident_overlay_inner"],
+  ]) {
+    const body = rustFunctionBody(source, symbol);
+    if (!body.includes("CandidateBasis::StructuralFloor") || !body.includes("select_compatibility_resident")) {
+      throw new Error(`${symbol} is not wired to its structural-floor compatibility candidate`);
+    }
+  }
+  const videoSelector = rustFunctionBody(bodies.videoAdmission, "select_legacy_video_resident");
+  if (
+    !videoSelector.includes("lane != VideoLane::Candle") ||
+    !videoSelector.includes("CandidateBasis::LegacyVideo")
+  ) {
+    throw new Error("legacy video selector lost its typed Candle lane or LegacyVideo basis");
+  }
+  for (const symbol of [
+    "mochi_fit_error",
+    "svd_fit_error",
+    "video_weights_fit_error",
+    "wan_video_fit_error_with_adapter_bytes",
+    "scail2_video_fit_error_with_adapter_bytes",
+  ]) {
+    const body = rustFunctionBody(bodies.vramGate, symbol);
+    if (
+      !body.includes("select_legacy_video_resident") ||
+      !body.includes("VideoLane::Candle")
+    ) {
+      throw new Error(`${symbol} is not wired to the typed Candle legacy-video selector`);
+    }
+  }
 }
 
 /**
@@ -1292,11 +1400,33 @@ function classifyRoute({
   conditionedLanes,
   videoBinding,
   registryProviders,
+  compatibility,
 }) {
   const mechanisms = [...laneMechanisms];
   const named = engineId ? dispatch.named.get(engineId) : undefined;
   let sharedSelector;
-  if (laneMechanisms.includes("shared_selector_bespoke_override")) {
+  if (compatibility.legacyScalar.has(modelId)) {
+    sharedSelector = {
+      reached: true,
+      via: "legacy_scalar_compatibility",
+      evidenceRevision: "sc-19055-candle-compatibility-v1",
+    };
+    mechanisms.push("shared_selector_legacy_scalar_compatibility");
+  } else if (compatibility.structuralFloor.has(modelId)) {
+    sharedSelector = {
+      reached: true,
+      via: "structural_floor_compatibility",
+      evidenceRevision: "sc-19055-candle-compatibility-v1",
+    };
+    mechanisms.push("shared_selector_structural_floor_compatibility");
+  } else if (compatibility.legacyVideo.has(modelId)) {
+    sharedSelector = {
+      reached: true,
+      via: "legacy_video_compatibility",
+      evidenceRevision: "sc-19055-candle-compatibility-v1",
+    };
+    mechanisms.push("shared_selector_legacy_video_compatibility");
+  } else if (laneMechanisms.includes("shared_selector_bespoke_override")) {
     const override = dispatch.overrideOnly[0] ?? null;
     sharedSelector = {
       reached: true,
@@ -1353,7 +1483,22 @@ function classifyRoute({
  * with mutated sources.
  */
 export function buildInventory(bodies) {
+  validateCompatibilityWiring(bodies);
   const entries = manifestEntries(bodies.manifest);
+  const compatibility = {
+    legacyScalar: parseCompatibilityRoutes(
+      bodies.candleMemoryStrategy,
+      "LEGACY_SCALAR_COMPATIBILITY_ROUTES",
+    ),
+    structuralFloor: parseCompatibilityRoutes(
+      bodies.candleMemoryStrategy,
+      "STRUCTURAL_FLOOR_COMPATIBILITY_ROUTES",
+    ),
+    legacyVideo: parseCompatibilityRoutes(
+      bodies.videoAdmission,
+      "LEGACY_VIDEO_COMPATIBILITY_ROUTES",
+    ),
+  };
   const lanes = routedLanes({
     routingCatalog: bodies.routingCatalog,
     routingCandle: bodies.routingCandle,
@@ -1439,6 +1584,7 @@ export function buildInventory(bodies) {
       conditionedLanes: conditionedLanesByModel.get(modelId) ?? new Set(),
       videoBinding,
       registryProviders,
+      compatibility,
     });
   });
 
@@ -1597,6 +1743,15 @@ export function buildInventory(bodies) {
         ).length,
         bespokeOverride: routes.filter((route) => route.sharedSelector.via === "bespoke_override")
           .length,
+        legacyScalarCompatibility: routes.filter(
+          (route) => route.sharedSelector.via === "legacy_scalar_compatibility",
+        ).length,
+        structuralFloorCompatibility: routes.filter(
+          (route) => route.sharedSelector.via === "structural_floor_compatibility",
+        ).length,
+        legacyVideoCompatibility: routes.filter(
+          (route) => route.sharedSelector.via === "legacy_video_compatibility",
+        ).length,
         unreached: routes.filter((route) => !route.sharedSelector.reached).length,
       },
       geometryAwareMechanisms: mechanismFacts

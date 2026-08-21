@@ -3283,16 +3283,20 @@ use flux_ipadapter::{flux_ipadapter_available, generate_candle_flux_ipadapter_st
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod conditioning_gate;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-use conditioning_gate::{admit_conditioning_overlay, admit_conditioning_paths};
+use conditioning_gate::{
+    admit_conditioning_overlay, admit_conditioning_paths,
+    admit_conditioning_paths_via_compatibility_selector,
+};
 // Shared admission seam for bespoke single-base Candle routes (sc-16093). Built-in tiers use catalog
 // catalog peaks; imported/ComfyUI checkpoints use an explicitly weaker on-disk weights floor.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod base_admission;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use base_admission::{
-    admit_candle_base, admit_candle_base_floor, admit_candle_base_floor_with_resident_overlay,
-    admit_candle_load_spec_floor, has_candle_tier_peak_row, prepare_cached_candle_base_floor,
-    safetensors_tensor_bytes_with_prefixes, CandleBaseEvidence,
+    admit_candle_base, admit_candle_base_floor,
+    admit_candle_base_floor_with_resident_overlay_via_selector, admit_candle_load_spec_floor,
+    has_candle_tier_peak_row, prepare_cached_candle_base_floor,
+    safetensors_tensor_bytes_with_prefixes, BaseFloorSelectorScope, CandleBaseEvidence,
 };
 // Shared candle strict-control driver (sc-8304, epic 8236): the `CandleStrictControl` trait + the one
 // `run_candle_strict_control` driver the candle trio (qwen/zimage/flux2 control below) route through —

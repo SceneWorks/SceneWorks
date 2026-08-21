@@ -1577,8 +1577,10 @@ fn krea_turbo_smaller_fit(
 ///
 /// The widening therefore moves the number TOWARD the measured behavior rather than away from it,
 /// which is what makes this flip conservative in substance and not merely in direction.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn mochi_fit_error(
     model_label: &str,
+    tier_key: &str,
     weight_bytes: u64,
     frames: u32,
     width: u32,
@@ -1586,14 +1588,27 @@ pub(crate) fn mochi_fit_error(
     gpu_id: &str,
     budget: Option<VramBudget>,
 ) -> Option<WorkerError> {
-    let (needed_gb, budget) =
-        (
-            crate::video_admission::graded_derived_video_floor_gb(
-                crate::fit_gate::mochi_needed_gb(weight_bytes, frames, width, height, HEADROOM_GB)?,
-            ),
-            budget?,
-        );
-    (budget.free_gb + f64::EPSILON < needed_gb).then(|| {
+    let needed_gb =
+        crate::fit_gate::mochi_needed_gb(weight_bytes, frames, width, height, HEADROOM_GB)
+            .map(crate::video_admission::graded_derived_video_floor_gb);
+    let selection = crate::video_admission::select_legacy_video_resident(
+        model_label,
+        sceneworks_core::video_request::VideoLane::Candle,
+        tier_key,
+        "text_to_video",
+        crate::video_admission::video_gate_geometry(width, height, frames),
+        budget,
+        needed_gb,
+    );
+    let (needed_gb, budget) = (needed_gb?, budget?);
+    let rejects = match selection {
+        Some(crate::memory_strategy::Selection::Selected { .. }) => false,
+        Some(crate::memory_strategy::Selection::Reject { .. }) => true,
+        Some(crate::memory_strategy::Selection::Unverified { .. }) | None => {
+            budget.free_gb + f64::EPSILON < needed_gb
+        }
+    };
+    rejects.then(|| {
         mochi_too_big_error(
             model_label,
             needed_gb,
@@ -1657,7 +1672,7 @@ fn mochi_too_big_error(
 /// The check keys off physical `total_gb`, not momentary `free_gb`. This story establishes a hardware
 /// boundary, not a trustworthy transient-working-set threshold for a busy card.
 ///
-/// ## sc-19055: nothing to grade, and that is a property of the gate's shape
+/// ## SC-19055: class-envelope compatibility, not a fabricated peak
 ///
 /// This is the one flat video gate that predicts no peak. `svd_profile_needs_larger_card` is a
 /// BOOLEAN envelope over `(frames, chunk, steps, width, height, physical card class)` — it answers
@@ -1667,8 +1682,11 @@ fn mochi_too_big_error(
 /// no-silent-flips rule exists to prevent.
 ///
 /// It is also already the most geometry-aware gate on the video lane: every axis of the envelope is
-/// a request axis. So its migration under this story is that it now says so explicitly rather than
-/// being lumped with the resolution-blind scalars it never resembled.
+/// a request axis. The compatibility selector therefore receives the exact two physical-card class
+/// thresholds the boolean encoded (18 GiB for the validated tuple; 33 GiB outside it on the
+/// 32-GiB-or-smaller class), against the same rounded `total_gb`. `LegacyVideo` adds no estimate
+/// widening or reserve, so this expresses the existing predicate without pretending 18/33 is a
+/// runtime peak.
 pub(crate) fn svd_fit_error(
     frames: u32,
     decode_chunk_size: u32,
@@ -1679,14 +1697,44 @@ pub(crate) fn svd_fit_error(
     budget: Option<VramBudget>,
 ) -> Option<WorkerError> {
     let budget = budget?;
-    if !crate::fit_gate::svd_profile_needs_larger_card(
+    let legacy_rejects = crate::fit_gate::svd_profile_needs_larger_card(
         frames,
         decode_chunk_size,
         steps,
         width,
         height,
         budget.total_gb,
-    ) {
+    );
+    // The legacy SVD proof is a physical-card CLASS envelope, not a free-VRAM peak. Submit its two
+    // exact boundaries (18 GiB for the validated tuple, 33 GiB outside it) against the rounded card
+    // class so the selector expresses the same predicate without inventing an affine formula.
+    let physical_card_gb = budget.total_gb.round();
+    let required_card_gb = if legacy_rejects
+        && physical_card_gb + f64::EPSILON >= crate::fit_gate::SVD_VALIDATED_PROFILE_MIN_VRAM_GB
+    {
+        crate::fit_gate::SVD_VALIDATED_VRAM_GB + 1.0
+    } else {
+        crate::fit_gate::SVD_VALIDATED_PROFILE_MIN_VRAM_GB
+    };
+    let class_budget = VramBudget {
+        free_gb: physical_card_gb,
+        total_gb: physical_card_gb,
+    };
+    let selection = crate::video_admission::select_legacy_video_resident(
+        "svd",
+        sceneworks_core::video_request::VideoLane::Candle,
+        "bf16",
+        "image_to_video",
+        crate::video_admission::video_gate_geometry(width, height, frames),
+        Some(class_budget),
+        Some(required_card_gb),
+    );
+    let rejects = match selection {
+        Some(crate::memory_strategy::Selection::Selected { .. }) => false,
+        Some(crate::memory_strategy::Selection::Reject { .. }) => true,
+        Some(crate::memory_strategy::Selection::Unverified { .. }) | None => legacy_rejects,
+    };
+    if !rejects {
         return None;
     }
     Some(WorkerError::InvalidPayload(format!(
@@ -1924,8 +1972,25 @@ pub(crate) fn video_weights_fit_error(
     gpu_id: &str,
     budget: Option<VramBudget>,
 ) -> Option<WorkerError> {
-    let (needed_gb, budget) = (video_weights_needed_gb(weight_bytes)?, budget?);
-    (budget.free_gb + f64::EPSILON < needed_gb).then(|| {
+    let needed_gb = video_weights_needed_gb(weight_bytes);
+    let selection = crate::video_admission::select_legacy_video_resident(
+        model_label,
+        sceneworks_core::video_request::VideoLane::Candle,
+        "bf16",
+        "text_to_video",
+        crate::video_admission::video_gate_geometry(1, 1, 1),
+        budget,
+        needed_gb,
+    );
+    let (needed_gb, budget) = (needed_gb?, budget?);
+    let rejects = match selection {
+        Some(crate::memory_strategy::Selection::Selected { .. }) => false,
+        Some(crate::memory_strategy::Selection::Reject { .. }) => true,
+        Some(crate::memory_strategy::Selection::Unverified { .. }) | None => {
+            budget.free_gb + f64::EPSILON < needed_gb
+        }
+    };
+    rejects.then(|| {
         video_weights_too_big_error(
             model_label,
             needed_gb,
@@ -2040,7 +2105,27 @@ pub(crate) fn wan_video_fit_error_with_adapter_bytes(
         );
     };
     let budget = budget?;
-    (budget.free_gb + f64::EPSILON < needed_gb)
+    let selection = crate::video_admission::select_legacy_video_resident(
+        model_label,
+        sceneworks_core::video_request::VideoLane::Candle,
+        tier_key,
+        if geometry.reference_count > 0 {
+            "image_to_video"
+        } else {
+            "text_to_video"
+        },
+        geometry,
+        Some(budget),
+        Some(needed_gb),
+    );
+    let rejects = match selection {
+        Some(crate::memory_strategy::Selection::Selected { .. }) => false,
+        Some(crate::memory_strategy::Selection::Reject { .. }) => true,
+        Some(crate::memory_strategy::Selection::Unverified { .. }) | None => {
+            budget.free_gb + f64::EPSILON < needed_gb
+        }
+    };
+    rejects
         .then(|| video_peak_too_big_error(model_label, tier_key, needed_gb, budget.free_gb, gpu_id))
 }
 
@@ -2155,7 +2240,23 @@ pub(crate) fn scail2_video_fit_error_with_adapter_bytes(
                 .to_owned(),
         ));
     };
-    (budget.free_gb + f64::EPSILON < needed_gb).then(|| {
+    let selection = crate::video_admission::select_legacy_video_resident(
+        "scail2_14b",
+        sceneworks_core::video_request::VideoLane::Candle,
+        "bf16",
+        "text_to_video",
+        geometry,
+        Some(budget),
+        Some(needed_gb),
+    );
+    let rejects = match selection {
+        Some(crate::memory_strategy::Selection::Selected { .. }) => false,
+        Some(crate::memory_strategy::Selection::Reject { .. }) => true,
+        Some(crate::memory_strategy::Selection::Unverified { .. }) | None => {
+            budget.free_gb + f64::EPSILON < needed_gb
+        }
+    };
+    rejects.then(|| {
         WorkerError::InvalidPayload(format!(
             "SCAIL-2 shared bf16 needs ~{needed} GB of free GPU VRAM (the measured 832x480, \
              81-frame render peak plus CUDA reserve), but GPU {gpu_id} has ~{available} GB \
@@ -6439,19 +6540,19 @@ mod tests {
             .expect("weights > 0");
         let inside = apply_vram_cap(None, Some(mechanism_interval(raw)));
         assert!(
-            mochi_fit_error("mochi_1", WEIGHTS, 19, 848, 480, "0", inside).is_some(),
+            mochi_fit_error("mochi_1", "q4", WEIGHTS, 19, 848, 480, "0", inside).is_some(),
             "a card inside the mechanism interval must be refused — the ungraded derived peak \
              admits it"
         );
         let above = apply_vram_cap(None, Some(raw * 1.2 + 1.0));
         assert!(
-            mochi_fit_error("mochi_1", WEIGHTS, 19, 848, 480, "0", above).is_none(),
+            mochi_fit_error("mochi_1", "q4", WEIGHTS, 19, 848, 480, "0", above).is_none(),
             "the grade must stay a bounded margin over the derived peak"
         );
         // Still frame-scaled: the same card that admits a 19-frame clip refuses a 151-frame one.
         let card = apply_vram_cap(None, Some(raw * 1.2 + 1.0));
         assert!(
-            mochi_fit_error("mochi_1", WEIGHTS, 151, 848, 480, "0", card).is_some(),
+            mochi_fit_error("mochi_1", "q4", WEIGHTS, 151, 848, 480, "0", card).is_some(),
             "grading must compose with the decode term, not replace it"
         );
     }
@@ -6492,7 +6593,7 @@ mod tests {
     /// peak here so there were something to grade would be a fabricated prediction.
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     #[test]
-    fn the_svd_envelope_is_ungraded_because_it_predicts_no_peak() {
+    fn the_svd_envelope_keeps_its_exact_ungraded_card_class_boundaries() {
         let minimum = apply_vram_cap(
             None,
             Some(crate::fit_gate::SVD_VALIDATED_PROFILE_MIN_VRAM_GB),

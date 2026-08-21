@@ -744,37 +744,15 @@ mod tests {
         );
     }
 
-    /// **sc-19055: the unreached IMAGE class, enumerated with its blocker named.**
+    /// **SC-19055 reopened: pin the fourteen image routes whose policy still needs an owner.**
     ///
-    /// Note the direction, which the original name of this test overstated (review finding L2): the
-    /// assertions prove **unreached ⇒ declares no provider contract**, not the converse. Six routes
-    /// reach the selector while declaring no contract, through a named evidence revision or the
-    /// bespoke PuLID override, and those are legitimate — the second assertion below is what bounds
-    /// them to exactly those two routes.
-    ///
-    /// Epic 19048 R2 wants every candle image route on the shared selector. This story owns the
-    /// third inventory class — the routes that never reach it — and the finding is that the image
-    /// half of that class is not a SceneWorks wiring gap at all.
-    ///
-    /// `candle_memory_strategy::evaluate_shared_image` is already CALLED for every base-routed
-    /// candle image request: the engine-id `match` only picks an evidence-revision string, and
-    /// sc-18456's catch-all arm means an unnamed engine still enters the function. What decides
-    /// whether the selector actually grades anything is
-    /// `inference_runtime::media().memory_strategy_contract(engine_id, spec)` — and at the pinned
-    /// inference revision only eight candle provider crates publish one — flux, flux2, krea, lens,
-    /// mage, qwen-image and z-image on the image side, plus wan on the video side. Every other
-    /// provider returns `None` and the function returns `Ok(None)` before any candidate exists.
-    ///
-    /// The manifest's `candle.memoryStrategyContract` is the declaration side of that same fact,
-    /// and it is what the generated inventory keys `sharedSelector.reached` on. So this test pins
-    /// the PARTITION: no image route is classified unreached while declaring a provider contract,
-    /// and none is classified reached without one. A future slice that lands contract publication
-    /// for, say, sdxl will flip rows here and must say so.
-    ///
-    /// Why this is a test and not a paragraph: it is the difference between claiming the image half
-    /// is blocked upstream and demonstrating it against the artifact sc-19059 has to drive to empty.
+    /// The source-backed classes now reach the selector through an honest resident-only
+    /// `compatibility_default`: fourteen scalar routes plus InstantID and Bernini image. The
+    /// remaining fourteen publish neither a provider contract nor a source-owned capacity truth.
+    /// Choosing legacy fail-open versus disable for those routes is explicitly outside this change,
+    /// so an exact-set assertion prevents accidental policy by adjacency.
     #[test]
-    fn no_unreached_image_route_declares_a_provider_contract() {
+    fn only_the_fourteen_owner_pending_image_routes_remain_unreached() {
         let inventory: Value = serde_json::from_str(INVENTORY).expect("inventory parses");
         let routes = inventory["routes"].as_array().expect("routes");
 
@@ -795,6 +773,10 @@ mod tests {
             // than through a manifest declaration, so it is legitimately reached without one.
             let bespoke = route["sharedSelector"]["via"].as_str() == Some("bespoke_override");
             let named = route["sharedSelector"]["via"].as_str() == Some("named_revision");
+            let compatibility = matches!(
+                route["sharedSelector"]["via"].as_str(),
+                Some("legacy_scalar_compatibility" | "structural_floor_compatibility")
+            );
             if !reached {
                 assert!(
                     !declares,
@@ -802,7 +784,7 @@ mod tests {
                      inventory's reachability key and this partition disagree"
                 );
                 unreached_image.push(model_id.to_owned());
-            } else if !declares && !bespoke && !named {
+            } else if !declares && !bespoke && !named && !compatibility {
                 reached_without_declaration.push(model_id.to_owned());
             }
         }
@@ -810,20 +792,36 @@ mod tests {
         assert!(
             reached_without_declaration.is_empty(),
             "these image routes reach the selector through neither a named revision, a bespoke \
-             override, nor a manifest provider contract: {reached_without_declaration:?}"
+             override, a compatibility basis, nor a manifest provider contract: \
+             {reached_without_declaration:?}"
         );
-        assert!(
-            !unreached_image.is_empty(),
-            "the unreached image class is empty — if a slice genuinely closed it, delete this test \
-             and record the closure in the epic's divergence ledger rather than weakening it"
+        unreached_image.sort();
+        assert_eq!(
+            unreached_image,
+            [
+                "anima_aesthetic",
+                "anima_base",
+                "anima_turbo",
+                "boogu_image_edit",
+                "chroma1_base",
+                "chroma1_flash",
+                "chroma1_hd",
+                "illustrious_xl_v1",
+                "illustrious_xl_v2",
+                "realvisxl",
+                "realvisxl_lightning",
+                "sana_1600m",
+                "sana_sprint_1600m",
+                "sdxl",
+            ],
+            "the owner-pending image class changed; do not silently choose fallback-versus-disable"
         );
 
         // The blocker is upstream, so the count is a property of the PIN, not of this tree. Printed
         // rather than pinned: pinning it would red on an inference bump that publishes a contract,
         // which is the outcome the epic wants, not a regression.
         eprintln!(
-            "sc-19055: {} candle image routes remain off the shared selector at this inference \
-             pin, every one of them because its provider publishes no MemoryProviderContract: {:?}",
+            "sc-19055: {} evidence-free candle image routes remain off the shared selector: {:?}",
             unreached_image.len(),
             unreached_image
         );

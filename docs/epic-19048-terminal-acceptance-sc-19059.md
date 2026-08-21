@@ -17,6 +17,36 @@ remain terminal gates.
 The final acceptance must repeat this reconciliation at the eventual feature head. These identifiers
 are the starting point for the terminal campaign, not permission to accept a stale head.
 
+## Reopened SC-19055 compatibility migration
+
+The non-owner-choice portion of SC-19055 was resumed from feature head
+`a9d0be3080e5112654c18e0cb87ce245653375d8`. It reduces shared-selector-unreached from 38 routes to
+15 without assigning policy to an evidence-free route:
+
+- 14 image routes with an existing scalar admission ceiling now submit that already-normalized
+  ceiling through resident-only `MemoryProviderContract::compatibility_default` as
+  `LegacyScalar`: `boogu_image`, `boogu_image_turbo`, `ideogram_4`, `ideogram_4_turbo`, `kolors`,
+  `sd3_5_large`, `sd3_5_large_turbo`, `sd3_5_medium`, and all six `sensenova_u1_8b*` routes.
+- `instantid_realvisxl` and `bernini_image` submit their existing on-disk structural lower bounds
+  through the same resident-only contract as `StructuralFloor`. Neither is labelled `Measured` or
+  `EstimateFloor` and neither receives an invented estimate margin.
+- The seven existing flat-video paths submit their already-normalized ceilings as typed Candle-lane
+  `LegacyVideo` candidates: `ltx_2_3`, `mochi_1`, `scail2_14b`, `svd`, `wan_2_2`,
+  `wan_2_2_i2v_14b`, and `wan_2_2_t2v_14b`. The selector adds neither another 4% grade nor another
+  reserve.
+
+The inventory parses these exact source-owned 14 + 2 + 7 sets and validates the production calls,
+typed Candle lane, and `reserved_headroom_gb: 0.0` normalization. The regenerated inventory reports
+20 named, 4 declaration-catch-all, 1 bespoke, 14 scalar-compatibility, 2 structural-floor, 7
+legacy-video, and 15 unreached routes. The remaining set is exactly 14 evidence-free image routes
+plus Bernini video. Their fallback-versus-disable policy remains an owner decision.
+
+The non-circular Rust decision producer remains byte-identical at digest
+`sha256:2aecbc27a99e467d78488df09441452434d72ddcf0cb432613fb611581125bc9`.
+Comparing all 2,540 generated Candle coordinates across prediction, fit decision, and load-plan
+fields reports **zero decision changes**. Inventory mechanism/provenance fields change as expected;
+user-visible availability does not.
+
 ## Mechanical inventory and provenance
 
 `scripts/generate-candle-admission-inventory.mjs` derives the route universe from production routing
@@ -127,7 +157,7 @@ product decision under the label of refactoring.
 
 | ID | Residual | Current effect / terminal requirement |
 | --- | --- | --- |
-| C1 | Selector reach and compatibility contracts | 38 routes (30 image + 8 video) do not reach the shared selector. Provider-contract absence does not make them intrinsically unselectable: pinned inference's `MemoryProviderContract::compatibility_default` is a resident-only, no-calibration, no-fabrication path. The unresolved owner choice is what the application does with its expected `Unverified` result: keep the existing sourced legacy fallback, or disable/refuse that route. |
+| C1 | Selector reach and compatibility contracts | The 23 source-backed routes described above now reach the shared selector through resident-only no-fabrication compatibility contracts. Fifteen remain unreached: 14 evidence-free image routes plus Bernini video. Their fallback-versus-disable policy is still unresolved and was not chosen here. |
 | C2 | Bernini Candle video | A real served route has no Candle block, fit symbol, or pre-load gate. It remains entirely ungated. |
 | C3 | Bare `measured` boolean | The manifest cannot distinguish a fitted curve, a single measured point, and a declared floor. No evidence-class producer exists to adopt. |
 | C4 | No packaged Candle video curve before capture | The bundle contains one MLX curve and zero Candle curves. The real SC-19057 campaign must add, validate, and bind the first Candle curve; synthetic evidence must not be retained. |
@@ -195,8 +225,9 @@ the full ledger must be rerun at the final head.
 
 ## Remaining terminal gates
 
-- Owner disposition for D1-D5 and the C1 `Unverified` fallback-versus-disable choice, plus C2-C3;
-  the inventory is currently non-empty.
+- Owner disposition for D1-D5, the 14 evidence-free image routes' C1
+  `Unverified` fallback-versus-disable choice, and Bernini non-T2V/C2-C3; the inventory is currently
+  non-empty.
 - Real SC-19057 Candle capture and promotion, with no synthetic curve or fabricated closure retained.
 - CUDA-linked sequential-capability resolution and Candle acceptance.
 - Final-head macOS MLX and Windows Candle workflow URLs with terminal required CI.
