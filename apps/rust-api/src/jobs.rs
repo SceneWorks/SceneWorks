@@ -844,59 +844,6 @@ fn project_image_manifest_for_worker(mut entry: Value) -> Value {
     entry
 }
 
-#[cfg(test)]
-mod image_manifest_projection_tests {
-    use super::*;
-
-    #[test]
-    fn worker_projection_removes_only_the_exact_soft_openpose_component() {
-        let primary = json!({
-            "provider": "huggingface",
-            "repo": "SceneWorks/sdxl-base-mlx",
-            "files": ["q4/*"]
-        });
-        let hard = json!({
-            "coRequisite": true,
-            "componentId": "vae_fp16_fix",
-            "repo": "madebyollin/sdxl-vae-fp16-fix"
-        });
-        let selected_vae = json!({
-            "coRequisite": true,
-            "required": "soft",
-            "componentId": "vae",
-            "repo": "operator/selected-vae",
-            "files": ["vae.safetensors"]
-        });
-        let openpose = json!({
-            "coRequisite": true,
-            "required": "soft",
-            "componentId": "controlnet_openpose",
-            "repo": "xinsir/controlnet-openpose-sdxl-1.0",
-            "files": ["diffusion_pytorch_model.safetensors"]
-        });
-        let entry = json!({
-            "id": "projection-probe",
-            "downloads": [
-                primary.clone(),
-                hard.clone(),
-                selected_vae.clone(),
-                openpose
-            ],
-            "ui": { "description": "preserved metadata" }
-        });
-
-        assert_eq!(
-            project_image_manifest_for_worker(entry),
-            json!({
-                "id": "projection-probe",
-                "downloads": [primary, hard, selected_vae],
-                "ui": { "description": "preserved metadata" }
-            }),
-            "projection must remove only required:soft/controlnet_openpose and preserve every other Value exactly"
-        );
-    }
-}
-
 #[cfg(not(target_os = "macos"))]
 fn canonicalize_image_detail_dense_tier(payload: &mut JsonObject) -> Result<(), ApiError> {
     // Candle's SDXL detail provider supports only the dense bf16 base. Batch Detail does not expose
@@ -2129,4 +2076,57 @@ pub(crate) async fn register_trained_control_overlay(
     })
     .await?;
     Ok(Some((overlay_id, manifest_path)))
+}
+
+#[cfg(test)]
+mod image_manifest_projection_tests {
+    use super::*;
+
+    #[test]
+    fn worker_projection_removes_only_the_exact_soft_openpose_component() {
+        let primary = json!({
+            "provider": "huggingface",
+            "repo": "SceneWorks/sdxl-base-mlx",
+            "files": ["q4/*"]
+        });
+        let hard = json!({
+            "coRequisite": true,
+            "componentId": "vae_fp16_fix",
+            "repo": "madebyollin/sdxl-vae-fp16-fix"
+        });
+        let selected_vae = json!({
+            "coRequisite": true,
+            "required": "soft",
+            "componentId": "vae",
+            "repo": "operator/selected-vae",
+            "files": ["vae.safetensors"]
+        });
+        let openpose = json!({
+            "coRequisite": true,
+            "required": "soft",
+            "componentId": "controlnet_openpose",
+            "repo": "xinsir/controlnet-openpose-sdxl-1.0",
+            "files": ["diffusion_pytorch_model.safetensors"]
+        });
+        let entry = json!({
+            "id": "projection-probe",
+            "downloads": [
+                primary.clone(),
+                hard.clone(),
+                selected_vae.clone(),
+                openpose
+            ],
+            "ui": { "description": "preserved metadata" }
+        });
+
+        assert_eq!(
+            project_image_manifest_for_worker(entry),
+            json!({
+                "id": "projection-probe",
+                "downloads": [primary, hard, selected_vae],
+                "ui": { "description": "preserved metadata" }
+            }),
+            "projection must remove only required:soft/controlnet_openpose and preserve every other Value exactly"
+        );
+    }
 }
