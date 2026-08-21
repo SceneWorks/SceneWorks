@@ -913,12 +913,24 @@ async fn generate_instantid_stream(
         ];
         overlays.extend(openpose_files.iter().map(std::path::PathBuf::as_path));
         overlays.extend(crate::conditioning_fit::pid_paths(pid_weights.as_ref()));
-        admit_conditioning_paths(
+        admit_conditioning_paths_via_compatibility_selector(
             settings,
             "InstantID",
             "face-identity conditioning stack",
             &sdxl_base,
             &overlays,
+            crate::conditioning_fit::ConditioningSelectorScope {
+                route: "instantid_realvisxl",
+                tier_key: "bf16",
+                mode_key: "character_image",
+                geometry: gen_core::MemoryGeometry {
+                    width: request.width,
+                    height: request.height,
+                    batch: 1,
+                    frames: 1,
+                    reference_count: 1,
+                },
+            },
         )
         .await?;
     }

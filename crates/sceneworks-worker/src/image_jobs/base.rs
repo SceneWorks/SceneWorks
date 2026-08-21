@@ -10212,6 +10212,13 @@ async fn generate_candle_stream(
         edit_mask.is_some(),
         hires_fix.is_some(),
     );
+    let shared_geometry = gen_core::MemoryGeometry {
+        width: memory_width,
+        height: memory_height,
+        batch: 1,
+        frames: 1,
+        reference_count,
+    };
     let shared_memory = crate::candle_memory_strategy::evaluate_shared_image(
         engine_id,
         &request.model,
@@ -10227,13 +10234,7 @@ async fn generate_candle_stream(
         tier,
         shared_request_mode,
         (adapter_count > 0).then_some("lora"),
-        gen_core::MemoryGeometry {
-            width: memory_width,
-            height: memory_height,
-            batch: 1,
-            frames: 1,
-            reference_count,
-        },
+        shared_geometry,
         reference_count > 0,
         use_pid,
         hires_fix.is_some(),
@@ -10256,6 +10257,26 @@ async fn generate_candle_stream(
         // Resident scope would then overwrite that request memory back to resident in configure_request.
         selected_memory_strategy_context = optimized_shared_memory_context(evaluation.context);
     }
+    // SC-19055: the fourteen scalar-only routes have no provider-owned contract, but inference's
+    // `compatibility_default` is an honest resident-only selector shape. Submit the exact ceiling
+    // the legacy gate already computed (`gated_needed` includes its reserve/padding) through that
+    // selector with no second reserve or margin. A resident reject still flows into the existing
+    // sequential-capability decision below; an Unverified result preserves the established
+    // never-block-without-evidence fallback.
+    let legacy_scalar_selection =
+        crate::candle_memory_strategy::is_legacy_scalar_compatibility_route(&request.model).then(
+            || {
+                crate::candle_memory_strategy::select_compatibility_resident(
+                    &request.model,
+                    tier,
+                    shared_request_mode,
+                    shared_geometry,
+                    budget,
+                    gated_needed,
+                    crate::memory_strategy::CandidateBasis::LegacyScalar,
+                )
+            },
+        );
     // Krea's shared selector runs before any legacy resident/staged gate and owns the final fit
     // decision whenever its revision-bound evidence is available. A `None` result is the explicit
     // unverified path; only then may the established gate remain as provider-safe fallback.
@@ -10340,6 +10361,28 @@ async fn generate_candle_stream(
                 }
             } else if krea_turbo_ladder {
                 krea_unverified_resident_decision(gated_needed, budget)
+            } else if let Some(selection) = legacy_scalar_selection {
+                match selection {
+                    crate::memory_strategy::Selection::Selected { .. } => {
+                        crate::vram_gate::FitDecision::Fits
+                    }
+                    crate::memory_strategy::Selection::Reject {
+                        needed_gb,
+                        available_gb,
+                    } => crate::vram_gate::resolve_offload(
+                        crate::vram_gate::FitDecision::TooBig {
+                            needed_gb,
+                            available_gb,
+                        },
+                        sequential_capable,
+                    ),
+                    crate::memory_strategy::Selection::Unverified { .. } => {
+                        crate::vram_gate::resolve_offload(
+                            crate::vram_gate::fit_decision(gated_needed, budget),
+                            sequential_capable,
+                        )
+                    }
+                }
             } else {
                 crate::vram_gate::resolve_offload(
                     crate::vram_gate::fit_decision(gated_needed, budget),

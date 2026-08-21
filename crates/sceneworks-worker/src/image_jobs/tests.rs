@@ -3489,9 +3489,10 @@ fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
     let sequential_reject = candle_stream
         .find("if let Some(seq_gb) =")
         .expect("sequential overflow reject");
-    let too_big_reject = candle_stream
-        .find("FitDecision::TooBig")
-        .expect("resident reject");
+    let too_big_reject = sequential_reject
+        + candle_stream[sequential_reject..]
+            .find("FitDecision::TooBig")
+            .expect("resident reject after sequential overflow handling");
     let shared_krea_selection = candle_stream
         .find("let shared_krea_fit =")
         .expect("shared Krea selection");
@@ -16018,7 +16019,7 @@ fn candle_adapter_routes_charge_nonzero_bytes_to_admission() {
         ("FLUX.2 edit selector", include_str!("flux2_edit_candle.rs"), "predicted_peak_gb_with_adapter_bytes(\n        &request.model_manifest_entry,\n        tier,\n        adapter_source_bytes,"),
         ("FLUX.1 control selector", include_str!("flux1_control_candle.rs"), "runtime_overlay_bytes,\n        gen_core::MemoryCacheState::Cold"),
         ("FLUX.2 control selector", include_str!("flux2_control_candle.rs"), "runtime_overlay_bytes,\n        gen_core::MemoryCacheState::Cold"),
-        ("Bernini admission", include_str!("bernini.rs"), "admit_candle_base_floor_with_resident_overlay(\n        &request.model,\n        \"Bernini still image\",\n        settings,\n        &[weights_dir.as_path()],\n        adapter_resident_bytes,"),
+        ("Bernini admission", include_str!("bernini.rs"), "admit_candle_base_floor_with_resident_overlay_via_selector(\n        &request.model,\n        \"Bernini still image\",\n        settings,\n        &[weights_dir.as_path()],\n        adapter_resident_bytes,"),
         ("Qwen control", include_str!("qwen_control.rs"), "self.adapters.iter()"),
         ("Kolors control", include_str!("kolors_control.rs"), "self.adapters.iter()"),
         ("Z-Image control", include_str!("zimage_control.rs"), "self.adapters.iter()"),
@@ -19430,7 +19431,7 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             "InstantId",
             "instantid.rs",
             include_str!("instantid.rs"),
-            "admit_conditioning_paths(",
+            "admit_conditioning_paths_via_compatibility_selector(",
         ),
         (
             "SdxlIpAdapter",
@@ -19629,7 +19630,7 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             "Bernini",
             "bernini.rs",
             include_str!("bernini.rs"),
-            "admit_candle_base_floor_with_resident_overlay(",
+            "admit_candle_base_floor_with_resident_overlay_via_selector(",
         ),
     ];
     for (route, file, source, marker) in BASE_ADMITTED {

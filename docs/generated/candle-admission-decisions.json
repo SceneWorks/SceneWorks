@@ -23227,7 +23227,7 @@
       "tier": "bf16",
       "gate": "video_weights_fit_error",
       "resolution": "not_evaluated",
-      "geometrySensitive": false,
+      "geometrySensitive": true,
       "missingInput": "weight_bytes: u64, measured off the resolved model dir on disk (wan_weight_bytes / wan_vace_fun_sequential_weight_bytes); no manifest number reproduces it"
     },
     {
@@ -23237,7 +23237,7 @@
       "tier": "q8",
       "gate": "video_weights_fit_error",
       "resolution": "not_evaluated",
-      "geometrySensitive": false,
+      "geometrySensitive": true,
       "missingInput": "weight_bytes: u64, measured off the resolved model dir on disk (wan_weight_bytes / wan_vace_fun_sequential_weight_bytes); no manifest number reproduces it"
     },
     {
@@ -23247,7 +23247,7 @@
       "tier": "q4",
       "gate": "video_weights_fit_error",
       "resolution": "not_evaluated",
-      "geometrySensitive": false,
+      "geometrySensitive": true,
       "missingInput": "weight_bytes: u64, measured off the resolved model dir on disk (wan_weight_bytes / wan_vace_fun_sequential_weight_bytes); no manifest number reproduces it"
     },
     {
@@ -23257,7 +23257,7 @@
       "tier": "nvfp4",
       "gate": "video_weights_fit_error",
       "resolution": "not_evaluated",
-      "geometrySensitive": false,
+      "geometrySensitive": true,
       "missingInput": "weight_bytes: u64, measured off the resolved model dir on disk (wan_weight_bytes / wan_vace_fun_sequential_weight_bytes); no manifest number reproduces it"
     },
     {

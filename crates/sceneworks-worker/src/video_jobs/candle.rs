@@ -543,8 +543,16 @@ pub(super) fn mochi_vram_preflight(
     gpu_id: &str,
     budget: Option<crate::vram_gate::VramBudget>,
 ) -> WorkerResult<MochiVramPreflight> {
+    let quant = mochi_tier_quant(tier_dir);
+    let tier_key = match quant {
+        Some(Quant::Q4) => "q4",
+        Some(Quant::Q8) => "q8",
+        Some(Quant::Nvfp4) => "nvfp4",
+        None => "bf16",
+    };
     match crate::vram_gate::mochi_fit_error(
         model_label,
+        tier_key,
         crate::mlx_fit_gate::mochi_resident_bytes(tier_dir),
         frames,
         width,
@@ -553,9 +561,7 @@ pub(super) fn mochi_vram_preflight(
         budget,
     ) {
         Some(error) => Err(error),
-        None => Ok(MochiVramPreflight {
-            quant: mochi_tier_quant(tier_dir),
-        }),
+        None => Ok(MochiVramPreflight { quant }),
     }
 }
 
@@ -776,7 +782,7 @@ fn vace_fun_cold_load_admission(
                         .to_owned(),
                 )
             })?;
-            match crate::vram_gate::video_weights_fit_error(
+            match crate::vram_gate::unscoped_video_weights_fit_error(
                 "wan2_2_vace_fun_14b",
                 weight_bytes,
                 &gpu_id,
@@ -853,12 +859,23 @@ pub(super) fn ltx_resident_weight_bytes(input: &VideoGenInput) -> WorkerResult<u
 async fn admit_candle_ltx(
     engine_id: &'static str,
     bytes: u64,
+    tier_key: &str,
+    mode_key: &str,
+    geometry: gen_core::MemoryGeometry,
     settings: &Settings,
 ) -> WorkerResult<()> {
     let budget = candle_video_vram_budget(settings).await;
-    if let Some(error) =
-        crate::vram_gate::video_weights_fit_error(engine_id, bytes, &settings.gpu_id, budget)
-    {
+    if let Some(error) = crate::vram_gate::video_weights_fit_error(
+        engine_id,
+        bytes,
+        crate::vram_gate::LegacyVideoRequestScope {
+            tier_key,
+            mode_key,
+            geometry,
+        },
+        &settings.gpu_id,
+        budget,
+    ) {
         return Err(error);
     }
     Ok(())
@@ -1083,7 +1100,7 @@ pub(super) async fn generate_candle_video_using(
     // (the packed-detect seam reads the baked-in quant). A flat/dense repo (no subdirs, e.g. the
     // `Wan-AI/*-Diffusers` fallback) stays as-is with no quant marker.
     let is_ltx = engine_id == "ltx_2_3_distilled";
-    let (mut model_dir, wan_quant) = if is_mochi {
+    let (mut model_dir, wan_quant, ltx_tier_key) = if is_mochi {
         // `resolve_mochi_model_dir` already returned the TIER dir. The VRAM fit gate (sc-12306) runs
         // here, and the quant marker comes back OUT of it — see `mochi_vram_preflight` for why the
         // marker is bundled into the gated return rather than read alongside a free-standing check.
@@ -1096,11 +1113,11 @@ pub(super) async fn generate_candle_video_using(
             &settings.gpu_id,
             candle_video_vram_budget(settings).await,
         )?;
-        (snapshot_dir, quant)
+        (snapshot_dir, quant, None)
     } else if let Some((dir, quant)) =
         candle_ltx_tier_subdir(&snapshot_dir, engine_id, &request.model)
     {
-        (dir, quant)
+        (dir, quant, Some("q4"))
     } else {
         let (dir, quant) = match candle_wan_tier_subdir(&snapshot_dir, engine_id, request) {
             Some((tier_dir, quant)) => (tier_dir, quant),
@@ -1126,7 +1143,7 @@ pub(super) async fn generate_candle_video_using(
             &settings.gpu_id,
             candle_video_vram_budget(settings).await,
         )?;
-        (dir, quant)
+        (dir, quant, is_ltx.then_some("bf16"))
     };
     // ltx needs the separate Gemma-3-12B encoder (its only conditioning input). Resolve its snapshot
     // dir here and thread it onto the LoadSpec below (sc-8827) instead of mutating `$LTX_GEMMA_DIR`.
@@ -1296,7 +1313,15 @@ pub(super) async fn generate_candle_video_using(
         // one-shot cold-load admission closure, which is `Send` but intentionally not `Sync`; an
         // async helper taking `&VideoGenInput` would therefore make the worker loop future non-`Send`.
         let resident_bytes = ltx_resident_weight_bytes(&input)?;
-        admit_candle_ltx(input.engine_id, resident_bytes, settings).await?;
+        admit_candle_ltx(
+            input.engine_id,
+            resident_bytes,
+            ltx_tier_key.expect("an LTX model path must resolve an admission tier"),
+            request.mode.as_str(),
+            crate::video_admission::video_gate_geometry(request.width, request.height, frames),
+            settings,
+        )
+        .await?;
     }
     let raw_settings = candle_video_raw_settings(request, &repo);
     let decoded = generate_video_using(
