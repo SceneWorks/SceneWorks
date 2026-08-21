@@ -950,6 +950,9 @@ jobs:
           FLUX_REVISION: ${{ inputs.provision_revision }}
         run: |
           $evidence = Join-Path $env:RUNNER_TEMP "sc19054-flux-acceptance-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          # Export the bounded attempt path before any check or mkdir can fail. The always upload
+          # and cleanup steps must still be able to find scratch left by an interrupted seal.
+          "SC19054_EVIDENCE_DIR=$evidence" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           if (Test-Path -LiteralPath $evidence) {
             throw "refusing stale SC-19054 evidence directory: $evidence"
           }
@@ -998,7 +1001,6 @@ jobs:
             gpu = $gpu
           }
           $identity | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $evidence 'identity.json') -Encoding utf8
-          "SC19054_EVIDENCE_DIR=$evidence" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "SC19054_FLUX_Q4_ROOT=$env:SCENEWORKS_PROVISIONED_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "SC19054_OUTPUT_DIR=$output" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "SC19054_SCENEWORKS_REVISION=$head" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append

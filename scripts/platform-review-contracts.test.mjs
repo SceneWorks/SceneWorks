@@ -721,6 +721,19 @@ function assertSc19054FluxAcceptanceContract({ workflow, rust }, context = "SC-1
   ]) {
     assert.ok(seal.includes(exact), `${context}: identity receipt lost ${exact}`);
   }
+  const evidencePath = seal.indexOf(
+    '$evidence = Join-Path $env:RUNNER_TEMP "sc19054-flux-acceptance-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"',
+  );
+  const evidenceExport = seal.indexOf(
+    '"SC19054_EVIDENCE_DIR=$evidence" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append',
+  );
+  const firstFailableSealCheck = seal.indexOf("if (Test-Path -LiteralPath $evidence)");
+  assert.ok(
+    evidencePath >= 0 &&
+      evidencePath < evidenceExport &&
+      evidenceExport < firstFailableSealCheck,
+    `${context}: bounded evidence path must reach GITHUB_ENV before any seal check or mkdir can fail`,
+  );
   const run = stepBody(workflow, "Run the exact SC-19054 admission-to-FLUX render");
   assert.match(
     run,
@@ -752,10 +765,13 @@ function assertSc19054FluxAcceptanceContract({ workflow, rust }, context = "SC-1
     stepBody(workflow, "Upload the SC-19054 FLUX acceptance evidence"),
     /if: \$\{\{ always\(\) && github\.event_name == 'workflow_dispatch' && inputs\.run_sc19054_flux_acceptance \}\}/,
   );
+  const cleanup = stepBody(workflow, "Clean up the SC-19054 FLUX acceptance scratch");
   assert.match(
-    stepBody(workflow, "Clean up the SC-19054 FLUX acceptance scratch"),
-    /StartsWith\('sc19054-flux-acceptance-'\)/,
+    cleanup,
+    /if: \$\{\{ always\(\) && github\.event_name == 'workflow_dispatch' && inputs\.run_sc19054_flux_acceptance \}\}/,
   );
+  assert.match(cleanup, /\$env:SC19054_EVIDENCE_DIR/);
+  assert.match(cleanup, /StartsWith\('sc19054-flux-acceptance-'\)/);
 
   for (const exact of [
     'const MODEL_ID: &str = "flux_schnell";',
@@ -823,6 +839,23 @@ test("SC-19054 FLUX acceptance binds the exact admission cell to one real Candle
       `${name} must be killed by the acceptance contract`,
     );
   }
+
+  const earlyExport =
+    '          "SC19054_EVIDENCE_DIR=$evidence" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append\n';
+  const firstFailableSealCheck = "          if (Test-Path -LiteralPath $evidence) {\n";
+  const lateExportWorkflow = documents.workflow
+    .replace(earlyExport, "")
+    .replace(firstFailableSealCheck, `${firstFailableSealCheck}${earlyExport}`);
+  assert.notEqual(lateExportWorkflow, documents.workflow, "late evidence export mutation did not apply");
+  assert.throws(
+    () =>
+      assertSc19054FluxAcceptanceContract(
+        { ...documents, workflow: lateExportWorkflow },
+        "late evidence export",
+      ),
+    /bounded evidence path must reach GITHUB_ENV/,
+    "cleanup must retain the attempt path when the first failable seal check aborts",
+  );
 });
 
 // sc-18691 AC2. Decoupling must not turn a genuine provisioning failure into a silent skip. With
