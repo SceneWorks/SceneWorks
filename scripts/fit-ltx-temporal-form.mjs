@@ -55,6 +55,20 @@ const isCanonicalRepoPath = (value) =>
   !value.startsWith("../") &&
   !value.includes("\\") &&
   path.posix.normalize(value) === value;
+/**
+ * The FAMILY of temporal-form fit reports a promoted curve may name as its provenance. Mirrors
+ * `is_canonical_video_memory_curve_fit_path` in `crates/sceneworks-core/src/video_memory_curves.rs`
+ * and the `sourceFit` pattern in `packages/schemas/video-memory-curves.schema.json`; a producer
+ * that emitted something outside it would write a bundle the runtime reader refuses to load.
+ */
+// Built from a STRING rather than a regex literal so `.source` is byte-comparable with the schema's
+// own `pattern` — a literal would escape the slashes and make the two look different when they are
+// the same contract.
+export const VIDEO_MEMORY_CURVE_FIT_PATH_PATTERN = new RegExp(
+  "^docs/generated/[a-z0-9]+(?:-[a-z0-9]+)*-temporal-form-fit-sc-[0-9]+\\.json$",
+);
+export const VIDEO_MEMORY_CURVE_SCHEMA_VERSION = 3;
+export const VIDEO_MEMORY_CURVE_GENERATOR = "scripts/fit-ltx-temporal-form.mjs";
 // Kept in lockstep with `sceneworks_core::memory_calibration::MEMORY_CALIBRATION_ABI`, whose
 // worker-side parity test in turn pins it to `gen_core::MEMORY_CALIBRATION_ABI`. A pin bump cannot
 // make an old curve look current: the runtime query carries the provider contract's live ABI.
@@ -1226,11 +1240,139 @@ export function geometryHull(geometries) {
 }
 
 /**
+ * Merge ONE lane's freshly promoted curves into an existing multi-lane bundle (epic 19048).
+ *
+ * The container holds one curve set per measurement lane. A capture campaign runs on exactly one
+ * backend, so a promotion REPLACES that lane wholesale — every curve it previously contributed
+ * disappears, so a lane is never a mixture of two fit reports — and PRESERVES every other lane
+ * verbatim, together with the source-catalog entries those preserved curves consume. That
+ * one-lane-one-report property is not left to construction: the Rust validator rejects a bundle
+ * whose lane mixes fit reports, so a hand-edited artifact fails closed too.
+ *
+ * Preservation is explicit rather than incidental: the promoted lane is derived from the incoming
+ * curves and asserted to be singular, the preserved source catalog is REDERIVED from the preserved
+ * curves' own evidence references (so a catalog entry belonging only to the replaced lane is
+ * dropped rather than orphaned), and every cross-lane collision the merge could hide — a shared
+ * curve id, a shared source path, a shared immutable record, a preserved curve carrying stale
+ * provenance — throws instead of silently resolving.
+ */
+export function mergeVideoMemoryCurveLane(existingBundle, promotion) {
+  // Hoisted ABOVE the first-promotion early return: "a promotion carries exactly one measurement
+  // lane" is a property of the promotion itself, not of the merge, so a from-scratch bundle must
+  // not be the one path that can emit a mixed-lane or empty container.
+  const promotedLanes = [...new Set(promotion.curves.map((curve) => curve.backend))].sort(compareText);
+  if (promotedLanes.length !== 1) {
+    throw new Error(
+      `a promotion replaces exactly one measurement lane, got ${promotedLanes.length}: ${promotedLanes.join(", ")}`,
+    );
+  }
+  const [promotedLane] = promotedLanes;
+  if (existingBundle === null || existingBundle === undefined) return promotion;
+  if (
+    !existingBundle ||
+    typeof existingBundle !== "object" ||
+    Array.isArray(existingBundle) ||
+    !Array.isArray(existingBundle.curves) ||
+    !Array.isArray(existingBundle.sourceCatalog)
+  ) {
+    throw new Error("the existing video curve bundle is not a curve container");
+  }
+  if (existingBundle.schemaVersion !== VIDEO_MEMORY_CURVE_SCHEMA_VERSION) {
+    throw new Error(
+      `the existing video curve bundle is schema v${existingBundle.schemaVersion}, not v${VIDEO_MEMORY_CURVE_SCHEMA_VERSION} — ` +
+        "delete it and regenerate rather than merging across schema versions",
+    );
+  }
+  if (existingBundle.generatedBy !== VIDEO_MEMORY_CURVE_GENERATOR) {
+    throw new Error("the existing video curve bundle was produced by another generator");
+  }
+  // F7: clone rather than alias. The merged bundle must not share curve objects with the caller's
+  // input, or a later mutation of either would silently reach into the other.
+  const preserved = structuredClone(
+    existingBundle.curves.filter((curve) => curve.backend !== promotedLane),
+  );
+  for (const curve of preserved) {
+    if (typeof curve.sourceFit !== "string" || !VIDEO_MEMORY_CURVE_FIT_PATH_PATTERN.test(curve.sourceFit)) {
+      throw new Error(
+        `preserved curve ${curve.id} carries no canonical fit provenance — the existing bundle is not v3-shaped`,
+      );
+    }
+  }
+  const promotedIds = new Set(promotion.curves.map((curve) => curve.id));
+  for (const curve of preserved) {
+    if (promotedIds.has(curve.id)) {
+      throw new Error(`preserved curve ${curve.id} collides with a promoted curve id across lanes`);
+    }
+  }
+  // A preserved lane's sources are whatever its own curves still reference, cross-checked against
+  // the digest the existing catalog recorded. Rebuilding it this way is what stops a replaced
+  // lane's source file from lingering in the catalog with nothing consuming its records — the exact
+  // shape the Rust loader refuses with "curves do not consume the exact compiled source-record
+  // catalog".
+  const existingDigests = new Map(
+    existingBundle.sourceCatalog.map((entry) => [entry.path, entry.sha256]),
+  );
+  const preservedCatalog = new Map();
+  const preservedRecordIds = new Set();
+  for (const curve of preserved) {
+    for (const source of curve.evidence.sources) {
+      const recorded = existingDigests.get(source.path);
+      if (recorded === undefined) {
+        throw new Error(
+          `preserved curve ${curve.id} references ${source.path}, which is absent from the existing source catalog`,
+        );
+      }
+      if (recorded !== source.sha256) {
+        throw new Error(
+          `preserved source ${source.path} has two digests between the catalog and ${curve.id}`,
+        );
+      }
+      preservedCatalog.set(source.path, { path: source.path, sha256: source.sha256 });
+      for (const recordId of source.recordIds) {
+        if (preservedRecordIds.has(recordId)) {
+          throw new Error(`preserved record ${recordId} feeds more than one preserved curve`);
+        }
+        preservedRecordIds.add(recordId);
+      }
+    }
+  }
+  for (const entry of promotion.sourceCatalog) {
+    if (preservedCatalog.has(entry.path)) {
+      throw new Error(
+        `evidence source ${entry.path} is claimed by both the ${promotedLane} promotion and a preserved lane — ` +
+          "one source file may not straddle two lanes, or replacing one lane would orphan the other's records",
+      );
+    }
+  }
+  for (const curve of promotion.curves) {
+    for (const source of curve.evidence.sources) {
+      for (const recordId of source.recordIds) {
+        if (preservedRecordIds.has(recordId)) {
+          throw new Error(`immutable record ${recordId} is claimed by both a preserved and a promoted curve`);
+        }
+      }
+    }
+  }
+  return {
+    ...promotion,
+    sourceCatalog: [...preservedCatalog.values(), ...promotion.sourceCatalog].sort((left, right) =>
+      compareText(left.path, right.path),
+    ),
+    curves: [...preserved, ...promotion.curves].sort((left, right) => compareText(left.id, right.id)),
+  };
+}
+
+/**
  * Promote the ratified per-phase `cross` form into the backend-neutral runtime container owned by
  * sc-19020. Records are partitioned by the COMPLETE runtime selector before fitting: a campaign may
  * capture several tiers/rungs/providers/sources, but no regression is ever allowed to cross one of
  * those boundaries. Each curve names the exact immutable record subset it consumed, partitioned by
- * source path and bound to the digest of that source's exact committed bytes.
+ * source path and bound to the digest of that source's exact committed bytes, AND the fit report
+ * its coefficients came from (schema v3).
+ *
+ * `existingBundle` makes the container multi-lane: pass the current committed bundle and this
+ * promotion replaces its own lane while preserving every other one. Pass `null` to emit a
+ * single-lane bundle from scratch.
  */
 export function buildVideoMemoryCurveBundle(
   report,
@@ -1238,7 +1380,13 @@ export function buildVideoMemoryCurveBundle(
   manifest,
   sourceEvidenceInput,
   sourceFit = "docs/generated/ltx-temporal-form-fit-sc-18810.json",
+  existingBundle = null,
 ) {
+  if (!VIDEO_MEMORY_CURVE_FIT_PATH_PATTERN.test(sourceFit)) {
+    throw new Error(
+      `sourceFit must be a canonical temporal-form fit report under docs/generated, got ${sourceFit}`,
+    );
+  }
   if (!Array.isArray(records) || records.length === 0) {
     throw new Error("the video curve source dataset has no records");
   }
@@ -1483,6 +1631,9 @@ export function buildVideoMemoryCurveBundle(
       calibrationAbi,
       calibrationFingerprint,
       decodePass,
+      // Fit provenance rides on the CURVE, not the bundle: the container is multi-lane and each
+      // lane is promoted from its own campaign's report.
+      sourceFit,
       measuredGeometryHull: geometryHull(observations.map((observation) => observation.geometry)),
       phases: { conditioning: phase("text"), denoise: phase("denoise"), decode: phase("decode") },
       evidence: {
@@ -1495,13 +1646,12 @@ export function buildVideoMemoryCurveBundle(
   });
   curves.sort((left, right) => compareText(left.id, right.id));
 
-  return {
-    schemaVersion: 2,
-    generatedBy: "scripts/fit-ltx-temporal-form.mjs",
-    sourceFit,
+  return mergeVideoMemoryCurveLane(existingBundle, {
+    schemaVersion: VIDEO_MEMORY_CURVE_SCHEMA_VERSION,
+    generatedBy: VIDEO_MEMORY_CURVE_GENERATOR,
     sourceCatalog,
     curves,
-  };
+  });
 }
 
 async function readJson(file) {
@@ -1548,8 +1698,10 @@ async function main() {
     value("--curve-write", "docs/generated/video-memory-curves.json"),
   );
   const sourceFit = value("--source-fit", `docs/generated/ltx-temporal-form-fit-${story}.json`);
-  if (!isCanonicalRepoPath(sourceFit)) {
-    throw new Error(`--source-fit must be a canonical repository-relative path, got ${sourceFit}`);
+  if (!isCanonicalRepoPath(sourceFit) || !VIDEO_MEMORY_CURVE_FIT_PATH_PATTERN.test(sourceFit)) {
+    throw new Error(
+      `--source-fit must be docs/generated/<family>-temporal-form-fit-sc-<story>.json, got ${sourceFit}`,
+    );
   }
   const manifestPath = path.resolve(ROOT, "config/manifests/builtin.models.jsonc");
   const curveSchemaPath = path.resolve(ROOT, "packages/schemas/video-memory-curves.schema.json");
@@ -1595,12 +1747,21 @@ async function main() {
     story,
   );
   const serialised = `${JSON.stringify(report, null, 2)}\n`;
+  // The container is multi-lane. Promoting THIS campaign replaces only its own measurement lane;
+  // every other lane already in the bundle is carried through untouched. An absent file is a
+  // first-ever promotion, which is the only case that legitimately starts from nothing — to RETIRE
+  // a lane, delete the bundle and re-promote the lanes that should remain.
+  const existingBundle = await readJson(curvePath).catch((error) => {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  });
   const curveBundle = buildVideoMemoryCurveBundle(
     report,
     records,
     manifest,
     datasets,
     sourceFit,
+    existingBundle,
   );
   const curveSchemaProblems = videoCurveSchemaErrors(curveSchema, curveBundle);
   if (curveSchemaProblems.length > 0) {
