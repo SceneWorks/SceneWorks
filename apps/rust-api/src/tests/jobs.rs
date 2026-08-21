@@ -472,31 +472,68 @@ async fn ordinary_sdxl_txt2img_never_forwards_the_soft_openpose_component() {
             job["payload"]["advanced"].get("poses").is_none(),
             "{boundary}: the ordinary request must remain a no-pose job"
         );
-        let component_ids: std::collections::BTreeSet<&str> = job["payload"]["modelManifestEntry"]
-            ["downloads"]
+        let co_requisites: Vec<&Value> = job["payload"]["modelManifestEntry"]["downloads"]
             .as_array()
             .expect("authoritative downloads array")
             .iter()
             .filter(|download| download["coRequisite"] == json!(true))
+            .collect();
+        let component_ids: std::collections::BTreeSet<&str> = co_requisites
+            .iter()
             .filter_map(|download| download["componentId"].as_str())
             .collect();
         assert!(
             !component_ids.contains("controlnet_openpose"),
             "{boundary}: a no-pose job must not forward the soft OpenPose component: {component_ids:?}"
         );
+        let hard_sdxl_components = std::collections::BTreeSet::from([
+            "tokenizer_clip_l",
+            "tokenizer_clip_bigg",
+            "vae_fp16_fix",
+        ]);
+        assert_eq!(
+            component_ids, hard_sdxl_components,
+            "{boundary}: the authoritative payload carries only the exact hard SDXL metadata rows"
+        );
+        for download in &co_requisites {
+            let platforms = download["platforms"]
+                .as_array()
+                .expect("hard SDXL co-requisites declare their platforms")
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(
+                platforms,
+                std::collections::BTreeSet::from(["windows", "linux"]),
+                "{boundary}: carried hard SDXL metadata is Candle-only: {download}"
+            );
+        }
+        #[cfg(target_os = "macos")]
+        let target_platform = "macos";
+        #[cfg(target_os = "windows")]
+        let target_platform = "windows";
+        #[cfg(target_os = "linux")]
+        let target_platform = "linux";
+        let applicable_component_ids = co_requisites
+            .iter()
+            .filter(|download| {
+                download["platforms"].as_array().is_some_and(|platforms| {
+                    platforms
+                        .iter()
+                        .any(|platform| platform.as_str() == Some(target_platform))
+                })
+            })
+            .filter_map(|download| download["componentId"].as_str())
+            .collect::<std::collections::BTreeSet<_>>();
         #[cfg(target_os = "macos")]
         assert!(
-            component_ids.is_empty(),
-            "{boundary}: self-contained MLX SDXL needs no generic co-requisite: {component_ids:?}"
+            applicable_component_ids.is_empty(),
+            "{boundary}: carried Candle metadata is inapplicable to self-contained MLX SDXL: \
+             {applicable_component_ids:?}"
         );
         #[cfg(not(target_os = "macos"))]
         assert_eq!(
-            component_ids,
-            std::collections::BTreeSet::from([
-                "tokenizer_clip_l",
-                "tokenizer_clip_bigg",
-                "vae_fp16_fix",
-            ]),
+            applicable_component_ids, hard_sdxl_components,
             "{boundary}: Candle receives exactly its three descriptor-required components"
         );
     }

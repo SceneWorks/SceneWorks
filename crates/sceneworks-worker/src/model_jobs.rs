@@ -6444,6 +6444,29 @@ mod co_requisite_tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mlx_sdxl_descriptor_stages_none_of_the_carried_candle_components() {
+        let descriptor = crate::inference_runtime::media_descriptor("sdxl")
+            .expect("the macOS MLX SDXL provider is registered");
+        assert_eq!(descriptor.backend, "mlx");
+        assert!(
+            descriptor.required_components.is_empty(),
+            "the self-contained MLX SDXL provider requires no caller-staged components"
+        );
+
+        let components = resolve_co_requisites(
+            &descriptor,
+            &builtin_manifest_entry("realvisxl"),
+            &settings_at(PathBuf::from("/nonexistent/sc-20747-mlx-sdxl")),
+        )
+        .expect("an empty MLX descriptor ignores carried Candle-only component metadata");
+        assert!(
+            components.is_empty(),
+            "the generic resolver stages no components for self-contained MLX SDXL"
+        );
+    }
+
     // --- SDXL shared components (epic 13657, sc-13682) -----------------------------------------------
 
     /// The candle `sdxl` generator descriptor shape at the inference pin: it advertises the three
