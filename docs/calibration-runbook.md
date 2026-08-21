@@ -1790,7 +1790,12 @@ wired into `npm run check` so it stays schema-valid:
    lane. The candle invocation is:
 
    ```bash
-   node scripts/fit-ltx-temporal-form.mjs      --story sc-19057      --dataset docs/generated/wan-candle-video-sc-19057.json      --plan docs/calibration/sc-19057/wan-candle-video-capture-plan.json      --write docs/generated/wan-temporal-form-fit-sc-19057.json      --source-fit docs/generated/wan-temporal-form-fit-sc-19057.json
+   node scripts/fit-ltx-temporal-form.mjs \
+     --story sc-19057 \
+     --dataset docs/generated/wan-candle-video-sc-19057.json \
+     --plan docs/calibration/sc-19057/wan-candle-video-capture-plan.json \
+     --write docs/generated/wan-temporal-form-fit-sc-19057.json \
+     --source-fit docs/generated/wan-temporal-form-fit-sc-19057.json
    ```
 
    There is no `--driver-log` for this lane (the runbook's §12d invocation writes none), so the
@@ -1804,8 +1809,10 @@ wired into `npm run check` so it stays schema-valid:
    exact sorted packaged catalog"*, which is the length check in `validate_source_catalog` firing
    before the later record-consumption check.
 
-   🔴 **Two gates fire deliberately when the candle curve lands. Both are correct; clear them, do
-   not weaken them.** They were confirmed by promoting a synthetic candle lane end to end:
+   🔴 **Three gates fire deliberately when the candle curve lands. All three are correct; clear
+   them, do not weaken them.** The list was derived by promoting a synthetic candle lane end to end
+   and diffing the whole `npm run check` failure set against a clean-head baseline (41 clean, 44
+   with two lanes); no fourth gate appeared by that method:
 
    * `platform-review-contracts.test.mjs` — *"Rust Docker builders copy every production generated
      embed from sceneworks-core"*. The new `include_str!` needs a matching
@@ -1817,6 +1824,13 @@ wired into `npm run check` so it stays schema-valid:
      assertion says *"a candle curve now exists — update the recorded gap"*. Retire the
      `zero-candle-video-memory-curves-packaged` known gap and let
      `summary.byMechanism.video_memory_curve_bundle` reflect the route that now reaches the bundle.
+   * `generate-candle-admission-inventory.test.mjs` — *"the committed artifacts match a fresh
+     build"*. The candle-admission inventory hashes both
+     `crates/sceneworks-core/src/video_memory_curves.rs` and
+     `docs/generated/video-memory-curves.json` as sources, so adding the `include_str!` and
+     promoting the curve rotates two source digests plus the aggregate `sceneWorksRevision` and the
+     committed inventory goes stale. Re-run `npm run generate:candle-admission` and commit the
+     result. Do this **after** the two edits above, or it will need doing twice.
 
    🔴 **`--check` verifies ONE lane. Run it once per lane.** The producer reads the committed
    bundle and copies the other lanes' curves verbatim into the artifact it compares against, so a

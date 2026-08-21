@@ -426,7 +426,8 @@ fn validate_video_memory_curve_bundle_ref(
             std::collections::btree_map::Entry::Occupied(slot) => {
                 if *slot.get() != curve.source_fit.as_str() {
                     return Err(format!(
-                        "video-memory lane {:?} mixes fit reports {:?} and {:?}; one lane is                          promoted from one campaign",
+                        "video-memory lane {:?} mixes fit reports {:?} and {:?}; one lane is \
+                         promoted from one campaign",
                         curve.backend.as_key(),
                         slot.get(),
                         curve.source_fit
@@ -1399,8 +1400,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let q4_raw = format!(
-            "{}
-",
+            "{}\n",
             serde_json::to_string_pretty(&serde_json::json!({ "records": q4_records }))
                 .expect("synthetic q4 candle source serializes")
         );
@@ -1461,9 +1461,15 @@ mod tests {
             families,
         )
         .expect_err("a lane blending two campaigns must fail closed");
-        assert!(
-            error.contains("mixes fit reports"),
-            "the diagnostic must name the defect, got {error:?}"
+        // Pin the WHOLE operator-facing sentence, not just a fragment. An operator greps this
+        // string; a substring assertion cannot see whitespace rot inside it (a stray run of spaces
+        // where a line continuation belongs is invisible to fmt and clippy alike).
+        assert_eq!(
+            error,
+            "video-memory lane \"candle\" mixes fit reports \
+             \"docs/generated/wan-temporal-form-fit-sc-19057.json\" and \
+             \"docs/generated/wan-temporal-form-fit-sc-19999.json\"; one lane is promoted from one \
+             campaign"
         );
     }
 
