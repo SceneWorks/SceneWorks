@@ -5,7 +5,7 @@
     "modelCount": 92,
     "importedFamilyCount": 3,
     "cellCount": 872,
-    "mlxOnlyCellCount": 62,
+    "mlxOnlyCellCount": 56,
     "candleOnlyCellCount": 45,
     "exceptionCount": 11
   },
@@ -15,18 +15,18 @@
     "apiGeneration": "095d6dcc340d30ddcf47e0cb946bf55f11f289ea8ff372aaacb84bdfe594710f",
     "apiValidation": "7b3b614849834522f475a8a16e37cf3f2ff202d8ad61dd93116a68ba76775efd",
     "baseWeightImports": "f61da9f523417d6ad075fabfd6eb57edc7ae7f533aa213606cd6f0f5cad219d2",
-    "descriptorAudioFacts": "128c10e43d2234a2aebb39318559b5d8c980f4dc3a5f7c0a94c6cfa90887ac71",
-    "descriptorCandleFacts": "70fc6268d50674330da805173e56f94c4e1954de004044e7e2c1ee0286f24193",
-    "descriptorCandleRuntime": "9fa622bdf45089405d2f61165234e8943ad068953bb7461c152829673c87e4de",
-    "descriptorMlxFacts": "816740887b48a2a32ebc5c71cdecdd1eca10edcc1a567ea36b6fa87b567c5122",
-    "descriptorMlxRuntime": "b9b544f64f07cafb9bc6e11eef40b1214dac1df32ea22402c94e24f710a3fd9a",
-    "descriptorPreviewFacts": "6c9e656e52d11a4ca59d0862584579c4fa8f540647d686cda345c0a5e1c17e7b",
-    "exceptionRegister": "1c89d8c3dad1025e119d9faed44c3f44173b3f316c1b70faccfed4f44157f704",
+    "descriptorAudioFacts": "fe73dab99445315ae2cc169e374dd2fcdbc183e1f7eb92212f9ea500e1317f94",
+    "descriptorCandleFacts": "b52cb8d2bf3466f0296817b4e85f7dc4cf01c2ab78883f5e2b4171d4575eb862",
+    "descriptorCandleRuntime": "126a7b84e0e6576320870f7ccc81c81a2e9943bb22b6473d737a7524c098f439",
+    "descriptorMlxFacts": "10896fa092ce5043b091408bf379c9335d9ee4f504caefb6e86d1538b01a694f",
+    "descriptorMlxRuntime": "db4f3828779169a630c2af2b510826de0b59b39bc5f4b6a39ae1147242df581a",
+    "descriptorPreviewFacts": "8429afd6b3dfcb1265ee32bd559b160b25d6b575f7f66cb1cfaede1c53b262b9",
+    "exceptionRegister": "d28019eceb1a5da041d142a07394175a76f177a66414f1f1ec1fb40c7c3b1859",
     "manifest": "cbe6889a52eea6af32a10ffa519408c1e6745ab1cdc71d5a1635795e6420234f",
-    "modelImportDefaults": "be25b4d008912a83668bf9faf3af4c02bafa9b9cb6003bf161fef1901247a6a9",
-    "routerCandle": "b80d1af50cbf8ad49c083b6f364b46045d60c8a949d8e16fe0cb3fbc6e391ff8",
-    "routerCatalog": "461abba26710b637c50cf0f1a4ed5477baeafaa1be83a60b538a3e1bafa6f25c",
-    "routerGaps": "7227b336212498d286d277abb224a0873988a2dbb1075ac6433a14e4ac6d39d3",
+    "modelImportDefaults": "f818358f1ed492d5c40d79f01701aac540c1445b22b075d0711385184c87512e",
+    "routerCandle": "3a8c25f01aba7ab4c9d6532a336e40a6c5fffd01ad15f8a9fdfb2a51b6fadba7",
+    "routerCatalog": "cbac6c3dd70925e007a9eec1b98ccf5b0d97b3101476c9f364ff93c35b0c96a8",
+    "routerGaps": "b6e49e41eb0fb9992cdb03f6cb2c55455aecfb7037a205d3bce5b852a43d422a",
     "routerMlx": "973a5073f4b34dc45b3b3526ca1eeb4ee0ce69520c9d69430b7fd1697fe70b2b",
     "scheduler": "a47922ac91e5d61b0456dd2b306e42c9fe0725e94546dbe0e7ee81c87f0474e2",
     "trainingCatalog": "ba87e0cb93ab872fd2a430f2ac4aeaedf8c65d6869b37b7ff7df4071309289e0",
@@ -838,22 +838,12 @@
         {
           "capability": "q4",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "epic-9083",
-            "url": "https://app.shortcut.com/trefry/epic/9083",
-            "authority": "epic-9083"
-          }
+          "candle": true
         },
         {
           "capability": "q8",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "epic-9083",
-            "url": "https://app.shortcut.com/trefry/epic/9083",
-            "authority": "epic-9083"
-          }
+          "candle": true
         }
       ],
       "guidanceMethod": [],
@@ -902,22 +892,12 @@
         {
           "capability": "q4",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "epic-9083",
-            "url": "https://app.shortcut.com/trefry/epic/9083",
-            "authority": "epic-9083"
-          }
+          "candle": true
         },
         {
           "capability": "q8",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "epic-9083",
-            "url": "https://app.shortcut.com/trefry/epic/9083",
-            "authority": "epic-9083"
-          }
+          "candle": true
         }
       ],
       "guidanceMethod": [],
@@ -966,22 +946,12 @@
         {
           "capability": "q4",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "epic-9083",
-            "url": "https://app.shortcut.com/trefry/epic/9083",
-            "authority": "epic-9083"
-          }
+          "candle": true
         },
         {
           "capability": "q8",
           "mlx": true,
-          "candle": false,
-          "parityObligation": {
-            "workItem": "epic-9083",
-            "url": "https://app.shortcut.com/trefry/epic/9083",
-            "authority": "epic-9083"
-          }
+          "candle": true
         }
       ],
       "guidanceMethod": [],
@@ -7096,12 +7066,6 @@
         "models/anima_base/precisionTier/q8",
         "models/anima_turbo/precisionTier/q4",
         "models/anima_turbo/precisionTier/q8",
-        "models/chroma1_base/precisionTier/q4",
-        "models/chroma1_base/precisionTier/q8",
-        "models/chroma1_flash/precisionTier/q4",
-        "models/chroma1_flash/precisionTier/q8",
-        "models/chroma1_hd/precisionTier/q4",
-        "models/chroma1_hd/precisionTier/q8",
         "models/flux2_klein_9b_true_v2/precisionTier/q4",
         "models/flux2_klein_9b_true_v2/precisionTier/q8",
         "models/flux_dev/precisionTier/q4",

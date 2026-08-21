@@ -4716,7 +4716,7 @@ mod tests {
 
         assert_eq!(register.records.len(), 11);
         let expected_groups = BTreeMap::from([
-            (("epic-9083", "precision"), 27usize),
+            (("epic-9083", "precision"), 21usize),
             (("epic-8433", "operation"), 3usize),
             (("epic-8433", "conditioning"), 2usize),
             (("epic-8433", "adapter"), 2usize),
@@ -4765,7 +4765,7 @@ mod tests {
             .collect();
         assert_eq!(
             exception_paths.len(),
-            60,
+            54,
             "every approved cell appears once"
         );
         assert_eq!(
