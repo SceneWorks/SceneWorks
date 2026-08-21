@@ -1797,12 +1797,19 @@ wired into `npm run check` so it stays schema-valid:
      --story sc-19057 \
      --dataset docs/generated/wan-candle-video-sc-19057.json \
      --plan docs/calibration/sc-19057/wan-candle-video-capture-plan.json \
+     --record-terminals \
      --write docs/generated/wan-temporal-form-fit-sc-19057.json \
      --source-fit docs/generated/wan-temporal-form-fit-sc-19057.json
    ```
 
-   There is no `--driver-log` for this lane (the runbook's §12d invocation writes none), so the
-   coverage block is derived from the plan and dataset alone.
+   There is no `--driver-log` for this lane (the runbook's §12d invocation writes none), so
+   `--record-terminals` explicitly derives terminal counts from `runtime_complete` records stamped
+   with two clean repositories. The two provenance modes are mutually exclusive; omitting both is
+   refused rather than silently treating captured rows as terminal. The fit report persists
+   `terminalProvenance.mode = "record_terminals"` with its clean-record authority and leaves
+   `sourceSessions` empty. A driver-log campaign instead persists `mode = "driver_logs"`, the exact
+   repository-relative log paths, and the sessions derived from those logs. Thus an auditor can
+   distinguish the two authorities without pretending direct records came from a driver session.
 
    Then add `docs/generated/wan-candle-video-sc-19057.json` to
    `PACKAGED_VIDEO_MEMORY_CURVE_SOURCES` in `crates/sceneworks-core/src/video_memory_curves.rs`.
