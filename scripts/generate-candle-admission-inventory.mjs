@@ -302,9 +302,10 @@ export const ADMISSION_MECHANISMS = Object.freeze([
       "scail2_video_fit_error",
       "scail2_video_fit_error_with_adapter_bytes",
       "video_weights_fit_error",
+      "unscoped_video_weights_fit_error",
     ]),
     callPattern:
-      "(?<!fn\\s)\\b(?:svd_fit_error|mochi_fit_error|wan_video_fit_error(?:_with_adapter_bytes)?|scail2_video_fit_error(?:_with_adapter_bytes)?|video_weights_fit_error)\\s*\\(",
+      "(?<!fn\\s)\\b(?:svd_fit_error|mochi_fit_error|wan_video_fit_error(?:_with_adapter_bytes)?|scail2_video_fit_error(?:_with_adapter_bytes)?|video_weights_fit_error|unscoped_video_weights_fit_error)\\s*\\(",
     summary: "Flat per-model video fit errors, one bespoke function per family.",
   },
   {
@@ -367,7 +368,7 @@ export const VIDEO_ADMISSION_BINDINGS = Object.freeze([
   }),
   Object.freeze({
     engineId: "wan_2_2_vace_fun_14b",
-    symbol: "video_weights_fit_error",
+    symbol: "unscoped_video_weights_fit_error",
     offMatch: true,
   }),
 ]);
@@ -606,6 +607,20 @@ function rustFunctionBody(source, symbol) {
   throw new Error(`${symbol}: unterminated function body`);
 }
 
+/** Extract one call's balanced argument list from a production function body. */
+function rustCallArguments(source, symbol) {
+  const call = new RegExp(`\\b${symbol}\\s*\\(`).exec(source);
+  if (!call) throw new Error(`could not locate production call ${symbol}`);
+  const open = source.indexOf("(", call.index);
+  let depth = 0;
+  for (let index = open; index < source.length; index += 1) {
+    if (source[index] === "(") depth += 1;
+    if (source[index] === ")") depth -= 1;
+    if (depth === 0) return source.slice(open + 1, index);
+  }
+  throw new Error(`${symbol}: unterminated call`);
+}
+
 /** Load-bearing wiring guards for the compatibility migration, driven from production source. */
 export function validateCompatibilityWiring(bodies) {
   const compatibilityBody = rustFunctionBody(
@@ -659,6 +674,40 @@ export function validateCompatibilityWiring(bodies) {
       throw new Error(`${symbol} is not wired to the typed Candle legacy-video selector`);
     }
   }
+
+
+  // The generic weights-floor helper is shared with VACE-Fun, which owns no approved SC-19055
+  // compatibility route. Eligible callers therefore provide an explicit request scope, and the
+  // selector must consume every field from that scope rather than stamping placeholder evidence.
+  const weightsFloorBody = rustFunctionBody(bodies.vramGate, "video_weights_fit_error");
+  const weightsSelectorArgs = rustCallArguments(weightsFloorBody, "select_legacy_video_resident");
+  for (const field of [
+    "request_scope.tier_key",
+    "request_scope.mode_key",
+    "request_scope.geometry",
+  ]) {
+    if (!weightsSelectorArgs.includes(field)) {
+      throw new Error(`video_weights_fit_error does not propagate ${field} to the selector`);
+    }
+  }
+
+  // LTX is the production path that resolves a packed tier and full request coordinates before
+  // invoking the floor. Keep those exact values co-located in the call so a literal bf16/T2V/1x1x1
+  // regression cannot retain a green generated inventory.
+  const candleVideoBody = rustFunctionBody(bodies.videoRouteCandle, "generate_candle_video_using");
+  const ltxAdmissionArgs = rustCallArguments(candleVideoBody, "admit_candle_ltx");
+  for (const [field, expected] of [
+    ["tier", 'ltx_tier_key.expect("an LTX model path must resolve an admission tier")'],
+    ["mode", "request.mode.as_str()"],
+    [
+      "geometry",
+      "crate::video_admission::video_gate_geometry(request.width, request.height, frames)",
+    ],
+  ]) {
+    if (!ltxAdmissionArgs.includes(expected)) {
+      throw new Error(`Candle LTX admission does not propagate its resolved ${field}`);
+    }
+  }
 }
 
 /**
@@ -690,12 +739,11 @@ export function parseBespokeOverrideEngines(bodies) {
 //  1. **Unioning across a mechanism.** `flat_video_fit_error` names seven symbols and they do
 //     NOT agree. `svd_fit_error` and `mochi_fit_error` take `(frames, width, height)` as
 //     scalars; `wan_video_fit_error*` and `scail2_video_fit_error*` take
-//     `geometry: MemoryGeometry` since sc-19055; `video_weights_fit_error` remains deliberately
-//     resolution-blind, because its input is an on-disk weights byte sum rather than a
-//     prediction (see its sc-19055 note). A union would label the LTX / Wan-VACE-Fun routes
-//     geometry-aware on the strength of a signature belonging to a function those routes never
-//     call, which is why this stays a PER-SYMBOL derivation even now that most of the
-//     mechanism's symbols happen to agree.
+//     `geometry: MemoryGeometry` since sc-19055. `video_weights_fit_error` now carries geometry as
+//     compatibility-selector identity without scaling its ungraded byte floor, while the separate
+//     `unscoped_video_weights_fit_error` used by VACE-Fun stays resolution-blind. A union would still
+//     erase that distinction, which is why this stays a PER-SYMBOL derivation even now that most of
+//     the mechanism's symbols happen to agree.
 //  2. **Scanning parameter TOKENS for `width:`.** Geometry also arrives inside a struct:
 //     `krea_control_fit::fit_ladder_for_entry_with_runtime` takes `geometry: MemoryGeometry` and
 //     `candle_memory_strategy::evaluate_shared_image` takes the same, while
@@ -2108,9 +2156,10 @@ export function renderMarkdown(inventory) {
     "parameter (`geometry: MemoryGeometry`, `query: VideoCurveQuery`) â€” a scan of the parameter",
     "tokens sees none of those. Unioning these per mechanism is what previously labelled the",
     "wan/scail2/LTX video routes geometry-aware on the strength of `svd_fit_error`'s signature.",
-    "sc-19055 migrated the wan/scail2 gates onto `geometry: MemoryGeometry`, so they are now",
-    "geometry-aware on their OWN signatures; `video_weights_fit_error` (LTX, Wan-VACE-Fun) is",
-    "not, and a union would still misreport it.",
+    "sc-19055 migrated the wan/scail2 gates onto `geometry: MemoryGeometry`; LTX's",
+    "`video_weights_fit_error` now also carries resolved geometry as selector identity while",
+    "preserving its ungraded flat ceiling. VACE-Fun uses the separate resolution-blind",
+    "`unscoped_video_weights_fit_error`, so a mechanism union would still misreport it.",
   );
   lines.push("");
   lines.push("| gate | mechanism | geometry-aware | axes | reached via |");
@@ -2232,8 +2281,8 @@ export async function selfTest() {
   }));
   expectFailure("a video fit call site deleted from video_jobs/candle.rs", () => ({
     videoRouteCandle: bodies.videoRouteCandle.replaceAll(
-      "vram_gate::scail2_video_fit_error_with_adapter_bytes(",
-      "vram_gate::scail2_video_fit_error_removed_call(",
+      "vram_gate::unscoped_video_weights_fit_error(",
+      "vram_gate::unscoped_video_weights_fit_error_removed_call(",
     ),
   }));
   expectFailure("a new candle video engine with no admission binding", () => ({
@@ -2246,6 +2295,24 @@ export async function selfTest() {
     fitGate: bodies.fitGate.replace(
       /const DEDICATED_VRAM_ALLOCATOR_SLACK_GB:\s*f64\s*=\s*[0-9.]+\s*;/,
       "",
+    ),
+  }));
+  expectFailure("LTX compatibility evidence stamped with a placeholder tier", () => ({
+    videoRouteCandle: bodies.videoRouteCandle.replace(
+      'ltx_tier_key.expect("an LTX model path must resolve an admission tier")',
+      '"bf16"',
+    ),
+  }));
+  expectFailure("LTX compatibility evidence stamped with a placeholder mode", () => ({
+    videoRouteCandle: bodies.videoRouteCandle.replace(
+      "request.mode.as_str(),\n            crate::video_admission::video_gate_geometry(request.width, request.height, frames)",
+      '"text_to_video",\n            crate::video_admission::video_gate_geometry(request.width, request.height, frames)',
+    ),
+  }));
+  expectFailure("LTX compatibility evidence stamped with placeholder geometry", () => ({
+    videoRouteCandle: bodies.videoRouteCandle.replace(
+      "request.mode.as_str(),\n            crate::video_admission::video_gate_geometry(request.width, request.height, frames)",
+      "request.mode.as_str(),\n            crate::video_admission::video_gate_geometry(1, 1, 1)",
     ),
   }));
 

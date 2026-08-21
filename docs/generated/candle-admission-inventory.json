@@ -3,7 +3,7 @@
   "generatedBy": "scripts/generate-candle-admission-inventory.mjs",
   "story": "sc-19049",
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:699bcc029d2c5bd20f5bdd5e12e88200fde71c87ed9c919bda4547a2b92dd980",
+    "sceneWorksRevision": "source-tree:a9760090b9b97563c5b0b9c982945823f7bcef13489f6653c0932a654e604889",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -35,7 +35,7 @@
       },
       "vramGate": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "013782a9390ad991c32c589c6f4a1d5e3e481bf2618a23f3144927fd56f83b29"
+        "sha256": "06bc544f0950b3483e521ca20e61742fa7926a574bebf82f9ed982b8c5690b8a"
       },
       "candleMemoryStrategy": {
         "path": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
@@ -139,7 +139,7 @@
       },
       "videoRouteCandle": {
         "path": "crates/sceneworks-worker/src/video_jobs/candle.rs",
-        "sha256": "2ca3139b22e03ba3ba51aa35f835625f8b36dc6bba2c22ff013c57ab79fcbae9"
+        "sha256": "e6b721bf143823d064c4a41ad73ac0faaf936bde3c900b7146d9aca0ffad92b0"
       }
     }
   },
@@ -850,7 +850,8 @@
         "wan_video_fit_error_with_adapter_bytes",
         "scail2_video_fit_error",
         "scail2_video_fit_error_with_adapter_bytes",
-        "video_weights_fit_error"
+        "video_weights_fit_error",
+        "unscoped_video_weights_fit_error"
       ],
       "symbols": [
         {
@@ -953,6 +954,19 @@
         },
         {
           "symbol": "video_weights_fit_error",
+          "geometryAware": true,
+          "geometryAxes": [
+            "frames",
+            "height",
+            "width"
+          ],
+          "reachedVia": [
+            "struct_parameter:request_scope:LegacyVideoRequestScope"
+          ],
+          "unresolvedParameterTypes": []
+        },
+        {
+          "symbol": "unscoped_video_weights_fit_error",
           "geometryAware": false,
           "geometryAxes": [],
           "reachedVia": [],
@@ -971,10 +985,11 @@
         "wan_video_fit_error",
         "wan_video_fit_error_with_adapter_bytes",
         "scail2_video_fit_error",
-        "scail2_video_fit_error_with_adapter_bytes"
+        "scail2_video_fit_error_with_adapter_bytes",
+        "video_weights_fit_error"
       ],
       "geometryBlindSymbols": [
-        "video_weights_fit_error"
+        "unscoped_video_weights_fit_error"
       ],
       "calledFrom": [
         "crates/sceneworks-worker/src/video_jobs/candle.rs",
@@ -1388,12 +1403,26 @@
       ]
     },
     {
-      "gate": "video_weights_fit_error",
+      "gate": "unscoped_video_weights_fit_error",
       "mechanism": "flat_video_fit_error",
       "definedIn": "crates/sceneworks-worker/src/vram_gate.rs",
       "geometryAware": false,
       "geometryAxes": [],
       "reachedVia": []
+    },
+    {
+      "gate": "video_weights_fit_error",
+      "mechanism": "flat_video_fit_error",
+      "definedIn": "crates/sceneworks-worker/src/vram_gate.rs",
+      "geometryAware": true,
+      "geometryAxes": [
+        "frames",
+        "height",
+        "width"
+      ],
+      "reachedVia": [
+        "struct_parameter:request_scope:LegacyVideoRequestScope"
+      ]
     },
     {
       "gate": "wan_video_fit_error",
@@ -1462,7 +1491,7 @@
     },
     {
       "engineId": "wan_2_2_vace_fun_14b",
-      "symbol": "video_weights_fit_error",
+      "symbol": "unscoped_video_weights_fit_error",
       "offMatch": true
     }
   ],

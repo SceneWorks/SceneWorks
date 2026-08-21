@@ -242,10 +242,13 @@ fn gate_is_geometry_aware(gate: &str) -> bool {
         | "wan_video_fit_error_with_adapter_bytes"
         | "scail2_video_fit_error"
         | "scail2_video_fit_error_with_adapter_bytes" => true,
-        // Deliberately still resolution-blind, and deliberately still UNGRADED: an on-disk weights
-        // byte sum, whose dense-tier over-count already wall-rejects a card that renders. See
-        // `vram_gate::video_weights_fit_error`'s sc-19055 note.
-        "video_weights_fit_error" => false,
+        // The numeric byte floor remains deliberately UNGRADED, but the migrated compatibility
+        // route now carries its resolved request geometry as selector identity. Geometry is
+        // therefore a real typed input even though it cannot widen or scale this legacy ceiling.
+        "video_weights_fit_error" => true,
+        // VACE-Fun shares the arithmetic but owns no approved compatibility route and therefore
+        // acquires no invented request coordinates.
+        "unscoped_video_weights_fit_error" => false,
         // geometry: MemoryGeometry — STRUCT-WRAPPED, invisible to a token scan.
         "krea_control_fit::fit_ladder_for_entry_with_runtime" => true,
         // ConditioningFootprint carries labels and byte counts only.

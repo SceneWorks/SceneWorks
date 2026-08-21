@@ -1938,6 +1938,18 @@ pub(crate) fn wan_vace_fun_sequential_weight_bytes(
     Ok(shared.max(high).max(low))
 }
 
+/// Request identity for a legacy video ceiling that is eligible for the compatibility selector.
+///
+/// Migrated routes must pass the tier, mode, and geometry already resolved by their production
+/// request path. Adjacent callers without approved SC-19055 compatibility truth use the separate
+/// unscoped arithmetic entry point instead of inventing evidence coordinates.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct LegacyVideoRequestScope<'a> {
+    pub(crate) tier_key: &'a str,
+    pub(crate) mode_key: &'a str,
+    pub(crate) geometry: gen_core::MemoryGeometry,
+}
+
 /// The pure Wan candle video admission decision: `Some(error)` when the model's RESIDENT WEIGHTS alone
 /// cannot fit the VRAM budget, `None` to admit. The non-Mochi twin of [`mochi_fit_error`], and pure for
 /// the same reason — the caller resolves the budget, so the whole decision is unit-testable with no CUDA
@@ -1969,6 +1981,7 @@ pub(crate) fn wan_vace_fun_sequential_weight_bytes(
 pub(crate) fn video_weights_fit_error(
     model_label: &str,
     weight_bytes: u64,
+    request_scope: LegacyVideoRequestScope<'_>,
     gpu_id: &str,
     budget: Option<VramBudget>,
 ) -> Option<WorkerError> {
@@ -1976,12 +1989,37 @@ pub(crate) fn video_weights_fit_error(
     let selection = crate::video_admission::select_legacy_video_resident(
         model_label,
         sceneworks_core::video_request::VideoLane::Candle,
-        "bf16",
-        "text_to_video",
-        crate::video_admission::video_gate_geometry(1, 1, 1),
+        request_scope.tier_key,
+        request_scope.mode_key,
+        request_scope.geometry,
         budget,
         needed_gb,
     );
+    video_weights_fit_error_from_selection(model_label, weight_bytes, gpu_id, budget, selection)
+}
+
+/// Raw byte-floor admission for a caller that owns no approved compatibility route.
+///
+/// VACE-Fun deliberately remains outside [`crate::video_admission::LEGACY_VIDEO_COMPATIBILITY_ROUTES`].
+/// Keeping its entry point separate prevents its request from acquiring fabricated tier, mode, or
+/// geometry evidence merely because it shares the same legacy arithmetic.
+pub(crate) fn unscoped_video_weights_fit_error(
+    model_label: &str,
+    weight_bytes: u64,
+    gpu_id: &str,
+    budget: Option<VramBudget>,
+) -> Option<WorkerError> {
+    video_weights_fit_error_from_selection(model_label, weight_bytes, gpu_id, budget, None)
+}
+
+fn video_weights_fit_error_from_selection(
+    model_label: &str,
+    weight_bytes: u64,
+    gpu_id: &str,
+    budget: Option<VramBudget>,
+    selection: Option<crate::memory_strategy::Selection>,
+) -> Option<WorkerError> {
+    let needed_gb = video_weights_needed_gb(weight_bytes);
     let (needed_gb, budget) = (needed_gb?, budget?);
     let rejects = match selection {
         Some(crate::memory_strategy::Selection::Selected { .. }) => false,
@@ -2100,6 +2138,15 @@ pub(crate) fn wan_video_fit_error_with_adapter_bytes(
         return video_weights_fit_error(
             model_label,
             weight_bytes.saturating_add(adapter_bytes),
+            LegacyVideoRequestScope {
+                tier_key,
+                mode_key: if geometry.reference_count > 0 {
+                    "image_to_video"
+                } else {
+                    "text_to_video"
+                },
+                geometry,
+            },
             gpu_id,
             budget,
         );
@@ -5614,6 +5661,14 @@ mod tests {
         apply_vram_cap(None, Some(32.0))
     }
 
+    fn legacy_video_request_scope(tier_key: &'static str) -> LegacyVideoRequestScope<'static> {
+        LegacyVideoRequestScope {
+            tier_key,
+            mode_key: "text_to_video",
+            geometry: wan_geometry(),
+        }
+    }
+
     /// Wan2.2 T2V-A14B candle tier bytes — the SHIPPED hosted sizes, straight from this platform's
     /// `downloads[]` `estimatedSizeBytes` in `builtin.models.jsonc`: q4/q8 from the packed
     /// `SceneWorks/wan2.2-t2v-a14b-candle`, bf16 from the dense `Wan-AI/Wan2.2-T2V-A14B-Diffusers` the
@@ -5636,6 +5691,7 @@ mod tests {
         let message = video_weights_fit_error(
             "wan2_2_t2v_14b",
             WAN_A14B_CANDLE_BF16_BYTES,
+            legacy_video_request_scope("bf16"),
             "0",
             rtx_5090(),
         )
@@ -5681,27 +5737,51 @@ mod tests {
     fn wan_a14b_admits_the_tier_that_fits_the_card() {
         // q4 = 27.74 + 2 = 29.74 GB ≤ 32 — the tier a 5090 actually runs.
         assert!(
-            video_weights_fit_error("wan2_2_t2v_14b", WAN_A14B_CANDLE_Q4_BYTES, "0", rtx_5090())
-                .is_none(),
+            video_weights_fit_error(
+                "wan2_2_t2v_14b",
+                WAN_A14B_CANDLE_Q4_BYTES,
+                legacy_video_request_scope("q4"),
+                "0",
+                rtx_5090(),
+            )
+            .is_none(),
             "q4 fits a 32 GB card — refusing it wall-rejects hardware that works today"
         );
         // q8 = 43.05 does NOT fit the same card…
         assert!(
-            video_weights_fit_error("wan2_2_t2v_14b", WAN_A14B_CANDLE_Q8_BYTES, "0", rtx_5090())
-                .is_some(),
+            video_weights_fit_error(
+                "wan2_2_t2v_14b",
+                WAN_A14B_CANDLE_Q8_BYTES,
+                legacy_video_request_scope("q8"),
+                "0",
+                rtx_5090(),
+            )
+            .is_some(),
             "q8 does not fit 32 GB"
         );
         // …but does fit a 48 GB card, where bf16 (69.06) still does not — two tiers, one card, two
         // verdicts: the gate reads the TIER's bytes, not the model id.
         let card_48 = apply_vram_cap(None, Some(48.0));
         assert!(
-            video_weights_fit_error("wan2_2_t2v_14b", WAN_A14B_CANDLE_Q8_BYTES, "0", card_48)
-                .is_none(),
+            video_weights_fit_error(
+                "wan2_2_t2v_14b",
+                WAN_A14B_CANDLE_Q8_BYTES,
+                legacy_video_request_scope("q8"),
+                "0",
+                card_48,
+            )
+            .is_none(),
             "q8 fits 48 GB"
         );
         assert!(
-            video_weights_fit_error("wan2_2_t2v_14b", WAN_A14B_CANDLE_BF16_BYTES, "0", card_48)
-                .is_some(),
+            video_weights_fit_error(
+                "wan2_2_t2v_14b",
+                WAN_A14B_CANDLE_BF16_BYTES,
+                legacy_video_request_scope("bf16"),
+                "0",
+                card_48,
+            )
+            .is_some(),
             "bf16 does not fit the SAME 48 GB card"
         );
         // The 96 GB RTX PRO 6000 runs bf16 — the gate must not refuse the box this tier exists for.
@@ -5709,6 +5789,7 @@ mod tests {
             video_weights_fit_error(
                 "wan2_2_t2v_14b",
                 WAN_A14B_CANDLE_BF16_BYTES,
+                legacy_video_request_scope("bf16"),
                 "0",
                 apply_vram_cap(None, Some(96.0))
             )
@@ -5729,8 +5810,14 @@ mod tests {
             "fixture guard: the raw weights must FIT the card, else this proves nothing"
         );
         assert!(
-            video_weights_fit_error("wan2_2_t2v_14b", WAN_A14B_CANDLE_Q4_BYTES, "0", card_29)
-                .is_some(),
+            video_weights_fit_error(
+                "wan2_2_t2v_14b",
+                WAN_A14B_CANDLE_Q4_BYTES,
+                legacy_video_request_scope("q4"),
+                "0",
+                card_29,
+            )
+            .is_some(),
             "weights alone fit 29 GB but weights + 2 GB of allocator/context reserve do not"
         );
         // And the reserve is the CUDA allocator one, not MLX's foreign-demand reserve, so pin the
@@ -5748,15 +5835,23 @@ mod tests {
     #[test]
     fn video_weights_fit_error_no_ops_without_a_budget_or_weight_signal() {
         // No budget ⇒ admit, even for a model no card could hold.
-        assert!(
-            video_weights_fit_error("wan2_2_t2v_14b", WAN_A14B_CANDLE_BF16_BYTES, "0", None)
-                .is_none()
-        );
+        assert!(video_weights_fit_error(
+            "wan2_2_t2v_14b",
+            WAN_A14B_CANDLE_BF16_BYTES,
+            legacy_video_request_scope("bf16"),
+            "0",
+            None,
+        )
+        .is_none());
         // No weight signal ⇒ admit, even on a tiny card.
-        assert!(
-            video_weights_fit_error("wan2_2_t2v_14b", 0, "0", apply_vram_cap(None, Some(1.0)))
-                .is_none()
-        );
+        assert!(video_weights_fit_error(
+            "wan2_2_t2v_14b",
+            0,
+            legacy_video_request_scope("bf16"),
+            "0",
+            apply_vram_cap(None, Some(1.0)),
+        )
+        .is_none());
         assert_eq!(video_weights_needed_gb(0), None);
     }
 
@@ -5859,6 +5954,7 @@ mod tests {
             video_weights_fit_error(
                 "wan2_2_t2v_14b",
                 wan_weight_bytes("wan2_2_t2v_14b", root),
+                legacy_video_request_scope("q4"),
                 "0",
                 rtx_5090()
             )
@@ -6072,7 +6168,14 @@ mod tests {
 
         // Floor alone: ~18 GB needed vs 32 GB free ⇒ admits (the shipped behavior, and the bug).
         assert!(
-            video_weights_fit_error("wan_2_2", WAN_5B_Q4_DISK_BYTES, "0", rtx_5090()).is_none(),
+            video_weights_fit_error(
+                "wan_2_2",
+                WAN_5B_Q4_DISK_BYTES,
+                legacy_video_request_scope("q4"),
+                "0",
+                rtx_5090(),
+            )
+            .is_none(),
             "precondition: the weights floor admits this job on a 5090 — that IS the sc-12402 bug"
         );
 
@@ -6254,7 +6357,13 @@ mod tests {
 
         // The floor alone WALL-REJECTS this card (117.5 + 2 = ~120 > 95.6) — the bug.
         assert!(
-            video_weights_fit_error("wan2_2_t2v_14b", WAN_A14B_DENSE_DISK_BYTES, "0", card96)
+            video_weights_fit_error(
+                "wan2_2_t2v_14b",
+                WAN_A14B_DENSE_DISK_BYTES,
+                legacy_video_request_scope("bf16"),
+                "0",
+                card96,
+            )
                 .is_some(),
             "precondition: the on-disk floor over-counts the fp32 dense tier and wall-rejects a 96 GB card"
         );
@@ -6290,8 +6399,13 @@ mod tests {
             "0",
             rtx_5090(),
         );
-        let via_floor =
-            video_weights_fit_error("wan2_2_t2v_14b", WAN_A14B_BF16_BYTES, "0", rtx_5090());
+        let via_floor = video_weights_fit_error(
+            "wan2_2_t2v_14b",
+            WAN_A14B_BF16_BYTES,
+            legacy_video_request_scope("bf16"),
+            "0",
+            rtx_5090(),
+        );
         assert_eq!(
             via_wan.map(|e| e.to_string()),
             via_floor.map(|e| e.to_string()),
@@ -6574,13 +6688,27 @@ mod tests {
         let raw = WEIGHTS as f64 / BYTES_PER_GIB + HEADROOM_GB;
         let inside = apply_vram_cap(None, Some(mechanism_interval(raw)));
         assert!(
-            video_weights_fit_error("ltx_2_3_distilled", WEIGHTS, "0", inside).is_none(),
+            video_weights_fit_error(
+                "ltx_2_3_distilled",
+                WEIGHTS,
+                legacy_video_request_scope("q4"),
+                "0",
+                inside,
+            )
+            .is_none(),
             "the weights floor must NOT be graded — see its sc-19055 note for the measured reason"
         );
         // …and it is still a live gate: below the raw floor it refuses.
         let below = apply_vram_cap(None, Some(raw - 1.0));
         assert!(
-            video_weights_fit_error("ltx_2_3_distilled", WEIGHTS, "0", below).is_some(),
+            video_weights_fit_error(
+                "ltx_2_3_distilled",
+                WEIGHTS,
+                legacy_video_request_scope("q4"),
+                "0",
+                below,
+            )
+            .is_some(),
             "not grading is not the same as not gating"
         );
     }

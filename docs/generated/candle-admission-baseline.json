@@ -3,10 +3,10 @@
   "generatedBy": "scripts/generate-candle-admission-inventory.mjs",
   "story": "sc-19049",
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:699bcc029d2c5bd20f5bdd5e12e88200fde71c87ed9c919bda4547a2b92dd980",
+    "sceneWorksRevision": "source-tree:a9760090b9b97563c5b0b9c982945823f7bcef13489f6653c0932a654e604889",
     "decisions": {
       "path": "docs/generated/candle-admission-decisions.json",
-      "digest": "sha256:2aecbc27a99e467d78488df09441452434d72ddcf0cb432613fb611581125bc9",
+      "digest": "sha256:03fe68dc3dc37ee7c2e15aaa061ca23f2e4766cb149fc4845e7fba3a372c36f3",
       "producedBy": {
         "module": "crates/sceneworks-worker/src/candle_admission_decisions.rs",
         "gateModule": "crates/sceneworks-worker/src/candle_scalar_gate.rs",
@@ -91,7 +91,7 @@
       "too_big": 746,
       "unknown": 1008
     },
-    "geometrySensitiveCandleRows": 2524,
+    "geometrySensitiveCandleRows": 2528,
     "notEvaluatedByGate": {
       "conditioning_fit::decide": 8,
       "krea_turbo_fit_with_runtime": 4,
@@ -36690,8 +36690,12 @@
         "shared_selector_legacy_video_compatibility"
       ],
       "sharedSelectorVia": "legacy_video_compatibility",
-      "geometrySensitive": false,
-      "geometryAxes": [],
+      "geometrySensitive": true,
+      "geometryAxes": [
+        "frames",
+        "height",
+        "width"
+      ],
       "missingInput": "weight_bytes: u64, measured off the resolved model dir on disk (wan_weight_bytes / wan_vace_fun_sequential_weight_bytes); no manifest number reproduces it"
     },
     {
@@ -36708,8 +36712,12 @@
         "shared_selector_legacy_video_compatibility"
       ],
       "sharedSelectorVia": "legacy_video_compatibility",
-      "geometrySensitive": false,
-      "geometryAxes": [],
+      "geometrySensitive": true,
+      "geometryAxes": [
+        "frames",
+        "height",
+        "width"
+      ],
       "missingInput": "weight_bytes: u64, measured off the resolved model dir on disk (wan_weight_bytes / wan_vace_fun_sequential_weight_bytes); no manifest number reproduces it"
     },
     {
@@ -36726,8 +36734,12 @@
         "shared_selector_legacy_video_compatibility"
       ],
       "sharedSelectorVia": "legacy_video_compatibility",
-      "geometrySensitive": false,
-      "geometryAxes": [],
+      "geometrySensitive": true,
+      "geometryAxes": [
+        "frames",
+        "height",
+        "width"
+      ],
       "missingInput": "weight_bytes: u64, measured off the resolved model dir on disk (wan_weight_bytes / wan_vace_fun_sequential_weight_bytes); no manifest number reproduces it"
     },
     {
@@ -36744,8 +36756,12 @@
         "shared_selector_legacy_video_compatibility"
       ],
       "sharedSelectorVia": "legacy_video_compatibility",
-      "geometrySensitive": false,
-      "geometryAxes": [],
+      "geometrySensitive": true,
+      "geometryAxes": [
+        "frames",
+        "height",
+        "width"
+      ],
       "missingInput": "weight_bytes: u64, measured off the resolved model dir on disk (wan_weight_bytes / wan_vace_fun_sequential_weight_bytes); no manifest number reproduces it"
     },
     {
