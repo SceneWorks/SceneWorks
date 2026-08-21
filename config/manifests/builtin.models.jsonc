@@ -13053,6 +13053,24 @@
           "platforms": ["windows", "linux"],
           "estimatedSizeBytes": 167335590,
           "footprint": { "diskSizeBytes": 167335590 }
+        },
+        // Generic SDXL OpenPose ControlNet (sc-20747): an OPTIONAL on-demand component shared by
+        // the exact five SDXL-family pose-control backbones on both MLX and Candle. Soft means a
+        // missing control checkpoint never makes ordinary text/image generation look uninstalled;
+        // Model Manager still provisions or repairs it alongside this base. Every base repeats this
+        // identical repo/revision/file authority, while the shared HF cache stores the bytes once.
+        // The pose route resolves only this immutable local snapshot and never downloads at render.
+        {
+          "provider": "huggingface",
+          "repo": "xinsir/controlnet-openpose-sdxl-1.0",
+          "revision": "23f966cd5cfdd3f7729c903e243d87152162d2b7",
+          "coRequisite": true,
+          "required": "soft",
+          "componentId": "controlnet_openpose",
+          "files": ["diffusion_pytorch_model.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 2500000000,
+          "footprint": { "diskSizeBytes": 2500000000 }
         }
       ],
       "paths": {
@@ -14093,6 +14111,20 @@
           "platforms": ["windows", "linux"],
           "estimatedSizeBytes": 167335590,
           "footprint": { "diskSizeBytes": 167335590 }
+        },
+        // Same soft, untiered OpenPose component as `sdxl`. Model Manager provisions the exact
+        // shared snapshot with this base; normal generation stays installed when it is absent.
+        {
+          "provider": "huggingface",
+          "repo": "xinsir/controlnet-openpose-sdxl-1.0",
+          "revision": "23f966cd5cfdd3f7729c903e243d87152162d2b7",
+          "coRequisite": true,
+          "required": "soft",
+          "componentId": "controlnet_openpose",
+          "files": ["diffusion_pytorch_model.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 2500000000,
+          "footprint": { "diskSizeBytes": 2500000000 }
         }
       ],
       "paths": {
@@ -15069,6 +15101,20 @@
           "platforms": ["windows", "linux"],
           "estimatedSizeBytes": 167335590,
           "footprint": { "diskSizeBytes": 167335590 }
+        },
+        // Same soft, untiered OpenPose component as `sdxl`. It is provisioned for the Candle
+        // Lightning route while remaining optional for the current-pin MLX refusal.
+        {
+          "provider": "huggingface",
+          "repo": "xinsir/controlnet-openpose-sdxl-1.0",
+          "revision": "23f966cd5cfdd3f7729c903e243d87152162d2b7",
+          "coRequisite": true,
+          "required": "soft",
+          "componentId": "controlnet_openpose",
+          "files": ["diffusion_pytorch_model.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 2500000000,
+          "footprint": { "diskSizeBytes": 2500000000 }
         }
       ],
       "paths": {
@@ -15995,6 +16041,20 @@
           "platforms": ["windows", "linux"],
           "estimatedSizeBytes": 167335590,
           "footprint": { "diskSizeBytes": 167335590 }
+        },
+        // Same soft, untiered OpenPose component as `sdxl`; its immutable HF snapshot is shared
+        // across every SDXL backbone and consumed only by a pose-control request.
+        {
+          "provider": "huggingface",
+          "repo": "xinsir/controlnet-openpose-sdxl-1.0",
+          "revision": "23f966cd5cfdd3f7729c903e243d87152162d2b7",
+          "coRequisite": true,
+          "required": "soft",
+          "componentId": "controlnet_openpose",
+          "files": ["diffusion_pytorch_model.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 2500000000,
+          "footprint": { "diskSizeBytes": 2500000000 }
         }
       ],
       "paths": {
@@ -16925,6 +16985,20 @@
           "platforms": ["windows", "linux"],
           "estimatedSizeBytes": 167335590,
           "footprint": { "diskSizeBytes": 167335590 }
+        },
+        // Same soft, untiered OpenPose component as `sdxl`; its immutable HF snapshot is shared
+        // across every SDXL backbone and consumed only by a pose-control request.
+        {
+          "provider": "huggingface",
+          "repo": "xinsir/controlnet-openpose-sdxl-1.0",
+          "revision": "23f966cd5cfdd3f7729c903e243d87152162d2b7",
+          "coRequisite": true,
+          "required": "soft",
+          "componentId": "controlnet_openpose",
+          "files": ["diffusion_pytorch_model.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 2500000000,
+          "footprint": { "diskSizeBytes": 2500000000 }
         }
       ],
       "paths": {
@@ -20941,47 +21015,6 @@
             { "label": "openai/clip-vit-large-patch14 model card", "url": "https://huggingface.co/openai/clip-vit-large-patch14" }
           ]
         }
-      }
-    },
-    {
-      // Generic SDXL OpenPose ControlNet (sc-20747): the optional conditioning network shared by
-      // the exact five SDXL-family pose-control models on both MLX and Candle. It is a standalone
-      // utility, like the Tile ControlNet below, because one immutable snapshot serves every base;
-      // duplicating it as a hard co-requisite would add ~2.5 GB to ordinary non-pose installs.
-      //
-      // Model Manager owns the only download path. `image_jobs/sdxl_control.rs` resolves this exact
-      // pinned snapshot synchronously with `resolve_hf_component_file`; a render with no install
-      // refuses actionably and never creates an app-private cache or reaches the network.
-      // Apache-2.0, ungated; the single safetensors file is consumed directly by both providers.
-      "id": "controlnet_openpose_sdxl",
-      "autoDownload": false,
-      "name": "SDXL OpenPose ControlNet",
-      "family": "controlnet-openpose",
-      "type": "utility",
-      "adapter": "controlnet-openpose",
-      "capabilities": [],
-      "downloads": [
-        {
-          "provider": "huggingface",
-          "repo": "xinsir/controlnet-openpose-sdxl-1.0",
-          "revision": "23f966cd5cfdd3f7729c903e243d87152162d2b7",
-          "files": ["diffusion_pytorch_model.safetensors"],
-          "estimatedSizeBytes": 2500000000
-        }
-      ],
-      "paths": {
-        "model": "${HF_CACHE}/xinsir/controlnet-openpose-sdxl-1.0"
-      },
-      "defaults": {},
-      "limits": {},
-      "loraCompatibility": {
-        "families": [],
-        "types": []
-      },
-      "ui": {
-        "label": "SDXL OpenPose ControlNet",
-        "description": "Optional OpenPose ControlNet weights used by pose-guided SDXL, RealVisXL, and Illustrious generation on Mac, Windows, and Linux. Install once in Model Manager; the generic SDXL pose-control route uses the immutable local snapshot and never downloads weights. Apache-2.0, commercial-use OK, ungated.",
-        "recommendedFor": []
       }
     },
     {

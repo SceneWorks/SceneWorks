@@ -133,6 +133,21 @@ pub fn default_control_revision(engine_id: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{json, Value};
+
+    fn builtin_models() -> Vec<Value> {
+        let raw = crate::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .map(|(_, contents)| *contents)
+            .expect("builtin.models.jsonc is embedded");
+        let manifest: Value = serde_json::from_str(&crate::jsonc::strip_jsonc_comments(raw))
+            .expect("builtin.models.jsonc parses");
+        manifest["models"]
+            .as_array()
+            .expect("models array")
+            .to_vec()
+    }
 
     #[test]
     fn allow_list_is_exact_and_revisions_are_pinned() {
@@ -173,5 +188,75 @@ mod tests {
                     .bytes()
                     .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
         }));
+    }
+
+    #[test]
+    fn sdxl_openpose_is_one_shared_soft_component_on_the_exact_five_backbones() {
+        const SDXL_BACKBONES: [&str; 5] = [
+            "sdxl",
+            "realvisxl",
+            "realvisxl_lightning",
+            "illustrious_xl_v1",
+            "illustrious_xl_v2",
+        ];
+        let artifact = shipped_control_weight(
+            "sdxl",
+            "xinsir/controlnet-openpose-sdxl-1.0",
+            "diffusion_pytorch_model.safetensors",
+        )
+        .expect("shipped SDXL control authority");
+        let models = builtin_models();
+        assert!(
+            models
+                .iter()
+                .all(|model| model["id"] != "controlnet_openpose_sdxl"),
+            "OpenPose is a component of the five real SDXL capability rows, not a fake utility model"
+        );
+
+        for model_id in SDXL_BACKBONES {
+            let model = models
+                .iter()
+                .find(|model| model["id"] == model_id)
+                .unwrap_or_else(|| panic!("builtin model {model_id} exists"));
+            let components = model["downloads"]
+                .as_array()
+                .expect("downloads array")
+                .iter()
+                .filter(|download| download["componentId"] == "controlnet_openpose")
+                .collect::<Vec<_>>();
+            assert_eq!(
+                components.len(),
+                1,
+                "{model_id} declares the shared control component exactly once"
+            );
+            let component = components[0];
+            assert_eq!(component["coRequisite"], true, "{model_id}");
+            assert_eq!(component["required"], "soft", "{model_id}");
+            assert_eq!(component["repo"], artifact.repo, "{model_id}");
+            assert_eq!(component["revision"], artifact.revision, "{model_id}");
+            assert_eq!(component["files"], json!([artifact.file]), "{model_id}");
+            assert_eq!(
+                component["platforms"],
+                json!(["macos", "windows", "linux"]),
+                "{model_id}: the shared route exists on both MLX and Candle bundles"
+            );
+        }
+
+        let declaring_models = models
+            .iter()
+            .filter(|model| {
+                model["downloads"].as_array().is_some_and(|downloads| {
+                    downloads
+                        .iter()
+                        .any(|download| download["componentId"] == "controlnet_openpose")
+                })
+            })
+            .map(|model| model["id"].as_str().expect("model id"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            declaring_models.len(),
+            SDXL_BACKBONES.len(),
+            "no utility or sixth backbone may acquire the component"
+        );
     }
 }

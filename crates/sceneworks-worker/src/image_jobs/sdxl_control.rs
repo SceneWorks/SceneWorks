@@ -793,20 +793,6 @@ mod sdxl_control_tests {
     }
 
     #[test]
-    fn manifest_declares_exactly_the_shipped_sdxl_control_authority() {
-        let artifact = sceneworks_core::control_weights::shipped_control_weight(
-            SDXL_CONTROL_ENGINE_ID,
-            SDXL_CONTROL_REPO,
-            SDXL_CONTROL_FILE,
-        )
-        .expect("shipped SDXL control authority");
-        let pin = crate::manifest_pins::builtin_model_pin("controlnet_openpose_sdxl");
-        assert_eq!(pin.repo, artifact.repo);
-        assert_eq!(pin.revision, artifact.revision);
-        assert_eq!(pin.files, [artifact.file]);
-    }
-
-    #[test]
     fn installed_control_component_resolves_from_the_exact_pinned_snapshot() {
         let _env = isolate_hf_cache();
         let root = tempfile::tempdir().expect("data dir");

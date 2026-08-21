@@ -160,7 +160,7 @@ test("the committed evidence grades the real catalog clean", async () => {
 // (`SceneWorks/instantid-mlx`, the SCRFD + ArcFace pair), which landed on the epic branch while
 // this gate landed on main, so neither PR could see the other. The census is a shape assertion —
 // it moves whenever the catalog gains or loses a repo@revision key, together with a re-record.
-// 96 -> 97 on sc-20747: `controlnet_openpose_sdxl` added the pinned
+// 96 -> 97 on sc-20747: the exact five SDXL backbones gained the one pinned, shared
 // `xinsir/controlnet-openpose-sdxl-1.0` component used by SDXL ControlNet jobs.
 test("all 97 real download keys are pinned to immutable lowercase commit SHAs", async () => {
   const { claims, evidence } = await realInputs();

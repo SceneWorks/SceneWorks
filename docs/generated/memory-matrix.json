@@ -1,12 +1,12 @@
 {
   "schemaVersion": 8,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:4da756cb178451de55a2b04ad6209041f3bb82236679c4fce81050fd519057f7",
+    "sceneWorksRevision": "source-tree:a288be57e07fdfcd75b41dc028c79e9e1658b7cb76ef9d37d6ded713dd81b38a",
     "inferenceRevision": "c3bfb064843f517abfe65660be57456214982770",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "583fd03c24124fca3499096e90f44f951f24599cc8306db9e6561ac91b634206"
+        "sha256": "c6b2179286d85b54c16413d7816022be81dcf1e0ee391bbafbac8aff108bf72d"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -16595,6 +16595,11 @@
           "repository": "madebyollin/sdxl-vae-fp16-fix",
           "revision": "207b116dae70ace3637169f1ddd2434b91b3a8cd",
           "variant": null
+        },
+        {
+          "repository": "xinsir/controlnet-openpose-sdxl-1.0",
+          "revision": "23f966cd5cfdd3f7729c903e243d87152162d2b7",
+          "variant": null
         }
       ]
     },
@@ -16633,6 +16638,11 @@
           "repository": "madebyollin/sdxl-vae-fp16-fix",
           "revision": "207b116dae70ace3637169f1ddd2434b91b3a8cd",
           "variant": null
+        },
+        {
+          "repository": "xinsir/controlnet-openpose-sdxl-1.0",
+          "revision": "23f966cd5cfdd3f7729c903e243d87152162d2b7",
+          "variant": null
         }
       ]
     },
@@ -16670,6 +16680,11 @@
         {
           "repository": "madebyollin/sdxl-vae-fp16-fix",
           "revision": "207b116dae70ace3637169f1ddd2434b91b3a8cd",
+          "variant": null
+        },
+        {
+          "repository": "xinsir/controlnet-openpose-sdxl-1.0",
+          "revision": "23f966cd5cfdd3f7729c903e243d87152162d2b7",
           "variant": null
         }
       ]
