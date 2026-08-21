@@ -1,7 +1,7 @@
 use super::{
     admit_conditioning_paths, consume_gen_events, curated_image_menu, dense_tier_subdir,
     drive_gen_items_scored, load_reference_image, non_empty, normalize_sampling_knob,
-    pid_effective_dims, pid_output_tier, read_advanced_sampling_knobs, resolve_adapters,
+    pid_effective_dims, pid_output_tier, read_advanced_sampling_knobs,
     resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32,
     resolve_character_image_likeness_source, resolve_pid_weights, resolve_sdxl_components,
     resolve_seed, stage_likeness, standard_tier_subdir, start_gen_stream,
@@ -252,7 +252,6 @@ pub(super) async fn generate_candle_sdxl_ipadapter_stream(
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
     let request = &plan.request;
-    let adapters = resolve_adapters(request, settings)?;
     let sdxl_base = resolve_sdxl_ipadapter_base(request, settings)?.ok_or_else(|| {
         WorkerError::InvalidPayload("SDXL IP-Adapter base (SDXL/RealVisXL) not found".to_owned())
     })?;
@@ -383,7 +382,6 @@ pub(super) async fn generate_candle_sdxl_ipadapter_stream(
             crate::conditioning_fit::weights_source_path(&vae_fp16_fix),
         ];
         overlays.extend(crate::conditioning_fit::pid_paths(pid_weights.as_ref()));
-        overlays.extend(adapters.iter().map(|adapter| adapter.path.as_path()));
         admit_conditioning_paths(settings, "SDXL", "IP-Adapter", &sdxl_base, &overlays).await?;
     }
 
@@ -399,7 +397,9 @@ pub(super) async fn generate_candle_sdxl_ipadapter_stream(
                 tokenizer_clip_l,
                 tokenizer_clip_bigg,
                 vae_fp16_fix,
-                adapters,
+                // This lane has no LoRA/LoKr plumbing; an empty stack is the load it has always
+                // performed.
+                adapters: Vec::new(),
             };
             let model = IpAdapterSdxl::load(&paths).map_err(|error| {
                 WorkerError::Engine(format!("SDXL IP-Adapter load failed: {error}"))

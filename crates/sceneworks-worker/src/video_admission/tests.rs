@@ -230,7 +230,7 @@ fn decoder_substitution_profile(
 /// `sceneworks-core`'s `EXPECTED_SHIPPED_VIDEO_COUNT` and `pinned_engine_geometry`'s
 /// `EXPECTED_VIDEO_IDS`. Adding a video model without updating it trips
 /// [`core_transcribes_the_pinned_vae_write_bounds`].
-const EXPECTED_SHIPPED_VIDEO_COUNT: usize = 10;
+const EXPECTED_SHIPPED_VIDEO_COUNT: usize = 12;
 
 /// Every video model id in the shipped manifest. The ONE list the transcription pin is driven
 /// from, so a newly shipped family cannot be transcribed in core and left unpinned here.
@@ -294,6 +294,11 @@ fn expected_vae_tiling(id: &str, lane: VideoLane) -> Option<VaeTiling> {
         | "bernini"
         | "scail2_14b"
         | "krea_realtime_14b" => Some(VaeTiling::WAN),
+        // MiniMax-H3 (both partitions) is deliberately unmodelled on BOTH lanes, mirroring
+        // sceneworks-core's `vae_full_res_channels` unmodelled lists: the family has no candle
+        // lane at all, and its MLX decode envelope is owned by the epic's terminal calibration
+        // campaign rather than transcribed unverified (sc-17137 main-sync reconciliation).
+        "minimax_h3" | "minimax_h3_ref" => None,
         "svd" => match lane {
             VideoLane::Mlx => None,
             VideoLane::Candle => Some(VaeTiling {
@@ -340,7 +345,8 @@ fn core_transcribes_the_pinned_vae_write_bounds() {
         }
         assert_eq!(modelled + unmodelled, EXPECTED_SHIPPED_VIDEO_COUNT);
         assert!(modelled > 0);
-        assert_eq!(unmodelled, usize::from(lane == VideoLane::Mlx));
+        // MiniMax-H3's pair is unmodelled on BOTH lanes; SVD only on MLX.
+        assert_eq!(unmodelled, 2 + usize::from(lane == VideoLane::Mlx));
     }
 
     // The three constants are genuinely different, so the per-family loop above is not comparing

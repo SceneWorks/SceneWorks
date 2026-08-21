@@ -30,7 +30,7 @@
         },
         "component": {
           "type": "string",
-          "enum": ["textEncoder", "vae", "visionTower", "controlBranch", "identityAdapters", "transformerHead"],
+          "enum": ["textEncoder", "vae", "audioVae", "visionTower", "controlBranch", "identityAdapters", "transformerHead"],
           "description": "Which component is resident above tier. The row uniqueness key is (model, component, BACKEND LANE) — a component whose residency genuinely differs per lane is split into one row per lane, and the checker rejects two rows that claim the same lane for the same pair."
         },
         "residentTier": {
@@ -108,7 +108,7 @@
         "vaeScope": {
           "type": "string",
           "enum": ["decoder-only", "full-autoencoder"],
-          "description": "Required by the checker on every VAE row. Bound to the numeric receipt: decoder-only excludes encoder tensors; full-autoencoder includes encoder and decoder residency."
+          "description": "Required by the checker on every `vae` and `audioVae` row. Bound to the numeric receipt: decoder-only excludes encoder tensors; full-autoencoder includes encoder and decoder residency."
         },
         "triageDecision": {
           "type": "string",

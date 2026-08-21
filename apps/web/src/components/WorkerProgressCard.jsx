@@ -15,6 +15,8 @@ import { useScreenActive } from "../context/ScreenActiveContext.js";
 import { deriveWorkerHardware, findWorkerForJob, liveMeters } from "../workers.js";
 import { AssetMedia, AssetThumbnail, assetUrl, posterUrl, suppressThumbnailContextMenu } from "./assetMedia.jsx";
 import { LikenessBadge } from "./LikenessBadge.jsx";
+import { AudioTrackBadge } from "./AudioTrackBadge.jsx";
+import { ModelAttribution } from "./ModelAttribution.jsx";
 
 // Live-ticking elapsed seconds for in-flight jobs. Re-exported here after the
 // sc-2093 cleanup deleted the legacy JobProgress.jsx that originally housed it.
@@ -369,6 +371,7 @@ function ThumbnailGrid({ assets, variant, onThumbnailClick, isRunning, expectedC
           <>
             <AssetThumbnail asset={asset} className="worker-progress-card__thumb-media" />
             <LikenessBadge asset={asset} />
+            <AudioTrackBadge asset={asset} />
           </>
         );
         const label = asset.displayName && variant === "image-grid" ? (
@@ -462,7 +465,12 @@ function VideoThumbnail({ assets, onThumbnailClick }) {
       onContextMenu={suppressThumbnailContextMenu}
     >
       {src ? (
-        <AssetMedia asset={asset} className="worker-progress-card__video" />
+        <>
+          <AssetMedia asset={asset} className="worker-progress-card__video" />
+          {/* sc-19577 — the queue card is where a just-finished render is first seen, and for the
+              joint audio+video family it is where "did this one come out with sound?" is asked. */}
+          <AudioTrackBadge asset={asset} />
+        </>
       ) : poster ? (
         <img alt="" className="worker-progress-card__video" src={poster} />
       ) : (
@@ -801,6 +809,12 @@ export function WorkerProgressCard({
         </div>
         <code className="worker-progress-card__id" title={job.id}>{idShort}</code>
       </div>
+      {/* Licence-required attribution (sc-17227 §IV.2, sc-17161). The queue is a generation
+          surface — it is what the user watches while the model runs — and `job.payload.model` is
+          only an id, so the string is resolved from the catalog entry rather than stored on the
+          job. `modelForJob` returns null for a job whose model is not in the catalog, and a model
+          that declares no attribution renders nothing. */}
+      <ModelAttribution model={modelForJob(job, models)} />
       <div className="worker-progress-card__hardware">
         <HardwarePills {...hardware} />
         {hardware.device === "GPU" ? (

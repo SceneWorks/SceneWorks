@@ -144,6 +144,584 @@ test("Windows Krea provisioning accepts supported newer Python 3 runtimes", asyn
   );
 });
 
+// sc-18677 generalized windows-candle.yml's provisioning from "the Krea q4 snapshot" to "the
+// snapshot named by the provision_* inputs", so epic 17137 can land MiniMax-H3 weights on the
+// CUDA box for sc-17153/sc-17156's per-tier VRAM measurement. The story's acceptance criterion
+// is that a Krea dispatch "still behaves identically -- proven, not assumed". These tests are
+// that proof, and they are structural rather than prose-matching: they pin the input DEFAULTS
+// and the path-construction EXPRESSIONS, which together determine the resolved snapshot path.
+//
+// The path the old hardcoded step produced, verbatim:
+//   %USERPROFILE%\.cache\huggingface\hub\models--SceneWorks--krea-2-turbo-mlx\snapshots\<rev>\q4
+// Every fragment below is a factor of that string. Change any one and a Krea five-rung capture
+// silently reads another directory -- or, if it is lucky, throws.
+// Assertions about a step must be scoped TO that step. A bare `assert.match(workflow, ...)` is
+// satisfied by an identical string anywhere in the file, which is not hypothetical: dropping
+// `inputs.provision_snapshot` from the Provision step's `if:` left the suite green because the
+// neighbouring "Validate runner Python" step carries the byte-identical condition. Slice first.
+function stepBody(workflow, name) {
+  const at = workflow.indexOf(`      - name: ${name}\n`);
+  assert.ok(at >= 0, `windows-candle.yml must keep a step named ${name}`);
+  const next = workflow.indexOf("\n      - ", at + 1);
+  return workflow.slice(at, next === -1 ? undefined : next);
+}
+
+function dispatchInputs(workflow) {
+  const start = workflow.indexOf("  workflow_dispatch:\n    inputs:\n");
+  assert.ok(start >= 0, "windows-candle.yml must keep a workflow_dispatch inputs block");
+  const end = workflow.indexOf("\nconcurrency:", start);
+  assert.ok(end > start, "could not find the end of the workflow_dispatch block");
+  const names = [];
+  const defaults = {};
+  let current = null;
+  for (const line of workflow.slice(start, end).split("\n")) {
+    // Deliberately permissive: GitHub allows digits, case and hyphens in an input name, and this
+    // helper backs the "at most 10 inputs" cap check. A narrower pattern would silently skip an
+    // input and let a workflow GitHub rejects sail through as 10-or-fewer.
+    const header = line.match(/^ {6}([A-Za-z0-9_-]+):$/);
+    if (header) {
+      current = header[1];
+      names.push(current);
+      defaults[current] = undefined;
+      continue;
+    }
+    const def = current && line.match(/^ {8}default: (.*)$/);
+    if (def) defaults[current] = def[1].trim().replace(/^"|"$/g, "");
+  }
+  return { names, defaults };
+}
+
+test("windows-candle provisioning is model-parameterized, not Krea-hardcoded", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  const { names, defaults } = dispatchInputs(workflow);
+
+  // GitHub rejects a workflow_dispatch with more than 10 inputs. The Krea inputs were RENAMED
+  // rather than shadowed by a parallel provision_* family precisely to stay under that cap;
+  // a future story that adds an input needs the headroom this preserves.
+  assert.ok(names.length <= 10, `workflow_dispatch allows at most 10 inputs, found ${names.length}`);
+
+  for (const gone of ["provision_krea_snapshot", "krea_repository", "krea_revision"]) {
+    assert.ok(!names.includes(gone), `${gone} was renamed; two provisioning paths must not coexist`);
+  }
+  for (const required of [
+    "provision_snapshot",
+    "provision_repository",
+    "provision_revision",
+    "provision_patterns",
+    "provision_subdir",
+    "provision_cache_dir",
+  ]) {
+    assert.ok(names.includes(required), `missing generalized input ${required}`);
+  }
+
+  // The defaults ARE the Krea dispatch. With these values and no other input set, the
+  // generalized steps must reconstruct the old hardcoded path exactly.
+  assert.equal(defaults.provision_repository, "SceneWorks/krea-2-turbo-mlx");
+  assert.equal(defaults.provision_patterns, "q4/**");
+  assert.equal(defaults.provision_subdir, "q4");
+  assert.equal(defaults.provision_cache_dir, undefined, "an empty cache dir must mean the historical location");
+});
+
+test("windows-candle rebuilds the exact Krea snapshot path from the generalized inputs", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+
+  // cache dir: %USERPROFILE%\.cache\huggingface\hub when provision_cache_dir is empty. This box
+  // sets HF_HOME=E:\huggingface, and honoring it here would relocate Krea's cache -- so the
+  // default deliberately ignores HF_HOME. A caller that wants another cache passes it in.
+  assert.match(workflow, /\$cache = Join-Path \$env:USERPROFILE '\.cache\\huggingface\\hub'/);
+  assert.doesNotMatch(
+    workflow,
+    /^\s*\$cache = .*HF_HOME/m,
+    "the default cache dir must not be derived from HF_HOME",
+  );
+
+  // models--<owner>--<name>\snapshots\<revision>[\<subdir>]
+  assert.match(workflow, /\$folder = 'models--' \+ \$env:PROVISION_REPOSITORY\.Replace\('\/', '--'\)/);
+  assert.match(workflow, /\$subdirTail = '\\' \+ \$env:PROVISION_SUBDIR\.Replace\('\/', '\\'\)/);
+  assert.match(
+    workflow,
+    /\$suffix = '\\' \+ \$folder \+ '\\snapshots\\' \+ \$env:PROVISION_REVISION \+ \$subdirTail/,
+  );
+
+  // The resolve step still asserts existence AND that the canonical path ends with that exact
+  // suffix, so a stale cache entry or a lookalike repo cannot satisfy it.
+  assert.match(workflow, /Test-Path -LiteralPath \$root -PathType Container/);
+  assert.match(
+    workflow,
+    /\$root\.EndsWith\(\$env:PROVISION_SNAPSHOT_SUFFIX, \[StringComparison\]::OrdinalIgnoreCase\)/,
+  );
+
+  // The PYTHON half of the cache binding, not just the PowerShell half. Centralizing the cache
+  // path exists because it was previously spelled twice in two languages with nothing tying
+  // them; pinning only the PowerShell side leaves a re-hardcoded `os.path.join(USERPROFILE...)`
+  // green, which downloads the whole component set to C: before the resolve step throws.
+  assert.match(workflow, /cache_dir=os\.environ\["PROVISION_CACHE_DIR"\],/);
+  assert.doesNotMatch(
+    workflow,
+    /cache_dir=os\.path\.join\(os\.environ\["USERPROFILE"\]/,
+    "the provisioning cache dir must come from the shared resolved value, not a second hardcoding",
+  );
+
+  // The memory-adapter binaries read these env names via required_env; renaming the dispatch
+  // inputs must not rename the runtime contract (bin/candle.rs, bin/mlx.rs).
+  assert.match(workflow, /"SCENEWORKS_KREA_ROOT=\$root" \| Out-File/);
+  assert.match(workflow, /SCENEWORKS_KREA_REPOSITORY: \$\{\{ inputs\.provision_repository \}\}/);
+  assert.match(workflow, /SCENEWORKS_KREA_REVISION: \$\{\{ inputs\.provision_revision \}\}/);
+  // ...and SCENEWORKS_KREA_ROOT stays scoped to Krea, so an H3 dispatch cannot hand the
+  // five-rung adapter a MiniMax root under a Krea-shaped name.
+  assert.match(workflow, /\$isKrea = \$env:PROVISION_REPOSITORY -eq 'SceneWorks\/krea-2-turbo-mlx'/);
+  assert.match(workflow, /if \(\$isKrea\) \{\n\s*"SCENEWORKS_KREA_ROOT=\$root"/);
+  // The CONSUMPTION side too, not just the export side. `secrets.SCENEWORKS_KREA_ROOT` is a
+  // Krea-specific override; dropping the `$isKrea -and` would let it redirect an H3 resolve.
+  assert.match(workflow, /if \(\$isKrea -and \$env:KREA_ROOT_OVERRIDE\) \{/);
+});
+
+// sc-18677: the provisioning branch's timeout is the whole point of the change (a 144 GB fetch
+// under the ordinary 45m cap dies mid-download), and the doc claims Krea's two dispatch shapes
+// keep their exact previous budgets. Pin the whole expression the way the macOS twin above pins
+// its lane's -- otherwise a revert to a flat `timeout-minutes: 45` passes every other test here.
+test("windows-candle keeps the provisioning and five-rung timeout budgets", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  assert.match(
+    workflow,
+    // The LTX Eros acceptance arm (SC-18902, from main) rides ahead of the provisioning budget;
+    // the provisioning / five-rung / default budgets keep their exact prior values behind it.
+    /timeout-minutes: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.run_ltx_eros_acceptance && 360 \|\| github\.event_name == 'workflow_dispatch' && inputs\.provision_snapshot && 240 \|\| github\.event_name == 'workflow_dispatch' && inputs\.run_five_rung_reference && 120 \|\| 45 \}\}/,
+  );
+});
+
+test("windows-candle keeps the five-rung guards while decoupling provisioning", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+
+  // Provisioning is now a first-class outcome: sc-17153/sc-17156 need H3 weights resident and
+  // there is no H3 five-rung fixture. The old coupling throw must be gone...
+  assert.doesNotMatch(workflow, /requires run_five_rung_reference=true/);
+  // Scoped to the Provision step itself: the identical `if:` string also appears on the
+  // "Validate runner Python" step, so a file-wide match would stay green if this step's gate were
+  // dropped -- and an ungated Provision step re-downloads the snapshot on every five-rung run.
+  assert.match(
+    stepBody(workflow, "Provision exact snapshot"),
+    /if: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.provision_snapshot \}\}/,
+  );
+  // ...but every five-rung guard it used to sit beside must survive, keyed on the new names.
+  assert.match(workflow, /throw 'inference_revision must be an exact lowercase 40-hex commit'/);
+  assert.match(
+    workflow,
+    /\$env:PROVISION_REVISION -notmatch '\^\[0-9a-f\]\{40\}\$'/,
+  );
+  assert.match(
+    workflow,
+    /\$env:PROVISION_REPOSITORY -ne 'SceneWorks\/krea-2-turbo-mlx'/,
+    "a five-rung capture is still only valid against the fixed Krea reference artifact",
+  );
+  assert.match(workflow, /does not match the adapter's compiled INFERENCE_PIN/);
+
+  // The resolve step must still run for a five-rung dispatch that does NOT provision, and the
+  // params step that FEEDS it (PROVISION_CACHE_DIR / _SNAPSHOT_SUFFIX / _SUBDIR_TAIL) must run on
+  // the same wider condition. Scoped per step for the reason at the top of this block: the two
+  // `if:` strings are byte-identical, so one file-wide match is satisfied by EITHER step and three
+  // mutations stayed green -- narrowing the resolve step to five-rung-only (a provision-only
+  // dispatch then exports no snapshot root at all, skipping AC1's whole proof step), narrowing it
+  // to provision-only (a five-rung-without-provisioning dispatch loses it), and narrowing the
+  // params step (the resolve step then joins two empty env vars and throws, or worse, matches).
+  const resolveGate =
+    /if: \$\{\{ github\.event_name == 'workflow_dispatch' && \(inputs\.run_five_rung_reference \|\| inputs\.provision_snapshot\) \}\}/;
+  assert.match(stepBody(workflow, "Resolve exact snapshot"), resolveGate);
+  assert.match(stepBody(workflow, "Resolve snapshot provisioning parameters"), resolveGate);
+});
+
+test("windows-candle routes weights dispatches to a real-weights runner, like the MLX lane", async () => {
+  const candle = await source(".github/workflows/windows-candle.yml");
+  const mlx = await source(".github/workflows/macos-mlx.yml");
+
+  // The MLX lane is the template: base labels for ordinary runs, plus a weights label for a
+  // dispatch that needs real weights on disk. Assert the template still looks like that, so this
+  // guard cannot outlive the convention it mirrors.
+  assert.match(mlx, /runs-on: \$\{\{ \(github\.event_name == 'workflow_dispatch' && \(inputs\.run_memory_calibration \|\| inputs\.run_five_rung_reference\)\) && fromJSON\('\["self-hosted","macOS","ARM64","nax","weights"\]'\)/);
+
+  // The `cuda` pool spans two registration levels and only the org-level half carries
+  // `real-weights`; a provisioning job on the other half finds no snapshot.
+  assert.match(
+    candle,
+    /runs-on: \$\{\{ \(github\.event_name == 'workflow_dispatch' && \(inputs\.provision_snapshot \|\| inputs\.run_five_rung_reference\)\) && fromJSON\('\["self-hosted","Windows","X64","cuda","real-weights"\]'\) \|\| fromJSON\('\["self-hosted","Windows","X64","cuda"\]'\) \}\}/,
+  );
+  // Ordinary PR/push runs must NOT be narrowed to the real-weights half: that would cut the
+  // available pool for this ~24m lane in half for no coverage.
+  assert.doesNotMatch(
+    candle,
+    /^\s*runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]/m,
+  );
+});
+
+test("windows-candle provisioning can never degrade into a whole-repo fetch", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  // MiniMaxAI/MiniMax-H3 is ~498 GB because FL2VA/ and Ref2VA/ re-package the same components;
+  // the set sc-18677 provisions is 144.051 GB. snapshot_download treats allow_patterns=[] as
+  // "everything", so an empty list is a 354.424 GB accident on a box that shares its disk with
+  // CI -- FL2VA/ and Ref2VA/ alone are 288.102 GB of it. Both the
+  // validation step and the Python body must refuse it.
+  assert.match(
+    workflow,
+    /throw 'provision_patterns must name at least one allow-pattern; an empty list would fetch the whole repository'/,
+  );
+  assert.match(workflow, /raise SystemExit\("provision_patterns resolved to an empty allow-list"\)/);
+  assert.match(workflow, /allow_patterns=patterns,/);
+
+  // A non-zero pip/python exit must fail the step: `@'...'@ | python -` does not propagate.
+  assert.match(workflow, /if \(\$LASTEXITCODE -ne 0\) \{ throw "snapshot provisioning failed with exit code \$LASTEXITCODE" \}/);
+
+  assert.match(
+    workflow,
+    /if \(\$LASTEXITCODE -ne 0\) \{ throw "installing huggingface_hub failed with exit code \$LASTEXITCODE" \}/,
+  );
+
+  // With provision_subdir empty the snapshot directory exists as soon as ANY file lands, so
+  // existence alone is not proof. Every declared component's literal prefix must be present.
+  //
+  // Pin the LOOP BODY, not just the throw string: replacing the `if (-not $head) { continue }`
+  // guard with an unconditional `continue` makes the assertion vacuous while leaving the error
+  // message -- and every other assertion in this file -- untouched.
+  const resolve = stepBody(workflow, "Resolve exact snapshot");
+  // Pin the THROW, not the message. Every other assertion here survives `throw` ->
+  // `Write-Warning`: the head computation, the guard, the Join-Path, the Test-Path and the string
+  // all still match, while "fails loudly if absent" quietly becomes a log line.
+  //
+  // All THREE of the resolve step's assertions need that treatment, not just the component one.
+  // The existence check and the canonical-suffix check are pinned elsewhere in this file as
+  // EXPRESSIONS (`Test-Path -LiteralPath $root -PathType Container`, `$root.EndsWith(...)`), which
+  // a `throw` -> `Write-Warning` downgrade leaves untouched. The suffix one is the dangerous case:
+  // downgraded, a snapshot whose canonical path does not match the requested repo+revision is
+  // accepted and exported as SCENEWORKS_PROVISIONED_ROOT / SCENEWORKS_KREA_ROOT, so a five-rung
+  // capture or a per-tier VRAM measurement silently runs against the WRONG weights.
+  assert.match(resolve, /throw "the exact snapshot is not available on this runner/);
+  assert.match(resolve, /throw "the resolved root does not match the requested repository/);
+  assert.match(resolve, /throw "provisioned snapshot is missing declared components under/);
+  assert.match(resolve, /\$head = \(\$pattern -split '\[\\\*\\\?\\\[\]'\)\[0\]/);
+  assert.match(resolve, /if \(-not \$head\) \{ continue \}/);
+  assert.match(resolve, /foreach \(\$pattern in \(\$env:PROVISION_PATTERNS -split/);
+  assert.match(resolve, /\$component = Join-Path \$snapshotRoot \$head\.Replace\('\/', '\\'\)/);
+  assert.match(resolve, /if \(-not \(Test-Path -LiteralPath \$component\)\) \{ \$missing \+= \$head \}/);
+  // Without Resolve-Path the EndsWith below compares the raw Join-Path output against the suffix
+  // it was just built from -- a tautology -- and nothing normalizes a traversal before it.
+  assert.match(resolve, /\$root = \(Resolve-Path -LiteralPath \$root\)\.Path/);
+});
+
+// sc-18677: provisioning must stay anonymous. This box sets HF_HOME=E:\huggingface, which can hold
+// a credential; with an implicit token a gated repo turns a "not entitled" failure into a silent
+// success on whoever's token the runner happens to carry. macos-mlx.yml pins both of these for its
+// own provisioning block and this lane pinned neither.
+test("windows-candle provisioning stays anonymous", async () => {
+  const provision = stepBody(await source(".github/workflows/windows-candle.yml"), "Provision exact snapshot");
+  assert.match(provision, /HF_HUB_DISABLE_IMPLICIT_TOKEN: "1"/);
+  assert.match(provision, /^\s+token=False,$/m);
+});
+
+// sc-18677 section 8.1, generalized. GitHub substitutes an input's `default` for any empty dispatch
+// value, so a non-empty default makes "the absence of this thing" INEXPRESSIBLE unless the step
+// body understands a sentinel. That cost run 31509409586. Any future provision_* input with a
+// non-empty default has to make the same decision consciously.
+test("every OPTIONAL provision_* input with a non-empty default has a sentinel", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  const { names, defaults } = dispatchInputs(workflow);
+  const validate = stepBody(workflow, "Validate dispatch inputs");
+  const params = stepBody(workflow, "Resolve snapshot provisioning parameters");
+
+  let checked = 0;
+  for (const name of names.filter((n) => n.startsWith("provision_"))) {
+    const def = defaults[name];
+    if (def === undefined || def === "" || def === "false") continue;
+    // "Optional" is derived, not listed: the validation step wraps an optional input's checks in
+    // `if ($env:NAME)`. A required input (provision_repository, provision_patterns) is checked
+    // unconditionally, and "unset" is not a state it can meaningfully have.
+    const env = name.toUpperCase();
+    const optional = new RegExp(`if \\(\\$env:${env}(_INPUT)?\\) \\{`).test(validate);
+    if (!optional) continue;
+    checked += 1;
+    assert.match(
+      params,
+      new RegExp(`\\$env:${env}(_INPUT)? -ne '\\.'`),
+      `${name} is optional and defaults to ${JSON.stringify(def)}, so an empty dispatch value ` +
+        "cannot unset it; the params step must honor a '.' sentinel or the default must be empty",
+    );
+  }
+  assert.ok(checked > 0, "this guard must actually examine an input, or it is vacuous");
+});
+
+// sc-18677: the containment checks around the two operator inputs that reach the filesystem.
+// `provision_subdir` is joined onto the cache path; each `provision_patterns` entry's literal
+// head is joined onto the snapshot root by the component-presence assertion above. Both are
+// validated on the SAME condition as the steps that consume them, not on provision_snapshot
+// alone -- a five-rung-only dispatch consumes both just the same.
+test("windows-candle validates every provisioning input that reaches a path", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  assert.match(
+    workflow,
+    /if \(\$env:PROVISION_SNAPSHOT -eq 'true' -or \$env:RUN_FIVE_RUNG_REFERENCE -eq 'true'\) \{/,
+    "provisioning-input validation must cover the five-rung-only path that also consumes them",
+  );
+  assert.match(workflow, /throw 'provision_subdir must not traverse out of the snapshot'/);
+  // The root sentinel. GitHub substitutes an input's `default` for any empty dispatch value, so
+  // `-f provision_subdir=` resolves to `q4`, not to "no subdir" (proved by run 31509409586).
+  // The default must stay `q4` to keep a Krea dispatch identical, so without '.' a
+  // root-resolved model like MiniMax-H3 cannot be expressed at all.
+  assert.match(
+    workflow,
+    /if \(\$env:PROVISION_SUBDIR -and \$env:PROVISION_SUBDIR -ne '\.'\) \{/,
+    "'.' must mean the snapshot root; an empty input cannot override a non-empty default",
+  );
+  assert.match(
+    workflow,
+    /description: "Tier\/subdirectory under the snapshot the resolve step must prove\. Use '\.' for a model whose components sit at the snapshot ROOT/,
+    "the sentinel must be documented on the input the operator actually reads",
+  );
+  assert.match(
+    workflow,
+    /throw "provision_patterns entries must not traverse out of the snapshot: \$pattern"/,
+  );
+  assert.match(
+    workflow,
+    /throw "provision_patterns entries must be relative to the snapshot root: \$pattern"/,
+  );
+  // Containment is decided by CANONICALIZING, not by matching path segments against '..'.
+  // Segment-equality was bypassable two ways: `..*` yields head `..` while the pattern contains
+  // no `..` segment, and `.. ` survives -contains yet Win32 strips the trailing space. The
+  // GetFullPath probe kills the first class; the TrimEnd(' ', '.') segment check kills the
+  // second, which GetFullPath does NOT normalize.
+  const validate = stepBody(workflow, "Validate dispatch inputs");
+  assert.match(validate, /\$head = \(\(\$pattern -split '\[\\\*\\\?\\\[\]'\)\[0\]\)\.TrimEnd\('\/'\)/);
+  assert.match(validate, /if \(-not \$segment\.TrimEnd\(' ', '\.'\)\) \{/);
+  // The validate step has its own loop and its own head guard, distinct from the resolve step's.
+  // Pin BOTH, scoped: `foreach ($pattern in @($patterns[0]))` checks only the first of thirteen
+  // H3 patterns, and `if ($true) { continue }` skips every one, while every other assertion in
+  // this file keeps matching because the resolve step still spells them correctly.
+  assert.match(validate, /foreach \(\$pattern in \$patterns\) \{/);
+  assert.match(validate, /if \(-not \$head\) \{ continue \}/);
+  // Both containment guards must stay FATAL. There are two throws with this message -- the
+  // segment check and the canonical probe -- and turning either into a Write-Host leaves the
+  // string present, so presence alone is not the property worth asserting.
+  assert.equal(
+    (validate.match(/throw "provision_patterns entries must not traverse out of the snapshot: \$pattern"/g) || []).length,
+    2,
+    "both the segment check and the canonical-containment probe must throw",
+  );
+  assert.match(
+    validate,
+    /\$full\.StartsWith\(\$probe \+ '\\', \[StringComparison\]::OrdinalIgnoreCase\)/,
+  );
+  // ...and the resolve step canonicalizes independently, so the proof does not rest on
+  // validation having run.
+  assert.match(
+    stepBody(workflow, "Resolve exact snapshot"),
+    /throw "declared component escapes the snapshot root: \$pattern"/,
+  );
+  // provision_cache_dir is written verbatim into $GITHUB_ENV.
+  assert.match(workflow, /throw 'provision_cache_dir must be a single line'/);
+  assert.match(workflow, /throw 'provision_cache_dir must be an absolute path with a drive letter'/);
+  // IsPathRooted accepts `\foo` and `C:foo` -- rooted, but not absolute -- so the check would not
+  // mean what its message says. PowerShell 5.1's .NET has no IsPathFullyQualified.
+  assert.match(workflow, /\$env:PROVISION_CACHE_DIR_INPUT -notmatch '\^\[A-Za-z\]:\\\\'/);
+});
+
+// sc-18691: provisioning must be INDEPENDENT of the compile chain. It used to sit BELOW
+// `cargo test -p sceneworks-worker --features backend-candle` with no guard, so an unrelated build
+// break made landing weights on the CUDA box impossible rather than merely slow -- the fetch was
+// never reached. Epic 17137 hits that concretely at sc-17149, which must land `transformer_ref`
+// (+66.28 GB) onto a box whose resident set is already 144.051 GB.
+//
+// TWO properties, pinned by two separate tests because either alone is insufficient. ORDER without
+// SKIP still drags a weights-only run red on an unrelated break and still burns the lane's ~24m of
+// box time; SKIP without ORDER leaves a five-rung dispatch's provisioning downstream of the compile
+// chain. Both are DERIVED from the workflow's own cargo invocations rather than from a hand-written
+// step order, so a NEW compile step added above provisioning, or added unguarded, goes red.
+
+const PROVISIONING_STEPS = [
+  "Validate dispatch inputs",
+  "Resolve snapshot provisioning parameters",
+  "Validate runner Python for snapshot provisioning",
+  "Provision exact snapshot",
+  "Resolve exact snapshot",
+];
+
+const COMPILE_CHAIN_STEPS = [
+  "Fetch the pinned inference release",
+  "Test the candle GPU worker (backend-candle)",
+  "Check the candle sidecar builds (rust-api, backend-candle)",
+  "Check and test the candle memory adapter (lib + memory-candle-adapter)",
+  "Clippy (candle worker)",
+  "Verify capabilities.candle.json content against a fresh dump",
+];
+
+// The ORDERED view of the job's steps. `stepBody()` above finds one step by name; this keeps
+// position, and keeps the `uses:`-only steps (checkout, prepare-rust-runner) that have no name at
+// all and so are invisible to `stepBody`.
+function jobSteps(workflow) {
+  const start = workflow.indexOf("\n    steps:\n");
+  assert.ok(start >= 0, "windows-candle.yml must keep a steps: block");
+  const body = workflow.slice(start);
+  const steps = [];
+  const marker = "\n      - ";
+  for (let at = body.indexOf(marker); at !== -1; ) {
+    const next = body.indexOf(marker, at + 1);
+    const chunk = body.slice(at, next === -1 ? undefined : next);
+    const named = chunk.match(/^\n      - name: (.*)$/m);
+    const used = chunk.match(/^\n      - uses: (.*)$/m);
+    steps.push({
+      name: named ? named[1] : `uses:${used ? used[1].trim() : "?"}`,
+      body: chunk,
+      // A cargo COMMAND, line-initial, so an `echo`ed fix-it message that merely QUOTES
+      // `cargo run -p sceneworks-worker` (the restamp step has one) counts as the prose it is.
+      cargo: chunk.split("\n").some((line) => /^\s+(run: )?cargo\s/.test(line)),
+    });
+    at = next;
+  }
+  return steps;
+}
+
+// A step's body with comment lines removed. Both YAML and PowerShell comment with a leading `#`,
+// and the counts below must not be movable by editing prose -- in either direction. This file's own
+// header comments narrate `throw` and `continue-on-error` as history.
+function stepCode(workflow, name) {
+  return stepBody(workflow, name)
+    .split("\n")
+    .filter((line) => !/^\s*#/.test(line))
+    .join("\n");
+}
+
+test("windows-candle provisions before it compiles anything", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  const steps = jobSteps(workflow);
+  const indexOf = (name) => {
+    const at = steps.findIndex((step) => step.name === name);
+    assert.ok(at >= 0, `windows-candle.yml must keep a step named ${name}`);
+    return at;
+  };
+
+  const compiling = steps.map((step, at) => (step.cargo ? at : -1)).filter((at) => at >= 0);
+  // Anti-vacuity. If the derivation stops recognising cargo steps, "provisioning comes first" is
+  // trivially true and this whole test means nothing -- which is precisely how the sibling audit at
+  // the bottom of this file silently emptied itself when sc-18691 changed a guard's polarity.
+  assert.ok(
+    compiling.length >= COMPILE_CHAIN_STEPS.length,
+    `expected at least ${COMPILE_CHAIN_STEPS.length} cargo steps, derived ${compiling.length}`,
+  );
+  for (const name of COMPILE_CHAIN_STEPS) {
+    assert.ok(steps[indexOf(name)].cargo, `${name} must still be a cargo invocation`);
+  }
+
+  const firstCompile = Math.min(...compiling);
+  for (const name of PROVISIONING_STEPS) {
+    assert.ok(
+      indexOf(name) < firstCompile,
+      `${name} must run before the first cargo step (${steps[firstCompile].name}); a build ` +
+        "break must not be able to starve a weights dispatch",
+    );
+  }
+  // Stronger than "ahead of the compile chain": ahead of the Rust setup too. prepare-rust-runner
+  // fails loudly on a broken rustup, and a weights fetch has no business depending on toolchain
+  // discovery -- it needs the checkout and the box's Python, nothing else.
+  for (const name of PROVISIONING_STEPS) {
+    assert.ok(
+      indexOf(name) < indexOf("uses:./.github/actions/prepare-rust-runner"),
+      `${name} must not depend on toolchain discovery either`,
+    );
+  }
+  // ...but still after the checkout, which every one of them reads (INFERENCE_PIN lives in the
+  // worktree, and an unchecked-out repo has no workflow to run).
+  assert.ok(
+    steps[0].name.startsWith("uses:actions/checkout@"),
+    "the checkout must remain the job's first step",
+  );
+});
+
+test("a weights-only dispatch skips the entire compile chain, pinned per step", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+
+  // The WHOLE expression. A weights-only dispatch is `provision_snapshot` true AND
+  // `run_five_rung_reference` false; every other shape must still compile. Half of this is not a
+  // weaker version of it -- dropping `&& !inputs.run_five_rung_reference` would strip the compile
+  // chain off Krea's five-rung capture too, which this story's scope guard forbids, and dropping
+  // `github.event_name == 'workflow_dispatch'` would strip it off every PR and push.
+  const skip =
+    /^        if: \$\{\{ !\(github\.event_name == 'workflow_dispatch' && inputs\.provision_snapshot && !inputs\.run_five_rung_reference\) \}\}$/m;
+
+  // SCOPED PER STEP. The expression is byte-identical on all six steps, so one file-wide
+  // `assert.match` is satisfied by any single survivor and a narrowing mutation on the other five
+  // stays green. That is not hypothetical -- it is trap 1 from sc-18677's third review round, which
+  // found three such mutations green against this same file.
+  for (const name of COMPILE_CHAIN_STEPS) {
+    assert.match(stepBody(workflow, name), skip, `${name} must carry the weights-only skip guard`);
+  }
+
+  // Derived backstop, so a NEW compile step cannot appear without a decision: every cargo step is
+  // either skipped for a weights-only dispatch, or gated on the five-rung capture or the LTX Eros
+  // acceptance capture (SC-18902) -- neither of which is a weights-only dispatch, so both
+  // legitimately compile what they run.
+  for (const step of jobSteps(workflow).filter((candidate) => candidate.cargo)) {
+    assert.ok(
+      skip.test(step.body) ||
+        /if: \$\{\{[^\n]*inputs\.(run_five_rung_reference|run_ltx_eros_acceptance)/.test(step.body),
+      `${step.name} would compile on a weights-only dispatch; guard it or gate it`,
+    );
+  }
+});
+
+// sc-18691 AC2. Decoupling must not turn a genuine provisioning failure into a silent skip. With
+// the compile chain skipped, these five steps ARE the entire verdict of a weights-only dispatch, so
+// every failure mode they carry has to stay fatal.
+//
+// PIN THE THROW, NOT THE MESSAGE -- trap 2 from sc-18677's third review round, and it is live in
+// this file right now: "Windows Krea provisioning accepts supported newer Python 3 runtimes" above
+// asserts the string `Python 3.12 or newer`, which survives a `throw` -> `Write-Warning` downgrade
+// completely intact. Counting `throw`s is what makes a downgrade red, and the count is taken PER
+// STEP because a file-wide count is satisfied by adding a throw anywhere else.
+test("every failure mode a weights-only dispatch can hit is still fatal", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+
+  const throwCounts = {
+    // repo-id shape, revision shape, empty allow-list, rooted pattern, the two containment guards
+    // (segment shape + canonical probe), subdir shape, subdir traversal, cache-dir newline,
+    // cache-dir absoluteness, and the three five-rung guards (inference_revision shape, the fixed
+    // Krea repository, INFERENCE_PIN agreement).
+    "Validate dispatch inputs": 13,
+    // Pure derivation: it writes GITHUB_ENV and throws nothing.
+    "Resolve snapshot provisioning parameters": 0,
+    // A non-zero `python --version`, and a minor version below 12.
+    "Validate runner Python for snapshot provisioning": 2,
+    // pip install, and the heredoc'd snapshot_download -- `@'...'@ | python -` does not propagate
+    // its exit code, so the explicit $LASTEXITCODE check is the only thing that fails the step.
+    "Provision exact snapshot": 2,
+    // Absent snapshot, canonical-suffix mismatch, escaping component, missing components. The
+    // suffix one is the dangerous downgrade: warned rather than thrown, a snapshot that does NOT
+    // match the requested repo+revision is exported as SCENEWORKS_PROVISIONED_ROOT and a per-tier
+    // VRAM measurement silently runs against the wrong weights.
+    "Resolve exact snapshot": 4,
+  };
+  for (const [name, expected] of Object.entries(throwCounts)) {
+    assert.equal(
+      (stepCode(workflow, name).match(/\bthrow /g) || []).length,
+      expected,
+      `${name} must keep exactly ${expected} fatal throw(s); a throw -> Write-Warning downgrade ` +
+        "leaves every message assertion in this file green",
+    );
+  }
+  // The Python body guards itself with a `raise`, which the count above cannot see.
+  assert.match(
+    stepCode(workflow, "Provision exact snapshot"),
+    /raise SystemExit\("provision_patterns resolved to an empty allow-list"\)/,
+  );
+
+  // Decoupling by SKIPPING is safe; decoupling by SWALLOWING is not. `continue-on-error` on any of
+  // these would let a weights-only dispatch report success with no weights on the box -- strictly
+  // worse than the coupling this story removed, because the coupling at least failed visibly.
+  for (const name of [...PROVISIONING_STEPS, ...COMPILE_CHAIN_STEPS]) {
+    assert.doesNotMatch(
+      stepCode(workflow, name),
+      /continue-on-error|always\(\)/,
+      `${name} must not degrade a failure into a warning`,
+    );
+  }
+});
+
 test("Windows CUDA runs the Candle adapter's platform-only unit tests", async () => {
   const workflow = await source(".github/workflows/windows-candle.yml");
   // NO `--bin` selector (sc-18808 review): it excludes the crate's LIB test target, and the crate
@@ -1179,12 +1757,23 @@ test("every workspace path a self-hosted lane watches maps to a package that lan
     // dispatch-only calibration build that reaches a member is not PR coverage of it, so
     // drop every step block gated on workflow_dispatch before scanning (same step-splitting
     // idiom as the capability-dump ordering check above).
-    const prSteps = lane
-      .split(/\n {6}- (?=name: |uses: )/)
-      .filter(
-        (block) => !/if: \$\{\{[^\n]*github\.event_name == 'workflow_dispatch'/.test(block),
-      )
-      .join("\n");
+    //
+    // POLARITY MATTERS, and it did not used to (sc-18691). This filter was a bare substring test
+    // for `github.event_name == 'workflow_dispatch'` inside the step's `if:`. sc-18691 added the
+    // opposite polarity to windows-candle.yml -- `!(github.event_name == 'workflow_dispatch' &&
+    // inputs.provision_snapshot && !inputs.run_five_rung_reference)`, which skips the compile chain
+    // for a weights-only dispatch and therefore RUNS on every PR and push. The substring test read
+    // those two forms as identical, dropped all six compile steps, and left this audit with zero
+    // cargo invocations to reason about -- it survived only because of the `invocations.length > 0`
+    // assertion below, which is exactly the vacuity backstop that case is for. Strip negated groups
+    // before looking for the positive requirement, so "requires a dispatch" means what it says.
+    const requiresDispatch = (block) => {
+      const gate = block.match(/^\s*if: ([^\n]*)$/m);
+      if (!gate) return false;
+      return /github\.event_name == 'workflow_dispatch'/.test(gate[1].replace(/!\([^)]*\)/g, ""));
+    };
+    const blocks = lane.split(/\n {6}- (?=name: |uses: )/);
+    const prSteps = blocks.filter((block) => !requiresDispatch(block)).join("\n");
     // Strip comment lines, then re-join backslash line continuations so a `-p <pkg>` split
     // across lines cannot degrade into a "package-less" invocation (which the rule below
     // would over-widen into the whole default-member set).
@@ -2506,6 +3095,507 @@ test("the MLX FLUX.2-dev calibration arm is bound to the direct reference-free T
   assert.match(arm, /generator\s*\.memory_strategy_contract\(\)/);
   assert.match(arm, /loaded_contract != &contract/);
   assert.doesNotMatch(arm, /registered_dev_safety_check|FLUX2_CONTRACT_PROVIDER/);
+});
+
+// =====================================================================================
+// sc-18921 — macos-mlx.yml's fatal guards, pinned as fatal.
+//
+// sc-18691 closed this on the CANDLE lane by counting PowerShell `throw`s per step
+// ("every failure mode a weights-only dispatch can hit is still fatal", above). The MLX
+// lane had the identical exposure in bash form and nothing closed it: macos-mlx.yml
+// carried 18 `exit 1` guards and this file contained zero occurrences of `exit 1`, so
+// downgrading ANY of them to a bare `echo` left the whole suite green. That lane is the
+// sole producer of config/engine-capabilities/capabilities.mlx.json and of every MLX
+// five-rung / memory-calibration capture, so a silently non-fatal guard there does not
+// merely miss a break — it publishes a wrong measurement as evidence.
+//
+// WHY THIS IS NOT A HAND-COUNTED COPY OF THE CANDLE TEST. That one carries per-step
+// literals (13, 0, 2, 2, 4) beside the predicate they describe, which is the sc-18932
+// defect shape: a literal next to a changed predicate is a new false green. Here NOTHING
+// is counted by hand. The lane's own text supplies both sides:
+//
+//   * fatality  — `exit 1` as a whole statement;
+//   * the guard — a FAILURE DIAGNOSTIC: an `echo` that writes to stderr or emits
+//                 `::error::`. A downgrade removes the exit and LEAVES the diagnostic,
+//                 so "every diagnostic is immediately followed by `exit 1`" goes red on
+//                 the downgrade without any number being maintained anywhere.
+//
+// The enumeration below is therefore not a count. It is the answer to "WHICH failure",
+// one row per guard, and it is cross-checked against the file scan in both directions:
+// a guard deleted outright (diagnostic AND exit together, which the equality above
+// cannot see) drops out of the table lookup, and a guard added anywhere on the lane
+// leaves an `exit 1` no row claims.
+// =====================================================================================
+
+const MLX_LANE = ".github/workflows/macos-mlx.yml";
+
+// THE lane-wide fatality predicate. A whole statement, so `exit 1` inside a quoted
+// message or a comment cannot satisfy it.
+const MLX_FATAL_EXIT = "exit 1";
+
+// THE lane-wide guard predicate, and the one that makes a downgrade visible: a downgrade
+// deletes the exit and keeps the message. Deliberately narrow — `::warning::` and
+// `::notice::` are NOT diagnostics, so a step that genuinely wants to report without
+// failing has a spelling available that this contract does not claim.
+function isMlxFailureDiagnostic(statement) {
+  return /^echo\b/.test(statement) && (/>&2$/.test(statement) || /::error::/.test(statement));
+}
+
+// A job's steps, each reduced to LOGICAL statements: comment lines dropped (both YAML and
+// bash comment with `#`, and this lane's prose quotes its own guards), backslash
+// continuations joined (the two `::error::` messages span four and five lines), blanks
+// dropped, indentation normalised.
+//
+// Scoped to ONE JOB rather than reusing the file-wide `stepBody()` above, because
+// macos-mlx.yml has two jobs and "Fetch the pinned inference release" appears in both —
+// a file-wide lookup by name silently resolves to whichever comes first.
+function mlxJobSteps(workflow, job) {
+  const start = workflow.indexOf(`\n  ${job}:\n`);
+  assert.ok(start >= 0, `${MLX_LANE} must keep a ${job} job`);
+  const rest = workflow.slice(start + 1);
+  // Job keys are the only two-space keys in the file; everything inside a job is deeper.
+  const end = rest.slice(1).search(/\n {2}[a-z][a-z0-9-]*:\n/);
+  const body = end === -1 ? rest : rest.slice(0, end + 1);
+
+  const steps = [];
+  const marker = "\n      - ";
+  for (let at = body.indexOf(marker); at !== -1; ) {
+    const next = body.indexOf(marker, at + 1);
+    const chunk = body.slice(at, next === -1 ? undefined : next);
+    at = next;
+    const named = chunk.match(/^\n {6}- name: (.*)$/m);
+    const used = chunk.match(/^\n {6}- uses: (.*)$/m);
+    const statements = [];
+    let joined = "";
+    for (const line of chunk.split("\n")) {
+      if (/^\s*#/.test(line)) continue;
+      const text = line.trim();
+      if (text === "") continue;
+      if (text.endsWith("\\")) {
+        joined += (joined ? " " : "") + text.slice(0, -1).trim();
+        continue;
+      }
+      statements.push(joined ? `${joined} ${text}` : text);
+      joined = "";
+    }
+    if (joined) statements.push(joined);
+    steps.push({ name: named ? named[1] : `uses:${used ? used[1].trim() : "?"}`, statements });
+  }
+  return steps;
+}
+
+// The jobs that carry fatal guards, scanned as ONE set. Both, not just `nax-worker`: main
+// moved "Verify capabilities.mlx.json content against a fresh dump" onto the hosted
+// `macos-checks` job, because it is a weights-free registry walk that has no business on the
+// scarce M5/NAX pool. The guard was not weakened — it still ends every branch in `exit 1` —
+// it changed jobs, and the `laneExits` assertion below (which counts the WHOLE FILE) is what
+// caught it: that assertion exists precisely so a guard living outside the scanned job cannot
+// ship unpinned, and the fix it asks for is to enumerate that job, which is this.
+const MLX_GUARD_JOBS = ["macos-checks", "nax-worker"];
+
+function mlxGuardSteps(workflow) {
+  return MLX_GUARD_JOBS.flatMap((job) => mlxJobSteps(workflow, job));
+}
+
+// ONE ROW PER FATAL GUARD, saying which failure it detects — not merely that the step
+// fails somehow. `branch` is the statement chain that reaches the diagnostic, matched
+// exactly and in order, which is what distinguishes guards whose MESSAGE is identical:
+// "Resolve exact Qwen calibration snapshot" emits the same "not available on this runner"
+// string from an `else` fallthrough and from a following `-d` re-check, and the two
+// "Validate ..." steps share both the `INFERENCE_PIN` condition and its message.
+const MLX_FATAL_GUARDS = [
+  {
+    step: "Verify capabilities.mlx.json content against a fresh dump",
+    detects: "the checked-in MLX facts file differs in capability content from a fresh dump at this pin",
+    branch: [
+      'if ! node scripts/compare-engine-capability-facts.mjs config/engine-capabilities/capabilities.mlx.json "$scratch/capabilities.mlx.json"; then',
+    ],
+    diagnostic: /^echo "::error::config\/engine-capabilities\/capabilities\.mlx\.json differs in capability"/,
+  },
+  {
+    step: "Verify capabilities.mlx.json content against a fresh dump",
+    detects:
+      "the checked-in RUNTIME facts file differs in capability content from inference's fresh snapshot",
+    branch: [
+      'if ! node scripts/compare-engine-capability-facts.mjs config/engine-capabilities/runtime/capabilities.mlx.json "$scratch/runtime/capabilities.mlx.json"; then',
+    ],
+    diagnostic:
+      /^echo "::error::config\/engine-capabilities\/runtime\/capabilities\.mlx\.json does not"/,
+  },
+  {
+    step: "Verify capabilities.mlx.json content against a fresh dump",
+    detects: "the checked-in AUDIO facts file differs in capability content — the one dump BOTH lanes write",
+    branch: [
+      'if ! node scripts/compare-engine-capability-facts.mjs config/engine-capabilities/audio/capabilities.candle.json "$scratch/audio/capabilities.candle.json"; then',
+    ],
+    diagnostic:
+      /^echo "::error::config\/engine-capabilities\/audio\/capabilities\.candle\.json does not"/,
+  },
+  {
+    step: "Validate Qwen provisioning mode",
+    detects: "a ~57 GiB Qwen download requested by a dispatch that will not calibrate",
+    branch: [
+      'if [[ "$PROVISION_QWEN_SNAPSHOT" == "true" && "$RUN_MEMORY_CALIBRATION" != "true" ]]; then',
+    ],
+    diagnostic: /^echo "provision_qwen_snapshot requires run_memory_calibration=true" >&2$/,
+  },
+  {
+    step: "Validate Z-Image provisioning mode",
+    detects: "a Z-Image download requested by a dispatch that will not capture the reference",
+    branch: [
+      'if [[ "$PROVISION_Z_IMAGE_SNAPSHOT" == "true" && "$RUN_FIVE_RUNG_REFERENCE" != "true" ]]; then',
+    ],
+    diagnostic: /^echo "provision_z_image_snapshot requires run_five_rung_reference=true" >&2$/,
+  },
+  {
+    step: "Validate memory-strategy calibration identities",
+    detects: "a calibration dispatch whose inference_revision is not an exact 40-hex commit",
+    branch: ['if [[ ! "$INFERENCE_REVISION" =~ ^[0-9a-f]{40}$ ]]; then'],
+    diagnostic: /^echo "inference_revision must be an exact lowercase 40-hex commit" >&2$/,
+  },
+  {
+    step: "Validate memory-strategy calibration identities",
+    detects: "a calibration dispatch whose qwen_revision is not an exact 40-hex artifact revision",
+    branch: ['if [[ ! "$QWEN_REVISION" =~ ^[0-9a-f]{40}$ ]]; then'],
+    diagnostic: /^echo "qwen_revision must be an exact lowercase 40-hex artifact revision" >&2$/,
+  },
+  {
+    step: "Validate memory-strategy calibration identities",
+    detects: "calibration pointed at some repository other than the fixed Qwen artifact",
+    branch: ['if [[ "$QWEN_REPOSITORY" != "SceneWorks/qwen-image-mlx" ]]; then'],
+    diagnostic:
+      /^echo "qwen_repository must be the fixed SceneWorks\/qwen-image-mlx calibration artifact" >&2$/,
+  },
+  {
+    step: "Validate memory-strategy calibration identities",
+    detects: "a qwen_tier outside the three declared quantization tiers",
+    branch: [
+      'if [[ "$QWEN_TIER" != "bf16" && "$QWEN_TIER" != "q4" && "$QWEN_TIER" != "q8" ]]; then',
+    ],
+    diagnostic: /^echo "qwen_tier must be one of bf16, q4, or q8" >&2$/,
+  },
+  {
+    step: "Validate memory-strategy calibration identities",
+    detects:
+      "calibration evidence stamped with a revision the adapter was NOT compiled against",
+    branch: ['if [[ "$PIN" != "$INFERENCE_REVISION" ]]; then'],
+    diagnostic:
+      /^echo "input inference_revision does not match the adapter's compiled INFERENCE_PIN" >&2$/,
+  },
+  {
+    step: "Validate five-rung reference identities",
+    detects: "a five-rung dispatch whose inference_revision is not an exact 40-hex commit",
+    branch: ['if [[ ! "$INFERENCE_REVISION" =~ ^[0-9a-f]{40}$ ]]; then'],
+    diagnostic: /^echo "inference_revision must be an exact lowercase 40-hex commit" >&2$/,
+  },
+  {
+    step: "Validate five-rung reference identities",
+    detects:
+      "a five-rung dispatch whose z_image_revision is not an exact 40-hex artifact revision",
+    branch: ['if [[ ! "$Z_IMAGE_REVISION" =~ ^[0-9a-f]{40}$ ]]; then'],
+    diagnostic: /^echo "z_image_revision must be an exact lowercase 40-hex artifact revision" >&2$/,
+  },
+  {
+    step: "Validate five-rung reference identities",
+    detects: "a five-rung capture pointed at some repository other than the fixed Z-Image artifact",
+    branch: ['if [[ "$Z_IMAGE_REPOSITORY" != "SceneWorks/z-image-turbo-mlx" ]]; then'],
+    diagnostic:
+      /^echo "z_image_repository must be the fixed SceneWorks\/z-image-turbo-mlx reference artifact" >&2$/,
+  },
+  {
+    step: "Validate five-rung reference identities",
+    detects: "five-rung evidence stamped with a revision the adapter was NOT compiled against",
+    branch: ['if [[ "$PIN" != "$INFERENCE_REVISION" ]]; then'],
+    diagnostic:
+      /^echo "input inference_revision does not match the adapter's compiled INFERENCE_PIN" >&2$/,
+  },
+  {
+    step: "Resolve exact Qwen calibration snapshot",
+    detects: "the Qwen snapshot is in NEITHER the HF cache nor the Application Support cache",
+    branch: [
+      'if [[ -d "$QWEN_HF_ROOT" ]]; then',
+      'QWEN_ROOT="$QWEN_HF_ROOT"',
+      'elif [[ -d "$QWEN_APP_ROOT" ]]; then',
+      'QWEN_ROOT="$QWEN_APP_ROOT"',
+      "else",
+    ],
+    diagnostic:
+      /^echo "the exact Qwen calibration snapshot is not available on this runner" >&2$/,
+  },
+  {
+    step: "Resolve exact Qwen calibration snapshot",
+    detects: "the resolved Qwen root — override included — is not a directory",
+    branch: ['if [[ ! -d "$QWEN_ROOT" ]]; then'],
+    diagnostic:
+      /^echo "the exact Qwen calibration snapshot is not available on this runner" >&2$/,
+  },
+  {
+    step: "Resolve exact Qwen calibration snapshot",
+    detects:
+      "a real directory that is NOT the requested repository+revision+tier — the dangerous one: " +
+      "downgraded, a per-tier measurement runs against the wrong weights and is published as evidence",
+    branch: ['if [[ "$QWEN_ROOT" != *"$EXPECTED_SUFFIX" ]]; then'],
+    diagnostic:
+      /^echo "the Qwen calibration root does not match the fixed repository and exact revision" >&2$/,
+  },
+  {
+    step: "Resolve exact Z-Image reference snapshot",
+    detects: "the Z-Image snapshot is in NEITHER the HF cache nor the Application Support cache",
+    branch: [
+      'if [[ -d "$Z_IMAGE_HF_ROOT" ]]; then',
+      'Z_IMAGE_ROOT="$Z_IMAGE_HF_ROOT"',
+      'elif [[ -d "$Z_IMAGE_APP_ROOT" ]]; then',
+      'Z_IMAGE_ROOT="$Z_IMAGE_APP_ROOT"',
+      "else",
+    ],
+    diagnostic:
+      /^echo "the exact Z-Image reference snapshot is not available on this runner" >&2$/,
+  },
+  {
+    step: "Resolve exact Z-Image reference snapshot",
+    detects: "a real directory that is NOT the requested Z-Image repository+revision+tier",
+    branch: ['if [[ "$Z_IMAGE_ROOT" != *"$EXPECTED_SUFFIX" ]]; then'],
+    diagnostic:
+      /^echo "the Z-Image reference root does not match the fixed repository and exact revision" >&2$/,
+  },
+];
+
+// Reachability is the sibling of fatality: a guard whose step never runs is exactly as
+// silent as one that never fails. The dispatch-only guards are dispatch-only BY DESIGN, so
+// the contract is the exact expression, not its presence. `null` means the step is
+// unconditional and must stay that way.
+//
+// The content-verify step reads `if: ${{ always() }}` since main moved it to `macos-checks`, and
+// that is MORE reachable than unconditional, not less: `always()` on a step's `if:` makes it
+// run even when an earlier step in the job already failed. It does not swallow this step's own
+// failures — only `continue-on-error` and `|| true` do that, and both remain banned below. The
+// reason main wants it is stated in the workflow: a pin bump deliberately makes descriptor-
+// backed tests fail closed, and `always()` lets the producer and its paired upload still run so
+// the fresh facts can be committed, instead of deadlocking the bootstrap.
+const MLX_GUARD_STEP_REACHABILITY = {
+  "Verify capabilities.mlx.json content against a fresh dump": "if: ${{ always() }}",
+  "Validate Qwen provisioning mode": "if: ${{ github.event_name == 'workflow_dispatch' }}",
+  "Validate Z-Image provisioning mode": "if: ${{ github.event_name == 'workflow_dispatch' }}",
+  "Validate memory-strategy calibration identities":
+    "if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_memory_calibration }}",
+  "Validate five-rung reference identities":
+    "if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}",
+  "Resolve exact Qwen calibration snapshot":
+    "if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_memory_calibration }}",
+  "Resolve exact Z-Image reference snapshot":
+    "if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}",
+};
+
+test("every failure diagnostic on the MLX lane is fatal, derived from the lane's own text", async () => {
+  const workflow = await source(MLX_LANE);
+  const steps = mlxGuardSteps(workflow);
+
+  // ANTI-VACUITY. If the splitter stops recognising steps, every loop below is trivially
+  // satisfied and this test means nothing — which is exactly how the sibling audit in this
+  // file silently emptied itself when sc-18691 changed a guard's polarity.
+  assert.ok(
+    steps.length >= 20,
+    `expected ${MLX_GUARD_JOBS.join(" + ")} to still split into steps, derived ${steps.length}`,
+  );
+  // Per-job anti-vacuity too: the union above stays over the floor even if one job's splitter
+  // silently returns nothing, which would hide every guard that job carries.
+  for (const job of MLX_GUARD_JOBS) {
+    assert.ok(
+      mlxJobSteps(workflow, job).length > 0,
+      `expected the ${job} job to still split into steps`,
+    );
+  }
+
+  const diagnostics = [];
+  const exits = [];
+  for (const step of steps) {
+    step.statements.forEach((statement, at) => {
+      if (isMlxFailureDiagnostic(statement)) diagnostics.push({ step, statement, at });
+      if (statement === MLX_FATAL_EXIT) exits.push({ step, at });
+    });
+  }
+
+  // The one number in this test, and it is derived on BOTH sides: the enumeration below is
+  // one row per guard, and the scan above is the lane's own text. A guard added without a
+  // row, or a row without a guard, breaks this before any message is compared.
+  assert.equal(
+    diagnostics.length,
+    MLX_FATAL_GUARDS.length,
+    `${MLX_LANE} carries ${diagnostics.length} failure diagnostics but MLX_FATAL_GUARDS ` +
+      `enumerates ${MLX_FATAL_GUARDS.length}. Add or remove the row that says which failure ` +
+      "the guard detects — an unenumerated guard is one nothing pins as fatal.",
+  );
+
+  // THE DOWNGRADE DETECTOR. `exit 1` -> `echo`, `::warning::`, `exit 0` or deletion all
+  // leave the diagnostic standing and remove the exit after it. No count is maintained by
+  // hand anywhere in this assertion; both operands come out of the file.
+  for (const { step, statement, at } of diagnostics) {
+    assert.equal(
+      step.statements[at + 1],
+      MLX_FATAL_EXIT,
+      `${MLX_LANE} / "${step.name}": the diagnostic\n    ${statement}\nmust be followed ` +
+        `immediately by \`${MLX_FATAL_EXIT}\`, found ${JSON.stringify(step.statements[at + 1])}. ` +
+        "A reported-but-not-fatal failure on this lane publishes a wrong capability dump or a " +
+        "wrong memory measurement as evidence. To report without failing, use ::warning::.",
+    );
+  }
+
+  // The mirror direction, so a fatal exit cannot appear with no diagnostic saying WHY, and
+  // so the equality above cannot be satisfied by moving an exit between steps.
+  for (const step of steps) {
+    const stepDiagnostics = step.statements.filter(isMlxFailureDiagnostic).length;
+    const stepExits = step.statements.filter((s) => s === MLX_FATAL_EXIT).length;
+    assert.equal(
+      stepExits,
+      stepDiagnostics,
+      `${MLX_LANE} / "${step.name}": ${stepExits} fatal exit(s) against ${stepDiagnostics} ` +
+        "failure diagnostic(s). Every fatal exit needs a diagnostic saying which failure it is.",
+    );
+  }
+
+  // WHOLE FILE, not just the scanned jobs. A guard added anywhere else in the lane would be
+  // invisible to the job-scoped scan above and would ship unpinned. This is the assertion that
+  // caught main moving the restamp guard into `macos-checks`; the answer it demands is to
+  // enumerate that job (see MLX_GUARD_JOBS), never to relax the count. Comment lines stripped
+  // so prose cannot move the number either way.
+  const laneExits = workflow
+    .split("\n")
+    .filter((line) => !/^\s*#/.test(line))
+    .filter((line) => line.trim() === MLX_FATAL_EXIT).length;
+  assert.equal(
+    laneExits,
+    exits.length,
+    `${MLX_LANE} has ${laneExits} fatal exits but only ${exits.length} are inside ` +
+      `${MLX_GUARD_JOBS.join(" + ")}. A guard outside those jobs is pinned by nothing here; ` +
+      "enumerate its job.",
+  );
+});
+
+test("each MLX-lane fatal guard is pinned individually, by which failure it detects", async () => {
+  const workflow = await source(MLX_LANE);
+  const steps = mlxGuardSteps(workflow);
+  const byName = new Map(steps.map((step) => [step.name, step]));
+  const claimed = new Set();
+
+  for (const guard of MLX_FATAL_GUARDS) {
+    const step = byName.get(guard.step);
+    assert.ok(step, `${MLX_LANE} must keep a ${MLX_GUARD_JOBS.join(" or ")} step named "${guard.step}"`);
+
+    // Located by the branch chain AND the message together. Either alone is ambiguous on
+    // this lane: two guards share the "not available on this runner" message, and two share
+    // both the INFERENCE_PIN condition and its message across sibling steps.
+    const found = [];
+    step.statements.forEach((statement, at) => {
+      if (!guard.diagnostic.test(statement)) return;
+      const chain = step.statements.slice(at - guard.branch.length, at);
+      if (chain.length !== guard.branch.length) return;
+      if (chain.every((line, i) => line === guard.branch[i])) found.push(at);
+    });
+    assert.equal(
+      found.length,
+      1,
+      `${MLX_LANE} / "${guard.step}": expected exactly one guard against ${guard.detects}, ` +
+        `matched ${found.length}. Its branch chain is\n    ${guard.branch.join("\n    ")}`,
+    );
+
+    const at = found[0];
+    assert.equal(
+      step.statements[at + 1],
+      MLX_FATAL_EXIT,
+      `${MLX_LANE} / "${guard.step}": the guard against ${guard.detects} must stay FATAL. ` +
+        `Found ${JSON.stringify(step.statements[at + 1])} where \`${MLX_FATAL_EXIT}\` belongs.`,
+    );
+    claimed.add(`${guard.step}#${at + 1}`);
+  }
+
+  // Every fatal exit on the lane is claimed by exactly one row. Without this, deleting a
+  // guard outright and adding an unrelated one elsewhere keeps the totals equal.
+  for (const step of steps) {
+    step.statements.forEach((statement, at) => {
+      if (statement !== MLX_FATAL_EXIT) return;
+      assert.ok(
+        claimed.has(`${step.name}#${at}`),
+        `${MLX_LANE} / "${step.name}": a fatal guard at statement ${at} is claimed by no row ` +
+          "in MLX_FATAL_GUARDS. Say which failure it detects, so a downgrade names it.",
+      );
+    });
+  }
+});
+
+test("MLX-lane guard steps stay reachable and cannot be degraded into warnings", async () => {
+  const workflow = await source(MLX_LANE);
+  const steps = mlxGuardSteps(workflow);
+  const byName = new Map(steps.map((step) => [step.name, step]));
+
+  // Derived from the guards, not hand-listed beside them: every step that carries a row is
+  // a step this contract must hold for.
+  const guardSteps = [...new Set(MLX_FATAL_GUARDS.map((guard) => guard.step))];
+  assert.deepEqual(
+    guardSteps.slice().sort(),
+    Object.keys(MLX_GUARD_STEP_REACHABILITY).sort(),
+    "every step carrying a fatal guard needs a reachability pin, and vice versa",
+  );
+
+  for (const name of guardSteps) {
+    const step = byName.get(name);
+    assert.ok(step, `${MLX_LANE} must keep a ${MLX_GUARD_JOBS.join(" or ")} step named "${name}"`);
+    const conditions = step.statements.filter((statement) => statement.startsWith("if: "));
+    const expected = MLX_GUARD_STEP_REACHABILITY[name];
+    if (expected === null) {
+      assert.deepEqual(
+        conditions,
+        [],
+        `${MLX_LANE} / "${name}" must stay unconditional — it is the lane's only check that ` +
+          "the checked-in capability dump is real, and it has to run on every PR.",
+      );
+    } else {
+      assert.deepEqual(
+        conditions,
+        [expected],
+        `${MLX_LANE} / "${name}": a guard that never runs is as silent as one that never ` +
+          "fails. Pin the exact condition here when the step's reachability changes.",
+      );
+    }
+
+    // Degrading by SWALLOWING: `continue-on-error` makes every `exit 1` in the step
+    // advisory without touching one of them, and `|| true` does it per command. Neither is
+    // ever allowed, on any statement.
+    for (const statement of step.statements) {
+      assert.doesNotMatch(
+        statement,
+        /continue-on-error|\|\| true/,
+        `${MLX_LANE} / "${name}": "${statement}" degrades a guard failure into a warning.`,
+      );
+    }
+
+    // `always()` is banned everywhere EXCEPT as the step's own pinned `if:` condition, which
+    // the `deepEqual` above already fixes to an exact string. The distinction is real:
+    // `always()` in a step `if:` makes the step run even after an earlier step in the job
+    // failed — strictly more reachable, and it does not touch this step's own exit status.
+    // Anywhere else (inside a `run:` body, on a nested expression) it is a swallow. Comparing
+    // against `expected` rather than allowing the substring means a step can only carry
+    // `always()` if a reachability row deliberately says so.
+    for (const statement of step.statements) {
+      if (expected !== null && statement === expected) continue;
+      assert.doesNotMatch(
+        statement,
+        /always\(\)/,
+        `${MLX_LANE} / "${name}": "${statement}" degrades a guard failure into a warning.`,
+      );
+    }
+  }
+
+  // The content-verify step is the one guard step that runs several commands and a `trap`, and it
+  // opts into strictness explicitly. `pipefail` and `-u` are NOT GitHub's defaults (the
+  // default shell is `bash -e {0}`), so this is a real declaration, not a restatement of
+  // one: without it a failing `cargo run` inside a pipeline, or an unset `$scratch`, reaches
+  // the comparison and the guard compares against nothing.
+  assert.ok(
+    byName
+      .get("Verify capabilities.mlx.json content against a fresh dump")
+      .statements.includes("set -euo pipefail"),
+    `${MLX_LANE}: the content-verify step must keep \`set -euo pipefail\``,
+  );
 });
 
 // SC-18902 historical acceptance evidence. The real Windows/CUDA baseline proved the former Eros

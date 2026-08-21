@@ -556,10 +556,12 @@ def test_rust_worker_claims_and_completes_lora_import_against_rust_api_binary(ru
 
 
 def test_rust_worker_completes_ffmpeg_frame_and_timeline_jobs_against_rust_api_binary(rust_api, tmp_path):
-    # ffmpeg is intentionally NOT provisioned in the `check.yml` CI (only in the
-    # desktop/release packaging workflows), so this stays a plain skip: it must not
-    # red the e2e gate. The all-skipped guard in conftest still fires if cargo (and
-    # thus every other e2e test) also went missing (sc-8935 / F-133).
+    # `check.yml`'s `checks` job DOES provision ffmpeg as of sc-19549, so this test now runs there
+    # rather than skipping — and the first time it ran it failed, on an export resolution the route
+    # has never accepted (see below). The skip is kept for hosts that genuinely have no ffmpeg (a
+    # developer laptop, the packaging-only lanes); it is no longer the normal outcome in CI. The
+    # all-skipped guard in conftest still fires if cargo (and thus every other e2e test) also went
+    # missing (sc-8935 / F-133).
     if shutil.which("ffmpeg") is None:
         pytest.skip("ffmpeg is required for the FFmpeg worker smoke test")
 
@@ -597,13 +599,20 @@ def test_rust_worker_completes_ffmpeg_frame_and_timeline_jobs_against_rust_api_b
         for index in range(5):
             detection_job = httpx.post(
                 f"{rust_api}/api/v1/projects/{project_id}/person-tracks/detections",
-                # `preview: true` is required for this CPU-only smoke. Detection/tracking
-                # default to the REAL, model-backed capability (`preview` defaults to false in
-                # `PersonDetectionJobRequest`), which only the MLX/candle GPU worker advertises;
-                # the CPU utility worker this test spawns (`SCENEWORKS_GPU_ID=cpu`) advertises
-                # only `person_detect_preview`/`person_track_preview`, so a real job would sit
-                # queued forever. Exercising the procedural preview path is the point here.
-                json={"sourceAssetId": asset_id, "sourceTimestamp": index * 0.1, "preview": True},
+                # `preview: True`, not the default: this test spawns ONE worker with
+                # SCENEWORKS_GPU_ID=cpu, and `worker_capabilities_with_utility` gives a CPU worker
+                # `person_detect_preview` but deliberately NOT `person_detect` — real model-backed
+                # detection routes to the MLX/candle GPU worker (`preview` defaults to false in
+                # `PersonDetectionJobRequest`, so omitting it asks for the real capability).
+                # Without this the five jobs stayed `queued` with `workerId: None` forever and the
+                # test timed out; exercising the procedural preview path is the point here. Same
+                # latent class as the export resolution above: invisible until the ffmpeg skip
+                # stopped hiding this test from CI (sc-19549).
+                json={
+                    "sourceAssetId": asset_id,
+                    "sourceTimestamp": index * 0.1,
+                    "preview": True,
+                },
                 timeout=5,
             )
             detection_job.raise_for_status()
@@ -648,11 +657,13 @@ def test_rust_worker_completes_ffmpeg_frame_and_timeline_jobs_against_rust_api_b
         frame_job.raise_for_status()
         export_job = httpx.post(
             f"{rust_api}/api/v1/projects/{project_id}/timelines/{timeline_id}/exports",
-            # 640 is the smallest export preset the API accepts (`validate_timeline_export`
-            # allows 640/720/1024/1280). The original 240 here was the *worker's* clamp floor
-            # (`media_jobs.rs` `.clamp(240, 2160)`), which is a defensive bound on an untrusted
-            # payload, not a supported size — so this POST 400'd and the test never passed on a
-            # machine with ffmpeg. Matches the parity contract snapshot's export payload.
+            # 640, not 240: `validate_timeline_export` admits only 640/720/1024/1280, so 240 is a
+            # flat 400 and this request never created a job. The 240 came from the *worker's* clamp
+            # floor (`media_jobs.rs` `.clamp(240, 2160)`), which is a defensive bound on an
+            # untrusted payload rather than a supported size. It had been that way since the route
+            # and this test landed on the same day (7aef05c4f / 3168dd187, 2026-05-17) — invisible
+            # because the ffmpeg skip below meant this test had never once executed in CI.
+            # Matches `test_rust_api_contract_snapshots.py`, which exports at 640.
             json={"resolution": 640, "fps": 24, "requestedGpu": "auto"},
             timeout=5,
         )
@@ -671,7 +682,8 @@ def test_rust_worker_completes_ffmpeg_frame_and_timeline_jobs_against_rust_api_b
                 "representativeFrameAssetId": detection_completed[0]["result"]["frameAssetId"],
                 "detection": first_detection,
                 "trackName": "Hero",
-                # Same CPU-lane reason as the detection jobs above.
+                # Same reason as the detections above: a CPU worker advertises
+                # `person_track_preview`, never `person_track`.
                 "preview": True,
             },
             timeout=5,
