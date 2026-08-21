@@ -1702,20 +1702,18 @@ and the whole sweep is discarded at the end (§5, §6). Resume an interrupted sw
 `--resume` at the partial output — the runner atomically checkpoints after every successful provider
 response.
 
-Six rows, ordered cheapest-first. The three-coefficient cross form needs at least three distinct
-non-collinear geometry points plus at least one held-out row, so if the lane budget runs out the last
-row (`704x1280 f189`, the heaviest) may be dropped and the remaining five still fit. Dropping more
-than that makes the slice singular.
+Six rows, ordered cheapest-first, and **all six are mandatory**: four `fit` plus two `held_out`.
+The three-coefficient cross form is mathematically identifiable from fewer points, but mathematical
+identifiability is not the SC-19057 terminal acceptance contract. If the resource window ends after
+five, retain the checkpoint outside the repository and resume at the exact same SceneWorks,
+inference, and artifact revisions. Never drop `704x1280 f189`, copy a reduced plan, or promote a
+five-row subset. The pre-promotion validator and the fitter's `--record-terminals` path both fail
+closed unless the exact six unique fixtures are `runtime_complete`.
 
-**q8 runs from a separate copy of the plan, never an in-place edit.** The committed plan's
-`target.tier` must stay `q4` — `platform-review-contracts.test.mjs` pins every row's tier to
-`candleDefaults[0].variant`, so a committed q8 swap reds that gate. An in-place *uncommitted* swap
-is just as unusable: the harness stamps every record with each repository's dirty flag from `git
-status --porcelain`, which counts untracked changes, so editing the plan inside this checkout
-dirties SceneWorks and the whole q8 sweep is discarded at `check` (§5, and the `--output` note
-above). Instead, copy `wan-candle-video-capture-plan.json` to a path OUTSIDE
-the checkout, swap `q4` → `q8` in that copy's `target.tier`, `name`, and `fixture` tokens, and point
-`--config` at the copy.
+**q4 is the only SC-19057 campaign.** The shared Windows Candle workflow accepts provisioning
+inputs for its older modes, but its SC-19057 mode rejects every repository, revision, pattern, or
+subdirectory other than the immutable q4 identity below. q8 and bf16 are outside the accepted
+terminal campaign; do not create an external plan copy to route around that decision.
 
 **Cost is unmeasured on this lane — measure yours and report it, do not promise a number.** What is
 known: the shipped `candle.vramGbByTier` for this model was measured on an idle RTX PRO 6000 at
@@ -1726,19 +1724,55 @@ two full clips (the measured render and its warm repeat).
 
 ### 12e. Through the guarded dispatch
 
-There is no `run_memory_calibration`-style input for this lane on `windows-candle.yml` yet; the
-existing `run_five_rung_reference` input drives `candle:krea_2_turbo` only (§6b). Until one is added,
-run §12d directly on the CUDA host with the runner tokens paused. If you add the workflow input,
-mirror the existing one's shape: validate the artifact identity, resolve the snapshot root without
-printing it, check inference out at the exact `INFERENCE_PIN`, build the release adapter, run the
-harness, `check` the bundle, and upload it.
+Dispatch the existing default-branch `.github/workflows/windows-candle.yml` at the frozen feature
+head, selecting only `run_sc19057_wan_capture`. GitHub can dispatch that path against a feature ref
+because the workflow itself already exists on `main`; a brand-new feature-only workflow would not
+be callable. The SC-19057 steps are guarded by `workflow_dispatch` plus that exact mode input, and
+the workflow rejects selecting it together with any other real-weight execution mode.
+
+Set the following inputs exactly (the workflow rejects every drift from the compiled pin or fixed
+artifact):
+
+```text
+run_sc19057_wan_capture = true
+provision_snapshot      = true
+inference_revision      = 4013049764172ee7dc707101c7da8c83c1483f2d
+provision_repository    = SceneWorks/wan2.2-ti2v-5b-candle
+provision_revision      = 9b173dc8660334a87a11e67de58939afe68f8cb2
+provision_patterns      = q4/**
+provision_subdir        = q4
+run_five_rung_reference = false
+run_ltx_eros_acceptance = false
+```
+
+`provision_cache_dir` may be left empty for the runner's established public Hugging Face cache or
+set to an absolute runner-local cache path. It does not change the sealed artifact identity.
+
+Do not dispatch while another CUDA/real-weight workflow occupies the shared physical lane. The job
+checks out both exact sources, verifies the closure ledger before capture, anonymously provisions
+and hashes the 25-file/17,338,835,457-byte q4 artifact, maps all three `SCENEWORKS_WAN_*` variables,
+captures outside the checkout, validates exact 6/6 acceptance, and uploads the raw bundle plus plan,
+artifact inventory, acceptance receipt, run identity, and SHA-256 manifest. Its bounded cleanup
+removes only job scratch and the nested inference checkout; the exact q4 hub cache is retained.
 
 ### 12f. Verify the receipt before believing it
 
 ```bash
 node scripts/memory-calibration-harness.mjs check \
   --input /abs/path/OUTSIDE/the/repo/wan-candle-video-sc-19057.json
+
+node scripts/validate-sc19057-wan-capture.mjs \
+  --input /abs/path/OUTSIDE/the/repo/wan-candle-video-sc-19057.json \
+  --plan docs/calibration/sc-19057/wan-candle-video-capture-plan.json \
+  --sceneworks-revision <exact capture head> \
+  --inference-revision 4013049764172ee7dc707101c7da8c83c1483f2d
 ```
+
+The second command is the promotion boundary, not an optional receipt summary. It requires exactly
+six records and six unique record/fixture identities, the exact committed case set and geometry,
+`runtime_complete` on every row, clean paired-repository stamps, the exact inference closure and q4
+artifact identity, and the authoritative Candle lane. In its receipt, `plannedEntries`,
+`capturedFixtures`, and `runtimeComplete` must all equal `6`.
 
 Then read the receipt rather than assuming it. The arm is built so that each of these is a measured
 claim, and each has a way to be wrong:
@@ -1765,7 +1799,8 @@ wired into `npm run check` so it stays schema-valid:
    holds the capture plan and nothing else.
 2. Add it to the `check:memory-calibration` chain in `package.json`, beside the LTX video record.
    Confirm the gate protects its **existence** by deleting the file and watching the check red.
-3. Feed it to the fitter. `scripts/fit-ltx-temporal-form.mjs` is backend-neutral **in its plumbing**
+3. Feed it to the fitter only after the standalone acceptance command above passes.
+   `scripts/fit-ltx-temporal-form.mjs` is backend-neutral **in its plumbing**
    — it reads `record.backend`, `record.target.modelId` (→ `modelFamily` from the manifest),
    `record.repositories.inference.closureDigest`, and the `_role` labels from the committed plan —
    so it emits a `backend: "candle"` curve into `docs/generated/video-memory-curves.json` beside the
@@ -1857,7 +1892,7 @@ wired into `npm run check` so it stays schema-valid:
    nothing. Two consequences for the terminal-phase operator:
 
    * Read and promote the `cross` candidate only — `fixedGb + perMpxGb*mpx + perMpxFrameGb*mpx*frames`.
-     That is what the six-row plan is designed for (two pixel counts x three frame counts, three fit
+     That is what the six-row plan is designed for (two pixel counts x three frame counts, four fit
      rows and two held-out), and it is the ONLY form the runtime reader evaluates:
      `crates/sceneworks-core/src/video_memory_curves.rs` implements the affine cross form and nothing
      else, so a winning `latent_tokens` fit could not be read back even if it were meaningful.

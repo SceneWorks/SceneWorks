@@ -180,8 +180,8 @@ function dispatchInputs(workflow) {
   let current = null;
   for (const line of workflow.slice(start, end).split("\n")) {
     // Deliberately permissive: GitHub allows digits, case and hyphens in an input name, and this
-    // helper backs the "at most 10 inputs" cap check. A narrower pattern would silently skip an
-    // input and let a workflow GitHub rejects sail through as 10-or-fewer.
+    // helper backs the "at most 25 inputs" cap check. A narrower pattern would silently skip an
+    // input and let a workflow GitHub rejects sail through as 25-or-fewer.
     const header = line.match(/^ {6}([A-Za-z0-9_-]+):$/);
     if (header) {
       current = header[1];
@@ -195,14 +195,29 @@ function dispatchInputs(workflow) {
   return { names, defaults };
 }
 
+function assertDispatchInputLimit(workflow) {
+  const { names } = dispatchInputs(workflow);
+  assert.ok(names.length <= 25, `workflow_dispatch allows at most 25 inputs, found ${names.length}`);
+}
+
+test("windows-candle enforces GitHub's current 25-input workflow_dispatch ceiling", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  assertDispatchInputLimit(workflow);
+  const extra = Array.from(
+    { length: 25 },
+    (_, index) => `      mutation_input_${index}:\n        type: boolean\n        default: false\n`,
+  ).join("");
+  const overLimit = workflow.replace("      run_sc19057_wan_capture:\n", `${extra}      run_sc19057_wan_capture:\n`);
+  assert.throws(() => assertDispatchInputLimit(overLimit), /at most 25 inputs, found 35/);
+});
+
 test("windows-candle provisioning is model-parameterized, not Krea-hardcoded", async () => {
   const workflow = await source(".github/workflows/windows-candle.yml");
   const { names, defaults } = dispatchInputs(workflow);
 
-  // GitHub rejects a workflow_dispatch with more than 10 inputs. The Krea inputs were RENAMED
-  // rather than shadowed by a parallel provision_* family precisely to stay under that cap;
-  // a future story that adds an input needs the headroom this preserves.
-  assert.ok(names.length <= 10, `workflow_dispatch allows at most 10 inputs, found ${names.length}`);
+  // GitHub's current ceiling is 25. Keep the generalized provision family rather than cloning it
+  // per model; the dedicated limit test above proves this workflow remains dispatchable.
+  assertDispatchInputLimit(workflow);
 
   for (const gone of ["provision_krea_snapshot", "krea_repository", "krea_revision"]) {
     assert.ok(!names.includes(gone), `${gone} was renamed; two provisioning paths must not coexist`);
@@ -290,7 +305,7 @@ test("windows-candle keeps the provisioning and five-rung timeout budgets", asyn
     workflow,
     // The LTX Eros acceptance arm (SC-18902, from main) rides ahead of the provisioning budget;
     // the provisioning / five-rung / default budgets keep their exact prior values behind it.
-    /timeout-minutes: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.run_ltx_eros_acceptance && 360 \|\| github\.event_name == 'workflow_dispatch' && inputs\.provision_snapshot && 240 \|\| github\.event_name == 'workflow_dispatch' && inputs\.run_five_rung_reference && 120 \|\| 45 \}\}/,
+    /timeout-minutes: \$\{\{ github\.event_name == 'workflow_dispatch' && \(inputs\.run_ltx_eros_acceptance \|\| inputs\.run_sc19057_wan_capture\) && 360 \|\| github\.event_name == 'workflow_dispatch' && inputs\.provision_snapshot && 240 \|\| github\.event_name == 'workflow_dispatch' && inputs\.run_five_rung_reference && 120 \|\| 45 \}\}/,
   );
 });
 
@@ -347,7 +362,7 @@ test("windows-candle routes weights dispatches to a real-weights runner, like th
   // `real-weights`; a provisioning job on the other half finds no snapshot.
   assert.match(
     candle,
-    /runs-on: \$\{\{ \(github\.event_name == 'workflow_dispatch' && \(inputs\.provision_snapshot \|\| inputs\.run_five_rung_reference\)\) && fromJSON\('\["self-hosted","Windows","X64","cuda","real-weights"\]'\) \|\| fromJSON\('\["self-hosted","Windows","X64","cuda"\]'\) \}\}/,
+    /runs-on: \$\{\{ \(github\.event_name == 'workflow_dispatch' && \(inputs\.provision_snapshot \|\| inputs\.run_five_rung_reference \|\| inputs\.run_sc19057_wan_capture\)\) && fromJSON\('\["self-hosted","Windows","X64","cuda","real-weights"\]'\) \|\| fromJSON\('\["self-hosted","Windows","X64","cuda"\]'\) \}\}/,
   );
   // Ordinary PR/push runs must NOT be narrowed to the real-weights half: that would cut the
   // available pool for this ~24m lane in half for no coverage.
@@ -460,8 +475,8 @@ test("windows-candle validates every provisioning input that reaches a path", as
   const workflow = await source(".github/workflows/windows-candle.yml");
   assert.match(
     workflow,
-    /if \(\$env:PROVISION_SNAPSHOT -eq 'true' -or \$env:RUN_FIVE_RUNG_REFERENCE -eq 'true'\) \{/,
-    "provisioning-input validation must cover the five-rung-only path that also consumes them",
+    /if \(\$env:PROVISION_SNAPSHOT -eq 'true' -or \$env:RUN_FIVE_RUNG_REFERENCE -eq 'true' -or \$env:RUN_SC19057_WAN_CAPTURE -eq 'true'\) \{/,
+    "provisioning-input validation must cover every capture path that also consumes them",
   );
   assert.match(workflow, /throw 'provision_subdir must not traverse out of the snapshot'/);
   // The root sentinel. GitHub substitutes an input's `default` for any empty dispatch value, so
@@ -641,12 +656,12 @@ test("a weights-only dispatch skips the entire compile chain, pinned per step", 
   const workflow = await source(".github/workflows/windows-candle.yml");
 
   // The WHOLE expression. A weights-only dispatch is `provision_snapshot` true AND
-  // `run_five_rung_reference` false; every other shape must still compile. Half of this is not a
-  // weaker version of it -- dropping `&& !inputs.run_five_rung_reference` would strip the compile
-  // chain off Krea's five-rung capture too, which this story's scope guard forbids, and dropping
-  // `github.event_name == 'workflow_dispatch'` would strip it off every PR and push.
+  // neither real execution mode selected; every other shape must still compile. Half of this is
+  // not a weaker version of it -- dropping either negative arm would strip the compile chain off
+  // that real capture, and dropping `github.event_name == 'workflow_dispatch'` would strip it off
+  // every PR and push.
   const skip =
-    /^        if: \$\{\{ !\(github\.event_name == 'workflow_dispatch' && inputs\.provision_snapshot && !inputs\.run_five_rung_reference\) \}\}$/m;
+    /^        if: \$\{\{ !\(github\.event_name == 'workflow_dispatch' && inputs\.provision_snapshot && !inputs\.run_five_rung_reference && !inputs\.run_sc19057_wan_capture\) \}\}$/m;
 
   // SCOPED PER STEP. The expression is byte-identical on all six steps, so one file-wide
   // `assert.match` is satisfied by any single survivor and a narrowing mutation on the other five
@@ -663,7 +678,7 @@ test("a weights-only dispatch skips the entire compile chain, pinned per step", 
   for (const step of jobSteps(workflow).filter((candidate) => candidate.cargo)) {
     assert.ok(
       skip.test(step.body) ||
-        /if: \$\{\{[^\n]*inputs\.(run_five_rung_reference|run_ltx_eros_acceptance)/.test(step.body),
+        /if: \$\{\{[^\n]*inputs\.(run_five_rung_reference|run_ltx_eros_acceptance|run_sc19057_wan_capture)/.test(step.body),
       `${step.name} would compile on a weights-only dispatch; guard it or gate it`,
     );
   }
@@ -684,9 +699,9 @@ test("every failure mode a weights-only dispatch can hit is still fatal", async 
   const throwCounts = {
     // repo-id shape, revision shape, empty allow-list, rooted pattern, the two containment guards
     // (segment shape + canonical probe), subdir shape, subdir traversal, cache-dir newline,
-    // cache-dir absoluteness, and the three five-rung guards (inference_revision shape, the fixed
-    // Krea repository, INFERENCE_PIN agreement).
-    "Validate dispatch inputs": 13,
+    // cache-dir absoluteness; the three five-rung guards (inference_revision shape, the fixed Krea
+    // repository, INFERENCE_PIN agreement); mutual exclusion; and six exact SC-19057 guards.
+    "Validate dispatch inputs": 20,
     // Pure derivation: it writes GITHUB_ENV and throws nothing.
     "Resolve snapshot provisioning parameters": 0,
     // A non-zero `python --version`, and a minor version below 12.
@@ -1781,8 +1796,9 @@ test("every workspace path a self-hosted lane watches maps to a package that lan
     // POLARITY MATTERS, and it did not used to (sc-18691). This filter was a bare substring test
     // for `github.event_name == 'workflow_dispatch'` inside the step's `if:`. sc-18691 added the
     // opposite polarity to windows-candle.yml -- `!(github.event_name == 'workflow_dispatch' &&
-    // inputs.provision_snapshot && !inputs.run_five_rung_reference)`, which skips the compile chain
-    // for a weights-only dispatch and therefore RUNS on every PR and push. The substring test read
+    // inputs.provision_snapshot && !inputs.run_five_rung_reference &&
+    // !inputs.run_sc19057_wan_capture)`, which skips the compile chain for a weights-only dispatch
+    // and therefore RUNS on every PR and push. The substring test read
     // those two forms as identical, dropped all six compile steps, and left this audit with zero
     // cargo invocations to reason about -- it survived only because of the `invocations.length > 0`
     // assertion below, which is exactly the vacuity backstop that case is for. Strip negated groups
@@ -4035,7 +4051,7 @@ test("the rejected LTX Eros CUDA baseline keeps renderer and product timelines d
     );
     assert.match(
       workflow,
-      /timeout-minutes: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.run_ltx_eros_acceptance && 360 \|\|/,
+      /timeout-minutes: \$\{\{ github\.event_name == 'workflow_dispatch' && \(inputs\.run_ltx_eros_acceptance \|\| inputs\.run_sc19057_wan_capture\) && 360 \|\|/,
       "the real-weight render needs the guarded six-hour ceiling",
     );
     for (const [repository, revision] of [
