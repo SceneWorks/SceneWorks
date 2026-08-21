@@ -298,6 +298,13 @@ export function VideoStudio() {
   const [recipeTierRequest, setRecipeTierRequest] = useState(null);
   const [advancedOpen, setAdvancedOpen] = useState(saved.advancedOpen ?? false);
   const [model, setModel] = useState(saved.model ?? videoModels[0]?.id ?? ltxVideoModelId);
+  // Every USER model picker must retire replay-only state. Automatic catalog/mode/recipe snaps use
+  // the raw state setter below and preserve the replay while its target model becomes active.
+  const setUserModel = useCallback((nextModel) => {
+    setRecipeModelNotice("");
+    setRecipeTierRequest(null);
+    setModel(nextModel);
+  }, []);
   const textEncoderModel =
     textEncoderSelection.modelId === model ? textEncoderSelection.id : null;
   const setTextEncoderModel = (next, modelId = model) =>
@@ -753,19 +760,6 @@ export function VideoStudio() {
     scail2CandleTierLane && !availableTiers.includes("bf16")
       ? "SCAIL-2 Candle generation currently requires the installed bf16 tier. Install or repair bf16 in Model Manager; q4 and q8 are not yet enabled for Candle generation."
       : null;
-  const replayTierTargetsActiveModel = Boolean(
-    recipeTierRequest && recipeTierRequest.modelId === selectedModel?.id,
-  );
-  const replayTierBlockMessage =
-    replayTierTargetsActiveModel && !availableTiers.includes(recipeTierRequest.tier)
-      ? unavailableRecipeTierMessage(
-          selectedModel,
-          activeBackend,
-          recipeTierRequest.tier,
-          availableTiers,
-        )
-      : null;
-  const executionTierBlockMessage = replayTierBlockMessage ?? baseExecutionTierBlockMessage;
   const hostMemory = useHostMemory();
   const nativeMemoryGb = hostMemoryGbForBackend(hostMemory, activeBackend);
   const autoTier = useMemo(
@@ -812,6 +806,28 @@ export function VideoStudio() {
     },
     [handleTierChange],
   );
+  const replayTierTargetsActiveModel = Boolean(
+    recipeTierRequest && recipeTierRequest.modelId === selectedModel?.id,
+  );
+  const replayTierBlockMessage = replayTierTargetsActiveModel
+    ? !availableTiers.includes(recipeTierRequest.tier)
+      ? unavailableRecipeTierMessage(
+          selectedModel,
+          activeBackend,
+          recipeTierRequest.tier,
+          availableTiers,
+        )
+      : quantTier !== recipeTierRequest.tier
+        ? `Preparing this recipe's exact ${tierLabel(recipeTierRequest.tier)} tier. Generation stays blocked until that tier is selected.`
+        : null
+    : null;
+  const executionTierBlockMessage = replayTierBlockMessage ?? baseExecutionTierBlockMessage;
+  const canStartNewBf16FromReplay =
+    replayTierTargetsActiveModel &&
+    scail2CandleTierLane &&
+    recipeTierRequest.tier !== "bf16" &&
+    !SCAIL2_CANDLE_PRODUCT_TIERS.includes(recipeTierRequest.tier) &&
+    availableTiers.includes("bf16");
   const showTorchQuantization = activeBackend !== "mlx" && !nativeTierLane && supportsQuantization;
   const selectedTierQuantize =
     nativeTierLane && availableTiers.includes(quantTier) ? tierQuantize(quantTier) : null;
@@ -2162,7 +2178,7 @@ export function VideoStudio() {
                 videoAssets={videoAssets}
                 videoModels={videoModels}
                 model={model}
-                setModel={setModel}
+                setModel={setUserModel}
               />
             ) : null}
           </div>
@@ -2174,12 +2190,7 @@ export function VideoStudio() {
                 Model
                 <StudioUpdateBadge item={selectedModel} />
                 <select
-                  onChange={(event) => {
-                    // Picking a model answers both recipe notices, so retire them.
-                    setRecipeModelNotice("");
-                    setRecipeTierRequest(null);
-                    setModel(event.target.value);
-                  }}
+                  onChange={(event) => setUserModel(event.target.value)}
                   value={model}
                 >
                   {/* Models gated on the selected tab (sc-5716): show only models that serve the
@@ -2778,6 +2789,15 @@ export function VideoStudio() {
               row, from the same summary that gates the button (sc-10650). Project, prompt
               and inputs are silent requirements: their empty fields show it. */}
           <ValidationSummary issues={videoValidity.surfaced} label="Generate errors" />
+          {canStartNewBf16FromReplay ? (
+            <button
+              className="secondary-action"
+              onClick={() => handleExecutionTierChange("bf16")}
+              type="button"
+            >
+              Use bf16 for a new generation
+            </button>
+          ) : null}
 
         </WorkPanel>
 

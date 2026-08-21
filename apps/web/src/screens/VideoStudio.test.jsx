@@ -3,6 +3,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import React, { act } from "react";
+import { flushSync } from "react-dom";
 import JSON5 from "json5";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { click, mountRoot, setInput, setSelect, unmountRoot } from "../testUtils/dom.js";
@@ -1666,8 +1667,121 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
           .dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
       });
       expect(context.createVideoJob).not.toHaveBeenCalled();
+
+      const useBf16 = buttonWithText(container, "Use bf16 for a new generation");
+      expect(useBf16).toBeTruthy();
+      await click(useBf16);
+      expect(renderButton.disabled).toBe(false);
+      expect(container.textContent).not.toContain(
+        "not enabled for SCAIL-2 Candle generation",
+      );
+      await click(renderButton);
+      expect(context.createVideoJob.mock.calls[0][0].advanced).toMatchObject({ mlxQuantize: 0 });
     });
   }
+
+  it("blocks direct submit while an exact replay tier is still transitioning across backends", async () => {
+    const createVideoJob = vi.fn();
+    const common = {
+      videoModels: [scailTierModel(["q4", "q8", "bf16"])],
+      assets: replayAssets,
+      createVideoJob,
+      studioLaunch: tierReplay("scail2_14b", 8, "candle-to-mlx-q8"),
+    };
+    await render(baseContext({ ...common, macCapabilities: null }));
+
+    expect(tierPicker().value).toBe("bf16");
+    expect(buttonWithText(container, "Render clip").disabled).toBe(true);
+
+    // Make Q8 available by changing the active backend, then submit in the same turn. Availability
+    // is not selection: the replay effect has not yet written Q8 into picker state, so the previous
+    // Candle bf16 value must neither run nor be omitted from the payload.
+    flushSync(() => {
+      root.render(
+        <AppContext.Provider value={baseContext({ ...common, macCapabilities: MAC_CAPS })}>
+          <VideoStudio />
+        </AppContext.Provider>,
+      );
+    });
+    container
+      .querySelector("form")
+      .dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+    expect(createVideoJob).not.toHaveBeenCalled();
+
+    await act(async () => {});
+    expect(tierPicker().value).toBe("q8");
+    expect(buttonWithText(container, "Render clip").disabled).toBe(false);
+    await click(buttonWithText(container, "Render clip"));
+    expect(createVideoJob.mock.calls[0][0].advanced).toMatchObject({ mlxQuantize: 8 });
+  });
+
+  it("retires a rejected replay through the Replace Person engine selector", async () => {
+    const scail = {
+      ...scailTierModel(["q4", "q8", "bf16"]),
+      capabilities: ["replace_person"],
+    };
+    const wan = {
+      ...tieredVideoModel(["q4"]),
+      id: "wan_2_2",
+      name: "Wan 2.2",
+      family: "wan-video",
+      adapter: "wan_video",
+      capabilities: ["replace_person"],
+    };
+    const context = baseContext({
+      videoModels: [wan, scail],
+      assets: replayAssets,
+      characters: [{ id: "char_1", name: "Ada", projectId: "project_1" }],
+      personTracks: [
+        {
+          id: "track_1",
+          name: "Selected person",
+          projectId: "project_1",
+          sourceAssetId: "driving",
+          status: {},
+          frames: [],
+        },
+      ],
+      macCapabilities: null,
+      studioLaunch: {
+        id: "replace-scail-q8",
+        view: "Video",
+        recipe: {
+          mode: "replace_person",
+          model: "scail2_14b",
+          prompt: "Replay this exact replacement",
+          normalizedSettings: {
+            sourceClipAssetId: "driving",
+            personTrackId: "track_1",
+            characterId: "char_1",
+          },
+          rawAdapterSettings: { mlxQuantize: 8 },
+        },
+      },
+    });
+    await render(context);
+
+    expect(container.textContent).toContain("This recipe was recorded at Q8");
+    const engineSelect = [...container.querySelectorAll("label")]
+      .find((label) => label.textContent.includes("Replacement engine"))
+      .querySelector("select");
+    setSelect(engineSelect, "wan_2_2");
+    await act(async () => {});
+    expect(container.textContent).not.toContain("This recipe was recorded at Q8");
+
+    setSelect(engineSelect, "scail2_14b");
+    await act(async () => {});
+    expect(container.textContent).not.toContain("This recipe was recorded at Q8");
+    expect(tierPicker().value).toBe("bf16");
+    const submitCta = container.querySelector(".prompt-cta");
+    expect(submitCta.disabled).toBe(false);
+    await click(submitCta);
+    expect(context.createVideoJob.mock.calls[0][0]).toMatchObject({
+      mode: "replace_person",
+      model: "scail2_14b",
+      advanced: { mlxQuantize: 0 },
+    });
+  });
 
   it("refuses an unavailable Candle SCAIL-2 tier after a recipe switches models", async () => {
     const initial = tieredVideoModel(["q4"]);
