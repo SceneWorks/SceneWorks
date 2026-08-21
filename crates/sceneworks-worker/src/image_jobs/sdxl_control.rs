@@ -857,10 +857,10 @@ mod sdxl_control_tests {
         let base = root.path().join("base");
         std::fs::create_dir_all(&base).expect("base dir");
         sparse(base.join("model.safetensors"), GIB);
-        let control = sparse(root.path().join("control.safetensors"), 2 * GIB / 3);
-        let adapter = sparse(root.path().join("adapter.safetensors"), 2 * GIB / 3);
-        let component = sparse(root.path().join("component.safetensors"), 2 * GIB / 3);
-        let selected_te = sparse(root.path().join("selected-te.safetensors"), GIB / 8);
+        let control = sparse(root.path().join("control.safetensors"), GIB / 8);
+        let adapter = sparse(root.path().join("adapter.safetensors"), GIB / 8);
+        let component = sparse(root.path().join("component.safetensors"), GIB / 4);
+        let selected_te = sparse(root.path().join("selected-te.safetensors"), 5 * GIB / 2);
 
         let base_composition = sdxl_control_spec(
             base,
@@ -878,14 +878,11 @@ mod sdxl_control_tests {
             "4",
             || {
                 assert!(
-                    apply_sdxl_control_mlx_residency(LoadSpec::new(WeightsSource::Dir(
-                        root.path().join("base")
-                    )))
-                    .is_ok(),
-                    "the base alone fits the 4 GiB weights floor"
+                    apply_sdxl_control_mlx_residency(base_composition).is_ok(),
+                    "the otherwise identical composition fits without the selected encoder"
                 );
                 let error = apply_sdxl_control_mlx_residency(complete)
-                    .expect_err("the finalized control composition must be refused before load");
+                    .expect_err("attaching the selected encoder alone must cross the fit threshold");
                 assert!(error.to_string().contains("unified memory"), "{error}");
             },
         );

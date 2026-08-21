@@ -4292,6 +4292,24 @@ fn weights_source_bytes(src: &WeightsSource) -> u64 {
     }
 }
 
+fn weights_source_path(source: &WeightsSource) -> &Path {
+    match source {
+        WeightsSource::Dir(path) | WeightsSource::File(path) => path.as_path(),
+    }
+}
+
+fn adapter_path_bytes(path: &Path) -> u64 {
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_dir() => sum_safetensors_bytes(path),
+        Ok(metadata)
+            if path.extension().and_then(|extension| extension.to_str()) == Some("safetensors") =>
+        {
+            metadata.len()
+        }
+        _ => 0,
+    }
+}
+
 fn adapter_source_bytes_for_gate(engine_id: &str, spec: &LoadSpec) -> u64 {
     adapter_source_bytes_for_gate_where(engine_id, spec, |_| true)
 }
@@ -4312,19 +4330,7 @@ fn adapter_source_bytes_for_gate_where(
         if !include(&adapter.path) {
             return total;
         }
-        let bytes = match std::fs::metadata(&adapter.path) {
-            Ok(metadata) if metadata.is_dir() => sum_safetensors_bytes(&adapter.path),
-            Ok(metadata)
-                if adapter
-                    .path
-                    .extension()
-                    .and_then(|extension| extension.to_str())
-                    == Some("safetensors") =>
-            {
-                metadata.len()
-            }
-            _ => 0,
-        };
+        let bytes = adapter_path_bytes(&adapter.path);
         total.saturating_add(bytes)
     });
     adapter_resident_source_bytes(engine_id, spec, source_bytes)
@@ -5045,6 +5051,7 @@ fn spec_component_bytes_with_provider_footprint(
         footprint,
         weights_source_bytes,
         external_adapter_bytes,
+        adapter_path_bytes,
     )
 }
 
@@ -5054,6 +5061,7 @@ fn spec_component_bytes_with_provider_footprint_and_sizes(
     footprint: Option<PerComponentBytes>,
     source_bytes: impl Fn(&WeightsSource) -> u64,
     external_adapter_bytes: u64,
+    adapter_source_bytes: impl Fn(&Path) -> u64,
 ) -> (u64, u64, HeadroomAllowance) {
     let footprint_te = footprint.map(|fp| fp.text_encoder);
     // A provider that accepts a primary single-file checkpoint owns the meaning of its named
@@ -5095,14 +5103,26 @@ fn spec_component_bytes_with_provider_footprint_and_sizes(
             },
         ),
     };
+    let mut priced_external_paths = Vec::new();
     if let Some(control) = &spec.control {
-        total_bytes += source_bytes(control);
+        let bytes = source_bytes(control);
+        total_bytes = total_bytes.saturating_add(bytes);
+        priced_external_paths.push((weights_source_path(control), bytes));
     }
     // Read the actual adapter sources at the same pre-load seam as controls. Provider-specific
     // residency matters: packed Wan keeps additive residuals, while dense Wan folds them into the
     // base and adds zero independent bytes. Other providers conservatively retain the source bytes;
     // a typed component contract may replace them with a more exact resident measurement below.
     total_bytes = total_bytes.saturating_add(external_adapter_bytes);
+    if external_adapter_bytes > 0 {
+        priced_external_paths.extend(spec.adapters.iter().filter_map(|adapter| {
+            let inside = match &spec.weights {
+                WeightsSource::Dir(root) => adapter.path.starts_with(root),
+                WeightsSource::File(_) => false,
+            };
+            (!inside).then(|| (adapter.path.as_path(), adapter_source_bytes(&adapter.path)))
+        }));
+    }
     // Caller-provisioned components (epic 13657) are staged from a DIFFERENT snapshot than
     // `spec.weights`, so the dir scan above cannot see them (sc-15154). Mage-Flow's per-tier dir
     // holds the DiT alone — its text encoder and VAE are bit-identical across the six variants and
@@ -5150,11 +5170,57 @@ fn spec_component_bytes_with_provider_footprint_and_sizes(
         if !inside {
             let component_bytes = source_bytes(source);
             total_bytes = total_bytes.saturating_add(component_bytes);
+            priced_external_paths.push((weights_source_path(source), component_bytes));
             if matches!(&spec.weights, WeightsSource::File(_))
                 && component_id == gen_core::COMFYUI_TEXT_ENCODER_COMPONENT
             {
                 te_bytes = te_bytes.saturating_add(component_bytes);
             }
+        }
+    }
+    // The optional selected encoder is a typed source, not a named component. Include its exact
+    // source bytes in the resident total and the staged text-encoder phase. The primary directory is
+    // already scanned recursively, and the same selected source can also be carried by a named slot,
+    // so charge only the part not already covered by an ancestor/duplicate/descendant source.
+    // Provider-owned File footprints are complete assemblies and remain authoritative.
+    if provider_owned_file_footprint.is_none() {
+        if let Some(text_encoder) = &spec.text_encoder {
+            let text_encoder_path = weights_source_path(text_encoder);
+            let inside_primary = match &spec.weights {
+                WeightsSource::Dir(root) => text_encoder_path.starts_with(root),
+                WeightsSource::File(_) => false,
+            };
+            let text_encoder_bytes = source_bytes(text_encoder);
+            let additional_bytes = if inside_primary
+                || priced_external_paths
+                    .iter()
+                    .any(|(path, _)| text_encoder_path.starts_with(path))
+            {
+                0
+            } else {
+                let mut descendants: Vec<(&Path, u64)> = priced_external_paths
+                    .iter()
+                    .copied()
+                    .filter(|(path, _)| path.starts_with(text_encoder_path))
+                    .collect();
+                descendants.sort_by_key(|(path, _)| path.as_os_str().len());
+                let mut kept: Vec<(&Path, u64)> = Vec::with_capacity(descendants.len());
+                for (path, bytes) in descendants {
+                    if kept.iter().any(|(parent, _)| path.starts_with(parent)) {
+                        continue;
+                    }
+                    kept.push((path, bytes));
+                }
+                let already_priced = kept
+                    .into_iter()
+                    .fold(0_u64, |total, (_, bytes)| total.saturating_add(bytes));
+                text_encoder_bytes.saturating_sub(already_priced)
+            };
+            total_bytes = total_bytes.saturating_add(additional_bytes);
+            // A selection-aware provider footprint may already report this source's projected TE
+            // residency. `max`, rather than addition, preserves that provider contract while making
+            // a base-subdir-only footprint account for the external selection.
+            te_bytes = te_bytes.max(text_encoder_bytes);
         }
     }
     (total_bytes, te_bytes, headroom)
@@ -5200,6 +5266,12 @@ fn spec_component_bytes_with_provider_footprint_checked(
         footprint,
         |source| prepared_source_bytes(source, &file_sizes),
         external_adapter_bytes,
+        |path| {
+            std::path::absolute(path)
+                .ok()
+                .and_then(|path| file_sizes.get(&path).copied())
+                .unwrap_or(0)
+        },
     ))
 }
 
@@ -15642,6 +15714,40 @@ mod tests {
         let flat = LoadSpec::new(WeightsSource::Dir(tier))
             .with_component("text_encoder", WeightsSource::Dir(flat_te));
         assert_eq!(spec_component_bytes("mage_flow_edit", &flat).0, 3_700);
+    }
+
+    #[test]
+    fn external_selected_text_encoder_is_counted_once_across_containment_shapes() {
+        let root_guard = tempfile::Builder::new()
+            .prefix("mlx_fit_gate_selected_te_")
+            .tempdir()
+            .expect("temp dir");
+        let root = root_guard.path();
+        let write = |dir: std::path::PathBuf, bytes: usize| {
+            std::fs::create_dir_all(&dir).expect("mk dir");
+            std::fs::write(dir.join("model.safetensors"), vec![0_u8; bytes]).expect("write");
+            dir
+        };
+        let base = write(root.join("base"), 1_000);
+
+        // The selected encoder contains a separately named component. The component is already in
+        // the running total, so only the encoder directory's remaining bytes are additive.
+        let external_te = write(root.join("selected-te"), 500);
+        let nested_component = write(external_te.join("projection"), 200);
+        let external = LoadSpec::new(WeightsSource::Dir(base.clone()))
+            .with_component("projection", WeightsSource::Dir(nested_component))
+            .with_text_encoder(WeightsSource::Dir(external_te));
+        let (total, te_bytes, _) = spec_component_bytes("unregistered_fixture", &external);
+        assert_eq!(total, 1_000 + 500 + 200);
+        assert_eq!(te_bytes, 500 + 200);
+
+        // A selected source nested under the primary directory is already covered by the base scan.
+        let nested_te = write(base.join("selected-te"), 300);
+        let nested = LoadSpec::new(WeightsSource::Dir(base))
+            .with_text_encoder(WeightsSource::Dir(nested_te));
+        let (total, te_bytes, _) = spec_component_bytes("unregistered_fixture", &nested);
+        assert_eq!(total, 1_000 + 300);
+        assert_eq!(te_bytes, 300);
     }
 
     /// sc-15154 — the Mage q4 admit boundary, from the REAL published install sizes.
