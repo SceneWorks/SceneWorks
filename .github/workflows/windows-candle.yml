@@ -867,19 +867,29 @@ jobs:
       # child workflow, per-cell dispatch, cache/root override, or secret weight path
       # is accepted. The four dismantled pin-keyed gates remain untouched; this profile runs once only
       # after the final paired pins are frozen.
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - name: Set up the pinned terminal Node runtime
+        id: terminal_node
+        continue-on-error: true
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda }}
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: package-lock.json
-      - name: Install the pinned terminal schema validator
-        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda }}
+      - name: Install the pinned terminal Node dependencies
+        id: terminal_npm
+        continue-on-error: true
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' }}
         run: npm ci --ignore-scripts
+      - name: Run the targeted cross-platform terminal harness tests
+        id: terminal_tests
+        continue-on-error: true
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' && steps.terminal_npm.outcome == 'success' }}
+        run: node --test scripts/epic-20738-terminal-cuda-harness.test.mjs scripts/hash-artifact-inventory.test.mjs
       - name: Validate the frozen epic-20738 terminal dispatch
         id: terminal_validation
         continue-on-error: true
-        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda }}
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' && steps.terminal_npm.outcome == 'success' && steps.terminal_tests.outcome == 'success' }}
         shell: powershell
         env:
           SCENEWORKS_REVISION: ${{ inputs.sceneworks_revision }}
@@ -901,7 +911,7 @@ jobs:
       - name: Provision an isolated terminal Python client
         id: terminal_python
         continue-on-error: true
-        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_validation.outcome == 'success' }}
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' && steps.terminal_npm.outcome == 'success' && steps.terminal_tests.outcome == 'success' && steps.terminal_validation.outcome == 'success' }}
         shell: powershell
         run: |
           $venv = Join-Path $env:RUNNER_TEMP "sc-20945-python-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
@@ -914,7 +924,7 @@ jobs:
       - name: Check out the exact terminal inference source
         id: terminal_inference
         continue-on-error: true
-        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_validation.outcome == 'success' }}
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' && steps.terminal_npm.outcome == 'success' && steps.terminal_tests.outcome == 'success' && steps.terminal_validation.outcome == 'success' }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: SceneWorks/inference
@@ -924,7 +934,7 @@ jobs:
       - name: Run the exact 19-cell epic-20738 terminal CUDA profile
         id: terminal_campaign
         continue-on-error: true
-        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_validation.outcome == 'success' && steps.terminal_python.outcome == 'success' && steps.terminal_inference.outcome == 'success' }}
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' && steps.terminal_npm.outcome == 'success' && steps.terminal_tests.outcome == 'success' && steps.terminal_validation.outcome == 'success' && steps.terminal_python.outcome == 'success' && steps.terminal_inference.outcome == 'success' }}
         shell: cmd
         env:
           SCENEWORKS_ENABLE_EPIC_20738_TERMINAL_CUDA: "1"
@@ -943,15 +953,20 @@ jobs:
           path: ${{ runner.temp }}/sc-20945-epic-20738-${{ github.run_id }}-${{ github.run_attempt }}/
           if-no-files-found: error
       - name: Enforce the epic-20738 terminal verdict after receipt upload
+        id: terminal_verdict
         if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda }}
         shell: powershell
         env:
+          NODE_OUTCOME: ${{ steps.terminal_node.outcome }}
+          NPM_OUTCOME: ${{ steps.terminal_npm.outcome }}
+          TESTS_OUTCOME: ${{ steps.terminal_tests.outcome }}
           VALIDATION_OUTCOME: ${{ steps.terminal_validation.outcome }}
           PYTHON_OUTCOME: ${{ steps.terminal_python.outcome }}
           INFERENCE_OUTCOME: ${{ steps.terminal_inference.outcome }}
           CAMPAIGN_OUTCOME: ${{ steps.terminal_campaign.outcome }}
         run: |
-          $outcomes = @($env:VALIDATION_OUTCOME, $env:PYTHON_OUTCOME, $env:INFERENCE_OUTCOME, $env:CAMPAIGN_OUTCOME)
-          if ($outcomes -contains 'failure') {
+          $outcomes = @($env:NODE_OUTCOME, $env:NPM_OUTCOME, $env:TESTS_OUTCOME, $env:VALIDATION_OUTCOME, $env:PYTHON_OUTCOME, $env:INFERENCE_OUTCOME, $env:CAMPAIGN_OUTCOME)
+          $notSuccessful = @($outcomes | Where-Object { $_ -ne 'success' })
+          if ($notSuccessful.Count -gt 0) {
             throw "epic-20738 terminal evidence failed after upload: $($outcomes -join ', ')"
           }

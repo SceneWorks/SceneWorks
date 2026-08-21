@@ -329,7 +329,7 @@ test("campaign paths are fresh non-nested RUNNER_TEMP descendants and cleanup re
   }
 });
 
-test("injected setup/finalization/hash/schema/write/cleanup faults attempt all 19 and preserve emergency evidence", async () => {
+test("injected lifecycle faults preserve all 19 outcomes and quarantine after cleanup isolation failure", async () => {
   const temporary = await mkdtemp(path.join(tmpdir(), "sc-20945-faults-"));
   const runnerTemp = path.join(temporary, "runner-temp");
   const sceneworks = path.join(temporary, "sceneworks");
@@ -357,6 +357,8 @@ test("injected setup/finalization/hash/schema/write/cleanup faults attempt all 1
     memoryTotalMiB: 49140, memoryUsedMiB: 10, memoryFreeMiB: 49130, raw: "fixture raw",
   }];
   const attemptedCells = [];
+  const provisionedCells = [];
+  const executedCells = [];
   const injectedStages = [];
   const fault = async (stage, index) => {
     if (stage === "setup") attemptedCells.push(index);
@@ -375,6 +377,7 @@ test("injected setup/finalization/hash/schema/write/cleanup faults attempt all 1
   };
   const operations = {
     provisionArtifact: async ({ id, artifact, scratch: cellScratch }) => {
+      provisionedCells.push(path.basename(cellScratch));
       const selectedRoot = path.resolve(cellScratch, "artifacts", id, artifact.subdirectory);
       return {
         id, ...artifact, selectedRoot,
@@ -384,6 +387,7 @@ test("injected setup/finalization/hash/schema/write/cleanup faults attempt all 1
     executeCell: async ({ cellDir, logFile }) => {
       await writeFile(logFile, "fixture runtime\n", "utf8");
       const runtimeCell = JSON.parse(await readFile(path.join(cellDir, "cell.json"), "utf8"));
+      executedCells.push(runtimeCell.id);
       await writeFile(path.join(cellDir, "runtime-result.json"), `${JSON.stringify({
         requestedTier: runtimeCell.requestedTier,
         resolvedTier: runtimeCell.requestedTier,
@@ -403,7 +407,13 @@ test("injected setup/finalization/hash/schema/write/cleanup faults attempt all 1
       },
       fault, operations, suppressVerdict: true,
     });
-    assert.deepEqual(attemptedCells, Array.from({ length: 19 }, (_, index) => index));
+    assert.deepEqual(attemptedCells, Array.from({ length: 7 }, (_, index) => index));
+    assert.ok(provisionedCells.length > 0);
+    assert.ok(provisionedCells.every((name) => /^0[1-7]-/.test(name)));
+    assert.match(provisionedCells.at(-1), /^07-/);
+    assert.ok(executedCells.length > 0);
+    assert.ok(executedCells.every((id) => checked.cells.slice(0, 7).some((cell) => cell.id === id)));
+    assert.equal(executedCells.at(-1), checked.cells[6].id);
     assert.equal(result.summary.receipts.length, 19);
     assert.equal(new Set(result.summary.receipts.map((receipt) => receipt.id)).size, 19);
     assert.equal(result.summaryPath, "_emergency/campaign-summary-fallback.json");
@@ -422,6 +432,11 @@ test("injected setup/finalization/hash/schema/write/cleanup faults attempt all 1
     assert.match(result.summary.receipts[0].receipt, /receipt-last-resort\.json$/);
     assert.match(result.summary.receipts[0].error, /emergency receipt failed/);
     assert.doesNotMatch(result.summary.receipts[6].receipt, /^_emergency\//);
+    assert.match(result.summary.campaignErrors.join("\n"), /prior cell .* scratch cleanup isolation failed/);
+    for (const outcome of result.summary.receipts.slice(7)) {
+      assert.match(outcome.receipt, /^_emergency\//);
+      assert.match(outcome.error, new RegExp(`prior cell ${checked.cells[6].id} scratch cleanup isolation failed`));
+    }
     const durableSummary = JSON.parse(await readFile(path.join(output, ...result.summaryPath.split("/")), "utf8"));
     assert.equal(durableSummary.receipts.length, 19);
     assert.ok(injectedStages.includes("null:summaryWrite"));
@@ -439,6 +454,88 @@ test("schemas, clean Node dependencies, and workflow preserve the opt-in single-
     readFile("package.json", "utf8").then(JSON.parse),
     readFile("package-lock.json", "utf8").then(JSON.parse),
   ]);
+  const normalizedWorkflow = workflow.replace(/\r\n/g, "\n");
+  const terminalStep = (document, id) => {
+    const lines = document.split("\n");
+    const idIndex = lines.findIndex((line) => line.trim() === `id: ${id}`);
+    assert.notEqual(idIndex, -1, `missing terminal step ${id}`);
+    let start = idIndex;
+    while (start >= 0 && !lines[start].startsWith("      - ")) start -= 1;
+    let end = idIndex + 1;
+    while (end < lines.length && !lines[end].startsWith("      - ")) end += 1;
+    return lines.slice(start, end).join("\n");
+  };
+  const requiresOutcomes = (block, ids, label) => {
+    for (const id of ids) {
+      assert.match(
+        block,
+        new RegExp(`steps\\.${id}\\.outcome == 'success'`),
+        `${label} must require ${id} success`,
+      );
+    }
+  };
+  const assertTerminalWorkflowGates = (document) => {
+    const node = terminalStep(document, "terminal_node");
+    const npm = terminalStep(document, "terminal_npm");
+    const tests = terminalStep(document, "terminal_tests");
+    const validation = terminalStep(document, "terminal_validation");
+    const python = terminalStep(document, "terminal_python");
+    const inference = terminalStep(document, "terminal_inference");
+    const campaign = terminalStep(document, "terminal_campaign");
+    const verdict = terminalStep(document, "terminal_verdict");
+    assert.match(node, /continue-on-error: true/);
+    assert.match(npm, /continue-on-error: true/);
+    assert.match(tests, /continue-on-error: true/);
+    requiresOutcomes(npm, ["terminal_node"], "npm install");
+    requiresOutcomes(tests, ["terminal_node", "terminal_npm"], "targeted tests");
+    requiresOutcomes(validation, ["terminal_node", "terminal_npm", "terminal_tests"], "profile check");
+    requiresOutcomes(
+      python,
+      ["terminal_node", "terminal_npm", "terminal_tests", "terminal_validation"],
+      "Python setup",
+    );
+    requiresOutcomes(
+      inference,
+      ["terminal_node", "terminal_npm", "terminal_tests", "terminal_validation"],
+      "inference checkout",
+    );
+    requiresOutcomes(
+      campaign,
+      ["terminal_node", "terminal_npm", "terminal_tests", "terminal_validation", "terminal_python", "terminal_inference"],
+      "terminal campaign",
+    );
+    for (const [name, id] of [
+      ["NODE_OUTCOME", "terminal_node"],
+      ["NPM_OUTCOME", "terminal_npm"],
+      ["TESTS_OUTCOME", "terminal_tests"],
+      ["VALIDATION_OUTCOME", "terminal_validation"],
+      ["PYTHON_OUTCOME", "terminal_python"],
+      ["INFERENCE_OUTCOME", "terminal_inference"],
+      ["CAMPAIGN_OUTCOME", "terminal_campaign"],
+    ]) {
+      assert.match(verdict, new RegExp(`${name}: \\$\\{\\{ steps\\.${id}\\.outcome \\}\\}`));
+    }
+    assert.match(verdict, /Where-Object \{ \$_ -ne 'success' \}/);
+  };
+  assertTerminalWorkflowGates(normalizedWorkflow);
+  for (const id of ["terminal_node", "terminal_npm", "terminal_tests"]) {
+    const relaxed = normalizedWorkflow.replaceAll(
+      `steps.${id}.outcome == 'success'`,
+      "true",
+    );
+    assert.throws(() => assertTerminalWorkflowGates(relaxed), new RegExp(id));
+  }
+  for (const [name, id] of [
+    ["NODE_OUTCOME", "terminal_node"],
+    ["NPM_OUTCOME", "terminal_npm"],
+    ["TESTS_OUTCOME", "terminal_tests"],
+  ]) {
+    const unboundVerdict = normalizedWorkflow.replace(
+      `${name}: \${{ steps.${id}.outcome }}`,
+      `${name}: success`,
+    );
+    assert.throws(() => assertTerminalWorkflowGates(unboundVerdict), new RegExp(name));
+  }
   assert.equal(profileSchema.properties.cells.minItems, 19);
   assert.equal(profileSchema.properties.cells.maxItems, 19);
   assert.deepEqual(receiptSchema.properties.cell.properties.denseFallback, { const: false });
@@ -453,7 +550,10 @@ test("schemas, clean Node dependencies, and workflow preserve the opt-in single-
   assert.equal((workflow.match(/epic-20738-terminal-cuda-harness\.mjs run/g) ?? []).length, 1);
   assert.match(workflow, /id: terminal_campaign[\s\S]*?continue-on-error: true/);
   assert.doesNotMatch(workflow, /jsonschema|harness\.mjs check --python/);
-  assert.match(workflow, /npm ci --ignore-scripts[\s\S]*?harness\.mjs check/);
+  assert.match(
+    workflow,
+    /npm ci --ignore-scripts[\s\S]*?node --test scripts\/epic-20738-terminal-cuda-harness\.test\.mjs scripts\/hash-artifact-inventory\.test\.mjs[\s\S]*?harness\.mjs check/,
+  );
   assert.equal(packageJson.devDependencies.ajv, "8.20.0");
   assert.equal(packageJson.devDependencies["ajv-formats"], "3.0.1");
   assert.equal(packageLock.packages[""].devDependencies.ajv, "8.20.0");

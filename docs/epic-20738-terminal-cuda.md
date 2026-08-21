@@ -64,9 +64,11 @@ persisted inputs, outputs, and logs. Receipts also bind:
   identity/UUID/compute capability/driver/total memory, and raw VRAM samples.
 
 A cell failure anywhere in setup, provisioning, execution, hashing, schema validation, atomic
-receipt publication, or cleanup is recorded and the controller proceeds to the next reviewed cell.
-Cleanup failures are part of the receipt rather than aborting the campaign. It reports the aggregate
-failure only after attempting all 19. The workflow uploads the run-scoped evidence with
+receipt publication, or cleanup is recorded and the controller proceeds through all reviewed cells.
+If a per-cell scratch removal fails or its absence cannot be proven, the controller quarantines the
+campaign: it skips setup, provisioning, and execution for every later cell while still emitting
+bound failure receipts for all 19 outcomes. It reports the aggregate failure only after iterating all
+19. The workflow uploads the run-scoped evidence with
 `always()` before enforcing that aggregate verdict, so a later load, generation, comparison, or
 schema failure cannot hide earlier receipts. A provisioning failure records the exact attempted
 authority and the reason its inventory is incomplete. If primary log, evidence, validation, or
@@ -81,7 +83,7 @@ These checks do not dispatch hardware or download weights:
 ```text
 npm ci --ignore-scripts
 node scripts/epic-20738-terminal-cuda-harness.mjs check
-node --test scripts/epic-20738-terminal-cuda-harness.test.mjs
+node --test scripts/epic-20738-terminal-cuda-harness.test.mjs scripts/hash-artifact-inventory.test.mjs
 cargo fmt --all -- --check
 ```
 

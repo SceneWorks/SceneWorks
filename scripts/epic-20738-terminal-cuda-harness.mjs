@@ -393,6 +393,17 @@ export async function safeRemoveTree(candidate, guard, label = "cleanup target")
   const target = await assertExistingConfinedTree(candidate, guard, label);
   // This confinement/reparse check intentionally sits immediately beside the only recursive remove.
   await rm(target, { recursive: true, force: false });
+  await assertPathAbsent(target, label);
+}
+
+async function assertPathAbsent(target, label) {
+  try {
+    await lstat(target);
+  } catch (error) {
+    if (error?.code === "ENOENT") return;
+    throw error;
+  }
+  fail(`${label} still exists after recursive cleanup`);
 }
 
 async function sha256File(file) {
@@ -904,12 +915,18 @@ export async function runCampaign(args, options = {}) {
   };
   const receipts = [];
   const campaignErrors = [];
+  let quarantineReason = null;
   for (const [index, cell] of profile.cells.entries()) {
     const ordinalName = `${String(index + 1).padStart(2, "0")}-${cell.id}`;
     let emergencyCleanup = { attempted: false, completed: true, error: null };
     const errors = [...startupErrors];
-    let emergencyFailureMessages = errors;
+    const emergencyFailureMessages = errors;
     try {
+    // Artifacts from a scratch tree whose removal was not proven may not coexist with a later cell.
+    // Continue the reviewed sequence for durable outcomes, but do not enter any later lifecycle.
+    if (quarantineReason) {
+      fail(`cell ${cell.id} blocked before setup, provisioning, and execution: ${quarantineReason}`);
+    }
     await invokeFault(fault, "setup", index);
     let cellDir = path.join(output, ordinalName);
     const cellScratch = path.join(scratch, ordinalName);
@@ -990,10 +1007,15 @@ export async function runCampaign(args, options = {}) {
         try {
           await invokeFault(fault, "cleanup", index);
           await operations.cleanup(cellScratch, guard, `scratch for ${cell.id}`);
+          await assertPathAbsent(cellScratch, `scratch for ${cell.id}`);
           receipt.cleanup.completed = true;
         } catch (error) {
           const message = recordError(errors, "cell scratch cleanup failed", error);
           receipt.cleanup.error = message;
+          if (!quarantineReason) {
+            quarantineReason = `prior cell ${cell.id} scratch cleanup isolation failed: ${errorText(error)}`;
+            campaignErrors.push(quarantineReason);
+          }
         }
       } else {
         receipt.cleanup.completed = true;
