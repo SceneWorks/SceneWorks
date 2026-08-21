@@ -775,13 +775,13 @@ pub(crate) fn classify_candle_image_gap(payload: &Map<String, Value>) -> Unsuppo
             ),
             Some("sc-20742"),
         ),
-        CandleImageRefusal::PackedTierAdapter => UnsupportedReason::new(
+        CandleImageRefusal::QuantLoraCombination => UnsupportedReason::new(
             Some(model),
             "user adapter on an explicitly selected packed Candle tier",
             &format!(
                 "this request combines an explicit packed tier (advanced.mlxQuantize) with a user \
-                 LoRA / LyCORIS. Candle serves FLUX.1's existing adapter route and its q4/q8 packed \
-                 tiers separately, but it has not declared packed-tier-plus-adapter support, so the \
+                 LoRA / LyCORIS. Candle serves this family's existing adapter route and its q4/q8 \
+                 packed tiers separately, but it has not declared packed-tier-plus-adapter support, so the \
                  combination is refused rather than guessing at a load shape.{remediation}{also}",
                 remediation = if also.is_empty() {
                     " Re-submit without the explicit packed-tier selection or without the adapter."

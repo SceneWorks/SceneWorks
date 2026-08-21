@@ -1121,13 +1121,18 @@ fn new_candle_families_conditioning_shapes_fall_back_to_torch() {
 #[test]
 fn flux1_lora_stays_on_candle() {
     for model in ["flux_schnell", "flux_dev"] {
-        assert!(
-            image_request_candle_eligible(
-                model,
-                &object(json!({ "prompt": "x", "loras": [{ "name": "x" }] }))
-            ),
-            "{model} LoRA must stay on Candle"
-        );
+        for network_type in ["lora", "lokr"] {
+            assert!(
+                image_request_candle_eligible(
+                    model,
+                    &object(json!({
+                        "prompt": "x",
+                        "loras": [{ "name": "dense-adapter", "networkType": network_type }]
+                    }))
+                ),
+                "{model} dense {network_type} must preserve the existing Candle adapter lane"
+            );
+        }
     }
 }
 
@@ -1170,18 +1175,26 @@ fn flux1_packed_tier_routing_accepts_only_exact_q4_q8_without_adapter_folding() 
             );
         }
 
-        let packed_lora = object(json!({
-            "model": model,
-            "prompt": "a red fox",
-            "advanced": { "mlxQuantize": 4 },
-            "loras": [{ "id": "style", "scale": 0.8 }]
-        }));
-        assert!(!image_request_candle_eligible(model, &packed_lora));
-        assert_eq!(
-            candle_image_first_refusal(model, &packed_lora),
-            Some(CandleImageRefusal::PackedTierAdapter),
-            "{model} must not imply packed-tier-plus-adapter support"
-        );
+        for bits in [4, 8] {
+            for network_type in ["lora", "lokr"] {
+                let packed_adapter = object(json!({
+                    "model": model,
+                    "prompt": "a red fox",
+                    "advanced": { "mlxQuantize": bits },
+                    "loras": [{
+                        "id": "style",
+                        "networkType": network_type,
+                        "scale": 0.8
+                    }]
+                }));
+                assert!(!image_request_candle_eligible(model, &packed_adapter));
+                assert_eq!(
+                    candle_image_first_refusal(model, &packed_adapter),
+                    Some(CandleImageRefusal::QuantLoraCombination),
+                    "{model} must not imply q{bits}+{network_type} support"
+                );
+            }
+        }
     }
 
     // True V2 remains the flat BF16 convert-at-install route. Promoting FLUX.1 must not make

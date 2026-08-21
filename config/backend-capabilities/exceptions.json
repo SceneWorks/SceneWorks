@@ -27,7 +27,7 @@
       "id": "epic-9083-precision-sequencing",
       "category": "precision",
       "decisionType": "sequencing_choice",
-      "evidence": "Michael Trefry directly approved carrying these exact 27 MLX-only precision-tier cells under epic-9083 on 2026-08-14; the canonical owner-approval record is Shortcut activity 19457: https://app.shortcut.com/trefry/story/18481/parity-closure-reconcile-specialist-epics-stale-records-ui-gating-and-final-crossbackend-acceptance#activity-19457",
+      "evidence": "Michael Trefry directly approved carrying these exact 23 MLX-only precision-tier cells under epic-9083 on 2026-08-14; the canonical owner-approval record is Shortcut activity 19457: https://app.shortcut.com/trefry/story/18481/parity-closure-reconcile-specialist-epics-stale-records-ui-gating-and-final-crossbackend-acceptance#activity-19457",
       "approver": "Michael Trefry",
       "authority": "epic-9083",
       "approvedDate": "2026-08-14",

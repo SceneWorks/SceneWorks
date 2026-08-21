@@ -356,9 +356,8 @@ pub(crate) enum CandleImageRefusal {
     UserLora,
     /// FLUX.1 accepts only its hosted packed q4/q8 tiers on the generic Candle route.
     Flux1PackedTier,
-    /// An explicitly selected packed tier plus a user adapter where that combined provider
-    /// contract has not been declared.
-    PackedTierAdapter,
+    /// A quant tier plus adapter on a family where both are admitted only independently.
+    QuantLoraCombination,
     /// `advanced.poses` — strict-pose ControlNet.
     Poses,
     /// `advanced.phases` — a multi-phase schedule.
@@ -379,7 +378,7 @@ impl CandleImageRefusal {
             Self::ConditioningCarrier => "a populated conditioning carrier",
             Self::UserLora => "a user LoRA on an adapter-less family",
             Self::Flux1PackedTier => "a FLUX.1 tier other than packed q4/q8",
-            Self::PackedTierAdapter => "a packed tier combined with a user adapter",
+            Self::QuantLoraCombination => "an unproven quant tier plus adapter combination",
             Self::Poses => "advanced.poses",
             Self::Phases => "advanced.phases",
             Self::QuantTier => "advanced.mlxQuantize",
@@ -415,8 +414,8 @@ const CANDLE_IMAGE_CHECKS: &[(CandleImageRefusal, CandleImageCheck)] = &[
         candle_refuses_flux1_unsupported_packed_tier,
     ),
     (
-        CandleImageRefusal::PackedTierAdapter,
-        candle_refuses_packed_tier_adapter,
+        CandleImageRefusal::QuantLoraCombination,
+        candle_refuses_quant_lora_combination,
     ),
     (CandleImageRefusal::Poses, candle_refuses_poses),
     (CandleImageRefusal::Phases, candle_refuses_phases),
@@ -511,6 +510,11 @@ pub(crate) fn candle_family_serves_quant(model: &str) -> bool {
     CANDLE_QUANT_LORA_MODELS.contains(&model) || CANDLE_QUANT_MODELS.contains(&model)
 }
 
+/// Whether the family admits adapters composed with a selected/loaded Q4 or Q8 tier.
+pub(crate) fn candle_family_serves_quant_lora(model: &str) -> bool {
+    CANDLE_QUANT_LORA_MODELS.contains(&model)
+}
+
 /// LoRAs: not in the candle lane unless the audited family row advertises adapters.
 fn candle_refuses_user_lora(model: &str, payload: &Map<String, Value>) -> bool {
     !candle_family_serves_lora(model) && has_nonempty_array(payload, "loras")
@@ -565,15 +569,15 @@ fn candle_refuses_flux1_unsupported_packed_tier(model: &str, payload: &Map<Strin
     }
 }
 
-/// `candle_quant` and `candle_lora` can be true independently: that advertises two supported
-/// request surfaces, not their Cartesian product. A user-selected q4/q8 FLUX.1 artifact plus a
-/// user adapter stays fail-closed until a provider advertises the combined contract.
-fn candle_refuses_packed_tier_adapter(model: &str, payload: &Map<String, Value>) -> bool {
-    candle_request_wants_quant(payload)
-        && has_nonempty_array(payload, "loras")
-        && candle_family_serves_quant(model)
+/// Some families admit quant and adapters independently without proving their composition.
+/// FLUX.1 is the current case: dense LoRA/LoKr remains supported, q4/q8 tier selection is supported,
+/// but an adapter on packed codes must fail closed until the engine advertises and validates it.
+fn candle_refuses_quant_lora_combination(model: &str, payload: &Map<String, Value>) -> bool {
+    candle_family_serves_quant(model)
         && candle_family_serves_lora(model)
-        && !CANDLE_QUANT_LORA_MODELS.contains(&model)
+        && !candle_family_serves_quant_lora(model)
+        && candle_request_wants_quant(payload)
+        && has_nonempty_array(payload, "loras")
 }
 
 /// The first [`CANDLE_IMAGE_CHECKS`] entry that refuses this request, short-circuiting exactly like

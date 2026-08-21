@@ -2342,8 +2342,10 @@ const STANDARD_TIER_MODELS: &[&str] = &[
     "qwen_image_edit_2511_lightning",
     // FLUX.1 (sc-8669, Group-B): schnell + dev ship the standard q4/q8/bf16 turnkey. FLUX quantizes
     // all four components (DiT transformer + CLIP + T5 + VAE attention), so the TE is packed too —
-    // hence no `mlx.denseTextEncoderTier` (the q4/q8 load-quant is a harmless no-op on already-packed
-    // weights, bf16 resolves to Quant::None). Replaces the gated BFL download + install-time quantize.
+    // hence no `mlx.denseTextEncoderTier`. The pinned Candle descriptor advertises no load-time
+    // quants and rejects a nonempty `LoadSpec.quantize`; its loader packed-detects q4/q8 directly
+    // from the selected directory while the worker records that resolved tier separately. Replaces
+    // the gated BFL download + install-time quantize.
     "flux_schnell",
     "flux_dev",
     // PuLID-FLUX (sc-9947, epic 8506): the MLX lane's FLUX.1-dev backbone now loads from the SAME
@@ -2368,8 +2370,8 @@ const STANDARD_TIER_MODELS: &[&str] = &[
     // SANA + SANA-Sprint (sc-8489/sc-8513, epic 8506): the `SceneWorks/Sana_1600M_1024px_mlx` /
     // `Sana_Sprint_1.6B_1024px_mlx` turnkeys ship standard q4/q8/bf16 tiers. mlx-gen #653 packs the
     // Linear-DiT transformer + the Gemma-2 CHI TE and packed-detects on load; the DC-AE VAE stays
-    // dense in every tier. Like flux1/qwen (and UNLIKE the dense-TE klein class) the q4/q8 load-quant
-    // is a harmless no-op on the already-packed weights and bf16 resolves to Quant::None — so these do
+    // dense in every tier. Unlike the dense-TE klein class, the q4/q8 load-quant is an accepted no-op
+    // on the already-packed weights and bf16 resolves to Quant::None — so these do
     // NOT need a `mlx.denseTextEncoderTier` declaration (only `flux2_klein_9b` / `_kv` carry that flag;
     // the "NOT" was dropped by a rename, which left this block contradicting its own UNLIKE clause two
     // lines above). The SANA descriptor now advertises supported_quants
@@ -2379,9 +2381,9 @@ const STANDARD_TIER_MODELS: &[&str] = &[
     "sana_sprint_1600m",
     // Kolors (sc-9946, epic 8506): the `SceneWorks/kolors-mlx` turnkey ships standard q4/q8/bf16
     // tiers. mlx-gen #659 packs the SDXL-style UNet + the ChatGLM3-6B `ChatGlmLinear` projections
-    // and packed-detects on load; the SDXL VAE stays dense in every tier. Like flux1/sana (and
-    // UNLIKE the dense-TE klein class) the ChatGLM3 TE is packed, so the q4/q8 load-quant is a
-    // harmless no-op on the already-packed weights and bf16 resolves to Quant::None — no
+    // and packed-detects on load; the SDXL VAE stays dense in every tier. Unlike the dense-TE klein
+    // class, the ChatGLM3 TE is packed, so the q4/q8 load-quant is an accepted no-op on the
+    // already-packed weights and bf16 resolves to Quant::None — no
     // `mlx.denseTextEncoderTier` declaration. The kolors descriptor already advertises supported_quants Q4/Q8,
     // so it flows through the same resolve_quant + reconcile path as every other matrix model.
     "kolors",
@@ -9234,6 +9236,15 @@ fn candle_quant_for_resolved_tier(
     if is_dense_te_tier(request) {
         return (None, resolved_bits);
     }
+    // The pinned candle-gen-flux descriptor advertises `supported_quants: []` and rejects a
+    // nonempty `LoadSpec.quantize`: its direct loader discovers the already-packed q4/q8 tensors
+    // from the selected directory. Keep the load instruction empty while retaining the resolved
+    // artifact bits for the recipe and later telemetry. This is deliberately narrower than
+    // `!supports_quant`: other descriptors with an empty list are dense-only and must not acquire
+    // a packed-tier receipt.
+    if matches!(request.model.as_str(), "flux_schnell" | "flux_dev") {
+        return (None, resolved_bits);
+    }
     if force_dense || !supports_quant {
         return (None, None);
     }
@@ -9439,9 +9450,9 @@ mod candle_resolved_tier_contract_tests {
         }
     }
 
-    fn flux1_request(quantize: Option<Value>) -> ImageRequest {
+    fn flux1_request(model: &str, quantize: Option<Value>) -> ImageRequest {
         let mut payload = json!({
-            "model": "flux_dev",
+            "model": model,
             "modelManifestEntry": { "mlx": { "standardTierLayout": true } }
         });
         if let Some(quantize) = quantize {
@@ -9452,47 +9463,65 @@ mod candle_resolved_tier_contract_tests {
 
     #[test]
     fn flux1_candle_packed_tiers_are_exact_and_keep_the_load_receipt_truthful() {
-        for (requested, expected) in [(None, "q4"), (Some(json!(4)), "q4"), (Some(json!(8)), "q8")] {
-            let request = flux1_request(requested);
-            assert_eq!(candle_flux1_packed_requested_tier(&request).unwrap(), expected);
-
-            let exact = Path::new("/models/flux1-dev-mlx").join(expected);
-            let other = Path::new("/models/flux1-dev-mlx").join(if expected == "q4" {
-                "q8"
-            } else {
-                "q4"
-            });
-            assert!(candle_flux1_packed_resolution_is_exact(expected, &exact));
+        for model_id in ["flux_dev", "flux_schnell"] {
+            let descriptor = mlx_model(model_id).expect("linked Candle FLUX.1 descriptor");
             assert!(
-                !candle_flux1_packed_resolution_is_exact(expected, &other),
-                "a requested {expected} must not fall back to {}",
-                other.display()
+                !descriptor.supports_quant(),
+                "{model_id}'s pinned descriptor must keep supported_quants empty"
             );
 
-            let (quant, bits) =
-                candle_quant_for_resolved_tier(&request, expected, &exact, true, false);
-            let expected_quant = (expected == "q4").then_some(Quant::Q4).or_else(|| {
-                (expected == "q8").then_some(Quant::Q8)
-            });
-            let expected_bits = (expected == "q4").then_some(4).or_else(|| {
-                (expected == "q8").then_some(8)
-            });
-            assert_eq!((quant, bits), (expected_quant, expected_bits));
-            assert_eq!(
-                load_spec(exact.clone(), quant, Vec::new(), None).quantize,
-                expected_quant,
-                "LoadSpec must record the exact packed artifact tier"
-            );
-            assert_eq!(
-                effective_quant_label_gated(&request, false, Some(&exact)),
-                (Some(expected.to_owned()), expected_bits),
-                "asset telemetry must name the exact packed artifact tier"
-            );
+            for (requested, expected) in
+                [(None, "q4"), (Some(json!(4)), "q4"), (Some(json!(8)), "q8")]
+            {
+                let request = flux1_request(model_id, requested);
+                assert_eq!(candle_flux1_packed_requested_tier(&request).unwrap(), expected);
+
+                let exact = Path::new("/models").join(model_id).join(expected);
+                let other = Path::new("/models").join(model_id).join(if expected == "q4" {
+                    "q8"
+                } else {
+                    "q4"
+                });
+                assert!(candle_flux1_packed_resolution_is_exact(expected, &exact));
+                assert!(
+                    !candle_flux1_packed_resolution_is_exact(expected, &other),
+                    "a requested {expected} must not fall back to {}",
+                    other.display()
+                );
+
+                let expected_bits = if expected == "q4" { Some(4) } else { Some(8) };
+                let (load_quant, receipt_bits) = candle_quant_for_resolved_tier(
+                    &request,
+                    expected,
+                    &exact,
+                    descriptor.supports_quant(),
+                    false,
+                );
+                assert_eq!((load_quant, receipt_bits), (None, expected_bits));
+                assert_eq!(
+                    load_spec(exact.clone(), load_quant, Vec::new(), None).quantize,
+                    None,
+                    "the prepacked FLUX.1 descriptor rejects a load-time quant instruction"
+                );
+                assert_eq!(
+                    mlx_raw_settings(&request, "SceneWorks/flux1-mlx", 28, receipt_bits, None)
+                        .get("mlxQuantize")
+                        .and_then(Value::as_i64),
+                    expected_bits,
+                    "the recipe must retain the exact packed artifact tier"
+                );
+                assert_eq!(
+                    effective_quant_label_gated(&request, false, Some(&exact)),
+                    (Some(expected.to_owned()), expected_bits),
+                    "asset telemetry must agree with the recipe's packed tier"
+                );
+            }
         }
 
         for unsupported in [json!(0), json!(6), json!(-1), json!(true), json!("4.0")] {
             assert!(
-                candle_flux1_packed_requested_tier(&flux1_request(Some(unsupported))).is_err(),
+                candle_flux1_packed_requested_tier(&flux1_request("flux_dev", Some(unsupported)))
+                    .is_err(),
                 "bf16, q6, and malformed FLUX.1 selections must fail closed"
             );
         }
@@ -10155,9 +10184,10 @@ async fn generate_candle_stream(
             }
         }
     }
-    // Reconcile only after the capability clamp has made its final directory/tier decision. The same
-    // resolved value now drives recipe bits, LoadSpec.quantize, MemoryNumericTier, active component
-    // floors, and the provider begin-request check.
+    // Reconcile only after the capability clamp has made its final directory/tier decision. The
+    // resolved artifact drives recipe bits, MemoryNumericTier, active component floors, and the
+    // provider begin-request check. `LoadSpec.quantize` remains descriptor-governed: in particular,
+    // FLUX.1 packed-detects q4/q8 and therefore receives `None` while its receipt keeps the tier bits.
     let (quant, quant_bits) = candle_quant_for_resolved_tier(
         request,
         tier,
