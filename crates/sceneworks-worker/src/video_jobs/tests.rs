@@ -7899,9 +7899,12 @@ fn scail2_multi_reference_conditioning_is_ordered_paired_and_bounded() {
         let pairs: Vec<_> = (0..count)
             .map(|index| (image(index as u8), image(index as u8 + 32)))
             .collect();
-        let conditioning =
-            scail2_animate_conditioning(pairs, driving.clone(), driving_mask.clone())
-                .expect("1–6 reference/mask pairs must be valid");
+        let conditioning = super::scail2::scail2_animate_conditioning(
+            pairs,
+            driving.clone(),
+            driving_mask.clone(),
+        )
+        .expect("1–6 reference/mask pairs must be valid");
         assert_eq!(conditioning.len(), count * 2 + 1);
         for index in 0..count {
             match &conditioning[index * 2] {
@@ -7935,14 +7938,15 @@ fn scail2_multi_reference_conditioning_is_ordered_paired_and_bounded() {
         );
     }
 
-    let empty = scail2_animate_conditioning(vec![], driving.clone(), driving_mask.clone())
-        .expect_err("a missing reference/mask pair must fail before engine dispatch")
-        .to_string();
+    let empty =
+        super::scail2::scail2_animate_conditioning(vec![], driving.clone(), driving_mask.clone())
+            .expect_err("a missing reference/mask pair must fail before engine dispatch")
+            .to_string();
     assert!(
         empty.contains("at least one reference character"),
         "got: {empty}"
     );
-    let seven = scail2_animate_conditioning(
+    let seven = super::scail2::scail2_animate_conditioning(
         (0..7)
             .map(|index| (image(index), image(index + 32)))
             .collect(),
@@ -7972,11 +7976,15 @@ fn scail2_multi_reference_segmentation_stops_between_references_on_cancel() {
     };
     let cancel = CancelFlag::new();
     let mut seen = Vec::new();
-    let result = segment_scail2_references(vec![image(1), image(2)], &cancel, |reference, _| {
-        seen.push(reference.pixels[0]);
-        cancel.cancel();
-        Ok(image(reference.pixels[0] + 32))
-    });
+    let result = super::scail2::segment_scail2_references(
+        vec![image(1), image(2)],
+        &cancel,
+        |reference, _| {
+            seen.push(reference.pixels[0]);
+            cancel.cancel();
+            Ok(image(reference.pixels[0] + 32))
+        },
+    );
     assert!(
         matches!(result, Err(WorkerError::Canceled(_))),
         "got: {result:?}"

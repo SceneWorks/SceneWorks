@@ -1,7 +1,7 @@
 {
   "schemaVersion": 8,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:fd68f27e5f49eadb8e1b02683f7c20d70dd7be4818649d9ca1fb350053d8ebb7",
+    "sceneWorksRevision": "source-tree:e5c0a614c05d3315645404b43749fb8c62f3aa03b87bfb66ec5e5a76fecac8e1",
     "inferenceRevision": "4013049764172ee7dc707101c7da8c83c1483f2d",
     "sources": {
       "manifest": {
@@ -46,7 +46,7 @@
       },
       "videoRouteScail2": {
         "path": "crates/sceneworks-worker/src/video_jobs/scail2.rs",
-        "sha256": "976cae2c9c13f953ffc8eb5a7886d8fffb53fb15e1c674ea0841a8dba3d3ffb9"
+        "sha256": "a4ea65a7fbfb476d89371041d55e1f78098fccf3ff1efe25d8d06cc059fe23c4"
       },
       "videoRouteKreaRealtime": {
         "path": "crates/sceneworks-worker/src/video_jobs/krea_realtime.rs",
@@ -54,7 +54,7 @@
       },
       "videoRouteCandle": {
         "path": "crates/sceneworks-worker/src/video_jobs/candle.rs",
-        "sha256": "4f4b3d9353229feb432f3dfd228592bd6a299b4ccfbc1a6af635fcc2b456f6c3"
+        "sha256": "cfa2f05aec38bd59b276932fd4d47b97efc993ae80d60056e47b2b2eda5ec051"
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",

@@ -2025,7 +2025,7 @@ async fn resolve_candle_scail2_conditioning(
         settings,
         &job.id,
         move |flag| {
-            super::segment_scail2_references(references, &flag, |reference, flag| {
+            super::scail2::segment_scail2_references(references, &flag, |reference, flag| {
                 let masks = crate::person_segment_sam3_candle::segment_all_persons_in_memory(
                     &rm,
                     &rt,
