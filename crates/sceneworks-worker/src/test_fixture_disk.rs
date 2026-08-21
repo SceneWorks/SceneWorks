@@ -15,7 +15,7 @@
 //! NTFS compression was measured NOT to help: a compressed file's `set_len` tail still allocates in
 //! full.
 //!
-//! Two entry points, matching the two ways a fixture gets its length:
+//! Two entry points carry that discipline, matching the two ways a fixture gets its length:
 //!
 //! * [`create_sparse_weights`] — this crate creates the file itself. The sparse flag is set on the
 //!   still-empty file BEFORE the `set_len`, so the tail is never allocated even transiently.
@@ -32,6 +32,23 @@
 //! Neither call changes what a test observes: the logical length `metadata.len()` reports is
 //! exactly the length that was requested, every byte actually written is preserved, and the tail
 //! reads back as the zeros it already was.
+//!
+//! [`set_sparse_valid_safetensor`] is a third fixture builder that lives here because it shares the
+//! `set_len`-tail shape, but it does NOT carry the NTFS discipline. That is a scope line, not a
+//! structural one — nothing about its layout resists either route above. It is un-hardened for one
+//! reason only: every caller today is macOS-only (`mlx_fit_gate`'s source-bound audit), where a
+//! `set_len` tail is a hole for free, so flagging it would be a behaviour change with no caller to
+//! fix.
+//!
+//! A Windows caller WOULD pay the fixture's full logical size — these are multi-gigabyte fixtures —
+//! so give it the discipline before adding one. Both routes work on its layout:
+//!
+//! * pre-flag the still-empty file and then write the header. The header write costs one cluster
+//!   and obstructs nothing; the `set_len` that follows still extends without allocating.
+//! * or run [`sparsify_written_safetensors`] over the finished directory. The 8-byte length prefix
+//!   plus header JSON this writes is exactly the written prefix that pass preserves — the header is
+//!   what makes a file legible to it, which is why a headerless [`create_sparse_weights`] file is
+//!   the shape it cannot reason about.
 
 // The fixture sites that call these live behind `backend-candle` / `target_os` gates, so which
 // helper is live depends on the target and feature set — same reason as `test_env`.
@@ -137,6 +154,46 @@ pub(crate) fn sparsify_written_safetensors(dir: &Path) {
 /// Non-Windows: the testkit's `set_len` tail is already a hole.
 #[cfg(not(windows))]
 pub(crate) fn sparsify_written_safetensors(_dir: &Path) {}
+
+/// Create `path` as a structurally valid, `bytes`-long safetensors file: one `U8` tensor whose
+/// declared data covers every byte past the header.
+///
+/// For a fixture a gate PARSES rather than merely stats. The header is space-padded to the
+/// safetensors 8-byte alignment and then re-fitted until `8 + header.len() + data_offsets[1]` is
+/// exactly `bytes`, so the declared tensor and the file's logical length agree. Only the header is
+/// written; the tensor data is the `set_len` tail.
+///
+/// Unlike [`create_sparse_weights`], this does NOT mark the file sparse — see the module docs for
+/// why, and read them before calling this from a lane that runs on NTFS.
+pub(crate) fn set_sparse_valid_safetensor(path: &Path, bytes: u64) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let mut data_bytes = bytes
+        .checked_sub(128)
+        .ok_or_else(|| format!("{bytes} bytes is too small for a safetensors fixture"))?;
+    let header = loop {
+        let mut header = format!(
+            r#"{{"weight":{{"dtype":"U8","shape":[{data_bytes}],"data_offsets":[0,{data_bytes}]}}}}"#
+        );
+        while (8 + header.len()) % 8 != 0 {
+            header.push(' ');
+        }
+        let next_data_bytes = bytes
+            .checked_sub(8 + header.len() as u64)
+            .ok_or_else(|| format!("{bytes} bytes is too small for its safetensors header"))?;
+        if next_data_bytes == data_bytes {
+            break header;
+        }
+        data_bytes = next_data_bytes;
+    };
+    use std::io::Write;
+    let mut file = std::fs::File::create(path).map_err(|error| error.to_string())?;
+    file.write_all(&(header.len() as u64).to_le_bytes())
+        .and_then(|()| file.write_all(header.as_bytes()))
+        .and_then(|()| file.set_len(bytes))
+        .map_err(|error| error.to_string())
+}
 
 /// `fsutil sparse setflag`, reporting rather than failing. Returns whether the flag is now set.
 #[cfg(windows)]
