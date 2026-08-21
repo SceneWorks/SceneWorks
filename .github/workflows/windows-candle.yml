@@ -163,6 +163,15 @@ on:
         required: false
         type: boolean
         default: false
+      run_epic_20738_terminal_cuda:
+        description: "Run the frozen SC-20945 19-cell terminal CUDA profile once"
+        required: false
+        type: boolean
+        default: false
+      sceneworks_revision:
+        description: "Exact clean SceneWorks HEAD for the SC-20945 terminal profile"
+        required: false
+        type: string
 
 # Cancel superseded PR runs, but never cancel a main-push run: this lane is the
 # ONLY thing that compiles the candle-gated worker code, so a main commit whose
@@ -263,7 +272,7 @@ on:
 # under RUNNER_TEMP is re-downloaded every run -- see "Isolate Cargo dependency checkout")
 # and the three separate compile graphs, not the test filter.
 concurrency:
-  group: windows-candle-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  group: windows-candle-${{ github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && 'epic-20738-terminal' || github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -282,9 +291,21 @@ jobs:
     # that box and starves every queued PR/main run on it until the cap fires
     # (sc-13603). Well above the healthy ~11-14 min build+test+clippy — a cold
     # candle-kernels (nvcc) rebuild still fits comfortably.
-    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && inputs.run_ltx_eros_acceptance && 360 || github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && inputs.provision_krea_snapshot && 240 || github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && 120 || 45 }}
+    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && inputs.run_ltx_eros_acceptance && 360 || github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && 360 || github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && inputs.provision_krea_snapshot && 240 || github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && 120 || 45 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Refuse combined manual measurement profiles
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        shell: powershell
+        env:
+          RUN_EPIC_20738_TERMINAL_CUDA: ${{ inputs.run_epic_20738_terminal_cuda }}
+          RUN_FIVE_RUNG_REFERENCE: ${{ inputs.run_five_rung_reference }}
+          RUN_LTX_EROS_ACCEPTANCE: ${{ inputs.run_ltx_eros_acceptance }}
+          PROVISION_KREA_SNAPSHOT: ${{ inputs.provision_krea_snapshot }}
+        run: |
+          if ($env:RUN_EPIC_20738_TERMINAL_CUDA -eq 'true' -and ($env:RUN_FIVE_RUNG_REFERENCE -eq 'true' -or $env:RUN_LTX_EROS_ACCEPTANCE -eq 'true' -or $env:PROVISION_KREA_SNAPSHOT -eq 'true')) {
+            throw 'the epic-20738 terminal profile cannot share a dispatch with another measurement flag'
+          }
       # sc-13166: point this lane at the REAL rustup toolchain bin and prepend it to
       # PATH, so cargo/rustc/clippy never dispatch through the fragile
       # %USERPROFILE%\.cargo\bin proxies (0-byte symlinks -> rustup.exe that go dangling
@@ -840,3 +861,112 @@ jobs:
             ${{ runner.temp }}/sc-18902-ltx-eros-${{ github.run_id }}-${{ github.run_attempt }}/runner.json
             ${{ runner.temp }}/sc-18902-ltx-eros-${{ github.run_id }}-${{ github.run_attempt }}/sha256.txt
           if-no-files-found: error
+      # SC-20945 terminal epic evidence. This is deliberately one opt-in profile in this existing
+      # Windows CUDA job: the checked-in controller validates the exact ordered 19-cell semantic
+      # digest and awaits one fresh worker process at a time in isolated per-cell scratch. No matrix,
+      # child workflow, per-cell dispatch, cache/root override, or secret weight path
+      # is accepted. The four dismantled pin-keyed gates remain untouched; this profile runs once only
+      # after the final paired pins are frozen.
+      - name: Set up the pinned terminal Node runtime
+        id: terminal_node
+        continue-on-error: true
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda }}
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Install the pinned terminal Node dependencies
+        id: terminal_npm
+        continue-on-error: true
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' }}
+        run: npm ci --ignore-scripts
+      - name: Run the targeted cross-platform terminal harness tests
+        id: terminal_tests
+        continue-on-error: true
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' && steps.terminal_npm.outcome == 'success' }}
+        run: node --test scripts/epic-20738-terminal-cuda-harness.test.mjs scripts/hash-artifact-inventory.test.mjs
+      - name: Validate the frozen epic-20738 terminal dispatch
+        id: terminal_validation
+        continue-on-error: true
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' && steps.terminal_npm.outcome == 'success' && steps.terminal_tests.outcome == 'success' }}
+        shell: powershell
+        env:
+          SCENEWORKS_REVISION: ${{ inputs.sceneworks_revision }}
+          INFERENCE_REVISION: ${{ inputs.inference_revision }}
+          RUN_FIVE_RUNG_REFERENCE: ${{ inputs.run_five_rung_reference }}
+          RUN_LTX_EROS_ACCEPTANCE: ${{ inputs.run_ltx_eros_acceptance }}
+          PROVISION_KREA_SNAPSHOT: ${{ inputs.provision_krea_snapshot }}
+        run: |
+          if ($env:RUN_FIVE_RUNG_REFERENCE -eq 'true' -or $env:RUN_LTX_EROS_ACCEPTANCE -eq 'true' -or $env:PROVISION_KREA_SNAPSHOT -eq 'true') {
+            throw 'the epic-20738 terminal profile cannot share a dispatch with another measurement flag'
+          }
+          if ($env:SCENEWORKS_REVISION -notmatch '^[0-9a-f]{40}$' -or $env:SCENEWORKS_REVISION -ne $env:GITHUB_SHA) {
+            throw 'sceneworks_revision must exactly equal this dispatch clean HEAD'
+          }
+          if ($env:INFERENCE_REVISION -notmatch '^[0-9a-f]{40}$') {
+            throw 'inference_revision must be an exact lowercase 40-hex commit'
+          }
+          node scripts/epic-20738-terminal-cuda-harness.mjs check
+      - name: Provision an isolated terminal Python client
+        id: terminal_python
+        continue-on-error: true
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' && steps.terminal_npm.outcome == 'success' && steps.terminal_tests.outcome == 'success' && steps.terminal_validation.outcome == 'success' }}
+        shell: powershell
+        run: |
+          $venv = Join-Path $env:RUNNER_TEMP "sc-20945-python-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          python -m venv $venv
+          if ($LASTEXITCODE -ne 0) { throw 'Python 3 with venv support is required on the CUDA runner' }
+          $python = Join-Path $venv 'Scripts\python.exe'
+          & $python -m pip install --disable-pip-version-check --no-input 'huggingface_hub==0.36.0'
+          if ($LASTEXITCODE -ne 0) { throw 'failed to provision the pinned anonymous artifact client' }
+          Add-Content -Path $env:GITHUB_ENV -Value "SCENEWORKS_TERMINAL_PYTHON=$python"
+      - name: Check out the exact terminal inference source
+        id: terminal_inference
+        continue-on-error: true
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' && steps.terminal_npm.outcome == 'success' && steps.terminal_tests.outcome == 'success' && steps.terminal_validation.outcome == 'success' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: SceneWorks/inference
+          ref: ${{ inputs.inference_revision }}
+          path: .terminal/inference
+          persist-credentials: false
+      - name: Run the exact 19-cell epic-20738 terminal CUDA profile
+        id: terminal_campaign
+        continue-on-error: true
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' && steps.terminal_npm.outcome == 'success' && steps.terminal_tests.outcome == 'success' && steps.terminal_validation.outcome == 'success' && steps.terminal_python.outcome == 'success' && steps.terminal_inference.outcome == 'success' }}
+        shell: cmd
+        env:
+          SCENEWORKS_ENABLE_EPIC_20738_TERMINAL_CUDA: "1"
+          SCENEWORKS_REVISION: ${{ inputs.sceneworks_revision }}
+          INFERENCE_REVISION: ${{ inputs.inference_revision }}
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          echo .terminal/>>.git\info\exclude
+          node scripts\epic-20738-terminal-cuda-harness.mjs run --profile config\terminal-evidence\epic-20738-cuda.json --sceneworks-repo "%GITHUB_WORKSPACE%" --inference-repo "%GITHUB_WORKSPACE%\.terminal\inference" --sceneworks-revision "%SCENEWORKS_REVISION%" --inference-revision "%INFERENCE_REVISION%" --output "%RUNNER_TEMP%\sc-20945-epic-20738-%GITHUB_RUN_ID%-%GITHUB_RUN_ATTEMPT%" --scratch "%RUNNER_TEMP%\sc-20945-epic-20738-scratch-%GITHUB_RUN_ID%-%GITHUB_RUN_ATTEMPT%" --python "%SCENEWORKS_TERMINAL_PYTHON%"
+      - name: Upload every epic-20738 terminal receipt
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sc-20945-epic-20738-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/sc-20945-epic-20738-${{ github.run_id }}-${{ github.run_attempt }}/
+          if-no-files-found: error
+      - name: Enforce the epic-20738 terminal verdict after receipt upload
+        id: terminal_verdict
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda }}
+        shell: powershell
+        env:
+          NODE_OUTCOME: ${{ steps.terminal_node.outcome }}
+          NPM_OUTCOME: ${{ steps.terminal_npm.outcome }}
+          TESTS_OUTCOME: ${{ steps.terminal_tests.outcome }}
+          VALIDATION_OUTCOME: ${{ steps.terminal_validation.outcome }}
+          PYTHON_OUTCOME: ${{ steps.terminal_python.outcome }}
+          INFERENCE_OUTCOME: ${{ steps.terminal_inference.outcome }}
+          CAMPAIGN_OUTCOME: ${{ steps.terminal_campaign.outcome }}
+        run: |
+          $outcomes = @($env:NODE_OUTCOME, $env:NPM_OUTCOME, $env:TESTS_OUTCOME, $env:VALIDATION_OUTCOME, $env:PYTHON_OUTCOME, $env:INFERENCE_OUTCOME, $env:CAMPAIGN_OUTCOME)
+          $notSuccessful = @($outcomes | Where-Object { $_ -ne 'success' })
+          if ($notSuccessful.Count -gt 0) {
+            throw "epic-20738 terminal evidence failed after upload: $($outcomes -join ', ')"
+          }

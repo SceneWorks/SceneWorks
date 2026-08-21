@@ -20,7 +20,7 @@ async function fileSha256(file, signal) {
   return hash.digest("hex");
 }
 
-async function inventoryFiles(root, relative = "", signal) {
+async function inventoryFiles(root, relative = "", signal, excludeDirectories = new Set()) {
   signal?.throwIfAborted();
   const directory = path.join(root, relative);
   const entries = await readdir(directory, { withFileTypes: true });
@@ -28,7 +28,10 @@ async function inventoryFiles(root, relative = "", signal) {
   for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
     const child = path.join(relative, entry.name);
     if (entry.isDirectory()) {
-      files.push(...await inventoryFiles(root, child, signal));
+      const normalized = child.split(path.sep).join("/");
+      if (!excludeDirectories.has(normalized)) {
+        files.push(...await inventoryFiles(root, child, signal, excludeDirectories));
+      }
     } else if (entry.isFile() || entry.isSymbolicLink()) {
       const absolute = path.join(root, child);
       const resolved = await stat(absolute);
@@ -42,9 +45,16 @@ async function inventoryFiles(root, relative = "", signal) {
   return files;
 }
 
-export async function hashArtifactInventory(root, { signal } = {}) {
+export async function hashArtifactInventory(root, { signal, excludeDirectories = [] } = {}) {
   const absolute = path.resolve(root);
-  const files = await inventoryFiles(absolute, "", signal);
+  const excluded = new Set(excludeDirectories.map((directory) => {
+    const normalized = directory.split(/[\\/]/).filter(Boolean).join("/");
+    if (!normalized || path.isAbsolute(directory) || normalized.split("/").includes("..")) {
+      throw new Error(`artifact inventory exclusion must be a confined relative directory: ${directory}`);
+    }
+    return normalized;
+  }));
+  const files = await inventoryFiles(absolute, "", signal, excluded);
   if (files.length === 0) throw new Error(`artifact inventory is empty: ${absolute}`);
   const bytes = files.reduce((total, file) => total + file.bytes, 0);
   const hash = createHash("sha256");

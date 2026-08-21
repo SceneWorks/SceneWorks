@@ -1,0 +1,213 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sceneworks.ai/schemas/epic-20738-terminal-receipt-v1.json",
+  "title": "Epic 20738 CUDA terminal evidence receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "profile", "cell", "status", "error", "repositories", "artifacts", "execution", "hardware", "cleanup", "inputs", "outputs", "logs", "startedAt", "completedAt"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "profile": { "const": "epic-20738-candle-cuda-terminal-v1" },
+    "cell": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "ordinal", "modelId", "engineId", "kind", "requestedTier", "resolvedTier", "denseFallback"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]+$" },
+        "ordinal": { "type": "integer", "minimum": 1, "maximum": 19 },
+        "modelId": { "type": "string", "minLength": 1 },
+        "engineId": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["image", "scail2", "ltx", "sdxlOpenPose"] },
+        "requestedTier": { "enum": ["q4", "q8"] },
+        "resolvedTier": { "enum": ["q4", "q8"] },
+        "denseFallback": { "const": false }
+      }
+    },
+    "status": { "enum": ["passed", "failed"] },
+    "error": { "type": ["string", "null"] },
+    "repositories": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sceneworks", "inference"],
+      "properties": {
+        "sceneworks": { "$ref": "#/$defs/repository" },
+        "inference": { "$ref": "#/$defs/repository" }
+      }
+    },
+    "artifacts": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/artifact" } },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runId", "runAttempt", "headSha", "headRef", "workflow", "runnerName", "runnerOs", "runnerArch"],
+      "properties": {
+        "runId": { "type": "string", "minLength": 1 },
+        "runAttempt": { "type": "string", "minLength": 1 },
+        "headSha": { "$ref": "#/$defs/sha40" },
+        "headRef": { "type": "string" },
+        "workflow": { "type": "string", "minLength": 1 },
+        "runnerName": { "type": "string", "minLength": 1 },
+        "runnerOs": { "type": "string", "minLength": 1 },
+        "runnerArch": { "type": "string", "minLength": 1 }
+      }
+    },
+    "hardware": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gpuIdentity", "systemMemory", "cudaComputeCap", "cudaVisibleDevices", "rawVramSamples"],
+      "properties": {
+        "gpuIdentity": { "type": "array", "items": { "$ref": "#/$defs/gpuIdentity" } },
+        "systemMemory": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["totalBytes", "availableBytesAtStart"],
+          "properties": {
+            "totalBytes": { "type": "integer", "minimum": 1 },
+            "availableBytesAtStart": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "cudaComputeCap": { "type": "string" },
+        "cudaVisibleDevices": { "type": "string" },
+        "rawVramSamples": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/gpuSample" } }
+      }
+    },
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["attempted", "completed", "error"],
+      "properties": {
+        "attempted": { "type": "boolean" },
+        "completed": { "type": "boolean" },
+        "error": { "type": ["string", "null"] }
+      }
+    },
+    "inputs": { "type": "array", "items": { "$ref": "#/$defs/hashedFile" } },
+    "outputs": { "type": "array", "items": { "$ref": "#/$defs/hashedFile" } },
+    "logs": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/hashedFile" } },
+    "startedAt": { "type": "string", "format": "date-time" },
+    "completedAt": { "type": "string", "format": "date-time" }
+  },
+  "allOf": [
+    {
+      "if": { "type": "object", "properties": { "status": { "const": "passed" } }, "required": ["status"] },
+      "then": {
+        "type": "object",
+        "properties": {
+          "error": { "const": null },
+          "artifacts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "selectedRoot": { "type": "string", "minLength": 1 },
+                "inventory": {
+                  "type": "object",
+                  "properties": {
+                    "complete": { "const": true },
+                    "sha256": { "$ref": "#/$defs/sha256" },
+                    "files": { "type": "integer", "minimum": 1 },
+                    "bytes": { "type": "integer", "minimum": 1 },
+                    "error": { "const": null }
+                  }
+                }
+              }
+            }
+          },
+          "hardware": {
+            "type": "object",
+            "properties": {
+              "gpuIdentity": { "type": "array", "minItems": 1 },
+              "rawVramSamples": { "type": "array", "minItems": 1 }
+            }
+          },
+          "cleanup": {
+            "type": "object",
+            "properties": {
+              "attempted": { "const": true },
+              "completed": { "const": true },
+              "error": { "const": null }
+            }
+          },
+          "inputs": { "type": "array", "minItems": 1 },
+          "outputs": { "type": "array", "minItems": 1 },
+          "logs": { "type": "array", "minItems": 1 }
+        }
+      }
+    },
+    {
+      "if": { "type": "object", "properties": { "status": { "const": "failed" } }, "required": ["status"] },
+      "then": { "type": "object", "properties": { "error": { "type": "string", "minLength": 1 } } }
+    }
+  ],
+  "$defs": {
+    "sha40": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha", "clean"],
+      "properties": { "sha": { "$ref": "#/$defs/sha40" }, "clean": { "const": true } }
+    },
+    "inventory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root", "complete", "sha256", "files", "bytes", "error"],
+      "properties": {
+        "root": { "type": "string", "minLength": 1 },
+        "complete": { "type": "boolean" },
+        "sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+        "files": { "type": "integer", "minimum": 0 },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "error": { "type": ["string", "null"] }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "role", "repository", "revision", "subdirectory", "selectedRoot", "allowPatterns", "inventory"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]+$" },
+        "role": { "type": "string", "minLength": 1 },
+        "repository": { "type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$" },
+        "revision": { "$ref": "#/$defs/sha40" },
+        "subdirectory": { "type": "string", "minLength": 1 },
+        "selectedRoot": { "type": ["string", "null"] },
+        "allowPatterns": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "inventory": { "$ref": "#/$defs/inventory" }
+      }
+    },
+    "hashedFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "bytes", "sha256"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "bytes": { "type": "integer", "minimum": 0 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "gpuSample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["raw"],
+      "properties": {
+        "timestamp": { "type": "string" },
+        "index": { "type": "integer", "minimum": 0 },
+        "name": { "type": "string" },
+        "uuid": { "type": "string" },
+        "pciBusId": { "type": "string" },
+        "computeCapability": { "type": "string" },
+        "driverVersion": { "type": "string" },
+        "memoryTotalMiB": { "type": "number" },
+        "memoryUsedMiB": { "type": "number" },
+        "memoryFreeMiB": { "type": "number" },
+        "raw": { "type": "string", "minLength": 1 }
+      }
+    },
+    "gpuIdentity": {
+      "allOf": [
+        { "$ref": "#/$defs/gpuSample" },
+        { "type": "object", "required": ["index", "name", "uuid", "pciBusId", "computeCapability", "driverVersion", "memoryTotalMiB", "memoryUsedMiB", "memoryFreeMiB"] }
+      ]
+    }
+  }
+}
