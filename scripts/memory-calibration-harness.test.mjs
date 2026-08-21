@@ -2878,11 +2878,11 @@ test("every checked-in capture invocation selects a plan fixture on a DECLARED l
   // nothing, or the plan gains an authoritative lane nobody declared a crate for. Each one kills a
   // capture job on a runner instead of here.
   const root = new URL("../", import.meta.url);
-  const plan = JSON.parse(await readFile(new URL("config/memory-calibration-plan.json", root)));
   const closures = JSON.parse(await readFile(new URL("config/inference-provider-closures.json", root)));
   const workflows = await readdir(new URL(".github/workflows/", root));
 
   const selected = [];
+  const checkedPlans = new Map();
   for (const file of workflows.filter((name) => name.endsWith(".yml"))) {
     const body = await readFile(new URL(`.github/workflows/${file}`, root), "utf8");
     // `harness.mjs run` invocations only; `assess-reuse` and `check` never derive a digest. Windows
@@ -2890,9 +2890,18 @@ test("every checked-in capture invocation selects a plan fixture on a DECLARED l
     for (const invocation of body.match(/memory-calibration-harness\.mjs\s+run\b[\s\S]*?--output\s+\S+/g) ?? []) {
       const backend = invocation.match(/--backend\s+(\S+)/)?.[1];
       const fixture = invocation.match(/--fixture\s+"?([^"\s\\]+)"?/)?.[1];
-      assert.ok(backend && fixture, `${file}: a capture invocation selects no --backend/--fixture`);
+      const configToken = invocation.match(/--config\s+"?(\S+?)"?\s+[\\`]?\s*--backend/)?.[1];
+      assert.ok(backend && configToken, `${file}: a capture invocation selects no --config/--backend`);
+      assert.ok(!configToken.includes("$"), `${file}: capture plan path must be statically auditable`);
+      const configPath = configToken.replaceAll("\\", "/");
+      const invocationPlan = JSON.parse(await readFile(new URL(configPath, root)));
+      checkedPlans.set(configPath, invocationPlan);
+      if (!fixture) {
+        selected.push([`${file} --config ${configPath} (all fixtures)`, backend, () => true, invocationPlan]);
+        continue;
+      }
       if (!fixture.includes("$")) {
-        selected.push([`${file} --fixture ${fixture}`, backend, (name) => name === fixture]);
+        selected.push([`${file} --fixture ${fixture}`, backend, (name) => name === fixture, invocationPlan]);
         continue;
       }
       // The Qwen invocation templates its fixture from `inputs.qwen_tier` and a seed chosen in the
@@ -2907,13 +2916,13 @@ test("every checked-in capture invocation selects a plan fixture on a DECLARED l
       assert.ok(seeds.length, `${file}: the templated fixture's seed is set nowhere in the workflow`);
       for (const tier of tiers.match(/-\s*(\w+)/g).map((line) => line.replace(/-\s*/, ""))) {
         const shape = new RegExp(`^${fixture.replace("${QWEN_TIER}", tier).replace("${QWEN_SEED}", `(?:${seeds.join("|")})`)}$`);
-        selected.push([`${file} --fixture ${fixture} (tier ${tier})`, backend, (name) => shape.test(name)]);
+        selected.push([`${file} --fixture ${fixture} (tier ${tier})`, backend, (name) => shape.test(name), invocationPlan]);
       }
     }
   }
   assert.ok(selected.length >= 6, `expected the checked-in capture selections, found ${selected.length}`);
 
-  for (const [label, backend, matches] of selected) {
+  for (const [label, backend, matches, plan] of selected) {
     // Exactly what `runProviderPlan` does: filter the plan, then key every authoritative survivor.
     const entries = plan.providers.filter((provider) => provider.backend === backend && matches(provider.fixture));
     assert.ok(entries.length, `${label}: selects no plan provider on backend ${backend}`);
@@ -2924,7 +2933,7 @@ test("every checked-in capture invocation selects a plan fixture on a DECLARED l
   }
 
   // And the converse, so a plan lane that no workflow captures yet still cannot be added undeclared.
-  const undeclared = [...new Set(plan.providers
+  const undeclared = [...new Set([...checkedPlans.values()].flatMap((plan) => plan.providers)
     .filter((provider) => provider.evidenceScope === "authoritative")
     .map((provider) => `${provider.backend}:${provider.target.provider}`))]
     .filter((lane) => !closures.providers[lane]);

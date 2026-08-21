@@ -42,6 +42,7 @@ import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 
 import { stripJsoncComments } from "./lib/jsonc.mjs";
+import { validateSc19057WanCapture } from "./validate-sc19057-wan-capture.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const GIB = 1024 ** 3;
@@ -564,6 +565,21 @@ export function driverStatesFrom(logs) {
  * when the harness says `runtime_complete` and both stamped repositories were clean.
  */
 export function recordTerminalStatesFrom(records, plan) {
+  const plannedFixtures = plan.providers.map(({ fixture }) => fixture);
+  const capturedFixtures = records.map(({ fixture }) => fixture);
+  const uniquePlannedFixtures = new Set(plannedFixtures);
+  const uniqueCapturedFixtures = new Set(capturedFixtures);
+  if (uniquePlannedFixtures.size !== plannedFixtures.length) {
+    throw new Error("record-terminal sweep plans must declare each fixture exactly once");
+  }
+  const missing = plannedFixtures.filter((fixture) => !uniqueCapturedFixtures.has(fixture));
+  const extra = [...uniqueCapturedFixtures].filter((fixture) => !uniquePlannedFixtures.has(fixture));
+  if (missing.length > 0 || extra.length > 0) {
+    throw new Error(
+      "record-terminal provenance requires the exact planned fixture set; " +
+        `missing=${JSON.stringify(missing)} extra=${JSON.stringify(extra)}`,
+    );
+  }
   const nameByFixture = new Map(plan.providers.map(({ fixture, name }) => [fixture, name]));
   const states = new Map();
   for (const record of records) {
@@ -1786,6 +1802,12 @@ async function main() {
   );
   const records = datasets.flatMap(({ parsed }) => parsed.records);
   const plan = await readJson(planPath);
+  if (recordTerminals && story === "sc-19057") {
+    // The first Candle video campaign has a deliberately fixed six-case design. Validate the
+    // artifact, authority, exact geometry set and clean repository stamps before deriving terminal
+    // counts; otherwise a copied five-row plan could still fit and promote a partial campaign.
+    validateSc19057WanCapture({ bundle: { records }, plan });
+  }
   const manifest = JSON.parse(stripJsoncComments(await readFile(manifestPath, "utf8")));
   const curveSchema = await readJson(curveSchemaPath);
   const logs = await Promise.all(
