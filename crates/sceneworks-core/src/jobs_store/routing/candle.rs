@@ -872,28 +872,66 @@ pub(crate) fn video_request_candle_eligible(model: &str, payload: &Map<String, V
         return false;
     }
     // `advanced.mlxQuantize` is a tier select for the published Wan q4/q8/bf16 matrices and for
-    // LTX base's shared packed-q4 turnkey. Other video providers remain dense and fail closed.
-    if candle_request_wants_quant(payload) && !candle_video_tier_select_eligible(model, payload) {
+    // base LTX's packed Candle turnkey. LTX intentionally has no dense/bf16 Candle tier; q4 is the
+    // currently proven product route, while exact q8 remains source-ready but withheld pending the
+    // terminal campaign. Other video providers remain dense and fail closed for positive requests.
+    if (candle_request_wants_quant(payload) || model == "ltx_2_3")
+        && !candle_video_tier_select_eligible(model, payload)
+    {
         return false;
     }
     true
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CandleLtxTier {
+    Q4,
+    Q8,
+}
+
+/// Parse only the exact packed tiers published by the shared LTX bundle. Recognizing q8 here is
+/// source readiness, not product admission: the q8 route remains withheld until the terminal
+/// campaign advances its capability fact and closes the matching exception.
+fn candle_ltx_requested_tier(payload: &Map<String, Value>) -> Option<CandleLtxTier> {
+    let value = payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .and_then(|advanced| advanced.get("mlxQuantize"));
+    let Some(value) = value else {
+        return Some(CandleLtxTier::Q4);
+    };
+    match value
+        .as_i64()
+        .or_else(|| value.as_str()?.trim().parse::<i64>().ok())?
+    {
+        4 => Some(CandleLtxTier::Q4),
+        8 => Some(CandleLtxTier::Q8),
+        _ => None,
+    }
+}
+
+fn candle_ltx_product_tier_eligible(model: &str, mode: &str, payload: &Map<String, Value>) -> bool {
+    model == "ltx_2_3"
+        && candle_ltx_requested_tier(payload).is_some_and(|tier| {
+            match tier {
+                // The existing packed-q4 route is already the proven Candle baseline. Q8 is staged
+                // below the runtime descriptor fact so source plumbing cannot promote the product.
+                CandleLtxTier::Q4 => true,
+                CandleLtxTier::Q8 => {
+                    super::matrix::candle_video_descriptor_supports_quant(model, mode, "q8")
+                }
+            }
+        })
 }
 
 fn candle_video_tier_select_eligible(model: &str, payload: &Map<String, Value>) -> bool {
     if matches!(model, "wan_2_2" | "wan_2_2_t2v_14b" | "wan_2_2_i2v_14b") {
         return true;
     }
-    model == "ltx_2_3"
-        && payload
-            .get("advanced")
-            .and_then(Value::as_object)
-            .and_then(|advanced| advanced.get("mlxQuantize"))
-            .and_then(|value| {
-                value
-                    .as_i64()
-                    .or_else(|| value.as_str()?.trim().parse().ok())
-            })
-            == Some(4)
+    let Some(mode) = payload.get("mode").and_then(Value::as_str) else {
+        return false;
+    };
+    candle_ltx_product_tier_eligible(model, mode, payload)
 }
 
 /// Native LTX replace-person eligibility. Unlike the historical generic Wan-VACE substitution, this
@@ -914,7 +952,7 @@ pub(crate) fn ltx_replace_candle_eligible(model: &str, payload: &Map<String, Val
     {
         return false;
     }
-    !candle_request_wants_quant(payload) || candle_video_tier_select_eligible(model, payload)
+    candle_ltx_product_tier_eligible(model, "replace_person", payload)
 }
 
 /// Candle Wan-VACE eligibility for the advanced video job types (sc-5494): `PersonReplace`
