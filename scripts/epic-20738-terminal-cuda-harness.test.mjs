@@ -14,6 +14,7 @@ import {
   loadProfile,
   parseNvidiaSmi,
   receiptSkeleton,
+  runCampaign,
   safeRemoveTree,
   validateCampaignPaths,
   validateDocumentWithSchema,
@@ -200,8 +201,7 @@ test("raw nvidia-smi and one exact inference pin fixtures parse deterministicall
 });
 
 test("Draft 2020-12 schemas validate the profile and close adversarial receipt drift", async () => {
-  const python = process.env.SCENEWORKS_TEST_PYTHON ?? "python";
-  assert.doesNotThrow(() => validateDocumentWithSchema(python, PROFILE_SCHEMA_PATH, PROFILE_PATH));
+  assert.doesNotThrow(() => validateDocumentWithSchema(PROFILE_SCHEMA_PATH, PROFILE_PATH));
   const temporary = await mkdtemp(path.join(tmpdir(), "sc-20945-schema-"));
   try {
     const writeReceipt = async (name, receipt) => {
@@ -210,38 +210,38 @@ test("Draft 2020-12 schemas validate the profile and close adversarial receipt d
       return file;
     };
     const valid = await writeReceipt("valid.json", fixtureReceipt());
-    assert.doesNotThrow(() => validateDocumentWithSchema(python, RECEIPT_SCHEMA_PATH, valid));
+    assert.doesNotThrow(() => validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, valid));
 
     const openInventory = fixtureReceipt();
     openInventory.artifacts[0].inventory.injected = true;
     const openInventoryFile = await writeReceipt("open-inventory.json", openInventory);
     assert.throws(
-      () => validateDocumentWithSchema(python, RECEIPT_SCHEMA_PATH, openInventoryFile),
-      /Additional properties are not allowed/,
+      () => validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, openInventoryFile),
+      /must NOT have additional properties/,
     );
 
     const openGpuSample = fixtureReceipt();
     openGpuSample.hardware.rawVramSamples[0].injected = true;
     const openGpuFile = await writeReceipt("open-gpu.json", openGpuSample);
     assert.throws(
-      () => validateDocumentWithSchema(python, RECEIPT_SCHEMA_PATH, openGpuFile),
-      /Additional properties are not allowed/,
+      () => validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, openGpuFile),
+      /must NOT have additional properties/,
     );
 
     const passedWithoutOutput = fixtureReceipt();
     passedWithoutOutput.outputs = [];
     const noOutputFile = await writeReceipt("passed-without-output.json", passedWithoutOutput);
     assert.throws(
-      () => validateDocumentWithSchema(python, RECEIPT_SCHEMA_PATH, noOutputFile),
-      /should be non-empty/,
+      () => validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, noOutputFile),
+      /must NOT have fewer than 1 items/,
     );
 
     const failedWithoutError = fixtureReceipt("failed");
     failedWithoutError.error = null;
     const noErrorFile = await writeReceipt("failed-without-error.json", failedWithoutError);
     assert.throws(
-      () => validateDocumentWithSchema(python, RECEIPT_SCHEMA_PATH, noErrorFile),
-      /is not of type 'string'/,
+      () => validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, noErrorFile),
+      /must be string/,
     );
   } finally {
     await rm(temporary, { recursive: true, force: true });
@@ -329,11 +329,115 @@ test("campaign paths are fresh non-nested RUNNER_TEMP descendants and cleanup re
   }
 });
 
-test("schemas and workflow preserve the opt-in single-job terminal contract", async () => {
-  const [profileSchema, receiptSchema, workflow] = await Promise.all([
+test("injected setup/finalization/hash/schema/write/cleanup faults attempt all 19 and preserve emergency evidence", async () => {
+  const temporary = await mkdtemp(path.join(tmpdir(), "sc-20945-faults-"));
+  const runnerTemp = path.join(temporary, "runner-temp");
+  const sceneworks = path.join(temporary, "sceneworks");
+  const inference = path.join(temporary, "inference");
+  await Promise.all([runnerTemp, sceneworks, inference].map((directory) => mkdir(directory)));
+  const output = path.join(runnerTemp, "output");
+  const scratch = path.join(runnerTemp, "scratch");
+  const guard = await validateCampaignPaths({
+    runnerTemp, output, scratch, repositories: [sceneworks, inference],
+  });
+  await mkdir(output);
+  await mkdir(scratch);
+  const checked = profile();
+  const repositories = {
+    sceneworks: { sha: "1".repeat(40), clean: true },
+    inference: { sha: "2".repeat(40), clean: true },
+  };
+  const execution = {
+    runId: "fault-run", runAttempt: "1", headSha: "1".repeat(40), headRef: "refs/heads/fault",
+    workflow: "fixture", runnerName: "fixture-runner", runnerOs: "Windows", runnerArch: "X64",
+  };
+  const gpuIdentity = [{
+    timestamp: "2026/08/21 12:00:00", index: 0, name: "fixture GPU", uuid: "GPU-fixture",
+    pciBusId: "00000000:01:00.0", computeCapability: "12.0", driverVersion: "999.1",
+    memoryTotalMiB: 49140, memoryUsedMiB: 10, memoryFreeMiB: 49130, raw: "fixture raw",
+  }];
+  const attemptedCells = [];
+  const injectedStages = [];
+  const fault = async (stage, index) => {
+    if (stage === "setup") attemptedCells.push(index);
+    const shouldFail = (index === 0 && new Set(["setup", "emergencyReceipt"]).has(stage))
+      || (index === 1 && new Set(["finalLog", "fallbackLog"]).has(stage))
+      || (index === 2 && new Set(["evidenceHash", "evidenceRehash"]).has(stage))
+      || (index === 3 && stage === "semanticValidation")
+      || (index === 4 && stage === "schemaValidation")
+      || (index === 5 && stage === "receiptWrite")
+      || (index === 6 && stage === "cleanup")
+      || (index === null && stage === "summaryWrite");
+    if (shouldFail) {
+      injectedStages.push(`${index}:${stage}`);
+      throw new Error(`injected ${stage} failure for ${index}`);
+    }
+  };
+  const operations = {
+    provisionArtifact: async ({ id, artifact, scratch: cellScratch }) => {
+      const selectedRoot = path.resolve(cellScratch, "artifacts", id, artifact.subdirectory);
+      return {
+        id, ...artifact, selectedRoot,
+        inventory: { root: selectedRoot, files: 1, bytes: 7, sha256: "a".repeat(64) },
+      };
+    },
+    executeCell: async ({ cellDir, logFile }) => {
+      await writeFile(logFile, "fixture runtime\n", "utf8");
+      const runtimeCell = JSON.parse(await readFile(path.join(cellDir, "cell.json"), "utf8"));
+      await writeFile(path.join(cellDir, "runtime-result.json"), `${JSON.stringify({
+        requestedTier: runtimeCell.requestedTier,
+        resolvedTier: runtimeCell.requestedTier,
+        denseFallback: false,
+      })}\n`, "utf8");
+      await writeFile(path.join(cellDir, "output.bin"), "fixture", "utf8");
+    },
+    sample: () => {},
+  };
+  try {
+    const result = await runCampaign({}, {
+      prepared: {
+        profile: checked, repositories, execution, guard, output, scratch,
+        startupErrors: [], gpuIdentity,
+        systemMemory: { totalBytes: 128 * 1024 ** 3, availableBytesAtStart: 100 * 1024 ** 3 },
+        sceneworksRoot: sceneworks,
+      },
+      fault, operations, suppressVerdict: true,
+    });
+    assert.deepEqual(attemptedCells, Array.from({ length: 19 }, (_, index) => index));
+    assert.equal(result.summary.receipts.length, 19);
+    assert.equal(new Set(result.summary.receipts.map((receipt) => receipt.id)).size, 19);
+    assert.equal(result.summaryPath, "_emergency/campaign-summary-fallback.json");
+    assert.match(result.summary.campaignErrors.join("\n"), /primary campaign summary write failed/);
+    for (const [index, outcome] of result.summary.receipts.entries()) {
+      assert.ok(outcome.receipt, `${outcome.id} must retain a receipt path`);
+      const receiptFile = path.join(output, ...outcome.receipt.split("/"));
+      const receipt = JSON.parse(await readFile(receiptFile, "utf8"));
+      assert.doesNotThrow(() => validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, receipt));
+      assert.doesNotThrow(() => validateReceipt(receipt, checked.cells[index], checked));
+    }
+    for (const index of [0, 1, 2, 3, 4, 5]) {
+      assert.match(result.summary.receipts[index].receipt, /^_emergency\//);
+      assert.equal(result.summary.receipts[index].emergencyReceiptError, null);
+    }
+    assert.match(result.summary.receipts[0].receipt, /receipt-last-resort\.json$/);
+    assert.match(result.summary.receipts[0].error, /emergency receipt failed/);
+    assert.doesNotMatch(result.summary.receipts[6].receipt, /^_emergency\//);
+    const durableSummary = JSON.parse(await readFile(path.join(output, ...result.summaryPath.split("/")), "utf8"));
+    assert.equal(durableSummary.receipts.length, 19);
+    assert.ok(injectedStages.includes("null:summaryWrite"));
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("schemas, clean Node dependencies, and workflow preserve the opt-in single-job terminal contract", async () => {
+  const [profileSchema, receiptSchema, workflow, checks, packageJson, packageLock] = await Promise.all([
     readFile("config/terminal-evidence/epic-20738-profile.schema.json", "utf8").then(JSON.parse),
     readFile("config/terminal-evidence/epic-20738-receipt.schema.json", "utf8").then(JSON.parse),
     readFile(".github/workflows/windows-candle.yml", "utf8"),
+    readFile(".github/workflows/check.yml", "utf8"),
+    readFile("package.json", "utf8").then(JSON.parse),
+    readFile("package-lock.json", "utf8").then(JSON.parse),
   ]);
   assert.equal(profileSchema.properties.cells.minItems, 19);
   assert.equal(profileSchema.properties.cells.maxItems, 19);
@@ -348,7 +452,11 @@ test("schemas and workflow preserve the opt-in single-job terminal contract", as
   assert.doesNotMatch(workflow, /^  [a-zA-Z0-9_-]+:\s*\n\s+strategy:\s*\n\s+matrix:/m);
   assert.equal((workflow.match(/epic-20738-terminal-cuda-harness\.mjs run/g) ?? []).length, 1);
   assert.match(workflow, /id: terminal_campaign[\s\S]*?continue-on-error: true/);
-  assert.match(workflow, /jsonschema==4\.25\.1/);
-  assert.match(workflow, /harness\.mjs check --python \$python/);
+  assert.doesNotMatch(workflow, /jsonschema|harness\.mjs check --python/);
+  assert.match(workflow, /npm ci --ignore-scripts[\s\S]*?harness\.mjs check/);
+  assert.equal(packageJson.devDependencies.ajv, "8.20.0");
+  assert.equal(packageJson.devDependencies["ajv-formats"], "3.0.1");
+  assert.equal(packageLock.packages[""].devDependencies.ajv, "8.20.0");
+  assert.match(checks, /parity-scaffold:[\s\S]*?npm ci --ignore-scripts[\s\S]*?npm run check/);
   assert.match(workflow, /name: Upload every epic-20738 terminal receipt[\s\S]*?if: \$\{\{ always\(\)/);
 });

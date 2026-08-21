@@ -11,6 +11,9 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
+import Ajv2020 from "ajv/dist/2020.js";
+import addFormats from "ajv-formats";
+
 import { hashArtifactInventory } from "./hash-artifact-inventory.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 
@@ -19,7 +22,7 @@ export const PROFILE_PATH = "config/terminal-evidence/epic-20738-cuda.json";
 export const PROFILE_SCHEMA_PATH = "config/terminal-evidence/epic-20738-profile.schema.json";
 export const RECEIPT_SCHEMA_PATH = "config/terminal-evidence/epic-20738-receipt.schema.json";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const SCHEMA_VALIDATOR_PATH = path.join(ROOT, "scripts/validate-epic-20738-terminal-schema.py");
+const SCHEMA_VALIDATORS = new Map();
 const SHA40 = /^[0-9a-f]{40}$/;
 const SAFE_ID = /^[a-z0-9][a-z0-9-]+$/;
 const BLOCKED = ["anima", "sana", "vace", "flux2", "true_v2", "true-v2", "eros"];
@@ -234,20 +237,34 @@ function run(command, args, options = {}) {
   return result.stdout.trim();
 }
 
-export function validateDocumentWithSchema(python, schemaPath, documentPath) {
-  return run(python, [
-    SCHEMA_VALIDATOR_PATH,
-    "--schema", path.resolve(ROOT, schemaPath),
-    "--document", path.resolve(documentPath),
-  ]);
+function schemaValidator(schemaPath) {
+  const absolute = path.resolve(ROOT, schemaPath);
+  if (!SCHEMA_VALIDATORS.has(absolute)) {
+    const ajv = new Ajv2020({ allErrors: true, allowUnionTypes: true, strict: true });
+    addFormats(ajv);
+    SCHEMA_VALIDATORS.set(absolute, ajv.compile(JSON.parse(readFileSync(absolute, "utf8"))));
+  }
+  return SCHEMA_VALIDATORS.get(absolute);
 }
 
-async function writeJsonAtomically(file, value, { python, schemaPath } = {}) {
+export function validateDocumentWithSchema(schemaPath, document) {
+  const value = typeof document === "string"
+    ? JSON.parse(readFileSync(path.resolve(document), "utf8"))
+    : document;
+  const validate = schemaValidator(schemaPath);
+  if (!validate(value)) {
+    const details = validate.errors.map((error) => `${error.instancePath || "/"}: ${error.message}`).join("\n");
+    fail(`Draft 2020-12 validation failed for ${schemaPath}:\n${details}`);
+  }
+  return value;
+}
+
+async function writeJsonAtomically(file, value, { schemaPath } = {}) {
   await mkdir(path.dirname(file), { recursive: true });
   const temporary = `${file}.tmp-${process.pid}-${randomUUID()}`;
   try {
     await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
-    if (schemaPath) validateDocumentWithSchema(python, schemaPath, temporary);
+    if (schemaPath) validateDocumentWithSchema(schemaPath, value);
     await rename(temporary, file);
   } finally {
     await rm(temporary, { force: true });
@@ -679,8 +696,13 @@ function sampleGpuBestEffort(samples, errors, label) {
   }
 }
 
-async function refreshEvidence(receipt, cellDir, errors) {
+async function invokeFault(fault, stage, index) {
+  if (fault) await fault(stage, index);
+}
+
+async function refreshEvidence(receipt, cellDir, errors, { fault, index } = {}) {
   try {
+    await invokeFault(fault, "evidenceHash", index);
     const evidence = await evidenceFiles(cellDir);
     receipt.inputs = evidence.inputs;
     receipt.outputs = evidence.outputs;
@@ -692,17 +714,30 @@ async function refreshEvidence(receipt, cellDir, errors) {
     receipt.outputs = [];
     const fallbackLog = path.join(cellDir, "evidence-fallback.log");
     await writeFile(fallbackLog, `${new Date().toISOString()} ${message}\n`, "utf8");
+    await invokeFault(fault, "evidenceRehash", index);
     const fallback = await hashedFiles(cellDir, { exclude: new Set(["receipt.json"]) });
     receipt.logs = fallback.filter((file) => file.path.endsWith(".log"));
   }
 }
 
+async function writePrimaryReceipt({ file, receipt, cell, profile, fault, index }) {
+  await invokeFault(fault, "semanticValidation", index);
+  validateReceipt(receipt, cell, profile);
+  await invokeFault(fault, "schemaValidation", index);
+  validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, receipt);
+  await invokeFault(fault, "receiptWrite", index);
+  await writeJsonAtomically(file, receipt);
+}
+
 async function writeEmergencyReceipt({
-  args, profile, cell, index, ordinalName, output, scratch, repositories, execution, gpuIdentity,
-  systemMemory, error,
+  profile, cell, index, ordinalName, output, scratch, repositories, execution, gpuIdentity,
+  systemMemory, error, cleanup,
 }) {
-  const cellDir = path.join(output, `${ordinalName}-emergency`);
-  await mkdir(cellDir);
+  // This path deliberately bypasses all injected/primary finalization operations. If the primary
+  // log, evidence hash, semantic/schema check, or atomic writer fails, a fresh controller-owned
+  // directory under the already-confined output root gets a separately constructed receipt.
+  const cellDir = path.join(output, "_emergency", ordinalName);
+  await mkdir(cellDir, { recursive: true });
   const startedAt = new Date().toISOString();
   const message = `unhandled cell setup/finalization failure: ${errorText(error)}`;
   await writeFile(path.join(cellDir, "controller.log"), `${startedAt} ${message}\n`, "utf8");
@@ -714,7 +749,7 @@ async function writeEmergencyReceipt({
     startedAt,
   });
   receipt.error = message;
-  receipt.cleanup = { attempted: false, completed: true, error: null };
+  receipt.cleanup = cleanup ?? { attempted: false, completed: true, error: null };
   receipt.hardware.rawVramSamples = gpuIdentity.length
     ? [...gpuIdentity]
     : [{ timestamp: startedAt, raw: message }];
@@ -722,62 +757,163 @@ async function writeEmergencyReceipt({
   receipt.logs = evidence.logs;
   receipt.completedAt = new Date().toISOString();
   validateReceipt(receipt, cell, profile);
-  await writeJsonAtomically(path.join(cellDir, "receipt.json"), receipt, {
-    python: args.python, schemaPath: RECEIPT_SCHEMA_PATH,
-  });
-  return `${path.basename(cellDir)}/receipt.json`;
+  validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, receipt);
+  await writeJsonAtomically(path.join(cellDir, "receipt.json"), receipt);
+  return `_emergency/${ordinalName}/receipt.json`;
 }
 
-async function runCampaign(args) {
-  if (process.env.SCENEWORKS_ENABLE_EPIC_20738_TERMINAL_CUDA !== "1") {
-    fail("terminal hardware execution is opt-in; set SCENEWORKS_ENABLE_EPIC_20738_TERMINAL_CUDA=1 only for the frozen final dispatch");
-  }
-  validateDocumentWithSchema(args.python, PROFILE_SCHEMA_PATH, args.profile);
-  const profile = validateProfile(loadProfile(args.profile));
-  const sceneworks = repositoryIdentity(args.sceneworks, "SceneWorks");
-  const inference = repositoryIdentity(args.inference, "inference");
-  if (sceneworks.sha !== args.sceneworksRevision) fail("SceneWorks HEAD does not match --sceneworks-revision");
-  if (inference.sha !== args.inferenceRevision) fail("inference HEAD does not match --inference-revision");
-  const pins = inferencePins(await readFile(path.join(sceneworks.root, "Cargo.toml"), "utf8"));
-  if (pins.length !== 1 || pins[0] !== inference.sha) {
-    fail(`SceneWorks must have exactly one inference revision and it must equal checked-out inference HEAD; got ${pins.join(",")}`);
-  }
-  const manifest = JSON.parse(stripJsoncComments(await readFile(
-    path.join(sceneworks.root, "config/manifests/builtin.models.jsonc"), "utf8",
-  )));
-  validateManifestAuthorities(profile, manifest);
-
-  const repositories = {
-    sceneworks: { sha: sceneworks.sha, clean: true },
-    inference: { sha: inference.sha, clean: true },
-  };
-  const execution = workflowExecution(sceneworks.sha);
-  const guard = await validateCampaignPaths({
-    runnerTemp: process.env.RUNNER_TEMP,
-    output: args.output,
-    scratch: args.scratch,
-    repositories: [sceneworks.root, inference.root],
+async function writeLastResortEmergencyReceipt({
+  profile, cell, index, ordinalName, output, scratch, repositories, execution, gpuIdentity,
+  systemMemory, errors, cleanup,
+}) {
+  // A second implementation intentionally avoids evidenceFiles(), writeJsonAtomically(), and every
+  // primary/injected callback. It hashes its one log directly and publishes under a different name.
+  const cellDir = path.join(output, "_emergency", ordinalName);
+  await mkdir(cellDir, { recursive: true });
+  const startedAt = new Date().toISOString();
+  const logFile = path.join(cellDir, "controller-last-resort.log");
+  await writeFile(logFile, `${startedAt} ${errors.join("\n")}\n`, "utf8");
+  const metadata = await stat(logFile);
+  const receipt = receiptSkeleton({
+    cell,
+    ordinal: index + 1,
+    repositories,
+    artifacts: cell.artifactIds.map((id) => pendingArtifact(
+      id, profile.artifacts[id], path.join(scratch, ordinalName),
+    )),
+    execution,
+    gpuIdentity,
+    systemMemory,
+    startedAt,
   });
-  const { output, scratch } = guard;
-  await mkdir(output, { recursive: false });
-  await mkdir(scratch, { recursive: false });
-  const startupErrors = [];
-  let gpuIdentity = [];
+  receipt.error = errors.join("\n");
+  receipt.cleanup = cleanup;
+  receipt.hardware.rawVramSamples = gpuIdentity.length
+    ? [...gpuIdentity]
+    : [{ timestamp: startedAt, raw: receipt.error }];
+  receipt.logs = [{
+    path: "controller-last-resort.log", bytes: metadata.size, sha256: await sha256File(logFile),
+  }];
+  receipt.completedAt = new Date().toISOString();
+  validateReceipt(receipt, cell, profile);
+  validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, receipt);
+  const finalPath = path.join(cellDir, "receipt-last-resort.json");
+  const temporary = `${finalPath}.tmp-${process.pid}-${randomUUID()}`;
   try {
-    gpuIdentity = sampleGpu();
-  } catch (error) {
-    recordError(startupErrors, "initial GPU identity sample failed", error);
+    await writeFile(temporary, `${JSON.stringify(receipt, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
+    await rename(temporary, finalPath);
+  } finally {
+    await rm(temporary, { force: true });
   }
-  const systemMemory = { totalBytes: totalmem(), availableBytesAtStart: freemem() };
+  return `_emergency/${ordinalName}/receipt-last-resort.json`;
+}
+
+async function writeSummaryDurably({ output, summary, fault }) {
+  const primary = path.join(output, "campaign-summary.json");
+  try {
+    await invokeFault(fault, "summaryWrite", null);
+    await writeJsonAtomically(primary, summary);
+    return "campaign-summary.json";
+  } catch (error) {
+    summary.campaignErrors.push(`primary campaign summary write failed: ${errorText(error)}`);
+    const fallbackDir = path.join(output, "_emergency");
+    await mkdir(fallbackDir, { recursive: true });
+    const fallback = path.join(fallbackDir, "campaign-summary-fallback.json");
+    const temporary = `${fallback}.tmp-${process.pid}-${randomUUID()}`;
+    try {
+      // Independent path and primitives: neither the primary summary hook nor writer is reused.
+      await writeFile(temporary, `${JSON.stringify(summary, null, 2)}\n`, {
+        encoding: "utf8", flag: "wx",
+      });
+      await rename(temporary, fallback);
+      return "_emergency/campaign-summary-fallback.json";
+    } catch (fallbackError) {
+      const failureLog = path.join(fallbackDir, "campaign-summary-fallback-error.log");
+      await writeFile(
+        failureLog,
+        `${new Date().toISOString()} ${errorText(fallbackError)}\n${JSON.stringify(summary)}\n`,
+        "utf8",
+      );
+      throw new Error(`primary and fallback campaign summary writes failed; evidence: ${failureLog}`, {
+        cause: fallbackError,
+      });
+    } finally {
+      await rm(temporary, { force: true });
+    }
+  }
+}
+
+export async function runCampaign(args, options = {}) {
+  let prepared = options.prepared;
+  if (!prepared) {
+    if (process.env.SCENEWORKS_ENABLE_EPIC_20738_TERMINAL_CUDA !== "1") {
+      fail("terminal hardware execution is opt-in; set SCENEWORKS_ENABLE_EPIC_20738_TERMINAL_CUDA=1 only for the frozen final dispatch");
+    }
+    validateDocumentWithSchema(PROFILE_SCHEMA_PATH, args.profile);
+    const profile = validateProfile(loadProfile(args.profile));
+    const sceneworks = repositoryIdentity(args.sceneworks, "SceneWorks");
+    const inference = repositoryIdentity(args.inference, "inference");
+    if (sceneworks.sha !== args.sceneworksRevision) fail("SceneWorks HEAD does not match --sceneworks-revision");
+    if (inference.sha !== args.inferenceRevision) fail("inference HEAD does not match --inference-revision");
+    const pins = inferencePins(await readFile(path.join(sceneworks.root, "Cargo.toml"), "utf8"));
+    if (pins.length !== 1 || pins[0] !== inference.sha) {
+      fail(`SceneWorks must have exactly one inference revision and it must equal checked-out inference HEAD; got ${pins.join(",")}`);
+    }
+    const manifest = JSON.parse(stripJsoncComments(await readFile(
+      path.join(sceneworks.root, "config/manifests/builtin.models.jsonc"), "utf8",
+    )));
+    validateManifestAuthorities(profile, manifest);
+
+    const repositories = {
+      sceneworks: { sha: sceneworks.sha, clean: true },
+      inference: { sha: inference.sha, clean: true },
+    };
+    const execution = workflowExecution(sceneworks.sha);
+    const guard = await validateCampaignPaths({
+      runnerTemp: process.env.RUNNER_TEMP,
+      output: args.output,
+      scratch: args.scratch,
+      repositories: [sceneworks.root, inference.root],
+    });
+    const { output, scratch } = guard;
+    await mkdir(output, { recursive: false });
+    await mkdir(scratch, { recursive: false });
+    const startupErrors = [];
+    let gpuIdentity = [];
+    try {
+      gpuIdentity = sampleGpu();
+    } catch (error) {
+      recordError(startupErrors, "initial GPU identity sample failed", error);
+    }
+    prepared = {
+      profile, repositories, execution, guard, output, scratch, startupErrors, gpuIdentity,
+      systemMemory: { totalBytes: totalmem(), availableBytesAtStart: freemem() },
+      sceneworksRoot: sceneworks.root,
+    };
+  }
+  const {
+    profile, repositories, execution, guard, output, scratch, startupErrors, gpuIdentity,
+    systemMemory, sceneworksRoot,
+  } = prepared;
+  const fault = options.fault;
+  const operations = {
+    provisionArtifact: options.operations?.provisionArtifact ?? provisionArtifact,
+    executeCell: options.operations?.executeCell ?? executeCell,
+    cleanup: options.operations?.cleanup ?? safeRemoveTree,
+    sample: options.operations?.sample ?? sampleGpuBestEffort,
+  };
   const receipts = [];
   const campaignErrors = [];
   for (const [index, cell] of profile.cells.entries()) {
     const ordinalName = `${String(index + 1).padStart(2, "0")}-${cell.id}`;
+    let emergencyCleanup = { attempted: false, completed: true, error: null };
+    const errors = [...startupErrors];
+    let emergencyFailureMessages = errors;
     try {
+    await invokeFault(fault, "setup", index);
     let cellDir = path.join(output, ordinalName);
     const cellScratch = path.join(scratch, ordinalName);
     const startedAt = new Date().toISOString();
-    const errors = [...startupErrors];
     const artifacts = cell.artifactIds.map((id) => pendingArtifact(id, profile.artifacts[id], cellScratch));
     const samples = gpuIdentity.length
       ? [...gpuIdentity]
@@ -800,16 +936,14 @@ async function runCampaign(args) {
       const logFile = path.join(cellDir, "runtime.log");
       await writeFile(controllerLog, `${startedAt} starting ${cell.id}\n`, { encoding: "utf8", flag: "wx" });
       receipt.logs = (await evidenceFiles(cellDir)).logs;
-      validateReceipt(receipt, cell, profile);
-      await writeJsonAtomically(receiptPath, receipt, {
-        python: args.python, schemaPath: RECEIPT_SCHEMA_PATH,
-      });
+      await writePrimaryReceipt({ file: receiptPath, receipt, cell, profile, fault, index });
 
       await mkdir(cellScratch);
       scratchCreated = true;
       for (const [artifactIndex, artifactId] of cell.artifactIds.entries()) {
         activeArtifactIndex = artifactIndex;
-        const artifact = await provisionArtifact({
+        await invokeFault(fault, "provision", index);
+        const artifact = await operations.provisionArtifact({
           id: artifactId, artifact: profile.artifacts[artifactId], scratch: cellScratch, python: args.python,
         });
         artifacts[artifactIndex] = {
@@ -829,9 +963,10 @@ async function runCampaign(args) {
       };
       const cellFile = path.join(cellDir, "cell.json");
       await writeFile(cellFile, `${JSON.stringify(runtimeCell, null, 2)}\n`, "utf8");
-      sampleGpuBestEffort(samples, errors, "pre-execution VRAM sample failed");
-      await executeCell({ sceneworks: sceneworks.root, cellFile, cellDir, logFile, samples });
-      sampleGpuBestEffort(samples, errors, "post-execution VRAM sample failed");
+      operations.sample(samples, errors, "pre-execution VRAM sample failed");
+      await invokeFault(fault, "execute", index);
+      await operations.executeCell({ sceneworks: sceneworksRoot, cellFile, cellDir, logFile, samples });
+      operations.sample(samples, errors, "post-execution VRAM sample failed");
       const runtimeResult = JSON.parse(await readFile(path.join(cellDir, "runtime-result.json"), "utf8"));
       if (runtimeResult.requestedTier !== cell.requestedTier
         || runtimeResult.resolvedTier !== cell.requestedTier || runtimeResult.denseFallback !== false) {
@@ -848,12 +983,13 @@ async function runCampaign(args) {
           // The fallback log below is independently created and hashed if this path is unavailable.
         }
       }
-      sampleGpuBestEffort(samples, [], "failure VRAM sample failed");
+      operations.sample(samples, [], "failure VRAM sample failed");
     } finally {
       receipt.cleanup.attempted = scratchCreated;
       if (scratchCreated) {
         try {
-          await safeRemoveTree(cellScratch, guard, `scratch for ${cell.id}`);
+          await invokeFault(fault, "cleanup", index);
+          await operations.cleanup(cellScratch, guard, `scratch for ${cell.id}`);
           receipt.cleanup.completed = true;
         } catch (error) {
           const message = recordError(errors, "cell scratch cleanup failed", error);
@@ -862,6 +998,7 @@ async function runCampaign(args) {
       } else {
         receipt.cleanup.completed = true;
       }
+      emergencyCleanup = structuredClone(receipt.cleanup);
 
       try {
         if (!cellDirCreated) {
@@ -872,6 +1009,7 @@ async function runCampaign(args) {
           receiptPath = path.join(cellDir, "receipt.json");
         }
         try {
+          await invokeFault(fault, "finalLog", index);
           await appendFile(
             controllerLog,
             `${new Date().toISOString()} finalizing ${cell.id}; errors=${errors.length}\n`,
@@ -880,58 +1018,56 @@ async function runCampaign(args) {
         } catch (error) {
           recordError(errors, "controller log finalization failed", error);
           controllerLog = path.join(cellDir, "controller-fallback.log");
+          await invokeFault(fault, "fallbackLog", index);
           await writeFile(controllerLog, `${new Date().toISOString()} ${errors.join("\n")}\n`, "utf8");
         }
         receipt.artifacts = artifacts;
         receipt.hardware.rawVramSamples = samples;
-        await refreshEvidence(receipt, cellDir, errors);
+        await refreshEvidence(receipt, cellDir, errors, { fault, index });
         receipt.status = executionPassed && errors.length === 0 && receipt.cleanup.completed ? "passed" : "failed";
         receipt.error = receipt.status === "passed" ? null : (errors.join("\n") || "cell did not complete");
         receipt.completedAt = new Date().toISOString();
-        validateReceipt(receipt, cell, profile);
-        try {
-          await writeJsonAtomically(receiptPath, receipt, {
-            python: args.python, schemaPath: RECEIPT_SCHEMA_PATH,
-          });
-        } catch (error) {
-          recordError(errors, "atomic receipt write failed", error);
-          receipt.status = "failed";
-          receipt.error = errors.join("\n");
-          await appendFile(controllerLog, `${new Date().toISOString()} ${receipt.error}\n`, "utf8");
-          await refreshEvidence(receipt, cellDir, errors);
-          receipt.error = errors.join("\n");
-          receipt.completedAt = new Date().toISOString();
-          validateReceipt(receipt, cell, profile);
-          await writeJsonAtomically(receiptPath, receipt, {
-            python: args.python, schemaPath: RECEIPT_SCHEMA_PATH,
-          });
-        }
+        await writePrimaryReceipt({ file: receiptPath, receipt, cell, profile, fault, index });
         receipts.push({
           id: cell.id, status: receipt.status,
           receipt: `${path.basename(cellDir)}/receipt.json`, error: receipt.error,
         });
       } catch (error) {
-        const message = recordError(errors, "best-effort receipt finalization failed", error);
-        receipts.push({ id: cell.id, status: "failed", receipt: null, error: message });
+        throw new Error(recordError(errors, "best-effort receipt finalization failed", error), {
+          cause: error,
+        });
       }
     }
     } catch (error) {
-      let receiptPath = null;
-      let emergencyError = errorText(error);
+      let receiptPath;
+      let emergencyError = [...emergencyFailureMessages, errorText(error)].filter(Boolean).join("\n");
       try {
+        await invokeFault(fault, "emergencyReceipt", index);
         receiptPath = await writeEmergencyReceipt({
-          args, profile, cell, index, ordinalName, output, scratch, repositories, execution, gpuIdentity,
-          systemMemory, error,
+          profile, cell, index, ordinalName, output, scratch, repositories, execution, gpuIdentity,
+          systemMemory, error: new Error(emergencyError), cleanup: emergencyCleanup,
         });
       } catch (receiptError) {
         emergencyError += `\nemergency receipt failed: ${errorText(receiptError)}`;
+        try {
+          receiptPath = await writeLastResortEmergencyReceipt({
+            profile, cell, index, ordinalName, output, scratch, repositories, execution, gpuIdentity,
+            systemMemory, errors: [emergencyError], cleanup: emergencyCleanup,
+          });
+        } catch (lastResortError) {
+          emergencyError += `\nlast-resort emergency receipt failed: ${errorText(lastResortError)}`;
+        }
       }
-      receipts.push({ id: cell.id, status: "failed", receipt: receiptPath, error: emergencyError });
+      receipts.push({
+        id: cell.id, status: "failed", receipt: receiptPath, error: emergencyError,
+        emergencyReceiptError: receiptPath ? null : emergencyError,
+      });
     }
   }
 
   try {
-    await safeRemoveTree(scratch, guard, "campaign scratch");
+    await invokeFault(fault, "campaignCleanup", null);
+    await operations.cleanup(scratch, guard, "campaign scratch");
   } catch (error) {
     campaignErrors.push(recordError([], "campaign scratch cleanup failed", error));
   }
@@ -942,10 +1078,13 @@ async function runCampaign(args) {
     failed: receipts.filter((receipt) => receipt.status === "failed").length,
     campaignErrors,
   };
-  await writeJsonAtomically(path.join(output, "campaign-summary.json"), summary);
-  if (summary.failed || campaignErrors.length) {
+  const summaryPath = await writeSummaryDurably({ output, summary, fault });
+  summary.passed = receipts.filter((receipt) => receipt.status === "passed").length;
+  summary.failed = receipts.filter((receipt) => receipt.status === "failed").length;
+  if (!options.suppressVerdict && (summary.failed || campaignErrors.length)) {
     fail(`terminal campaign completed all 19 cells with ${summary.failed} cell failure(s) and ${campaignErrors.length} campaign cleanup failure(s)`);
   }
+  return { summary, summaryPath };
 }
 
 function value(args, flag) {
@@ -958,8 +1097,7 @@ async function main() {
   const [command, ...argv] = process.argv.slice(2);
   const profilePath = argv.includes("--profile") ? value(argv, "--profile") : PROFILE_PATH;
   if (command === "check") {
-    const python = value(argv, "--python");
-    validateDocumentWithSchema(python, PROFILE_SCHEMA_PATH, profilePath);
+    validateDocumentWithSchema(PROFILE_SCHEMA_PATH, profilePath);
     const profile = validateProfile(loadProfile(profilePath));
     const manifest = JSON.parse(stripJsoncComments(await readFile("config/manifests/builtin.models.jsonc", "utf8")));
     validateManifestAuthorities(profile, manifest);
@@ -977,7 +1115,7 @@ async function main() {
     });
     return;
   }
-  fail("usage: epic-20738-terminal-cuda-harness.mjs check --python path [--profile path] | run --profile path --sceneworks-repo path --inference-repo path --sceneworks-revision sha40 --inference-revision sha40 --output path --scratch path --python path");
+  fail("usage: epic-20738-terminal-cuda-harness.mjs check [--profile path] | run --profile path --sceneworks-repo path --inference-repo path --sceneworks-revision sha40 --inference-revision sha40 --output path --scratch path --python path");
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

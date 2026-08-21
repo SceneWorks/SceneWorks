@@ -35,8 +35,9 @@ Leave `run_five_rung_reference`, `provision_krea_snapshot`, and `run_ltx_eros_ac
 workflow rejects a combined dispatch. Its fixed terminal concurrency key admits only one campaign at
 a time across the Windows CUDA pool.
 
-The job checks out exact source revisions and requires both checkouts to be clean. It creates a fresh
-Python environment with pinned artifact and Draft 2020-12 schema clients, then anonymously downloads
+The job checks out exact source revisions and requires both checkouts to be clean. It installs the
+lockfile-pinned in-process Node Draft 2020-12 validator and creates a fresh Python environment only
+for the pinned anonymous artifact client, then downloads
 each public Hugging Face artifact at its exact commit and allow-listed paths into isolated per-cell
 scratch. Runner caches, weight-root secrets, and pre-existing snapshots are not accepted as
 authorities. Output and scratch must be fresh, distinct, non-nested descendants of the resolved
@@ -68,15 +69,18 @@ Cleanup failures are part of the receipt rather than aborting the campaign. It r
 failure only after attempting all 19. The workflow uploads the run-scoped evidence with
 `always()` before enforcing that aggregate verdict, so a later load, generation, comparison, or
 schema failure cannot hide earlier receipts. A provisioning failure records the exact attempted
-authority and the reason its inventory is incomplete.
+authority and the reason its inventory is incomplete. If primary log, evidence, validation, or
+atomic receipt finalization fails, an independent writer publishes a fresh schema-valid failure
+receipt under `_emergency/`. A failed primary campaign-summary write likewise uses an independent
+`_emergency/campaign-summary-fallback.json`, preserving all 19 outcomes before the verdict.
 
 ## Source-only checks
 
 These checks do not dispatch hardware or download weights:
 
 ```text
-python -m pip install "jsonschema==4.25.1"
-node scripts/epic-20738-terminal-cuda-harness.mjs check --python python
+npm ci --ignore-scripts
+node scripts/epic-20738-terminal-cuda-harness.mjs check
 node --test scripts/epic-20738-terminal-cuda-harness.test.mjs
 cargo fmt --all -- --check
 ```
