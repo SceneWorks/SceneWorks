@@ -1836,7 +1836,9 @@ fn candle_scail2_adapters_have_lightning(adapters: &[AdapterSpec]) -> bool {
 /// sibling of the macOS `resolve_scail2_conditioning`. Loads the reference character image + the
 /// driving clip, segments both with the candle SAM3 PCS segmenter (every person → a palette color,
 /// left-to-right), paints the color-coded masks (animation: reference bg white, driving bg black), and
-/// assembles `Reference` + `Mask` + `ControlClip`. Segmentation + painting run on the blocking pool.
+/// assembles strict ordered `Reference`, `Mask` pairs before the `ControlClip`. Every
+/// `referenceAssetIds` entry is loaded + segmented separately in caller order; `sourceAssetId` is
+/// retained only as the legacy single-reference fallback. Segmentation + painting run on the blocking pool.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 async fn resolve_candle_scail2_conditioning(
     api: &ApiClient,
@@ -1845,25 +1847,39 @@ async fn resolve_candle_scail2_conditioning(
     request: &VideoRequest,
     project_path: &Path,
 ) -> WorkerResult<Vec<Conditioning>> {
-    // The character: a reference image (referenceAssetIds first, else the i2v sourceAssetId).
-    let ref_id = request
-        .reference_asset_ids
-        .first()
-        .map(String::as_str)
-        .or(request.source_asset_id.as_deref())
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload(
-                "scail2 animate_character requires a reference character image (referenceAssetIds \
-                 or sourceAssetId)."
-                    .into(),
+    let reference_ids: Vec<&str> = if request.reference_asset_ids.is_empty() {
+        request.source_asset_id.as_deref().into_iter().collect()
+    } else {
+        request
+            .reference_asset_ids
+            .iter()
+            .map(String::as_str)
+            .collect()
+    };
+    if reference_ids.is_empty() {
+        return Err(WorkerError::InvalidPayload(
+            "scail2 animate_character requires a reference character image (referenceAssetIds \
+             or sourceAssetId)."
+                .into(),
+        ));
+    }
+    if reference_ids.len() > sceneworks_core::video_request::MAX_SCAIL2_REFERENCE_CHARACTERS {
+        return Err(WorkerError::InvalidPayload(format!(
+            "SCAIL-2 Animate Character supports at most {} reference characters.",
+            sceneworks_core::video_request::MAX_SCAIL2_REFERENCE_CHARACTERS
+        )));
+    }
+    let references = reference_ids
+        .into_iter()
+        .map(|reference_id| {
+            crate::image_jobs::load_reference_image(
+                &settings.data_dir,
+                &request.project_id,
+                reference_id,
+                project_path,
             )
-        })?;
-    let reference = crate::image_jobs::load_reference_image(
-        &settings.data_dir,
-        &request.project_id,
-        ref_id,
-        project_path,
-    )?;
+        })
+        .collect::<WorkerResult<Vec<_>>>()?;
 
     // The driving video → frames at the output size (the engine re-resizes internally). Reuses the
     // candle Wan-VACE source-clip loader (`load_source_video_frames`, which reads `sourceClipAssetId`
@@ -1905,16 +1921,16 @@ async fn resolve_candle_scail2_conditioning(
         settings,
         &job.id,
         move |flag| {
-            let masks = crate::person_segment_sam3_candle::segment_all_persons_in_memory(
-                &rm,
-                &rt,
-                std::slice::from_ref(&reference),
-                Some(flag),
-                None,
-            )?;
-            let mask =
-                crate::scail2_masks::paint_reference_mask(&masks, crate::scail2_masks::BG_WHITE)?;
-            Ok((reference, mask))
+            super::segment_scail2_references(references, &flag, |reference, flag| {
+                let masks = crate::person_segment_sam3_candle::segment_all_persons_in_memory(
+                    &rm,
+                    &rt,
+                    std::slice::from_ref(reference),
+                    Some(flag.clone()),
+                    None,
+                )?;
+                crate::scail2_masks::paint_reference_mask(&masks, crate::scail2_masks::BG_WHITE)
+            })
         },
         move |flag| {
             let masks = crate::person_segment_sam3_candle::segment_all_persons_in_memory(

@@ -741,6 +741,10 @@ describe("VideoStudio SCAIL-2 character animation + replacement backend", () => 
     loraCompatibility: {},
     ui: {},
   };
+  const SCAIL2_MULTI_REFERENCE = {
+    ...SCAIL2,
+    ui: { scail2MultiReference: true },
+  };
   // A Wan-VACE-style replace-capable model — the default replacement backend SCAIL-2 augments.
   const WAN = {
     id: "wan_2_2",
@@ -825,6 +829,42 @@ describe("VideoStudio SCAIL-2 character animation + replacement backend", () => 
       sourceClipAssetId: "vid_src",
     });
     expect(payload.referenceAssetIds).toEqual(["img_ref_a"]);
+  });
+
+  it("keeps SCAIL-2 multi-character selection descriptor-gated, ordered, and bounded", async () => {
+    const characters = [
+      character,
+      { id: "img_ref_b", type: "image", projectId: "project_1", displayName: "Character B" },
+      { id: "img_ref_c", type: "image", projectId: "project_1", displayName: "Character C" },
+      { id: "img_ref_d", type: "image", projectId: "project_1", displayName: "Character D" },
+      { id: "img_ref_e", type: "image", projectId: "project_1", displayName: "Character E" },
+      { id: "img_ref_f", type: "image", projectId: "project_1", displayName: "Character F" },
+      { id: "img_ref_g", type: "image", projectId: "project_1", displayName: "Character G" },
+    ];
+    const context = baseContext({ videoModels: [SCAIL2_MULTI_REFERENCE], assets: [clip, ...characters] });
+    await render(context);
+    await click(modeButton("Animate character"));
+
+    expect(pickerLabels()).toContain("Reference characters (ordered, up to 6)");
+    await click(buttonWithText(container, "Select clip"));
+    let modal = document.querySelector(".asset-picker-modal");
+    await doubleClick(
+      [...modal.querySelectorAll('[role="option"]')].find((el) => el.textContent.includes("Driving Clip")),
+    );
+
+    await click(buttonWithText(container, "Select images"));
+    modal = document.querySelector(".asset-picker-modal");
+    for (const asset of characters) {
+      await click(
+        [...modal.querySelectorAll('[role="option"]')].find((el) => el.textContent.includes(asset.displayName)),
+      );
+    }
+    await click(buttonWithText(modal, "Use Selection"));
+
+    // All seven remain visible/selectable so the user can correct the choice; the studio must not
+    // silently trim one before serialization, and the explicit validation blocks submission.
+    expect(container.textContent).toContain("SCAIL-2 supports at most 6 reference characters");
+    expect(buttonWithText(container, "Render clip").disabled).toBe(true);
   });
 
   it("offers SCAIL-2 as a replacement engine when 2+ backends can replace", async () => {

@@ -7298,6 +7298,158 @@ async fn scail2_conditioning_guards_fire_before_io() {
     );
 }
 
+/// One shared assembler is the parity boundary for both MLX and Candle. It must retain every
+/// reference's own mask and caller order, reject the missing-pair and seven-reference cases, and
+/// never substitute the image-only generic MultiReference carrier.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn scail2_multi_reference_conditioning_is_ordered_paired_and_bounded() {
+    let image = |shade| Image {
+        width: 1,
+        height: 1,
+        pixels: vec![shade, shade, shade],
+    };
+    let driving = vec![image(200)];
+    let driving_mask = vec![image(201)];
+
+    for count in [1usize, 2, 6] {
+        let pairs: Vec<_> = (0..count)
+            .map(|index| (image(index as u8), image(index as u8 + 32)))
+            .collect();
+        let conditioning =
+            scail2_animate_conditioning(pairs, driving.clone(), driving_mask.clone())
+                .expect("1–6 reference/mask pairs must be valid");
+        assert_eq!(conditioning.len(), count * 2 + 1);
+        for index in 0..count {
+            match &conditioning[index * 2] {
+                Conditioning::Reference { image, strength } => {
+                    assert_eq!(
+                        image.pixels[0], index as u8,
+                        "reference {index} keeps its order"
+                    );
+                    assert_eq!(*strength, None);
+                }
+                other => panic!("entry {} must be Reference, got {other:?}", index * 2),
+            }
+            match &conditioning[index * 2 + 1] {
+                Conditioning::Mask { image } => assert_eq!(
+                    image.pixels[0],
+                    index as u8 + 32,
+                    "reference {index} must retain its own mask"
+                ),
+                other => panic!("entry {} must be Mask, got {other:?}", index * 2 + 1),
+            }
+        }
+        assert!(matches!(
+            conditioning.last(),
+            Some(Conditioning::ControlClip { .. })
+        ));
+        assert!(
+            !conditioning
+                .iter()
+                .any(|item| matches!(item, Conditioning::MultiReference { .. })),
+            "SCAIL-2 must never emit bare image-only MultiReference conditioning"
+        );
+    }
+
+    let empty = scail2_animate_conditioning(vec![], driving.clone(), driving_mask.clone())
+        .expect_err("a missing reference/mask pair must fail before engine dispatch")
+        .to_string();
+    assert!(
+        empty.contains("at least one reference character"),
+        "got: {empty}"
+    );
+    let seven = scail2_animate_conditioning(
+        (0..7)
+            .map(|index| (image(index), image(index + 32)))
+            .collect(),
+        driving,
+        driving_mask,
+    )
+    .expect_err("a seventh pair must not be silently dropped")
+    .to_string();
+    assert!(
+        seven.contains("at most 6 reference characters"),
+        "got: {seven}"
+    );
+}
+
+/// Cancellation is checked at each reference boundary, so a user cancellation after one masked
+/// reference cannot continue into later character segmentation.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn scail2_multi_reference_segmentation_stops_between_references_on_cancel() {
+    let image = |shade| Image {
+        width: 1,
+        height: 1,
+        pixels: vec![shade, shade, shade],
+    };
+    let cancel = CancelFlag::new();
+    let mut seen = Vec::new();
+    let result = segment_scail2_references(vec![image(1), image(2)], &cancel, |reference, _| {
+        seen.push(reference.pixels[0]);
+        cancel.cancel();
+        Ok(image(reference.pixels[0] + 32))
+    });
+    assert!(
+        matches!(result, Err(WorkerError::Canceled(_))),
+        "got: {result:?}"
+    );
+    assert_eq!(
+        seen,
+        vec![1],
+        "the second reference must not begin after cancellation"
+    );
+}
+
+/// Loading every requested reference fails closed before segmentation if one asset has disappeared;
+/// a missing second character must not result in the first character being rendered by itself.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn scail2_missing_reference_asset_fails_before_masking() {
+    let data_dir = tempfile::tempdir().expect("data dir creates");
+    let project_dir = tempfile::tempdir().expect("project dir creates");
+    let error = crate::image_jobs::load_reference_image(
+        data_dir.path(),
+        "project-scail2",
+        "missing-second-character",
+        project_dir.path(),
+    )
+    .expect_err("a missing ordered reference asset must stop the job")
+    .to_string();
+    assert!(
+        error.contains("reference asset missing-second-character"),
+        "missing asset error must identify the rejected reference, got: {error}"
+    );
+}
+
+/// Both backend-specific resolvers must enter the same paired-reference helper. This source-level
+/// contract runs even in a lightweight build that does not link MLX or Candle.
+#[test]
+fn scail2_multi_reference_resolvers_stay_backend_parity_twins() {
+    const MLX: &str = include_str!("scail2.rs");
+    const CANDLE: &str = include_str!("candle.rs");
+    for (backend, source) in [("MLX", MLX), ("Candle", CANDLE)] {
+        assert!(
+            source.contains("segment_scail2_references(references, &flag"),
+            "{backend} must independently segment every ordered reference through the shared helper"
+        );
+        assert!(
+            source.contains("MAX_SCAIL2_REFERENCE_CHARACTERS"),
+            "{backend} must reject a seventh reference even for legacy/retry payloads"
+        );
+    }
+}
+
 /// A SCAIL-2 MLX snapshot dir if present: env override (`SCENEWORKS_MLX_SCAIL2_DIR`), then the
 /// bring-up convert/staging dirs, then the app-managed default. `None` ⇒ the smoke skips.
 #[cfg(target_os = "macos")]

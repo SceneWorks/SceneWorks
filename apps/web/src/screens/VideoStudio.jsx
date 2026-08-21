@@ -110,6 +110,7 @@ const legacyDefaultTextEncoderId = "default";
 const amoralTextEncoderId = "ltx_amoral_gemma_3_12b";
 const ltxIcLoraRequiredModes = new Set(["extend_clip", "video_bridge", "replace_person"]);
 const TIER_SCREEN = "video";
+const MAX_SCAIL2_REFERENCE_CHARACTERS = 6;
 
 // Video sub-modes that map onto a recipe workflow. extend_clip / replace_person
 // aren't recipe workflows, so "Save as Preset" is gated to these.
@@ -236,6 +237,12 @@ export function VideoStudio() {
     }
   }, [macVideoModels, model]);
   const selectedModel = videoModels.find((item) => item.id === model) ?? videoModels[0];
+  // Multi-reference SCAIL-2 needs a reference/mask pair per character. Keep this source-ready UI
+  // behind the descriptor-derived manifest flag: the currently pinned engine descriptor does not
+  // advertise the paired contract yet, so a normal catalog remains on the existing single picker
+  // until the final inference-main pin makes the capability truthful.
+  const scail2MultiReferenceEnabled =
+    model === "scail2_14b" && selectedModel?.ui?.scail2MultiReference === true;
   // Runtime-curated selector surface (sc-13800). The API emits only complete encoders the worker can
   // resolve; Video Studio stays adapter-agnostic and future models can expose the same shape.
   const textEncoderOptions = selectedModel?.textEncoderOptions ?? [];
@@ -1128,7 +1135,16 @@ export function VideoStudio() {
     (mode === "multi_video_to_video" && sourceClipAssetIds.length >= 2) ||
     (mode === "ads2v" && sourceClipAssetId && referenceClipAssetId && referenceAssetIds.length > 0) ||
     // SCAIL-2 character animation (sc-5449): a driving video + a reference character image.
-    (mode === "animate_character" && sourceClipAssetId && referenceAssetIds.length > 0);
+    // Once the paired multi-reference descriptor is live, its source-position table admits 1–6
+    // ordered character images. Keep all seven in state to show a rejection; never truncate one.
+    (mode === "animate_character" &&
+      sourceClipAssetId &&
+      referenceAssetIds.length > 0 &&
+      (!scail2MultiReferenceEnabled || referenceAssetIds.length <= MAX_SCAIL2_REFERENCE_CHARACTERS));
+  const scail2ReferenceOverflow =
+    mode === "animate_character" &&
+    scail2MultiReferenceEnabled &&
+    referenceAssetIds.length > MAX_SCAIL2_REFERENCE_CHARACTERS;
   // Don't let Replace Person queue a job the readiness endpoint says no live
   // worker can run — that would sit unclaimable instead of honoring the gate.
   const replaceReady = mode !== "replace_person" || personReadiness?.replace?.ready !== false;
@@ -1200,6 +1216,7 @@ export function VideoStudio() {
       requiresLtxIcLora,
       hasLtxIcLora,
       replaceReady,
+      scail2ReferenceOverflow,
       modelName: selectedModel?.name,
       presetMissing: presetValidationResult.missing,
       presetIncompatible: presetValidationResult.incompatible,
@@ -1217,6 +1234,7 @@ export function VideoStudio() {
       requiresLtxIcLora,
       hasLtxIcLora,
       replaceReady,
+      scail2ReferenceOverflow,
       selectedModel,
       presetValidationResult,
       selectedLoraValidationResult,
@@ -1644,21 +1662,32 @@ export function VideoStudio() {
                   projectId={activeProject?.id}
                   value={sourceClipAssetId}
                 />
-                {/* One character today; the worker reads the first reference. Multi-reference is
-                    experimental and tracked separately (sc-5583), so this stays a single image. */}
+                {/* The paired-reference UI stays descriptor-gated until the matching inference pin is
+                    live. Its ordered array maps to strict Reference,Mask pairs in both workers. */}
                 <ImageEditSourcePickerField
                   assets={imageAssets}
-                  buttonLabel="Select image"
+                  buttonLabel={scail2MultiReferenceEnabled ? "Select images" : "Select image"}
                   characters={characters}
-                  changeLabel="Change character"
-                  emptyLabel="No reference character selected"
+                  changeLabel={scail2MultiReferenceEnabled ? "Edit characters" : "Change character"}
+                  emptyLabel={scail2MultiReferenceEnabled ? "No reference characters selected" : "No reference character selected"}
                   eyebrow="Video Studio"
                   importAsset={importAsset}
-                  label="Reference character"
-                  onChange={(id) => setReferenceAssetIds(id ? [id] : [])}
+                  label={scail2MultiReferenceEnabled ? "Reference characters (ordered, up to 6)" : "Reference character"}
+                  multiple={scail2MultiReferenceEnabled}
+                  onChange={(ids) =>
+                    setReferenceAssetIds(
+                      scail2MultiReferenceEnabled ? ids : ids ? [ids] : [],
+                    )
+                  }
                   projectId={activeProject?.id}
                   value={referenceAssetIds[0] ?? ""}
+                  values={referenceAssetIds}
                 />
+                {scail2ReferenceOverflow ? (
+                  <p className="inline-warning" role="alert">
+                    SCAIL-2 supports at most {MAX_SCAIL2_REFERENCE_CHARACTERS} reference characters. Remove one before rendering.
+                  </p>
+                ) : null}
               </>
             ) : null}
 
