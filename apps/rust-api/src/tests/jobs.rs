@@ -6912,6 +6912,20 @@ async fn scail2_animate_character_preserves_ordered_multi_references_and_rejects
     // layout.
     let (status, _) = request(app.clone(), "POST", "/api/v1/video/jobs", base()).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+    let mut padded_reference = base();
+    padded_reference.as_object_mut().unwrap().insert(
+        "referenceAssetIds".to_owned(),
+        json!([" character-primary "]),
+    );
+    let (status, error) =
+        request(app.clone(), "POST", "/api/v1/video/jobs", padded_reference).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert!(
+        error["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("leading or trailing whitespace")),
+        "submit must reject a padded reference id rather than letting the worker trim it: {error}"
+    );
     let single_reference = vec!["character-0"];
     let mut single = base();
     single.as_object_mut().unwrap().insert(
@@ -7047,6 +7061,45 @@ async fn retry_and_duplicate_strictly_validate_scail2_multi_reference_replay() {
     let current_job_id = current_original["id"].as_str().expect("current job id");
 
     for operation in ["retry", "duplicate"] {
+        let (status, error) = request(
+            current_app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{current_job_id}/{operation}"),
+            json!({
+                "payloadChanges": {
+                    "mode": " animate_character ",
+                    "referenceAssetIds": ["character-primary", "character-secondary"]
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {error}");
+        assert!(
+            error["detail"]
+                .as_str()
+                .is_some_and(|detail| detail
+                    .contains("mode must not contain leading or trailing whitespace")),
+            "{operation} must reject the padded-mode capability bypass: {error}"
+        );
+
+        let (status, error) = request(
+            current_app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{current_job_id}/{operation}"),
+            json!({
+                "payloadChanges": {
+                    "referenceAssetIds": [" character-primary "]
+                }
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{operation}: {error}");
+        assert!(
+            error["detail"].as_str().is_some_and(|detail| detail
+                .contains("referenceAssetIds must not contain leading or trailing whitespace")),
+            "{operation} must reject a padded id rather than letting VideoRequest trim it: {error}"
+        );
+
         let (status, error) = request(
             current_app.clone(),
             "POST",
