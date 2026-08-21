@@ -3725,15 +3725,15 @@ fn downtier_candidate_tiers(
 }
 
 /// Reconcile the request-derived `(quant, quant_bits)` against the tier subdir the resolver ACTUALLY
-/// landed on (sc-8820). The tier resolvers fall through q4→q8→bf16 when the preferred tier isn't
-/// downloaded, but the recipe quant is derived from the REQUEST — so a user who selected bf16 with
-/// only `q4/` present would silently render Q4 while the sidecar records dense. That makes the epic
-/// 8506 quant A/B workflow lie about precision (and can compare a tier against itself). This corrects
-/// the recorded quant to the resolved tier, and — when a downgrade actually happened — `warn!`s and
-/// emits a `quant_tier_downgraded` event so the UI/telemetry surfaces the fallback instead of hiding
-/// it. We do NOT hard-error: a working render at an adjacent tier beats failing because the preferred
-/// tier is missing (the finding prefers warn+fallback+correct-recording). Returns the
-/// `(quant, quant_bits)` to record + load with.
+/// landed on (sc-8820). A different tier can be selected because the preferred tier is absent OR
+/// because admission deliberately chooses the highest installed tier that fits. The recipe quant is
+/// still derived from the REQUEST, so without reconciliation either path can render Q4/Q8 while the
+/// sidecar records dense. That makes the epic 8506 quant A/B workflow lie about precision (and can
+/// compare a tier against itself). This corrects the recorded quant to the resolved tier and, when a
+/// resolution difference actually happened, `warn!`s and emits a `quant_tier_downgraded` event so
+/// the UI/telemetry surfaces the result without inventing its cause. We do NOT hard-error: a working
+/// render at an adjacent tier beats failing when an installed lower tier is the valid resolution.
+/// Returns the `(quant, quant_bits)` to record + load with.
 ///
 /// `allow_quant_change` gates whether the LOAD quant may be rewritten to match the resolved tier.
 /// It's `true` for the ordinary packed-turnkey families (the load-quant is a no-op on already-packed
@@ -7448,8 +7448,12 @@ fn mlx_tier_fit(
 ) -> TierFit {
     let own_resident_bytes =
         resident.map_or(0, |attribution| attribution.credit_for(engine_id, spec));
-    match crate::mlx_fit_gate::decide_residency_for_spec(engine_id, spec, live, own_resident_bytes)
-    {
+    match crate::mlx_fit_gate::decide_residency_for_spec_candidate(
+        engine_id,
+        spec,
+        live,
+        own_resident_bytes,
+    ) {
         crate::mlx_fit_gate::ResidencyOutcome::Resident
         | crate::mlx_fit_gate::ResidencyOutcome::Sequential => TierFit::Fits,
         crate::mlx_fit_gate::ResidencyOutcome::Reject {
@@ -14152,18 +14156,78 @@ mod quant_tier_reconcile_tests {
     }
 
     /// Admission may deliberately resolve an installed lower tier when the requested tier does not
-    /// fit. The warning must describe the observed resolution without falsely claiming that the
-    /// requested tier was absent from disk.
+    /// fit. Drive the production emission path and prove its warning describes only the observed
+    /// resolution, without falsely claiming that the requested tier was absent from disk.
     #[test]
-    fn resolved_tier_warning_does_not_invent_a_missing_download() {
-        let warning =
-            resolved_tier_warning_message("mlx", "qwen_image", "bf16", "q8");
+    fn resolved_tier_production_warning_does_not_invent_a_missing_download() {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
 
-        assert_eq!(
-            warning,
-            "mlx: quant tier for qwen_image resolved from bf16 to q8; recording the tier that actually ran"
+        crate::test_env::install_tracing_interest_floor();
+
+        #[derive(Clone, Default)]
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl Write for Capture {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let capture = Capture::default();
+        let writer = capture.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .without_time()
+            .finish();
+
+        let resolved = tracing::subscriber::with_default(subscriber, || {
+            reconcile_resolved_tier_quant(
+                (None, None),
+                std::path::Path::new("/m/q8"),
+                true,
+                "qwen_image",
+                "job1",
+                "mlx",
+            )
+        });
+        assert_eq!(resolved, (Some(Quant::Q8), Some(8)));
+
+        let output = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            output.contains(
+                "mlx: quant tier for qwen_image resolved from bf16 to q8; recording the tier that actually ran"
+            ),
+            "production warning missing from trace output: {output}"
         );
-        assert!(!warning.contains("not downloaded"));
+        assert!(!output.contains("not downloaded"), "{output}");
+    }
+
+    /// The per-tier chooser is a probe, not a cache-miss loader. Pin its production callsite to the
+    /// candidate-specific decision seam so a mutation back to the cold-load seam turns this red.
+    #[test]
+    fn mlx_tier_fit_uses_candidate_telemetry_seam() {
+        let source = include_str!("base.rs");
+        let start = source.find("fn mlx_tier_fit(").unwrap();
+        let end = source[start..]
+            .find("/// The [`LoadSpec`] a candidate tier")
+            .map(|offset| start + offset)
+            .unwrap();
+        let body = &source[start..end];
+
+        assert!(
+            body.contains("crate::mlx_fit_gate::decide_residency_for_spec_candidate("),
+            "tier scoring must use the non-loading telemetry seam: {body}"
+        );
+        assert!(
+            !body.contains("crate::mlx_fit_gate::decide_residency_for_spec(engine_id"),
+            "tier scoring must not emit cache-miss telemetry: {body}"
+        );
     }
 
     #[test]
