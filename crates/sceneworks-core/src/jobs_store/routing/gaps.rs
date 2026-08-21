@@ -767,11 +767,12 @@ pub(crate) fn classify_candle_image_gap(payload: &Map<String, Value>) -> Unsuppo
         ),
         CandleImageRefusal::Flux1PackedTier => UnsupportedReason::new(
             Some(model),
-            "FLUX.1 Candle packed-tier selection",
+            "FLUX.1 Candle packed-tier selection is not admitted",
             &format!(
-                "FLUX.1 on Candle opens only its hosted packed q4 or q8 artifacts. A bf16, q6, \
-                 or malformed advanced.mlxQuantize selection has no truthful Candle fallback, so \
-                 it is refused instead of loading a different tier.{also}"
+                "FLUX.1 packed-tier product admission remains staged pending terminal CUDA \
+                 evidence. Its exact-artifact resolver has no bf16, q6, or malformed \
+                 advanced.mlxQuantize fallback, so this request is refused instead of loading a \
+                 different tier.{also}"
             ),
             Some("sc-20742"),
         ),
