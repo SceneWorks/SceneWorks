@@ -5233,10 +5233,10 @@ const MAX_VIDEO_DIMENSION: u32 = 1920;
 const MAX_VIDEO_REFERENCE_ASSET_IDS: usize = 8;
 const MAX_VIDEO_SOURCE_CLIP_ASSET_IDS: usize = 8;
 
-/// Validate the exact mode spelling and reference array every video creation boundary will persist.
-/// The typed submit route and retry/duplicate all call this after preset/patch merging and current
-/// manifest resolution, so replay cannot drift into the worker parser's deliberately tolerant
-/// behavior (which trims strings and drops blank/non-string list entries for legacy reads).
+/// Validate the exact model/mode spelling and reference array every video creation boundary will
+/// persist. The typed submit route and retry/duplicate all call this after preset/patch merging and
+/// current manifest resolution, so replay cannot drift into the worker parser's deliberately
+/// tolerant behavior (which trims strings and drops blank/non-string list entries for legacy reads).
 ///
 /// This helper is validation-only: it never trims, filters, sorts, or truncates, preserving every
 /// accepted id byte-for-byte and in caller order. SCAIL-2 additionally consumes strict ordered
@@ -5276,10 +5276,16 @@ pub(crate) fn validate_video_reference_asset_ids_payload(
         )));
     }
 
-    let model = payload
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
+    let model = match payload.get("model") {
+        None => "",
+        Some(Value::String(model)) if model == model.trim() => model.as_str(),
+        Some(Value::String(_)) => {
+            return Err(ApiError::bad_request(
+                "model must not contain leading or trailing whitespace",
+            ));
+        }
+        Some(_) => return Err(ApiError::bad_request("model must be a string")),
+    };
     let mode = match payload.get("mode") {
         None => "",
         Some(Value::String(mode)) if mode == mode.trim() => mode.as_str(),
