@@ -151,6 +151,43 @@ const ltxIcLoraRequiredModes = new Set(["extend_clip", "video_bridge", "replace_
 const TIER_SCREEN = "video";
 const MAX_SCAIL2_REFERENCE_CHARACTERS = 6;
 
+function videoExecutionTierModel(model, backend) {
+  if (backend !== "candle" || model?.id !== SCAIL2_MODEL_ID) {
+    return model;
+  }
+  const accepted = (tier) => SCAIL2_CANDLE_PRODUCT_TIERS.includes(tier);
+  return {
+    ...model,
+    variants: Array.isArray(model.variants)
+      ? model.variants.filter((variant) => accepted(variant?.variant))
+      : model.variants,
+    runtimeQuantTiers: Array.isArray(model.runtimeQuantTiers)
+      ? model.runtimeQuantTiers.filter(accepted)
+      : model.runtimeQuantTiers,
+    mlxTiers: Array.isArray(model.mlxTiers)
+      ? model.mlxTiers.filter(accepted)
+      : model.mlxTiers,
+    mlxTierStates: Array.isArray(model.mlxTierStates)
+      ? model.mlxTierStates.filter((state) => accepted(state?.tier))
+      : model.mlxTierStates,
+  };
+}
+
+function unavailableRecipeTierMessage(model, backend, tier, availableTiers) {
+  const recorded = tierLabel(tier);
+  if (
+    backend === "candle" &&
+    model?.id === SCAIL2_MODEL_ID &&
+    !SCAIL2_CANDLE_PRODUCT_TIERS.includes(tier)
+  ) {
+    const bf16Action = availableTiers.includes("bf16")
+      ? "start a new bf16 generation"
+      : "install bf16 in Model Manager before starting a new bf16 generation";
+    return `This recipe was recorded at ${recorded}, which is not enabled for SCAIL-2 Candle generation. Replay it on MLX, or ${bf16Action}.`;
+  }
+  return `This recipe was recorded at ${recorded}, but that tier is not installed and available for ${model?.name ?? "the selected model"} on ${backend === "mlx" ? "MLX" : "Candle"}. Install or repair that tier in Model Manager before replaying this recipe.`;
+}
+
 // Video sub-modes that map onto a recipe workflow. extend_clip / replace_person
 // aren't recipe workflows, so "Save as Preset" is gated to these.
 const VIDEO_PRESET_MODES = ["image_to_video", "text_to_video", "first_last_frame"];
@@ -255,6 +292,10 @@ export function VideoStudio() {
   // restore; the mode-snap effect moves the picker to a model that serves the mode. Named rather
   // than silent so the swap doesn't read as the recipe's own choice.
   const [recipeModelNotice, setRecipeModelNotice] = useState("");
+  // A recorded native tier is an exact replay request, not a preference. Keep it separate from the
+  // picker state so an unavailable/disallowed replay can block instead of being clamped to whatever
+  // installed tier the current model would normally seed.
+  const [recipeTierRequest, setRecipeTierRequest] = useState(null);
   const [advancedOpen, setAdvancedOpen] = useState(saved.advancedOpen ?? false);
   const [model, setModel] = useState(saved.model ?? videoModels[0]?.id ?? ltxVideoModelId);
   const textEncoderModel =
@@ -675,27 +716,10 @@ export function VideoStudio() {
   // A Video Studio-only projection: retain the complete catalog object for every non-tier concern,
   // but narrow every tier vocabulary the shared picker understands. The original model object still
   // reaches Model Manager unchanged, so q4/q8 install and repair metadata remain visible there.
-  const executionTierModel = useMemo(() => {
-    if (!scail2CandleTierLane || !selectedModel) {
-      return selectedModel;
-    }
-    const accepted = (tier) => SCAIL2_CANDLE_PRODUCT_TIERS.includes(tier);
-    return {
-      ...selectedModel,
-      variants: Array.isArray(selectedModel.variants)
-        ? selectedModel.variants.filter((variant) => accepted(variant?.variant))
-        : selectedModel.variants,
-      runtimeQuantTiers: Array.isArray(selectedModel.runtimeQuantTiers)
-        ? selectedModel.runtimeQuantTiers.filter(accepted)
-        : selectedModel.runtimeQuantTiers,
-      mlxTiers: Array.isArray(selectedModel.mlxTiers)
-        ? selectedModel.mlxTiers.filter(accepted)
-        : selectedModel.mlxTiers,
-      mlxTierStates: Array.isArray(selectedModel.mlxTierStates)
-        ? selectedModel.mlxTierStates.filter((state) => accepted(state?.tier))
-        : selectedModel.mlxTierStates,
-    };
-  }, [scail2CandleTierLane, selectedModel]);
+  const executionTierModel = useMemo(
+    () => videoExecutionTierModel(selectedModel, activeBackend),
+    [selectedModel, activeBackend],
+  );
   const tierOptions = useMemo(
     () => ({ convRotEligible: false, nvfp4Eligible: false }),
     [],
@@ -725,10 +749,23 @@ export function VideoStudio() {
       (possibleTiers.length > 1 || scail2CandleTierLane),
     [nativeTierLane, possibleTiers, availableTiers, scail2CandleTierLane],
   );
-  const executionTierBlockMessage =
+  const baseExecutionTierBlockMessage =
     scail2CandleTierLane && !availableTiers.includes("bf16")
       ? "SCAIL-2 Candle generation currently requires the installed bf16 tier. Install or repair bf16 in Model Manager; q4 and q8 are not yet enabled for Candle generation."
       : null;
+  const replayTierTargetsActiveModel = Boolean(
+    recipeTierRequest && recipeTierRequest.modelId === selectedModel?.id,
+  );
+  const replayTierBlockMessage =
+    replayTierTargetsActiveModel && !availableTiers.includes(recipeTierRequest.tier)
+      ? unavailableRecipeTierMessage(
+          selectedModel,
+          activeBackend,
+          recipeTierRequest.tier,
+          availableTiers,
+        )
+      : null;
+  const executionTierBlockMessage = replayTierBlockMessage ?? baseExecutionTierBlockMessage;
   const hostMemory = useHostMemory();
   const nativeMemoryGb = hostMemoryGbForBackend(hostMemory, activeBackend);
   const autoTier = useMemo(
@@ -742,7 +779,6 @@ export function VideoStudio() {
     setQuantTier,
     tierSwitching,
     handleTierChange,
-    skipNextReseed,
   } = useQuantTierPicker({
     screen: TIER_SCREEN,
     model,
@@ -753,6 +789,29 @@ export function VideoStudio() {
     useGenerationQuality: true,
     reseedOnModelChange: true,
   });
+  const availableTierKey = availableTiers.join(",");
+  // Apply a recorded tier only after its target model is active and only when that exact tier is
+  // selectable on the active backend. This also re-validates if the platform capability response
+  // changes the active backend after mount. Invalid requests stay in `recipeTierRequest`, which is
+  // what keeps the refusal explicit instead of silently omitting mlxQuantize and running a default.
+  useEffect(() => {
+    if (
+      recipeTierRequest &&
+      recipeTierRequest.modelId === selectedModel?.id &&
+      availableTiers.includes(recipeTierRequest.tier)
+    ) {
+      setQuantTier(recipeTierRequest.tier);
+    }
+    // The stable key represents exact tier availability; the array identity changes with renders.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recipeTierRequest, selectedModel?.id, activeBackend, availableTierKey]);
+  const handleExecutionTierChange = useCallback(
+    (nextTier) => {
+      setRecipeTierRequest(null);
+      handleTierChange(nextTier);
+    },
+    [handleTierChange],
+  );
   const showTorchQuantization = activeBackend !== "mlx" && !nativeTierLane && supportsQuantization;
   const selectedTierQuantize =
     nativeTierLane && availableTiers.includes(quantTier) ? tierQuantize(quantTier) : null;
@@ -976,6 +1035,7 @@ export function VideoStudio() {
   // reproduce the recipe, not a hybrid of the recipe and whatever was on screen.
   useEffect(() => {
     if (launchRequest?.view !== "Video" || !launchRequest.recipe) {
+      setRecipeTierRequest(null);
       return;
     }
     const recipe = launchRequest.recipe;
@@ -1063,14 +1123,19 @@ export function VideoStudio() {
     setVideoConditioningStrength(rawSettings.videoConditioningStrength ?? "");
     setBridgeRightVideoConditioningStrength(rawSettings.bridgeRightVideoConditioningStrength ?? "");
 
-    // The MLX tier the clip was generated at. Arm the reseed skip only when the model is actually
-    // changing — that's exactly when the tier effect fires and would overwrite this.
+    // The exact native tier the clip was generated at. Record the request against the model this
+    // replay will actually activate; the reactive validator above applies it only when that exact
+    // tier is selectable on the active backend. It deliberately does NOT write picker state here:
+    // same-model q4/q8 SCAIL Candle replays used to escape the narrowed tier set through this setter,
+    // then serialize no mlxQuantize and silently run bf16.
     const recipeTier = quantizeTier(rawSettings.mlxQuantize);
     if (recipeTier) {
-      if (recipe.model && recipeModelAvailable && recipe.model !== model) {
-        skipNextReseed();
-      }
-      setQuantTier(recipeTier);
+      setRecipeTierRequest({
+        modelId: recipe.model && recipeModelAvailable ? recipe.model : model,
+        tier: recipeTier,
+      });
+    } else {
+      setRecipeTierRequest(null);
     }
 
     // Sources. A deleted asset is left to the existing `hasInputs` + validation machinery to
@@ -2110,8 +2175,9 @@ export function VideoStudio() {
                 <StudioUpdateBadge item={selectedModel} />
                 <select
                   onChange={(event) => {
-                    // Picking a model answers the recipe notice, so retire it.
+                    // Picking a model answers both recipe notices, so retire them.
                     setRecipeModelNotice("");
+                    setRecipeTierRequest(null);
                     setModel(event.target.value);
                   }}
                   value={model}
@@ -2171,7 +2237,7 @@ export function VideoStudio() {
                 <TierPickerField
                   className="settings-field settings-field-tier"
                   value={quantTier}
-                  onChange={handleTierChange}
+                  onChange={handleExecutionTierChange}
                   items={tierPickerItems}
                   tierSwitching={tierSwitching}
                   tierLabel={tierLabel}
