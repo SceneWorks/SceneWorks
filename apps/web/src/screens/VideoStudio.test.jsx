@@ -1149,6 +1149,34 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
     expect(context.createVideoJob.mock.calls[0][0].advanced).not.toHaveProperty("quantization");
   });
 
+  it("shows the Candle SCAIL-2 picker only for its real installed package variants", async () => {
+    const scail = {
+      ...tieredVideoModel(["q4", "q8"]),
+      id: "scail2_14b",
+      name: "SCAIL-2",
+      family: "scail2",
+      adapter: "scail2",
+    };
+    const context = baseContext({ videoModels: [scail], macCapabilities: null });
+    await render(context);
+
+    expect(tierPicker()).toBeTruthy();
+    expect(quantizationPicker()).toBeNull();
+    expect([...tierPicker().options].map((option) => option.value)).toEqual(["q4", "q8", "bf16"]);
+    setSelect(tierPicker(), "q8");
+    await act(async () => {});
+    await click(buttonWithText(container, "Render clip"));
+    expect(context.createVideoJob.mock.calls[0][0].advanced).toMatchObject({ mlxQuantize: 8 });
+
+    // The engine id alone never creates a selectable precision. A stale/non-matrix catalog row
+    // remains picker-free instead of manufacturing q4/q8 payloads for an incomplete install.
+    await unmountRoot(root, container);
+    ({ container, root } = mountRoot());
+    const noVariants = { ...scail, hasVariantMatrix: false, variants: [] };
+    await render(baseContext({ videoModels: [noVariants], macCapabilities: null }));
+    expect(tierPicker()).toBeNull();
+  });
+
   it("keeps the candle-only NVFP4 tier out of the MLX video picker (sc-11042)", async () => {
     const context = baseContext({
       videoModels: [tieredVideoModel(["q4", "nvfp4"])],

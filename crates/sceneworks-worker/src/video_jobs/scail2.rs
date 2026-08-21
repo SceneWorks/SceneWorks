@@ -133,9 +133,10 @@ pub(super) fn scail2_tier_order(request: &VideoRequest) -> &'static [&'static st
 }
 
 /// Whether `dir` is a COMPLETE self-contained SCAIL-2 tier snapshot. The canonical six-file
-/// inventory and this predicate live together in `sceneworks_core::mlx_tier_completeness`, so the
-/// MLX and shared-Candle resolvers cannot drift. A partially-downloaded tier fails this and
-/// [`scail2_tier_subdir`] falls through to a smaller complete tier rather than half-loading.
+/// inventory and exact q4/q8/bf16 config-marker contract live together in
+/// `sceneworks_core::mlx_tier_completeness`, so the catalog and native resolvers cannot disagree
+/// about an installed tier. A partial or mixed-marker tier fails this and [`scail2_tier_subdir`]
+/// falls through to a smaller complete tier rather than half-loading.
 #[cfg(target_os = "macos")]
 pub(super) fn scail2_tier_is_complete(dir: &Path) -> bool {
     sceneworks_core::mlx_tier_completeness::scail2_tier_complete(dir)

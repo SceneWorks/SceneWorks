@@ -837,6 +837,18 @@ fn both_candle_scail2_arms_attach_the_atomic_cold_load_plan() {
         3,
         "one owner function and exactly two production callers must exist"
     );
+    let plan = SOURCE
+        .split_once("pub(super) fn scail2_cold_load_plan(")
+        .expect("SCAIL-2 cold-load plan")
+        .1
+        .split_once("/// Windows/CUDA candle video path")
+        .expect("SCAIL-2 cold-load plan boundary")
+        .0;
+    assert!(
+        plan.contains("let tier_key = resolved.tier.key();")
+            && plan.contains("&manifest_entry,\n            tier_key,"),
+        "cold-load accounting must use the same resolved package tier as the model path"
+    );
     let animate = SOURCE
         .split_once("pub(super) async fn generate_candle_scail2(")
         .expect("animate arm")
@@ -855,8 +867,9 @@ fn both_candle_scail2_arms_attach_the_atomic_cold_load_plan() {
         assert!(
             arm.contains("let Scail2ColdLoadPlan {")
                 && arm.contains("model_dir,")
+                && arm.contains("quant,")
                 && arm.contains("admission,"),
-            "{name} must keep the resolved model path and cold admission together"
+            "{name} must keep the resolved model path, exact quant tier, and cold admission together"
         );
         let input = arm
             .split_once("let input = VideoGenInput {")
@@ -865,6 +878,10 @@ fn both_candle_scail2_arms_attach_the_atomic_cold_load_plan() {
         assert!(
             input.contains("model_dir,"),
             "{name} must use the planned model path"
+        );
+        assert!(
+            input.contains("quant,"),
+            "{name} must pass the planned q4/q8 LoadSpec quant through the shared video telemetry path"
         );
         assert!(
             input.contains("cold_load_admission: Some(admission),"),
@@ -884,6 +901,12 @@ fn both_candle_scail2_arms_attach_the_atomic_cold_load_plan() {
                 "with_cached_generator_for_request_using_cold_admission(\n                            engine_id,\n                            spec,\n                            \"video load failed\",\n                            cold_load_cancel,"
             ),
         "the shared video path must bind SCAIL admission, request accounting, and the same cancel flag at the generator-cache seam"
+    );
+    assert!(
+        wan.contains("spec.quantize = input.quant;")
+            && wan.contains("quant: input.quant,")
+            && wan.contains("let video_settings = VideoSettingsSnapshot::from_input(&input);"),
+        "the exact planned quant must remain in LoadSpec and completion telemetry"
     );
     let cache = include_str!("../generator_cache.rs");
     assert!(
@@ -6906,11 +6929,11 @@ fn scail2_engine_id_maps_only_the_scail2_family() {
     assert_eq!(scail2_engine_id(""), None);
 }
 
-/// The off-Mac resolver must consume the exact pinned bf16 tier that Model Manager installs, and it
-/// must use the provider-owned completeness predicate rather than a weaker worker-side sentinel.
+/// The off-Mac resolver must consume the exact Model Manager q4/q8/bf16 directory, require both the
+/// provider-owned complete layout and the packed marker, and never fall back from the user's tier.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
-fn candle_scail2_resolves_model_manager_shared_bf16_tier_fail_closed() {
+fn candle_scail2_resolves_exact_model_manager_tier_fail_closed() {
     let _env = crate::test_env::EnvVars::set(&[
         ("HF_HUB_CACHE", ""),
         ("HUGGINGFACE_HUB_CACHE", ""),
@@ -6925,36 +6948,92 @@ fn candle_scail2_resolves_model_manager_shared_bf16_tier_fail_closed() {
         .prefix("sw_candle_scail2_shared_")
         .tempdir()
         .expect("temp dir");
-    let tier = huggingface_repo_cache_path(data.path(), SCAIL2_REPO)
+    let snapshot = huggingface_repo_cache_path(data.path(), SCAIL2_REPO)
         .expect("repo cache path")
         .join("snapshots")
-        .join(SCAIL2_REVISION)
-        .join("bf16");
-    std::fs::create_dir_all(&tier).unwrap();
+        .join(SCAIL2_REVISION);
     let settings = Settings {
         data_dir: data.path().to_path_buf(),
         ..Settings::from_env()
     };
 
+    let write_complete_tier = |tier: Scail2CandleTier, marker: Value| {
+        let path = snapshot.join(tier.key());
+        std::fs::create_dir_all(&path).unwrap();
+        for file in runtime_cuda::providers::scail2::SHARED_TIER_FILES {
+            std::fs::write(path.join(file), b"").unwrap();
+        }
+        std::fs::write(
+            path.join("config.json"),
+            serde_json::to_vec(&marker).unwrap(),
+        )
+        .unwrap();
+        path
+    };
+
     // A directory or one plausible tensor is not an install. Missing any provider-required file
     // must keep routing closed and name Model Manager as the repair path.
-    std::fs::write(tier.join("dit.safetensors"), b"").unwrap();
-    let error = resolve_managed_candle_scail2_model_dir(&settings)
+    let incomplete_q4 = snapshot.join("q4");
+    std::fs::create_dir_all(&incomplete_q4).unwrap();
+    std::fs::write(incomplete_q4.join("dit.safetensors"), b"").unwrap();
+    let error = resolve_managed_candle_scail2_model(&settings, Scail2CandleTier::Q4)
         .unwrap_err()
         .to_string();
     assert!(error.contains("Model Manager"), "got: {error}");
-    assert!(error.contains("bf16"), "got: {error}");
+    assert!(error.contains("q4"), "got: {error}");
 
-    for file in runtime_cuda::providers::scail2::SHARED_TIER_FILES {
-        std::fs::write(tier.join(file), b"").unwrap();
-    }
+    let q4 = write_complete_tier(
+        Scail2CandleTier::Q4,
+        json!({ "quantization": { "bits": 4, "group_size": 64 } }),
+    );
     assert_eq!(
-        resolve_managed_candle_scail2_model_dir(&settings).unwrap(),
-        tier
+        resolve_managed_candle_scail2_model(&settings, Scail2CandleTier::Q4)
+            .unwrap()
+            .model_dir,
+        q4
+    );
+    assert_eq!(
+        resolve_managed_candle_scail2_model(&settings, Scail2CandleTier::Q4)
+            .unwrap()
+            .tier,
+        Scail2CandleTier::Q4
     );
 
-    std::fs::remove_file(tier.join("t5_encoder.safetensors")).unwrap();
-    assert!(resolve_managed_candle_scail2_model_dir(&settings).is_err());
+    let q8 = write_complete_tier(
+        Scail2CandleTier::Q8,
+        json!({ "quantization": { "bits": 8, "group_size": 64 } }),
+    );
+    assert_eq!(
+        resolve_managed_candle_scail2_model(&settings, Scail2CandleTier::Q8)
+            .unwrap()
+            .model_dir,
+        q8
+    );
+
+    // q8 must not use a complete q4 tier. The selector's marker is checked independently of
+    // directory name so a mixed or copied package cannot be misreported as q8.
+    std::fs::write(
+        q8.join("config.json"),
+        serde_json::to_vec(&json!({ "quantization": { "bits": 4, "group_size": 64 } })).unwrap(),
+    )
+    .unwrap();
+    let mixed = resolve_managed_candle_scail2_model(&settings, Scail2CandleTier::Q8)
+        .unwrap_err()
+        .to_string();
+    assert!(mixed.contains("q8"), "got: {mixed}");
+    assert!(mixed.contains("No q4/q8 fallback"), "got: {mixed}");
+    std::fs::write(
+        q8.join("config.json"),
+        serde_json::to_vec(&json!({ "quantization": { "bits": 8, "group_size": 64 } })).unwrap(),
+    )
+    .unwrap();
+
+    std::fs::remove_file(q8.join("t5_encoder.safetensors")).unwrap();
+    let partial = resolve_managed_candle_scail2_model(&settings, Scail2CandleTier::Q8)
+        .unwrap_err()
+        .to_string();
+    assert!(partial.contains("q8"), "got: {partial}");
+    assert!(partial.contains("No q4/q8 fallback"), "got: {partial}");
 }
 
 /// Existing manually assembled candle snapshots remain a compatibility fallback, but only when the
@@ -6979,13 +7058,66 @@ fn candle_scail2_preserves_complete_legacy_layout_only() {
         data_dir: data.path().to_path_buf(),
         ..Settings::from_env()
     };
-    assert!(resolve_managed_candle_scail2_model_dir(&settings).is_err());
+    assert!(resolve_managed_candle_scail2_model(&settings, Scail2CandleTier::Bf16).is_err());
 
     std::fs::write(legacy.join("tokenizer/tokenizer.json"), b"").unwrap();
     assert_eq!(
-        resolve_managed_candle_scail2_model_dir(&settings).unwrap(),
+        resolve_managed_candle_scail2_model(&settings, Scail2CandleTier::Bf16)
+            .unwrap()
+            .model_dir,
         legacy
     );
+    assert!(
+        resolve_managed_candle_scail2_model(&settings, Scail2CandleTier::Q4).is_err(),
+        "a legacy dense tree must never satisfy a packed q4 request"
+    );
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn candle_scail2_tier_selector_is_exact_and_adapter_safe() {
+    let request_with = |advanced: Value| request(json!({ "projectId": "p", "advanced": advanced }));
+    assert_eq!(
+        resolve_candle_scail2_tier(&request_with(json!({})), false).unwrap(),
+        Scail2CandleTier::Bf16,
+        "the off-Mac default remains the established dense baseline"
+    );
+    assert_eq!(
+        resolve_candle_scail2_tier(&request_with(json!({ "mlxQuantize": 4 })), false).unwrap(),
+        Scail2CandleTier::Q4
+    );
+    assert_eq!(
+        resolve_candle_scail2_tier(&request_with(json!({ "mlxQuantize": "8" })), false).unwrap(),
+        Scail2CandleTier::Q8
+    );
+    assert_eq!(
+        resolve_candle_scail2_tier(&request_with(json!({ "mlxQuantize": 0 })), false).unwrap(),
+        Scail2CandleTier::Bf16
+    );
+    assert_eq!(
+        resolve_candle_scail2_tier(&request_with(json!({})), true).unwrap(),
+        Scail2CandleTier::Bf16,
+        "adapter-bearing default requests retain the valid dense flow"
+    );
+    for value in [json!(6), json!("q8"), json!(4.0)] {
+        let error =
+            resolve_candle_scail2_tier(&request_with(json!({ "mlxQuantize": value })), false)
+                .unwrap_err()
+                .to_string();
+        assert!(
+            error.contains("exact hosted tier") || error.contains("must be exactly"),
+            "{error}"
+        );
+    }
+    let adapter_error =
+        resolve_candle_scail2_tier(&request_with(json!({ "mlxQuantize": 8 })), true)
+            .unwrap_err()
+            .to_string();
+    assert!(
+        adapter_error.contains("cannot merge adapters"),
+        "{adapter_error}"
+    );
+    assert!(adapter_error.contains("bf16"), "{adapter_error}");
 }
 
 /// SCAIL-2 load quantization (sc-5450): Q4 is the default (the validated ~16 GB tier),
@@ -7719,8 +7851,8 @@ fn wan_tier_ti2v_5b_single_expert_completeness() {
     assert_eq!(wan_tier_subdir(root, &req), Some(dir));
 }
 
-/// Write the six files that make a SCAIL-2 tier subdir COMPLETE ([`scail2_tier_is_complete`]), so
-/// [`scail2_tier_subdir`] treats it as present.
+/// Write the six files plus the tier-matching config marker that make a SCAIL-2 tier subdir COMPLETE
+/// ([`scail2_tier_is_complete`]), so [`scail2_tier_subdir`] treats it as present.
 #[cfg(target_os = "macos")]
 fn write_complete_scail2_tier(root: &Path, tier: &str) {
     let dir = root.join(tier);
@@ -7728,6 +7860,17 @@ fn write_complete_scail2_tier(root: &Path, tier: &str) {
     for file in sceneworks_core::mlx_tier_completeness::SCAIL2_TIER_FILES {
         std::fs::write(dir.join(file), b"x").unwrap();
     }
+    let config = match tier {
+        "bf16" => json!({}),
+        "q4" => json!({ "quantization": { "bits": 4, "group_size": 64 } }),
+        "q8" => json!({ "quantization": { "bits": 8, "group_size": 64 } }),
+        _ => panic!("unsupported SCAIL-2 test tier {tier}"),
+    };
+    std::fs::write(
+        dir.join("config.json"),
+        serde_json::to_vec(&config).unwrap(),
+    )
+    .unwrap();
 }
 
 /// `mlxQuantize` selects the preferred SCAIL-2 tier, then falls back to the always-smaller present
