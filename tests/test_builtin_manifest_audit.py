@@ -97,6 +97,12 @@ EXPECTED_SHIPPED_CONTROL_WEIGHTS = frozenset(
             "a061fbc42a4744d6a7ec206370fbd3a37d4a7cca",
         ),
         (
+            "sdxl",
+            "xinsir/controlnet-openpose-sdxl-1.0",
+            "diffusion_pytorch_model.safetensors",
+            "23f966cd5cfdd3f7729c903e243d87152162d2b7",
+        ),
+        (
             "kolors_control",
             "Kwai-Kolors/Kolors-ControlNet-Pose",
             "diffusion_pytorch_model.safetensors",
@@ -455,6 +461,7 @@ def _assert_strict_control_consumers_use_central_pinned_authority(
         "image_jobs/krea_imported.rs",
         "image_jobs/qwen.rs",
         "image_jobs/qwen_control.rs",
+        "image_jobs/sdxl_control.rs",
         "image_jobs/zimage.rs",
         "image_jobs/zimage_control.rs",
     }

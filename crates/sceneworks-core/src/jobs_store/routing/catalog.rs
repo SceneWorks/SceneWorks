@@ -675,7 +675,11 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // PuLID-FLUX on FLUX.1-dev (sc-3344): `character_image` with a reference face runs through native
     // MLX or the bespoke `pulid_flux_candle_eligible` lane, not the plain txt2img gate.
     ModelCaps::new("pulid_flux_dev", true, false, false, false, false),
-    // Chroma (epic 3531 / sc-3843 MLX; epic 3692 / sc-5576 candle). Pure txt2img on candle.
+    // Chroma (epic 3531 / sc-3843 MLX; epic 3692 / sc-5576 candle). The packed q4/q8 resolver and
+    // exact-tier refusal plumbing are staged by sc-20741, but product admission remains false until
+    // the epic-end CUDA evidence phase proves the published tiers. Preserve the existing dense
+    // LoRA/LoKr lane; a later evidence-backed promotion may set `candle_quant` while leaving
+    // `candle_quant_lora` false because adapter-on-packed is independently unsupported.
     ModelCaps::new("chroma1_hd", true, true, false, true, false),
     ModelCaps::new("chroma1_base", true, true, false, true, false),
     ModelCaps::new("chroma1_flash", true, true, false, true, false),
