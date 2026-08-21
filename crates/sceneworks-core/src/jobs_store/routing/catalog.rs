@@ -589,6 +589,9 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     ModelCaps::new("z_image", true, true, false, false, true),
     // `z_image_edit` (epic 3529 / sc-3923): MLX-only edit id on Turbo weights.
     ModelCaps::new("z_image_edit", true, false, false, false, false),
+    // FLUX.1's exact packed q4/q8 resolver and receipt plumbing are staged by sc-20742, but product
+    // admission remains false until the terminal CUDA campaign proves those cells. Preserve the
+    // existing dense LoRA/LoKr route; packed-plus-adapter remains independently unsupported.
     ModelCaps::new("flux_schnell", true, true, false, true, false),
     ModelCaps::new("flux_dev", true, true, false, true, false),
     // Base `qwen_image` candle txt2img is a turnkey packed-quant family (sc-8669 wired the q4/q8/bf16
@@ -2191,9 +2194,10 @@ mod tests {
                     caps.id
                 );
             }
-            // A combined-capability row is complete in itself rather than being duplicated into the
-            // two standalone lists. The standalone lists MAY overlap when a future evidence-backed
-            // row admits dense adapters and packed tiers independently but not their composition.
+            // A combined-capability row is complete in itself rather than duplicated into the two
+            // standalone lists. The standalone lists MAY overlap: that precisely encodes a family
+            // whose dense adapter and packed-tier paths are independently admitted while their
+            // composition is not.
             assert!(
                 !caps.candle_quant_lora || !(caps.candle_quant || caps.candle_lora),
                 "{}: candle_quant_lora must not be duplicated into standalone columns",

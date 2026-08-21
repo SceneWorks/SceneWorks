@@ -365,6 +365,8 @@ pub(crate) enum CandleImageRefusal {
     ConditioningCarrier,
     /// A user LoRA on a family that advertises no inference adapter slot.
     UserLora,
+    /// FLUX.1 accepts only its hosted packed q4/q8 tiers on the generic Candle route.
+    Flux1PackedTier,
     /// A quant tier plus adapter on a family where both are admitted only independently.
     QuantLoraCombination,
     /// `advanced.poses` — strict-pose ControlNet.
@@ -386,6 +388,7 @@ impl CandleImageRefusal {
             Self::EditMode => "mode edit_image",
             Self::ConditioningCarrier => "a populated conditioning carrier",
             Self::UserLora => "a user LoRA on an adapter-less family",
+            Self::Flux1PackedTier => "a FLUX.1 tier other than packed q4/q8",
             Self::QuantLoraCombination => "an unproven quant tier plus adapter combination",
             Self::Poses => "advanced.poses",
             Self::Phases => "advanced.phases",
@@ -417,6 +420,10 @@ const CANDLE_IMAGE_CHECKS: &[(CandleImageRefusal, CandleImageCheck)] = &[
         candle_refuses_conditioning_carrier,
     ),
     (CandleImageRefusal::UserLora, candle_refuses_user_lora),
+    (
+        CandleImageRefusal::Flux1PackedTier,
+        candle_refuses_flux1_unsupported_packed_tier,
+    ),
     (
         CandleImageRefusal::QuantLoraCombination,
         candle_refuses_quant_lora_combination,
@@ -580,6 +587,31 @@ fn candle_refuses_quant_tier(model: &str, payload: &Map<String, Value>) -> bool 
             && !matches!(bits, 4 | 8))
 }
 
+/// FLUX.1's direct Candle loader opens the hosted q4/q8 artifact directories. It has no honest
+/// q6 or bf16 route: accepting either and letting the general resolver reinterpret it would make
+/// the selected tier and the loaded weights disagree. An absent/null selection keeps the hosted q4
+/// default; every other shape fails closed.
+fn candle_refuses_flux1_unsupported_packed_tier(model: &str, payload: &Map<String, Value>) -> bool {
+    if !matches!(model, "flux_schnell" | "flux_dev") {
+        return false;
+    }
+    let Some(advanced) = payload.get("advanced") else {
+        return false;
+    };
+    let Some(advanced) = advanced.as_object() else {
+        return true;
+    };
+    match advanced.get("mlxQuantize") {
+        None | Some(Value::Null) => false,
+        Some(value) => !matches!(
+            value
+                .as_i64()
+                .or_else(|| value.as_str()?.trim().parse().ok()),
+            Some(4 | 8)
+        ),
+    }
+}
+
 /// The first [`CANDLE_IMAGE_CHECKS`] entry that refuses this request, short-circuiting exactly like
 /// the chain of early returns it replaced. `None` means the generic candle txt2img lane accepts it.
 pub(crate) fn candle_image_first_refusal(
@@ -620,9 +652,9 @@ pub(crate) fn image_request_candle_eligible(model: &str, payload: &Map<String, V
 }
 
 /// Whether the request explicitly asks for on-the-fly quantization the candle backend can't do.
-/// `advanced.mlxQuantize` is an optional advanced override (the web UI doesn't send it; the MLX path
-/// otherwise defaults quant from the manifest) — so a payload-level value `> 0` is a deliberate quant
-/// request. `<= 0` (dense) and absent both leave candle on its native dense path (sc-5099).
+/// `advanced.mlxQuantize` is an optional advanced override, so a payload-level value `> 0` is a
+/// deliberate tier/quant request. Individual families may provide their own default tier or reject
+/// explicit dense encodings; this helper deliberately reports only an explicit positive request.
 pub(crate) fn candle_request_wants_quant(payload: &Map<String, Value>) -> bool {
     candle_requested_quant_bits(payload).is_some()
 }

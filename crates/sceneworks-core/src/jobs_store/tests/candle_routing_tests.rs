@@ -1168,14 +1168,131 @@ fn new_candle_families_conditioning_shapes_fall_back_to_torch() {
 #[test]
 fn flux1_lora_stays_on_candle() {
     for model in ["flux_schnell", "flux_dev"] {
+        for network_type in ["lora", "lokr"] {
+            assert!(
+                image_request_candle_eligible(
+                    model,
+                    &object(json!({
+                        "prompt": "x",
+                        "loras": [{ "name": "dense-adapter", "networkType": network_type }]
+                    }))
+                ),
+                "{model} dense {network_type} must preserve the existing Candle adapter lane"
+            );
+        }
+    }
+}
+
+#[test]
+fn flux1_packed_tier_routing_remains_staged_and_fail_closed() {
+    for model in ["flux_schnell", "flux_dev"] {
         assert!(
             image_request_candle_eligible(
                 model,
-                &object(json!({ "prompt": "x", "loras": [{ "name": "x" }] }))
+                &object(json!({ "model": model, "prompt": "a red fox" }))
             ),
-            "{model} LoRA must stay on Candle"
+            "{model}'s existing dense route must remain available"
+        );
+        for bits in [4, 8] {
+            let payload = object(json!({
+                "model": model,
+                "prompt": "a red fox",
+                "advanced": { "mlxQuantize": bits }
+            }));
+            assert!(
+                !image_request_candle_eligible(model, &payload),
+                "{model} q{bits} must remain fail-closed before terminal CUDA evidence"
+            );
+            assert_eq!(
+                candle_image_first_refusal(model, &payload),
+                Some(CandleImageRefusal::QuantTier)
+            );
+        }
+
+        // The hosted FLUX.1 Candle surface has only q4/q8. Do not reinterpret a dense/q6 or
+        // malformed request as an adjacent packed tier.
+        for tier in [json!(0), json!(6), json!(-1), json!(true), json!("4.0")] {
+            let payload = object(json!({
+                "model": model,
+                "prompt": "a red fox",
+                "advanced": { "mlxQuantize": tier }
+            }));
+            assert!(!image_request_candle_eligible(model, &payload));
+            assert_eq!(
+                candle_image_first_refusal(model, &payload),
+                Some(CandleImageRefusal::Flux1PackedTier),
+                "{model} must fail closed for {payload:?}"
+            );
+        }
+
+        for bits in [4, 8] {
+            for network_type in ["lora", "lokr"] {
+                let packed_adapter = object(json!({
+                    "model": model,
+                    "prompt": "a red fox",
+                    "advanced": { "mlxQuantize": bits },
+                    "loras": [{
+                        "id": "style",
+                        "networkType": network_type,
+                        "scale": 0.8
+                    }]
+                }));
+                assert!(!image_request_candle_eligible(model, &packed_adapter));
+                assert_eq!(
+                    candle_image_first_refusal(model, &packed_adapter),
+                    Some(CandleImageRefusal::QuantTier),
+                    "{model} must not launder staged q{bits}+{network_type} into its dense adapter lane"
+                );
+            }
+        }
+    }
+
+    // True V2 remains the flat BF16 convert-at-install route. Promoting FLUX.1 must not make
+    // the similarly named FLUX.2 variant look packed-tier capable.
+    for bits in [4, 8] {
+        let payload = object(json!({
+            "model": "flux2_klein_9b_true_v2",
+            "prompt": "a red fox",
+            "advanced": { "mlxQuantize": bits }
+        }));
+        assert!(!image_request_candle_eligible(
+            "flux2_klein_9b_true_v2",
+            &payload
+        ));
+        assert_eq!(
+            candle_image_first_refusal("flux2_klein_9b_true_v2", &payload),
+            Some(CandleImageRefusal::QuantTier)
         );
     }
+}
+
+#[test]
+fn standalone_quant_and_adapter_capabilities_do_not_admit_their_composition() {
+    let quant_only = object(json!({ "advanced": { "mlxQuantize": 4 } }));
+    let adapter_only = object(json!({ "loras": [{ "id": "adapter_1" }] }));
+    let combined = object(json!({
+        "advanced": { "mlxQuantize": 4 },
+        "loras": [{ "id": "adapter_1" }]
+    }));
+
+    assert!(!candle_quant_lora_combination_is_unsupported(
+        true,
+        true,
+        false,
+        &quant_only
+    ));
+    assert!(!candle_quant_lora_combination_is_unsupported(
+        true,
+        true,
+        false,
+        &adapter_only
+    ));
+    assert!(candle_quant_lora_combination_is_unsupported(
+        true, true, false, &combined
+    ));
+    assert!(!candle_quant_lora_combination_is_unsupported(
+        true, true, true, &combined
+    ));
 }
 
 #[test]
@@ -1539,35 +1656,6 @@ fn chroma_packed_tiers_remain_staged_while_dense_adapters_stay_on_candle() {
             }
         }
     }
-}
-
-#[test]
-fn standalone_quant_and_adapter_capabilities_do_not_admit_their_composition() {
-    let quant_only = object(json!({ "advanced": { "mlxQuantize": 4 } }));
-    let adapter_only = object(json!({ "loras": [{ "id": "adapter_1" }] }));
-    let combined = object(json!({
-        "advanced": { "mlxQuantize": 4 },
-        "loras": [{ "id": "adapter_1" }]
-    }));
-
-    assert!(!candle_quant_lora_combination_is_unsupported(
-        true,
-        true,
-        false,
-        &quant_only
-    ));
-    assert!(!candle_quant_lora_combination_is_unsupported(
-        true,
-        true,
-        false,
-        &adapter_only
-    ));
-    assert!(candle_quant_lora_combination_is_unsupported(
-        true, true, false, &combined
-    ));
-    assert!(!candle_quant_lora_combination_is_unsupported(
-        true, true, true, &combined
-    ));
 }
 
 #[test]
@@ -4356,9 +4444,9 @@ fn quant_request_on_a_dense_only_candle_family_names_the_tier_not_a_conditioned_
     }
 }
 
-/// AC-4 mutation guard: the classification split must not move a single routing decision. The same
-/// five families with the quant override REMOVED still route to candle, and `mlxQuantize: 0` (the
-/// dense encoding) still routes too — only the refusal STRING changed.
+/// AC-4 mutation guard: all five families with the quant override REMOVED still route to candle.
+/// Chroma also keeps treating `mlxQuantize: 0` as its ordinary dense encoding; FLUX.1 deliberately
+/// refuses that explicit BF16 request because its staged packed resolver has no BF16 artifact.
 #[test]
 fn quant_message_split_did_not_move_the_routing_decision() {
     for model in [
@@ -4392,10 +4480,19 @@ fn quant_message_split_did_not_move_the_routing_decision() {
             "mode": "text_to_image",
             "advanced": { "mlxQuantize": 0 }
         }));
-        assert!(
-            image_job_is_candle_eligible(&zero) && candle_supported(&zero).is_ok(),
-            "{model} mlxQuantize:0 is dense and must still route"
-        );
+        if matches!(model, "flux_dev" | "flux_schnell") {
+            assert!(!image_job_is_candle_eligible(&zero));
+            assert_eq!(
+                candle_image_first_refusal(model, &zero.payload),
+                Some(CandleImageRefusal::Flux1PackedTier),
+                "{model} must fail closed for an explicit BF16 selection"
+            );
+        } else {
+            assert!(
+                image_job_is_candle_eligible(&zero) && candle_supported(&zero).is_ok(),
+                "{model} mlxQuantize:0 is dense and must still route"
+            );
+        }
     }
 }
 
