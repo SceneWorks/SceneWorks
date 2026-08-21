@@ -4164,6 +4164,25 @@ fn krea_realtime_conditioning_i2v_drops_strength_v2v_honors_it() {
 fn krea_realtime_routes_to_the_krea_engine_and_never_degrades_to_a_fake_video() {
     let model_dir_guard = krea_fake_model_dir("route");
     let model_dir = model_dir_guard.path();
+    let hf_cache_guard = tempfile::Builder::new()
+        .prefix("krea_route_hf_cache_")
+        .tempdir()
+        .expect("empty Krea HF cache");
+    // Hold the crate-wide env guard for the entire route + failure assertion. The resolver consults
+    // the HF cache variables before `data_dir`, so a developer cache must not make the missing-
+    // weights half of this test pass by accident.
+    let _env = EnvVars::set(&[
+        (
+            "HF_HUB_CACHE",
+            hf_cache_guard.path().to_str().expect("utf-8 fixture hub"),
+        ),
+        ("HUGGINGFACE_HUB_CACHE", ""),
+        ("HF_HOME", ""),
+        (
+            "SCENEWORKS_MLX_KREA_REALTIME_DIR",
+            model_dir.to_str().expect("utf-8 fixture root"),
+        ),
+    ]);
     // Never created and never cleaned before: a bare `temp_dir()/krea_route_data_{pid}` path
     // handed straight to `Settings` (sc-17707).
     let data_dir_guard = tempfile::Builder::new()
@@ -4177,30 +4196,24 @@ fn krea_realtime_routes_to_the_krea_engine_and_never_degrades_to_a_fake_video() 
     let req = request(json!({
         "projectId": "p", "model": "krea_realtime_14b", "mode": "text_to_video", "prompt": "p"
     }));
-    temp_env_var(
-        "SCENEWORKS_MLX_KREA_REALTIME_DIR",
-        model_dir.to_str().unwrap(),
-        || {
-            assert_eq!(
-                resolve_video_route(&req, &settings),
-                VideoRoute::KreaRealtime("krea_realtime_14b")
-            );
-            // A non-krea model never lands on the krea route (even though krea weights ARE available):
-            // routing is keyed on the model id, not merely availability.
-            for other in ["wan_2_2", "scail2_14b", "bernini", "mochi_1"] {
-                let r = request(json!({
-                    "projectId": "p", "model": other, "mode": "text_to_video", "prompt": "p"
-                }));
-                assert!(
-                    !matches!(
-                        resolve_video_route(&r, &settings),
-                        VideoRoute::KreaRealtime(_)
-                    ),
-                    "{other} must not route to KreaRealtime"
-                );
-            }
-        },
+    assert_eq!(
+        resolve_video_route(&req, &settings),
+        VideoRoute::KreaRealtime("krea_realtime_14b")
     );
+    // A non-krea model never lands on the krea route (even though krea weights ARE available):
+    // routing is keyed on the model id, not merely availability.
+    for other in ["wan_2_2", "scail2_14b", "bernini", "mochi_1"] {
+        let r = request(json!({
+            "projectId": "p", "model": other, "mode": "text_to_video", "prompt": "p"
+        }));
+        assert!(
+            !matches!(
+                resolve_video_route(&r, &settings),
+                VideoRoute::KreaRealtime(_)
+            ),
+            "{other} must not route to KreaRealtime"
+        );
+    }
 
     // Weights absent (empty env override, empty data dir) ⇒ the route falls to Stub, BUT the Stub
     // arm's fail-loud gate must refuse rather than hand back a procedural fake video.
@@ -4209,22 +4222,22 @@ fn krea_realtime_routes_to_the_krea_engine_and_never_degrades_to_a_fake_video() 
         .tempdir()
         .expect("temp dir");
     let empty = empty_guard.path();
+    // The same lock remains held; `EnvVars` restores the original process environment on drop.
+    std::env::remove_var("SCENEWORKS_MLX_KREA_REALTIME_DIR");
     let bare = Settings {
         data_dir: empty.to_path_buf(),
         ..Settings::from_env()
     };
-    temp_env_var("SCENEWORKS_MLX_KREA_REALTIME_DIR", "", || {
-        assert_eq!(resolve_video_route(&req, &bare), VideoRoute::Stub);
-        let err = ensure_video_engine_weights(&req, &bare)
-            .expect_err("an unprovisioned krea MUST fail loudly, never render a fake video");
-        let WorkerError::InvalidPayload(message) = err else {
-            panic!("expected an actionable InvalidPayload");
-        };
-        assert!(
-            message.contains("krea_realtime_14b") && message.contains("Model Manager"),
-            "the error must name the model and tell the user what to do: {message}"
-        );
-    });
+    assert_eq!(resolve_video_route(&req, &bare), VideoRoute::Stub);
+    let err = ensure_video_engine_weights(&req, &bare)
+        .expect_err("an unprovisioned krea MUST fail loudly, never render a fake video");
+    let WorkerError::InvalidPayload(message) = err else {
+        panic!("expected an actionable InvalidPayload");
+    };
+    assert!(
+        message.contains("krea_realtime_14b") && message.contains("Model Manager"),
+        "the error must name the model and tell the user what to do: {message}"
+    );
 }
 
 /// The caller-side mapping pin: drives `generate_krea_realtime_using` end to end (through the

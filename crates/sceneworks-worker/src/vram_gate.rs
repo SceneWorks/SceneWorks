@@ -494,32 +494,16 @@ fn krea_test_artifact_root(tier: &str) -> std::path::PathBuf {
         root: std::path::PathBuf,
     }
 
-    const FIXTURE_PREFIX: &str = "sceneworks-krea-memfix-";
+    /// Distinctive enough that the sweep can match nothing else under the shared temp root.
+    const FIXTURE_FAMILY: &str = "sceneworks-krea-memfix-";
 
     static FIXTURE: std::sync::OnceLock<Fixture> = std::sync::OnceLock::new();
     let fixture = FIXTURE.get_or_init(|| {
-        let temp_root = std::env::temp_dir();
-        if let Ok(entries) = std::fs::read_dir(&temp_root) {
-            let stale_before =
-                std::time::SystemTime::now() - std::time::Duration::from_secs(24 * 60 * 60);
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                let Some(name) = name.to_str() else { continue };
-                if !name.starts_with(FIXTURE_PREFIX) {
-                    continue;
-                }
-                let is_stale = entry
-                    .metadata()
-                    .and_then(|metadata| metadata.modified())
-                    .map(|modified| modified < stale_before)
-                    .unwrap_or(false);
-                if is_stale {
-                    let _ = std::fs::remove_dir_all(entry.path());
-                }
-            }
-        }
+        crate::test_fixture_disk::sweep_stale_fixtures(FIXTURE_FAMILY);
         let temp = tempfile::Builder::new()
-            .prefix(FIXTURE_PREFIX)
+            .prefix(&crate::test_fixture_disk::process_keyed_prefix(
+                FIXTURE_FAMILY,
+            ))
             .tempdir()
             .expect("Krea memory-contract fixture root");
         let root = temp.path().to_path_buf();
