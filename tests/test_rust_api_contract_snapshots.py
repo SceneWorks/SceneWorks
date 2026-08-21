@@ -1465,6 +1465,19 @@ def test_person_tracking_and_replace_person_contracts(contract_runtimes):
     ]
     assert_response_contract("person track job response", baseline_runtime, candidate_runtime, track_jobs[0], track_jobs[1], expected_status=201, snapshot=True)
 
+    # `model` is named explicitly (sc-19570). This fixture used to omit it and inherit the
+    # DEFAULT video model, which today is `ltx_2_3` — a model whose `replace_person` mode runs
+    # only on the macOS MLX engine. The enqueue CONTRACT is platform-independent (201 with a job
+    # snapshot on every host, which is what `expected_status` below pins), but the job's own
+    # lifecycle is not: off-Mac such a pair is failed terminal at once with a
+    # `platform_unreachable:` reason instead of queueing for a worker that can never exist. That
+    # made `status` / `stage` / `error` / `completedAt` in the SNAPSHOT depend on which runner
+    # recorded it, and this suite runs on `ubuntu-latest`.
+    #
+    # `wan_2_2` serves `replace_person` on BOTH lanes — candle Wan-VACE off-Mac, MLX on a Mac — so
+    # the snapshot is stable everywhere and the fixture is testing the person-replace contract
+    # rather than the default model's reachability. Naming it also makes the fixture immune to a
+    # future change of the catalog default.
     replace_jobs = [
         runtime.request(
             "POST",
@@ -1472,6 +1485,7 @@ def test_person_tracking_and_replace_person_contracts(contract_runtimes):
             json_payload={
                 "projectId": runtime.project_id,
                 "projectName": "Parity Project",
+                "model": "wan_2_2",
                 "mode": "replace_person",
                 "prompt": "hero walks through rain",
                 "sourceClipAssetId": "asset-video",

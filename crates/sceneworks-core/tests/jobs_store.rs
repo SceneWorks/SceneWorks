@@ -4011,6 +4011,219 @@ fn candle_stranded_sweep_partitions_and_is_noop_when_off() {
     );
 }
 
+// sc-19570 — the PLATFORM-reachability sweep. The store-level twin of the API guards in
+// `apps/rust-api/src/tests/jobs.rs`: those prove the HTTP contract is platform-independent and the
+// job terminates; these pin the mechanism's exact reach.
+
+/// The sweep fails an MLX-only video job off-Mac, IMMEDIATELY and with a named reason, and leaves
+/// it alone on a Mac.
+///
+/// No `backdate_job_created_at` anywhere in this test, unlike every `fail_stranded_*` sibling
+/// above, and that is the point: those sweeps hold a grace window because their gap is transient (a
+/// worker that has not checked in yet). This gap is structural — no worker that could claim the job
+/// can register on this OS at all — so waiting would only extend the hang. A future edit that adds
+/// a grace window here turns this red.
+#[test]
+fn platform_sweep_fails_an_mlx_only_video_job_off_mac_immediately() {
+    let store = store("platform-unreachable-offmac");
+    // `krea_realtime_14b`, not `ltx_2_3`. This test needs a pair that is MLX-claimable and
+    // candle-unclaimable, and sc-19570 originally used LTX because that held on the epic branch.
+    // Syncing `main` gave the LTX pair a real candle lane (`candle_video_engine_id` resolves it to
+    // `ltx_2_3_distilled`), so the old pair is now candle-SERVED and the sweep is correctly inert on
+    // it — the assertion below would fail for the right reason. Krea Realtime has no
+    // `candle-gen-krea-realtime` at all, so it is still MLX-only; it is one of the seven pairs left
+    // in `MLX_ONLY_ADVERTISED_PAIRS` after that same sync.
+    let job = job_of(
+        &store,
+        JobType::VideoGenerate,
+        json!({ "model": "krea_realtime_14b", "mode": "image_to_video", "sourceAssetId": "img-1", "prompt": "p" }),
+    );
+
+    // macOS FIRST, on the very same job: the MLX engine renders this pair, so the sweep must be
+    // inert there. Asserting it before the off-Mac arm means a sweep that failed everything cannot
+    // reach the interesting assertion at all.
+    assert!(store
+        .fail_platform_unreachable_jobs("macos")
+        .expect("sweep ok")
+        .is_empty());
+    assert!(store
+        .fail_platform_unreachable_jobs("darwin")
+        .expect("sweep ok")
+        .is_empty());
+    assert_eq!(
+        store.get_job(&job.id).expect("loads").status,
+        JobStatus::Queued
+    );
+
+    let failed = store
+        .fail_platform_unreachable_jobs("windows")
+        .expect("sweep ok");
+    assert_eq!(failed.len(), 1, "the unreachable job is failed");
+    assert_eq!(failed[0].id, job.id);
+    assert_eq!(failed[0].status, JobStatus::Failed);
+    // WHICH error. `is_err()`-shaped assertions are satisfied by the wrong failure, and the three
+    // neighbouring causes describe situations with different remedies — `candle_unavailable` and
+    // `mlx_unavailable` say "start the worker", `*_unsupported` says "port the surface". This one
+    // says "there is nothing to start and nothing to enable".
+    let error = failed[0].error.as_deref().unwrap_or_default();
+    assert!(
+        error.starts_with("platform_unreachable: "),
+        "error names its own cause: {error:?}"
+    );
+    for foreign in [
+        "candle_unavailable",
+        "mlx_unavailable",
+        "candle_unsupported",
+        "mlx_unsupported",
+    ] {
+        assert!(
+            !error.contains(foreign),
+            "the platform reason must not be confusable with {foreign}: {error}"
+        );
+    }
+    assert!(
+        error.contains("krea_realtime_14b")
+            && error.contains("image_to_video")
+            && error.contains("windows"),
+        "the reason names the model, the mode and the host: {error}"
+    );
+    assert_eq!(
+        store.get_job(&job.id).expect("loads").status,
+        JobStatus::Failed,
+        "the transition is persisted, not just reported"
+    );
+    // Idempotent: a second pass finds nothing, because the row is no longer `queued`.
+    assert!(store
+        .fail_platform_unreachable_jobs("linux")
+        .expect("sweep ok")
+        .is_empty());
+}
+
+/// **THE SCOPING GUARD.** The sweep must touch ONLY the four video job types.
+///
+/// `video_request_is_candle_eligible` answers `false` for every other job type — its match arm is
+/// literally `_ => false` — so a sweep that skipped the job-type filter would read "unreachable"
+/// for an image, training or upscale job and fail the entire off-Mac queue on the first claim.
+/// That is a far worse defect than the one sc-19570 fixes, and nothing about the reachability
+/// predicate's own signature prevents it.
+///
+/// Every job below is created queued, swept on `windows`, and must survive.
+#[test]
+fn platform_sweep_never_touches_a_non_video_or_candle_served_job() {
+    let store = store("platform-unreachable-scope");
+    let survivors = [
+        // Non-video: the candle lane runs all of these off-Mac.
+        job_of(
+            &store,
+            JobType::ImageGenerate,
+            json!({ "model": "z_image_turbo", "prompt": "p" }),
+        ),
+        job_of(
+            &store,
+            JobType::ImageUpscale,
+            json!({ "model": "z_image_turbo", "prompt": "p" }),
+        ),
+        job_of(
+            &store,
+            JobType::LoraTrain,
+            json!({ "model": "z_image_turbo", "prompt": "p" }),
+        ),
+        // Video, but candle-SERVED off-Mac — the half a too-broad sweep would break.
+        job_of(
+            &store,
+            JobType::VideoGenerate,
+            json!({ "model": "wan_2_2", "mode": "text_to_video", "prompt": "p" }),
+        ),
+        job_of(
+            &store,
+            JobType::VideoExtend,
+            json!({ "model": "wan_2_2", "mode": "extend_clip", "sourceClipAssetId": "clip-1", "prompt": "p" }),
+        ),
+        job_of(
+            &store,
+            JobType::PersonReplace,
+            json!({ "model": "wan_2_2", "mode": "replace_person", "sourceClipAssetId": "clip-1", "personTrackId": "t-1", "characterId": "c-1", "prompt": "p" }),
+        ),
+    ];
+
+    let failed = store
+        .fail_platform_unreachable_jobs("windows")
+        .expect("sweep ok");
+    assert!(
+        failed.is_empty(),
+        "the sweep reached outside the four video job types or refused a candle-served pair: {:?}",
+        failed
+            .iter()
+            .map(|job| (job.job_type.as_str(), job.error.clone()))
+            .collect::<Vec<_>>()
+    );
+    for job in &survivors {
+        assert_eq!(
+            store.get_job(&job.id).expect("loads").status,
+            JobStatus::Queued,
+            "{} must stay claimable off-Mac",
+            job.job_type.as_str()
+        );
+    }
+
+    // …and the sweep is not simply inert: an unreachable job in the SAME store, on the same pass,
+    // is still failed. Without this arm every assertion above would pass on a no-op.
+    // Krea Realtime rather than LTX, for the reason spelled out in
+    // `platform_sweep_fails_an_mlx_only_video_job_off_mac_immediately`: syncing `main` gave the LTX
+    // pair a candle lane, so an LTX job is no longer stranded off-Mac and this arm would assert a
+    // no-op — the precise failure it exists to prevent.
+    let stranded = job_of(
+        &store,
+        JobType::VideoGenerate,
+        json!({ "model": "krea_realtime_14b", "mode": "image_to_video", "sourceAssetId": "img-1", "prompt": "p" }),
+    );
+    let failed = store
+        .fail_platform_unreachable_jobs("windows")
+        .expect("sweep ok");
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(failed[0].id, stranded.id);
+}
+
+/// The sweep fires **regardless of worker presence**, which is what separates it from
+/// `fail_stranded_candle_jobs` and is the reason that sweep could never have covered this case.
+///
+/// A live, healthy candle worker is registered here. `fail_stranded_candle_jobs` returns early the
+/// moment it sees one — correctly: the job is not unserved, it is unclaimable — and that early
+/// return is exactly why the twenty measured pairs hung on real Windows deployments, which do run
+/// a candle worker. Asserting both sweeps against the same store makes the division explicit.
+#[test]
+fn platform_sweep_fires_even_with_a_live_candle_worker_that_will_never_claim() {
+    let store = store("platform-unreachable-live-worker");
+    register_candle_worker(&store, "worker-candle");
+    let job = job_of(
+        &store,
+        JobType::VideoGenerate,
+        json!({ "model": "minimax_h3", "mode": "text_to_video", "prompt": "p" }),
+    );
+    backdate_job_created_at(&store, &job.id);
+
+    // The pre-existing sweep declines — a live candle worker exists, so as far as it is concerned
+    // the job is simply waiting. This is the false-negative sc-19570 had to work around.
+    assert!(
+        store
+            .fail_stranded_candle_jobs(true, 90)
+            .expect("sweep ok")
+            .is_empty(),
+        "fail_stranded_candle_jobs cannot see this class — that is why a second sweep exists"
+    );
+    assert_eq!(
+        store.get_job(&job.id).expect("loads").status,
+        JobStatus::Queued
+    );
+
+    let failed = store
+        .fail_platform_unreachable_jobs("windows")
+        .expect("sweep ok");
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert_eq!(failed[0].id, job.id);
+    assert_eq!(failed[0].status, JobStatus::Failed);
+}
+
 // epic 3482 / sc-3484 — mac_rust_supported oracle (the inverse of the eligibility predicates)
 // + the enforce sweep that fails unsupported jobs terminal with `mlx_unsupported`.
 

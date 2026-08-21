@@ -503,6 +503,299 @@ impl HuggingFaceCacheHealth {
     }
 }
 
+/// Machine-readable code on the license-acknowledgment rejection (sc-17227). Mirrored in the web
+/// client as `LICENSE_ACK_ERROR_CODE` (`apps/web/src/licenseAcknowledgment.js`) so both halves of
+/// the gate name the same refusal rather than matching on prose.
+pub(crate) const LICENSE_ACKNOWLEDGMENT_REQUIRED_CODE: &str = "license_acknowledgment_required";
+
+/// True when the catalog entry declares that the user must accept its license before the weights
+/// may be downloaded (`requiresLicenseAcknowledgment`, sc-17227). Deliberately does NOT include
+/// `gated`: see the call site for why the two are enforced differently.
+fn model_requires_license_acknowledgment(model: &Value) -> bool {
+    model
+        .get("requiresLicenseAcknowledgment")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// The payload key every job-creation door uses to carry the caller's acknowledgment through to
+/// the queue (sc-17227). Stamped by `create_model_download_job` once its own gate has passed, so a
+/// RETRY of a legitimately-authorized download re-validates against the same assertion rather than
+/// being refused for a field the typed route never wrote.
+pub(crate) const LICENSE_ACKNOWLEDGED_PAYLOAD_KEY: &str = "licenseAcknowledged";
+
+/// Canonical comparison key for a Hugging Face `owner/name`. Lowercased so a case-variant repo
+/// string cannot walk past a gate keyed on the catalog's spelling — the hub resolves `owner/Name`
+/// and `owner/name` to the same repository, so treating them as different would be a bypass.
+///
+/// A trailing `.git` is stripped for the same reason: `MiniMaxAI/MiniMax-H3.git` is the git-remote
+/// spelling of the same repository, it passes the worker's `validate_hf_repo_id`, and it was the
+/// one spelling that missed this index — leaving Hugging Face's own 401 as the only thing between
+/// the request and the weights. Stripped AFTER the trailing-slash trim (and re-trimmed) so
+/// `…/MiniMax-H3.git/` and `…/MiniMax-H3/.git` both normalize too.
+fn huggingface_repo_key(repo: &str) -> Option<String> {
+    let repo = repo.trim().trim_end_matches('/').trim();
+    let repo = match repo.rfind('.') {
+        // `rfind` yields a char boundary, so the slice is safe; compared case-insensitively
+        // because the lowercasing below happens only after this strip.
+        Some(dot) if repo[dot..].eq_ignore_ascii_case(".git") => repo[..dot].trim_end_matches('/'),
+        _ => repo,
+    };
+    let repo = repo.trim();
+    if repo.is_empty() {
+        return None;
+    }
+    Some(repo.to_ascii_lowercase())
+}
+
+/// The `owner/name` a huggingface.co URL addresses, or `None` for any other host. `/models/import`
+/// accepts a `sourceUrl` as an alternative to `repo`, and
+/// `https://huggingface.co/MiniMaxAI/MiniMax-H3/resolve/main/…` fetches exactly the same bytes as
+/// `repo: "MiniMaxAI/MiniMax-H3"`, so a repo-keyed gate that read only `repo` would leave the
+/// equivalent request open.
+fn huggingface_repo_from_url(url: &str) -> Option<String> {
+    let url = url.trim();
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let (host, path) = rest.split_once('/')?;
+    let host = host.split('@').next_back().unwrap_or(host);
+    let host = host.split(':').next().unwrap_or(host).to_ascii_lowercase();
+    if host != "huggingface.co" && host != "www.huggingface.co" && host != "hf.co" {
+        return None;
+    }
+    // `/models/<owner>/<name>` and `/<owner>/<name>` both address a model repo; `datasets/…` and
+    // `spaces/…` are different namespaces and are left alone.
+    let path = path.strip_prefix("models/").unwrap_or(path);
+    let mut segments = path.split('/').filter(|segment| !segment.is_empty());
+    let owner = segments.next()?;
+    if matches!(owner, "datasets" | "spaces" | "api") {
+        return None;
+    }
+    let name = segments.next()?;
+    Some(format!("{owner}/{name}"))
+}
+
+/// Every Hugging Face repo declared by a catalog entry that requires a license acknowledgment,
+/// mapped to the entry that declares it (sc-17227). Includes co-requisite rows: MiniMax-H3's text
+/// encoder and both VAEs come straight from `MiniMaxAI/MiniMax-H3`, which is the repo the review's
+/// bypass named, and a primary-only index would have missed it.
+///
+/// Read from the UNFILTERED manifest entries on purpose. The catalog snapshot narrows `downloads`
+/// to the running OS (`retain_downloads_for_os`), and every MiniMax-H3 row is platform-scoped: the
+/// MLX tiers and their co-requisites are `platforms: ["macos"]` and sc-19558's raw-snapshot set is
+/// `platforms: ["windows", "linux"]`. An index built from the snapshot would therefore see only the
+/// subset that survived the filter on the running host, and the gate would be keyed on a partial
+/// view of the repos an entry can actually fetch — on exactly the hosts where the LAN-exposed jobs
+/// API (epic 4484) is most likely to be reachable. A licence requirement is not a platform
+/// capability.
+async fn license_acknowledgment_repo_index(
+    state: &AppState,
+) -> Result<std::collections::BTreeMap<String, LicenseAcknowledgmentSource>, ApiError> {
+    let (models, _) = merged_model_manifest_entries(state).await?;
+    let mut index = std::collections::BTreeMap::new();
+    for model in models {
+        if !model_requires_license_acknowledgment(&model) {
+            continue;
+        }
+        let Some(model_id) = model.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let model_name = model
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or(model_id)
+            .to_owned();
+        for download in model
+            .get("downloads")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(key) = download
+                .get("repo")
+                .and_then(Value::as_str)
+                .and_then(huggingface_repo_key)
+            else {
+                continue;
+            };
+            index
+                .entry(key)
+                .or_insert_with(|| LicenseAcknowledgmentSource {
+                    model_id: model_id.to_owned(),
+                    model_name: model_name.clone(),
+                });
+        }
+    }
+    Ok(index)
+}
+
+/// The catalog entry whose licence acknowledgment covers a fetch of some repo. The NAME travels
+/// with the id because the surfaces that have to explain the requirement — the LoRA rows on the
+/// Models screen — have no licence copy of their own and must point the user at the model card
+/// that does.
+#[derive(Clone)]
+pub(crate) struct LicenseAcknowledgmentSource {
+    pub(crate) model_id: String,
+    pub(crate) model_name: String,
+}
+
+/// Client-visible keys naming the model whose licence acknowledgment covers a catalog row that is
+/// not itself a model (sc-17227). Written onto LoRA catalog rows by `list_loras`.
+pub(crate) const LICENSE_ACKNOWLEDGMENT_MODEL_ID_KEY: &str = "licenseAcknowledgmentModelId";
+pub(crate) const LICENSE_ACKNOWLEDGMENT_MODEL_NAME_KEY: &str = "licenseAcknowledgmentModelName";
+
+/// Stamp each catalog row whose Hugging Face source repo is licence-gated with the model that
+/// gates it (sc-17227), so a client can raise the SAME acknowledgment gate it raises on a model
+/// and send the assertion the server now requires.
+///
+/// Without this, `create_lora_download_job`'s repo-keyed gate is unsatisfiable from the shipped UI:
+/// the row carries nothing that says an acknowledgment is needed, `createLoraDownloadJob` sends no
+/// `licenseAcknowledged`, and the click yields a bare 403 with no checkbox anywhere to clear it.
+///
+/// Derived here rather than authored in `builtin.loras.jsonc` on purpose. A manifest flag is a
+/// second copy of a fact the model manifest already states, and the two drift; this reads the one
+/// source. It is also the only form that is correct on every host — the index is built from the
+/// UNFILTERED model manifest, so it does not evaporate on a platform where the gating model's
+/// download rows are filtered out, which is exactly where a client-side re-derivation would fail.
+///
+/// Applied at the CATALOG-READ door (`list_loras`) and not inside `lora_catalog`, which the
+/// per-job-create validation sweep also calls (sc-8819): the annotation is for rendering, and the
+/// enforcement path resolves the repo itself.
+pub(crate) async fn annotate_license_acknowledgment_sources(
+    state: &AppState,
+    rows: &mut [Value],
+    repo_of: impl Fn(&Value) -> Option<String>,
+) -> Result<(), ApiError> {
+    let keyed: Vec<(usize, String)> = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(position, row)| {
+            repo_of(row)
+                .as_deref()
+                .and_then(huggingface_repo_key)
+                .map(|key| (position, key))
+        })
+        .collect();
+    if keyed.is_empty() {
+        return Ok(());
+    }
+    let index = license_acknowledgment_repo_index(state).await?;
+    if index.is_empty() {
+        return Ok(());
+    }
+    for (position, key) in keyed {
+        let Some(source) = index.get(key.as_str()) else {
+            continue;
+        };
+        let Some(object) = rows[position].as_object_mut() else {
+            continue;
+        };
+        object.insert(
+            LICENSE_ACKNOWLEDGMENT_MODEL_ID_KEY.to_owned(),
+            Value::String(source.model_id.clone()),
+        );
+        object.insert(
+            LICENSE_ACKNOWLEDGMENT_MODEL_NAME_KEY.to_owned(),
+            Value::String(source.model_name.clone()),
+        );
+    }
+    Ok(())
+}
+
+/// The license-acknowledgment refusal for a request that named its weights by REPO (sc-17227).
+///
+/// [`create_model_download_job`] gates the typed `POST /api/v1/models/:id/download` by catalog id.
+/// That is not the only door: `POST /api/v1/jobs` enqueues a `model_download` payload VERBATIM
+/// (`repo` + `files` + `revision`, no catalog lookup anywhere between the request and
+/// `run_model_download_job`), and `POST /api/v1/models/import` fetches a caller-supplied repo or
+/// URL with no licence logic of its own. Both reached `MiniMaxAI/MiniMax-H3` — a PUBLIC repo, so
+/// nothing upstream refuses them — while the typed route answered 403. Keying on the repo rather
+/// than on the model id is what lets ONE mechanism close both: the payloads have no `modelId` to
+/// look up, but they must name the repo or they cannot fetch anything.
+///
+/// `repos` is a LIST because "the repo this request will fetch" is not always spelled `repo`: a
+/// `model_convert` payload names its download target in `baseRepo` (the LTX converter's
+/// `ensure_ltx_upscaler_cached` fetches it, and `upscalerFile` is a glob, so `"**"` pulls the whole
+/// repo). Checking every repo-bearing key of a payload is what keeps this ONE predicate rather than
+/// one per job type — a new key is an addition to the list, not a second gate.
+///
+/// `acknowledged` is the caller's own assertion, exactly as on the typed route: the gate obtains
+/// an affirmative acknowledgment, it is not an authorization check (see
+/// `docs/minimax-h3-use-restriction-safeguards.md`).
+pub(crate) async fn ensure_license_acknowledged_for_source(
+    state: &AppState,
+    repos: &[Option<&str>],
+    source_url: Option<&str>,
+    acknowledged: bool,
+) -> Result<(), ApiError> {
+    // Each candidate keeps the caller's own spelling next to the lookup key, so the refusal echoes
+    // what was actually requested rather than the lowercased index key.
+    let candidates: Vec<(String, String)> = repos
+        .iter()
+        .copied()
+        .flatten()
+        .map(str::to_owned)
+        .chain(source_url.and_then(huggingface_repo_from_url))
+        .filter_map(|named| huggingface_repo_key(&named).map(|key| (named, key)))
+        .collect();
+    if candidates.is_empty() {
+        return Ok(());
+    }
+    let index = license_acknowledgment_repo_index(state).await?;
+    let Some((requested, source)) = candidates
+        .iter()
+        .find_map(|(named, key)| index.get(key.as_str()).map(|source| (named, source)))
+    else {
+        return Ok(());
+    };
+    if acknowledged {
+        return Ok(());
+    }
+    let model_id = &source.model_id;
+    Err(ApiError {
+        status: StatusCode::FORBIDDEN,
+        detail: format!(
+            "'{requested}' supplies '{model_id}', which requires accepting its license before \
+             download. Accept the license on the Models screen, or send \
+             `licenseAcknowledged: true` to assert that the user has accepted it."
+        ),
+        code: Some(LICENSE_ACKNOWLEDGMENT_REQUIRED_CODE),
+        context: None,
+    })
+}
+
+/// Every payload key that can name a Hugging Face repo the WORKER will fetch (sc-17227). Keep this
+/// aligned with the worker's own readers: `run_model_download_job` / `run_model_import_job` /
+/// `run_lora_*_job` take `repo` (`crates/sceneworks-worker/src/model_jobs.rs`), and
+/// `resolve_convert_plan` takes `baseRepo` — which the LTX arm hands to `ensure_ltx_upscaler_cached`
+/// → `ensure_hf_files_cached`, a real download. `sourceRepo` is listed because it is the other repo
+/// a convert payload names; it resolves against the local cache today (`huggingface_snapshot_dir`),
+/// so gating it costs nothing and removes the question of which of the two a future arm fetches.
+const LICENSE_GATED_REPO_PAYLOAD_KEYS: &[&str] = &["repo", "baseRepo", "sourceRepo"];
+
+/// [`ensure_license_acknowledged_for_source`] over a raw job payload — the shape
+/// `POST /api/v1/jobs` (and the retry/duplicate re-validation) hands to the worker verbatim.
+pub(crate) async fn ensure_job_payload_license_acknowledged(
+    state: &AppState,
+    payload: &JsonObject,
+) -> Result<(), ApiError> {
+    let repos: Vec<Option<&str>> = LICENSE_GATED_REPO_PAYLOAD_KEYS
+        .iter()
+        .map(|key| payload.get(*key).and_then(Value::as_str))
+        .collect();
+    ensure_license_acknowledged_for_source(
+        state,
+        &repos,
+        payload.get("sourceUrl").and_then(Value::as_str),
+        payload
+            .get(LICENSE_ACKNOWLEDGED_PAYLOAD_KEY)
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    )
+    .await
+}
+
 pub(crate) async fn create_model_download_job(
     State(state): State<AppState>,
     Path(model_id): Path<String>,
@@ -519,6 +812,31 @@ pub(crate) async fn create_model_download_job(
             code: None,
         })?;
     ensure_model_downloadable(&model)?;
+    // License-acknowledgment gate (sc-17227), enforced HERE and not only in the web client.
+    //
+    // The web client refuses an unacknowledged download at `createModelDownloadJob`, but that code
+    // only runs in the client. This endpoint is reachable from a browser on another machine (the
+    // remote-access lane, epic 4484), from a workflow envelope's suggested action, and from curl,
+    // and no client-side check binds any of those.
+    //
+    // Scoped to `requiresLicenseAcknowledgment` — NOT to `gated`. A gated model's download fails at
+    // Hugging Face with a 401 without a saved credential, so an unacknowledged fetch never lands its
+    // weights; adding the requirement there would 4xx every existing gated download whose client
+    // predates the field, for no gain. A `requiresLicenseAcknowledgment` model's repo is PUBLIC —
+    // nothing upstream refuses it — so this rejection is the only thing between the request and the
+    // weights, which is why the flag defaults to `false` and must be asserted, not assumed.
+    if model_requires_license_acknowledgment(&model) && !payload.license_acknowledged {
+        return Err(ApiError {
+            status: StatusCode::FORBIDDEN,
+            detail: format!(
+                "Model '{model_id}' requires accepting its license before download. Accept the \
+                 license on the Models screen, or send `licenseAcknowledged: true` to assert that \
+                 the user has accepted it."
+            ),
+            code: Some(LICENSE_ACKNOWLEDGMENT_REQUIRED_CODE),
+            context: None,
+        });
+    }
     // Tier selection (sc-8508): an explicit `variant` installs that quant tier's download entry; an
     // absent variant installs the default tier (back-compat). A variant the model doesn't advertise
     // is a 400 rather than a silent wrong-tier install.
@@ -545,12 +863,58 @@ pub(crate) async fn create_model_download_job(
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
+
+    // Only the SELECTED tier's co-requisites (sc-14980). Mage-Flow's shared text encoder exists as
+    // three per-tier subtrees; fetching all of them would pull 16.1 GB of text encoder for a q4
+    // install that needs 2.51 GB. Tier-agnostic co-requisites (every other family) are unaffected —
+    // they carry no `variant` and always apply. Read the tier off the resolved `download` rather than
+    // the request so the default-tier install (no explicit `variant`) picks up its tier too.
+    let selected_variant = download
+        .get("variant")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let co_requisites =
+        model_co_requisite_downloads_for_variant(&model, selected_variant.as_deref());
+
+    // The REPO-keyed half of the same gate (sc-17227). The check above is keyed on the catalog id
+    // in the PATH, so it fires only when the entry that id names declares
+    // `requiresLicenseAcknowledgment` itself. Every other door — `POST /api/v1/jobs`,
+    // `/models/import`, `/loras/import` — is keyed on the repo the request will FETCH, resolved
+    // against `license_acknowledgment_repo_index`. That asymmetry left two doors onto one set of
+    // weights: an entry that does not carry the flag but whose `downloads` name a repo a flagged
+    // entry declares would have been fetched here while the generic queue answered 403 for the same
+    // repo. Shared co-requisite rows are exactly that shape, and the manifest already uses it.
+    //
+    // Unreachable in the shipped catalog today — every restricted repo reference lives inside an
+    // entry that carries the flag, and the manifest audit's
+    // `test_every_entry_naming_a_license_gated_repo_carries_the_flag_itself` keeps it that way —
+    // but that is a property of the current manifest, not of this route. An
+    // ADDITION, not a replacement: the id check above keeps its own refusal text, which names the
+    // model the caller asked for rather than the repo that supplies it.
+    let queued_repos: Vec<String> = std::iter::once(&download)
+        .chain(co_requisites.iter())
+        .filter_map(|entry| entry.get("repo").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect();
+    let queued_repos: Vec<Option<&str>> = queued_repos
+        .iter()
+        .map(|repo| Some(repo.as_str()))
+        .collect();
+    ensure_license_acknowledged_for_source(
+        &state,
+        &queued_repos,
+        None,
+        payload.license_acknowledged,
+    )
+    .await?;
+
     let job_payload = build_model_download_job_payload(
         &model,
         &model_id,
         &download,
         requested_variant,
         true,
+        payload.license_acknowledged,
         &state.settings.data_dir,
     )?;
 
@@ -564,27 +928,17 @@ pub(crate) async fn create_model_download_job(
     // is a different artifact than the model's primary checkpoint and must not be reconciled
     // against the model's family.
     let requested_gpu = requested_gpu_or_auto(payload.requested_gpu);
-    // Only the SELECTED tier's co-requisites (sc-14980). Mage-Flow's shared text encoder exists as
-    // three per-tier subtrees; fetching all of them would pull 16.1 GB of text encoder for a q4
-    // install that needs 2.51 GB. Tier-agnostic co-requisites (every other family) are unaffected —
-    // they carry no `variant` and always apply. Read the tier off the resolved `download` rather than
-    // the request so the default-tier install (no explicit `variant`) picks up its tier too.
-    let selected_variant = download
-        .get("variant")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    for co_requisite in
-        model_co_requisite_downloads_for_variant(&model, selected_variant.as_deref())
-    {
-        if co_requisite_satisfied_by_exact_legacy_rename(&state.settings.data_dir, &co_requisite) {
+    for co_requisite in &co_requisites {
+        if co_requisite_satisfied_by_exact_legacy_rename(&state.settings.data_dir, co_requisite) {
             continue;
         }
         let co_payload = build_model_download_job_payload(
             &model,
             &model_id,
-            &co_requisite,
+            co_requisite,
             None,
             false,
+            payload.license_acknowledged,
             &state.settings.data_dir,
         )?;
         create_generation_job(
@@ -663,6 +1017,7 @@ fn build_model_download_job_payload(
     download: &Value,
     explicit_variant: Option<&str>,
     include_family: bool,
+    license_acknowledged: bool,
     data_dir: &FsPath,
 ) -> Result<JsonObject, ApiError> {
     let repo = required_string_field(download, "repo")?.to_owned();
@@ -693,6 +1048,28 @@ fn build_model_download_job_payload(
     // client request cannot supply or override this flag, and co-requisites stay inert because the
     // calibration artifact identity is the primary checkpoint.
     insert_memory_calibration_provenance_requirement(&mut job_payload, model, include_family);
+    // Record the acknowledgment ON the job (sc-17227). `create_model_download_job` — the only
+    // non-test caller — has already refused the request unless the caller asserted it, so reaching
+    // here for a gated fetch means the assertion was made. Writing it into the payload is what
+    // keeps RETRY and DUPLICATE working: those re-run `validate_raw_job_payload` over the stored
+    // payload, and the repo-keyed gate there would otherwise refuse a download the typed route had
+    // already authorized. Co-requisites carry it too — `MiniMaxAI/MiniMax-H3` is itself a
+    // co-requisite repo, and it is the one the review's bypass named.
+    //
+    // Keyed on the FLAG OR the caller's own assertion, not on the flag alone. The two gates in
+    // `create_model_download_job` do not fire on the same predicate: the id gate reads the entry's
+    // flag, while the repo gate reads the repos the job will queue. For the shape the repo gate
+    // exists to catch — an entry with NO flag whose download names a repo a flagged entry declares
+    // — a flag-keyed stamp writes nothing, and the RETRY of that authorized download is then
+    // refused by the repo gate over its own stored `repo`. `license_acknowledged` is the caller's
+    // assertion carried verbatim, so the stamp records exactly what was asserted rather than
+    // re-deriving it from a predicate that already disagreed once.
+    if model_requires_license_acknowledgment(model) || license_acknowledged {
+        job_payload.insert(
+            LICENSE_ACKNOWLEDGED_PAYLOAD_KEY.to_owned(),
+            Value::Bool(true),
+        );
+    }
     job_payload.insert(
         "provider".to_owned(),
         Value::String(required_string_field(download, "provider")?.to_owned()),
@@ -890,6 +1267,7 @@ mod memory_calibration_job_payload_tests {
             &download(),
             None,
             true,
+            false,
             data.path(),
         )
         .expect("primary payload");
@@ -903,6 +1281,7 @@ mod memory_calibration_job_payload_tests {
             "fixture-model",
             &download(),
             None,
+            false,
             false,
             data.path(),
         )
@@ -923,6 +1302,7 @@ mod memory_calibration_job_payload_tests {
             &download(),
             client.variant.as_deref(),
             true,
+            false,
             data.path(),
         )
         .expect("uncalibrated payload");
@@ -1245,8 +1625,11 @@ pub(crate) async fn delete_model(
             .root()
             .to_owned(),
     ];
-    let removal = match remove_owned_artifacts(
-        model_artifact_paths(cleanup_source, &state.settings.data_dir),
+    let removal = match remove_whole_model_artifacts(
+        catalogs.models(&state).await?,
+        &model_id,
+        cleanup_source,
+        &state.settings.data_dir,
         &allowed_roots,
         permanent,
     )
@@ -1325,6 +1708,220 @@ pub(crate) async fn delete_model(
         "warnings": warnings,
         "policy": policy,
     })))
+}
+
+/// The file scopes `model` OWNS inside `repo` — the union of its PRIMARY (non-co-requisite) download
+/// entries that point at `repo`. Co-requisite rows are deliberately excluded; see the comment on the
+/// filter below for why that is what makes this "owned" rather than merely "referenced".
+///
+/// `None` when ANY of those primaries declares no `files` filter: that is a claim on the WHOLE repo,
+/// which cannot be expressed as a scoped removal, so the caller keeps the blanket path removal rather
+/// than silently reclaiming less than the user asked for.
+fn model_repo_file_scopes(model: &Value, repo: &str) -> Option<Vec<String>> {
+    let mut scopes = Vec::new();
+    for download in model
+        .get("downloads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        // Co-requisites are EXCLUDED, and that is what makes this "owned" rather than "referenced".
+        // A co-requisite may be shared by several models and is never removed by a model delete
+        // (the `coRequisite` schema note says so outright). sc-19573 made this load-bearing: both
+        // MiniMax-H3 entries now co-require the OTHER's DiT partition from the shared repo, so
+        // counting co-requisite rows here would make an entry claim its sibling's subtree as its own
+        // — and, symmetrically in `other_entries_repo_file_scopes`, retain its own. The two sets
+        // would cover everything, `selected && !retained` would never hold, and a whole-model delete
+        // would silently reclaim nothing. `delete_model_variant`'s `retained_files` already applies
+        // exactly this filter for exactly this reason.
+        .filter(|entry| !is_co_requisite_download(entry))
+        .filter(|entry| entry.get("repo").and_then(Value::as_str) == Some(repo))
+    {
+        let files = string_array_field(download, "files");
+        if files.is_empty() {
+            return None;
+        }
+        for file in files {
+            if !scopes.contains(&file) {
+                scopes.push(file);
+            }
+        }
+    }
+    (!scopes.is_empty()).then_some(scopes)
+}
+
+/// The file scopes every catalog entry OTHER than `model_id` claims inside `repo` (sc-19078).
+///
+/// Thirteen catalog groups put two or more entries in ONE Hugging Face repo, and a whole-model delete
+/// resolves that repo's cache path ([`model_artifact_paths`]) — so removing one entry took the SIBLING
+/// entry's bytes with it. For most of those groups the two entries name the same `files`, so the
+/// removal at least matched what both wanted. MiniMax-H3 is the group where it becomes destructive:
+/// `minimax_h3` owns `{tier}/transformer` and `minimax_h3_ref` owns `{tier}/transformer_ref` inside
+/// `SceneWorks/minimax-h3-mlx` — DIFFERENT weights, up to 66.3 GB per tier — so deleting the
+/// text-to-video entry wiped an installed reference model the user never asked to remove.
+///
+/// Co-requisite rows are included: a sibling's shared component living in the same repo is still bytes
+/// that sibling needs. Nothing here is conditioned on the sibling being INSTALLED — an installed
+/// sibling is exactly the case that matters, and for a sibling that is absent every one of these
+/// patterns matches no file on disk, so retaining them costs the delete nothing.
+///
+/// The two kinds are returned SEPARATELY, because the caller may only ever subtract from one of them.
+/// See [`SiblingRepoScopes`].
+#[derive(Debug, Default, PartialEq, Eq)]
+struct SiblingRepoScopes {
+    /// Scopes a sibling entry claims as its OWN primary weights. These are the sc-19078 subject and
+    /// are NEVER subtracted from: the sibling is a separate installed model, and unlinking bytes it
+    /// names as its own primary download is precisely the data loss this function exists to prevent.
+    primaries: Vec<String>,
+    /// Scopes a sibling entry claims only as a CO-REQUISITE — a shared component, or (MiniMax-H3)
+    /// the deleted entry's own partition that the sibling's engine also opens. Overlap with the
+    /// deleted entry's own primaries is subtracted from THIS half only, so that "delete this model"
+    /// still frees the model's own weights instead of no-opping.
+    co_requisites: Vec<String>,
+}
+
+impl SiblingRepoScopes {
+    fn is_empty(&self) -> bool {
+        self.primaries.is_empty() && self.co_requisites.is_empty()
+    }
+
+    /// The retained set for [`remove_tier_artifacts`]: every sibling primary, untouched, plus the
+    /// co-requisite scopes that do NOT overlap `own_files`.
+    ///
+    /// Subtracting the overlap from the co-requisite half ONLY is the whole point of the split
+    /// (sc-19573 review). Subtracting it from the union instead collapses the retained set to `[]`
+    /// for every group whose sibling names the SAME primary `files` — `flux_dev`/`pulid_flux_dev`,
+    /// `z_image_turbo`/`z_image_edit`, `bernini`/`bernini_image`, `realvisxl`/`instantid_realvisxl`,
+    /// `qwen_image_edit_2511`/`_lightning`, `ideogram_4`/`ideogram_4_turbo` — and strips the shared
+    /// text-encoder/VAE out of the `anima_*` trio. `remove_tier_artifacts`'s `selected && !retained`
+    /// would then unlink the sibling's blobs with `permanent=true`: tens of GB, unrecoverable without
+    /// re-download, i.e. exactly the sc-19078 defect re-introduced.
+    fn retained_files(&self, own_files: &[String]) -> Vec<String> {
+        let mut retained = self.primaries.clone();
+        for file in &self.co_requisites {
+            if !own_files.contains(file) && !retained.contains(file) {
+                retained.push(file.clone());
+            }
+        }
+        retained
+    }
+}
+
+fn other_entries_repo_file_scopes(
+    catalog: &[Value],
+    model_id: &str,
+    repo: &str,
+) -> SiblingRepoScopes {
+    let mut scopes = SiblingRepoScopes::default();
+    for entry in catalog
+        .iter()
+        .filter(|entry| entry.get("id").and_then(Value::as_str) != Some(model_id))
+    {
+        for download in entry
+            .get("downloads")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|download| download.get("repo").and_then(Value::as_str) == Some(repo))
+        {
+            let bucket = if is_co_requisite_download(download) {
+                &mut scopes.co_requisites
+            } else {
+                &mut scopes.primaries
+            };
+            for file in string_array_field(download, "files") {
+                if !bucket.contains(&file) {
+                    bucket.push(file);
+                }
+            }
+        }
+    }
+    scopes
+}
+
+/// Remove a whole model's owned artifacts for [`delete_model`], keeping a shared-repo sibling's bytes.
+///
+/// The default path is unchanged: every path in [`model_artifact_paths`] is removed wholesale, which
+/// is right for the ~80 catalog entries that own their download repo outright. When the primary repo is
+/// ALSO claimed by another catalog entry, the repo's two storage locations (the app-managed mirror dir
+/// and the Hugging Face hub cache) are removed SCOPED instead — via the same
+/// [`remove_tier_artifacts`] machinery the per-tier delete uses, with the sibling's declared files as
+/// the retained set — so this entry's own subtrees and their exclusive blobs go and the sibling's stay.
+/// Every other artifact path (a manifest `paths.model`, an imported `source.path`) is entry-exclusive
+/// and still removed wholesale.
+///
+/// An entry that declares NO file scope inside a shared repo ([`model_repo_file_scopes`] → `None`)
+/// keeps the blanket removal: it claims the whole repo, so there is no honest narrower scope, and
+/// today's behavior is preserved rather than quietly reclaiming nothing.
+async fn remove_whole_model_artifacts(
+    catalog: &[Value],
+    model_id: &str,
+    cleanup_source: &Value,
+    data_dir: &FsPath,
+    allowed_roots: &[PathBuf],
+    permanent: bool,
+) -> Result<ArtifactRemoval, ApiError> {
+    let all_paths = model_artifact_paths(cleanup_source, data_dir);
+    let shared = model_download(cleanup_source)
+        .and_then(|download| {
+            download
+                .get("repo")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .and_then(|repo| {
+            let siblings = other_entries_repo_file_scopes(catalog, model_id, &repo);
+            let own = model_repo_file_scopes(cleanup_source, &repo)?;
+            (!siblings.is_empty()).then_some((repo, own, siblings))
+        });
+    let Some((repo, own_files, sibling_scopes)) = shared else {
+        return remove_owned_artifacts(all_paths, allowed_roots, permanent).await;
+    };
+    // sc-19573 — a sibling may co-require THIS entry's own subtree, and then the retained set would
+    // cover everything the delete selected: `selected && !retained` would never hold and the user's
+    // explicit "delete this model" would silently reclaim zero bytes.
+    //
+    // Both MiniMax-H3 entries are in that shape now — each co-requires the other's DiT partition,
+    // because the engine opens both on every load. Removing the overlap resolves it in the honest
+    // direction: the delete does what it says, and the sibling entry's install state drops to
+    // incomplete + `repairAvailable`, which is the truth (it can no longer load) and is re-fetchable
+    // in one click. Retaining instead would leave a user who asked to free 56 GB with a no-op and no
+    // explanation.
+    //
+    // The subtraction applies to the CO-REQUISITE half ONLY ([`SiblingRepoScopes::retained_files`]).
+    // A sibling's PRIMARY scopes are never subtracted — six catalog groups pair two entries that name
+    // the IDENTICAL primary `files` in one repo, and subtracting there would empty the retained set
+    // and let this delete unlink the sibling's own weights.
+    //
+    // Computed AFTER the `is_empty` gate above, so an entry whose only sibling claim is an overlap
+    // still takes the SCOPED path rather than falling back to the blanket whole-repo removal that
+    // sc-19078 exists to prevent.
+    let sibling_files = sibling_scopes.retained_files(&own_files);
+
+    let managed_dir = data_dir.join("models").join(safe_download_dir(&repo));
+    let repo_cache = huggingface_repo_cache_path(data_dir, &repo);
+    // Everything that is NOT the shared repo's storage: still this entry's alone, still removed whole.
+    let exclusive = all_paths
+        .into_iter()
+        .filter(|path| {
+            // `is_some_and` rather than `is_none_or`: the latter is stable only since 1.82 and the
+            // workspace MSRV is 1.80 (`clippy::incompatible_msrv` is denied).
+            path != &managed_dir && !repo_cache.as_ref().is_some_and(|cache| path == cache)
+        })
+        .collect::<Vec<_>>();
+    let mut removal = remove_owned_artifacts(exclusive, allowed_roots, permanent).await?;
+    let scoped = remove_tier_artifacts(
+        repo_cache,
+        Some(managed_dir),
+        &own_files,
+        &sibling_files,
+        allowed_roots,
+        permanent,
+    )
+    .await?;
+    removal.removed_paths.extend(scoped.removed_paths);
+    removal.retained_paths.extend(scoped.retained_paths);
+    removal.trash_failed_paths.extend(scoped.trash_failed_paths);
+    Ok(removal)
 }
 
 /// Delete ONE installed quant tier of a model and reclaim its disk, leaving the other tiers
@@ -1876,6 +2473,18 @@ pub(crate) async fn queue_model_import_job(
     if let Some(repo) = payload.repo.as_deref() {
         validate_huggingface_repo(repo)?;
     }
+    // Licence acknowledgment, keyed on the repo the import will FETCH (sc-17227). This route had no
+    // licence logic at all — `model_import_enabled()` hard-returns `true` and nothing below reads
+    // the catalog for the source — so `{"repo": "MiniMaxAI/MiniMax-H3"}` pulled the restricted
+    // weights from upstream while `POST /api/v1/models/:id/download` was answering 403 for the same
+    // bytes. The same predicate the raw jobs route uses, so there is one mechanism, not two.
+    ensure_license_acknowledged_for_source(
+        &state,
+        &[payload.repo.as_deref()],
+        payload.source_url.as_deref(),
+        payload.license_acknowledged,
+    )
+    .await?;
     let model_type = match payload.model_type.as_deref().map(str::trim) {
         Some(value) if !value.is_empty() => {
             let normalized = value.to_ascii_lowercase();
@@ -2037,6 +2646,7 @@ pub(crate) async fn model_import_request_from_multipart(
         files: Vec::new(),
         family: None,
         expected_sha256: None,
+        license_acknowledged: false,
         uploaded_source_path: false,
     };
     let mut staged_path = None;
@@ -2078,6 +2688,13 @@ pub(crate) async fn model_import_request_from_multipart(
                 "family" => payload.family = Some(value.to_owned()),
                 "repo" => payload.repo = Some(value.to_owned()),
                 "sourceUrl" => payload.source_url = Some(value.to_owned()),
+                // The multipart form accepts `repo`/`sourceUrl` too, so it can reach a
+                // licence-restricted repo exactly like the JSON body and needs the same way to
+                // assert the acknowledgment (sc-17227). Anything other than "true" leaves it false
+                // — the assertion is affirmative or it is not made.
+                "licenseAcknowledged" => {
+                    payload.license_acknowledged = value.eq_ignore_ascii_case("true")
+                }
                 _ => {}
             }
         }
@@ -5454,6 +6071,13 @@ fn no_model_index_family_predicate(family: &str, model_id: &str) -> Option<fn(&F
         // not the family — picks the predicate. Dispatched through the SHARED id list the worker's tier
         // resolver uses, so an id the worker would not tighten is not tightened here either.
         "sensenova-u1" => tc::sensenova_tier_predicate(model_id),
+        // sc-19078: the MiniMax-H3 tiers ship two DiT partition dirs (`{tier}/transformer` and
+        // `{tier}/transformer_ref`) and NO `model_index.json` at either level, so the coarse
+        // `q4/transformer/*` glob is satisfied by a single landed file out of fourteen shards. Like
+        // SenseNova the id — not the family — picks the predicate: the two catalog entries share the
+        // `minimax-h3` family but own DIFFERENT partitions of one repo, so a family-only predicate
+        // would have to demand both and report a reference-only install as torn forever.
+        "minimax-h3" => tc::minimax_h3_tier_predicate(model_id),
         _ => None,
     }
 }
@@ -6343,6 +6967,23 @@ fn apply_mac_and_mlx_fields(object: &mut JsonObject, data_dir: &FsPath) {
     if let Ok(mac_support) = serde_json::to_value(mac_support) {
         object.insert("macSupport".to_owned(), mac_support);
     }
+    // The off-Mac twin (sc-19570). Emitted on EVERY platform, exactly like `macSupport`: the client
+    // decides whether to act on it from `candleGatingActive`, and a block that appeared only on the
+    // platform it gates could never be asserted from a Mac test run — which is precisely how the
+    // off-Mac half of this defect stayed invisible for as long as it did. No `family` argument: the
+    // block carries the per-video-mode verdict, and video routing is id-keyed (route-by-family is
+    // an image-lane mechanism).
+    let candle_support = {
+        let id = object.get("id").and_then(Value::as_str).unwrap_or_default();
+        let model_type = object
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        model_candle_support(id, model_type)
+    };
+    if let Ok(candle_support) = serde_json::to_value(candle_support) {
+        object.insert("candleSupport".to_owned(), candle_support);
+    }
     // A LOCAL DISK probe for MLX convert-output tier dirs, so it is a platform fact and must NOT go
     // through `generation::enqueue_backend`: keying it off `candle_required` would hide `mlxTiers`
     // and its per-tier state from the Studio on macOS for directories that are genuinely present.
@@ -7219,23 +7860,59 @@ mod model_size_concurrency_tests {
         // 83 → 84.
         //
         // SCAIL-2 bf16 is now the shared cross-backend package, so Windows and Linux
-        // each gain its exact pinned download context while macOS keeps the same one: macOS 87,
-        // windows/linux 85.
+        // each gain its exact pinned download context while macOS keeps the same one.
+        //
         // sc-18481 retired AuraSR from the installable catalog because every production backend
         // rejects its dead `engine:aura-sr` route. Its unscoped download row had contributed one
         // context on every OS, so removing it reduces macOS 87 → 86 and windows/linux 85 → 84.
-        // SC-18902 then removed Eros's failed Candle route and platform-scoped both of its download
-        // rows to macOS. Its primary context therefore leaves Windows/Linux: 84 → 83, while macOS
-        // remains 86. Base LTX-2.3 stays cross-platform and continues to contribute on every OS.
         //
-        // sc-19708 declared `instantid_face_stack`: the SCRFD + ArcFace pair the face-analysis
-        // and identity lanes stage from `SceneWorks/instantid-mlx`, now a catalog entry so those
-        // routes carry a typed model-source identity. One download row, no `platforms` scoping
-        // (the pair loads on macOS and the off-Mac candle lane alike), so every OS gains exactly
-        // one: macOS 86 → 87, windows/linux 83 → 84.
+        // sc-17158 declared the MiniMax-H3 pair. Both entries share ONE repo
+        // (`SceneWorks/minimax-h3-mlx`) and are distinguished only by their default tier's `files`
+        // predicate — `q4/transformer/*` versus `q4/transformer_ref/*` — so the context key
+        // `(repo, files)` still separates them and macOS gains exactly two. Windows/Linux gained
+        // NOTHING at the time: every MiniMax-H3 download row was `platforms: ["macos"]`, so
+        // `retain_downloads_for_os` emptied both entries there and `model_download_context` yielded
+        // `None`. That asymmetry is the point of running this loop per OS.
+        //
+        // sc-19558 then gave `minimax_h3` — and ONLY `minimax_h3` — an off-Mac artifact: a
+        // `platforms: ["windows", "linux"]` set reading the raw upstream `MiniMaxAI/MiniMax-H3`
+        // snapshot, which is the layout `candle-gen-minimax-h3::REQUIRED_COMPONENT_DIRS` loads. Its
+        // ONE primary row (`transformer/*`) is a new `(repo, files)` context off-Mac, so
+        // windows/linux gain exactly one. `minimax_h3_ref` deliberately gained no off-Mac row, which
+        // is why that is +1 and not +2.
+        //
+        // sc-20267 then widened `minimax_h3`'s q4/q8 tier rows to `["macos","windows","linux"]`. That
+        // SWAPS which key that +1 is off-Mac without changing the count: `model_download` prefers the
+        // `default: true` row, so the off-Mac context is now
+        // `(SceneWorks/minimax-h3-mlx, ["q4/transformer/*"])` rather than
+        // `(MiniMaxAI/MiniMax-H3, ["transformer/*"])`, and no other off-Mac entry contributes either
+        // key. Recorded because the arithmetic below is unchanged while the reason for one of its terms
+        // is not — a reader auditing this count off-Mac will find a repo the sc-19558 note says those
+        // platforms never fetch.
+        //
+        // (The reason `minimax_h3_ref` has no off-Mac row is NOT that candle "default-denies ref2va" —
+        // that premise was falsified by sc-17157, which is an ancestor of the pinned inference
+        // revision. See the trailing note in that entry's `downloads` for the current reason.)
+        //
+        // SC-18902 (main) then removed Eros's failed Candle route and platform-scoped both of its
+        // download rows to macOS, so its primary context leaves Windows/Linux while macOS is
+        // unchanged. sc-19708 (main) declared `instantid_face_stack`: the SCRFD + ArcFace pair the
+        // face-analysis and identity lanes stage from `SceneWorks/instantid-mlx`, one unscoped
+        // download row, so every OS gains exactly one.
+        //
+        // THE NUMBERS BELOW ARE THE 2026-08-19 SYNC MERGE'S, not any single side's. Starting from
+        // the shared 87 / 84 / 84, six independent deltas all apply:
+        //   main  SCAIL-2 shared bf16 package      +0 / +1 / +1
+        //   main  sc-18481 AuraSR retirement       −1 / −1 / −1   (its row was unscoped)
+        //   main  SC-18902 Eros rows macOS-scoped  +0 / −1 / −1
+        //   main  sc-19708 instantid_face_stack    +1 / +1 / +1   (unscoped row)
+        //   epic  sc-17158 MiniMax-H3 pair         +2 / +0 / +0   (both rows macOS-only)
+        //   epic  sc-19558 H3 off-Mac artifact     +0 / +1 / +1
+        // giving 89 / 85 / 85. Each side read only its own set and so read 87/84/84 (main) or
+        // 88/85/85 (epic, at the previous sync); neither is right once both land.
         // Still far below `MODEL_SIZE_CACHE_LIMIT` (256), which is what this guard protects.
         for (os, expected_distinct_contexts) in
-            [("macos", 87_usize), ("windows", 84), ("linux", 84)]
+            [("macos", 89_usize), ("windows", 85), ("linux", 85)]
         {
             let mut keys = std::collections::HashSet::new();
             for mut model in manifest["models"]
@@ -7350,6 +8027,26 @@ async fn estimate_model_catalog_sizes(
     .await
     .into_iter()
     .collect()
+}
+
+/// Built-in + user model manifest entries merged by id, with NO platform filtering — the raw
+/// authored catalog. [`load_model_catalog_inputs`] narrows `downloads` to the running OS on top of
+/// this; [`license_acknowledgment_repo_index`] deliberately reads it unfiltered, because a licence
+/// requirement must not depend on which OS is asking. Both manifest reads are mtime/size-cached
+/// (`load_manifest_entries`), so the second consumer costs a stat and a clone.
+async fn merged_model_manifest_entries(
+    state: &AppState,
+) -> Result<(Vec<Value>, std::collections::HashSet<String>), ApiError> {
+    let manifest_dir = state.settings.config_dir.join("manifests");
+    let builtin =
+        load_manifest_entries(state, &manifest_dir.join("builtin.models.jsonc"), "models").await?;
+    let user =
+        load_manifest_entries(state, &manifest_dir.join("user.models.jsonc"), "models").await?;
+    let user_model_ids = user
+        .iter()
+        .filter_map(|model| model.get("id").and_then(Value::as_str).map(str::to_owned))
+        .collect::<std::collections::HashSet<_>>();
+    Ok((merge_entries_by_id(builtin, user), user_model_ids))
 }
 
 async fn load_model_catalog_inputs(
@@ -8776,6 +9473,45 @@ mod gated_credential_tests {
         assert_eq!(
             model.get("licenseUrl").and_then(Value::as_str),
             Some("https://huggingface.co/stabilityai/stable-diffusion-3.5-large"),
+        );
+    }
+
+    // sc-17227: an acknowledgment-only entry — MiniMax-H3, whose HF repo is PUBLIC. The catalog
+    // must carry `requiresLicenseAcknowledgment` + `licenseNotice` through to the web client
+    // untouched, and must NOT manufacture a `credentialHost` for it: the Models screen keys the
+    // "Add token in Settings" / "Request access on Hugging Face" affordances off that host, and
+    // there is no token to add and no access to request. Note the asymmetry with the gated case
+    // above — `gated` is normalized to an explicit `false`, but the host is left absent, which is
+    // exactly what `derive_credential_host` would have supplied had the two been coupled.
+    #[test]
+    fn license_acknowledgment_entry_keeps_its_fields_and_gains_no_credential_host() {
+        let mut model = map(json!({
+            "id": "minimax_h3",
+            "requiresLicenseAcknowledgment": true,
+            "licenseUrl": "https://huggingface.co/MiniMaxAI/MiniMax-H3",
+            "licenseNotice": "Applicable Territory excludes the United States of America.",
+            "downloads": [{ "provider": "huggingface", "repo": "SceneWorks/minimax-h3-mlx", "files": ["q4/transformer/*"] }]
+        }));
+        apply_gating_fields(&mut model);
+        assert_eq!(
+            model
+                .get("requiresLicenseAcknowledgment")
+                .and_then(Value::as_bool),
+            Some(true),
+            "the acknowledgment flag must survive to the web client",
+        );
+        assert_eq!(
+            model.get("licenseNotice").and_then(Value::as_str),
+            Some("Applicable Territory excludes the United States of America."),
+        );
+        assert_eq!(
+            model.get("licenseUrl").and_then(Value::as_str),
+            Some("https://huggingface.co/MiniMaxAI/MiniMax-H3"),
+        );
+        assert_eq!(model.get("gated").and_then(Value::as_bool), Some(false));
+        assert!(
+            !model.contains_key("credentialHost"),
+            "a public-repo acknowledgment model must not be given a credential host: {model:?}",
         );
     }
 }
@@ -10574,6 +11310,404 @@ mod variant_delete_tests {
         assert!(components
             .join("snapshots/rev/q4/text_encoder/model.safetensors")
             .exists());
+    }
+
+    /// The `SceneWorks/minimax-h3-mlx` shape (sc-17150 / sc-17158): ONE repo holding two DiT
+    /// partitions per tier, each owned by a DIFFERENT catalog entry. Seeds `tier`'s `transformer/`
+    /// (owned by `minimax_h3`) and `transformer_ref/` (owned by `minimax_h3_ref`).
+    ///
+    /// The two partitions ship a BYTE-IDENTICAL `config.json` (they carry the same architecture and
+    /// the same 638 tensor names; only the weights differ), so the hub cache stores it as ONE blob
+    /// that both snapshot entries symlink to. That shared blob is the trap: unlinking it with the base
+    /// partition would leave the reference partition's `config.json` dangling.
+    fn seed_minimax_tier(repo: &FsPath, tier: &str, base_etag: &str, ref_etag: &str, size: usize) {
+        let shared_config = blob(repo, &format!("{tier}-config"), b"{}");
+        link(
+            repo,
+            &format!("{tier}/transformer/config.json"),
+            &shared_config,
+        );
+        link(
+            repo,
+            &format!("{tier}/transformer_ref/config.json"),
+            &shared_config,
+        );
+        for partition in ["transformer", "transformer_ref"] {
+            let etag = if partition == "transformer" {
+                base_etag
+            } else {
+                ref_etag
+            };
+            seed(
+                repo,
+                &format!("{tier}/{partition}/diffusion_pytorch_model.safetensors.index.json"),
+                &format!("{etag}-index"),
+                1,
+            );
+            seed(
+                repo,
+                &format!("{tier}/{partition}/diffusion_pytorch_model-00001-of-00001.safetensors"),
+                etag,
+                size,
+            );
+        }
+    }
+
+    /// sc-19078 — a MiniMax-H3 per-tier delete reclaims that tier's own partition and NOTHING else.
+    ///
+    /// Mirrors `mage_flow_per_tier_delete_reclaims_only_that_tiers_dit`, which is the shipping
+    /// physical-per-tier precedent. H3 adds a dimension Mage does not have: the sibling that must
+    /// survive is not only another TIER of the same entry but another CATALOG ENTRY's partition inside
+    /// the same tier of the same repo — and the two partitions share a blob.
+    ///
+    /// Four things must hold at once, each a distinct way this could fail:
+    ///   - the deleted tier's own partition bytes are actually reclaimed (not 0);
+    ///   - the OTHER tier of the same entry survives (the tier predicates are disjoint);
+    ///   - the SIBLING ENTRY's partition in the SAME tier survives (the partition predicates are
+    ///     disjoint) — the case sc-17139's follow-ups flagged as reachable here for the first time;
+    ///   - the blob the two partitions SHARE survives, so the sibling's `config.json` still resolves.
+    #[tokio::test]
+    async fn minimax_h3_per_tier_delete_reclaims_only_that_entrys_partition() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hub = tmp.path().join("hub");
+        let repo = hub.join("models--SceneWorks--minimax-h3-mlx");
+        // Real hosted per-partition sizes scaled down by 1e6 (18,780,109,783 B q4 / 35,302,064,357 B
+        // q8). The RATIO and the disjointness are what the assertions are about.
+        const Q4_DIT: usize = 18780;
+        const Q8_DIT: usize = 35302;
+        seed_minimax_tier(&repo, "q4", "q4dit", "q4refdit", Q4_DIT);
+        seed_minimax_tier(&repo, "q8", "q8dit", "q8refdit", Q8_DIT);
+
+        // Delete `minimax_h3`'s q4 tier. `retained` carries the surviving tiers of THAT entry, exactly
+        // as `delete_model_variant` builds it from the entry's own `downloads`.
+        let removal = remove_tier_artifacts(
+            Some(repo.clone()),
+            None,
+            &["q4/transformer/*".to_owned()],
+            &[
+                "q8/transformer/*".to_owned(),
+                "bf16/transformer/*".to_owned(),
+            ],
+            std::slice::from_ref(&hub),
+            true,
+        )
+        .await
+        .unwrap();
+
+        // 1. Real bytes: the q4 base partition's shard + its index, and nothing else. The shared
+        //    `config.json` blob is NOT counted — it never left disk.
+        assert_eq!(
+            removal.reclaimed_bytes,
+            (Q4_DIT + 1) as u64,
+            "a MiniMax-H3 tier delete must reclaim that entry's own partition bytes"
+        );
+        assert!(!repo.join("blobs/q4dit").exists());
+        assert!(!repo
+            .join("snapshots/rev/q4/transformer/diffusion_pytorch_model-00001-of-00001.safetensors")
+            .exists());
+
+        // 2. The same entry's OTHER tier is untouched.
+        assert!(repo.join("blobs/q8dit").exists());
+        assert!(repo
+            .join("snapshots/rev/q8/transformer/diffusion_pytorch_model-00001-of-00001.safetensors")
+            .exists());
+
+        // 3. The SIBLING ENTRY's partition inside the deleted tier is untouched — `minimax_h3_ref`
+        //    stays installed at q4 even though its bytes live in the tier just deleted.
+        assert!(repo.join("blobs/q4refdit").exists());
+        assert!(repo
+            .join(
+                "snapshots/rev/q4/transformer_ref/diffusion_pytorch_model-00001-of-00001.safetensors"
+            )
+            .exists());
+
+        // 4. The blob the two partitions SHARE survives and the sibling's link still resolves through
+        //    it — a dangling `config.json` would make the reference entry unloadable while still
+        //    reading installed.
+        assert!(repo.join("blobs/q4-config").exists());
+        let sibling_config = repo.join("snapshots/rev/q4/transformer_ref/config.json");
+        assert!(
+            std::fs::read(&sibling_config).is_ok(),
+            "sibling config resolves"
+        );
+    }
+
+    /// sc-19078 — the WHOLE-model delete is scoped when the download repo is shared.
+    ///
+    /// This is the destructive half. `model_artifact_paths` resolves the repo's cache dir, so before
+    /// this the blanket `remove_dir_all` on `models--SceneWorks--minimax-h3-mlx` took every
+    /// `transformer_ref/` tier with it — up to 132.6 GB of an installed model the user never asked to
+    /// delete. `remove_whole_model_artifacts` removes the entry's own `files` scopes instead, with the
+    /// sibling entry's scopes retained.
+    #[tokio::test]
+    async fn whole_model_delete_on_a_shared_repo_keeps_the_sibling_entrys_partitions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let repo_name = "SceneWorks/minimax-h3-mlx";
+        let repo = huggingface_repo_cache_path(data_dir, repo_name).unwrap();
+        seed_minimax_tier(&repo, "q4", "q4dit", "q4refdit", 18780);
+        seed_minimax_tier(&repo, "bf16", "bf16dit", "bf16refdit", 66280);
+
+        let downloads = |partition: &str| {
+            json!(["q4", "q8", "bf16"]
+                .iter()
+                .map(|tier| json!({
+                    "provider": "huggingface",
+                    "repo": repo_name,
+                    "variant": tier,
+                    "files": [format!("{tier}/{partition}/*")],
+                }))
+                .collect::<Vec<_>>())
+        };
+        let base = json!({ "id": "minimax_h3", "downloads": downloads("transformer") });
+        let reference =
+            json!({ "id": "minimax_h3_ref", "downloads": downloads("transformer_ref") });
+        let catalog = vec![base.clone(), reference];
+        let allowed_roots = vec![data_dir.join("models"), huggingface_hub_cache_dir(data_dir)];
+
+        let removal = remove_whole_model_artifacts(
+            &catalog,
+            "minimax_h3",
+            &base,
+            data_dir,
+            &allowed_roots,
+            true,
+        )
+        .await
+        .unwrap();
+
+        // Every tier of the deleted entry's own partition is gone…
+        assert!(!removal.removed_paths.is_empty());
+        for etag in ["q4dit", "bf16dit"] {
+            assert!(!repo.join("blobs").join(etag).exists(), "{etag} removed");
+        }
+        assert!(!repo.join("snapshots/rev/q4/transformer").exists());
+        assert!(!repo.join("snapshots/rev/bf16/transformer").exists());
+
+        // …and every tier of the SIBLING entry's partition survives, blobs and links alike.
+        for etag in ["q4refdit", "bf16refdit", "q4-config", "bf16-config"] {
+            assert!(repo.join("blobs").join(etag).exists(), "{etag} retained");
+        }
+        for tier in ["q4", "bf16"] {
+            let sibling = repo.join(format!("snapshots/rev/{tier}/transformer_ref"));
+            assert!(sibling.join("config.json").exists(), "{tier} ref config");
+            assert!(std::fs::read(sibling.join("config.json")).is_ok());
+            assert!(sibling
+                .join("diffusion_pytorch_model-00001-of-00001.safetensors")
+                .exists());
+        }
+        // The repo cache dir itself must NOT be pruned — the sibling still lives in it.
+        assert!(repo.is_dir(), "shared repo cache survives a scoped delete");
+    }
+
+    /// The exclusive-repo case is UNCHANGED: with no sibling claiming the repo, a whole-model delete
+    /// still removes the repo cache wholesale, including files no `files` scope names.
+    ///
+    /// This is the non-vacuity partner of the test above — without it, scoping could silently become
+    /// the universal path and quietly stop reclaiming the ~80 entries that own their repo outright.
+    #[tokio::test]
+    async fn whole_model_delete_on_an_exclusive_repo_still_removes_the_repo_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let repo_name = "Org/solo-model";
+        let repo = huggingface_repo_cache_path(data_dir, repo_name).unwrap();
+        seed(&repo, "q4/transformer/model.safetensors", "q4dit", 100);
+        // A file NO declared scope names — only a blanket removal reaches it.
+        seed(&repo, "README.md", "readme", 10);
+
+        let model = json!({
+            "id": "solo_model",
+            "downloads": [{
+                "provider": "huggingface",
+                "repo": repo_name,
+                "variant": "q4",
+                "files": ["q4/transformer/*"],
+            }],
+        });
+        let allowed_roots = vec![data_dir.join("models"), huggingface_hub_cache_dir(data_dir)];
+
+        remove_whole_model_artifacts(
+            std::slice::from_ref(&model),
+            "solo_model",
+            &model,
+            data_dir,
+            &allowed_roots,
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            !repo.exists(),
+            "an exclusively-owned repo cache is removed whole"
+        );
+    }
+
+    /// A shared-repo entry that declares NO `files` scope keeps the blanket removal (`SceneWorks/bernini`
+    /// is the shipping example — both entries claim the whole repo with `files: []`). There is no
+    /// honest narrower scope for a whole-repo claim, so the documented behavior is preserved rather
+    /// than quietly reclaiming nothing.
+    #[tokio::test]
+    async fn whole_model_delete_keeps_the_blanket_path_for_an_unscoped_shared_claim() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let repo_name = "SceneWorks/whole-repo-pair";
+        let repo = huggingface_repo_cache_path(data_dir, repo_name).unwrap();
+        seed(&repo, "model.safetensors", "dit", 100);
+
+        let entry = |id: &str| {
+            json!({
+                "id": id,
+                "downloads": [{ "provider": "huggingface", "repo": repo_name, "files": [] }],
+            })
+        };
+        let first = entry("pair_a");
+        let catalog = vec![first.clone(), entry("pair_b")];
+        let allowed_roots = vec![data_dir.join("models"), huggingface_hub_cache_dir(data_dir)];
+
+        remove_whole_model_artifacts(&catalog, "pair_a", &first, data_dir, &allowed_roots, true)
+            .await
+            .unwrap();
+
+        assert!(!repo.exists());
+    }
+
+    #[test]
+    fn repo_file_scopes_union_tiers_and_reject_a_whole_repo_claim() {
+        let model = json!({
+            "id": "minimax_h3",
+            "downloads": [
+                { "repo": "SceneWorks/minimax-h3-mlx", "variant": "q4", "files": ["q4/transformer/*"] },
+                { "repo": "SceneWorks/minimax-h3-mlx", "variant": "q8", "files": ["q8/transformer/*"] },
+                { "repo": "MiniMaxAI/MiniMax-H3", "coRequisite": true, "files": ["vae/*"] },
+            ],
+        });
+        // Only the named repo's rows, unioned across tiers — the co-requisite repo is a different repo
+        // and contributes nothing to this repo's scope.
+        assert_eq!(
+            model_repo_file_scopes(&model, "SceneWorks/minimax-h3-mlx"),
+            Some(vec![
+                "q4/transformer/*".to_owned(),
+                "q8/transformer/*".to_owned()
+            ])
+        );
+        // A repo this entry does not claim at all has no scope.
+        assert_eq!(model_repo_file_scopes(&model, "Org/unrelated"), None);
+        // One unscoped row poisons the whole repo's scope: it is a claim on everything.
+        let unscoped = json!({
+            "id": "bernini",
+            "downloads": [{ "repo": "SceneWorks/bernini", "files": [] }],
+        });
+        assert_eq!(
+            model_repo_file_scopes(&unscoped, "SceneWorks/bernini"),
+            None
+        );
+        // …and it poisons it even when a SCOPED sibling row is present in the same repo. This is the
+        // case the empty-scopes fallback alone cannot express: without the early return the entry
+        // would scope its delete to `q4/*` and strand everything else the unscoped row claims.
+        let mixed = json!({
+            "id": "mixed_claim",
+            "downloads": [
+                { "repo": "Org/mixed", "variant": "q4", "files": ["q4/*"] },
+                { "repo": "Org/mixed", "files": [] },
+            ],
+        });
+        assert_eq!(model_repo_file_scopes(&mixed, "Org/mixed"), None);
+
+        // Sibling scopes exclude the entry itself and INCLUDE a sibling's co-requisite in that repo.
+        let sibling = json!({
+            "id": "minimax_h3_ref",
+            "downloads": [
+                { "repo": "SceneWorks/minimax-h3-mlx", "variant": "q4", "files": ["q4/transformer_ref/*"] },
+                { "repo": "SceneWorks/minimax-h3-mlx", "coRequisite": true, "files": ["shared/*"] },
+            ],
+        });
+        let catalog = vec![model.clone(), sibling];
+        assert_eq!(
+            other_entries_repo_file_scopes(&catalog, "minimax_h3", "SceneWorks/minimax-h3-mlx"),
+            SiblingRepoScopes {
+                primaries: vec!["q4/transformer_ref/*".to_owned()],
+                co_requisites: vec!["shared/*".to_owned()],
+            },
+            "the two kinds must stay SEPARATE — only the co-requisite half may be subtracted from"
+        );
+        // Viewed from the sibling, the base entry's scopes are the ones retained.
+        assert_eq!(
+            other_entries_repo_file_scopes(&catalog, "minimax_h3_ref", "SceneWorks/minimax-h3-mlx"),
+            SiblingRepoScopes {
+                primaries: vec!["q4/transformer/*".to_owned(), "q8/transformer/*".to_owned()],
+                co_requisites: Vec::new(),
+            }
+        );
+        // A repo only this entry claims has no sibling scopes at all — the discriminator that keeps
+        // the blanket path in force for the entries that own their repo outright.
+        assert!(
+            other_entries_repo_file_scopes(&catalog, "minimax_h3", "MiniMaxAI/MiniMax-H3")
+                .is_empty()
+        );
+    }
+
+    /// The retained set may subtract the deleted entry's own scopes from the sibling's CO-REQUISITE
+    /// half only (sc-19573 review). Subtracting from the union destroys the sibling's weights.
+    #[test]
+    fn retained_files_never_subtracts_a_siblings_primary_scopes() {
+        // The flux_dev ↔ pulid_flux_dev shape, and five more groups like it: the sibling names the
+        // IDENTICAL primary `files`, because both entries really do load the same checkpoint. Every
+        // one of those scopes must survive. Subtracting from the union yields `[]`, and then
+        // `remove_tier_artifacts`'s `selected && !retained` unlinks the sibling's blobs with
+        // `permanent=true` — tens of GB, unrecoverable without re-download.
+        let own = vec!["q4/*".to_owned(), "q8/*".to_owned(), "bf16/*".to_owned()];
+        let shared = SiblingRepoScopes {
+            primaries: own.clone(),
+            co_requisites: Vec::new(),
+        };
+        assert_eq!(
+            shared.retained_files(&own),
+            own,
+            "an identically-scoped sibling primary must be retained IN FULL, not emptied"
+        );
+
+        // The anima trio: the sibling's primary is its own DiT, and the TE/VAE it shares with the
+        // deleted entry ride the deleted entry's own primary rows too. Both must be retained.
+        let anima_own = vec![
+            "split_files/diffusion_models/anima-base-v1.0.safetensors".to_owned(),
+            "split_files/text_encoders/qwen_3_06b_base.safetensors".to_owned(),
+            "split_files/vae/qwen_image_vae.safetensors".to_owned(),
+        ];
+        let anima_sibling = SiblingRepoScopes {
+            primaries: vec![
+                "split_files/diffusion_models/anima-aesthetic-v1.0.safetensors".to_owned(),
+                "split_files/text_encoders/qwen_3_06b_base.safetensors".to_owned(),
+                "split_files/vae/qwen_image_vae.safetensors".to_owned(),
+            ],
+            co_requisites: Vec::new(),
+        };
+        assert!(
+            anima_sibling
+                .retained_files(&anima_own)
+                .contains(&"split_files/text_encoders/qwen_3_06b_base.safetensors".to_owned()),
+            "the shared text encoder anima_aesthetic/anima_turbo still need must be retained"
+        );
+
+        // MiniMax-H3, unchanged by the split: the sibling's PRIMARY is `transformer_ref`, and its
+        // co-requisite claim on the deleted entry's own `transformer` is what gets subtracted, so
+        // "delete minimax_h3" still frees the DiT the user asked to free.
+        let mm_own = vec!["q4/transformer/*".to_owned()];
+        let mm_sibling = SiblingRepoScopes {
+            primaries: vec!["q4/transformer_ref/*".to_owned()],
+            co_requisites: vec![
+                "q4/transformer/*".to_owned(),
+                "q4/text_encoder/*".to_owned(),
+            ],
+        };
+        assert_eq!(
+            mm_sibling.retained_files(&mm_own),
+            vec![
+                "q4/transformer_ref/*".to_owned(),
+                "q4/text_encoder/*".to_owned()
+            ],
+            "the overlapping co-requisite is dropped; the sibling's primary and the shared TE stay"
+        );
     }
 
     // Convert-at-install (Anima) tiers are real `<converted>/<tier>/` dirs with a packed DiT plus

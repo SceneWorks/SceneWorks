@@ -1,6 +1,6 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { parseResolution, pickClosestResolution } from "../resolutionMatch.js";
-import { ImageEditSourcePickerField, VideoSourcePickerField } from "../components/AssetPicker.jsx";
+import { AssetPickerField, ImageEditSourcePickerField, VideoSourcePickerField } from "../components/AssetPicker.jsx";
 import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
 import { AssetCard } from "../components/assetPanels.jsx";
 import { AssetMedia } from "../components/assetMedia.jsx";
@@ -60,17 +60,29 @@ import {
 import { ReplacePersonPanel } from "./ReplacePersonPanel.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
-import { videoGenerateValidation } from "../videoStudioValidation.js";
+import { replacementModeApplies, videoGenerateValidation } from "../videoStudioValidation.js";
 import { useValidation } from "../validation/useValidation.js";
 import { ValidationSummary } from "../validation/Validation.jsx";
-import { VIDEO_MODES, downloadOffersFor, videoModelUsable } from "../modelEligibility.js";
+import {
+  VIDEO_MODES,
+  downloadOffersFor,
+  videoModelServesMode,
+  videoModelUsable,
+} from "../modelEligibility.js";
+import {
+  defaultTurboVariant,
+  modelIsMinimaxH3,
+  selectedTurboVariant,
+  turboRecipeSummary,
+  turboVariantsForModel,
+} from "../minimaxH3Turbo.js";
 import { PROMPT_REFINE_MODEL_ID, WAN_A14B_LIGHTNING_MODEL_IDS } from "../constants.js";
 import {
   DEFAULT_MAC_CAPABILITIES,
   macAvailableModels,
   macGatingActive,
-  macVideoModeBlock,
 } from "../macGating.js";
+import { candleAvailableModels, candleGatingActive } from "../candleGating.js";
 import { loadStudioSettings, useStudioSettingsWriter } from "../hooks/useStudioSettings.js";
 import { qualityChoices } from "../jobTypes.js";
 import {
@@ -98,7 +110,24 @@ import {
   schedulerDefaultFromModel,
   schedulerOptionsFromModel,
   stepsDefaultFromModel,
+  stepsMenuFromModel,
 } from "../samplerOptions.js";
+import {
+  formatDurationOption,
+  minStepsForModel,
+  referenceCaps,
+  referenceLimitError,
+} from "../videoModelLimits.js";
+import { ModelAttribution } from "../components/ModelAttribution.jsx";
+
+// "8" / "4 or 8" / "4, 8, or 12" — the same phrasing `humanized_number_menu` gives the enqueue
+// gate's own rejection (crates/sceneworks-core/src/video_request.rs, sc-19502), so the Steps
+// picker's tooltip states the legal set the way a 400 from that gate would.
+function humanizedNumberMenu(menu) {
+  if (menu.length <= 1) return String(menu[0] ?? "");
+  if (menu.length === 2) return `${menu[0]} or ${menu[1]}`;
+  return `${menu.slice(0, -1).join(", ")}, or ${menu[menu.length - 1]}`;
+}
 
 const ltxVideoModelId = "ltx_2_3";
 const ltxIcLoraModelIds = new Set([ltxVideoModelId, "ltx_2_3_eros"]);
@@ -189,6 +218,9 @@ export function VideoStudio() {
     [assets],
   );
   const videoAssets = useMemo(() => assets.filter((asset) => asset.type === "video"), [assets]);
+  // Library audio tracks the reference-audio picker can offer (sc-17161) — the audio twin of
+  // `videoAssets`, type-scoped so the picker never offers a render as a "voice".
+  const audioAssets = useMemo(() => assets.filter((asset) => asset.type === "audio"), [assets]);
   // Open on Text→Video for parity with Image Studio's Text→Image default and the
   // launch-request fallback below (sc-5716); the prior image_to_video default was the odd one out.
   const [mode, setMode] = useState(saved.mode ?? "text_to_video");
@@ -226,9 +258,15 @@ export function VideoStudio() {
       };
     });
   const [guideOpen, setGuideOpen] = useState(false);
-  // Mac UI gating (sc-3486): hide torch-only video models (e.g. SVD) and snap off one if selected.
+  // Platform UI gating: hide whole models with no lane on THIS platform and snap off one if
+  // selected. Two composed partitions, one per platform, each a no-op on the other's platform:
+  //   * `macAvailableModels` (sc-3486) — torch-only models (e.g. SVD) on a gated Mac.
+  //   * `candleAvailableModels` (sc-19570) — models with no candle lane at all off-Mac (e.g.
+  //     `wan_2_2_vace_fun_14b`, whose only advertised mode is candle-unclaimable). Before this the
+  //     export existed and NOTHING imported it, so whole-model hiding was dead in the one screen
+  //     that matters and the picker still listed a model no off-Mac worker can claim.
   const macVideoModels = useMemo(
-    () => macAvailableModels(videoModels, macCapabilities),
+    () => candleAvailableModels(macAvailableModels(videoModels, macCapabilities), macCapabilities),
     [videoModels, macCapabilities],
   );
   useEffect(() => {
@@ -260,21 +298,43 @@ export function VideoStudio() {
   const selectedTextEncoderAvailable = textEncoderOptions.some(
     (option) => option.id === selectedTextEncoderModel,
   );
-  // Models gated on the selected tab, not tabs on the selected model (sc-5716). A model "serves" a
-  // mode when it declares the capability AND, under active Mac gating, that mode is MLX-routed for
-  // it (`macVideoModeBlock` is a no-op off-Mac, so there this is pure capability). The mode tabs,
-  // the model picker, and the snap-on-mode-switch effect all derive from this so the user is never
-  // trapped on a mode whose model can't serve the others.
+  // Models gated on the selected tab, not tabs on the selected model (sc-5716). "Serves" is the
+  // SHARED `videoModelServesMode` from modelEligibility.js — this screen used to keep a local copy
+  // that read the Mac block only, and that is exactly how sc-19570's off-Mac gate got added to the
+  // shared predicate (and so to the Simple studio, the screen gate and the download offers) while
+  // the Advanced shell kept rendering MLX-only tabs off-Mac. One authority, three layers:
+  // declaration + `macVideoModeBlock` + `candleVideoModeBlock`. The mode tabs, the model picker and
+  // the snap-on-mode-switch effect all derive from it so the user is never trapped on a mode whose
+  // model can't serve the others.
   const macGating = macGatingActive(macCapabilities);
-  const baseVideoModels = macVideoModels.length ? macVideoModels : videoModels;
-  const modelServesMode = (item, value) =>
-    Boolean(item?.capabilities?.includes(value)) && !macVideoModeBlock(item, macCapabilities, value);
-  const modelsForMode = (value) => baseVideoModels.filter((item) => modelServesMode(item, value));
-  // Model-availability gate (sc-5947): when the user has no mac-available video model at all,
-  // show recommended video-model downloads instead of the studio. `ready` matches the picker
-  // (which falls back to all baseVideoModels); offers come from the full catalog via
-  // videoModelUsable, recommended-first.
-  const modelReady = baseVideoModels.length > 0;
+  const candleGating = candleGatingActive(macCapabilities);
+  // sc-19570 — NO `macVideoModels.length ? macVideoModels : videoModels` FALLBACK, and its removal
+  // is the point rather than a tidy-up. That fallback restored the UNFILTERED catalog precisely when
+  // the platform filter had emptied it — i.e. exactly when every installed video model is blocked on
+  // this host. `modelReady` read off it, so it stayed `true`, the sc-5947 gate never engaged, and
+  // the user got the full Studio with a picker of models that cannot serve any mode: every tab
+  // disabled by `modeTabBlocked`, no download offer, and no statement of why. Degraded rather than
+  // hung, but it hid the one screen that could fix it.
+  //
+  // Pre-existing, and it did not fire before this story because `macAvailableModels` alone empties
+  // the list only for a Mac user whose every video model is torch-only. `candleAvailableModels`
+  // makes it reachable for an ordinary Windows/Linux user with an MLX-only catalog, which is the
+  // common case off-Mac.
+  //
+  // `ImageStudio.jsx:765` is the precedent and settles the semantics: `modelReady =
+  // macImageModels.length > 0`, filtered list, no fallback. This is the video twin.
+  //
+  // Not a behaviour change when no gate is engaged: `macAvailableModels` and `candleAvailableModels`
+  // both return the input list unfiltered when their gate is inactive (and before the capabilities
+  // endpoint responds), so `macVideoModels === videoModels` and the two expressions are identical.
+  // The difference appears only when a gate is active AND has filtered everything out — the case the
+  // gate exists for.
+  const modelsForMode = (value) =>
+    macVideoModels.filter((item) => videoModelServesMode(item, value, macCapabilities));
+  // Model-availability gate (sc-5947): when the user has no PLATFORM-available video model at all,
+  // show recommended video-model downloads instead of the studio. `ready` matches the picker; offers
+  // come from the full catalog via videoModelUsable, recommended-first.
+  const modelReady = macVideoModels.length > 0;
   const modelOffers = useMemo(
     () => downloadOffersFor(models, videoModelUsable, macCapabilities),
     [models, macCapabilities],
@@ -308,6 +368,19 @@ export function VideoStudio() {
   // native multi-step CFG default). Only the two A14B engines honor it (see showLightning),
   // so the dense 5B and non-Wan models never see the control. Persisted per-workspace.
   const [lightning, setLightning] = useState(saved.lightning ?? true);
+  // Which MiniMax-H3 models have already had the default-on turbo variant applied (sc-18727).
+  //
+  // Turbo IS a LoRA selection — the control and the generic LoRA picker write the same
+  // `selectedLoraIds`, which is the only way the two entry points can't disagree (sc-18727's "route
+  // both through one resolver"). That makes "default on" a ONE-SHOT seed rather than a default
+  // value: without this marker, re-selecting the default every time the studio saw an empty
+  // selection would silently undo a deliberate "Off", and undo it identically whether the user
+  // turned it off in the turbo control or deselected the adapter in the picker.
+  //
+  // Persisted in the studio snapshot (mirrored to server ui-preferences, so it survives a desktop
+  // relaunch — a localStorage-only marker would re-seed on every launch and re-defeat "Off").
+  // Per-model because the two partitions take different adapters.
+  const [turboSeededModels, setTurboSeededModels] = useState(saved.turboSeededModels ?? []);
   // LTX-2.3 native guidance knobs (epic 1753 sc-1769). The native ltx-core
   // path has no diffusers scheduler to swap — these three values (cfg + STG +
   // rescale) drive its sealed MultiModalGuiderParams instead.
@@ -357,6 +430,11 @@ export function VideoStudio() {
   // Reference video for Bernini's ads2v mode (sc-5425): a second source clip distinct from the
   // edited source clip (sourceClipAssetId).
   const [referenceClipAssetId, setReferenceClipAssetId] = useState(saved.referenceClipAssetId ?? "");
+  // Reference AUDIO clips for a multi-modal reference mode (sc-17160). Held and replayed here so a
+  // re-run rebuilds the same conditioning; the picker that populates it is sc-17161's.
+  const [referenceAudioAssetIds, setReferenceAudioAssetIds] = useState(
+    saved.referenceAudioAssetIds ?? [],
+  );
   const [characterId, setCharacterId] = useState(saved.characterId ?? "");
   const [characterLookId, setCharacterLookId] = useState(saved.characterLookId ?? "");
   const [personTrackId, setPersonTrackId] = useState(saved.personTrackId ?? "");
@@ -422,6 +500,38 @@ export function VideoStudio() {
   // for the same reason (`showGuidance` / `showNegative`).
   const supportsGuidance = selectedModel?.video?.supportsGuidance !== false;
   const supportsNegativePrompt = selectedModel?.video?.supportsNegativePrompt !== false;
+  // `limits.steps` — the exact set of step counts the model can render (sc-19502). Distilled models
+  // bake their sigma waypoints into training: LTX-2.3 runs 8 and nothing else, and BOTH backends now
+  // refuse anything off the menu, so an unpinned Steps box here would let the user type a number the
+  // enqueue gate 400s on.
+  //
+  // PINNED (disabled + the value shown), not hidden. The lightning precedent above disables because
+  // the inertness is transient, and `supportsGuidance` hides because the axis is missing entirely.
+  // This is a third case: the axis is real and the value is worth seeing — the user should know the
+  // render is 8 steps — but it is not theirs to move. Hiding it would answer "why is there no Steps
+  // control?" with nothing, and leaving it editable would be the silently-ignored knob this story
+  // exists to remove.
+  const stepsMenu = stepsMenuFromModel(selectedModel);
+  const stepsPinnedValue = stepsMenu?.length === 1 ? stepsMenu[0] : null;
+  const stepsPinned = stepsPinnedValue !== null;
+  // A menu with MORE than one entry is a CHOICE, not a pin — but the gate refuses off-menu counts
+  // exactly as hard there, so a free-text box would be the same "UI looser than the gate" desync in
+  // a different shape. Render the declared set as a picker, the way `fpsOptions` renders `limits.fps`
+  // below. No shipped model declares a multi-entry menu today, so this path is latent; it exists
+  // because every OTHER reader on this seam is already set-shaped (`allowed_steps` and
+  // `humanized_number_menu` in crates/sceneworks-core/src/video_request.rs, `stepsMenuFromModel`,
+  // `checkInMenu` in PresetManagerScreen, gen-core's `supported_steps`) and leaving this one
+  // singleton-only would make the studio the single seam that silently reopens the defect.
+  const stepsChoice = stepsMenu !== null && stepsMenu.length > 1 ? stepsMenu : null;
+  // Whether the override currently held is something the selected model can actually render. A
+  // number typed against a PREVIOUS model survives the switch (the same staleness `stepsPinned`
+  // suppresses), and a `<select>` whose `value` matches no `<option>` displays its first one — which
+  // would quietly assert `limits.steps[0]` is the default. It is not; `defaults.steps` is, and the
+  // manifest fixed-point invariant (`shipped_manifest_step_limits_are_what_core_reads`) guarantees
+  // that default is itself on the menu. So an off-menu override falls back to the empty
+  // "model default" option and, below, is kept out of the payload rather than 400ing.
+  const stepsOffMenu =
+    stepsChoice !== null && stepsOverride !== "" && !stepsChoice.includes(Number(stepsOverride));
   const implementedMode = [
     "image_to_video",
     "text_to_video",
@@ -485,6 +595,59 @@ export function VideoStudio() {
     initialLoraWeights: saved.loraWeights ?? {},
     initialGeneralStackIds: saved.generalStackIds ?? [],
   });
+  // ── MiniMax-H3 turbo (sc-18726 / sc-18727) ────────────────────────────────────────────────
+  //
+  // Every value below is derived from the LoRA catalog and the live selection; there is no separate
+  // turbo state to keep in sync. `turboVariants` is already narrowed to installed + compatible by
+  // `compatibleLoras`, so the control can only ever offer an adapter that would actually enqueue.
+  const turboVariants = useMemo(
+    () => turboVariantsForModel(selectedModel, compatibleLoras),
+    [selectedModel, compatibleLoras],
+  );
+  const activeTurboVariant = selectedTurboVariant(turboVariants, selectedLoraIds);
+  // Shown whenever the model is MiniMax-H3, even with nothing installed: an absent control would
+  // answer "why is this render two and a half hours?" with silence. With no variant installed the
+  // control renders the reason and the Model Manager pointer instead of an empty menu.
+  const showTurbo = modelIsMinimaxH3(selectedModel);
+  // Default-on seed. Runs once per model (see `turboSeededModels`) and only once the LoRA catalog
+  // has actually resolved — seeding against an empty `turboVariants` during the restart-restore
+  // window would mark the model seeded and leave turbo permanently off, the same sc-11962 trap the
+  // preset/LoRA prunes above guard.
+  useEffect(() => {
+    if (!showTurbo || !turboVariants.length) return;
+    if (turboSeededModels.includes(model)) return;
+    setTurboSeededModels((seeded) => (seeded.includes(model) ? seeded : [...seeded, model]));
+    // A variant already selected — a replayed recipe, a restored snapshot, a preset — is the
+    // caller's choice and the seed must not stack a SECOND accelerator on top of it. Two adapters
+    // asking for different schedules is refused by the worker, so seeding blind here would turn
+    // "replay this render" into a hard enqueue failure.
+    if (selectedTurboVariant(turboVariants, selectedLoraIds)) return;
+    const preferred = defaultTurboVariant(selectedModel, turboVariants);
+    if (!preferred) return;
+    setSelectedLoraIds((ids) => (ids.includes(preferred.id) ? ids : [...ids, preferred.id]));
+  }, [
+    showTurbo,
+    turboVariants,
+    turboSeededModels,
+    model,
+    selectedModel,
+    selectedLoraIds,
+    setSelectedLoraIds,
+  ]);
+  // Selecting a variant REPLACES any other turbo adapter rather than stacking: two accelerators ask
+  // for two different schedules and the worker refuses the pair by name
+  // (`resolve_turbo_recipe`), so letting the control build that payload would offer a selection that
+  // can only fail. Plain (non-accelerator) LoRAs are untouched — a style LoRA rides alongside turbo.
+  const selectTurboVariant = useCallback(
+    (id) => {
+      const turboIds = new Set(turboVariants.map((variant) => variant.id));
+      setSelectedLoraIds((ids) => {
+        const withoutTurbo = ids.filter((existing) => !turboIds.has(existing));
+        return id ? [...withoutTurbo, id] : withoutTurbo;
+      });
+    },
+    [turboVariants, setSelectedLoraIds],
+  );
   // Sampler / scheduler menus declared by the model. Video Wan torch
   // declares the full menu; sealed paths (LTX native, MLX) drop to
   // default-only and the picker hides. Gated to the ACTIVE backend (epic 7114 P5):
@@ -788,7 +951,7 @@ export function VideoStudio() {
     // picker on a phantom id; the mode-snap effect then moves to a model that serves the mode. Say
     // so rather than letting the swap look like the recipe's own choice.
     const recipeModelAvailable =
-      !recipe.model || baseVideoModels.some((item) => item.id === recipe.model);
+      !recipe.model || macVideoModels.some((item) => item.id === recipe.model);
     if (recipe.model && recipeModelAvailable) {
       setModel(recipe.model);
     }
@@ -873,6 +1036,9 @@ export function VideoStudio() {
     setBridgeRightClipAssetId(settings.bridgeRightClipAssetId ?? "");
     setSourceClipAssetIds(Array.isArray(settings.sourceClipAssetIds) ? settings.sourceClipAssetIds : []);
     setReferenceAssetIds(Array.isArray(settings.referenceAssetIds) ? settings.referenceAssetIds : []);
+    setReferenceAudioAssetIds(
+      Array.isArray(settings.referenceAudioAssetIds) ? settings.referenceAudioAssetIds : [],
+    );
     setReferenceClipAssetId(settings.referenceClipAssetId ?? "");
     setFitMode(settings.fitMode ?? "crop");
     setCharacterId(settings.characterId ?? "");
@@ -894,14 +1060,14 @@ export function VideoStudio() {
   // current model already serves the mode (e.g. an LTX image_to_video → text_to_video switch) or
   // when no model serves it (a reduced catalog) — there's nothing to snap to.
   useEffect(() => {
-    if (modelServesMode(selectedModel, mode)) {
+    if (videoModelServesMode(selectedModel, mode, macCapabilities)) {
       return;
     }
     const fallback = modelsForMode(mode)[0];
     if (fallback && fallback.id !== model) {
       setModel(fallback.id);
     }
-    // modelServesMode / modelsForMode close over videoModels + macCapabilities, captured below.
+    // videoModelServesMode / modelsForMode close over videoModels + macCapabilities, captured below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, model, selectedModel, videoModels, macCapabilities]);
 
@@ -1019,6 +1185,10 @@ export function VideoStudio() {
     steps: stepsOverride,
     guidanceScale: guidanceOverride,
     lightning,
+    // The MiniMax-H3 turbo default-on one-shot marker (sc-18727). The SELECTION itself already
+    // persists through `selectedLoraIds`; this records only that the seed has fired, so a
+    // deliberate "Off" is not re-seeded on the next mount or the next relaunch.
+    turboSeededModels,
     videoCfgGuidanceScale: ltxVideoCfg,
     videoStgGuidanceScale: ltxVideoStg,
     videoRescaleScale: ltxVideoRescale,
@@ -1033,6 +1203,7 @@ export function VideoStudio() {
     sourceClipAssetId,
     bridgeRightClipAssetId,
     referenceAssetIds,
+    referenceAudioAssetIds,
     sourceClipAssetIds,
     referenceClipAssetId,
     characterId,
@@ -1080,14 +1251,33 @@ export function VideoStudio() {
     // capabilities include it (today: scail2_14b); the same per-model gating as the others.
     ["animate_character", "Animate character"],
   ];
-  // Mac UI gating (sc-3486, sc-3773, sc-5716): mode tabs are gated at the MODE level, not on the
-  // selected model. A tab is disabled only under active Mac gating when NO available model serves
-  // the mode (mode-level availability across `macVideoModels`) — never on the selected model's
-  // `videoModes`, which used to trap the user on replace_person / animate_character with no way
-  // back. Off-Mac `macGating` is false so tabs are never disabled here. The active tab is always
-  // left enabled so a reduced catalog can't strand you on a disabled tab. `macVideoModeBlock` still
-  // gates the in-mode model picker + submit (via `modelsForMode` / `supportsMode`).
-  const macModeTabBlocked = (value) => macGating && modelsForMode(value).length === 0;
+  // Platform UI gating (sc-3486, sc-3773, sc-5716, sc-19570): mode tabs are gated at the MODE
+  // level, not on the selected model. A tab is disabled only under active platform gating when NO
+  // available model serves the mode (mode-level availability across `macVideoModels`) — never on
+  // the selected model's `videoModes`, which used to trap the user on replace_person /
+  // animate_character with no way back. The active tab is always left enabled so a reduced catalog
+  // can't strand you on a disabled tab; the per-mode block still gates the in-mode model picker +
+  // submit (via `modelsForMode` / `supportsMode`).
+  //
+  // sc-19570 — PLATFORM-AGNOSTIC. This read `macGating &&`, which is false off-Mac, so every
+  // MLX-only tab (LTX 2.3's Image→Video / First-Last-Frame / Extend / Bridge / Replace) stayed
+  // enabled on Windows/Linux and the user only learned at Generate. Either gate disables the tab now.
+  //
+  // The two are mutually exclusive, so AT MOST one is ever true — not "exactly one", which this
+  // comment used to claim and which is false in two ordinary states. `candleGatingActive` is
+  // `!is_mac` and `macGatingActive` is the SCENEWORKS_MLX_REQUIRED rollout flag, so BOTH are false
+  // (a) before `GET /api/v1/capabilities/mac` responds, since `DEFAULT_MAC_CAPABILITIES` sets both
+  // false, and (b) permanently on a Mac still in observe mode. In both windows this predicate is
+  // inert and the tab list falls back to the manifest declaration alone. That is deliberate — a
+  // client that has not yet been told the platform must not invent a gate — but it means the
+  // declaration IS the whole answer there, and copy that says otherwise misdescribes the screen.
+  const modeTabBlocked = (value) =>
+    (macGating || candleGating) && modelsForMode(value).length === 0;
+  // The tab tooltip names the platform that is doing the gating — off-Mac the honest sentence is
+  // the inverse of the Mac one (the pair works, just not here).
+  const modeTabBlockedText = candleGating
+    ? "No installed model supports this mode on this platform (macOS/MLX only)."
+    : "No installed model supports this mode on macOS.";
   const matchingTracks = useMemo(
     () =>
       mode === "replace_person"
@@ -1119,6 +1309,56 @@ export function VideoStudio() {
   const selectedTrack = personTracks.find((track) => track.id === personTrackId);
   const comparisonAsset = latestAssets.find((asset) => asset.recipe?.mode === "replace_person");
   const comparisonSource = assets.find((asset) => asset.id === comparisonAsset?.lineage?.sourceClipAssetId);
+  // Per-model reference-media caps (sc-17160), read at the FORM (sc-17161). Before this the four
+  // caps had Rust readers only, so an over-selection was submittable and came back as a 400.
+  const refCaps = useMemo(() => referenceCaps(selectedModel), [selectedModel]);
+  // Which reference pickers a MODE + MODEL pair can actually feed. `reference_to_video` was the
+  // only mode serving multi-modal references when MiniMax-H3 Ref2VA arrived; the audio picker keys
+  // on the declared cap alone (default 0) because no other model takes audio references, and the
+  // clip picker keys on the cap being DECLARED, not merely non-zero — the blanket default is 8, so
+  // a value check would offer reference clips on Bernini's r2v, whose engine encodes images only.
+  const showAudioReferences = mode === "reference_to_video" && refCaps.audio > 0;
+  const showReferenceClips = mode === "reference_to_video" && refCaps.clipsDeclared && refCaps.clips > 0;
+  // The reference media this mode will actually SEND. The gate counts these rather than the raw
+  // state so the client refusal and the payload can never disagree about what was selected — the
+  // same single-expression rule `videoStudioValidation.js` exists to keep.
+  const outgoingReferenceAssetIds = [
+    "reference_to_video",
+    "reference_video_to_video",
+    "ads2v",
+    "animate_character",
+  ].includes(mode)
+    ? referenceAssetIds
+    : [];
+  const outgoingSourceClipAssetIds =
+    mode === "multi_video_to_video" || showReferenceClips ? sourceClipAssetIds : [];
+  // The audio references the selected MODEL will carry, gated on its declared
+  // `limits.maxReferenceAudioAssets` (default 0) rather than a hardcoded mode list — which modes
+  // take audio references is a model fact, which is why the payload slot was never mode-gated.
+  // Before this the payload sent the raw state, so a selection made on Ref2VA rode along into a
+  // job for a model that declares no audio cap at all.
+  const outgoingReferenceAudioAssetIds = refCaps.audio > 0 ? referenceAudioAssetIds : [];
+  const referenceLimitMessage = referenceLimitError({
+    modelName: selectedModel?.name,
+    caps: refCaps,
+    images: outgoingReferenceAssetIds.length,
+    clips: outgoingSourceClipAssetIds.length,
+    // The count the visible PICKER can change, not the raw state. `referenceAudioAssetIds` outlives
+    // the picker — it is persisted per project and restored on mount — so counting it raw meant
+    // selecting one audio reference on Ref2VA and then switching mode or model disabled Generate
+    // with "…but 1 are selected. Remove them", while the only control that could remove them had
+    // just unmounted. That refusal was unclearable, and it survived a restart. A cap the form on
+    // screen cannot violate must not be able to refuse.
+    audio: showAudioReferences ? referenceAudioAssetIds.length : 0,
+  });
+  // sc-19574 — the audio-only Ref2VA shape, named so the Generate gate can SAY why rather than
+  // leaving the user to infer it from an empty image zone next to a full audio one. Counted off the
+  // outgoing lists so a stale audio selection on a model that declares no audio cap can't raise it.
+  const audioOnlyReferenceSet =
+    mode === "reference_to_video" &&
+    outgoingReferenceAudioAssetIds.length > 0 &&
+    referenceAssetIds.length === 0 &&
+    outgoingSourceClipAssetIds.length === 0;
   const hasInputs =
     mode === "text_to_video" ||
     (mode === "image_to_video" && sourceAssetId) ||
@@ -1128,7 +1368,21 @@ export function VideoStudio() {
     (mode === "replace_person" && sourceClipAssetId && personTrackId && characterId) ||
     // Bernini editing / reference-driven modes (sc-4703).
     (mode === "video_to_video" && sourceClipAssetId) ||
-    (mode === "reference_to_video" && referenceAssetIds.length > 0) ||
+    // `reference_to_video` needs at least one VISUAL reference — an image or a video clip. Audio
+    // references ride along and can never be the only one.
+    //
+    // sc-17159 widened this from images-alone because MiniMax-H3 Ref2VA also takes clips and audio;
+    // the clip half was right and the audio half was not. sc-19574 settled it against the reference
+    // implementation: diffusers `MiniMaxH3` refuses `set(kinds) == {"audio"}` outright — an audio
+    // reference never reaches the conditioner, so an audio-only set leaves the visual stream
+    // unconditioned — and the worker refuses it too (sc-19508). Enabling Generate for a shape three
+    // layers down rejects is exactly the "the product offers it and then says no" gap this closes;
+    // `validate_video_job` now 400s the same shape with the same rule.
+    //
+    // Bernini is unaffected: it declares no clip or audio caps, so `outgoingSourceClipAssetIds` is
+    // empty there and this stays "needs an image".
+    (mode === "reference_to_video" &&
+      (referenceAssetIds.length > 0 || outgoingSourceClipAssetIds.length > 0)) ||
     (mode === "reference_video_to_video" && sourceClipAssetId && referenceAssetIds.length > 0) ||
     // Bernini multi-source modes (sc-5425): mv2v needs >=2 clips; ads2v needs a source
     // clip, a reference video, and >=1 reference image.
@@ -1217,6 +1471,8 @@ export function VideoStudio() {
       hasLtxIcLora,
       replaceReady,
       scail2ReferenceOverflow,
+      referenceLimitMessage,
+      audioOnlyReferenceSet,
       modelName: selectedModel?.name,
       presetMissing: presetValidationResult.missing,
       presetIncompatible: presetValidationResult.incompatible,
@@ -1235,6 +1491,8 @@ export function VideoStudio() {
       hasLtxIcLora,
       replaceReady,
       scail2ReferenceOverflow,
+      referenceLimitMessage,
+      audioOnlyReferenceSet,
       selectedModel,
       presetValidationResult,
       selectedLoraValidationResult,
@@ -1244,6 +1502,8 @@ export function VideoStudio() {
   const stackAddsNegative = generalStack.some((preset) => Boolean(preset?.defaults?.negativePrompt));
   const stackAddsCount = generalStack.some((preset) => Number.isFinite(Number(preset?.defaults?.count)));
   const fpsOptions = selectedModel?.limits?.fps ?? [24, 25, 30];
+  // `limits.hardMinSteps` (sc-19426) had no web reader — the Steps input hardcoded min="1".
+  const minSteps = minStepsForModel(selectedModel);
   const durationHint =
     selectedModel?.ui?.durationHint ??
     (selectedModel?.limits?.recommendedMaxDuration ? `Recommended: ${selectedModel.limits.recommendedMaxDuration}s or less.` : "");
@@ -1312,30 +1572,42 @@ export function VideoStudio() {
         ].includes(mode)
           ? sourceClipAssetId || null
           : null,
-        // Bernini multi-source clips (sc-5425) — only mv2v carries the array.
-        sourceClipAssetIds: mode === "multi_video_to_video" ? sourceClipAssetIds : [],
+        // Bernini multi-source clips (sc-5425) — mv2v carries the array, and so does a
+        // reference→video on a model that DECLARES a reference-clip cap (MiniMax-H3 Ref2VA takes
+        // up to 3 clips alongside its images and audio, sc-17160).
+        sourceClipAssetIds: outgoingSourceClipAssetIds,
         bridgeRightClipAssetId: mode === "video_bridge" ? bridgeRightClipAssetId || null : null,
         // Bernini subject references (sc-4703 / sc-5425) — the reference-driven modes + ads2v carry
         // them; SCAIL-2 character animation (sc-5449) carries the reference character image.
-        referenceAssetIds: [
-          "reference_to_video",
-          "reference_video_to_video",
-          "ads2v",
-          "animate_character",
-        ].includes(mode)
-          ? referenceAssetIds
-          : [],
+        referenceAssetIds: outgoingReferenceAssetIds,
+        // Reference AUDIO clips (sc-17160). Gated on the MODEL's declared cap, not on a hardcoded
+        // mode list like the two above: which modes take audio references is a model fact,
+        // declared as `limits.maxReferenceAudioAssets` and enforced server-side, and a model that
+        // takes none refuses a non-empty list at enqueue. Sending the raw state meant a selection
+        // made on Ref2VA rode into a job for a model with no audio cap once the picker unmounted.
+        referenceAudioAssetIds: outgoingReferenceAudioAssetIds,
         // Bernini ads2v reference video (sc-5425).
         referenceClipAssetId: mode === "ads2v" ? referenceClipAssetId || null : null,
         personTrackId: mode === "replace_person" ? personTrackId || null : null,
-        replacementMode: mode === "replace_person" ? replacementMode : "face_only",
+        // Gated on the MODEL as well as the mode (sc-20262), for the same reason
+        // `referenceAudioAssetIds` above is: hiding a control does not unset the state behind it,
+        // so a mode picked on a Wan-VACE engine would otherwise ride into a SCAIL-2 job once the
+        // control unmounted — and SCAIL-2's engine refuses a non-default mode. `replacementMode`
+        // is only meaningful where `replacementModeApplies`.
+        replacementMode:
+          mode === "replace_person" && replacementModeApplies(model) ? replacementMode : "face_only",
         loras: selectedLoras.map((lora) => serializeLora(lora, { weight: effectiveLoraWeight(lora) })),
         advanced: {
           resolution,
           durationHint,
           motion,
           selectedPersonTrack: selectedTrack ?? null,
-          replacementModeLabel: replacementModeLabels[replacementMode],
+          // The recipe's human-readable echo of the field above, so it follows the same gate — a
+          // replayed SCAIL-2 recipe must not display a Replacement mode the job never carried.
+          replacementModeLabel:
+            replacementModeLabels[
+              replacementModeApplies(model) ? replacementMode : "face_only"
+            ],
           // Style Catalog round-trip (sc-13136, mirrors image sc-13132): record the picked style id
           // and the RAW pre-style prompt so replay re-selects the picker and recomposes the identical
           // prompt without double-wrapping. Rides advanced → rawAdapterSettings (cloned verbatim by
@@ -1372,7 +1644,20 @@ export function VideoStudio() {
           // the 4-step/CFG-off recipe, so we suppress the manual steps/guidance overrides below to
           // keep the payload consistent with the recipe the UI is reflecting.
           ...(showLightning ? { lightning } : {}),
-          ...(!lightningActive && stepsOverride !== "" && Number.isFinite(Number(stepsOverride))
+          // `stepsPinned` suppresses the override for the same reason `lightningActive` does: the
+          // count is not the caller's to set (sc-19502). Omitting `steps` entirely — rather than
+          // sending the pinned value — is what "use the baked schedule" means to the engine, and it
+          // also means a stale number left in the box by a previously-selected model can never leak
+          // into the payload and 400.
+          //
+          // `stepsOffMenu` is the multi-entry half of the same suppression: the picker below shows
+          // such a stale value as "model default", so emitting it anyway would send a count the UI
+          // is not displaying AND that the enqueue gate refuses.
+          ...(!lightningActive &&
+          !stepsPinned &&
+          !stepsOffMenu &&
+          stepsOverride !== "" &&
+          Number.isFinite(Number(stepsOverride))
             ? { steps: Number(stepsOverride) }
             : {}),
           ...(supportsGuidance &&
@@ -1441,8 +1726,8 @@ export function VideoStudio() {
               options={modeOptions}
               mode={mode}
               onChange={setMode}
-              blockFor={(value, active) => !active && macModeTabBlocked(value)
-                ? { text: "No installed model supports this mode on macOS." }
+              blockFor={(value, active) => !active && modeTabBlocked(value)
+                ? { text: modeTabBlockedText }
                 : null}
             />
             <div className="prompt-hero-links">
@@ -1649,6 +1934,50 @@ export function VideoStudio() {
               />
             ) : null}
 
+            {/* Reference VIDEO clips (sc-17160 / sc-17161). Only for a model that declares a
+                reference-clip cap: MiniMax-H3 Ref2VA conditions on motion and pacing from up to 3
+                clips, where Bernini's r2v encodes reference images alone and would silently ignore
+                them — the invisible-in-the-output failure the per-model caps exist to prevent. */}
+            {showReferenceClips ? (
+              <VideoSourcePickerField
+                assets={videoAssets}
+                buttonLabel="Select clips"
+                characters={characters}
+                changeLabel="Edit clips"
+                emptyLabel={`No reference clips selected (up to ${refCaps.clips})`}
+                importAsset={importAsset}
+                label="Reference clips"
+                multiple
+                onChange={setSourceClipAssetIds}
+                projectId={activeProject?.id}
+                values={sourceClipAssetIds}
+              />
+            ) : null}
+
+            {/* Reference AUDIO clips (sc-17160 landed the payload field; this is the control that
+                makes it reachable). Gated on the declared cap alone — it defaults to 0, so the
+                picker appears only for a model that says it conditions on audio. Uses the plain
+                AssetPickerField with categories hidden, the same shape Audio Studio's reference
+                voice uses: the media pickers' All/Images/Video tabs carry no audio bucket.
+                `importAsset` + `mediaKind` give it the same local-file import the image/clip
+                pickers above carry (sc-17137 review B3): a project with no audio assets would
+                otherwise offer an empty grid with no way in. */}
+            {showAudioReferences ? (
+              <AssetPickerField
+                assets={audioAssets}
+                buttonLabel="Select audio"
+                changeLabel="Edit audio"
+                emptyLabel={`No reference audio selected (up to ${refCaps.audio})`}
+                importAsset={importAsset}
+                label="Reference audio"
+                mediaKind="audio"
+                multiple
+                onChange={setReferenceAudioAssetIds}
+                showCategories={false}
+                values={referenceAudioAssetIds}
+              />
+            ) : null}
+
             {mode === "animate_character" ? (
               <>
                 <VideoSourcePickerField
@@ -1740,13 +2069,18 @@ export function VideoStudio() {
                   {/* Models gated on the selected tab (sc-5716): show only models that serve the
                       active mode, falling back to the full available list if none do (a reduced
                       catalog) so the picker is never empty. */}
-                  {(modelsForMode(mode).length ? modelsForMode(mode) : baseVideoModels).map((item) => (
+                  {(modelsForMode(mode).length ? modelsForMode(mode) : macVideoModels).map((item) => (
                     <option key={item.id} value={item.id}>
                       {updateOptionLabel(item)}
                     </option>
                   ))}
                 </select>
                 <StudioUpdateNotice item={selectedModel} onUpdate={createModelDownloadJob} />
+                {/* Licence-required attribution (sc-17227 §IV.2, landed on the generation surfaces
+                    by sc-17161). The Models card alone is one screen a user may never revisit after
+                    installing; this is where the model is used. Reads the manifest field — never a
+                    second hard-coded copy of a string a licence specifies. */}
+                <ModelAttribution model={selectedModel} className="studio-model-attribution" />
                 {recipeModelNotice ? (
                   <span className="field-hint" role="status">
                     This clip was made with “{recipeModelNotice}”, which isn’t installed. Its
@@ -1766,10 +2100,16 @@ export function VideoStudio() {
               </label>
               <label className="settings-field settings-field-count">
                 Duration
+                {/* A MENU, never a range: `limits.durations` is the model's exact renderable set,
+                    and MiniMax-H3 is the case that makes the distinction visible — its fourteen
+                    `17n + 5` lattice rungs are the ONLY lengths the checkpoint renders, so a
+                    slider would emit durations the engine refuses (15.0s among them, which its own
+                    docs advertise and which sits between the last rung and the next). The label
+                    carries the frame count because that is what the lattice is counting. */}
                 <select onChange={(event) => setDuration(Number(event.target.value))} value={duration}>
                   {durationOptions.map((value) => (
                     <option key={value} value={value}>
-                      {value}s
+                      {formatDurationOption(value, fps)}
                     </option>
                   ))}
                 </select>
@@ -1902,6 +2242,39 @@ export function VideoStudio() {
                     {lightning
                       ? "On: ~10× faster, 4 steps, CFG off, small quality trade-off. Steps and guidance are governed by the recipe."
                       : "Off: full multi-step quality with CFG (slower). Use the Steps and Guidance controls below."}
+                  </p>
+                </div>
+              ) : null}
+              {/* MiniMax-H3 turbo (sc-18727). A VARIANT selector, not a toggle: the three published
+                  fl2v adapters carry three different (NFE, video shift) pairs, so "on" is not one
+                  state. Writes the SAME `selectedLoraIds` the LoRA picker writes — the control and
+                  the picker are two views of one selection, which is why they cannot disagree.
+                  Default-on (seeded once per model): sc-18729 measured 2.42 h against 12.6 min at
+                  the model's default canvas. */}
+              {showTurbo ? (
+                <div className="lightning-toggle">
+                  <label>
+                    Turbo (step-distilled)
+                    <select
+                      aria-label="Turbo (step-distilled)"
+                      disabled={!turboVariants.length}
+                      onChange={(event) => selectTurboVariant(event.target.value)}
+                      value={activeTurboVariant?.id ?? ""}
+                    >
+                      <option value="">Off — {selectedModel?.defaults?.steps ?? 50} steps</option>
+                      {turboVariants.map((variant) => (
+                        <option key={variant.id} value={variant.id}>
+                          {variant.name} — {variant.sampling.steps} steps
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <p className="helper-copy">
+                    {!turboVariants.length
+                      ? "No turbo adapter installed for this model. Install one from the LoRA library to render in 4–8 steps instead of the full schedule."
+                      : activeTurboVariant
+                        ? `On: ${turboRecipeSummary(activeTurboVariant)}. Roughly 7–12× faster (measured 12.6 min against 2.42 h at 1344×768). The distilled checkpoints are trained at 544p/768p and upstream is still improving their detail, so this is a different sample rather than the same one faster — turn it off for the reference schedule.`
+                        : "Off: the full schedule at the model's own sigma shift. Slow — a default-canvas clip measured 2.42 h."}
                   </p>
                 </div>
               ) : null}
@@ -2136,16 +2509,80 @@ export function VideoStudio() {
               ) : null}
               <label>
                 Steps
-                <input
-                  min="1"
-                  max="80"
-                  disabled={lightningActive}
-                  onChange={(event) => setStepsOverride(event.target.value)}
-                  placeholder={lightningActive ? "4 (Lightning)" : String(stepsDefaultFromModel(selectedModel) ?? "")}
-                  title={lightningActive ? "Governed by Lightning (fast 4-step). Turn Lightning off to set steps." : undefined}
-                  type="number"
-                  value={lightningActive ? "" : stepsOverride}
-                />
+                {stepsChoice ? (
+                  <select
+                    disabled={lightningActive}
+                    onChange={(event) => setStepsOverride(event.target.value)}
+                    title={
+                      lightningActive
+                        ? "Governed by Lightning (fast 4-step). Turn Lightning off to set steps."
+                        : `${selectedModel?.ui?.label ?? selectedModel?.name ?? "This model"} is distilled: it renders at ${humanizedNumberMenu(stepsChoice)} steps only.`
+                    }
+                    value={lightningActive || stepsOffMenu ? "" : stepsOverride}
+                  >
+                    {/* The cleared state, exactly as for the free-text box above and as the panel's
+                        own "cleared values → model default" hint promises: no `advanced.steps` is
+                        sent and the engine runs `defaults.steps`. It is deliberately NOT
+                        `stepsChoice[0]` — `limits.steps[0]` is not a default — and it is safe
+                        because the manifest invariant pins `defaults.steps` onto the menu. */}
+                    <option value="">
+                      {stepsDefaultFromModel(selectedModel) == null
+                        ? "Model default"
+                        : `${stepsDefaultFromModel(selectedModel)} (model default)`}
+                    </option>
+                    {stepsChoice.map((value) => (
+                      <option key={value} value={String(value)}>
+                        {value}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  /* The `min` floor is the MODEL's, not a blanket 1 (sc-19426 / sc-17161).
+                     MiniMax-H3 declares 2: the unit is model evaluations (NFE — the engine appends
+                     the terminal sigma itself), and a 1-evaluation schedule is a single Euler jump
+                     from pure noise, so the floor is the corrected sc-18726 product judgement,
+                     REFUSED rather than raised — the form has to say so instead of letting it be
+                     typed and then 400'd at enqueue. `hardMinSteps` and `limits.steps` are INDEPENDENT axes
+                     (sc-19502): the floor bounds an open range, the menu enumerates a closed set,
+                     and this branch is the one a model reaches when it declares no menu — so the
+                     floor still has to be honoured here even though the pinned/menu cases above
+                     express their own, tighter constraint. */
+                  <input
+                    min={String(minSteps)}
+                    max="80"
+                    disabled={lightningActive || stepsPinned}
+                    onChange={(event) => setStepsOverride(event.target.value)}
+                    placeholder={
+                      lightningActive
+                        ? "4 (Lightning)"
+                        : stepsPinned
+                          ? `${stepsPinnedValue} (fixed schedule)`
+                          : /* Turbo supplies a step count but does NOT seize the control, unlike
+                               Lightning above: upstream's own spec table lists the 8-step MiniMax-H3
+                               adapter as "8 / 4", so a caller who knows the checkpoint may run it
+                               shorter, and `minimax_h3_sampling` honours an explicit
+                               `advanced.steps` over the variant's default for exactly that reason.
+                               So the placeholder REPORTS the recipe's count while the box stays
+                               editable — a knob honoured rather than rejected. */
+                            activeTurboVariant
+                            ? `${activeTurboVariant.sampling.steps} (Turbo)`
+                            : String(stepsDefaultFromModel(selectedModel) ?? "")
+                    }
+                    title={
+                      lightningActive
+                        ? "Governed by Lightning (fast 4-step). Turn Lightning off to set steps."
+                        : stepsPinned
+                          ? `${selectedModel?.ui?.label ?? selectedModel?.name ?? "This model"} is distilled: it runs a fixed ${stepsPinnedValue}-step schedule baked into its weights and cannot render any other step count.`
+                          : activeTurboVariant
+                            ? `${activeTurboVariant.name} is distilled for ${activeTurboVariant.sampling.steps} steps, which is what runs when this is blank. You can still set your own count.`
+                            : minSteps > 1
+                              ? `${selectedModel?.name ?? "This model"} needs at least ${minSteps} steps.`
+                              : undefined
+                    }
+                    type="number"
+                    value={lightningActive || stepsPinned ? "" : stepsOverride}
+                  />
+                )}
               </label>
               {supportsGuidance ? (
                 <label>

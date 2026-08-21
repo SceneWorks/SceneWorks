@@ -81,6 +81,11 @@ jobs:
       # Fetch the pinned inference source once, then force every build and build.rs process
       # offline so nothing else can reach the network mid-build.
       CARGO_NET_OFFLINE: "true"
+      # This lane installs a real ffmpeg (step below), so the measured AV-mux tests must RUN here
+      # rather than soft-skip. `video_jobs::tests::ffmpeg_reachable` turns "no ffmpeg" from a skip
+      # into a failure while this is set, so the install silently disappearing goes red instead of
+      # quietly reporting `ok` in 0.03 s (sc-19549; convention inherited from sc-19425).
+      SCENEWORKS_REQUIRE_FFMPEG: "1"
     # A stalled step otherwise rides GitHub's 6-hour default timeout, blocking the PR and
     # holding a runner for hours — this bit PR #1300 / sc-10354 for ~4 h. Cap well above the
     # healthy duration so healthy runs are unaffected but a wedge fails in minutes with a
@@ -130,6 +135,18 @@ jobs:
         env:
           CARGO_NET_OFFLINE: "false"
         run: cargo fetch --locked
+      - name: Install ffmpeg for the measured AV-mux tests (sc-19549)
+        # `npm run rust:check` runs `cargo test` over the workspace default members, which include
+        # `crates/sceneworks-worker`. Its AV-mux tests (sc-19425's generation mux, sc-19549's SeedVR2
+        # upscale mux) decode their own output to count frames, and their arg-shape halves cannot
+        # substitute: MEASURED, swapping the two `-i` inputs keeps every arg assertion green while
+        # producing 50 frames instead of 48. Without a binary here those tests returned early and
+        # reported `ok`, so nothing in CI had ever exercised them — the runner image was the only
+        # thing deciding. `SCENEWORKS_REQUIRE_FFMPEG` (job env above) makes that state fail loudly.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          ffmpeg -version | head -1
       - name: Install contract test dependencies
         # pillow / numpy / opencv were only needed by the retired Python worker's
         # adapter tests, deleted in sc-8863; the surviving suite (Rust-API
@@ -291,6 +308,14 @@ jobs:
             git -C "$RUNNER_TEMP/inference" fetch -q --depth=1 origin "$rev"
           done < <(node scripts/backfill-closure-digests.mjs --revisions)
           node scripts/backfill-closure-digests.mjs --repo "$RUNNER_TEMP/inference" --verify
+          # sc-19542: the same posture for the rung-4 prerequisite records. `npm run check` can only
+          # assert that config/rung4-contract-prerequisites.json is KEYED to the live pin; whether
+          # the recorded `additional_prerequisites` edges are the ones each provider actually
+          # appends needs inference's source, which a SceneWorks checkout does not contain. The
+          # pinned tree is already fetched above, so re-deriving all 40 records costs seconds. The
+          # memory matrix's rung-4 arm admits cells from these records, so a record nothing grades
+          # is the same fail-open shape the blanket rung-1 proxy was.
+          node scripts/rung4-contract-prerequisites.mjs --repo "$RUNNER_TEMP/inference" --check
 
   # Split out because the smoke recompiles the whole workspace inside BuildKit and shares
   # nothing with the host's rust-cache — ~7m that used to land at the END of a 14m serial job,

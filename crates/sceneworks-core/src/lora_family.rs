@@ -911,6 +911,32 @@ fn detect_unique_key_family(keys: &[String]) -> Option<String> {
     }) {
         return Some("krea_2".to_owned());
     }
+    // MiniMax-H3 (epic 17137, sc-18725). Its DiT prepends a two-layer token refiner whose blocks are
+    // keyed `token_refiner.refiner_blocks.<n>.` — a doubled `refiner` no other family we detect uses
+    // (Hunyuan's analogue is `individual_token_refiner.blocks`, and nothing else has a refiner at
+    // all). Needed HERE rather than as a bucket signature because the rest of an H3 LoRA is
+    // architecturally anonymous: bare `transformer_blocks.<n>.attn.to_{q,k,v}` / `attn.to_out.0` /
+    // `ff.net.0.proj` / `ff.net.2` with NO `transformer.` or `diffusion_model.` prefix and none of
+    // the dual-stream `img_mlp`/`txt_mlp`/`add_{q,k}_proj` markers, so every bucket scores it below
+    // `MIN_KEY_MATCHES` and it fell through as family-less. All four published
+    // `lightx2v/Minimax-h3-Turbo` diffusers files carry 24 refiner tensors of 624 (the refiner is
+    // load-bearing, not optional — sc-18724), so one marker identifies the whole shipped set.
+    //
+    // 🔴 Deliberately does NOT match the `_comfyui_` twins from the same repo. They spell the same
+    // sub-module `diffusion_model.token_refiner.blocks.<n>.` — `blocks`, not `refiner_blocks` — and
+    // they are a genuinely different key space (fused `attn.qkv_proj`, SwiGLU halves swapped) that
+    // the engine REFUSES rather than folds, because folding one is shape-valid and numerically wrong
+    // (sc-18724). Claiming `minimax-h3` for them would walk the file past the API's compatibility
+    // gate into a hard install-time failure; leaving them unclaimed is the honest verdict.
+    //
+    // Both the diffusers dotted form and the kohya/flattened underscore form are matched, per the
+    // Anima and Krea precedent above.
+    if keys.iter().any(|key| {
+        key.contains("token_refiner.refiner_blocks.")
+            || key.contains("_token_refiner_refiner_blocks_")
+    }) {
+        return Some("minimax-h3".to_owned());
+    }
     None
 }
 
@@ -1759,6 +1785,28 @@ fn contains_token(haystack: &str, needle: &str) -> bool {
     })
 }
 
+/// Whether `haystack` contains `needle` as a **whole token** — bounded by a non-alphanumeric byte
+/// (or the string edge) on *both* sides.
+///
+/// [`contains_token`] only guards the leading edge, which is all the Mage arm needs: its needles
+/// (`mage-flow`, `mageflow`) are not prefixes of some other family's name. The Anima arm is the
+/// opposite case (SceneWorks#1670): `anima` *is* a prefix of `animagine-xl-3.1` and `animatediff`,
+/// two unrelated SDXL/SD1.5 architectures, so the trailing edge has to be checked too — a
+/// leading-edge-only match would claim both and hard-reject legitimate SDXL LoRAs.
+///
+/// Byte indexing is safe for any input, for the same reason as [`contains_token`]: `match_indices`
+/// yields char-boundary offsets, and a UTF-8 continuation byte on either side is not
+/// ASCII-alphanumeric, so a multi-byte neighbour reads as a boundary rather than panicking.
+fn contains_delimited_token(haystack: &str, needle: &str) -> bool {
+    let bytes = haystack.as_bytes();
+    haystack.match_indices(needle).any(|(position, matched)| {
+        let leading = position == 0 || !bytes[position - 1].is_ascii_alphanumeric();
+        let end = position + matched.len();
+        let trailing = end == bytes.len() || !bytes[end].is_ascii_alphanumeric();
+        leading && trailing
+    })
+}
+
 fn metadata_value_to_family(value: &str) -> Option<String> {
     let normalized = value.trim().to_ascii_lowercase();
     if normalized.is_empty() {
@@ -1795,9 +1843,15 @@ fn metadata_value_to_family(value: &str) -> Option<String> {
     // architectures embed that substring — Animagine XL (`animagine-xl-3.1`) and AnimateDiff
     // (`animatediff`) most notably — and mapping one of those to `anima` would hard-reject a
     // perfectly good SDXL LoRA, the exact failure mode this whole path exists to avoid.
-    if normalized == "anima"
-        || normalized.starts_with("anima_")
-        || normalized.starts_with("anima-")
+    //
+    // The boundary is checked on BOTH edges ([`contains_delimited_token`]), not anchored to the
+    // start of the value. Every other arm here uses `contains`, so every other arm tolerates the
+    // org prefix that real stamps carry: `ss_base_model_version` / `modelspec.architecture` are
+    // routinely a Hugging Face repo id (`SceneWorks/anima-turbo`, `nvidia/anima_base`) or a path'd
+    // weight file (`loras/anima-aesthetic-v1.0.safetensors`). A `starts_with("anima-")` test misses
+    // all of those, dropping them to key detection — where a metadata-less Anima file reads as Wan
+    // and the import is hard-rejected, which is exactly the report in SceneWorks#1670.
+    if contains_delimited_token(&normalized, "anima")
         || normalized.contains("cosmos-predict")
         || normalized.contains("cosmos_predict")
         || normalized.contains("cosmospredict")
@@ -2417,6 +2471,77 @@ mod tests {
         keys
     }
 
+    /// The exact key space of the four **diffusers** `lightx2v/Minimax-h3-Turbo` files
+    /// (sc-18725), transcribed from the published safetensors headers at revision
+    /// `5d1d4829fe614c1b93fcfd9cc7718e9ba71f73e1`: 624 tensors = (50 DiT + 2 refiner)
+    /// blocks x 6 targets x {lora_A, lora_B}, with PEFT's `.default` adapter-name infix.
+    fn minimax_h3_diffusers_keys() -> Vec<String> {
+        const TARGETS: [&str; 6] = [
+            "attn.to_q",
+            "attn.to_k",
+            "attn.to_v",
+            "attn.to_out.0",
+            "ff.net.0.proj",
+            "ff.net.2",
+        ];
+        let mut keys = Vec::new();
+        for block in 0..50 {
+            for target in TARGETS {
+                keys.push(format!(
+                    "transformer_blocks.{block}.{target}.lora_A.default.weight"
+                ));
+                keys.push(format!(
+                    "transformer_blocks.{block}.{target}.lora_B.default.weight"
+                ));
+            }
+        }
+        for block in 0..2 {
+            for target in TARGETS {
+                keys.push(format!(
+                    "token_refiner.refiner_blocks.{block}.{target}.lora_A.default.weight"
+                ));
+                keys.push(format!(
+                    "token_refiner.refiner_blocks.{block}.{target}.lora_B.default.weight"
+                ));
+            }
+        }
+        keys
+    }
+
+    /// The `_comfyui_` twins' key space from the same repo — a DIFFERENT architecture
+    /// spelling (`diffusion_model.blocks.*`, q/k/v fused into `attn.qkv_proj`, SwiGLU
+    /// halves swapped in `mlp.fc1`), which the engine refuses rather than folds. Note
+    /// its refiner is `token_refiner.blocks.`, NOT `token_refiner.refiner_blocks.`.
+    fn minimax_h3_comfyui_keys() -> Vec<String> {
+        const TARGETS: [&str; 4] = ["attn.qkv_proj", "attn.out_proj", "mlp.fc1", "mlp.fc2"];
+        let mut keys = Vec::new();
+        for block in 0..50 {
+            for target in TARGETS {
+                keys.push(format!("diffusion_model.blocks.{block}.{target}.alpha"));
+                keys.push(format!(
+                    "diffusion_model.blocks.{block}.{target}.lora_A.weight"
+                ));
+                keys.push(format!(
+                    "diffusion_model.blocks.{block}.{target}.lora_B.weight"
+                ));
+            }
+        }
+        for block in 0..2 {
+            for target in TARGETS {
+                keys.push(format!(
+                    "diffusion_model.token_refiner.blocks.{block}.{target}.alpha"
+                ));
+                keys.push(format!(
+                    "diffusion_model.token_refiner.blocks.{block}.{target}.lora_A.weight"
+                ));
+                keys.push(format!(
+                    "diffusion_model.token_refiner.blocks.{block}.{target}.lora_B.weight"
+                ));
+            }
+        }
+        keys
+    }
+
     #[test]
     fn detects_wan_video() {
         let mut keys = Vec::new();
@@ -2907,6 +3032,67 @@ mod tests {
         let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
 
         assert_eq!(detect_lora_family(&header).as_deref(), Some("ltx-video"));
+    }
+
+    #[test]
+    fn detects_minimax_h3_turbo_lora_by_its_token_refiner() {
+        // sc-18725. Before this, all four published turbo files detected as `None`: their DiT keys
+        // are bare `transformer_blocks.<n>.attn.to_{q,k,v}` / `ff.net.*` with no architecture
+        // prefix, which reaches no bucket (the MMDiT bucket needs the dual-stream
+        // `img_mlp`/`txt_mlp`/`add_q_proj` group; LTX and SD3 need a `transformer.`/
+        // `diffusion_model.` prefix). `None` is not harmless: `reconcile_lora_family` then fills in
+        // no family for a user-imported copy, and the web picker fails CLOSED on a family-less LoRA
+        // (`loraHasResolvableFamily`, sc-10509), so the file is silently unusable.
+        let keys = minimax_h3_diffusers_keys();
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("minimax-h3"));
+    }
+
+    #[test]
+    fn detects_minimax_h3_from_the_token_refiner_alone() {
+        // The marker must classify on its own, EXEMPT from the `MIN_KEY_MATCHES` floor the bucket
+        // scorer applies, the way the Krea and Anima unique-key entries are — `detect_unique_key_family`
+        // runs ahead of the scorer and never consults the floor. 24 of the 624 published tensors
+        // target the refiner, and a sparse adapter touching only it must still classify rather than
+        // fall through as family-less.
+        let keys: Vec<String> = minimax_h3_diffusers_keys()
+            .into_iter()
+            .filter(|key| key.starts_with("token_refiner."))
+            .collect();
+        assert_eq!(keys.len(), 24, "the refiner slice of the published key set");
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("minimax-h3"));
+    }
+
+    #[test]
+    fn does_not_claim_minimax_h3_for_the_comfyui_twin_key_space() {
+        // 🔴 sc-18724 / sc-18725. `lightx2v/Minimax-h3-Turbo` publishes each adapter twice; the
+        // `_comfyui_` twins fuse q/k/v into `attn.qkv_proj` and carry `mlp.fc1` as `[gate | value]`
+        // where our DiT is `[value | gate]`. Folding one is shape-valid and numerically WRONG (the
+        // sc-18740 class, which shipped green at cosine 0.73-0.78), so the engine refuses them.
+        // Detection must therefore NOT vouch for that key space as `minimax-h3` — a confident-but-
+        // wrong family here would carry the file past the API gate to a hard failure at install.
+        // The discriminator is real, not incidental: the ComfyUI refiner is `token_refiner.blocks.`
+        // while the diffusers one is `token_refiner.refiner_blocks.`.
+        let keys = minimax_h3_comfyui_keys();
+        let header = header_from_keys(&keys.iter().map(String::as_str).collect::<Vec<_>>());
+
+        assert_ne!(detect_lora_family(&header).as_deref(), Some("minimax-h3"));
+    }
+
+    #[test]
+    fn minimax_h3_accepts_only_its_own_lora_family() {
+        // No cross-architecture arm: unlike scail2/krea-realtime (Wan-derived), MiniMax-H3's DiT is
+        // its own architecture and borrows no other family's adapters. Pins the ABSENCE so a future
+        // registry edit that hands H3 someone else's LoRAs has to change this test on purpose.
+        assert_eq!(accepted_lora_families("minimax-h3"), vec!["minimax-h3"]);
+        assert!(extra_compatible_lora_families("minimax-h3").is_empty());
+        // The catalog/model token round-trips unchanged through both normalizers, so the manifest
+        // string, the detected string, and the API's canonical form are one spelling.
+        assert_eq!(canonical_lora_family("minimax-h3"), "minimax-h3");
+        assert_eq!(normalize_model_family("minimax_h3"), "minimax-h3");
     }
 
     #[test]
@@ -3770,6 +3956,28 @@ mod tests {
     }
 
     #[test]
+    fn contains_delimited_token_requires_a_boundary_on_both_edges() {
+        // Leading edge: string start and any non-alphanumeric byte.
+        assert!(super::contains_delimited_token("anima", "anima"));
+        assert!(super::contains_delimited_token(
+            "nvidia/anima_base",
+            "anima"
+        ));
+        assert!(super::contains_delimited_token("a.anima.b", "anima"));
+        // Trailing edge: this is the half `contains_token` does not check.
+        assert!(!super::contains_delimited_token("animagine", "anima"));
+        assert!(!super::contains_delimited_token("org/animatediff", "anima"));
+        assert!(super::contains_token("animagine", "anima"));
+        // A later delimited occurrence still counts even when an earlier one is glued.
+        assert!(super::contains_delimited_token(
+            "animatediff-anima",
+            "anima"
+        ));
+        // Multi-byte neighbours read as boundaries rather than panicking on a byte index.
+        assert!(super::contains_delimited_token("日anima日", "anima"));
+    }
+
+    #[test]
     fn anima_metadata_base_ids_detect_without_tensor_evidence() {
         // A trainer that stamps the Anima training base / weight file names the family outright,
         // so detection never has to lean on the Wan-shaped tensor keys (SceneWorks#1670).
@@ -3779,6 +3987,15 @@ mod tests {
             "anima_turbo",
             "anima-aesthetic-v1.0",
             "cosmos-predict2-2b",
+            // Org-qualified and path'd spellings. `ss_base_model_version` / `modelspec.architecture`
+            // routinely carry a Hugging Face repo id or a relative weight path rather than the bare
+            // catalog id, and the anima arm used to be anchored to the START of the value — so every
+            // one of these fell through to key detection, where a metadata-less Anima file reads as
+            // Wan and the import is hard-rejected (SceneWorks#1670).
+            "SceneWorks/anima-turbo",
+            "nvidia/anima_base",
+            "loras/anima-aesthetic-v1.0.safetensors",
+            "models\\anima-base-v1.0.safetensors",
         ] {
             assert_eq!(
                 super::metadata_value_to_family(value).as_deref(),
@@ -3799,6 +4016,17 @@ mod tests {
         assert_eq!(
             super::metadata_value_to_family("sdxl_animagine_v3").as_deref(),
             Some("sdxl")
+        );
+        // The trailing edge is what rules these out, so it has to survive the org prefix that the
+        // leading edge now tolerates — otherwise widening the arm to accept `nvidia/anima_base`
+        // would swallow `cagliostrolab/animagine-xl-3.1` along with it.
+        assert_eq!(
+            super::metadata_value_to_family("cagliostrolab/animagine-xl-3.1"),
+            None
+        );
+        assert_eq!(
+            super::metadata_value_to_family("guoyww/animatediff-motion-adapter-v1-5-2"),
+            None
         );
     }
 

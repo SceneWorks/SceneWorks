@@ -179,6 +179,17 @@ pub struct VideoRequest {
     /// source video distinct from `source_clip_asset_id`. `generate_bernini` pushes
     /// it as a second `Conditioning::VideoClip` after the source clip.
     pub reference_clip_asset_id: Option<String>,
+    /// Reference **audio** clips for a multi-modal reference video mode (sc-17160,
+    /// MiniMax-H3 Ref2VA). The audio sibling of [`Self::reference_asset_ids`] (still
+    /// images) and [`Self::reference_clip_asset_id`] (a moving reference): the worker
+    /// resolves each id through the project-scoped asset guard, decodes the clip, and
+    /// pushes one `Conditioning::ReferenceAudio` per entry.
+    ///
+    /// Inert for every video model shipped before this field existed: the per-model cap
+    /// [`reference_caps`] resolves defaults to **0** audio references, so a payload that
+    /// carries any is refused at enqueue unless the model declares
+    /// `limits.maxReferenceAudioAssets`.
+    pub reference_audio_asset_ids: Vec<String>,
     /// Per-model advanced knobs (steps, guidanceScale, imageConditioningStrength,
     /// timelineContext, …), passed through.
     pub advanced: JsonObject,
@@ -228,6 +239,7 @@ impl VideoRequest {
             bridge_right_clip_asset_id: optional_id(payload, "bridgeRightClipAssetId"),
             reference_asset_ids: string_list(payload, "referenceAssetIds"),
             reference_clip_asset_id: optional_id(payload, "referenceClipAssetId"),
+            reference_audio_asset_ids: string_list(payload, "referenceAudioAssetIds"),
             advanced: object_or_empty(payload, "advanced"),
             model_manifest_entry,
         }
@@ -269,7 +281,8 @@ pub fn payload_video_mode(payload: &JsonObject) -> String {
 }
 
 /// The frame count `model` will actually render for `raw_frames` requested, coerced onto that
-/// engine's temporal stride: LTX `8k+1`, **Mochi `6k+1`**, everything else (Wan and the families
+/// engine's temporal stride: LTX `8k+1`, **Mochi `6k+1`**, **MiniMax-H3 `17n+5` clamped to the
+/// fourteen rungs of [`MINIMAX_H3_LEGAL_FRAME_COUNTS`]**, everything else (Wan and the families
 /// built on it) `4k+1`.
 ///
 /// THE ONE LADDER (sc-12371). It has two kinds of caller by design: [`VideoRequest::frame_count`],
@@ -299,9 +312,84 @@ pub fn video_frame_count(model: &str, raw_frames: u32) -> u32 {
         ltx_frame_count(raw_frames)
     } else if is_mochi_model(model) {
         mochi_frame_count(raw_frames)
+    } else if is_minimax_h3_model(model) {
+        minimax_h3_frame_count(raw_frames)
     } else {
         wan_frame_count(raw_frames)
     }
+}
+
+/// MiniMax-H3's complete legal frame set — **fourteen** values, 124 through 345 (sc-17158).
+///
+/// ⚠️ The epic's R7 and this story's own title say `4k + 1`. **Both are wrong**, measured false
+/// against the official diffusers reference (`MiniMaxH3`, diffusers `main` PR #14355) by the
+/// sc-17242 spike. The real lattice is `17n + 5` — the video VAE's `clip_length 17` with its
+/// `token_drop 3` — and the two lattices are **not nested**: 22, 39 and 56 are all legal `17n + 5`
+/// counts and none of them is `4k + 1`, so enforcing `4k + 1` would reject most of the legal set
+/// while admitting counts the engine refuses.
+///
+/// The checkpoint then clamps the clip to `5.0 ≤ frames / 24 ≤ 15.0` (`min_duration` /
+/// `max_duration` are hardcoded properties), i.e. `120 ≤ frames ≤ 360`. Intersecting the lattice
+/// with the clamp leaves exactly these fourteen rungs — which is why the manifest advertises a
+/// fourteen-value `limits.durations` MENU rather than a range: only fourteen clip lengths are
+/// renderable, and a slider over 5–15 s would emit requests the engine refuses.
+///
+/// **Neither advertised endpoint is a lattice point.** `345 / 24 = 14.375 s` and the next rung
+/// (362 frames) is 15.083 s, so upstream's advertised 15.0 s ceiling is unreachable — sc-17147 was
+/// silently delivering 14.375 s for a 15 s request. [`MINIMAX_H3_MIN_DURATION`] /
+/// [`MINIMAX_H3_MAX_DURATION`] are derived FROM this table for exactly that reason, and the
+/// manifest's `limits.hardMinDuration` / `limits.hardMaxDuration` are pinned to them, so the app
+/// refuses 15 s rather than quietly shortening it.
+///
+/// Re-derived from the `17n + 5` rule and the 5–15 s clamp by
+/// `minimax_h3_lattice_is_seventeen_n_plus_five_not_four_k_plus_one`, so this table cannot drift
+/// from the rule it encodes.
+pub const MINIMAX_H3_LEGAL_FRAME_COUNTS: [u32; 14] = [
+    124, 141, 158, 175, 192, 209, 226, 243, 260, 277, 294, 311, 328, 345,
+];
+
+/// MiniMax-H3's one cadence. Not a menu: the lattice, the duration window and every measured
+/// render are all at 24 fps, and `limits.fps` declares `[24]` alone.
+pub const MINIMAX_H3_FPS: u32 = 24;
+
+/// The shortest renderable MiniMax-H3 clip, in seconds — `124 / 24`, DERIVED from
+/// [`MINIMAX_H3_LEGAL_FRAME_COUNTS`] rather than transcribed, so the floor and the lattice cannot
+/// drift apart. **Not** the reference's advertised 5.0: 5.0 s has no lattice point.
+pub const MINIMAX_H3_MIN_DURATION: f32 =
+    MINIMAX_H3_LEGAL_FRAME_COUNTS[0] as f32 / MINIMAX_H3_FPS as f32;
+
+/// The longest renderable MiniMax-H3 clip, in seconds — `345 / 24 = 14.375`. **Not** the
+/// reference's advertised 15.0, which sits between rungs and is now refused rather than delivered
+/// short.
+pub const MINIMAX_H3_MAX_DURATION: f32 = MINIMAX_H3_LEGAL_FRAME_COUNTS
+    [MINIMAX_H3_LEGAL_FRAME_COUNTS.len() - 1] as f32
+    / MINIMAX_H3_FPS as f32;
+
+/// MiniMax-H3's temporal snap: frames align UP to the next [`MINIMAX_H3_LEGAL_FRAME_COUNTS`] rung,
+/// clamped to the ends of that table — the reference's own `align_num_frames`, which rounds up.
+///
+/// **Aligning up is not the safety gate**, and must not be mistaken for one: the rejection of an
+/// out-of-window clip lives in [`duration_limit_error`], which refuses anything under
+/// [`MINIMAX_H3_MIN_DURATION`] or over [`MINIMAX_H3_MAX_DURATION`] rather than clamping it here.
+/// This function exists for the same reason the other arms do — the asset sidecar's `frameCount`
+/// must equal what the engine renders (sc-12371) — and within the admitted window the reference
+/// aligns up too, so the two agree.
+///
+/// `T = 1` is deliberately unreachable: there is no image lane for this family. `min_duration` is a
+/// hardcoded 5.0 upstream, so a single-frame request does not render at all; it floors to 124.
+pub fn minimax_h3_frame_count(raw_frames: u32) -> u32 {
+    let last = MINIMAX_H3_LEGAL_FRAME_COUNTS[MINIMAX_H3_LEGAL_FRAME_COUNTS.len() - 1];
+    MINIMAX_H3_LEGAL_FRAME_COUNTS
+        .iter()
+        .copied()
+        .find(|legal| *legal >= raw_frames)
+        .unwrap_or(last)
+}
+
+/// Whether `model` is a MiniMax-H3 family id (`minimax_h3`, `minimax_h3_ref`). Both partitions
+/// share one DiT geometry, so both ride [`minimax_h3_frame_count`].
+pub fn is_minimax_h3_model(model: &str) -> bool {
+    model.starts_with("minimax_h3")
 }
 
 /// LTX-2.3 temporal stride: frames snap to the nearest `8k + 1`, minimum 9. Direct
@@ -392,8 +480,30 @@ pub fn hard_max_duration(model_manifest_entry: &JsonObject) -> Option<f32> {
         .filter(|cap| cap.is_finite() && *cap > 0.0)
 }
 
-/// The actionable rejection for a `duration` past the model's declared [`hard_max_duration`], or
-/// `None` to admit. The pure decision, so both enqueue gates assert on one message (sc-12297).
+/// `limits.hardMinDuration` (seconds) from a resolved manifest entry, or `None` for **no floor**.
+///
+/// The mirror of [`hard_max_duration`], added by sc-17158 because a family can have a floor its own
+/// engine refuses below rather than pads up to. MiniMax-H3's shortest renderable clip is
+/// [`MINIMAX_H3_MIN_DURATION`] (124 frames at 24 fps); a 3 s request is not a short clip there, it
+/// is an unrenderable one, and silently lengthening it to 5.1667 s is the same silent-coercion bug
+/// class [`duration_limit_error`] exists to refuse at the other end.
+///
+/// Absent ⇒ no floor, so every model that declares nothing is byte-identical to before this key had
+/// a reader — the same never-block-without-evidence posture, and the same typo'd-manifest tolerance:
+/// a non-positive or non-finite floor is not a constraint anyone could satisfy.
+pub fn hard_min_duration(model_manifest_entry: &JsonObject) -> Option<f32> {
+    model_manifest_entry
+        .get("limits")
+        .and_then(Value::as_object)
+        .and_then(|limits| limits.get("hardMinDuration"))
+        .and_then(Value::as_f64)
+        .map(|floor| floor as f32)
+        .filter(|floor| floor.is_finite() && *floor > 0.0)
+}
+
+/// The actionable rejection for a `duration` outside the model's declared
+/// [`hard_min_duration`]..=[`hard_max_duration`] window, or `None` to admit. The pure decision, so
+/// both enqueue gates assert on one message (sc-12297; floor added by sc-17158).
 ///
 /// **Reject, never clamp.** Quietly rewriting a 30 s request into a 5 s render is the same
 /// silent-coercion bug class B3 exists to fix (the invisible 848→832 dimension rewrite, sc-11993 /
@@ -410,11 +520,193 @@ pub fn duration_limit_error(
     duration: f32,
     model_manifest_entry: &JsonObject,
 ) -> Option<String> {
+    if let Some(floor) = hard_min_duration(model_manifest_entry) {
+        if duration < floor {
+            return Some(format!(
+                "{model} renders clips of at least {floor}s, but this request asks for \
+                 {duration}s. Lengthen the clip to {floor}s or more, or choose a model that \
+                 renders shorter clips."
+            ));
+        }
+    }
     let cap = hard_max_duration(model_manifest_entry)?;
     (duration > cap).then(|| {
         format!(
             "{model} renders clips up to {cap}s, but this request asks for {duration}s. Shorten \
              the clip to {cap}s or less, or choose a model that renders longer clips."
+        )
+    })
+}
+
+/// `limits.hardMinSteps` from a resolved manifest entry, or `None` for **no floor**.
+///
+/// The sampling-axis sibling of [`hard_min_duration`], added by sc-19426 because the catalog had no
+/// way to say "this engine REFUSES below N denoise steps" at all — the constraint could only be
+/// written as a manifest comment, which nothing reads.
+///
+/// MiniMax-H3 is the case that forced it, and its floor is a **product judgement, not an engine
+/// limit** (the corrected sc-18726 account, carried by the manifest's `hardMinSteps` comment).
+/// The unit everywhere in SceneWorks is MODEL EVALUATIONS (NFE): the engine builds the sigma grid
+/// as `linspace(1, 0, steps + 1)`, appending the terminal `0` itself
+/// (`JointSchedule::with_shifts(evaluations + 1, ..)`), so a `steps: 1` request is a legal
+/// 2-point grid that renders — as noise, because one evaluation is a single Euler jump from pure
+/// randomness; 2 is the smallest schedule with an intermediate sigma. This doc previously carried
+/// the retracted "`steps` points drive `steps - 1` evaluations, so `steps: 1` is unrenderable"
+/// account — that describes diffusers' `num_inference_steps` grid-point convention, which is NOT
+/// what this key counts. Pinned by
+/// `minimax_h3_turbo_steps_are_model_evaluations_not_grid_points` (this crate). Either way the
+/// floor is REFUSED rather than quietly raised, the same reject-never-clamp posture the duration
+/// bounds take.
+///
+/// Absent ⇒ no floor, so every model that declares nothing is byte-identical to before this key had
+/// a reader — the same never-block-without-evidence posture [`hard_min_duration`] takes, and the
+/// same typo'd-manifest tolerance: a zero, negative, fractional or non-numeric floor is not a
+/// constraint anyone could satisfy, so it falls back to no floor rather than bricking the model.
+///
+/// ⚠️ A **declared** floor is not automatically a **read** one: this reads `as_u64`, so an authored
+/// `2.0` parses as a float and lands back on `None` even though JSON Schema's `integer` accepts it.
+/// `shipped_manifest_step_floors_admit_everything_they_advertise` compares the reader's answer
+/// against a transcription of the manifest bytes for exactly that reason.
+pub fn hard_min_steps(model_manifest_entry: &JsonObject) -> Option<u32> {
+    model_manifest_entry
+        .get("limits")
+        .and_then(Value::as_object)
+        .and_then(|limits| limits.get("hardMinSteps"))
+        .and_then(Value::as_u64)
+        .filter(|floor| *floor > 0)
+        .and_then(|floor| u32::try_from(floor).ok())
+}
+
+/// `limits.steps` — the discrete set of denoise step counts a model advertises — or `None` for
+/// **no menu**, meaning any count the model's other bounds allow.
+///
+/// The **exact-value** sibling of [`hard_min_steps`], added by sc-19502 because a floor could only
+/// express half of LTX-2.3's constraint. LTX is distilled: its σ waypoints are baked into training,
+/// so `candle-gen-ltx` runs a fixed 8-step stage-1 schedule and can honor *no other count*.
+/// `hardMinSteps: 8` would have said "at least 8" and wrongly admitted `steps: 30`, which the engine
+/// refuses — so the shape had to be a SET, membership-tested like [`allowed_fps`], not a `<`
+/// comparison. `limits.steps: [8]` says exactly 8 and generalizes to a family with two baked
+/// schedules without becoming a range.
+///
+/// # Why one lane-agnostic key is legitimate here
+///
+/// sc-19502 filed this as possibly needing a **per-lane** block, because the two backends disagreed:
+/// candle rejected `steps: 30` while `mlx-gen-ltx` never read `req.steps` at all and silently
+/// rendered its baked schedule anyway. Reading both engines settled it — the divergence was a lane
+/// **defect**, not a real difference. Both lanes bake a byte-identical `STAGE1_SIGMAS` table (the
+/// same 9 σ waypoints ⇒ the same 8 steps); mlx had simply never enforced it. The inference-side
+/// half of sc-19502 moved the constraint onto the shared `Capabilities::supported_steps` seam that
+/// both lanes' `validate` already calls, so they now refuse identically. A per-lane key would have
+/// encoded the bug in the schema and made it permanent.
+///
+/// Absent ⇒ no menu, so a model that declares nothing is byte-identical to before this key had a
+/// reader — the same never-block-without-evidence posture [`allowed_fps`] and [`hard_min_steps`]
+/// take. An array with no usable entry (empty, or every value non-integer / zero) is likewise **no
+/// menu**: a menu nothing can satisfy would reject every request including the model's own
+/// `defaults.steps`, which is a typo'd manifest bricking a model rather than a constraint. Zero is
+/// filtered because every engine shares gen-core's `steps >= 1` rejection, so a declared `0` is not
+/// a count anyone could render.
+///
+/// ⚠️ Reads `as_u64`, so an authored `8.0` parses as a float and lands back on `None` even though
+/// JSON Schema's `integer` accepts it — a declaration with no reader.
+/// `shipped_manifest_step_floors_admit_everything_they_advertise` compares this against a
+/// transcription of the manifest bytes for exactly that reason — it covers both step axes.
+pub fn allowed_steps(model_manifest_entry: &JsonObject) -> Option<Vec<u32>> {
+    let menu: Vec<u32> = model_manifest_entry
+        .get("limits")
+        .and_then(Value::as_object)
+        .and_then(|limits| limits.get("steps"))
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(Value::as_u64)
+        .filter(|steps| *steps > 0)
+        .filter_map(|steps| u32::try_from(steps).ok())
+        .collect();
+    (!menu.is_empty()).then_some(menu)
+}
+
+/// The denoise step count a video payload actually renders at — `advanced.steps` as the caller named
+/// it — or `None` when they named none, in which case the engine picks and there is nothing to
+/// judge.
+///
+/// Deliberately reads the SAME two shapes, with the same width arithmetic, as the worker's own
+/// `video_jobs::wan::advanced_opt_u32` — a JSON number or a numeric string, narrowed with `as u32`.
+/// A gate that reads fewer shapes than the consumer is a gate with a hole: `"steps": "1"` would slip
+/// past a number-only gate and still reach the engine as 1, and `steps: 4294967297` would slip past
+/// a checked-conversion gate and reach it as 1 as well, which is the exact value the floor exists to
+/// refuse. Pinned by `requested_steps_reads_every_shape_the_worker_reads`.
+///
+/// Unlike [`resolve_duration`] / [`resolve_fps`] this does **not** fall back to `defaults.steps`.
+/// Those two resolve because the API serializes a value for them whether or not the caller named
+/// one, so the gate had to judge the resolved value or it would reject payloads the route built
+/// itself (sc-12400). `advanced` is a verbatim passthrough map with no blanket step count, so an
+/// omitted `steps` really is "the engine's own default" and inventing one here would gate a value
+/// nobody sends. That the shipped `defaults.steps` clears the shipped floor is a MANIFEST invariant,
+/// asserted against the real bytes rather than papered over at runtime.
+pub fn requested_steps(advanced: &JsonObject) -> Option<u32> {
+    advanced.get("steps").and_then(|value| {
+        value
+            .as_u64()
+            .or_else(|| value.as_str()?.trim().parse().ok())
+            .map(|steps: u64| steps as u32)
+    })
+}
+
+/// The actionable rejection for a `steps` count under the model's declared [`hard_min_steps`], or
+/// `None` to admit. The pure decision, so both enqueue gates assert on one message (sc-19426).
+///
+/// **Reject, never clamp**, for [`duration_limit_error`]'s reason: quietly raising a 1-step request
+/// to 2 doubles the compute the caller asked for with no error and no signal, which is the same
+/// silent-coercion class as the 848→832 dimension rewrite (sc-11993 / sc-12294) and as delivering
+/// 14.375 s for a 15 s request (sc-17147). It also matches the engine's own posture — the reference
+/// raises rather than rounding up.
+///
+/// Message follows the house convention (`mlx_fit_gate::too_big_error`): name the model, state what
+/// was asked and what the floor is, and give the lever. Pinned by
+/// `steps_limit_error_names_the_model_the_request_and_the_floor`.
+///
+/// # Two independent constraints, one gate
+///
+/// sc-19502 added the [`allowed_steps`] menu here rather than as a second function so that the new
+/// key needed **no new wiring**: the API (`generation.rs`) and the worker
+/// (`video_jobs/mod.rs`) already call this on the video enqueue path, so both immediately became
+/// readers of `limits.steps` and the rejection is reachable by a real request the day the key is
+/// declared. A parallel `steps_menu_error` would have been a second thing to remember to call at
+/// two seams — and forgetting one is precisely how a declared key becomes an inert one.
+///
+/// The menu is checked **first**: it is the stricter, exact statement, so when a model somehow
+/// declares both, the caller gets told the legal value rather than a floor that would still leave
+/// them off-menu.
+pub fn steps_limit_error(
+    model: &str,
+    steps: u32,
+    model_manifest_entry: &JsonObject,
+) -> Option<String> {
+    // `limits.steps` — the exact-value menu (sc-19502). Membership, not `<`: an over-menu count is
+    // as unrenderable as an under-menu one on a distilled schedule.
+    if let Some(menu) = allowed_steps(model_manifest_entry) {
+        if !menu.contains(&steps) {
+            let allowed = humanized_number_menu(&menu);
+            // Singular gets the natural "a fixed 8-step schedule"; a multi-entry menu cannot take
+            // the `-step` suffix ("a fixed 4, 8, or 12-step schedule" reads as one number), so it
+            // states the set instead.
+            let schedule = match menu.as_slice() {
+                [only] => format!("runs a fixed {only}-step schedule"),
+                _ => format!("renders at {allowed} steps only"),
+            };
+            return Some(format!(
+                "{model} {schedule}, but this request asks for {steps} steps. Set steps to \
+                 {allowed}, or choose a model whose step count you can change."
+            ));
+        }
+        return None;
+    }
+    let floor = hard_min_steps(model_manifest_entry)?;
+    (steps < floor).then(|| {
+        format!(
+            "{model} renders with at least {floor} sampling steps, but this request asks for \
+             {steps}. Raise the step count to {floor} or more, or choose a model that renders in \
+             fewer steps."
         )
     })
 }
@@ -592,8 +884,11 @@ pub fn default_resolution(model_manifest_entry: &JsonObject) -> Option<(u32, u32
     declared_resolution(model_manifest_entry, MIN_DIMENSION, MAX_DIMENSION)
 }
 
-/// The advertised frame rates as a human list: `30`, `16 or 24`, `6, 7, 8, 10, 12, or 25`.
-fn humanized_fps_menu(menu: &[u32]) -> String {
+/// An advertised numeric menu as a human list: `30`, `16 or 24`, `6, 7, 8, 10, 12, or 25`.
+///
+/// Shared by the fps and step menus (sc-19502) — the formatting is axis-agnostic, and a second copy
+/// would be a second place for the list style to drift.
+fn humanized_number_menu(menu: &[u32]) -> String {
     match menu {
         [only] => only.to_string(),
         [first, second] => format!("{first} or {second}"),
@@ -635,10 +930,197 @@ fn humanized_fps_menu(menu: &[u32]) -> String {
 pub fn fps_limit_error(model: &str, fps: u32, model_manifest_entry: &JsonObject) -> Option<String> {
     let menu = allowed_fps(model_manifest_entry)?;
     (!menu.contains(&fps)).then(|| {
-        let allowed = humanized_fps_menu(&menu);
+        let allowed = humanized_number_menu(&menu);
         format!(
             "{model} renders at {allowed} fps, but this request asks for {fps} fps. Set fps to \
              {allowed}, or choose a model that renders at {fps} fps."
+        )
+    })
+}
+
+/// The reference-image cap applied when a model declares no `limits.maxReferenceAssets` —
+/// the historical blanket, so every already-shipped video model keeps refusing a 9th
+/// reference exactly as it did before sc-17160 raised the API's payload-sanity ceiling.
+pub const DEFAULT_MAX_REFERENCE_ASSETS: usize = 8;
+/// The source-clip cap applied when a model declares no `limits.maxSourceClipAssets` —
+/// the historical blanket, unchanged for every already-shipped video model.
+pub const DEFAULT_MAX_SOURCE_CLIP_ASSETS: usize = 8;
+/// The reference-**audio** cap applied when a model declares no
+/// `limits.maxReferenceAudioAssets`.
+///
+/// **Zero, deliberately.** `referenceAudioAssetIds` is new surface (sc-17160) that no video
+/// model shipped before it could consume, and no engine silently ignores conditioning it was
+/// handed — it renders unconditioned, which is invisible in the output (the epic-1788 class).
+/// Defaulting to 0 means a model has to *declare* that it takes audio references before one
+/// can reach it, so the new field is inert for every existing family rather than accepted-and-
+/// dropped.
+pub const DEFAULT_MAX_REFERENCE_AUDIO_ASSETS: usize = 0;
+
+/// The per-model reference-media caps resolved from a manifest entry's `limits`.
+///
+/// Four independent facts, because a model's reference surface is not one number: MiniMax-H3's
+/// Ref2VA takes ≤9 images, ≤3 video clips and ≤3 audio clips but ≤12 **files in total**, so the
+/// per-list caps do not multiply out to the real ceiling and the combined cap is not derivable
+/// from them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReferenceCaps {
+    /// `limits.maxReferenceAssets` — still-image references (`referenceAssetIds`).
+    pub images: usize,
+    /// `limits.maxSourceClipAssets` — source/reference video clips (`sourceClipAssetIds`).
+    pub clips: usize,
+    /// `limits.maxReferenceAudioAssets` — audio references (`referenceAudioAssetIds`).
+    pub audio: usize,
+    /// `limits.maxCombinedReferenceAssets` — the ceiling on images + clips + audio together, or
+    /// `None` when the model declares none. Absent ⇒ no combined ceiling, so a model that
+    /// declares nothing behaves exactly as it did before this key had a reader.
+    pub combined: Option<usize>,
+}
+
+impl Default for ReferenceCaps {
+    fn default() -> Self {
+        Self {
+            images: DEFAULT_MAX_REFERENCE_ASSETS,
+            clips: DEFAULT_MAX_SOURCE_CLIP_ASSETS,
+            audio: DEFAULT_MAX_REFERENCE_AUDIO_ASSETS,
+            combined: None,
+        }
+    }
+}
+
+/// [`ReferenceCaps`] for a resolved manifest entry, falling back to the pre-sc-17160 defaults
+/// for every key the model does not declare.
+///
+/// Same never-block-without-evidence posture as [`hard_max_duration`]: a declared cap that is
+/// not a non-negative integer is not a constraint anyone could satisfy, so it falls back to the
+/// default rather than bricking the model.
+pub fn reference_caps(model_manifest_entry: &JsonObject) -> ReferenceCaps {
+    let limits = model_manifest_entry
+        .get("limits")
+        .and_then(Value::as_object);
+    let cap = |key: &str| -> Option<usize> {
+        limits
+            .and_then(|limits| limits.get(key))
+            .and_then(Value::as_u64)
+            .and_then(|cap| usize::try_from(cap).ok())
+    };
+    let defaults = ReferenceCaps::default();
+    ReferenceCaps {
+        images: cap("maxReferenceAssets").unwrap_or(defaults.images),
+        clips: cap("maxSourceClipAssets").unwrap_or(defaults.clips),
+        audio: cap("maxReferenceAudioAssets").unwrap_or(defaults.audio),
+        combined: cap("maxCombinedReferenceAssets"),
+    }
+}
+
+/// The actionable rejection for a request whose reference media exceeds what the model declares,
+/// or `None` to admit. The pure decision, so the API enqueue gate and the worker preflight assert
+/// on one message — the same shape as [`duration_limit_error`] / [`fps_limit_error`] (sc-17160).
+///
+/// **Per-model, not a global bump.** MiniMax-H3 accepts 9 images where every family before it
+/// accepted 8; raising the shared API constant alone would have handed every other video model a
+/// 9th reference its engine was never asked to encode. The manifest is the seam epic 12334
+/// established for exactly this: a model that takes more declares more, and one that declares
+/// nothing keeps the historical [`DEFAULT_MAX_REFERENCE_ASSETS`].
+///
+/// Per-list caps are checked before the combined one so the message names the list actually over
+/// budget; the combined cap is the only one that can reject a request in which every individual
+/// list fits.
+///
+/// Message follows the house convention (`mlx_fit_gate::too_big_error`): name the model, state
+/// what was asked and what the cap is, and give the lever.
+/// What a `reference_to_video` reference set is, judged against the ONE rule every layer must
+/// agree on (sc-19574).
+///
+/// Four layers used to hold three opinions about an audio-only set: the Video Studio enabled
+/// Generate for it, `validate_video_job` accepted it, `sceneworks-mcp` submitted it, and the worker
+/// refused it. A user could assemble a request the product presented as valid and then be told no.
+///
+/// The engine was right, and it is not a judgement call: diffusers `MiniMaxH3` (upstream PR #14355,
+/// `0.40.0.dev0 @ 7564fb01`) documents `MiniMaxH3AudioReference` as "a voice or music reference: at
+/// most 3 per request, and never on its own — an audio reference has to be paired with at least one
+/// image or video reference. It never reaches the conditioner and is encoded by the audio VAE
+/// alone", and enforces it in `before_encoder.py`:
+///
+/// ```text
+/// if set(kinds) == {"audio"}:
+///     raise ValueError("An audio reference has to be paired with at least one image or video
+///                       reference and cannot be used on its own.")
+/// ```
+///
+/// So an audio-only set leaves the VISUAL stream unconditioned, and the render it would produce is
+/// not the one asked for.
+///
+/// It lives HERE, as one predicate the API, the MCP tool and the worker all call, because
+/// restating the rule in each of them is exactly how they came to disagree. Each layer still words
+/// its own message — an agent's error, a user's error and an engine's error are different
+/// sentences — but none of them decides the rule.
+///
+/// It judges MEDIA KINDS, not model ids: "audio conditions the soundtrack, the visual stream needs
+/// a visual reference" is a fact about which lists carry pixels. Which of the three lists a given
+/// model takes at all, and how many, stays with the model as its declared
+/// `limits.max*ReferenceAssets` ([`reference_limit_error`]) — a model that takes no audio refuses
+/// it there, one list up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferenceSetVerdict {
+    /// At least one image or video-clip reference: the visual conditioner has something to read.
+    Conditionable,
+    /// No references at all.
+    Empty,
+    /// Audio references only — the shape upstream raises on.
+    AudioOnly,
+}
+
+/// Classify a `reference_to_video` reference set. See [`ReferenceSetVerdict`].
+pub fn classify_reference_set(images: usize, clips: usize, audio: usize) -> ReferenceSetVerdict {
+    if images > 0 || clips > 0 {
+        return ReferenceSetVerdict::Conditionable;
+    }
+    if audio > 0 {
+        return ReferenceSetVerdict::AudioOnly;
+    }
+    ReferenceSetVerdict::Empty
+}
+
+pub fn reference_limit_error(
+    model: &str,
+    images: usize,
+    clips: usize,
+    audio: usize,
+    model_manifest_entry: &JsonObject,
+) -> Option<String> {
+    let caps = reference_caps(model_manifest_entry);
+    for (count, cap, field, noun) in [
+        (images, caps.images, "referenceAssetIds", "reference images"),
+        (clips, caps.clips, "sourceClipAssetIds", "source clips"),
+        (
+            audio,
+            caps.audio,
+            "referenceAudioAssetIds",
+            "audio references",
+        ),
+    ] {
+        if count > cap {
+            return Some(if cap == 0 {
+                format!(
+                    "{model} takes no {noun}, but this request supplies {count}. Remove \
+                     {field}, or choose a model that conditions on {noun}."
+                )
+            } else {
+                format!(
+                    "{model} takes up to {cap} {noun}, but this request supplies {count}. \
+                     Reduce {field} to {cap} or fewer, or choose a model that takes more."
+                )
+            });
+        }
+    }
+    let combined = caps.combined?;
+    let total = images + clips + audio;
+    (total > combined).then(|| {
+        format!(
+            "{model} takes up to {combined} reference files in total, but this request supplies \
+             {total} ({images} reference images + {clips} source clips + {audio} audio \
+             references). Remove {} of them.",
+            total - combined
         )
     })
 }
@@ -1396,6 +1878,13 @@ mod tests {
         value.as_object().cloned().unwrap()
     }
 
+    /// The step-menu refusal for `steps` against `entry`, asserting there IS one (sc-19502).
+    /// Names a fixed model so the message assertions can look for it.
+    fn steps_menu_message(entry: &JsonObject, steps: u32) -> String {
+        steps_limit_error("some_distilled", steps, entry)
+            .unwrap_or_else(|| panic!("{steps} steps must be refused by the declared menu"))
+    }
+
     #[test]
     fn ltx_ic_lora_predicate_accepts_metadata_and_canonical_markers_only() {
         for lora in [
@@ -1803,6 +2292,18 @@ mod tests {
         // (`max_size: 1280`). So `None` here is the load-bearing half: the manifest must not
         // borrow the 14B family's 921,600 just because the backbone is a Wan 14B.
         ("krea_realtime_14b", Some(16), None),
+        // MiniMax-H3 (epic 17137, sc-17158), both partitions. `SIZE_MULTIPLE = 32` — the VAE's 16x
+        // spatial stride times the DiT's width patch 2 — which core's default floor already
+        // matches, so `None` here is a DECLARATION that the manifest must stay silent: writing 32
+        // into `limits.requiresDimensionsMultipleOf` would read as a per-model choice when it is
+        // the blanket (the same reason wan_2_2 and scail2_14b declare nothing).
+        //
+        // `CANVAS_MAX_PIXELS` = 1,032,192 = 768x1344 IS enforced, and as an AREA budget rather than
+        // a per-edge one: `Capabilities::max_size` bounds each edge independently, so before
+        // sc-17152 wired the area check a 1344x1344 request passed everything at 1.75x the
+        // checkpoint's budget. A cap is declared here because the engine has one.
+        ("minimax_h3", None, Some(1_032_192)),
+        ("minimax_h3_ref", None, Some(1_032_192)),
     ];
 
     /// The `models` array of the SHIPPED manifest — the exact bytes the app embeds and seeds.
@@ -1954,6 +2455,13 @@ mod tests {
         // checkpoint runs `sink_size = 0`, so a bounded-window AR clip drifts as it lengthens
         // (sc-15127). 5 s = 10 AR blocks, just past the reference driver's 9-block example.
         ("krea_realtime_14b", 5.0),
+        // MiniMax-H3's ceiling is a LATTICE bound, not a memory or stability one: 345 frames is the
+        // largest `17n + 5` count inside the checkpoint's own 5–15 s clamp, and `345 / 24` is
+        // 14.375. Upstream ADVERTISES 15.0 s and cannot reach it — the next rung, 362 frames, is
+        // 15.083 s — so the manifest must not repeat the advertisement or the engine will refuse
+        // its own dropdown (sc-17152; sc-17147 was silently delivering 14.375 s for a 15 s ask).
+        ("minimax_h3", 14.375),
+        ("minimax_h3_ref", 14.375),
     ];
 
     #[test]
@@ -2172,6 +2680,1123 @@ mod tests {
         );
     }
 
+    /// sc-17158 — **the lattice this family actually has, re-derived from its rule.**
+    ///
+    /// The epic's R7 and sc-17158's own title both say `4k + 1`. Measured against the official
+    /// diffusers `MiniMaxH3` reference on real weights (sc-17242 spike, correction of record on
+    /// sc-17158 activity 18824), the rule is `17n + 5`, clamped by the checkpoint's hardcoded
+    /// `min_duration = 5.0` / `max_duration = 15.0` at 24 fps — i.e. `120 ≤ frames ≤ 360`.
+    ///
+    /// [`MINIMAX_H3_LEGAL_FRAME_COUNTS`] is a transcribed table, so this test re-derives it from the
+    /// rule rather than reading it back: a typo in the table is RED here.
+    ///
+    /// DISCRIMINATING, and that is the whole point: the two candidate lattices are **not nested**,
+    /// so the wrong one is not merely coarser — it admits counts the engine refuses AND refuses
+    /// counts it accepts.
+    #[test]
+    fn minimax_h3_lattice_is_seventeen_n_plus_five_not_four_k_plus_one() {
+        // The reference's own clamp, in frames: `min <= aligned_frames / 24 <= max`.
+        const CLAMP_MIN_FRAMES: u32 = 120; // 5.0 s x 24
+        const CLAMP_MAX_FRAMES: u32 = 360; // 15.0 s x 24
+
+        let derived: Vec<u32> = (0..64)
+            .map(|n| 17 * n + 5)
+            .filter(|frames| (CLAMP_MIN_FRAMES..=CLAMP_MAX_FRAMES).contains(frames))
+            .collect();
+        assert_eq!(
+            derived,
+            MINIMAX_H3_LEGAL_FRAME_COUNTS.to_vec(),
+            "the table must be exactly `17n + 5` intersected with the 5-15 s clamp"
+        );
+        assert_eq!(derived.len(), 14, "exactly fourteen clip lengths render");
+        assert_eq!((derived[0], derived[13]), (124, 345));
+
+        // NOT NESTED — the finding that makes shipping `4k + 1` a bug rather than an
+        // approximation. 22, 39 and 56 are on this lattice and none is `4k + 1`.
+        for off_lattice_for_wan in [22u32, 39, 56] {
+            assert_eq!(
+                (off_lattice_for_wan - 5) % 17,
+                0,
+                "{off_lattice_for_wan} must be a genuine 17n+5 count"
+            );
+            assert_ne!(
+                off_lattice_for_wan % 4,
+                1,
+                "{off_lattice_for_wan} must NOT be 4k+1, or this test proves nothing"
+            );
+        }
+        // …and inside the shipped window the disagreement is the majority case: enforcing `4k + 1`
+        // would reject most of the legal set.
+        let rejected_by_the_wrong_rule = MINIMAX_H3_LEGAL_FRAME_COUNTS
+            .iter()
+            .filter(|frames| *frames % 4 != 1)
+            .count();
+        assert!(
+            rejected_by_the_wrong_rule > MINIMAX_H3_LEGAL_FRAME_COUNTS.len() / 2,
+            "the two rules must disagree on most of the legal set, else the correction is cosmetic"
+        );
+
+        // The derived duration window, and why neither ADVERTISED endpoint may be declared: 5.0 s
+        // and 15.0 s are both off-lattice. Judged from the DERIVED rungs rather than from the
+        // constants, so this is a real comparison rather than a constant-folded tautology (and so
+        // clippy's `assertions_on_constants` has nothing to say about it).
+        let shortest = f64::from(derived[0]) / 24.0;
+        let longest = f64::from(derived[13]) / 24.0;
+        assert_eq!(MINIMAX_H3_MIN_DURATION, shortest as f32);
+        assert_eq!(MINIMAX_H3_MAX_DURATION, longest as f32);
+        assert_eq!(longest, 14.375);
+        assert!(
+            shortest > 5.0,
+            "the reference advertises 5.0 s and has no lattice point there: {shortest}"
+        );
+        assert!(
+            longest < 15.0,
+            "the reference advertises 15.0 s and cannot reach it — the next rung is 362 frames: \
+             {longest}"
+        );
+        // The first rung is `n = 7` (124) and there are 14 of them, so the last is `n = 20` and the
+        // first UNREACHABLE one is `n = 7 + 14 = 21`.
+        let next_rung = 17 * (7 + derived.len() as u32) + 5;
+        assert_eq!(next_rung, 362, "the unreachable next rung");
+        assert!(f64::from(next_rung) / 24.0 > 15.0);
+    }
+
+    /// The snap: frames align UP onto the next rung, clamped to the table's ends — the reference's
+    /// `align_num_frames`. This is the sidecar-parity ladder (sc-12371), NOT the rejection gate;
+    /// out-of-window requests are refused by [`duration_limit_error`], which
+    /// [`minimax_h3_refuses_the_advertised_fifteen_seconds_rather_than_shortening_it`] pins.
+    #[test]
+    fn minimax_h3_frame_count_snaps_up_onto_the_lattice() {
+        // Every rung is a FIXED POINT — advertise it and it renders.
+        for legal in MINIMAX_H3_LEGAL_FRAME_COUNTS {
+            assert_eq!(minimax_h3_frame_count(legal), legal, "{legal} is a rung");
+        }
+        // Between rungs, align UP. 168 (7 s at 24 fps) is deliberately off-lattice.
+        assert_eq!(minimax_h3_frame_count(125), 141);
+        assert_eq!(minimax_h3_frame_count(168), 175);
+        assert_eq!(minimax_h3_frame_count(344), 345);
+        // Below the floor and above the ceiling clamp to the ends; the DURATION gate is what
+        // refuses them, so this must not panic or emit an off-lattice count.
+        assert_eq!(minimax_h3_frame_count(1), 124, "T=1 does not render");
+        assert_eq!(minimax_h3_frame_count(0), 124);
+        assert_eq!(minimax_h3_frame_count(362), 345);
+        assert_eq!(minimax_h3_frame_count(u32::MAX), 345);
+
+        // Dispatch: both partitions ride this arm, and neither falls through to the Wan 4k+1
+        // fallback. 168 discriminates — `wan_frame_count(168) == 165`, which is off `17n + 5`.
+        assert_ne!(wan_frame_count(168), minimax_h3_frame_count(168));
+        for model in ["minimax_h3", "minimax_h3_ref"] {
+            assert!(is_minimax_h3_model(model));
+            assert_eq!(video_frame_count(model, 168), 175, "{model}");
+        }
+        assert!(!is_minimax_h3_model("wan_2_2"));
+        assert!(!is_wan_model("minimax_h3"));
+        assert!(!is_ltx_model("minimax_h3"));
+        assert!(!is_mochi_model("minimax_h3"));
+    }
+
+    /// One lattice rung as the manifest DECLARES it: `frames / 24` rounded to 4 dp, which is the
+    /// menu sc-17152 published and what the studio dropdown shows.
+    ///
+    /// The rounding is why the shipped floor is compared against this rather than against
+    /// [`MINIMAX_H3_MIN_DURATION`]: `124 / 24` is 5.16666…, so the declared 5.1667 sits 8e-4 of a
+    /// frame ABOVE the exact rung. That is deliberate — a request in that sliver is told the exact
+    /// renderable value instead of being silently lengthened to it, which is the whole posture of
+    /// this gate. (`345 / 24 = 14.375` is exact, so the ceiling has no such gap.)
+    fn declared_rung_seconds(frames: u32) -> f64 {
+        (f64::from(frames) / 24.0 * 10_000.0).round() / 10_000.0
+    }
+
+    /// sc-17158 — the manifest's fourteen-value duration MENU is exactly the lattice, and every
+    /// entry round-trips back to its own frame count.
+    ///
+    /// This is the anti-drift gate between a hand-authored JSONC array and the Rust table: the
+    /// expectation is DERIVED from [`MINIMAX_H3_LEGAL_FRAME_COUNTS`], and the manifest is the thing
+    /// under test. Advertising a range instead of a menu, or rounding a rung to 3 dp so it snaps to
+    /// the neighbouring count, is RED here.
+    #[test]
+    fn shipped_minimax_h3_duration_menu_is_exactly_the_fourteen_lattice_rungs() {
+        let models = builtin_video_models();
+        for id in ["minimax_h3", "minimax_h3_ref"] {
+            let entry = models
+                .iter()
+                .find(|m| m.get("id").and_then(Value::as_str) == Some(id))
+                .unwrap_or_else(|| panic!("{id} present in builtin.models.jsonc"))
+                .as_object()
+                .expect("model entry object");
+            let limits = entry
+                .get("limits")
+                .and_then(Value::as_object)
+                .unwrap_or_else(|| panic!("{id} has limits"));
+
+            let advertised: Vec<f64> = limits
+                .get("durations")
+                .and_then(Value::as_array)
+                .unwrap_or_else(|| panic!("{id} advertises durations"))
+                .iter()
+                .map(|d| d.as_f64().expect("numeric duration"))
+                .collect();
+            let derived: Vec<f64> = MINIMAX_H3_LEGAL_FRAME_COUNTS
+                .iter()
+                .copied()
+                .map(declared_rung_seconds)
+                .collect();
+            assert_eq!(
+                advertised, derived,
+                "{id}: the duration menu must be the fourteen lattice rungs at 4 dp"
+            );
+
+            // ROUND TRIP, which is what the 4 dp buys: each advertised second lands back on its own
+            // frame count through the SAME f32 path a real request takes, so the studio's dropdown
+            // cannot emit a duration the engine then aligns somewhere else.
+            for (advertised, frames) in advertised.iter().zip(MINIMAX_H3_LEGAL_FRAME_COUNTS) {
+                let request = VideoRequest::from_payload(&payload(json!({
+                    "projectId": "p", "model": id, "duration": advertised, "fps": 24,
+                    "modelManifestEntry": Value::Object(entry.clone()),
+                })));
+                assert_eq!(
+                    request.raw_frame_count(),
+                    frames,
+                    "{id}: {advertised}s must round to {frames} raw frames"
+                );
+                assert_eq!(
+                    request.frame_count(),
+                    frames,
+                    "{id}: {advertised}s is a rung, so the snap must be the identity"
+                );
+                assert_eq!(
+                    duration_limit_error(id, request.duration, entry),
+                    None,
+                    "{id}: {advertised}s is advertised, so both bounds must admit it"
+                );
+            }
+
+            // The two bounds are the ENDS of the menu, at the same 4 dp.
+            let floor = declared_rung_seconds(MINIMAX_H3_LEGAL_FRAME_COUNTS[0]) as f32;
+            let ceiling = declared_rung_seconds(MINIMAX_H3_LEGAL_FRAME_COUNTS[13]) as f32;
+            assert_eq!(hard_min_duration(entry), Some(floor));
+            assert_eq!(hard_max_duration(entry), Some(ceiling));
+            // …and each is the DECLARED rendering of its lattice rung, not an independent number:
+            // within half a frame of the exact quotient. The ceiling is exact (14.375); the floor
+            // rounds 5.16666… UP by 8e-4 of a frame, which is the correct 4 dp value and the one
+            // sc-17152 published.
+            assert!((f64::from(floor) - 124.0 / 24.0).abs() < 0.5 / 24.0);
+            assert_eq!(ceiling, MINIMAX_H3_MAX_DURATION);
+            assert!(f64::from(floor) > f64::from(MINIMAX_H3_MIN_DURATION));
+            // …and the shipped default is the shortest rung, because the cheapest clip at the
+            // default canvas is already a ~2 hour render (sc-17152).
+            assert_eq!(default_duration(entry), Some(floor));
+            assert_eq!(default_fps(entry), Some(MINIMAX_H3_FPS));
+        }
+    }
+
+    /// Each shipped video model's declared `limits.hardMinDuration`, TRANSCRIBED from the manifest —
+    /// deliberately independent of [`hard_min_duration`], the function under test, for the same
+    /// reason [`DEFAULT_RESOLUTIONS`] is transcribed rather than derived.
+    ///
+    /// `None` is the load-bearing half here: it asserts that a model which declares no floor STILL
+    /// declares none, so sc-17158's new key cannot silently acquire a reader-visible value on a
+    /// family whose engine pads short clips up rather than refusing them.
+    const DURATION_FLOORS: &[(&str, Option<f32>)] = &[
+        ("ltx_2_3", None),
+        ("ltx_2_3_eros", None),
+        ("svd", None),
+        ("wan_2_2", None),
+        ("wan_2_2_t2v_14b", None),
+        ("wan_2_2_i2v_14b", None),
+        ("wan_2_2_vace_fun_14b", None),
+        ("bernini", None),
+        ("scail2_14b", None),
+        ("krea_realtime_14b", None),
+        // 124 / 24. The only family in the catalog whose engine REFUSES below its floor instead of
+        // padding up to it — `resolve_geometry` rejects, so the app must too (sc-17152).
+        ("minimax_h3", Some(5.1667)),
+        ("minimax_h3_ref", Some(5.1667)),
+    ];
+
+    /// sc-17158 — the FLOOR half of `shipped_manifest_duration_caps_admit_everything_they_advertise`.
+    ///
+    /// Same four-part skeleton, against the real manifest bytes: core reads exactly what is
+    /// declared, every advertised bucket and the shipped default are admitted, and the floor
+    /// actually refuses something.
+    #[test]
+    fn shipped_manifest_duration_floors_admit_everything_they_advertise() {
+        let models = builtin_video_models();
+        assert_eq!(
+            models.len(),
+            DURATION_FLOORS.len(),
+            "a video model was added/removed; decide whether its engine REFUSES a too-short clip \
+             or pads it up, and add it to DURATION_FLOORS — an undeclared floor is silently NO floor"
+        );
+
+        for (id, want_floor) in DURATION_FLOORS {
+            let entry = models
+                .iter()
+                .find(|m| m.get("id").and_then(Value::as_str) == Some(*id))
+                .unwrap_or_else(|| panic!("{id} present in builtin.models.jsonc"))
+                .as_object()
+                .expect("model entry object");
+            let limits = entry
+                .get("limits")
+                .and_then(Value::as_object)
+                .unwrap_or_else(|| panic!("{id} has limits"));
+
+            // 1. Core reads exactly what the manifest declares — including "nothing".
+            assert_eq!(
+                hard_min_duration(entry),
+                *want_floor,
+                "{id}: effective hard min duration"
+            );
+
+            let buckets: Vec<f64> = limits
+                .get("durations")
+                .and_then(Value::as_array)
+                .unwrap_or_else(|| panic!("{id} advertises durations"))
+                .iter()
+                .map(|d| d.as_f64().expect("numeric duration"))
+                .collect();
+            let default_duration = entry
+                .get("defaults")
+                .and_then(Value::as_object)
+                .and_then(|d| d.get("duration"))
+                .and_then(Value::as_f64)
+                .unwrap_or_else(|| panic!("{id} has a default duration"));
+
+            let Some(floor) = want_floor else {
+                continue;
+            };
+
+            // 2. UI PARITY, the mirror of the cap assertion: the floor is exactly the BOTTOM of the
+            //    advertised dropdown. A higher floor would reject the model's own picker; a lower
+            //    one would advertise less than it allows.
+            //    Compared in f32 — the width core actually reads — because the shipped rungs are
+            //    4 dp decimals with no exact binary form (5.1667 is not representable), so an f64
+            //    comparison would fail on the widening alone.
+            let advertised_min = buckets.iter().copied().fold(f64::MAX, f64::min);
+            assert_eq!(
+                *floor, advertised_min as f32,
+                "{id}: hardMinDuration must equal the bottom of its advertised durations"
+            );
+
+            // 3. FIXED POINT: every advertised bucket and the shipped default are ADMITTED. The
+            //    bound is `<`, so an at-floor request passes.
+            for advertised in buckets
+                .iter()
+                .copied()
+                .chain(std::iter::once(default_duration))
+            {
+                assert_eq!(
+                    duration_limit_error(id, advertised as f32, entry),
+                    None,
+                    "{id} advertises {advertised}s; the floor must admit it"
+                );
+            }
+
+            // 4. MUTATION CHECK: the floor actually refuses something, and names the model.
+            let under = floor - 0.5;
+            let message = duration_limit_error(id, under, entry).unwrap_or_else(|| {
+                panic!("{id}: {under}s is under the {floor}s floor and must be rejected")
+            });
+            assert!(message.contains(id), "{id}: names the model: {message}");
+            assert!(
+                message.contains("Lengthen"),
+                "{id}: gives the lever: {message}"
+            );
+        }
+    }
+
+    /// sc-17158 / sc-17152 — **15.0 s is REFUSED, not silently delivered as 14.375 s.**
+    ///
+    /// This is the standing trap the story warns about in its own words: SceneWorks normalization
+    /// can turn an engine geometry gate into a no-op, so the assertion has to be that the request
+    /// is REJECTED, not that some value got coerced onto the lattice. Before sc-17147 the reference
+    /// pipeline happily rendered 345 frames for a 360-frame ask; the app must not reproduce that.
+    ///
+    /// The symmetric case at the bottom matters just as much: a 3 s request is not a short clip for
+    /// this family, it is an unrenderable one.
+    #[test]
+    fn minimax_h3_refuses_the_advertised_fifteen_seconds_rather_than_shortening_it() {
+        let models = builtin_video_models();
+        for id in ["minimax_h3", "minimax_h3_ref"] {
+            let entry = models
+                .iter()
+                .find(|m| m.get("id").and_then(Value::as_str) == Some(id))
+                .unwrap_or_else(|| panic!("{id} present"))
+                .as_object()
+                .expect("model entry object");
+
+            // The number upstream ADVERTISES, and the number this catalog must refuse.
+            let over = duration_limit_error(id, 15.0, entry)
+                .unwrap_or_else(|| panic!("{id}: 15.0s must be refused, not delivered as 14.375s"));
+            assert!(over.contains("14.375s"), "{id}: states the cap: {over}");
+            assert!(over.contains("15s"), "{id}: states what was asked: {over}");
+
+            // …and the request would otherwise have been quietly satisfied: the snap alone produces
+            // a perfectly legal 345 frames, which is exactly why the snap cannot be the gate.
+            let request = VideoRequest::from_payload(&payload(json!({
+                "projectId": "p", "model": id, "duration": 15.0, "fps": 24,
+                "modelManifestEntry": Value::Object(entry.clone()),
+            })));
+            assert_eq!(request.raw_frame_count(), 360);
+            assert_eq!(
+                request.frame_count(),
+                345,
+                "the snap silently shortens it — the REJECTION above is the real gate"
+            );
+
+            // The floor, same shape. 3 s is under 5.1667 s.
+            let under = duration_limit_error(id, 3.0, entry)
+                .unwrap_or_else(|| panic!("{id}: 3.0s is unrenderable and must be refused"));
+            assert!(under.contains("5.1667s"), "{id}: states the floor: {under}");
+            assert!(under.contains("Lengthen"), "{id}: gives the lever: {under}");
+
+            // T = 1 has no lane at all: `min_duration` is a hardcoded 5.0 upstream, so a
+            // single-frame request is refused rather than rendered as a still.
+            assert!(
+                duration_limit_error(id, 1.0 / 24.0, entry).is_some(),
+                "{id}: a single-frame request must be refused — there is no image lane"
+            );
+        }
+    }
+
+    /// Each shipped video model's declared `limits.hardMinSteps`, TRANSCRIBED from the manifest —
+    /// deliberately independent of [`hard_min_steps`], the function under test, exactly as
+    /// [`DURATION_FLOORS`] is of [`hard_min_duration`].
+    ///
+    /// `None` is the load-bearing half, and it is a SURVEY RESULT rather than a default: sc-19426
+    /// read every video engine's schedule construction at the then-pinned inference rev `014134e3`
+    /// (sc-19721 moved the pin to `75d66db5`; the survey's finding below is unchanged, and the rev
+    /// is kept because it dates the READING)
+    /// looking for a step count below which it errors or builds an unusable schedule. What it found:
+    ///
+    /// * **Every** engine shares gen-core's `steps == 0` rejection (`generator.rs`, "steps must be
+    ///   >= 1"), so 1 is the universal floor and declaring `hardMinSteps: 1` would be a no-op.
+    /// * Wan / Bernini / SCAIL-2 / Krea-Realtime / SVD all build a structurally valid grid at a
+    ///   single step — SVD's Karras ramp even branches on `n == 1` deliberately — so a floor there
+    ///   would invent a constraint their engines do not have.
+    /// * MiniMax-H3 is the one family whose scheduler REFUSES below 2.
+    ///
+    /// ✅ **LTX's floor-shaped hole is now filled — by the third column, not this one.** sc-19426
+    /// recorded LTX as a `None` it could not express: `candle-gen-ltx` runs a baked 8-step distilled
+    /// schedule and rejects any `steps` that is not exactly `NATIVE_STEPS` (8), so `hardMinSteps: 8`
+    /// would have said "at least 8" and wrongly admitted 30. sc-19502 added `limits.steps`, the
+    /// membership-tested menu, which states it exactly. LTX therefore stays `None` on the FLOOR axis
+    /// — correctly, it has no floor — and carries `Some(&[8])` on the MENU axis.
+    ///
+    /// The lane divergence sc-19426 also recorded (mlx never reading `req.steps` and silently
+    /// rendering the baked schedule anyway) was fixed in inference rather than modelled here: both
+    /// lanes now derive the count from a byte-identical `STAGE1_SIGMAS` table and share gen-core's
+    /// `Capabilities::supported_steps` floor. That is what makes ONE lane-agnostic declaration
+    /// honest; `both_ltx_lanes_agree_on_one_legal_step_count` is the guard.
+    ///
+    /// The menu column is a survey result on the same footing as the floor column: `None` means the
+    /// engine genuinely accepts a range of counts, and every model but LTX does.
+    /// One row of [`STEP_FLOORS`]: the model id, its `limits.hardMinSteps` FLOOR, and its
+    /// `limits.steps` MENU. Both `None` for a model whose engine samples at any count.
+    ///
+    /// Named rather than written inline because `clippy::type_complexity` refuses the bare
+    /// three-column tuple — and the alias is the better read anyway: the two `Option`s are
+    /// different axes, not a pair.
+    type StepConstraints = (&'static str, Option<u32>, Option<&'static [u32]>);
+
+    const STEP_FLOORS: &[StepConstraints] = &[
+        // Distilled: the σ waypoints are baked into training, so 8 is the only renderable count
+        // (sc-19502). A menu, not a floor — 30 is as unrenderable as 1.
+        ("ltx_2_3", None, Some(&[8])),
+        ("ltx_2_3_eros", None, Some(&[8])),
+        ("svd", None, None),
+        ("wan_2_2", None, None),
+        ("wan_2_2_t2v_14b", None, None),
+        ("wan_2_2_i2v_14b", None, None),
+        ("wan_2_2_vace_fun_14b", None, None),
+        ("bernini", None, None),
+        ("scail2_14b", None, None),
+        ("krea_realtime_14b", None, None),
+        // `steps` counts MODEL EVALUATIONS (NFE): the engine appends the terminal sigma itself
+        // (`linspace(1, 0, steps + 1)`), so 1 renders — as noise, a single Euler jump from pure
+        // randomness. The floor of 2 is the corrected sc-18726 product judgement (see
+        // `hard_min_steps`), not an engine limit. A FLOOR, not a menu: everything at or above 2
+        // renders fine.
+        ("minimax_h3", Some(2), None),
+        ("minimax_h3_ref", Some(2), None),
+    ];
+
+    /// sc-19426 / sc-19502 — the step twin of
+    /// `shipped_manifest_duration_floors_admit_everything_they_advertise`, and the test that makes
+    /// `limits.hardMinSteps` **and** `limits.steps` live constraints on the REAL manifest bytes
+    /// rather than schema entries nothing exercises.
+    ///
+    /// Same four-part skeleton on each axis: core reads exactly what is declared (including
+    /// "nothing"), the model's own shipped default is admitted, the constraint actually refuses
+    /// something, and the refusal names the model. The menu axis adds a fifth part the floor axis
+    /// structurally cannot have — it must refuse an OVER-menu count too, which is the precise gap
+    /// that made `hardMinSteps` unable to express LTX.
+    #[test]
+    fn shipped_manifest_step_floors_admit_everything_they_advertise() {
+        let models = builtin_video_models();
+        assert_eq!(
+            models.len(),
+            STEP_FLOORS.len(),
+            "a video model was added/removed; decide whether its engine REFUSES below a step count \
+             (a floor), can render only specific counts (a menu), or samples happily at any count, \
+             and add it to STEP_FLOORS — an undeclared constraint is silently NO constraint"
+        );
+
+        for (id, want_floor, want_menu) in STEP_FLOORS {
+            let entry = models
+                .iter()
+                .find(|m| m.get("id").and_then(Value::as_str) == Some(*id))
+                .unwrap_or_else(|| panic!("{id} present in builtin.models.jsonc"))
+                .as_object()
+                .expect("model entry object");
+
+            // 1. Core reads exactly what the manifest declares — including "nothing". This is the
+            //    half that catches an authored `2.0`, which JSON Schema's `integer` admits and
+            //    `as_u64` does not, i.e. a declaration with no reader.
+            assert_eq!(hard_min_steps(entry), *want_floor, "{id}: hard min steps");
+            assert_eq!(
+                allowed_steps(entry).as_deref(),
+                *want_menu,
+                "{id}: step menu"
+            );
+
+            let declared_default = entry
+                .get("defaults")
+                .and_then(Value::as_object)
+                .and_then(|defaults| defaults.get("steps"))
+                .and_then(Value::as_u64)
+                .map(|steps| steps as u32);
+
+            // The MENU axis (sc-19502). Checked before the floor because a model carrying a menu is
+            // governed entirely by it — the exact statement wins over the floor's `<`.
+            if let Some(menu) = want_menu {
+                // 2a. FIXED POINT: the model's own `defaults.steps` must be ON the menu, or the app
+                //     would refuse the request it composed itself (the sc-12400 class).
+                let default_steps = declared_default.unwrap_or_else(|| {
+                    panic!("{id} declares a step menu, so it must declare a default step count")
+                });
+                assert!(
+                    menu.contains(&default_steps),
+                    "{id} defaults to {default_steps} steps, which is off its own menu {menu:?}"
+                );
+                for steps in *menu {
+                    assert_eq!(
+                        steps_limit_error(id, *steps, entry),
+                        None,
+                        "{id}: the advertised {steps}-step schedule must be admitted"
+                    );
+                }
+
+                // 2b. MUTATION CHECK, on BOTH sides. The over-menu case is the whole reason this key
+                //     exists: `hardMinSteps: 8` would have admitted 30, which the engine refuses.
+                for off in [1u32, menu.iter().max().expect("non-empty menu") + 22] {
+                    let message = steps_limit_error(id, off, entry).unwrap_or_else(|| {
+                        panic!("{id}: {off} steps is off the menu {menu:?} and must be rejected")
+                    });
+                    assert!(message.contains(id), "{id}: names the model: {message}");
+                    assert!(
+                        message.contains(&off.to_string()),
+                        "{id}: names the request: {message}"
+                    );
+                    assert!(
+                        menu.iter().all(|s| message.contains(&s.to_string())),
+                        "{id}: names the legal value(s): {message}"
+                    );
+                }
+                continue;
+            }
+
+            let Some(floor) = want_floor else {
+                // A model with neither menu nor floor admits everything, including the degenerate
+                // single step.
+                assert_eq!(steps_limit_error(id, 1, entry), None, "{id}: no floor");
+                continue;
+            };
+
+            // 2. FIXED POINT: the model's own shipped `defaults.steps` — the value the studio puts
+            //    in the form and therefore the likeliest number to arrive — must be admitted, or
+            //    the gate would refuse a request the app itself composed (the sc-12400 class).
+            let default_steps = declared_default.unwrap_or_else(|| {
+                panic!("{id} declares a step floor, so it must declare a default step count")
+            });
+            assert_eq!(
+                steps_limit_error(id, default_steps, entry),
+                None,
+                "{id} defaults to {default_steps} steps; its own floor must admit that"
+            );
+            // …and at the floor admits too: the bound is `<`, like every other bound here.
+            assert_eq!(steps_limit_error(id, *floor, entry), None, "{id}: at-floor");
+
+            // 3. MUTATION CHECK: the floor actually refuses something, and names the model.
+            let under = floor - 1;
+            let message = steps_limit_error(id, under, entry).unwrap_or_else(|| {
+                panic!("{id}: {under} steps is under the {floor}-step floor and must be rejected")
+            });
+            assert!(message.contains(id), "{id}: names the model: {message}");
+            assert!(
+                message.contains("Raise"),
+                "{id}: gives the lever: {message}"
+            );
+        }
+    }
+
+    /// sc-19574 — the ONE rule the API, the MCP tool and the worker now share about a
+    /// `reference_to_video` reference set, asserted as a complete truth table over the three
+    /// counts so no caller has to trust a prose restatement of it.
+    ///
+    /// The rule is upstream's, not ours: diffusers `MiniMaxH3` raises on `set(kinds) == {"audio"}`
+    /// (`before_encoder.py`) because an audio reference is encoded by the audio VAE alone and never
+    /// reaches the reference conditioner. Before this, four layers held three opinions — the Studio
+    /// enabled Generate, `validate_video_job` returned 201, the MCP tool submitted, and only the
+    /// worker said no.
+    #[test]
+    fn an_audio_only_reference_set_is_the_one_shape_no_layer_may_accept() {
+        use ReferenceSetVerdict::{AudioOnly, Conditionable, Empty};
+        // (images, clips, audio) -> verdict. Exhaustive over "none / some" per list.
+        for (images, clips, audio, expected) in [
+            (0, 0, 0, Empty),
+            (0, 0, 1, AudioOnly),
+            (0, 0, 3, AudioOnly),
+            (1, 0, 0, Conditionable),
+            (0, 1, 0, Conditionable),
+            (1, 0, 3, Conditionable),
+            (0, 1, 3, Conditionable),
+            (1, 1, 0, Conditionable),
+            (9, 3, 3, Conditionable),
+        ] {
+            assert_eq!(
+                classify_reference_set(images, clips, audio),
+                expected,
+                "images={images} clips={clips} audio={audio}"
+            );
+        }
+        // MUTATION CHECK: the two refusing verdicts are distinguishable from each other and from
+        // acceptance, so a layer cannot collapse them into one `is_err()` and still be correct
+        // about WHICH refusal it is reporting.
+        assert_ne!(
+            classify_reference_set(0, 0, 1),
+            classify_reference_set(0, 0, 0)
+        );
+        assert_ne!(
+            classify_reference_set(0, 0, 1),
+            classify_reference_set(1, 0, 1)
+        );
+        // The rule is about media KIND, not about counts: no number of audio references makes an
+        // audio-only set conditionable.
+        assert_eq!(classify_reference_set(0, 0, 99), AudioOnly);
+    }
+
+    /// sc-17158 — the two partitions are ONE model geometrically and TWO models in what they
+    /// condition on. Both halves are asserted here so a future edit cannot drift them apart in the
+    /// first sense or collapse them in the second.
+    #[test]
+    fn both_minimax_h3_partitions_declare_one_geometry_and_split_the_reference_caps() {
+        let models = builtin_video_models();
+        let limits = |id: &str| {
+            models
+                .iter()
+                .find(|m| m.get("id").and_then(Value::as_str) == Some(id))
+                .unwrap_or_else(|| panic!("{id} present"))
+                .get("limits")
+                .and_then(Value::as_object)
+                .unwrap_or_else(|| panic!("{id} has limits"))
+                .clone()
+        };
+        let base = limits("minimax_h3");
+        let reference = limits("minimax_h3_ref");
+
+        // Same DiT, same VAE, same lattice ⇒ identical geometry on every axis core reads.
+        for key in [
+            "durations",
+            "hardMinDuration",
+            "hardMaxDuration",
+            "recommendedMaxDuration",
+            // One scheduler ⇒ one step floor (sc-19426). It rides here rather than in its own test
+            // for the same reason the duration bounds do: the two partitions differ only in what
+            // they condition on.
+            "hardMinSteps",
+            "fps",
+            "maxPixels",
+            "resolutions",
+            "requiresDimensionsMultipleOf",
+        ] {
+            assert_eq!(
+                base.get(key),
+                reference.get(key),
+                "the two MiniMax-H3 partitions must declare one geometry; {key} differs"
+            );
+        }
+
+        // …but only `transformer_ref` conditions on references. Ref2VA's caps are 9 images, 3 video
+        // clips, 3 audio clips and 12 FILES IN TOTAL — the combined bound is not derivable from the
+        // three per-list ones (9 + 3 + 3 is 15), which is why it is its own key (sc-17160).
+        let base_entry = models
+            .iter()
+            .find(|m| m.get("id").and_then(Value::as_str) == Some("minimax_h3"))
+            .expect("minimax_h3 present")
+            .as_object()
+            .expect("object");
+        let ref_entry = models
+            .iter()
+            .find(|m| m.get("id").and_then(Value::as_str) == Some("minimax_h3_ref"))
+            .expect("minimax_h3_ref present")
+            .as_object()
+            .expect("object");
+
+        assert_eq!(
+            reference_caps(ref_entry),
+            ReferenceCaps {
+                images: 9,
+                clips: 3,
+                audio: 3,
+                combined: Some(12),
+            }
+        );
+        assert_eq!(
+            reference_limit_error("minimax_h3_ref", 9, 2, 1, ref_entry),
+            None
+        );
+        assert!(
+            reference_limit_error("minimax_h3_ref", 9, 3, 3, ref_entry).is_some(),
+            "15 files must be refused by the combined cap even though every list fits"
+        );
+
+        // The t2va/fl2va partition conditions on `sourceAssetId` / `lastFrameAssetId`, never on the
+        // reference LISTS — and it must DECLARE that rather than inherit the historical 8/8/0, or a
+        // Ref2VA-shaped request would reach a checkpoint that silently ignores it.
+        assert_eq!(
+            reference_caps(base_entry),
+            ReferenceCaps {
+                images: 0,
+                clips: 0,
+                audio: 0,
+                combined: None,
+            }
+        );
+        assert!(
+            reference_limit_error("minimax_h3", 1, 0, 0, base_entry).is_some(),
+            "the base partition takes no image references"
+        );
+        assert!(
+            reference_limit_error("minimax_h3", 0, 0, 1, base_entry).is_some(),
+            "…nor audio references"
+        );
+    }
+
+    /// sc-17158 — the AREA budget is binding, and the per-edge cap alone would not have caught the
+    /// case that motivated it.
+    ///
+    /// `CANVAS_MAX_PIXELS` is 1,032,192 = 768x1344. `Capabilities::max_size` bounds each edge
+    /// INDEPENDENTLY, so 1344x1344 satisfies every per-edge check while sitting at 1.75x the
+    /// checkpoint's budget — which is exactly what shipped until sc-17152 wired the area check.
+    /// Declaring `limits.maxPixels` is what makes the app refit it before it ever reaches an engine.
+    #[test]
+    fn minimax_h3_over_cap_canvas_is_refit_onto_the_area_budget() {
+        let models = builtin_video_models();
+        for id in ["minimax_h3", "minimax_h3_ref"] {
+            let entry = models
+                .iter()
+                .find(|m| m.get("id").and_then(Value::as_str) == Some(id))
+                .unwrap_or_else(|| panic!("{id} present"));
+
+            // The square that passed every per-edge check.
+            let square = VideoRequest::from_payload(&payload(json!({
+                "projectId": "p", "model": id, "width": 1344, "height": 1344,
+                "modelManifestEntry": entry.clone(),
+            })));
+            assert!(
+                u64::from(square.width) * u64::from(square.height) <= 1_032_192,
+                "{id}: 1344x1344 must be refit under the area budget, got {}x{}",
+                square.width,
+                square.height
+            );
+            assert_eq!((square.width % 32, square.height % 32), (0, 0));
+            assert!(
+                (square.width, square.height) != (1344, 1344),
+                "{id}: the refit must actually fire, else the cap is decoration"
+            );
+
+            // …while the advertised 16:9 bucket sits EXACTLY at the budget and is untouched.
+            let widescreen = VideoRequest::from_payload(&payload(json!({
+                "projectId": "p", "model": id, "width": 1344, "height": 768,
+                "modelManifestEntry": entry.clone(),
+            })));
+            assert_eq!((widescreen.width, widescreen.height), (1344, 768));
+            assert_eq!(1344 * 768, 1_032_192);
+        }
+    }
+
+    /// The floor's message, held to the same house convention as the cap's: name the model, state
+    /// what was asked and what the limit is, and give the lever.
+    #[test]
+    fn duration_limit_error_names_the_model_the_request_and_the_floor() {
+        let h3 =
+            payload(json!({ "limits": { "hardMinDuration": 5.1667, "hardMaxDuration": 14.375 } }));
+        let message =
+            duration_limit_error("minimax_h3", 2.0, &h3).expect("2s is under the 5.1667s floor");
+        assert!(message.contains("minimax_h3"), "names the model: {message}");
+        assert!(message.contains("5.1667s"), "states the floor: {message}");
+        assert!(message.contains("2s"), "states what was asked: {message}");
+        assert!(message.contains("Lengthen"), "gives the lever: {message}");
+
+        // The floor is checked FIRST, so a request that is under the floor never reports the cap.
+        assert!(
+            !message.contains("Shorten"),
+            "one lever, not both: {message}"
+        );
+        // At the floor admits (`<`, matching every other bound in this module being strict).
+        assert_eq!(duration_limit_error("minimax_h3", 5.1667, &h3), None);
+        // …and the cap still fires at the other end.
+        let over = duration_limit_error("minimax_h3", 15.0, &h3).expect("15s is past the cap");
+        assert!(
+            over.contains("Shorten"),
+            "the cap keeps its own lever: {over}"
+        );
+    }
+
+    /// The infallibility contract [`hard_max_duration`] holds to, applied to the floor: an absent or
+    /// unhonorable value is NO floor, so a model that declares nothing — every video model shipped
+    /// before sc-17158 — is byte-for-byte unchanged.
+    #[test]
+    fn absent_or_unhonorable_hard_min_duration_means_no_floor() {
+        let bare = payload(json!({}));
+        assert_eq!(hard_min_duration(&bare), None);
+        assert_eq!(duration_limit_error("bernini", 0.5, &bare), None);
+
+        for bad in [
+            json!(0),
+            json!(-1),
+            json!(f64::NAN),
+            json!("5.1667"),
+            json!(null),
+        ] {
+            let entry = payload(json!({ "limits": { "hardMinDuration": bad } }));
+            assert_eq!(hard_min_duration(&entry), None, "unhonorable floor {bad}");
+            assert_eq!(
+                duration_limit_error("some_model", 0.5, &entry),
+                None,
+                "an unhonorable floor must not brick the model: {bad}"
+            );
+        }
+
+        // A model that declares ONLY a floor still gets one — the two bounds are independent, and
+        // the cap arm must not swallow the floor when `hardMaxDuration` is absent.
+        let floor_only = payload(json!({ "limits": { "hardMinDuration": 5.1667 } }));
+        assert!(duration_limit_error("floor_only", 3.0, &floor_only).is_some());
+        assert_eq!(duration_limit_error("floor_only", 30.0, &floor_only), None);
+    }
+
+    /// sc-19426 — the step floor's message, held to the same house convention as the duration
+    /// bounds': name the model, state what was asked and what the limit is, and give the lever.
+    ///
+    /// The floor is deliberately 4 rather than MiniMax-H3's shipped 2, so every assertion below is
+    /// on a number that appears nowhere else in the entry — a message built from the wrong field
+    /// cannot coincidentally satisfy it.
+    #[test]
+    fn steps_limit_error_names_the_model_the_request_and_the_floor() {
+        let turbo = payload(json!({ "limits": { "hardMinSteps": 4 } }));
+        let message =
+            steps_limit_error("minimax_h3_turbo", 1, &turbo).expect("1 is under the 4-step floor");
+        assert!(
+            message.contains("minimax_h3_turbo"),
+            "names the model: {message}"
+        );
+        assert!(
+            message.contains("at least 4 sampling steps"),
+            "states the floor: {message}"
+        );
+        assert!(
+            message.contains("asks for 1."),
+            "states what was asked: {message}"
+        );
+        assert!(message.contains("Raise"), "gives the lever: {message}");
+
+        // At the floor admits (`<`, matching every other bound in this module being strict), and
+        // there is no ceiling arm to swallow it — a large count is somebody's slow render, not an
+        // error.
+        assert_eq!(steps_limit_error("minimax_h3_turbo", 4, &turbo), None);
+        assert_eq!(steps_limit_error("minimax_h3_turbo", 500, &turbo), None);
+        // …and it refuses, never clamps: the caller gets a message, not a rewritten step count.
+        assert!(steps_limit_error("minimax_h3_turbo", 3, &turbo).is_some());
+    }
+
+    /// The infallibility contract [`hard_min_duration`] holds to, applied to the step floor: an
+    /// absent or unhonorable value is NO floor, so every video model that declares nothing — all ten
+    /// of them before sc-19426 — is byte-for-byte unchanged.
+    #[test]
+    fn absent_or_unhonorable_hard_min_steps_means_no_floor() {
+        let bare = payload(json!({}));
+        assert_eq!(hard_min_steps(&bare), None);
+        assert_eq!(steps_limit_error("bernini", 1, &bare), None);
+
+        for bad in [
+            json!(0),
+            json!(-1),
+            json!(2.5),
+            // An authored `2.0` is an `integer` to JSON Schema and a float to serde — so it reads as
+            // NO floor, which is why the shipped-manifest test transcribes the bytes.
+            json!(2.0),
+            json!("2"),
+            json!(null),
+            json!(u64::from(u32::MAX) + 1),
+        ] {
+            let entry = payload(json!({ "limits": { "hardMinSteps": bad } }));
+            assert_eq!(hard_min_steps(&entry), None, "unhonorable floor {bad}");
+            assert_eq!(
+                steps_limit_error("some_model", 1, &entry),
+                None,
+                "an unhonorable floor must not brick the model: {bad}"
+            );
+        }
+
+        // The two hard floors are independent: declaring one must not conjure the other.
+        let duration_only = payload(json!({ "limits": { "hardMinDuration": 5.1667 } }));
+        assert_eq!(hard_min_steps(&duration_only), None);
+        let steps_only = payload(json!({ "limits": { "hardMinSteps": 2 } }));
+        assert_eq!(hard_min_duration(&steps_only), None);
+        assert_eq!(duration_limit_error("steps_only", 0.5, &steps_only), None);
+        assert!(steps_limit_error("steps_only", 1, &steps_only).is_some());
+    }
+
+    /// sc-19502 — the step MENU's message, held to the same house convention: name the model, what
+    /// was asked, the legal value, and the lever.
+    ///
+    /// The menu is deliberately `[6]` rather than LTX's shipped `[8]`, so every assertion is on a
+    /// number appearing nowhere else in the entry — a message built from the wrong field cannot
+    /// coincidentally satisfy it.
+    #[test]
+    fn steps_menu_error_names_the_model_the_request_and_the_legal_value() {
+        let distilled = payload(json!({ "limits": { "steps": [6] } }));
+        let message = steps_menu_message(&distilled, 30);
+        assert!(
+            message.contains("some_distilled"),
+            "names the model: {message}"
+        );
+        assert!(
+            message.contains("fixed 6-step schedule"),
+            "states the legal value: {message}"
+        );
+        assert!(
+            message.contains("asks for 30 steps"),
+            "states what was asked: {message}"
+        );
+        assert!(
+            message.contains("Set steps to 6"),
+            "gives the lever: {message}"
+        );
+
+        // ON the menu admits.
+        assert_eq!(steps_limit_error("some_distilled", 6, &distilled), None);
+
+        // THE POINT OF THE KEY: refused on BOTH sides. A floor would have admitted everything above
+        // 6, which is exactly why `hardMinSteps` could not express LTX (sc-19426 → sc-19502).
+        for off in [1u32, 5, 7, 8, 30, 500] {
+            assert!(
+                steps_limit_error("some_distilled", off, &distilled).is_some(),
+                "{off} is off the menu and must be refused"
+            );
+        }
+    }
+
+    /// sc-19502 — a multi-value menu is a SET, not a range, and it is humanized for the caller.
+    #[test]
+    fn a_multi_value_step_menu_refuses_the_gap_between_its_entries() {
+        let two = payload(json!({ "limits": { "steps": [4, 8] } }));
+        assert_eq!(allowed_steps(&two).as_deref(), Some(&[4u32, 8][..]));
+        assert_eq!(steps_limit_error("m", 4, &two), None);
+        assert_eq!(steps_limit_error("m", 8, &two), None);
+        let gap = steps_limit_error("m", 6, &two).expect("6 belongs to neither schedule");
+        assert!(
+            gap.contains("4 or 8"),
+            "the menu must be humanized, not debug-printed: {gap}"
+        );
+
+        let three = payload(json!({ "limits": { "steps": [4, 8, 12] } }));
+        let message = steps_menu_message(&three, 5);
+        assert!(
+            message.contains("renders at 4, 8, or 12 steps only"),
+            "a multi-entry menu states the SET rather than taking the singular `-step` suffix, \
+             which would read as one number: {message}"
+        );
+        assert!(
+            message.contains("Set steps to 4, 8, or 12"),
+            "…and still gives the lever: {message}"
+        );
+    }
+
+    /// The infallibility contract [`allowed_fps`] holds to, applied to the step menu: an absent or
+    /// unsatisfiable declaration is NO menu, so every video model that declares nothing — all ten
+    /// of them before sc-19502 — is byte-for-byte unchanged.
+    ///
+    /// The unsatisfiable half matters more here than for fps: a menu nothing can satisfy would
+    /// refuse EVERY request including the model's own `defaults.steps`, i.e. a typo would brick the
+    /// model rather than constrain it.
+    #[test]
+    fn absent_or_unsatisfiable_step_menu_means_no_menu() {
+        let bare = payload(json!({}));
+        assert_eq!(allowed_steps(&bare), None);
+        assert_eq!(steps_limit_error("bernini", 1, &bare), None);
+
+        for bad in [
+            json!([]),
+            json!([0]),
+            // An authored `8.0` is an `integer` to JSON Schema and a float to serde — so it reads as
+            // NO menu, which is why the shipped-manifest test transcribes the bytes.
+            json!([8.0]),
+            json!(["8"]),
+            json!([null]),
+            json!([u64::from(u32::MAX) + 1]),
+            json!(8),
+            json!(null),
+        ] {
+            let entry = payload(json!({ "limits": { "steps": bad } }));
+            assert_eq!(allowed_steps(&entry), None, "unsatisfiable menu {bad}");
+            assert_eq!(
+                steps_limit_error("some_model", 1, &entry),
+                None,
+                "an unsatisfiable menu must not brick the model: {bad}"
+            );
+            assert_eq!(
+                steps_limit_error("some_model", 8, &entry),
+                None,
+                "an unsatisfiable menu must not brick the model: {bad}"
+            );
+        }
+
+        // A partially-unhonorable menu keeps its usable entries rather than collapsing to no menu.
+        let mixed = payload(json!({ "limits": { "steps": [8, 0, "12"] } }));
+        assert_eq!(allowed_steps(&mixed).as_deref(), Some(&[8u32][..]));
+
+        // The menu and the floor are independent: declaring one must not conjure the other.
+        let menu_only = payload(json!({ "limits": { "steps": [8] } }));
+        assert_eq!(hard_min_steps(&menu_only), None);
+        let floor_only = payload(json!({ "limits": { "hardMinSteps": 2 } }));
+        assert_eq!(allowed_steps(&floor_only), None);
+    }
+
+    /// sc-19502 — when a model somehow declares BOTH, the exact menu governs and the floor is not
+    /// consulted. Pins the precedence so a future edit cannot make the two gates disagree with each
+    /// other on one entry.
+    #[test]
+    fn the_step_menu_governs_when_a_model_declares_both_axes() {
+        let both = payload(json!({ "limits": { "steps": [8], "hardMinSteps": 2 } }));
+        // 4 clears the floor but is off the menu — the menu must still refuse it, or declaring both
+        // would be strictly weaker than declaring the menu alone.
+        let message = steps_limit_error("m", 4, &both).expect("4 is off the menu");
+        assert!(
+            message.contains("fixed 8-step schedule"),
+            "the menu's message must win: {message}"
+        );
+        assert_eq!(steps_limit_error("m", 8, &both), None);
+    }
+
+    /// sc-19502 — ONE catalog entry drives BOTH backends, so the single legal step count must be a
+    /// fact about the family rather than about whichever lane happens to run.
+    ///
+    /// This guard lives here, in the consumer, because no crate in `inference` depends on both
+    /// `candle-gen-ltx` and `mlx-gen-ltx` (mlx is macOS-only), so neither lane can assert agreement
+    /// about the other. SceneWorks is where the two meet: `limits.steps` is lane-agnostic and is
+    /// enforced by `steps_limit_error` on the enqueue path regardless of which backend the router
+    /// picks, so if the lanes disagreed, one of them would be refusing a request the catalog
+    /// admits — or rendering something the caller did not ask for.
+    ///
+    /// The transcribed 8 is `STAGE1_SIGMAS.len() - 1` in BOTH lanes (9 σ waypoints, byte-identical
+    /// tables). Changing this number requires re-baking both schedules.
+    #[test]
+    fn both_ltx_lanes_agree_on_one_legal_step_count() {
+        let models = builtin_video_models();
+        for id in ["ltx_2_3", "ltx_2_3_eros"] {
+            let entry = models
+                .iter()
+                .find(|m| m.get("id").and_then(Value::as_str) == Some(id))
+                .unwrap_or_else(|| panic!("{id} present"))
+                .as_object()
+                .expect("model entry object");
+
+            // Exactly ONE legal count, and it is the distilled stage-1 schedule both lanes bake.
+            assert_eq!(
+                allowed_steps(entry).as_deref(),
+                Some(&[8u32][..]),
+                "{id}: both lanes run the same 8-step distilled stage-1 schedule"
+            );
+
+            // The declaration sits on the LANE-AGNOSTIC `limits` block, not on a per-backend one —
+            // a per-lane declaration would let the two drift apart again, which is the defect
+            // sc-19502 fixed rather than modelled.
+            for backend in ["mlx", "candle"] {
+                let per_lane = entry
+                    .get(backend)
+                    .and_then(Value::as_object)
+                    .and_then(|block| block.get("limits"))
+                    .and_then(Value::as_object)
+                    .and_then(|limits| limits.get("steps"));
+                assert_eq!(
+                    per_lane, None,
+                    "{id}: {backend} must not carry a per-lane step menu; the constraint is a \
+                     property of the distilled weights, not of the backend"
+                );
+            }
+
+            // And the studio's own default is that one legal value, so the common path never trips
+            // the gate.
+            assert_eq!(
+                entry
+                    .get("defaults")
+                    .and_then(Value::as_object)
+                    .and_then(|d| d.get("steps"))
+                    .and_then(Value::as_u64),
+                Some(8),
+                "{id}: defaults.steps must be the single legal count"
+            );
+        }
+    }
+
+    /// sc-19426 — the gate must read every shape the CONSUMER reads, or it is a gate with a hole.
+    ///
+    /// `video_jobs::wan::advanced_opt_u32` is what the adapters call to turn `advanced.steps` into
+    /// the number handed to an engine. It accepts a JSON number *or* a numeric string and narrows
+    /// with `as u32`. Both quirks are load-bearing here: `"1"` reaches the engine as 1, and
+    /// `4294967297` WRAPS to 1 — so a gate that read only `as_u64`, or that used a checked
+    /// conversion, would admit two payloads that arrive at the engine as exactly the value the floor
+    /// exists to refuse.
+    #[test]
+    fn requested_steps_reads_every_shape_the_worker_reads() {
+        let advanced = |value: Value| {
+            let mut map = JsonObject::new();
+            map.insert("steps".to_owned(), value);
+            map
+        };
+
+        assert_eq!(requested_steps(&advanced(json!(20))), Some(20));
+        assert_eq!(requested_steps(&advanced(json!("20"))), Some(20));
+        assert_eq!(requested_steps(&advanced(json!(" 20 "))), Some(20));
+        // The wrapping narrow, mirrored from `advanced_opt_u32`.
+        assert_eq!(
+            requested_steps(&advanced(json!(u64::from(u32::MAX) + 2))),
+            Some(1)
+        );
+        // Nothing the worker cannot read is a value this gate may invent.
+        assert_eq!(requested_steps(&JsonObject::new()), None);
+        for unreadable in [json!(null), json!("many"), json!(-4), json!(true)] {
+            assert_eq!(
+                requested_steps(&advanced(unreadable.clone())),
+                None,
+                "unreadable steps {unreadable}"
+            );
+        }
+
+        // …and the floor is applied to the value the worker would have passed down, not to the raw
+        // JSON: both of these reach an engine as 1.
+        let h3 = payload(json!({ "limits": { "hardMinSteps": 2 } }));
+        for wire in [json!("1"), json!(u64::from(u32::MAX) + 2)] {
+            let steps = requested_steps(&advanced(wire.clone())).expect("readable");
+            assert!(
+                steps_limit_error("minimax_h3", steps, &h3).is_some(),
+                "{wire} arrives at the engine as {steps} and must be refused"
+            );
+        }
+    }
+
     /// The house message convention (`mlx_fit_gate::too_big_error_names_model_budget_and_optional_staged`):
     /// name the model, state what was asked and what the limit is, and give the lever. A caller
     /// that hits this has no other signal — the request simply stops — so the message IS the UX.
@@ -2190,6 +3815,177 @@ mod tests {
         assert_eq!(duration_limit_error("mochi_1", 5.0, &mochi), None);
         assert_eq!(duration_limit_error("mochi_1", 1.0, &mochi), None);
         assert!(duration_limit_error("mochi_1", 5.5, &mochi).is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // Reference-media caps (sc-17160).
+    // -----------------------------------------------------------------------
+
+    /// THE regression test for the cap change. Raising the API's image blanket from 8 to 9 for
+    /// MiniMax-H3 must not hand a 9th reference to any other video model, and the new audio list
+    /// must not become quietly acceptable to a family whose engine cannot consume it.
+    ///
+    /// This is the "existing video models unaffected" assertion in its purest form: a model that
+    /// declares NOTHING (which is every video model shipped before this story — no builtin
+    /// declares any of the four keys) keeps 8 / 8 / 0 / no-combined-ceiling. Driven off a matrix
+    /// of the shapes a manifest entry actually takes in the wild, including the `{}` an
+    /// uncatalogued id resolves to.
+    #[test]
+    fn an_undeclared_model_keeps_the_pre_sc_17160_reference_caps() {
+        for empty in [json!({}), json!({ "limits": {} })] {
+            let entry = payload(empty.clone());
+            assert_eq!(
+                reference_caps(&entry),
+                ReferenceCaps {
+                    images: 8,
+                    clips: 8,
+                    audio: 0,
+                    combined: None,
+                },
+                "undeclared entry must keep the historical caps: {empty}"
+            );
+            // 8 images and 8 clips still admit — the exact pre-story ceiling, unchanged.
+            assert_eq!(reference_limit_error("bernini", 8, 8, 0, &entry), None);
+            // ...and a 9th image is still refused, one layer down from the raised blanket.
+            assert!(
+                reference_limit_error("bernini", 9, 0, 0, &entry).is_some(),
+                "the raised API blanket must not let a 9th reference through: {empty}"
+            );
+            // 16 files in total admit: an undeclared model has NO combined ceiling, so the new
+            // combined cap cannot retroactively narrow a shape bernini accepts today.
+            assert_eq!(reference_limit_error("bernini", 8, 8, 0, &entry), None);
+            // A single audio reference is refused outright — the new field is inert here.
+            let audio = reference_limit_error("bernini", 0, 0, 1, &entry)
+                .expect("an undeclared model takes no audio references");
+            assert!(audio.contains("bernini"), "names the model: {audio}");
+            assert!(
+                audio.contains("takes no audio references"),
+                "says the model takes none rather than quoting a cap of 0: {audio}"
+            );
+            assert!(
+                audio.contains("referenceAudioAssetIds"),
+                "names the field to remove: {audio}"
+            );
+        }
+    }
+
+    /// The story's acceptance pair, at the layer that owns the decision: 9 images + 3 clips +
+    /// 3 audio is 15 files against a declared 12 and must be REFUSED, while 9 + 2 + 1 is 12 and
+    /// must be ADMITTED.
+    ///
+    /// The combined cap is the only bound that can decide either of these — every individual list
+    /// in the rejected shape is within its own per-list cap — which is why it is a separate key
+    /// rather than something derived from the three.
+    #[test]
+    fn the_combined_cap_refuses_fifteen_files_and_admits_twelve() {
+        let ref2va = payload(json!({
+            "limits": {
+                "maxReferenceAssets": 9,
+                "maxSourceClipAssets": 3,
+                "maxReferenceAudioAssets": 3,
+                "maxCombinedReferenceAssets": 12,
+            }
+        }));
+        assert_eq!(
+            reference_caps(&ref2va),
+            ReferenceCaps {
+                images: 9,
+                clips: 3,
+                audio: 3,
+                combined: Some(12),
+            }
+        );
+
+        // Every list is within ITS OWN cap — 9 <= 9, 3 <= 3, 3 <= 3 — so nothing but the combined
+        // budget can refuse this. That is the whole point of the assertion.
+        assert_eq!(reference_limit_error("minimax_h3", 9, 0, 0, &ref2va), None);
+        assert_eq!(reference_limit_error("minimax_h3", 0, 3, 0, &ref2va), None);
+        assert_eq!(reference_limit_error("minimax_h3", 0, 0, 3, &ref2va), None);
+        let message = reference_limit_error("minimax_h3", 9, 3, 3, &ref2va)
+            .expect("15 files is past the 12-file combined cap");
+        assert!(message.contains("minimax_h3"), "names the model: {message}");
+        assert!(message.contains("12"), "states the cap: {message}");
+        assert!(message.contains("15"), "states what was asked: {message}");
+        assert!(
+            message.contains("Remove 3"),
+            "gives the lever, counted: {message}"
+        );
+
+        // 9 + 2 + 1 is exactly 12 — at the cap, which admits, matching every other bound in this
+        // module being `>` rather than `>=`.
+        assert_eq!(reference_limit_error("minimax_h3", 9, 2, 1, &ref2va), None);
+        // ...and 13 does not.
+        assert!(reference_limit_error("minimax_h3", 9, 3, 1, &ref2va).is_some());
+    }
+
+    /// A per-list overage names the list that is over, not the total. A caller told only
+    /// "12 files maximum" for a request of 4 images + 9 clips would have to work out which list to
+    /// cut; naming `sourceClipAssetIds` and its cap is the actionable form, and it is why the
+    /// per-list checks run before the combined one.
+    #[test]
+    fn a_per_list_overage_names_the_list_rather_than_the_total() {
+        let ref2va = payload(json!({
+            "limits": {
+                "maxReferenceAssets": 9,
+                "maxSourceClipAssets": 3,
+                "maxReferenceAudioAssets": 3,
+                "maxCombinedReferenceAssets": 12,
+            }
+        }));
+        // 4 + 5 + 0 = 9 files, well inside the combined budget, but 5 clips is past the 3 declared.
+        let message = reference_limit_error("minimax_h3", 4, 5, 0, &ref2va)
+            .expect("5 clips is past the declared 3");
+        assert!(
+            message.contains("sourceClipAssetIds"),
+            "names the offending list: {message}"
+        );
+        assert!(
+            message.contains("up to 3 source clips"),
+            "states that list's cap: {message}"
+        );
+        assert!(
+            !message.contains("in total"),
+            "must not report this as a combined-budget failure: {message}"
+        );
+    }
+
+    /// The infallibility contract [`hard_max_duration`] holds to, applied here: a declared cap that
+    /// is not a non-negative integer is not a constraint anyone could satisfy, so it falls back to
+    /// the default rather than bricking the model. A typo'd `"9"` must not turn a model that takes
+    /// nine references into one that takes none.
+    #[test]
+    fn an_unhonorable_declared_reference_cap_falls_back_to_the_default() {
+        for bad in [json!(-1), json!("9"), json!(null), json!(9.5), json!([9])] {
+            let entry = payload(json!({ "limits": { "maxReferenceAssets": bad } }));
+            assert_eq!(
+                reference_caps(&entry).images,
+                DEFAULT_MAX_REFERENCE_ASSETS,
+                "unhonorable cap {bad} must fall back, not brick the model"
+            );
+        }
+        // A declared 0 IS honorable — "this model takes no references" is a real statement — so it
+        // must NOT fall back to 8. This is the case that separates "unparseable" from "zero".
+        let none = payload(json!({ "limits": { "maxReferenceAssets": 0 } }));
+        assert_eq!(reference_caps(&none).images, 0);
+        assert!(reference_limit_error("t2v_only", 1, 0, 0, &none).is_some());
+    }
+
+    /// The payload parse: the new list arrives through the same `string_list` filter the two
+    /// existing id lists use, so blanks and non-strings are dropped identically and an absent key
+    /// yields an empty list rather than a missing one.
+    #[test]
+    fn from_payload_parses_reference_audio_asset_ids_like_the_other_id_lists() {
+        let request = VideoRequest::from_payload(&payload(json!({
+            "projectId": "p1",
+            "referenceAudioAssetIds": ["voice-a", "  ", "music-b", 7]
+        })));
+        assert_eq!(
+            request.reference_audio_asset_ids,
+            vec!["voice-a", "music-b"]
+        );
+
+        let bare = VideoRequest::from_payload(&payload(json!({ "projectId": "p1" })));
+        assert!(bare.reference_audio_asset_ids.is_empty());
     }
 
     /// A model that declares no cap is UNCONSTRAINED — the default-absent behavior that keeps
@@ -2327,7 +4123,10 @@ mod tests {
         // The blanket duration was over-cap for a MAJORITY of shipped models — the same shape as
         // the fps blanket, and the reason this is a generalized invariant rather than two
         // coincidences. Pinned as a number so reintroducing a blanket default fails here.
-        // 7 of 10 as of sc-8444 (krea_realtime_14b joined the 5s-capped group).
+        // 7 of 10 as of sc-8444 (krea_realtime_14b joined the 5s-capped group). Still 7 of 12 after
+        // sc-17158: MiniMax-H3's 14.375 s ceiling is well past the blanket, so neither partition
+        // joins this set — but both are caught by the FLOOR instead (`hardMinDuration` 5.1667 s is
+        // under the blanket 6.0 s, so the blanket is admitted, just off their lattice).
         let over_cap: Vec<&str> = FPS_MENUS
             .iter()
             .filter_map(|(id, ..)| {
@@ -2368,7 +4167,7 @@ mod tests {
             .collect();
         assert_eq!(
             unadvertised.len(),
-            8,
+            10,
             "the blanket {DEFAULT_WIDTH}x{DEFAULT_HEIGHT} is not advertised by these models: \
              {unadvertised:?}"
         );
@@ -2444,6 +4243,11 @@ mod tests {
         // autoregressive block lattice — see
         // [`krea_realtime_durations_are_on_the_ar_block_lattice`].
         ("krea_realtime_14b", &[24], 24),
+        // MiniMax-H3's single cadence. Not a curation choice: the `17n + 5` lattice, the 5–15 s
+        // clamp and every measured render are all at 24 fps, and the duration menu is literally
+        // `frames / 24`, so any other rate puts the whole dropdown off-lattice.
+        ("minimax_h3", &[24], 24),
+        ("minimax_h3_ref", &[24], 24),
     ];
 
     /// The fps the API blanket-defaulted to before sc-12347, kept as a named constant because the
@@ -2477,6 +4281,12 @@ mod tests {
         // The reference bucket: 832x480 is exactly the 52x30 = 1560 tokens/frame the shipped
         // AR config bakes as `frame_seq_length` (the engine still recomputes it per request).
         ("krea_realtime_14b", 832, 480),
+        // Upstream's own default canvas: `resolve_canvas_size` yields 1344x768 for a 16:9 request
+        // with the 768 shorter side the model card specifies. It is EXACTLY the 1,032,192 px area
+        // budget, so it is the largest legal bucket rather than a middle one — which is also why it
+        // is a ~2 hour render at the shortest clip (sc-17152).
+        ("minimax_h3", 1344, 768),
+        ("minimax_h3_ref", 1344, 768),
     ];
 
     /// sc-12347 — the temporal invariant's other half: **what a video model advertises is what it
@@ -2574,7 +4384,7 @@ mod tests {
             .collect();
         assert_eq!(
             rejecting_the_blanket.len(),
-            7,
+            9,
             "the blanket {THE_BLANKET_FPS} fps is off-menu for these models: {rejecting_the_blanket:?} \
              — if this count moved, re-read why resolve_fps consults defaults.fps before changing it"
         );
@@ -3394,7 +5204,9 @@ mod tests {
     /// count guard (`shipped_video_limits`, sc-12409) — and deliberately not a second hand-written
     /// id list beside it, which is what let `wan_2_2_vace_fun_14b` fall out of this module's
     /// coverage entirely (sc-18814 review).
-    const EXPECTED_SHIPPED_VIDEO_COUNT: usize = 10;
+    /// 12 = the ten pre-17137 families plus the MiniMax-H3 pair (`minimax_h3`,
+    /// `minimax_h3_ref`) the epic's manifest entries added (sc-17158).
+    const EXPECTED_SHIPPED_VIDEO_COUNT: usize = 12;
 
     /// Every video model id plus its declared generation modes in the shipped manifest. Keeping the
     /// modes beside the id is load-bearing for the routing-surface check: probing arbitrary generic
@@ -3529,7 +5341,11 @@ mod tests {
     #[test]
     fn video_admission_surface_matches_the_routing_catalog() {
         /// The shipped video ids whose catalog answer is internally inconsistent, with the story
-        /// that owns the inconsistency. Empty is the goal state.
+        /// that owns the inconsistency. Empty is the goal state, and the current state: the last
+        /// row (`minimax_h3_ref`, whose only mode was withheld from `video_mode_is_mlx_eligible`
+        /// pending a `MultiReference` conditioning declaration) was deleted by sc-18650, which
+        /// aligned the conditioning requirement to the engines' ordered omni-reference surface
+        /// and restored the arm.
         const CATALOG_MLX_DISAGREEMENTS: &[&str] = &[];
 
         let shipped = shipped_video_models();
@@ -3559,8 +5375,10 @@ mod tests {
                      from the `video_admission_surface` doc table"
                 );
             } else {
+                // Collected rather than panicked here: the after-loop equality against
+                // `CATALOG_MLX_DISAGREEMENTS` is what decides whether a disagreement is owned
+                // (named with its story above) or a new sc-18826-class gap.
                 observed_disagreements.push(model.to_owned());
-                panic!("{model}: the MLX table and mode predicates disagree");
             }
 
             let t2v = payload(json!({ "model": model, "mode": "text_to_video" }));
@@ -3707,9 +5525,15 @@ mod tests {
     /// uncovered decode envelope.
     #[test]
     fn every_shipped_video_family_is_mapped_or_named_unmodelled() {
-        for (lane, deliberately_unmodelled) in
-            [(VideoLane::Mlx, &["svd"][..]), (VideoLane::Candle, &[][..])]
-        {
+        // MiniMax-H3 (both partitions) is deliberately unmodelled on BOTH lanes for now: the
+        // family has no candle lane at all (`platforms: ["macos"]` everywhere but the raw
+        // upstream snapshot, and no candle route), and its MLX decode envelope is owned by the
+        // epic's terminal calibration campaign — inventing a `vae_full_res_channels` figure here
+        // would state a write bound nobody has measured (sc-17137 main-sync reconciliation).
+        for (lane, deliberately_unmodelled) in [
+            (VideoLane::Mlx, &["svd", "minimax_h3", "minimax_h3_ref"][..]),
+            (VideoLane::Candle, &["minimax_h3", "minimax_h3_ref"][..]),
+        ] {
             let mut modelled = 0_usize;
             for model in shipped_video_model_ids() {
                 match vae_full_res_channels(&model, lane) {

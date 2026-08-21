@@ -570,6 +570,10 @@ test("schemas, clean Node dependencies, and workflow preserve the opt-in single-
   assert.equal(receiptSchema.$defs.gpuSample.additionalProperties, false);
   assert.equal(receiptSchema.properties.profile.const, PROFILE_NAME);
   assert.match(workflow, /run_epic_20738_terminal_cuda:[\s\S]*?default: false/);
+  assert.doesNotMatch(workflow, /^      sceneworks_revision:/m);
+  assert.equal((workflow.match(/SCENEWORKS_REVISION: \$\{\{ github\.sha \}\}/g) ?? []).length, 2);
+  assert.doesNotMatch(workflow, /inputs\.provision_krea_snapshot/);
+  assert.match(workflow, /PROVISION_SNAPSHOT: \$\{\{ inputs\.provision_snapshot \}\}/);
   assert.match(workflow, /windows-candle-\$\{\{[^\n]*epic-20738-terminal/);
   assert.equal((workflow.match(/^jobs:\s*$/gm) ?? []).length, 1);
   assert.equal((workflow.match(/^  candle-worker:\s*$/gm) ?? []).length, 1);

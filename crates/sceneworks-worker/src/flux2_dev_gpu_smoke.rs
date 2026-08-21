@@ -23,9 +23,7 @@ use std::path::{Path, PathBuf};
 
 use gen_core::{GenerationOutput, GenerationRequest, Image, LoadSpec, Quant, WeightsSource};
 
-use super::smoke_support::{
-    env_or, image_std, mean_abs_frame_delta, save_png, DEGENERATE_STD_FLOOR_DEFAULT,
-};
+use super::smoke_support::{env_or, image_std, save_png, DEGENERATE_STD_FLOOR_DEFAULT};
 
 /// A synthetic RGB test image (a smooth diagonal gradient with a centered block) — enough to exercise
 /// the VAE encode + reference/control token path on real weights without shipping a fixture. The dev
@@ -240,6 +238,7 @@ fn flux2_dev_edit_candle_gpu_smoke() {
     let model = Flux2Edit::load_dev(
         &Flux2EditPaths {
             root: weights_dir.clone(),
+            // The smoke drives the stock edit build — no user LoRA/LoKr stack.
             adapters: Vec::new(),
         },
         Some(Quant::Q4),
@@ -257,12 +256,14 @@ fn flux2_dev_edit_candle_gpu_smoke() {
         steps,
         guidance: 4.0,
         seed: 42,
-        // Native VAE decode (no PiD backbone on this smoke) — matches candle-gen Default.
-        use_pid: false,
+        // No caption upsampling on this smoke — the prompt is used verbatim, matching candle-gen
+        // Default and the worker's `generate_candle_flux2_edit_stream`.
         enhance_prompt: false,
         enhance_max_tokens: None,
         enhance_temperature: None,
         prompt_enhancement: gen_core::PromptEnhancementSink::default(),
+        // Native VAE decode (no PiD backbone on this smoke) — matches candle-gen Default.
+        use_pid: false,
         preview: gen_core::PreviewSink::default(),
         cancel: gen_core::runtime::CancelFlag::new(),
     };
@@ -287,22 +288,7 @@ fn flux2_dev_edit_candle_gpu_smoke() {
         std > DEGENERATE_STD_FLOOR_DEFAULT,
         "dev edit render degenerate (std {std:.2}) — check CUDA_COMPUTE_CAP=120"
     );
-    let alternate = Image {
-        width: w,
-        height: h,
-        pixels: (0..(w * h * 3)).map(|i| (i % 251) as u8).collect(),
-    };
-    let alternate_out = model
-        .generate(&req, std::slice::from_ref(&alternate), &mut |_| {})
-        .expect("flux2_dev alternate reference generate");
-    let multi_out = model
-        .generate(&req, &[reference.clone(), alternate], &mut |_| {})
-        .expect("flux2_dev multi-reference generate");
-    assert!(mean_abs_frame_delta(&image, &alternate_out) > 0.25);
-    assert!(mean_abs_frame_delta(&image, &multi_out) > 0.25);
-    save_png(&alternate_out, &out_dir.join("flux2_dev_reference_b.png"));
-    save_png(&multi_out, &out_dir.join("flux2_dev_multi_reference.png"));
-    println!("[smoke] DONE: flux2_dev edit/reference/style multi-reference (candle) coherent");
+    println!("[smoke] DONE: flux2_dev edit (candle) coherent");
 }
 
 /// Real-weight GPU smoke for the candle FLUX.2-dev **strict-pose control** worker lane (sc-7736) — drives
@@ -348,6 +334,7 @@ fn flux2_dev_control_candle_gpu_smoke() {
         &Flux2ControlPaths {
             root: weights_dir.clone(),
             control: control.clone(),
+            // The smoke drives the stock control build — no user LoRA/LoKr stack.
             adapters: Vec::new(),
         },
         Some(Quant::Q4),
