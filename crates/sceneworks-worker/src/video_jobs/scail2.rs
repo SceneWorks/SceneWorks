@@ -23,9 +23,9 @@ use super::{
 // needs from native SAM3 (no user masks): the reference image and the driving frames are each
 // segmented (every person → a distinct palette color, left-to-right) and painted onto the
 // whose-world-to-keep background (animation: driving bg black, ref bg white). Conditioning =
-// `Reference` (the character) + `Mask` (its color mask) + `ControlClip{frames, mask}` (driving video +
+// ordered `Reference` + `Mask` pairs (one per character) + `ControlClip{frames, mask}` (driving video +
 // per-frame color masks). `replace_person` (cross-identity, replace_flag=true) is the same engine,
-// wired in sc-5452; multi-character (paired ref+mask) awaits the engine request-contract extension.
+// wired in sc-5452.
 // ---------------------------------------------------------------------------
 
 /// Adapter id recorded on a real MLX SCAIL-2 asset.
@@ -258,9 +258,10 @@ pub(super) fn scail2_engine_video_mode(mode: &str) -> &'static str {
 
 /// Resolve a SCAIL-2 request into the engine conditioning: load the reference character image and the
 /// driving clip, segment both with native SAM3 (every person → a palette color), paint the color-coded
-/// masks (animation background convention), and assemble `Reference` + `Mask` + `ControlClip`. The
-/// segmentation + painting run on the blocking pool (GPU inference). The reference is
-/// `referenceAssetIds[0]` (preferred) or `sourceAssetId`; the driving clip is `sourceClipAssetId`.
+/// masks (animation background convention), and assemble strict ordered `Reference`, `Mask` pairs
+/// before the `ControlClip`. Every `referenceAssetIds` entry is independently loaded and segmented
+/// in caller order; a legacy `sourceAssetId` remains the single-reference fallback. The segmentation
+/// + painting run on the blocking pool (GPU inference).
 #[cfg(target_os = "macos")]
 pub(super) async fn resolve_scail2_conditioning(
     api: &ApiClient,
@@ -269,25 +270,41 @@ pub(super) async fn resolve_scail2_conditioning(
     request: &VideoRequest,
     project_path: &Path,
 ) -> WorkerResult<Vec<Conditioning>> {
-    // The character: a reference image (referenceAssetIds first, else the i2v sourceAssetId).
-    let ref_id = request
-        .reference_asset_ids
-        .first()
-        .map(String::as_str)
-        .or(request.source_asset_id.as_deref())
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload(
-                "scail2 animate_character requires a reference character image (referenceAssetIds \
-                 or sourceAssetId)."
-                    .into(),
+    // The ordered plural list wins. The legacy i2v source image remains only as a single-reference
+    // fallback, never an unpaired extra character.
+    let reference_ids: Vec<&str> = if request.reference_asset_ids.is_empty() {
+        request.source_asset_id.as_deref().into_iter().collect()
+    } else {
+        request
+            .reference_asset_ids
+            .iter()
+            .map(String::as_str)
+            .collect()
+    };
+    if reference_ids.is_empty() {
+        return Err(WorkerError::InvalidPayload(
+            "scail2 animate_character requires a reference character image (referenceAssetIds \
+             or sourceAssetId)."
+                .into(),
+        ));
+    }
+    if reference_ids.len() > sceneworks_core::video_request::MAX_SCAIL2_REFERENCE_CHARACTERS {
+        return Err(WorkerError::InvalidPayload(format!(
+            "SCAIL-2 Animate Character supports at most {} reference characters.",
+            sceneworks_core::video_request::MAX_SCAIL2_REFERENCE_CHARACTERS
+        )));
+    }
+    let references = reference_ids
+        .into_iter()
+        .map(|reference_id| {
+            load_reference_image(
+                &settings.data_dir,
+                &request.project_id,
+                reference_id,
+                project_path,
             )
-        })?;
-    let reference = load_reference_image(
-        &settings.data_dir,
-        &request.project_id,
-        ref_id,
-        project_path,
-    )?;
+        })
+        .collect::<WorkerResult<Vec<_>>>()?;
 
     // The driving video → frames at the output size (the engine re-resizes internally).
     let clip_id = request.source_clip_asset_id.as_deref().ok_or_else(|| {
@@ -322,16 +339,16 @@ pub(super) async fn resolve_scail2_conditioning(
         settings,
         &job.id,
         move |flag| {
-            let masks = crate::person_segment_sam3::segment_all_persons_in_memory(
-                &rm,
-                &rt,
-                std::slice::from_ref(&reference),
-                Some(flag),
-                None,
-            )?;
-            let mask =
-                crate::scail2_masks::paint_reference_mask(&masks, crate::scail2_masks::BG_WHITE)?;
-            Ok((reference, mask))
+            super::segment_scail2_references(references, &flag, |reference, flag| {
+                let masks = crate::person_segment_sam3::segment_all_persons_in_memory(
+                    &rm,
+                    &rt,
+                    std::slice::from_ref(reference),
+                    Some(flag.clone()),
+                    None,
+                )?;
+                crate::scail2_masks::paint_reference_mask(&masks, crate::scail2_masks::BG_WHITE)
+            })
         },
         move |flag| {
             let masks = crate::person_segment_sam3::segment_all_persons_in_memory(

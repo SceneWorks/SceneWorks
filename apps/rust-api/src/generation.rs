@@ -778,7 +778,39 @@ pub(crate) async fn create_video_job(
         .and_then(Value::as_str)
         .unwrap_or(payload.model.as_str())
         .to_owned();
+    // The DTO validation runs before recipe-preset expansion, while this is the first point that
+    // knows the model actually being enqueued. Re-check SCAIL-2's narrower six-character ceiling
+    // here so a preset cannot turn a generally-valid seven-reference request into an ambiguous
+    // SCAIL-2 job after the first gate has run.
+    validate_scail2_animate_reference_count(
+        &model_id,
+        job_payload
+            .get("mode")
+            .and_then(Value::as_str)
+            .unwrap_or(payload.mode.as_str()),
+        job_payload
+            .get("referenceAssetIds")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len),
+    )?;
     let model_manifest_entry = resolve_model_manifest_entry(&state, &model_id).await?;
+    // Do not advertise or enqueue the paired source layout until the pinned inference descriptor
+    // records it. The worker implementation is deliberately source-ready ahead of that pin, but a
+    // direct API client must not be able to send additional references to an older engine that
+    // cannot consume them. The catalog flag is absent today and will be set only with the paired
+    // descriptor/pin evidence.
+    validate_scail2_animate_reference_capability(
+        &model_id,
+        job_payload
+            .get("mode")
+            .and_then(Value::as_str)
+            .unwrap_or(payload.mode.as_str()),
+        job_payload
+            .get("referenceAssetIds")
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len),
+        &model_manifest_entry,
+    )?;
     validate_selected_decoder_for_manifest(
         enqueue_backend(&state),
         &job_payload,

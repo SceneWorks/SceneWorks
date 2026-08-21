@@ -4880,6 +4880,11 @@ fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
             "referenceAssetIds must contain at most {MAX_VIDEO_REFERENCE_ASSET_IDS} ids"
         )));
     }
+    validate_scail2_animate_reference_count(
+        &payload.model,
+        &payload.mode,
+        payload.reference_asset_ids.len(),
+    )?;
     if payload
         .source_clip_asset_ids
         .iter()
@@ -5232,6 +5237,53 @@ const MAX_IMAGE_DIMENSION: u32 = 4096;
 const MAX_VIDEO_DIMENSION: u32 = 1920;
 const MAX_VIDEO_REFERENCE_ASSET_IDS: usize = 8;
 const MAX_VIDEO_SOURCE_CLIP_ASSET_IDS: usize = 8;
+
+/// SCAIL-2 consumes ordered character reference/mask pairs. The provider's source-position
+/// table has six slots, so accepting a seventh image would either make a later worker fail or
+/// tempt a caller to drop it. Keep the request explicit and fail closed instead.
+pub(crate) fn validate_scail2_animate_reference_count(
+    model: &str,
+    mode: &str,
+    reference_count: usize,
+) -> Result<(), ApiError> {
+    if model == "scail2_14b"
+        && mode == "animate_character"
+        && reference_count > sceneworks_core::video_request::MAX_SCAIL2_REFERENCE_CHARACTERS
+    {
+        return Err(ApiError::bad_request(format!(
+            "SCAIL-2 Animate Character supports at most {} reference characters.",
+            sceneworks_core::video_request::MAX_SCAIL2_REFERENCE_CHARACTERS
+        )));
+    }
+    Ok(())
+}
+
+/// A multi-reference request is valid only once the resolved, server-owned model entry says the
+/// pinned inference descriptor accepts its strict Reference/Mask pairs. This is separate from the
+/// six-character boundary: source readiness alone must not make an older inference pin appear to
+/// support a public capability.
+pub(crate) fn validate_scail2_animate_reference_capability(
+    model: &str,
+    mode: &str,
+    reference_count: usize,
+    model_manifest_entry: &Value,
+) -> Result<(), ApiError> {
+    validate_scail2_animate_reference_count(model, mode, reference_count)?;
+    if model == "scail2_14b"
+        && mode == "animate_character"
+        && reference_count > 1
+        && !model_manifest_entry
+            .get("ui")
+            .and_then(|ui| ui.get("scail2MultiReference"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    {
+        return Err(ApiError::bad_request(
+            "SCAIL-2 Animate Character multi-reference is unavailable until the paired inference descriptor is installed.",
+        ));
+    }
+    Ok(())
+}
 
 fn validate_dimension(value: u32, field: &'static str, max: u32) -> Result<(), ApiError> {
     if !(256..=max).contains(&value) {

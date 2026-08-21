@@ -6858,6 +6858,157 @@ async fn scail2_animate_character_reaches_the_queue_and_validates_media() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
+/// The paired SCAIL-2 provider has six source-position slots: the first character plus five
+/// ordered extras. The API owns the public boundary, while the worker keeps the same backstop for
+/// retry/legacy payloads; neither is permitted to silently retain only the first six. The source
+/// implementation must also stay behind the resolved descriptor gate until the final inference
+/// pin carries the paired layout. This pins that gate and the canonical empty-array payload shape
+/// used by recipes, replay, retry, and duplicate.
+#[tokio::test]
+async fn scail2_animate_character_preserves_ordered_multi_references_and_rejects_seven() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "SCAIL-2 multi-reference" }),
+    )
+    .await;
+
+    let base = || {
+        json!({
+            "projectId": "project-1",
+            "model": "scail2_14b",
+            "mode": "animate_character",
+            "prompt": "the character dances",
+            "sourceClipAssetId": "clip-driving"
+        })
+    };
+
+    // 0 references without the legacy source fallback remains incomplete. The one-reference
+    // path remains available while the current engine descriptor has not yet proven the paired
+    // layout.
+    let (status, _) = request(app.clone(), "POST", "/api/v1/video/jobs", base()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let single_reference = vec!["character-0"];
+    let mut single = base();
+    single.as_object_mut().unwrap().insert(
+        "referenceAssetIds".to_owned(),
+        json!(single_reference.clone()),
+    );
+    let (status, job) = request(app.clone(), "POST", "/api/v1/video/jobs", single).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(job["payload"]["referenceAssetIds"], json!(single_reference));
+
+    // A direct API caller is held to the same honest gate as the Studio. This prevents the
+    // source-ready worker path from making today's older inference pin claim multi-reference
+    // support before the descriptor flag is shipped with the final paired pin.
+    for count in [2usize, 6] {
+        let references: Vec<String> = (0..count)
+            .map(|index| format!("character-{index}"))
+            .collect();
+        let mut body = base();
+        body.as_object_mut()
+            .unwrap()
+            .insert("referenceAssetIds".to_owned(), json!(references));
+        let (status, error) = request(app.clone(), "POST", "/api/v1/video/jobs", body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            error
+                .to_string()
+                .contains("multi-reference is unavailable until the paired inference descriptor"),
+            "{count} references must stay behind the current descriptor gate, got: {error}"
+        );
+    }
+
+    // A sourceAssetId remains the old single-reference fallback. Whether referenceAssetIds was
+    // absent or explicitly [], the stored/replayable shape must canonicalize to [] rather than
+    // accidentally serializing null or dropping the field on a retry/duplicate.
+    for reference_ids in [None, Some(json!([]))] {
+        let mut body = base();
+        let object = body.as_object_mut().unwrap();
+        object.insert("sourceAssetId".to_owned(), json!("legacy-reference"));
+        if let Some(reference_ids) = reference_ids {
+            object.insert("referenceAssetIds".to_owned(), reference_ids);
+        }
+        let (status, job) = request(app.clone(), "POST", "/api/v1/video/jobs", body).await;
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(job["payload"]["referenceAssetIds"], json!([]));
+    }
+
+    let mut seven = base();
+    seven.as_object_mut().unwrap().insert(
+        "referenceAssetIds".to_owned(),
+        json!([
+            "character-0",
+            "character-1",
+            "character-2",
+            "character-3",
+            "character-4",
+            "character-5",
+            "character-6"
+        ]),
+    );
+    let (status, error) = request(app, "POST", "/api/v1/video/jobs", seven).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        error.to_string().contains("at most 6 reference characters"),
+        "seven references must be rejected explicitly, got: {error}"
+    );
+
+    // The exact same endpoint becomes source-ready when the resolved, server-owned manifest
+    // carries the paired-descriptor gate. Use an isolated miniature catalog rather than changing
+    // the real builtin manifest before inference-main and terminal evidence exist.
+    let enabled_temp_dir = tempfile::tempdir().expect("enabled temp dir creates");
+    let config_dir = enabled_temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"{
+            "schemaVersion": 1,
+            "models": [{
+                "id": "scail2_14b",
+                "name": "SCAIL-2 14B",
+                "family": "scail2",
+                "type": "video",
+                "capabilities": ["image_to_video"],
+                "ui": { "scail2MultiReference": true }
+            }]
+        }"#,
+    )
+    .expect("multi-reference manifest writes");
+    write_empty_sibling_manifests(&config_dir);
+    let enabled_app = create_app(test_settings(&enabled_temp_dir)).expect("enabled app creates");
+    request(
+        enabled_app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "SCAIL-2 paired descriptor" }),
+    )
+    .await;
+    for count in [2usize, 6] {
+        let references: Vec<String> = (0..count)
+            .map(|index| format!("character-{index}"))
+            .collect();
+        let mut body = base();
+        body.as_object_mut()
+            .unwrap()
+            .insert("referenceAssetIds".to_owned(), json!(references.clone()));
+        let (status, job) = request(enabled_app.clone(), "POST", "/api/v1/video/jobs", body).await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "{count} references must be accepted"
+        );
+        assert_eq!(
+            job["payload"]["referenceAssetIds"],
+            json!(references),
+            "{count} references must stay ordered for the paired worker contract"
+        );
+    }
+}
+
 #[tokio::test]
 async fn person_tracking_routes_match_contracts() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
