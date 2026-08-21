@@ -23,6 +23,7 @@ import {
   noiseFloor,
   phaseFlipVerdict,
   pointsFrom,
+  recordTerminalStatesFrom,
   rolesFromPlan,
   sessionsFrom,
   VIDEO_MEMORY_CURVE_CALIBRATION_ABI,
@@ -1240,6 +1241,39 @@ test("a captured record with no OK terminal in a committed log is refused", () =
     () => coverageOf(PLAN, threeF121, driverStatesFrom([DRIVER_LOG])),
     /has 3 record\(s\) but the committed driver logs record 2 OK terminal\(s\)/,
   );
+});
+
+test("record terminals are explicit and require clean runtime-complete harness records", () => {
+  const record = structuredClone(DATASET.records[0]);
+  const provider = PLAN.providers.find((entry) => entry.fixture === record.fixture);
+  assert.ok(provider);
+  record.status = "runtime_complete";
+  record.repositories.sceneWorks.dirty = false;
+  record.repositories.inference.dirty = false;
+  const states = recordTerminalStatesFrom([record], PLAN);
+  assert.equal(states.get(provider.name).terminal, "completed");
+  assert.equal(states.get(provider.name).oks, 1);
+  assert.equal(
+    coverageOf(
+      { providers: [provider] },
+      pointsFrom([record], rolesFromPlan(PLAN), MANIFEST),
+      states,
+    ).byState.captured.total,
+    1,
+  );
+
+  for (const mutate of [
+    (candidate) => { candidate.status = "gated"; },
+    (candidate) => { candidate.repositories.sceneWorks.dirty = true; },
+    (candidate) => { candidate.repositories.inference.dirty = true; },
+  ]) {
+    const candidate = structuredClone(record);
+    mutate(candidate);
+    assert.throws(
+      () => recordTerminalStatesFrom([candidate], PLAN),
+      /runtime_complete|dirty repository/,
+    );
+  }
 });
 
 test("renaming a captured provider is refused rather than silently unlinking it", () => {

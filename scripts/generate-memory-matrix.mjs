@@ -4112,6 +4112,16 @@ export const SOURCE_PATHS = Object.freeze({
   // without this entry the prediction law the matrix's memory numbers depend on would stop rotating
   // the fingerprint the day it was extracted — a hole created by the extraction itself.
   estimateSynthesis: "crates/sceneworks-worker/src/estimate_synthesis.rs",
+  // sc-19059 terminal acceptance: these seven files all decide a candle admission result. Keeping
+  // only the extracted generic law here was insufficient: its backend inputs and the compiled
+  // video-curve reader could move a decision without rotating the matrix provenance.
+  candleScalarGate: "crates/sceneworks-worker/src/candle_scalar_gate.rs",
+  candleMemoryStrategy: "crates/sceneworks-worker/src/candle_memory_strategy.rs",
+  videoAdmission: "crates/sceneworks-worker/src/video_admission.rs",
+  conditioningFit: "crates/sceneworks-worker/src/conditioning_fit.rs",
+  kreaControlFit: "crates/sceneworks-worker/src/krea_control_fit.rs",
+  videoMemoryCurves: "crates/sceneworks-core/src/video_memory_curves.rs",
+  payload: "crates/sceneworks-worker/src/payload.rs",
   memoryStrategy: "crates/sceneworks-worker/src/memory_strategy.rs",
   vramGate: "crates/sceneworks-worker/src/vram_gate.rs",
   instantId: "crates/sceneworks-worker/src/image_jobs/instantid.rs",

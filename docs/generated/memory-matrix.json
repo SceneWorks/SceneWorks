@@ -1,7 +1,7 @@
 {
   "schemaVersion": 8,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:8df5f8f536f3b49770b592472ed97650d5887d5ee1342e7a0ef19b90965a6d09",
+    "sceneWorksRevision": "source-tree:6421d59813cf51dd1e059139969341c8762e979f9814bc4c2bc2eb96d72361b6",
     "inferenceRevision": "4013049764172ee7dc707101c7da8c83c1483f2d",
     "sources": {
       "manifest": {
@@ -63,6 +63,34 @@
       "estimateSynthesis": {
         "path": "crates/sceneworks-worker/src/estimate_synthesis.rs",
         "sha256": "4bcef3864cf90065d8c881d4ca444f429010d3d68667acb66e78b9b0ded3bd34"
+      },
+      "candleScalarGate": {
+        "path": "crates/sceneworks-worker/src/candle_scalar_gate.rs",
+        "sha256": "59af6f5e548c6a8419929b1ee4c47d697068a6fc08ca7921b3fa3af49dba5331"
+      },
+      "candleMemoryStrategy": {
+        "path": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
+        "sha256": "41075502251360f2ebefd988a9a5cce522a6b836e0ef4b4ff232f976481faf7d"
+      },
+      "videoAdmission": {
+        "path": "crates/sceneworks-worker/src/video_admission.rs",
+        "sha256": "0b091905758d37569d1bd8244d3fdc874b7f11ca9f4672b3a4fe01262b141eff"
+      },
+      "conditioningFit": {
+        "path": "crates/sceneworks-worker/src/conditioning_fit.rs",
+        "sha256": "8d061b231d22f6794bd3895bfe5deb87a5850634062fb52a443c120783860a35"
+      },
+      "kreaControlFit": {
+        "path": "crates/sceneworks-worker/src/krea_control_fit.rs",
+        "sha256": "d54e602d3c8663ebc6529889e4058650b91b0432baf52914ad361e6b29431ed7"
+      },
+      "videoMemoryCurves": {
+        "path": "crates/sceneworks-core/src/video_memory_curves.rs",
+        "sha256": "1f27e51386f4de6031ea6d453cc59be5977d984dea8bea8ddc16801f5f4eda48"
+      },
+      "payload": {
+        "path": "crates/sceneworks-worker/src/payload.rs",
+        "sha256": "87bf47d9d068cb7391ea49337b070ad386e717e81e7acbda47f56f1ee3becbaf"
       },
       "memoryStrategy": {
         "path": "crates/sceneworks-worker/src/memory_strategy.rs",

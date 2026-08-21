@@ -1797,12 +1797,15 @@ wired into `npm run check` so it stays schema-valid:
      --story sc-19057 \
      --dataset docs/generated/wan-candle-video-sc-19057.json \
      --plan docs/calibration/sc-19057/wan-candle-video-capture-plan.json \
+     --record-terminals \
      --write docs/generated/wan-temporal-form-fit-sc-19057.json \
      --source-fit docs/generated/wan-temporal-form-fit-sc-19057.json
    ```
 
-   There is no `--driver-log` for this lane (the runbook's §12d invocation writes none), so the
-   coverage block is derived from the plan and dataset alone.
+   There is no `--driver-log` for this lane (the runbook's §12d invocation writes none), so
+   `--record-terminals` explicitly derives terminal counts from `runtime_complete` records stamped
+   with two clean repositories. The two provenance modes are mutually exclusive; omitting both is
+   refused rather than silently treating captured rows as terminal.
 
    Then add `docs/generated/wan-candle-video-sc-19057.json` to
    `PACKAGED_VIDEO_MEMORY_CURVE_SOURCES` in `crates/sceneworks-core/src/video_memory_curves.rs`.

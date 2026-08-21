@@ -31,7 +31,7 @@
  * within the noise floor" is a comparison against a number this dataset produced.
  *
  * Usage: node scripts/fit-ltx-temporal-form.mjs [--dataset <bundle.json>]... [--plan <plan.json>]
- *                                               [--driver-log <sweep-run.log>]...
+ *                                               ([--driver-log <sweep-run.log>]... | --record-terminals)
  *                                               [--write <report.json>]
  *                                               [--curve-write <curves.json>] [--check]
  */
@@ -551,6 +551,53 @@ export function driverStatesFrom(logs) {
           : state.fails > 0
             ? "failed"
             : "no_terminal_record";
+  }
+  return states;
+}
+
+/**
+ * Build terminal counts from a checked harness bundle when the capture has no separate driver log.
+ *
+ * The Candle Wan arm is driven directly by `memory-calibration-harness.mjs`; unlike the historical
+ * LTX sweep, it has no wrapper that emits `BEGIN`/`OK` lines. Requiring an explicit CLI flag keeps
+ * this from silently weakening the LTX provenance rule. A record counts as its own terminal only
+ * when the harness says `runtime_complete` and both stamped repositories were clean.
+ */
+export function recordTerminalStatesFrom(records, plan) {
+  const nameByFixture = new Map(plan.providers.map(({ fixture, name }) => [fixture, name]));
+  const states = new Map();
+  for (const record of records) {
+    const name = nameByFixture.get(record.fixture);
+    if (!name) {
+      throw new Error(
+        `record fixture ${record.fixture} is absent from the sweep plan and cannot be a terminal`,
+      );
+    }
+    if (record.status !== "runtime_complete") {
+      throw new Error(
+        `${record.fixture} has status ${JSON.stringify(record.status)}, not runtime_complete; ` +
+          "record terminals may only come from a completed harness case",
+      );
+    }
+    if (record.repositories?.sceneWorks?.dirty !== false || record.repositories?.inference?.dirty !== false) {
+      throw new Error(
+        `${record.fixture} was stamped from a dirty repository; it cannot supply record terminal provenance`,
+      );
+    }
+    if (!states.has(name)) {
+      states.set(name, {
+        begins: 0,
+        oks: 0,
+        fails: 0,
+        failReasons: [],
+        arithmeticReasons: [],
+        stoppedBefore: false,
+        terminal: "completed",
+      });
+    }
+    const state = states.get(name);
+    state.begins += 1;
+    state.oks += 1;
   }
   return states;
 }
@@ -1705,9 +1752,10 @@ async function main() {
   }
   const manifestPath = path.resolve(ROOT, "config/manifests/builtin.models.jsonc");
   const curveSchemaPath = path.resolve(ROOT, "packages/schemas/video-memory-curves.schema.json");
-  // BOTH driver sessions, in chronological order. The first crashed the host after four captures
-  // and its log went uncommitted in the original PR, which is what let four of the thirteen records
-  // ship with no terminal line anywhere. `--driver-log` may be repeated.
+  // The historical LTX default is BOTH driver sessions, in chronological order. The first crashed
+  // the host after four captures and its log went uncommitted in the original PR, which is what let
+  // four of the thirteen records ship with no terminal line anywhere. `--driver-log` may be
+  // repeated; a direct harness lane must explicitly choose `--record-terminals` instead.
   const driverLogPaths = repeated(
     "--driver-log",
     story === "sc-18810"
@@ -1717,6 +1765,15 @@ async function main() {
         ]
       : [],
   ).map((relative) => path.resolve(ROOT, relative));
+  const recordTerminals = args.includes("--record-terminals");
+  if (recordTerminals && driverLogPaths.length > 0) {
+    throw new Error("--record-terminals and --driver-log are mutually exclusive provenance modes");
+  }
+  if (!recordTerminals && driverLogPaths.length === 0) {
+    throw new Error(
+      "the fit needs terminal provenance: pass --driver-log or explicitly use --record-terminals",
+    );
+  }
   const datasets = await Promise.all(
     datasetPaths.map(async (file) => {
       const raw = await readFile(file, "utf8");
@@ -1734,7 +1791,9 @@ async function main() {
     })),
   );
   // Which geometries were ATTEMPTED comes from the drivers' own logs, not from a hand-typed list.
-  const driverStates = driverStatesFrom(logs.map((log) => log.text));
+  const driverStates = recordTerminals
+    ? recordTerminalStatesFrom(records, plan)
+    : driverStatesFrom(logs.map((log) => log.text));
   const points = pointsFrom(records, rolesFromPlan(plan), manifest);
   const fixtureByName = new Map(
     plan.providers.map((provider) => [provider.name, provider.fixture]),

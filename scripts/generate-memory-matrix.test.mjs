@@ -324,7 +324,10 @@ test("the fingerprint covers every declared source, and the artifact publishes t
   assert.deepEqual(Object.keys(SOURCE_PATHS).sort(), [
     "calibrationEvidence",
     "calibrationPlan",
+    "candleMemoryStrategy",
+    "candleScalarGate",
     "cargo",
+    "conditioningFit",
     "engineCapabilitiesCandle",
     "engineCapabilitiesMlx",
     "engines",
@@ -335,9 +338,11 @@ test("the fingerprint covers every declared source, and the artifact publishes t
     // closure digests that replaced it are declared here instead, for every lane.
     "inferenceClosures",
     "instantId",
+    "kreaControlFit",
     "manifest",
     "memoryStrategy",
     "mlxFitGate",
+    "payload",
     "routingCandle",
     "routingCatalog",
     "routingMlx",
@@ -348,6 +353,8 @@ test("the fingerprint covers every declared source, and the artifact publishes t
     // sc-18815: the video lane's route resolvers. Each `*_engine_id` function is where a video
     // model-id -> provider-id mapping actually lives, so the fingerprint watches them for the same
     // reason it watches `engines.rs#MODEL_TABLE` on the image side.
+    "videoAdmission",
+    "videoMemoryCurves",
     "videoRouteBernini",
     "videoRouteCandle",
     "videoRouteKreaRealtime",
@@ -358,16 +365,23 @@ test("the fingerprint covers every declared source, and the artifact publishes t
     "vramGate",
   ]);
   assert.deepEqual(Object.keys(RUST_SOURCE_PATHS).sort(), [
+    "candleMemoryStrategy",
+    "candleScalarGate",
     "cargo",
+    "conditioningFit",
     "engines",
     "estimateSynthesis",
     "imageRouting",
     "instantId",
+    "kreaControlFit",
     "memoryStrategy",
     "mlxFitGate",
+    "payload",
     "routingCandle",
     "routingCatalog",
     "routingMlx",
+    "videoAdmission",
+    "videoMemoryCurves",
     "videoRouteBernini",
     "videoRouteCandle",
     "videoRouteKreaRealtime",
