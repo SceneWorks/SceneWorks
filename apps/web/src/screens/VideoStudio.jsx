@@ -861,7 +861,8 @@ export function VideoStudio() {
     availableTiers.includes("bf16");
   const canStartNewGenerationFromReplay = Boolean(
     replayTierBlockMessage &&
-      macVideoModels.some((item) => item.id === selectedModel?.id) &&
+      model === selectedModel?.id &&
+      macVideoModels.some((item) => item.id === model) &&
       !baseExecutionTierBlockMessage &&
       (!nativeTierLane || availableTiers.includes(quantTier)),
   );
@@ -871,12 +872,36 @@ export function VideoStudio() {
         nativeTierLane ? ` ${tierLabel(quantTier)}` : ""
       }`;
   const handleStartNewGenerationFromReplay = useCallback(() => {
+    // Recheck the same identity/tier contract at the click boundary. During a catalog refresh,
+    // `selectedModel` can already derive the fallback while `model` still carries the removed id;
+    // clearing replay in that transient render would advertise one model and submit another.
+    if (
+      !recipeTierRequest ||
+      !replayTierBlockMessage ||
+      model !== selectedModel?.id ||
+      !macVideoModels.some((item) => item.id === model) ||
+      baseExecutionTierBlockMessage ||
+      (nativeTierLane && !availableTiers.includes(quantTier))
+    ) {
+      return;
+    }
     setRecipeModelNotice("");
     setRecipeTierRequest(null);
     if (nativeTierLane && availableTiers.includes(quantTier)) {
       handleTierChange(quantTier);
     }
-  }, [nativeTierLane, availableTiers, quantTier, handleTierChange]);
+  }, [
+    recipeTierRequest,
+    replayTierBlockMessage,
+    model,
+    selectedModel?.id,
+    macVideoModels,
+    baseExecutionTierBlockMessage,
+    nativeTierLane,
+    availableTiers,
+    quantTier,
+    handleTierChange,
+  ]);
   const showTorchQuantization = activeBackend !== "mlx" && !nativeTierLane && supportsQuantization;
   const selectedTierQuantize =
     nativeTierLane && availableTiers.includes(quantTier) ? tierQuantize(quantTier) : null;

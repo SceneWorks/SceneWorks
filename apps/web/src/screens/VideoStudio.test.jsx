@@ -1773,6 +1773,61 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
     });
   });
 
+  it("withholds catalog-removal recovery until fallback model state and its shared tier align", async () => {
+    const bernini = tieredVideoModel(["q8"]);
+    const fallback = {
+      ...tieredVideoModel(["q8"]),
+      id: "fallback_video",
+      name: "Fallback Video",
+    };
+    const createVideoJob = vi.fn();
+    const studioLaunch = tierReplay("bernini", 8, "shared-q8-catalog-removal");
+    const contextFor = (videoModels) =>
+      baseContext({
+        videoModels,
+        createVideoJob,
+        macCapabilities: MAC_CAPS,
+        studioLaunch,
+      });
+    await render(contextFor([bernini, fallback]));
+    expect(tierPicker().value).toBe("q8");
+
+    flushSync(() => {
+      root.render(
+        <AppContext.Provider value={contextFor([fallback])}>
+          <VideoStudio />
+        </AppContext.Provider>,
+      );
+    });
+
+    // The derived catalog model and tier happen to look ready, but payload `model` state still
+    // names removed Bernini until the passive snap. No recovery action may retire replay here.
+    expect(
+      [...container.querySelectorAll("button")].some((button) =>
+        button.textContent.includes("Start new generation with Fallback Video"),
+      ),
+    ).toBe(false);
+    container
+      .querySelector("form")
+      .dispatchEvent(new window.Event("submit", { bubbles: true, cancelable: true }));
+    expect(createVideoJob).not.toHaveBeenCalled();
+
+    await act(async () => {});
+    expect(container.querySelector(".settings-field-model select").value).toBe("fallback_video");
+    expect(tierPicker().value).toBe("q8");
+    const startNew = buttonWithText(
+      container,
+      "Start new generation with Fallback Video Q8 (balanced)",
+    );
+    expect(startNew).toBeTruthy();
+    await click(startNew);
+    await click(buttonWithText(container, "Render clip"));
+    expect(createVideoJob.mock.calls[0][0]).toMatchObject({
+      model: "fallback_video",
+      advanced: { mlxQuantize: 8 },
+    });
+  });
+
   it("blocks a mode fallback until an explicit action starts a new exact-tier generation", async () => {
     const bernini = tieredVideoModel(["q4", "q8"]);
     const imageVideo = {
