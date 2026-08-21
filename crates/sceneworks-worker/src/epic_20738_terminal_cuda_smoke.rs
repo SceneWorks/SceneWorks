@@ -66,6 +66,37 @@ struct Cell {
     artifacts: Vec<Artifact>,
 }
 
+/// The terminal profile selects immutable packed roots. Only SDXL's production loader still uses
+/// an advisory Q4 selector, and Candle SCAIL carries the exact selected tier as its production load
+/// hint. Chroma, FLUX, and LTX consume the selected packed root without asking the provider to
+/// quantize it again. Keep this policy pure and shared by both the load-spec builder and the runtime
+/// receipt so the evidence cannot describe a different load than the one the worker requested.
+fn family_load_spec_quant_bits(kind: &str, engine_id: &str, requested_tier: &str) -> Option<u64> {
+    match (kind, engine_id) {
+        ("image", "chroma1_base" | "chroma1_flash" | "chroma1_hd")
+        | ("image", "flux1_dev" | "flux1_schnell")
+        | ("ltx", "ltx_2_3_distilled") => None,
+        ("sdxlOpenPose", "sdxl") => Some(4),
+        ("scail2", "scail2_14b") => match requested_tier {
+            "q4" => Some(4),
+            "q8" => Some(8),
+            tier => panic!("unreviewed terminal SCAIL tier {tier}"),
+        },
+        _ => panic!("unreviewed terminal load-quant family {kind}/{engine_id}"),
+    }
+}
+
+fn primary_load_spec(cell: &Cell, primary: &Artifact) -> LoadSpec {
+    let spec = LoadSpec::new(WeightsSource::Dir(primary.root.clone()))
+        .with_resolved_route(cell.model_id.clone());
+    match family_load_spec_quant_bits(&cell.kind, &cell.engine_id, &cell.requested_tier) {
+        None => spec,
+        Some(4) => spec.with_quant(Quant::Q4),
+        Some(8) => spec.with_quant(Quant::Q8),
+        Some(bits) => panic!("unreviewed terminal load quant q{bits}"),
+    }
+}
+
 fn required_env(name: &str) -> String {
     std::env::var(name)
         .unwrap_or_else(|_| panic!("{name} is required by the terminal CUDA controller"))
@@ -262,14 +293,8 @@ fn image_output(output: GenerationOutput, context: &str) -> Image {
     }
 }
 
-fn generate_image(cell: &Cell, primary: &Artifact, bits: u64, output: &Path) -> Value {
-    let mut spec = LoadSpec::new(WeightsSource::Dir(primary.root.clone()))
-        .with_resolved_route(cell.model_id.clone());
-    // FLUX.1's packed artifact marker is authoritative and its final consumer intentionally carries
-    // quant=None. Chroma and SDXL retain their registered packed-load quant selector.
-    if !cell.engine_id.starts_with("flux1_") {
-        spec = spec.with_quant(if bits == 4 { Quant::Q4 } else { Quant::Q8 });
-    }
+fn generate_image(cell: &Cell, primary: &Artifact, output: &Path) -> Value {
+    let spec = primary_load_spec(cell, primary);
     let generator = crate::inference_runtime::load(&cell.engine_id, &spec)
         .unwrap_or_else(|error| panic!("{} load failed: {error}", cell.id));
     let request = GenerationRequest {
@@ -318,8 +343,7 @@ fn generate_sdxl_openpose(cell: &Cell, primary: &Artifact, bits: u64, output: &P
     let tokenizer_l = artifact(cell, "tokenizer_clip_l");
     let tokenizer_bigg = artifact(cell, "tokenizer_clip_bigg");
     let vae = artifact(cell, "vae_fp16_fix");
-    let spec = LoadSpec::new(WeightsSource::Dir(primary.root.clone()))
-        .with_quant(Quant::Q4)
+    let spec = primary_load_spec(cell, primary)
         .with_control(WeightsSource::File(exact_file(
             &control.root,
             "diffusion_pytorch_model.safetensors",
@@ -462,11 +486,15 @@ fn generate_scail2(cell: &Cell, primary: &Artifact, output: &Path) -> Value {
         mode: ReplacementMode::default(),
     });
     assert_eq!(conditioning.len(), pair_count * 2 + 1);
-    let spec = LoadSpec::new(WeightsSource::Dir(primary.root.clone()))
-        .with_resolved_route(cell.model_id.clone());
+    let spec = primary_load_spec(cell, primary);
+    let exact_tier_hint = match cell.requested_tier.as_str() {
+        "q4" => matches!(spec.quantize.as_ref(), Some(Quant::Q4)),
+        "q8" => matches!(spec.quantize.as_ref(), Some(Quant::Q8)),
+        _ => false,
+    };
     assert!(
-        spec.quantize.is_none(),
-        "SCAIL2 prepacked tiers must load with quant=None"
+        exact_tier_hint,
+        "Candle SCAIL2 must retain its exact production tier hint"
     );
     let generator = crate::inference_runtime::load("scail2_14b", &spec)
         .unwrap_or_else(|error| panic!("{} SCAIL2 load failed: {error}", cell.id));
@@ -502,9 +530,8 @@ fn generate_scail2(cell: &Cell, primary: &Artifact, output: &Path) -> Value {
 
 fn generate_ltx(cell: &Cell, primary: &Artifact, output: &Path) -> Value {
     let text_encoder = artifact(cell, "text_encoder");
-    let spec = LoadSpec::new(WeightsSource::Dir(primary.root.clone()))
-        .with_text_encoder(WeightsSource::Dir(text_encoder.root.clone()))
-        .with_resolved_route(cell.model_id.clone());
+    let spec = primary_load_spec(cell, primary)
+        .with_text_encoder(WeightsSource::Dir(text_encoder.root.clone()));
     assert!(
         spec.quantize.is_none(),
         "LTX prepacked q8 must load with quant=None"
@@ -585,18 +612,13 @@ fn epic_20738_terminal_cuda_cell() {
     .expect("write generated inputs");
 
     let metrics = match cell.kind.as_str() {
-        "image" => generate_image(&cell, primary, bits, &output),
+        "image" => generate_image(&cell, primary, &output),
         "sdxlOpenPose" => generate_sdxl_openpose(&cell, primary, bits, &output),
         "scail2" => generate_scail2(&cell, primary, &output),
         "ltx" => generate_ltx(&cell, primary, &output),
         other => panic!("unreviewed terminal cell kind {other}"),
     };
-    let quant =
-        if cell.engine_id.starts_with("flux1_") || matches!(cell.kind.as_str(), "scail2" | "ltx") {
-            Value::Null
-        } else {
-            json!(bits)
-        };
+    let quant = family_load_spec_quant_bits(&cell.kind, &cell.engine_id, &cell.requested_tier);
     let result = json!({
         "schemaVersion": 1,
         "cell": cell.id,
@@ -663,5 +685,100 @@ mod cpu_contract_tests {
             &mut bits,
         );
         assert_eq!(bits, vec![4]);
+    }
+
+    #[test]
+    fn family_load_quant_policy_covers_all_19_terminal_cells() {
+        let cases = [
+            ("chroma1-base-q4", "image", "chroma1_base", "q4", None),
+            ("chroma1-base-q8", "image", "chroma1_base", "q8", None),
+            ("chroma1-flash-q4", "image", "chroma1_flash", "q4", None),
+            ("chroma1-flash-q8", "image", "chroma1_flash", "q8", None),
+            ("chroma1-hd-q4", "image", "chroma1_hd", "q4", None),
+            ("chroma1-hd-q8", "image", "chroma1_hd", "q8", None),
+            ("flux1-dev-q4", "image", "flux1_dev", "q4", None),
+            ("flux1-dev-q8", "image", "flux1_dev", "q8", None),
+            ("flux1-schnell-q4", "image", "flux1_schnell", "q4", None),
+            ("flux1-schnell-q8", "image", "flux1_schnell", "q8", None),
+            ("scail2-q4", "scail2", "scail2_14b", "q4", Some(4)),
+            (
+                "scail2-multi-reference-q4",
+                "scail2",
+                "scail2_14b",
+                "q4",
+                Some(4),
+            ),
+            ("scail2-q8", "scail2", "scail2_14b", "q8", Some(8)),
+            ("ltx-2-3-q8", "ltx", "ltx_2_3_distilled", "q8", None),
+            ("sdxl-openpose", "sdxlOpenPose", "sdxl", "q4", Some(4)),
+            ("realvisxl-openpose", "sdxlOpenPose", "sdxl", "q4", Some(4)),
+            (
+                "realvisxl-lightning-openpose",
+                "sdxlOpenPose",
+                "sdxl",
+                "q4",
+                Some(4),
+            ),
+            (
+                "illustrious-v1-openpose",
+                "sdxlOpenPose",
+                "sdxl",
+                "q4",
+                Some(4),
+            ),
+            (
+                "illustrious-v2-openpose",
+                "sdxlOpenPose",
+                "sdxl",
+                "q4",
+                Some(4),
+            ),
+        ];
+        assert_eq!(cases.len(), 19);
+        for (id, kind, engine_id, requested_tier, expected) in cases {
+            assert_eq!(
+                family_load_spec_quant_bits(kind, engine_id, requested_tier),
+                expected,
+                "{id} load-quant policy"
+            );
+        }
+    }
+
+    #[test]
+    fn chroma_prepacked_root_builds_a_none_quant_load_spec_before_device_load() {
+        let cell = Cell {
+            id: "chroma1-base-q4".to_owned(),
+            kind: "image".to_owned(),
+            model_id: "chroma1_base".to_owned(),
+            engine_id: "chroma1_base".to_owned(),
+            requested_tier: "q4".to_owned(),
+            capability: None,
+            request: Request {
+                width: 32,
+                height: 32,
+                steps: 1,
+                seed: 1,
+                frames: None,
+                fps: None,
+                guidance: None,
+                true_cfg: None,
+                sampler: None,
+                reference_pairs: None,
+            },
+            artifacts: Vec::new(),
+        };
+        let primary = Artifact {
+            id: "chroma1-base-q4".to_owned(),
+            role: "primary".to_owned(),
+            repository: "SceneWorks/chroma1-base-candle".to_owned(),
+            revision: "0".repeat(40),
+            subdirectory: "q4".to_owned(),
+            root: PathBuf::from("fixture/chroma1_base/q4"),
+        };
+        let spec = primary_load_spec(&cell, &primary);
+        assert!(
+            spec.quantize.is_none(),
+            "the exact prepacked Chroma root must reach the provider without a load-time requant"
+        );
     }
 }

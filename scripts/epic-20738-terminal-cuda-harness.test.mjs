@@ -10,6 +10,7 @@ import {
   PROFILE_SCHEMA_PATH,
   RECEIPT_SCHEMA_PATH,
   cellSemanticsSha256,
+  expectedLoadSpecQuantBits,
   inferencePins,
   loadProfile,
   parseNvidiaSmi,
@@ -21,6 +22,7 @@ import {
   validateManifestAuthorities,
   validateProfile,
   validateReceipt,
+  validateRuntimeResult,
 } from "./epic-20738-terminal-cuda-harness.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 
@@ -131,24 +133,68 @@ test("profile validator rejects count, order, every semantic tuple mutation, blo
   assert.throws(() => validateProfile(artifactDefinitionDrift), /artifact definitions drifted/);
 });
 
-function fixtureReceipt(status = "passed") {
+test("all 19 cells require the exact family loadSpec quant policy", () => {
   const checked = profile();
-  const cell = checked.cells[0];
-  const artifact = checked.artifacts[cell.artifactIds[0]];
-  const selectedRoot = path.resolve("fixture-runner", "scratch", "01-chroma1-base-q4", "artifacts", cell.artifactIds[0], artifact.subdirectory);
+  const sdxlCells = new Set([
+    "sdxl-openpose", "realvisxl-openpose", "realvisxl-lightning-openpose",
+    "illustrious-v1-openpose", "illustrious-v2-openpose",
+  ]);
+  assert.equal(checked.cells.length, 19);
+  for (const [index, cell] of checked.cells.entries()) {
+    const expected = sdxlCells.has(cell.id)
+      ? 4
+      : cell.kind === "scail2" ? Number(cell.requestedTier.slice(1)) : null;
+    assert.equal(expectedLoadSpecQuantBits(cell), expected, cell.id);
+    const valid = {
+      requestedTier: cell.requestedTier,
+      resolvedTier: cell.requestedTier,
+      denseFallback: false,
+      loadSpecQuantBits: expected,
+    };
+    assert.equal(validateRuntimeResult(valid, cell), valid, cell.id);
+    const missing = { ...valid };
+    delete missing.loadSpecQuantBits;
+    assert.throws(() => validateRuntimeResult(missing, cell), /loadSpecQuantBits/, cell.id);
+    assert.throws(
+      () => validateRuntimeResult({ ...valid, loadSpecQuantBits: expected === null ? 4 : null }, cell),
+      /loadSpecQuantBits/,
+      cell.id,
+    );
+    const receipt = fixtureReceipt("passed", index);
+    assert.equal(validateReceipt(receipt, cell, checked), receipt, cell.id);
+    delete receipt.cell.loadSpecQuantBits;
+    assert.throws(() => validateReceipt(receipt, cell, checked), /loadSpecQuantBits/, cell.id);
+    receipt.cell.loadSpecQuantBits = expected === null ? 4 : null;
+    assert.throws(() => validateReceipt(receipt, cell, checked), /loadSpecQuantBits/, cell.id);
+  }
+});
+
+function fixtureReceipt(status = "passed", cellIndex = 0) {
+  const checked = profile();
+  const cell = checked.cells[cellIndex];
+  const artifacts = cell.artifactIds.map((artifactId) => {
+    const artifact = checked.artifacts[artifactId];
+    const selectedRoot = path.resolve(
+      "fixture-runner", "scratch", `${String(cellIndex + 1).padStart(2, "0")}-${cell.id}`,
+      "artifacts", artifactId, artifact.subdirectory,
+    );
+    return {
+      id: artifactId, role: artifact.role, repository: artifact.repository,
+      revision: artifact.revision, subdirectory: artifact.subdirectory,
+      selectedRoot, allowPatterns: artifact.allowPatterns,
+      inventory: {
+        root: selectedRoot, complete: true, sha256: "4".repeat(64), files: 3, bytes: 42, error: null,
+      },
+    };
+  });
   const receipt = receiptSkeleton({
     cell,
-    ordinal: 1,
+    ordinal: cellIndex + 1,
     repositories: {
       sceneworks: { sha: "1".repeat(40), clean: true },
       inference: { sha: "2".repeat(40), clean: true },
     },
-    artifacts: [{
-      id: cell.artifactIds[0], role: artifact.role, repository: artifact.repository,
-      revision: artifact.revision, subdirectory: artifact.subdirectory,
-      selectedRoot, allowPatterns: artifact.allowPatterns,
-      inventory: { root: selectedRoot, complete: true, sha256: "4".repeat(64), files: 3, bytes: 42, error: null },
-    }],
+    artifacts,
     execution: {
       runId: "123", runAttempt: "2", headSha: "1".repeat(40), workflow: "Windows Candle worker",
       headRef: "refs/heads/story/sc-20945-epic-20738-candle-cuda-parity",
@@ -183,6 +229,12 @@ test("receipt fixture binds paired clean sources, exact tier, artifacts, runner,
   const dense = fixtureReceipt();
   dense.cell.denseFallback = true;
   assert.throws(() => validateFixture(dense), /dense or cross-tier/);
+  const missingQuant = fixtureReceipt();
+  delete missingQuant.cell.loadSpecQuantBits;
+  assert.throws(() => validateFixture(missingQuant), /loadSpecQuantBits/);
+  const wrongQuant = fixtureReceipt();
+  wrongQuant.cell.loadSpecQuantBits = 4;
+  assert.throws(() => validateFixture(wrongQuant), /loadSpecQuantBits/);
   const dirty = fixtureReceipt();
   dirty.repositories.inference.clean = false;
   assert.throws(() => validateFixture(dirty), /clean paired/);
@@ -238,6 +290,32 @@ test("Draft 2020-12 schemas validate the profile and close adversarial receipt d
     };
     const valid = await writeReceipt("valid.json", fixtureReceipt());
     assert.doesNotThrow(() => validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, valid));
+
+    const missingQuant = fixtureReceipt();
+    delete missingQuant.cell.loadSpecQuantBits;
+    const missingQuantFile = await writeReceipt("missing-load-quant.json", missingQuant);
+    assert.throws(
+      () => validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, missingQuantFile),
+      /must have required property 'loadSpecQuantBits'/,
+    );
+
+    const wrongQuant = fixtureReceipt();
+    wrongQuant.cell.loadSpecQuantBits = 4;
+    const wrongQuantFile = await writeReceipt("wrong-load-quant.json", wrongQuant);
+    assert.throws(
+      () => validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, wrongQuantFile),
+      /must be equal to constant/,
+    );
+
+    const scailQ8 = fixtureReceipt("passed", 12);
+    const scailQ8File = await writeReceipt("scail-q8.json", scailQ8);
+    assert.doesNotThrow(() => validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, scailQ8File));
+    scailQ8.cell.loadSpecQuantBits = 4;
+    const wrongScailQ8File = await writeReceipt("wrong-scail-q8.json", scailQ8);
+    assert.throws(
+      () => validateDocumentWithSchema(RECEIPT_SCHEMA_PATH, wrongScailQ8File),
+      /must be equal to constant/,
+    );
 
     const openInventory = fixtureReceipt();
     openInventory.artifacts[0].inventory.injected = true;
@@ -419,6 +497,7 @@ test("injected lifecycle faults preserve all 19 outcomes and quarantine after cl
         requestedTier: runtimeCell.requestedTier,
         resolvedTier: runtimeCell.requestedTier,
         denseFallback: false,
+        loadSpecQuantBits: expectedLoadSpecQuantBits(runtimeCell),
       })}\n`, "utf8");
       await writeFile(path.join(cellDir, "output.bin"), "fixture", "utf8");
     },
@@ -566,6 +645,7 @@ test("schemas, clean Node dependencies, and workflow preserve the opt-in single-
   assert.equal(profileSchema.properties.cells.minItems, 19);
   assert.equal(profileSchema.properties.cells.maxItems, 19);
   assert.deepEqual(receiptSchema.properties.cell.properties.denseFallback, { const: false });
+  assert.deepEqual(receiptSchema.properties.cell.properties.loadSpecQuantBits, { enum: [null, 4, 8] });
   assert.equal(receiptSchema.$defs.inventory.additionalProperties, false);
   assert.equal(receiptSchema.$defs.gpuSample.additionalProperties, false);
   assert.equal(receiptSchema.properties.profile.const, PROFILE_NAME);
