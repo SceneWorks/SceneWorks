@@ -741,6 +741,10 @@ describe("VideoStudio SCAIL-2 character animation + replacement backend", () => 
     loraCompatibility: {},
     ui: {},
   };
+  const SCAIL2_MULTI_REFERENCE = {
+    ...SCAIL2,
+    ui: { scail2MultiReference: true },
+  };
   // A Wan-VACE-style replace-capable model — the default replacement backend SCAIL-2 augments.
   const WAN = {
     id: "wan_2_2",
@@ -825,6 +829,42 @@ describe("VideoStudio SCAIL-2 character animation + replacement backend", () => 
       sourceClipAssetId: "vid_src",
     });
     expect(payload.referenceAssetIds).toEqual(["img_ref_a"]);
+  });
+
+  it("keeps SCAIL-2 multi-character selection descriptor-gated, ordered, and bounded", async () => {
+    const characters = [
+      character,
+      { id: "img_ref_b", type: "image", projectId: "project_1", displayName: "Character B" },
+      { id: "img_ref_c", type: "image", projectId: "project_1", displayName: "Character C" },
+      { id: "img_ref_d", type: "image", projectId: "project_1", displayName: "Character D" },
+      { id: "img_ref_e", type: "image", projectId: "project_1", displayName: "Character E" },
+      { id: "img_ref_f", type: "image", projectId: "project_1", displayName: "Character F" },
+      { id: "img_ref_g", type: "image", projectId: "project_1", displayName: "Character G" },
+    ];
+    const context = baseContext({ videoModels: [SCAIL2_MULTI_REFERENCE], assets: [clip, ...characters] });
+    await render(context);
+    await click(modeButton("Animate character"));
+
+    expect(pickerLabels()).toContain("Reference characters (ordered, up to 6)");
+    await click(buttonWithText(container, "Select clip"));
+    let modal = document.querySelector(".asset-picker-modal");
+    await doubleClick(
+      [...modal.querySelectorAll('[role="option"]')].find((el) => el.textContent.includes("Driving Clip")),
+    );
+
+    await click(buttonWithText(container, "Select images"));
+    modal = document.querySelector(".asset-picker-modal");
+    for (const asset of characters) {
+      await click(
+        [...modal.querySelectorAll('[role="option"]')].find((el) => el.textContent.includes(asset.displayName)),
+      );
+    }
+    await click(buttonWithText(modal, "Use Selection"));
+
+    // All seven remain visible/selectable so the user can correct the choice; the studio must not
+    // silently trim one before serialization, and the explicit validation blocks submission.
+    expect(container.textContent).toContain("SCAIL-2 supports at most 6 reference characters");
+    expect(buttonWithText(container, "Render clip").disabled).toBe(true);
   });
 
   it("offers SCAIL-2 as a replacement engine when 2+ backends can replace", async () => {
@@ -1147,6 +1187,34 @@ describe("VideoStudio MLX quant-tier picker (sc-12165)", () => {
     await click(buttonWithText(container, "Render clip"));
     expect(context.createVideoJob.mock.calls[0][0].advanced).toMatchObject({ mlxQuantize: 4 });
     expect(context.createVideoJob.mock.calls[0][0].advanced).not.toHaveProperty("quantization");
+  });
+
+  it("shows the Candle SCAIL-2 picker only for its real installed package variants", async () => {
+    const scail = {
+      ...tieredVideoModel(["q4", "q8"]),
+      id: "scail2_14b",
+      name: "SCAIL-2",
+      family: "scail2",
+      adapter: "scail2",
+    };
+    const context = baseContext({ videoModels: [scail], macCapabilities: null });
+    await render(context);
+
+    expect(tierPicker()).toBeTruthy();
+    expect(quantizationPicker()).toBeNull();
+    expect([...tierPicker().options].map((option) => option.value)).toEqual(["q4", "q8", "bf16"]);
+    setSelect(tierPicker(), "q8");
+    await act(async () => {});
+    await click(buttonWithText(container, "Render clip"));
+    expect(context.createVideoJob.mock.calls[0][0].advanced).toMatchObject({ mlxQuantize: 8 });
+
+    // The engine id alone never creates a selectable precision. A stale/non-matrix catalog row
+    // remains picker-free instead of manufacturing q4/q8 payloads for an incomplete install.
+    await unmountRoot(root, container);
+    ({ container, root } = mountRoot());
+    const noVariants = { ...scail, hasVariantMatrix: false, variants: [] };
+    await render(baseContext({ videoModels: [noVariants], macCapabilities: null }));
+    expect(tierPicker()).toBeNull();
   });
 
   it("keeps the candle-only NVFP4 tier out of the MLX video picker (sc-11042)", async () => {

@@ -886,6 +886,10 @@
               "img2img": { "type": "boolean" },
               "multiReference": { "type": "boolean" },
               "sourceWithMultiReference": { "type": "boolean" },
+              "scail2MultiReference": {
+                "type": "boolean",
+                "description": "Enables SCAIL-2 Animate Character's ordered Reference/Mask-pair UI only after the matching inference descriptor is pinned."
+              },
               "poseLibrary": { "type": "boolean" },
               "poseControlScale": { "type": "boolean" },
               "controlOverlay": { "type": "boolean" },

@@ -20,6 +20,7 @@ export function videoGenerateValidation({
   requiresLtxIcLora,
   hasLtxIcLora,
   replaceReady,
+  scail2ReferenceOverflow = false,
   modelName,
   // sc-13136: the COMPOSED outgoing prompt (Subject:/Style: wrap + preset fold) and whether a
   // Style Catalog entry is active. `composedPrompt` is the exact string that will be sent — the same
@@ -72,6 +73,9 @@ export function videoGenerateValidation({
   }
   if (!replaceReady) {
     issues.push(issue.error(null, "No live GPU worker can run person replacement yet."));
+  }
+  if (scail2ReferenceOverflow) {
+    issues.push(issue.error(null, "SCAIL-2 Animate Character supports at most 6 reference characters."));
   }
   issues.push(...presetLoraIssues({ presetMissing, presetIncompatible, loraIncompatible, modelName }));
   return issues;

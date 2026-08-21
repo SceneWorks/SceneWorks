@@ -19867,7 +19867,7 @@
     // ViT-H/14 image tower; packed-token conditioning with auto-generated color-coded
     // segmentation masks (the worker paints them from native SAM3 — no user masks).
     // Native MLX on macOS and native Candle on NVIDIA Windows/Linux (engine id "scail2_14b").
-    // Both backends share the dense bf16 tier; q4/q8 remain MLX-only. Distributed the
+    // The verified q4/q8/bf16 package tiers are shared by both native backends. Distributed the
     // SceneWorks/*-mlx turnkey way: a pre-quantized Q4 snapshot is
     // published as `SceneWorks/scail2-mlx` (sc-5445), downloaded on first use. This entry
     // covers the standalone `animate_character` mode (sc-5447 /
@@ -19891,9 +19891,10 @@
         // fully self-contained (the DiT `dit.safetensors` at the tier's precision + the shared dense
         // Wan2.1 z16 VAE + UMT5 T5 encoder + open-CLIP ViT-H/14 visual tower + tokenizer + config.json
         // with the quant baked in), so the dense VAE/T5/CLIP repeat per tier (epic decision #3: storage
-        // is a non-issue; keeps the load path a single self-contained dir with no engine change). The
-        // worker fetches a toggled-but-not-downloaded tier on demand (ensure_scail2_tier_present,
-        // video_jobs.rs), so advanced.mlxQuantize works without a pre-pick. The legacy flat root files
+        // is a non-issue; keeps the load path a single self-contained dir with no engine change). On
+        // macOS the worker fetches a toggled-but-not-downloaded tier on demand
+        // (ensure_scail2_tier_present, video_jobs.rs); off-Mac Model Manager provisions the selected
+        // exact variant. The legacy flat root files
         // (the shipped Q4 snapshot + the DPO LoRA pickle) stay hosted for already-shipped workers that
         // resolve the repo root; a new worker only ever resolves the tier subdirs.
         // estimatedSizeBytes/footprint are the exact hosted subdir sizes measured post-build.
@@ -19904,7 +19905,7 @@
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           // The dense T5 (~11.4 GB) + open-CLIP tower (~2.5 GB) are shared bf16 in every tier, so the
           // Q4 DiT (~9.6 GB) makes this only modestly smaller than q8/bf16 (same shape as SD3.5).
           "estimatedSizeBytes": 23993093306,
@@ -19916,7 +19917,7 @@
           "revision": "ce88cfdb1008f395e9c820e525e6db7b6695f7b3",
           "variant": "q8",
           "files": ["q8/*"],
-          "platforms": ["macos"],
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 32067131269,
           "footprint": { "diskSizeBytes": 32067131269, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
@@ -20009,8 +20010,9 @@
       // 31455292141, job 93667700921, artifact 9089420126 (uploaded zip SHA-256
       // de62f67b175ca91519602d5e024baf5342907b9fbe8d1297ad5abb561748bac9) emitted the validated
       // overallPeakGb=102.115 marker after proving a stable 0.020 GB idle baseline. minMemoryGb is
-      // ceil(102.115 + the shared 2 GB dedicated-VRAM reserve) = 105; there is no lower Candle tier
-      // or sequential-offload path, so both worker modes fail closed below that live free-VRAM floor.
+      // ceil(102.115 + the shared 2 GB dedicated-VRAM reserve) = 105; there is no lower *measured*
+      // Candle tier or sequential-offload path in this current catalog, so both worker modes fail
+      // closed below that live free-VRAM floor.
       "candle": {
         "minMemoryGb": 105,
         "vramGbByTier": { "bf16": 102.115 },
@@ -20019,7 +20021,7 @@
       },
       "ui": {
         "label": "SCAIL-2",
-        "description": "zai-org SCAIL-2 character animation: give a reference character image and a driving video, and SCAIL-2 animates your character with the driving motion (the driving clip sets the motion and timing). Built on Wan2.1-14B; native MLX on macOS and native Candle on NVIDIA Windows/Linux using the same dense bf16 package. Candle needs at least 105 GB of free GPU VRAM (102.115 GB measured render peak plus reserve); lower-memory NVIDIA cards are rejected before load. Runs minutes-per-clip (segmented 14B denoise).",
+        "description": "zai-org SCAIL-2 character animation: give a reference character image and a driving video, and SCAIL-2 animates your character with the driving motion (the driving clip sets the motion and timing). Built on Wan2.1-14B; native MLX on macOS and native Candle on NVIDIA Windows/Linux use the same installable q4, q8, and bf16 package variants. Candle execution remains fail-closed until its installed capability and measured-tier data admit the selected package; the currently calibrated bf16 tier needs at least 105 GB of free GPU VRAM (102.115 GB measured render peak plus reserve). Runs minutes-per-clip (segmented 14B denoise).",
         "recommendedFor": ["animate_character"],
         "durationHint": "Segmented 14B denoise — keep clips at 5s or less. Generates at 16fps; the driving clip sets the motion and timing.",
         "promptGuide": {

@@ -613,6 +613,11 @@ async fn validate_and_canonicalize_merged_generation_payload(
         // trusting the original job's modelManifestEntry. This is the replay counterpart to the
         // typed `/video/jobs` pre-enqueue platform gate.
         let model_manifest_entry = resolve_model_manifest_entry(state, model_id).await?;
+        // Retry/duplicate are video creation boundaries too. Validate the exact shallow-merged
+        // reference array against the CURRENT server-owned entry before stamping it: malformed
+        // arrays must not be cleaned by VideoRequest's tolerant parser, and a legacy multi-ref row
+        // must not bypass today's descriptor gate simply because its stored entry is rebuilt here.
+        validate_video_reference_asset_ids_payload(&merged, &model_manifest_entry)?;
         crate::generation::ensure_video_model_available_on_platform(
             model_id,
             &model_manifest_entry,
