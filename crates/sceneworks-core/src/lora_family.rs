@@ -1785,6 +1785,28 @@ fn contains_token(haystack: &str, needle: &str) -> bool {
     })
 }
 
+/// Whether `haystack` contains `needle` as a **whole token** — bounded by a non-alphanumeric byte
+/// (or the string edge) on *both* sides.
+///
+/// [`contains_token`] only guards the leading edge, which is all the Mage arm needs: its needles
+/// (`mage-flow`, `mageflow`) are not prefixes of some other family's name. The Anima arm is the
+/// opposite case (SceneWorks#1670): `anima` *is* a prefix of `animagine-xl-3.1` and `animatediff`,
+/// two unrelated SDXL/SD1.5 architectures, so the trailing edge has to be checked too — a
+/// leading-edge-only match would claim both and hard-reject legitimate SDXL LoRAs.
+///
+/// Byte indexing is safe for any input, for the same reason as [`contains_token`]: `match_indices`
+/// yields char-boundary offsets, and a UTF-8 continuation byte on either side is not
+/// ASCII-alphanumeric, so a multi-byte neighbour reads as a boundary rather than panicking.
+fn contains_delimited_token(haystack: &str, needle: &str) -> bool {
+    let bytes = haystack.as_bytes();
+    haystack.match_indices(needle).any(|(position, matched)| {
+        let leading = position == 0 || !bytes[position - 1].is_ascii_alphanumeric();
+        let end = position + matched.len();
+        let trailing = end == bytes.len() || !bytes[end].is_ascii_alphanumeric();
+        leading && trailing
+    })
+}
+
 fn metadata_value_to_family(value: &str) -> Option<String> {
     let normalized = value.trim().to_ascii_lowercase();
     if normalized.is_empty() {
@@ -1821,9 +1843,15 @@ fn metadata_value_to_family(value: &str) -> Option<String> {
     // architectures embed that substring — Animagine XL (`animagine-xl-3.1`) and AnimateDiff
     // (`animatediff`) most notably — and mapping one of those to `anima` would hard-reject a
     // perfectly good SDXL LoRA, the exact failure mode this whole path exists to avoid.
-    if normalized == "anima"
-        || normalized.starts_with("anima_")
-        || normalized.starts_with("anima-")
+    //
+    // The boundary is checked on BOTH edges ([`contains_delimited_token`]), not anchored to the
+    // start of the value. Every other arm here uses `contains`, so every other arm tolerates the
+    // org prefix that real stamps carry: `ss_base_model_version` / `modelspec.architecture` are
+    // routinely a Hugging Face repo id (`SceneWorks/anima-turbo`, `nvidia/anima_base`) or a path'd
+    // weight file (`loras/anima-aesthetic-v1.0.safetensors`). A `starts_with("anima-")` test misses
+    // all of those, dropping them to key detection — where a metadata-less Anima file reads as Wan
+    // and the import is hard-rejected, which is exactly the report in SceneWorks#1670.
+    if contains_delimited_token(&normalized, "anima")
         || normalized.contains("cosmos-predict")
         || normalized.contains("cosmos_predict")
         || normalized.contains("cosmospredict")
@@ -3928,6 +3956,28 @@ mod tests {
     }
 
     #[test]
+    fn contains_delimited_token_requires_a_boundary_on_both_edges() {
+        // Leading edge: string start and any non-alphanumeric byte.
+        assert!(super::contains_delimited_token("anima", "anima"));
+        assert!(super::contains_delimited_token(
+            "nvidia/anima_base",
+            "anima"
+        ));
+        assert!(super::contains_delimited_token("a.anima.b", "anima"));
+        // Trailing edge: this is the half `contains_token` does not check.
+        assert!(!super::contains_delimited_token("animagine", "anima"));
+        assert!(!super::contains_delimited_token("org/animatediff", "anima"));
+        assert!(super::contains_token("animagine", "anima"));
+        // A later delimited occurrence still counts even when an earlier one is glued.
+        assert!(super::contains_delimited_token(
+            "animatediff-anima",
+            "anima"
+        ));
+        // Multi-byte neighbours read as boundaries rather than panicking on a byte index.
+        assert!(super::contains_delimited_token("日anima日", "anima"));
+    }
+
+    #[test]
     fn anima_metadata_base_ids_detect_without_tensor_evidence() {
         // A trainer that stamps the Anima training base / weight file names the family outright,
         // so detection never has to lean on the Wan-shaped tensor keys (SceneWorks#1670).
@@ -3937,6 +3987,15 @@ mod tests {
             "anima_turbo",
             "anima-aesthetic-v1.0",
             "cosmos-predict2-2b",
+            // Org-qualified and path'd spellings. `ss_base_model_version` / `modelspec.architecture`
+            // routinely carry a Hugging Face repo id or a relative weight path rather than the bare
+            // catalog id, and the anima arm used to be anchored to the START of the value — so every
+            // one of these fell through to key detection, where a metadata-less Anima file reads as
+            // Wan and the import is hard-rejected (SceneWorks#1670).
+            "SceneWorks/anima-turbo",
+            "nvidia/anima_base",
+            "loras/anima-aesthetic-v1.0.safetensors",
+            "models\\anima-base-v1.0.safetensors",
         ] {
             assert_eq!(
                 super::metadata_value_to_family(value).as_deref(),
@@ -3957,6 +4016,17 @@ mod tests {
         assert_eq!(
             super::metadata_value_to_family("sdxl_animagine_v3").as_deref(),
             Some("sdxl")
+        );
+        // The trailing edge is what rules these out, so it has to survive the org prefix that the
+        // leading edge now tolerates — otherwise widening the arm to accept `nvidia/anima_base`
+        // would swallow `cagliostrolab/animagine-xl-3.1` along with it.
+        assert_eq!(
+            super::metadata_value_to_family("cagliostrolab/animagine-xl-3.1"),
+            None
+        );
+        assert_eq!(
+            super::metadata_value_to_family("guoyww/animatediff-motion-adapter-v1-5-2"),
+            None
         );
     }
 
